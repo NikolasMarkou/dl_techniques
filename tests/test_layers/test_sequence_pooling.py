@@ -2153,7 +2153,7 @@ class PoolAfterDenseProbe(keras.Model):
         super().__init__()
         self.dense = keras.layers.Dense(4)
         self.pool = SequencePooling(
-            strategy=strategy, exclude_positions=exclude_positions
+            strategy=strategy, top_k=4, exclude_positions=exclude_positions
         )
 
     def call(self, inputs):
@@ -2164,18 +2164,24 @@ class PoolAfterDenseProbe(keras.Model):
 
 
 class TestPositionalModesPredictAtASecondLength:
-    """A positional mode serves ``predict`` at a second sequence length.
+    """A positional or top-k mode serves ``predict`` at a second length.
 
     The second ``predict`` retraces with an unknown length. Under XLA on GPU,
     ``ops.take_along_axis`` on the TensorFlow backend broadcasts through
     ``tf.broadcast_dynamic_shape`` and the compile refused it with
     "BroadcastArgs must be a compile-time constant", so a headed GPT-2 or
     Qwen3 (``last`` pooling over the attention mask) could predict at one
-    length only. The CPU XLA compile accepts the old gather, so this suite
-    goes RED only on a GPU run, which is how the repository's suite runs.
+    length only. The top-k modes failed the same way. The CPU XLA compile
+    accepts the old gather, so this suite goes RED only on a GPU run, which is
+    how the repository's suite runs. The third length (3) is below
+    ``top_k=4``, so the unknown-length top-k path selects padding there and
+    must exclude it.
     """
 
-    @pytest.mark.parametrize("strategy", ["last", "middle", "first", "cls"])
+    @pytest.mark.parametrize(
+        "strategy",
+        ["last", "middle", "first", "cls", "top_k_mean", "top_k_max"],
+    )
     @pytest.mark.parametrize("masked", [True, False], ids=["mask", "no_mask"])
     @pytest.mark.parametrize("exclude", [None, [0]], ids=["no_excl", "excl0"])
     def test_a_second_length_predicts_the_eager_values(
@@ -2184,7 +2190,7 @@ class TestPositionalModesPredictAtASecondLength:
         model = PoolAfterDenseProbe(strategy, exclude)
         model.compile(loss="mse")
         rng = np.random.default_rng(0)
-        for seq_len in (5, 12):
+        for seq_len in (5, 12, 3):
             feed = {"input_ids": rng.integers(1, 9, (2, seq_len)).astype("int32")}
             if masked:
                 mask = np.ones((2, seq_len), "int32")
@@ -2192,7 +2198,12 @@ class TestPositionalModesPredictAtASecondLength:
                 feed["attention_mask"] = mask
             got = model.predict(feed, verbose=0)
             want = keras.ops.convert_to_numpy(model(feed))
-            np.testing.assert_array_equal(got, want, err_msg=(
+            # A gather or a max is exact. The compiled mean of the first
+            # (static) trace differs from eager by a few float32 ULPs
+            # (4.8e-7 measured on GPU) on the unchanged static path; a padded
+            # position wrongly kept in the mean would move it by O(1).
+            tol = 1e-6 if strategy == "top_k_mean" else 0.0
+            np.testing.assert_allclose(got, want, rtol=tol, atol=tol, err_msg=(
                 f"strategy={strategy!r}, masked={masked}, exclude={exclude}, "
                 f"seq_len={seq_len}"
             ))

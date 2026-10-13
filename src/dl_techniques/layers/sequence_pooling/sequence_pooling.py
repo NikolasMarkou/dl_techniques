@@ -345,9 +345,12 @@ class SequencePooling(keras.layers.Layer):
             ``(batch, k, hidden_dim)`` gathered from the RAW ``inputs`` and
             ``validity`` is ``(batch, k)`` in ``inputs.dtype``, 1.0 for a
             selected position that is genuinely kept and 0.0 for one that is
-            masked. ``validity`` is ``None`` exactly when ``mask is None``, in
-            which case the caller must aggregate over all ``k`` positions
-            unconditionally — that path is bit-identical to the pre-F-24 code.
+            masked. ``validity`` is ``None`` exactly when ``mask is None`` and
+            the sequence length is static, in which case the caller must
+            aggregate over all ``k`` positions unconditionally — that path is
+            bit-identical to the pre-F-24 code. Under an unknown length it
+            also marks the padding positions as invalid (see the D-021 note
+            in the body).
         """
         # DECISION plan-2026-07-31T132403-b3f540cb/D-002: masked positions are
         # excluded in TWO places, and BOTH are required or the leak persists.
@@ -378,23 +381,41 @@ class SequencePooling(keras.layers.Layer):
                 keras.ops.cast(mask, "bool"), norms, keras.ops.cast(-1e4, norms.dtype)
             )
 
-        k = keras.ops.minimum(self.top_k, seq_len)
-        _, top_k_indices = keras.ops.top_k(norms, k=k)
+        if inputs.shape[1] is not None:
+            k = keras.ops.minimum(self.top_k, seq_len)
+            _, top_k_indices = keras.ops.top_k(norms, k=k)
+            top_k_embeds = self._take_positions(inputs, top_k_indices)
+            validity = None
+            if mask is not None:
+                validity = self._take_positions(
+                    keras.ops.cast(mask, inputs.dtype), top_k_indices
+                )
+            return top_k_embeds, validity
 
-        top_k_embeds = keras.ops.take_along_axis(
-            inputs,
-            keras.ops.expand_dims(top_k_indices, -1),
-            axis=1
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-021: an UNKNOWN length
+        # (a retrace, e.g. predict at a second length) pads `top_k` positions
+        # so that `k` is the constant `self.top_k`. XLA on GPU refuses a
+        # `top_k` whose `k` is `minimum(top_k, seq_len)` there. A padded
+        # position ranks below every masked one (`-2e4` < the `-1e4` mask
+        # sentinel, finite under float16) and is never valid, so it is
+        # selected only when `seq_len < top_k`, and is then excluded by the
+        # validity the caller already applies.
+        pad = self.top_k
+        padded = keras.ops.pad(inputs, [[0, 0], [0, pad], [0, 0]])
+        padded_norms = keras.ops.pad(
+            norms, [[0, 0], [0, pad]], constant_values=-2e4
         )
-
-        validity = None
+        _, top_k_indices = keras.ops.top_k(padded_norms, k=self.top_k)
+        top_k_embeds = self._take_positions(padded, top_k_indices)
+        validity = keras.ops.cast(
+            keras.ops.less(top_k_indices, keras.ops.cast(seq_len, 'int32')),
+            inputs.dtype
+        )
         if mask is not None:
-            validity = keras.ops.take_along_axis(
-                keras.ops.cast(mask, inputs.dtype),
-                top_k_indices,
-                axis=1
+            padded_mask = keras.ops.pad(
+                keras.ops.cast(mask, inputs.dtype), [[0, 0], [0, pad]]
             )
-
+            validity = validity * self._take_positions(padded_mask, top_k_indices)
         return top_k_embeds, validity
 
     def _positional_index(
@@ -422,7 +443,7 @@ class SequencePooling(keras.layers.Layer):
             middle of the KEPT positions) or ``'last'`` (the last KEPT
             position).
         :return: ``(batch,)`` ``int32`` index, safe to feed to
-            ``ops.take_along_axis``. An EMPTY keep set yields index 0 — a
+            :meth:`_take_positions`. An EMPTY keep set yields index 0 — a
             DOCUMENTED DEGENERATION (the returned token is itself suppressed),
             not a rescue. This covers both routes into an empty set: a fully
             masked row, and an ``exclude_positions`` that removes every
@@ -500,31 +521,36 @@ class SequencePooling(keras.layers.Layer):
         return keras.ops.maximum(keras.ops.max(candidates, axis=1), 0)
 
     @staticmethod
-    def _take_one_position(
-        inputs: keras.KerasTensor,
-        selected: keras.KerasTensor
+    def _take_positions(
+        sequence: keras.KerasTensor,
+        indices: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Gather ``inputs[b, selected[b], :]`` for every row ``b``.
+        """Gather ``sequence[b, indices[b, ...]]`` for every row ``b``.
 
-        :param inputs: Input sequence ``(batch, seq_len, hidden_dim)``.
-        :param selected: ``(batch,)`` ``int32`` index from
-            :meth:`_positional_index`.
-        :return: ``(batch, hidden_dim)``, the selected vectors unchanged.
+        :param sequence: ``(batch, seq_len)`` or
+            ``(batch, seq_len, hidden_dim)``.
+        :param indices: ``(batch,)`` or ``(batch, k)`` ``int32`` positions
+            along axis 1, each in ``[0, seq_len)``.
+        :return: ``sequence`` gathered at ``indices``: ``(batch,)`` or
+            ``(batch, k)``, followed by ``sequence``'s trailing axes, with the
+            gathered values unchanged.
         """
         # DECISION plan-2026-10-13T035756-5dd4d94d/D-020: a flat-row `take`,
-        # not `ops.take_along_axis`. On the TensorFlow
-        # backend `take_along_axis` broadcasts through
-        # `tf.broadcast_dynamic_shape`, and under XLA on GPU a retrace with an
-        # unknown sequence length (predict at a second length) refuses it with
-        # "BroadcastArgs must be a compile-time constant". The gather is exact,
-        # so the pooled values are the same.
-        seq_len = keras.ops.cast(keras.ops.shape(inputs)[1], 'int32')
-        row = keras.ops.cumsum(keras.ops.ones_like(selected), axis=0) - 1
-        hidden_dim = inputs.shape[-1]
-        if hidden_dim is None:
-            hidden_dim = keras.ops.shape(inputs)[-1]
-        flat = keras.ops.reshape(inputs, (-1, hidden_dim))
-        return keras.ops.take(flat, row * seq_len + selected, axis=0)
+        # not `ops.take_along_axis`. On the TensorFlow backend
+        # `take_along_axis` broadcasts through `tf.broadcast_dynamic_shape`,
+        # and under XLA on GPU a retrace with an unknown sequence length
+        # (predict at a second length) refuses it with "BroadcastArgs must be
+        # a compile-time constant". The gather is exact, so the pooled values
+        # are the same.
+        seq_len = keras.ops.cast(keras.ops.shape(sequence)[1], indices.dtype)
+        # Row b holds b + 1 after the cumsum, in every column.
+        row = keras.ops.cumsum(keras.ops.ones_like(indices), axis=0) - 1
+        tail = tuple(
+            dim if dim is not None else keras.ops.shape(sequence)[axis]
+            for axis, dim in enumerate(sequence.shape[2:], start=2)
+        )
+        flat = keras.ops.reshape(sequence, (-1,) + tail)
+        return keras.ops.take(flat, row * seq_len + indices, axis=0)
 
     def _apply_single_strategy(
         self,
@@ -573,7 +599,7 @@ class SequencePooling(keras.layers.Layer):
                 # No exclusions: bit-identical to the pre-H-02 code.
                 return inputs[:, 0, :]
             selected = self._positional_index(keep, seq_len, mode='first')
-            return self._take_one_position(inputs, selected)
+            return self._take_positions(inputs, selected)
 
         if strategy not in ['none', 'flatten']:
             inputs, mask = self._apply_mask_and_exclusions(inputs, mask)
@@ -588,7 +614,7 @@ class SequencePooling(keras.layers.Layer):
                 return inputs[:, seq_len // 2, :]
 
             selected = self._positional_index(mask, seq_len, mode=strategy)
-            return self._take_one_position(inputs, selected)
+            return self._take_positions(inputs, selected)
 
         # Statistical strategies
         elif strategy == 'mean':
