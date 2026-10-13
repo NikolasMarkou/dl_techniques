@@ -31,7 +31,7 @@ reference class's own defaults. ``MODEL_VARIANTS`` here covers only
 ``tiny`` and ``hiera_l``; trunk and neck geometry come from
 ``Hiera.MODEL_VARIANTS`` / ``SAM2ImageEncoder.MODEL_VARIANTS``. No
 pretrained weights ship: SAM 2's released code is under the SAM License,
-incompatible with this repository's GPL-3.0, so this is a reimplementation
+not this repository's Apache-2.0, so this is a reimplementation
 from the paper and published configuration numbers with no accuracy claim.
 
 References:

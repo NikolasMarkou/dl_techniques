@@ -2,7 +2,7 @@
 
 A deep learning research library providing a comprehensive set of model architectures, custom layers, and extensive tooling for Keras 3 / TensorFlow 2.18.
 
-**Author**: Nikolas Markou | **License**: GPL-3.0 | **Python**: >= 3.11
+**Author**: Nikolas Markou | **License**: Apache-2.0 | **Python**: >= 3.11
 
 ## NO CLAUDE ATTRIBUTION
 

@@ -395,8 +395,8 @@ naming the defining module is the rule that holds for all three.
 
 ## 11. Licensing — read this before extending
 
-`dl_techniques` is **GPL-3.0**. Meta's released SAM 3 code is under the **SAM
-License**, which is not compatible with it.
+`dl_techniques` is **Apache-2.0**. Meta's released SAM 3 code is under the **SAM
+License**, a different license.
 
 **This package was therefore reimplemented from published numbers and a re-read
 reference — never transliterated.** No upstream source file was copied,

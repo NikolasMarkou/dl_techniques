@@ -329,4 +329,4 @@ def test_ptrm_inference():
 
 ## 12. License
 
-GPL-3.0 — see repository root `LICENSE`.
+Apache-2.0 — see repository root `LICENSE`.

@@ -16,9 +16,9 @@ package's own README states its scope up front — start there.
 
 ## Licensing
 
-`dl_techniques` is **GPL-3.0**. SAM 1's architecture is described in a paper
+`dl_techniques` is **Apache-2.0**. SAM 1's architecture is described in a paper
 this package implements independently. **SAM 2's and SAM 3's released code is
-under the SAM License, which is not compatible with GPL-3.0** — so both
+under the SAM License, not this repository's Apache-2.0** — so both
 packages were reimplemented from published numbers and a re-read reference,
 never transliterated. No upstream source file was copied, adapted or
 line-by-line ported, and no upstream weights ship here. **That constraint binds

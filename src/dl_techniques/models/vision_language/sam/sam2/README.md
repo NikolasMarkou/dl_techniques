@@ -346,8 +346,8 @@ inspection.
 
 ## 10. Licensing — read this before extending
 
-`dl_techniques` is **GPL-3.0**. Meta's released SAM 2 code is under the **SAM
-License**, which is not compatible with it.
+`dl_techniques` is **Apache-2.0**. Meta's released SAM 2 code is under the **SAM
+License**, a different license.
 
 **This package was therefore reimplemented from published numbers and a re-read
 reference — never transliterated.** No upstream source file was copied,

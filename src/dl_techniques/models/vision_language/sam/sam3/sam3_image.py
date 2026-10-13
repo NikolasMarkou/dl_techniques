@@ -31,8 +31,8 @@ image-memory positions; off by default, it adds no weight when disabled.
 This is a phase-1 architecture: it omits the reference's vision-language
 early-fusion encoder (image memory and prompt go straight to the decoder),
 the exemplar/geometry prompt path, and DAC query doubling. As with SAM 2, no
-pretrained weights ship or ever will (the SAM License is incompatible with
-this repository's GPL-3.0); this is a reimplementation from the paper with
+pretrained weights ship or ever will (the SAM License is not this
+repository's Apache-2.0); this is a reimplementation from the paper with
 no accuracy claim. Only the `sam3` variant is a published size; `small` and
 `tiny` are this package's own development geometries.
 

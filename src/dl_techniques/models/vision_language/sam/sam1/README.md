@@ -430,15 +430,15 @@ rediscovers them.
 
 ## 11. Licensing
 
-This package is part of `dl_techniques` and is **GPL-3.0**, like the rest of
+This package is part of `dl_techniques` and is **Apache-2.0**, like the rest of
 the repository. It is an independent Keras 3 implementation of the
 architecture described by Kirillov et al. (2023); the original SAM was
 developed by Meta AI Research, and no code and no weights from that release
 are vendored here.
 
 Its two siblings carry a **stricter constraint that binds any future work on
-them**: SAM 2's and SAM 3's released code is under the SAM License, which is
-incompatible with this repository's GPL-3.0. Both packages were therefore
+them**: SAM 2's and SAM 3's released code is under the SAM License, not this
+repository's Apache-2.0. Both packages were therefore
 reimplemented from published numbers and a re-read reference, never
 transliterated — see [`../sam2/README.md`](../sam2/README.md) and
 [`../sam3/README.md`](../sam3/README.md) before extending either.

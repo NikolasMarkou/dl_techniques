@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/nikolasmarkou/dl_techniques/blob/main/LICENSE">
-    <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL_v3-blue.svg">
+    <img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg">
   </a>
   <img alt="Python Version" src="https://img.shields.io/badge/python-3.11+-blue.svg">
   <img alt="Framework" src="https://img.shields.io/badge/Keras-3.8-red">
@@ -30,7 +30,7 @@ We bridge the chasm between theoretical innovation and practical application, pr
 5.  [**In-Depth Documentation**](#in-depth-documentation): From Theory to Tensors.
 6.  [**Project Structure**](#project-structure): A Tour of the Repository.
 7.  [**Contributing**](#contributing): Join Our Research & Development Efforts.
-8.  [**License**](#license): Understanding the GPL-3.0 License.
+8.  [**License**](#license): Understanding the Apache 2.0 License.
 9.  [**Acknowledgments**](#acknowledgments): Recognition and Support.
 10. [**Citations & References**](#citations--references): The Research That Inspired This Library.
 
@@ -454,12 +454,12 @@ We welcome contributions from the research community. Whether you are implementi
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0**.
+This project is licensed under the **Apache License 2.0**.
 
 **Important Considerations:**
-- **Copyleft License**: Any derivative works must also be licensed under GPL-3.0.
-- **Enterprise Use**: Please contact us for commercial licensing options that may be better suited for enterprise environments.
-- **Research Use**: The library is fully open for academic and non-commercial research applications.
+- **Permissive License**: You may use, modify, and distribute the library, including in commercial and closed-source products.
+- **Attribution**: Redistributions must retain the copyright notice and a copy of the license, and modified files must carry a notice stating that they were changed.
+- **Patent Grant**: Contributors grant an express patent license covering their contributions.
 
 See the [LICENSE](./LICENSE) file for complete details.
 
