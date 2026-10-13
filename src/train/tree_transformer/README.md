@@ -51,7 +51,11 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES="" \
 ```
 
 Two-stage training (frozen encoder → full fine-tune) is on by default. Pass
-`--no-two-stage` to skip Stage 1.
+`--no-two-stage` to skip Stage 1. The model is the `TreeTransformer` class itself,
+rebuilt from the encoder checkpoint's own config with `include_top=True`; its head is
+`task_head` (the encoder's `lm_head_projection` is not part of a headed model), the final
+`.keras` reloads as `TreeTransformer`, and a checkpoint that does not load completely
+raises instead of training a random encoder.
 
 ## Flags
 

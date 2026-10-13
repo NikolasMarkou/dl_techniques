@@ -90,6 +90,8 @@ model-specific arguments on top of it.
 | `create_nlp_callbacks(name, prefix, ...)` | `create_callbacks` with NLP defaults and TensorBoard on |
 | `evaluate_mlm_model(mlm_model, preprocessor, test_texts=None)` | Qualitative MLM probe + `visualize_mlm_predictions` |
 | `run_finetune_post_training_analysis(config, model_name, create_initial_model, results_dir)` | Full `ModelAnalyzer` comparison over Initial/Best/Final. `results_dir` is REQUIRED with no fallback on purpose |
+| `build_sentiment_model_from_encoder(model_cls, encoder_path, num_classes, dropout_rate=0.1)` | The sentiment fine-tuning model, shared by the bert, fnet, tree_transformer and `bert/wikipedia` finetune scripts: `model_cls.from_config` over the HEADLESS encoder checkpoint's own config with `include_top=True` (nothing about the architecture is restated), then `load_pretrained_weights`. A failed load **raises** — never a random-init fallback. The head is the model's own `task_head` (CLS pooling, bare logits); the saved artifact reloads as the model class (`BERT`/`FNet`/`TreeTransformer`), not a Functional graph |
+| `set_backbone_trainable(model, trainable)` | The two-stage freeze: every layer but `task_head` is set by loop. **Never** `model.trainable = False` + `task_head.trainable = True` (leaves 0 trainable weights) and never `model.trainable = True` to unfreeze after a per-layer freeze (a no-op) |
 | `sentiment_final_model_filename(model_name)` | `f"{model_name}_sentiment_final_best.keras"` — called at both the save site and the read site |
 | `best_checkpoint_path(results_dir)` (in `common/callbacks.py`) | `<results_dir>/best_model.keras` — the ONE producer of the best-checkpoint path |
 

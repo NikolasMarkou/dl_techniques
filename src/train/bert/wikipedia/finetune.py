@@ -20,10 +20,11 @@ from typing import Dict, Optional, Tuple
 # Local Imports
 # ---------------------------------------------------------------------
 
+from train.common.nlp import build_sentiment_model_from_encoder
+
 from dl_techniques.models.language.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, create_nlp_head
 
 
 # ---------------------------------------------------------------------
@@ -111,6 +112,25 @@ def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, c
 
 
 # ---------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------
+
+def create_sst2_model(config: FinetuneConfig) -> keras.Model:
+    """Rebuild the pretrained BERT encoder with a sentiment head (``include_top=True``).
+
+    The architecture is read from the encoder checkpoint; the backbone loads
+    completely or this RAISES. There is deliberately no fallback to a random
+    encoder: a pretrained-encoder fine-tune that quietly starts from scratch
+    reports a number that means nothing. See
+    ``train.common.nlp.build_sentiment_model_from_encoder``.
+    """
+    logger.info(f"Loading Pretrained Encoder from {config.pretrained_encoder_path}...")
+    return build_sentiment_model_from_encoder(
+        BERT, config.pretrained_encoder_path, config.num_classes,
+    )
+
+
+# ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
@@ -165,43 +185,7 @@ def main(argv: Optional[list] = None):
     train_ds = preprocess_glue(data['train'], tokenizer, config)
     val_ds = preprocess_glue(data['validation'], tokenizer, config)
 
-    logger.info(f"Loading Pretrained Encoder from {config.pretrained_encoder_path}...")
-    try:
-        bert_encoder = keras.models.load_model(
-            config.pretrained_encoder_path,
-            custom_objects={"BERT": BERT}
-        )
-    except Exception as e:
-        logger.error(f"Could not load pretrained encoder: {e}")
-        logger.warning("Initializing random encoder for demonstration.")
-        bert_encoder = BERT.from_variant("base", vocab_size=100277)
-
-    # Build Classifier
-    task_config = NLPTaskConfig(
-        name="sst2_head",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=config.num_classes
-    )
-    head = create_nlp_head(task_config, input_dim=bert_encoder.hidden_size)
-
-    # Assemble End-to-End Model
-    inputs = {
-        "input_ids": keras.Input(shape=(config.max_seq_length,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(config.max_seq_length,), dtype="int32", name="attention_mask"),
-        "token_type_ids": keras.Input(shape=(config.max_seq_length,), dtype="int32", name="token_type_ids"),
-    }
-
-    # Forward pass
-    enc_out = bert_encoder(inputs)
-    # CLS token is at index 0
-    cls_embedding = enc_out["last_hidden_state"][:, 0, :]
-
-    # Head pass
-    # Note: Factory heads expect a dict or tensor depending on impl.
-    # Providing dict for compatibility with BaseNLPHead logic.
-    head_out = head({"hidden_states": cls_embedding})
-
-    model = keras.Model(inputs, head_out['logits'])
+    model = create_sst2_model(config)
 
     # Compile
     optimizer = keras.optimizers.AdamW(

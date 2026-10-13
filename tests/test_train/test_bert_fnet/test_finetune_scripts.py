@@ -7,6 +7,9 @@ What is pinned, and why each pin is not satisfied-by-construction:
 
 * ``test_sentiment_model_parameter_count`` -- a COUNT, split into encoder and
   head so a head-wiring change is isolated from an encoder change. Weak alone.
+* ``test_the_backbone_is_the_pretrained_one`` -- VALUE-carrying: every backbone
+  array of the rebuilt model equals the array in the saved encoder, so a model
+  that kept its random init (or a load that quietly did nothing) fails.
 * ``test_the_head_reads_the_CLS_POSITION`` -- VALUE-carrying, and the one that
   matters: it recomputes the model's own output from the encoder's
   ``last_hidden_state`` at position 0 and compares. It carries its own
@@ -19,11 +22,11 @@ What is pinned, and why each pin is not satisfied-by-construction:
   them (that drift is deliberate-untouched, see ``src/train/AGENTS.md``).
 
 The encoder is built and saved by this module (tiny variant, small vocab) --
-``create_sentiment_model`` loads it from ``config.pretrained_encoder_path``,
-so no checkpoint from a real run is needed and no dataset is touched.
+``create_sentiment_model`` rebuilds the model from ``config.pretrained_encoder_path``
+with ``include_top=True`` (the head is the model's own ``task_head``), so no
+checkpoint from a real run is needed and no dataset is touched.
 """
 
-import re
 from typing import Any, Dict
 
 import keras
@@ -53,8 +56,6 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "encoder_cls": BERT,
         "encoder_kwargs": {"attention_probs_dropout_rate": 0.1},
         "train_fn": "finetune_sentiment_model",
-        "model_name": "bert_sentiment_analyzer",
-        "encoder_layer_name": "bert",
         # 3,295,232 = 2,244,608 + 1,050,624. The BERT `tiny` variant's
         # intermediate_size was corrected 512 -> 1024 to match the released
         # google/bert_uncased_L-4_H-256_A-4 config it names. The delta is
@@ -64,8 +65,8 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "encoder_params": 3_295_232,
         "head_params": 67_330,
         "layer_names": [
-            "attention_mask", "input_ids", "token_type_ids",
-            "bert", "sentiment_analysis_head",
+            "embeddings", "encoder_layer_0", "encoder_layer_1",
+            "encoder_layer_2", "encoder_layer_3", "task_head",
         ],
         "config_defaults": {
             "pretrained_encoder_path":
@@ -100,13 +101,11 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "encoder_cls": FNet,
         "encoder_kwargs": {},
         "train_fn": "finetune_sentiment_model",
-        "model_name": "fnet_sentiment_analyzer",
-        "encoder_layer_name": "f_net",
         "encoder_params": 1_718_272,
         "head_params": 67_330,
         "layer_names": [
-            "attention_mask", "input_ids", "token_type_ids",
-            "f_net", "sentiment_analysis_head",
+            "embeddings", "encoder_layer_0", "encoder_layer_1",
+            "encoder_layer_2", "encoder_layer_3", "task_head",
         ],
         "config_defaults": {
             "pretrained_encoder_path":
@@ -155,7 +154,11 @@ def _probe_inputs(batch: int = 2):
 
 @pytest.fixture(scope="module")
 def built(tmp_path_factory):
-    """Save a tiny encoder, then build each script's sentiment model from it."""
+    """Save a tiny encoder, then build each script's sentiment model from it.
+
+    ``built(name)`` returns ``(model, encoder)``: the model the script rebuilt
+    from the archive, and the headless encoder that archive was saved from.
+    """
     cache: Dict[str, Any] = {}
     root = tmp_path_factory.mktemp("encoders")
 
@@ -175,7 +178,7 @@ def built(tmp_path_factory):
 
             config = spec["module"].FinetuneConfig()
             config.pretrained_encoder_path = path
-            cache[name] = spec["module"].create_sentiment_model(config)
+            cache[name] = (spec["module"].create_sentiment_model(config), encoder)
         return cache[name]
 
     return _build
@@ -187,35 +190,54 @@ class TestModelConstruction:
         spec = SPECS[name]
         model, encoder = built(name)
         assert encoder.count_params() == spec["encoder_params"]
-        assert model.count_params() - encoder.count_params() == spec["head_params"]
+        assert model.task_head.count_params() == spec["head_params"]
+        assert model.count_params() == spec["encoder_params"] + spec["head_params"]
 
-    def test_sentiment_model_layer_names_and_model_name(self, name, built):
+    def test_sentiment_model_is_the_encoder_class_with_its_own_head(self, name, built):
         spec = SPECS[name]
-        model, _ = built(name)
+        model, encoder = built(name)
+        assert type(model) is type(encoder) is spec["encoder_cls"]
+        assert model.include_top is True and encoder.include_top is False
         assert_layer_names([l.name for l in model.layers], spec["layer_names"])
-        assert re.fullmatch(re.escape(spec["model_name"]) + r"(_\d+)?", model.name)
 
     def test_output_shape_is_num_classes(self, name, built):
         spec = SPECS[name]
         model, _ = built(name)
         num_classes = spec["config_defaults"]["num_classes"]
-        assert model.output_shape == (None, num_classes)
+        output = model(_probe_inputs(), training=False)
+        assert not isinstance(output, dict), list(output)
+        assert tuple(output.shape) == (2, num_classes)
 
-    def test_the_returned_encoder_is_the_one_inside_the_model(self, name, built):
-        spec = SPECS[name]
+    def test_the_backbone_is_the_pretrained_one(self, name, built):
+        """Every backbone array equals the saved encoder's, by value.
+
+        Replaces the old ``get_layer(<name>) is encoder`` identity check: the
+        encoder is no longer a layer INSIDE the model, it is the model, so the
+        claim that matters is that the checkpoint's values arrived.
+        """
         model, encoder = built(name)
-        assert model.get_layer(spec["encoder_layer_name"]) is encoder
+        loaded = {l.name: l for l in model.layers if l.name != "task_head"}
+        saved = {l.name: l for l in encoder.layers}
+        assert set(loaded) == set(saved)
+        compared = 0
+        for layer_name, layer in loaded.items():
+            for got, want in zip(layer.weights, saved[layer_name].weights):
+                np.testing.assert_array_equal(
+                    np.asarray(got), np.asarray(want), err_msg=got.path
+                )
+                compared += 1
+        assert compared == len(encoder.weights) > 0
 
     def test_the_head_reads_the_CLS_POSITION(self, name, built):
         """The classifier must be fed ``last_hidden_state[:, 0, :]``.
 
-        Recomputed from the model's own parts, then compared. The precondition
-        below is what keeps this non-vacuous: if position 1 gave the same
-        logits, the assertion could not tell the two apart.
+        Recomputed from the model's own head and the saved encoder, then
+        compared. The precondition below is what keeps this non-vacuous: if
+        position 1 gave the same logits, the assertion could not tell the two
+        apart.
         """
-        spec = SPECS[name]
         model, encoder = built(name)
-        head = model.get_layer("sentiment_analysis_head")
+        head = model.task_head
         inputs = _probe_inputs()
 
         hidden = encoder(inputs, training=False)["last_hidden_state"]

@@ -19,6 +19,8 @@ from train.common.nlp import (
     load_text_dataset,
     preprocess_classification_dataset,
     create_nlp_callbacks,
+    build_sentiment_model_from_encoder,
+    set_backbone_trainable,
 )
 
 from train.tree_transformer.pretrain import (
@@ -26,13 +28,11 @@ from train.tree_transformer.pretrain import (
     pretrained_encoder_path as _pretrained_encoder_path,
 )
 
-from dl_techniques.models.language.tree_transformer import TreeTransformer  # noqa: F401  (registry)
+from dl_techniques.models.language.tree_transformer import TreeTransformer
 
 _PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -80,50 +80,20 @@ class FinetuneConfig:
 # ---------------------------------------------------------------------
 
 
-def create_sentiment_model(
-    config: FinetuneConfig,
-) -> Tuple[keras.Model, keras.Model]:
-    """Load pretrained TreeTransformer encoder and attach a classification head."""
+def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
+    """Rebuild the pretrained TreeTransformer encoder with a sentiment head (``include_top=True``).
+
+    The architecture is read from the encoder checkpoint itself; the backbone
+    loads completely or this raises, and the ``task_head`` starts fresh
+    (see ``train.common.nlp.build_sentiment_model_from_encoder``).
+    """
     logger.info("Creating Sentiment Analysis Model")
-    try:
-        tree_encoder = keras.models.load_model(config.pretrained_encoder_path)
-        logger.info("Pretrained TreeTransformer encoder loaded.")
-    except (IOError, OSError) as e:
-        logger.error(f"Failed to load TreeTransformer encoder: {e}")
-        raise
-
-    head = create_nlp_head(
-        task_config=NLPTaskConfig(
-            name="sentiment_analysis",
-            task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-            num_classes=config.num_classes,
-            dropout_rate=0.1,
-        ),
-        input_dim=tree_encoder.hidden_size,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-        "attention_mask": keras.Input(
-            shape=(None,), dtype="int32", name="attention_mask"
-        ),
-        "token_type_ids": keras.Input(
-            shape=(None,), dtype="int32", name="token_type_ids"
-        ),
-    }
-    encoder_out = tree_encoder(inputs)
-    cls_output = encoder_out["last_hidden_state"][:, 0, :]
-    logits = head({"hidden_states": cls_output})["logits"]
-
-    model = keras.Model(
-        inputs=inputs,
-        outputs=logits,
-        name="tree_transformer_sentiment_analyzer",
+    model = build_sentiment_model_from_encoder(
+        TreeTransformer, config.pretrained_encoder_path, config.num_classes,
+        dropout_rate=0.1,
     )
     logger.info(f"Model created: {model.count_params():,} parameters")
-    return model, tree_encoder
+    return model
 
 
 # ---------------------------------------------------------------------
@@ -185,7 +155,7 @@ def finetune_sentiment_model(
         ),
         preprocessor, config.max_seq_length, config.batch_size,
     )
-    model, tree_encoder = create_sentiment_model(config)
+    model = create_sentiment_model(config)
     callbacks, results_dir = create_nlp_callbacks(
         model_name="TreeTransformer-Sentiment-Finetuned",
         results_dir_prefix="tree_transformer_finetune",
@@ -199,7 +169,7 @@ def finetune_sentiment_model(
         logger.info(
             f"Stage 1: Head Training for {config.stage1_epochs} epochs"
         )
-        tree_encoder.trainable = False
+        set_backbone_trainable(model, False)
         compile_model(model, config, config.stage1_learning_rate)
         history1 = model.fit(
             train_dataset, epochs=config.stage1_epochs,
@@ -211,7 +181,7 @@ def finetune_sentiment_model(
         logger.info(
             f"Stage 2: Full Fine-tuning for {config.stage2_epochs} epochs"
         )
-        tree_encoder.trainable = True
+        set_backbone_trainable(model, True)
         compile_model(model, config, config.stage2_learning_rate)
         initial_epoch = final_history.epoch[-1] + 1
         history2 = model.fit(

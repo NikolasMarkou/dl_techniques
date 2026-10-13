@@ -24,8 +24,15 @@ from dl_techniques.models.common.masked_language_model import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
 )
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    NLPTaskType,
+    task_config_to_dict,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
+from dl_techniques.utils.weight_transfer import read_checkpoint_config
 # `create_warmup_lr_schedule` now lives in dl_techniques.optimization.schedule
 # alongside the other LR-schedule construction. It is re-exported here so the
 # ~11 existing `from train.common.nlp import create_warmup_lr_schedule` call
@@ -637,6 +644,103 @@ def evaluate_mlm_model(
 
 
 # ---------------------------------------------------------------------
+# Sentiment fine-tuning: the headed model and its two-stage freeze
+# ---------------------------------------------------------------------
+
+
+# DECISION plan-2026-10-11T170958-dc4d2202/D-010: the finetune trainers rebuild the
+# headed model from the ENCODER CHECKPOINT'S OWN config and load the backbone through
+# the class's complete-or-raise route. Do NOT go back to `keras.models.load_model(encoder)`
+# plus a hand-wired Functional head (a second head implementation, and a third source of
+# the head's name), and do NOT catch a failed load and carry on with a random encoder
+# (that trains from scratch and reports success). See decisions.md.
+def build_sentiment_model_from_encoder(
+    model_cls: type,
+    encoder_path: str,
+    num_classes: int,
+    dropout_rate: float = 0.1,
+) -> keras.Model:
+    """Rebuild a language encoder with a sentiment head from its headless checkpoint.
+
+    Interface contract (shared by the four sentiment fine-tuning scripts):
+
+    :param model_cls: The language model class that wrote the checkpoint
+        (``BERT``, ``FNet``, ``TreeTransformer``): a class with ``from_config``,
+        ``include_top`` / ``task_config`` constructor knobs and a
+        ``load_pretrained_weights`` method.
+    :param encoder_path: Path of a ``.keras`` archive of that class (a headless
+        encoder, or a model trained under any other head: the head is never
+        copied).
+    :param num_classes: Width of the new sentiment head.
+    :param dropout_rate: Dropout of the new head.
+    :returns: A ``model_cls`` instance with ``include_top=True``, the architecture
+        exactly as the archive records it (nothing restated by the caller), the
+        backbone loaded and a fresh ``task_head`` (CLS pooling, bare logits).
+    :raises FileNotFoundError: *encoder_path* does not exist.
+    :raises ValueError: the file is not a readable archive of *model_cls*, or the
+        backbone does not load completely (``load_pretrained_weights`` raises; a
+        failed load is never turned into a random-initialized model).
+    """
+    if not os.path.exists(encoder_path):
+        raise FileNotFoundError(f"Pretrained encoder not found: {encoder_path}")
+    archive = read_checkpoint_config(encoder_path)
+    config = archive.get("config")
+    if not isinstance(config, dict) or not str(
+        archive.get("class_name", "")
+    ).endswith(model_cls.__name__):
+        raise ValueError(
+            f"{encoder_path!r} is not a readable {model_cls.__name__} archive "
+            f"(class_name={archive.get('class_name')!r})."
+        )
+    task_config = NLPTaskConfig(
+        name="sentiment_analysis",
+        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+        num_classes=num_classes,
+        dropout_rate=dropout_rate,
+    )
+    model = model_cls.from_config({
+        **{key: value for key, value in config.items() if key != "name"},
+        "include_top": True,
+        "task_config": task_config_to_dict(task_config),
+    })
+    model.load_pretrained_weights(encoder_path)
+    logger.info(
+        f"{model_cls.__name__} rebuilt with a sentiment head from {encoder_path}: "
+        f"{model.count_params():,} parameters"
+    )
+    return model
+
+
+def set_backbone_trainable(model: keras.Model, trainable: bool) -> None:
+    """Freeze or unfreeze every layer of a headed model except its task head.
+
+    Interface contract (the two-stage fine-tuning recipe: head only, then all):
+
+    :param model: A language model built with ``include_top=True`` (it has a
+        ``task_head`` layer).
+    :param trainable: ``False`` leaves only the ``task_head`` trainable; ``True``
+        makes every layer trainable.
+    :raises ValueError: *model* has no ``task_head``.
+
+    Why a loop and not ``model.trainable``: ``model.trainable = False`` followed
+    by ``task_head.trainable = True`` leaves ZERO trainable weights (the parent's
+    flag wins), and ``model.trainable = True`` after a per-layer freeze is a
+    no-op (the model's own flag is already True), so the unfreeze would silently
+    leave the backbone frozen. The model's own flag is reset first, then every
+    layer is set one by one.
+    """
+    head = getattr(model, TASK_HEAD_NAME, None)
+    if head is None:
+        raise ValueError(
+            f"{type(model).__name__} has no {TASK_HEAD_NAME!r} layer; "
+            "build it with include_top=True."
+        )
+    model.trainable = True
+    for layer in model.layers:
+        layer.trainable = True if layer is head else trainable
+
+
+# ---------------------------------------------------------------------
 # Sentiment fine-tuning: post-training analysis
 # ---------------------------------------------------------------------
 
@@ -807,6 +911,8 @@ __all__ = [
     "prepare_dict_keyed_compile",
     "DEFAULT_MLM_PROBE_TEXTS",
     "evaluate_mlm_model",
+    "build_sentiment_model_from_encoder",
+    "set_backbone_trainable",
     "sentiment_final_model_filename",
     "prepare_data_for_analyzer",
     "run_finetune_post_training_analysis",

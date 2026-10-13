@@ -19,15 +19,15 @@ from train.common.nlp import (
     load_text_dataset,
     preprocess_classification_dataset,
     create_nlp_callbacks,
+    build_sentiment_model_from_encoder,
     run_finetune_post_training_analysis,
     sentiment_final_model_filename,
+    set_backbone_trainable,
 )
 
 from dl_techniques.models.language.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -79,39 +79,19 @@ class FinetuneConfig:
 # ---------------------------------------------------------------------
 
 
-def create_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras.Model]:
-    """Load pretrained BERT encoder and attach a classification head."""
+def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
+    """Rebuild the pretrained BERT encoder with a sentiment head (``include_top=True``).
+
+    The architecture is read from the encoder checkpoint itself; the backbone
+    loads completely or this raises, and the ``task_head`` starts fresh
+    (see ``train.common.nlp.build_sentiment_model_from_encoder``).
+    """
     logger.info("Creating Sentiment Analysis Model")
-    try:
-        bert_encoder = keras.models.load_model(
-            config.pretrained_encoder_path, custom_objects={"BERT": BERT},
-        )
-        logger.info("Pretrained BERT encoder loaded.")
-    except (IOError, OSError) as e:
-        logger.error(f"Failed to load BERT encoder: {e}")
-        raise
-
-    head = create_nlp_head(
-        task_config=NLPTaskConfig(
-            name="sentiment_analysis",
-            task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-            num_classes=config.num_classes, dropout_rate=0.1,
-        ),
-        input_dim=bert_encoder.hidden_size,
+    model = build_sentiment_model_from_encoder(
+        BERT, config.pretrained_encoder_path, config.num_classes, dropout_rate=0.1,
     )
-
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
-        "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
-    }
-    encoder_out = bert_encoder(inputs)
-    cls_output = encoder_out["last_hidden_state"][:, 0, :]
-    logits = head({"hidden_states": cls_output})['logits']
-
-    model = keras.Model(inputs=inputs, outputs=logits, name="bert_sentiment_analyzer")
     logger.info(f"Model created: {model.count_params():,} parameters")
-    return model, bert_encoder
+    return model
 
 
 # ---------------------------------------------------------------------
@@ -169,7 +149,7 @@ def finetune_sentiment_model(
         load_text_dataset(config.dataset_name, "test", config.max_samples, as_supervised=True),
         preprocessor, config.max_seq_length, config.batch_size,
     )
-    model, bert_encoder = create_sentiment_model(config)
+    model = create_sentiment_model(config)
     callbacks, results_dir = create_nlp_callbacks(
         model_name="BERT-Sentiment-Finetuned-Tiktoken",
         results_dir_prefix="bert_finetune",
@@ -183,7 +163,7 @@ def finetune_sentiment_model(
     if config.run_two_stage_finetuning:
         # Stage 1: train head only
         logger.info(f"Stage 1: Head Training for {config.stage1_epochs} epochs")
-        bert_encoder.trainable = False
+        set_backbone_trainable(model, False)
         compile_model(model, config, config.stage1_learning_rate)
         history1 = model.fit(
             train_dataset, epochs=config.stage1_epochs,
@@ -193,7 +173,7 @@ def finetune_sentiment_model(
 
         # Stage 2: full fine-tuning
         logger.info(f"Stage 2: Full Fine-tuning for {config.stage2_epochs} epochs")
-        bert_encoder.trainable = True
+        set_backbone_trainable(model, True)
         compile_model(model, config, config.stage2_learning_rate)
         initial_epoch = final_history.epoch[-1] + 1
         history2 = model.fit(
@@ -239,7 +219,7 @@ def post_training_analysis(config: FinetuneConfig, results_dir: str) -> None:
     run_finetune_post_training_analysis(
         config,
         model_name="bert",
-        create_initial_model=lambda: create_sentiment_model(config)[0],
+        create_initial_model=lambda: create_sentiment_model(config),
         results_dir=results_dir,
     )
 
