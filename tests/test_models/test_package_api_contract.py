@@ -171,6 +171,11 @@ def _resolve_required_arg(param_name: str, fn) -> Tuple[Any, str]:
         return 2, ""
     if param_name == "vocab_size":
         return 32, ""
+    if param_name == "seq_len":
+        # A size like the others: HRM and PTRM (from_variant and factory) take
+        # it as a required argument, and `pretrained=True` raises before any
+        # model of that length is built.
+        return 8, ""
     if param_name == "input_shape":
         return (32, 32, 3), ""
     return None, f"required argument {param_name!r} has no generic resolution"
@@ -234,7 +239,11 @@ def _pretrained_factories() -> Tuple[List[Tuple[str, Any, dict]], List[Tuple[str
     ``_PRETRAINED_UNREACHABLE_EVIDENCE`` below. (Re-measured 2026-10-11, after
     the ``_with_head`` factories were deleted and ``create_distilbert``,
     ``create_modern_bert``, ``create_fnet``, ``create_mamba`` and
-    ``create_mamba2`` added: population 84, reached 83, unreached 1.)
+    ``create_mamba2`` added: population 84, reached 83, unreached 1.
+    Re-measured 2026-10-13: population 95, reached 94, unreached 1; the
+    ``seq_len`` size resolution reaches HRM and PTRM, whose ``from_variant``
+    and factory gained ``pretrained`` in D-015 of
+    plan-2026-10-13T035756-5dd4d94d.)
     """
     reached: List[Tuple[str, Any, dict]] = []
     unreached: List[Tuple[str, str]] = []
@@ -4170,12 +4179,11 @@ _CREATE_DELEGATION_WAIVERS = {
     # initialised model with no error at all. The guard now lives in
     # `from_variant`, the chokepoint, and the factories delegate cleanly.
     ("models/vision/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
-    # (b) Optional-argument patching into **kwargs before delegating. Small, but
-    # it is logic the callee's own signature should be expressing.
-    ("models/language/bert/model.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/language/gpt2/gpt2.py", "create_gpt2"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/language/tree_transformer/model.py", "create_tree_transformer"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/language/wave_field/model.py", "create_wave_field_llm"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    # (b) Optional-argument patching into **kwargs before delegating. The four
+    # language entries (create_bert, create_gpt2, create_tree_transformer,
+    # create_wave_field_llm: `if vocab_size is not None: kwargs[...]`) were
+    # DELETED by plan-2026-10-13T035756-5dd4d94d D-015: `vocab_size` now flows
+    # through **kwargs and the factories delegate cleanly.
     # (c) Logging in the factory. Not arithmetic, but not delegation either, and
     # the predicate cannot tell a `logger.info` call from a `model.compile` one
     # without becoming a call-name allowlist that the next offender walks past.
@@ -4193,7 +4201,9 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/vision/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
     ("models/vision/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
     ("models/vision_language/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
-    ("models/language/hrm/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
+    # `models/language/hrm/model.py::create_hierarchical_reasoning_model` was
+    # DELETED by plan-2026-10-13T035756-5dd4d94d D-015: the `variant=None`
+    # constructor branch, the optimizer and the compile are gone; it delegates.
     # (f) SEVERE -- the factory compiled, ran, or asserted. DISPOSED at step 19
     # (D-078). Three were repaired and one is refuted; all four still trip the
     # predicate because a compile call, a `build()` call and a derived log line
@@ -4218,12 +4228,17 @@ _CREATE_DELEGATION_WAIVERS = {
 }
 
 
-#: The 15 ``create_*(variant=...)`` functions whose module defines no
+#: The 16 ``create_*(variant=...)`` functions whose module defines no
 #: ``from_variant`` -- excluded from R-051 BY SCOPE, since the rule is about
 #: delegating to a method that does not exist here. §5.6's functional-builder
 #: exemption class. Pinned by name so the exclusion cannot grow silently: a NEW
 #: variant factory that forgets ``from_variant`` altogether would otherwise slip
 #: into this set and never be judged.
+#:
+#: Re-measured 2026-10-13 (plan-2026-10-13T035756-5dd4d94d D-015): unchanged at
+#: 16. ``models/language/ptrm/factory.py::create_ptrm_from_variant`` had landed
+#: in the exclusion unpinned (its module has no ``from_variant``); it was folded
+#: into ``ptrm/model.py::create_ptrm``, which now delegates and is judged.
 _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/vision/bias_free_denoisers/bfcnn.py", "create_bfcnn_variant"),
     ("models/vision/bias_free_denoisers/bfconvunext.py", "create_convunext_variant"),
@@ -4267,7 +4282,9 @@ _CREATE_FACTORIES_THAT_COMPILE = {
     ("models/vision/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
     ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
     ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
-    ("models/language/hrm/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
+    # `models/language/hrm/model.py::create_hierarchical_reasoning_model` was
+    # DELETED by plan-2026-10-13T035756-5dd4d94d D-015: the factory no longer
+    # compiles; callers that want `fit()` compile it themselves.
     ("models/common/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
     ("models/general_purpose/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
     ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
@@ -4358,6 +4375,10 @@ class TestCreateFactoriesDelegateToFromVariant:
     live offenders, waived by name with their read and routed to step 19. This
     is the one guard in this step with a large live offender set, and narrowing
     the predicate until the tree passed would have been the failure mode.
+
+    Re-measured 2026-10-13 after D-015 of plan-2026-10-13T035756-5dd4d94d (the
+    language factories delegate; ``create_ptrm`` gained ``variant``): 90 take a
+    ``variant``, 16 excluded by scope, 50 delegate, 24 carry logic.
     """
 
     def test_every_variant_factory_delegates_to_from_variant(self):

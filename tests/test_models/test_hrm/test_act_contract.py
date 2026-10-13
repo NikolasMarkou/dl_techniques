@@ -11,7 +11,9 @@ Three independent sub-defects, one assertion group each:
     until the batch's slowest member finished, and the caller got its restarted
     partial run. (D-031)
 (c) `create_hierarchical_reasoning_model` documented an "optionally compiled"
-    model and built an optimizer it discarded, so `.fit()` raised. (D-032)
+    model and built an optimizer it discarded, so `.fit()` raised. (D-032;
+    superseded by D-015 of plan-2026-10-13T035756-5dd4d94d, which moved the
+    compile out of the factory and into the caller.)
 """
 
 import numpy as np
@@ -19,6 +21,7 @@ import keras
 import pytest
 import tensorflow as tf
 
+from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.models.language.hrm.model import (
     HierarchicalReasoningModel,
     create_hierarchical_reasoning_model,
@@ -218,12 +221,20 @@ class TestEarlyHaltingSequenceKeepsItsOwnAnswer:
         )
 
 
-class TestFactoryReturnsACompiledModel:
-    """(c) D-032 — 'optionally compiled' must mean compiled."""
+class TestTheFactoryLeavesTheCompileToTheCaller:
+    """(c) D-032, superseded by D-015 of plan-2026-10-13T035756-5dd4d94d.
+
+    D-032 made the factory's advertised compile real. D-015 removed the compile
+    from the factory altogether: `create_hierarchical_reasoning_model` now only
+    delegates to `from_variant` (the house R-051 shape), and the caller that
+    wants `fit()` compiles. What D-032 protected -- a `fit()` that works with
+    the documented logits-only loss -- is pinned here at the caller.
+    """
 
     def _factory(self, **kwargs):
         keras.utils.set_random_seed(0)
         return create_hierarchical_reasoning_model(
+            "small",
             vocab_size=16,
             seq_len=8,
             embed_dim=32,
@@ -235,18 +246,25 @@ class TestFactoryReturnsACompiledModel:
             **kwargs,
         )
 
-    def test_fit_succeeds_without_a_manual_compile(self, batch):
+    def test_the_factory_returns_a_built_uncompiled_model(self):
         model = self._factory()
-        assert model.compiled, (
-            "the factory returned an uncompiled model while its docstring "
-            "promises an optionally compiled one (decisions.md D-032)"
+        assert model.built
+        assert not model.compiled, (
+            "the factory compiled the model: it chose an optimizer and a loss "
+            "the caller did not ask for (D-015)"
         )
-        # R-038 / D-056: the factory's default compile supervises `logits`
-        # ONLY -- the Q/ACT term couples two model OUTPUTS and cannot be a
-        # per-output Keras loss (D-032). Keras therefore reports the q_head as
-        # gradient-free, DELIBERATELY. Asserted rather than suppressed; the
-        # paired liveness control is
-        # test_the_q_head_trains_where_it_is_supposed_to.py.
+
+    def test_the_documented_compile_trains_with_fit(self, batch):
+        model = self._factory()
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+            loss={"logits": StableMaxCrossEntropy()},
+        )
+        # R-038 / D-056: this compile supervises `logits` ONLY -- the Q/ACT
+        # term couples two model OUTPUTS and cannot be a per-output Keras loss
+        # (D-032). Keras therefore reports the q_head as gradient-free,
+        # DELIBERATELY. Asserted rather than suppressed; the paired liveness
+        # control is test_the_q_head_trains_where_it_is_supposed_to.py.
         with pytest.warns(UserWarning, match="Gradients do not exist"):
             history = model.fit(
                 batch,
@@ -258,23 +276,16 @@ class TestFactoryReturnsACompiledModel:
         loss = history.history["loss"][0]
         assert np.isfinite(loss), f"fit ran but produced a non-finite loss {loss}"
 
-    def test_the_learning_rate_argument_reaches_the_optimizer(self):
-        model = self._factory(learning_rate=3e-3)
-        lr = float(keras.ops.convert_to_numpy(model.optimizer.learning_rate))
-        assert lr == pytest.approx(3e-3), (
-            f"learning_rate=3e-3 produced an optimizer at {lr}; the argument is "
-            "inert again"
-        )
+    @pytest.mark.parametrize(
+        "retired",
+        [{"optimizer": "adamw"}, {"learning_rate": 1e-4}, {"loss": None}],
+        ids=["optimizer", "learning_rate", "loss"],
+    )
+    def test_the_retired_compile_arguments_are_refused(self, retired):
+        """A caller still passing the old compile knobs fails loudly.
 
-    def test_optimizer_none_still_returns_an_uncompiled_model(self):
-        """ANTI-VACUITY control: the opt-out route stays open.
-
-        `src/train/hrm/train_hrm.py` drives this model from its own
-        `GradientTape` with `create_hrm_loss`, so compiling unconditionally
-        would be a different defect.
+        Silently accepting them would hand back an uncompiled model to a caller
+        who believes it chose the optimizer.
         """
-        model = self._factory(optimizer=None)
-        assert not model.compiled, (
-            "optimizer=None compiled the model anyway; the custom-loop route "
-            "documented in the README no longer has an opt-out"
-        )
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments"):
+            self._factory(**retired)

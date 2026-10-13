@@ -567,9 +567,15 @@ class TestCreateWaveFieldLLM:
         assert model.max_seq_len == small["max_seq_len"]
         assert model.field_size == small["field_size"]
 
-    def test_vocab_size_none_keeps_class_default(self):
+    def test_omitting_vocab_size_keeps_class_default(self):
+        """No variant sets ``vocab_size``; an omitted one is the class default.
+
+        The factory's ``vocab_size=None`` branch is gone (D-015 of
+        plan-2026-10-13T035756-5dd4d94d): ``vocab_size`` is an ordinary
+        ``**kwargs`` override now, so "keep the default" means "omit it".
+        """
         model = create_wave_field_llm(
-            "tiny", vocab_size=None, embed_dim=32, depth=1, num_heads=2,
+            "tiny", embed_dim=32, depth=1, num_heads=2,
         )
         assert model.vocab_size == WaveFieldLLM.DEFAULT_VOCAB_SIZE
 

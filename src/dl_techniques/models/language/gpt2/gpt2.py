@@ -735,7 +735,6 @@ class GPT2(RecordedBuildShapeMixin, keras.Model):
 
 def create_gpt2(
     variant: str = "small",
-    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> "GPT2":
@@ -748,17 +747,15 @@ def create_gpt2(
     :param variant: GPT-2 variant name (``"tiny"``, ``"small"``, ``"medium"``,
         ``"large"``, ``"xl"``). Defaults to ``"small"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override. If ``None`` (default),
-        the model's default vocab size (100277, Tiktoken cl100k_base) is used.
-        If provided, forwarded as ``vocab_size=...`` in ``kwargs``.
-    :type vocab_size: Optional[int]
     :param pretrained: If ``True``, attempts to load pretrained weights — note
         that no public GPT-2 weights are distributed by this library, so
         ``True`` will raise ``NotImplementedError``. If a string path, loads
         local weights from that path. If ``False`` (default), random init.
     :type pretrained: Union[bool, str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`GPT2.from_variant` (e.g. ``dropout_rate``, ``tie_word_embeddings``,
+        :meth:`GPT2.from_variant` (e.g. ``vocab_size``, whose default is the
+        model's 100277, Tiktoken cl100k_base; ``dropout_rate``,
+        ``tie_word_embeddings``,
         or ``include_top=True`` with a ``task_config`` for a model with a task
         head). A local ``pretrained`` path never restores a checkpoint's task
         head.
@@ -785,8 +782,6 @@ def create_gpt2(
         ...         name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
         ...         num_classes=2))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return GPT2.from_variant(
         variant,
         pretrained=pretrained,

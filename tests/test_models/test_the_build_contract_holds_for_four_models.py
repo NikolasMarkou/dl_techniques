@@ -223,7 +223,8 @@ def test_the_hrm_factory_returns_a_built_model():
     `HRMTrainer.__init__`, so the trainer module could not start at all.
     """
     model = create_hierarchical_reasoning_model(
-        vocab_size=16, seq_len=8, embed_dim=32, num_puzzle_identifiers=4)
+        "small", vocab_size=16, seq_len=8, embed_dim=32,
+        num_puzzle_identifiers=4)
 
     assert model.built is True
     assert model.count_params() == 231298

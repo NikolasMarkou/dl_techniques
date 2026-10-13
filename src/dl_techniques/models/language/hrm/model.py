@@ -52,9 +52,12 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import (
+    load_weights_or_raise,
+    pretrained_path_or_raise,
+)
 
 # ---------------------------------------------------------------------
 
@@ -688,22 +691,35 @@ class HierarchicalReasoningModel(keras.Model):
             vocab_size: int,
             seq_len: int,
             num_puzzle_identifiers: int = 1000,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "HierarchicalReasoningModel":
-        """Create a Hierarchical Reasoning Model from a predefined variant.
+        """Create a built Hierarchical Reasoning Model from a predefined variant.
 
         Args:
-            variant: String, one of "micro", "tiny", "small", "base", "large", "xlarge"
+            variant: String, one of "micro", "tiny", "small", "base", "large", "xlarge".
+                "small" is `hrm_v1.yaml` and equals the constructor defaults.
             vocab_size: Integer, size of vocabulary
             seq_len: Integer, maximum sequence length
             num_puzzle_identifiers: Integer, number of puzzle identifiers
-            **kwargs: Additional arguments passed to the constructor
+            pretrained: `False` (default) for random init. `True` raises
+                `NotImplementedError`: no HRM weights are distributed. A string
+                is the path of a local checkpoint of the SAME architecture
+                (`.keras` or `.weights.h5`), restored whole and strictly; a load
+                that changes no variable raises.
+            **kwargs: Constructor arguments laid over the variant's entry
+                (`embed_dim`, `h_layers`, `halt_max_steps`, ...).
 
         Returns:
-            HierarchicalReasoningModel instance
+            HierarchicalReasoningModel instance, built and uncompiled. Compile
+            it yourself for `fit()` (`loss={"logits": StableMaxCrossEntropy()}`
+            supervises the LM head only), or drive it from
+            `src/train/hrm/train_hrm.py`'s ACT loop, which also trains the Q head.
 
         Raises:
             ValueError: If variant is not recognized
+            NotImplementedError: If `pretrained` is `True`.
+            FileNotFoundError: If `pretrained` is a path that does not exist.
 
         Example:
             >>> # Mathematical reasoning model
@@ -727,15 +743,27 @@ class HierarchicalReasoningModel(keras.Model):
         logger.info(f"Creating Hierarchical Reasoning Model-{variant.upper()}")
         logger.info(f"Architecture: {config}")
 
+        # Refused before anything is built: no weight is allocated for a load
+        # that cannot happen.
+        weights_path = pretrained_path_or_raise(pretrained, "HRM")
+
         # DECISION plan-2026-08-17T183311-79c63e38/D-025: merge, don't splat both dicts.
         # `**config, **kwargs` raises on any override of a variant key. See decisions.md.
         config.update(kwargs)
-        return cls(
+        model = cls(
             vocab_size=vocab_size,
             seq_len=seq_len,
             num_puzzle_identifiers=num_puzzle_identifiers,
             **config
         )
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-051: build() here, not a dummy forward
+        # pass. A forward pass advances the ACT carry and drops variables under a StatelessScope.
+        model.build()
+
+        if weights_path is not None:
+            load_weights_or_raise(model, weights_path)
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
@@ -833,131 +861,76 @@ class HierarchicalReasoningModel(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Factory function to create and configure HRM models
+# Factory function
 # ---------------------------------------------------------------------
 
 def create_hierarchical_reasoning_model(
+        variant: str,
         vocab_size: int,
         seq_len: int,
-        embed_dim: int = 512,
         num_puzzle_identifiers: int = 1000,
-        variant: Optional[str] = None,
-        optimizer: Union[str, keras.optimizers.Optimizer] = "adamw",
-        learning_rate: float = 1e-4,
-        loss: Optional[keras.losses.Loss] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> HierarchicalReasoningModel:
-    """Create and optionally compile a Hierarchical Reasoning Model.
+    """Create a built Hierarchical Reasoning Model from a variant name.
 
-    Factory function implementing the research architecture from Wang et al. (2025)
-    with sensible defaults based on paper findings. The "base" variant matches the
-    exact configuration that achieved 40.3% on ARC-AGI with only ~1000 training
-    examples and 27M parameters.
+    Delegates to `HierarchicalReasoningModel.from_variant` and holds no logic of
+    its own, like `create_resnet`. The model comes back built and UNCOMPILED:
+    it does not choose an optimizer or a loss for the caller.
 
-    Research-Validated Configurations:
-    - **base**: Paper configuration (27M params, 40.3% ARC-AGI)
-    - **AdamW optimizer**: Scale-invariant optimization with bounded parameters
-    - **Learning rate 1e-4**: Optimal for hierarchical convergence training
-    - **Post-Norm architecture**: With RMSNorm, SwiGLU, and RoPE applied to Q/K
-      inside the reasoning modules' grouped-query attention (Llama-style)
+    Variants: "small" is the paper's only published architecture
+    (sapientinc/HRM `hrm_v1.yaml`: embed_dim 512, 4+4 layers, 2+2 cycles,
+    8 heads, halt_max_steps 16) and equals the constructor defaults. "micro",
+    "tiny", "base", "large" and "xlarge" are size tiers of this repository
+    with no published counterpart.
+
+    Training: `src/train/hrm/train_hrm.py` drives the model with its own ACT
+    loop and `HRMLoss`, which is what trains the Q-halting head. For a stock
+    `fit()`, compile with `loss={"logits": StableMaxCrossEntropy()}`; that
+    supervises the LM head ONLY, because the Q term couples two model outputs
+    and cannot be a per-output Keras loss.
 
     Args:
+        variant: One of "micro", "tiny", "small", "base", "large", "xlarge".
         vocab_size: Size of vocabulary for token embeddings.
         seq_len: Maximum sequence length for input sequences.
-        embed_dim: Embedding dimension (ignored if variant is specified).
         num_puzzle_identifiers: Number of puzzle type identifiers.
-        variant: Optional model variant from research configurations:
-            - "micro": 1.2M params, minimal reasoning
-            - "base": 27M params, paper configuration, 40.3% ARC-AGI
-            - "large": 156.7M params, high-capacity reasoning
-        optimizer: Optimizer for compilation. Paper uses Adam-atan2 (scale-invariant).
-            Pass `None` to skip compilation and drive the model from your own
-            training loop (this is what `src/train/hrm/train_hrm.py` does).
-        learning_rate: Learning rate. Paper uses 1e-4 with linear warmup.
-        loss: Loss used when compiling. Defaults to
-            `{"logits": StableMaxCrossEntropy()}`, so the compiled model trains
-            with `fit(batch, {"logits": labels})`. This supervises the LM head
-            ONLY — the Q-learning halting term couples two model *outputs* and
-            cannot be expressed as a per-output Keras loss, so ACT supervision
-            requires `src/train/hrm/train_hrm.py`'s loop (or your own `loss=`
-            plus a `compute_loss` override). Ignored when `optimizer` is
-            `None`.
-        **kwargs: Additional arguments for HierarchicalReasoningModel constructor.
+        pretrained: `False` for random init; `True` raises
+            `NotImplementedError`; a string is a local checkpoint path (see
+            `HierarchicalReasoningModel.from_variant`).
+        **kwargs: Constructor arguments laid over the variant's entry.
 
     Returns:
-        HierarchicalReasoningModel instance, compiled unless `optimizer=None`.
+        HierarchicalReasoningModel instance, built and uncompiled.
 
     Example:
-        >>> # Reproduce paper ARC-AGI results
+        >>> # The paper's architecture (hrm_v1), Sudoku-sized
         >>> model = create_hierarchical_reasoning_model(
-        ...     vocab_size=32000,
-        ...     seq_len=512,
-        ...     variant="base",  # 27M params, matches paper
-        ...     halt_exploration_prob=0.1  # Paper ACT setting
-        ... )
-        >>>
-        >>> # Sudoku solver configuration
-        >>> model = create_hierarchical_reasoning_model(
+        ...     "small",
         ...     vocab_size=20,  # 0-9 digits + special tokens
         ...     seq_len=81,     # 9x9 grid flattened
-        ...     variant="base",
-        ...     halt_max_steps=16  # For backtracking search
+        ... )
+        >>> model.compile(
+        ...     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        ...     loss={"logits": StableMaxCrossEntropy()},
         ... )
         >>>
-        >>> # Maze pathfinding (30x30)
+        >>> # Maze pathfinding (30x30) on a larger tier
         >>> model = create_hierarchical_reasoning_model(
+        ...     "large",
         ...     vocab_size=4,   # wall, empty, start, goal
         ...     seq_len=900,    # 30x30 maze flattened
-        ...     variant="large",
         ...     halt_exploration_prob=0.2
         ... )
     """
-    # Create model from variant or custom specification
-    if variant is not None:
-        model = HierarchicalReasoningModel.from_variant(
-            variant,
-            vocab_size=vocab_size,
-            seq_len=seq_len,
-            num_puzzle_identifiers=num_puzzle_identifiers,
-            **kwargs
-        )
-    else:
-        model = HierarchicalReasoningModel(
-            vocab_size=vocab_size,
-            seq_len=seq_len,
-            embed_dim=embed_dim,
-            num_puzzle_identifiers=num_puzzle_identifiers,
-            **kwargs
-        )
+    return HierarchicalReasoningModel.from_variant(
+        variant,
+        vocab_size=vocab_size,
+        seq_len=seq_len,
+        num_puzzle_identifiers=num_puzzle_identifiers,
+        pretrained=pretrained,
+        **kwargs
+    )
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-032: actually call model.compile() here.
-    # A stock per-output loss cannot express the Q-learning term; full ACT/Q supervision
-    # needs src/train/hrm/train_hrm.py's own loop with HRMLoss. See decisions.md.
-    if optimizer is not None:
-        if isinstance(optimizer, str):
-            optimizer = keras.optimizers.get(optimizer)
-        if hasattr(optimizer, 'learning_rate'):
-            optimizer.learning_rate = learning_rate
-
-        model.compile(
-            optimizer=optimizer,
-            loss=loss if loss is not None else {
-                "logits": StableMaxCrossEntropy()
-            },
-        )
-        logger.info(
-            f"Created and compiled Hierarchical Reasoning Model with optimizer "
-            f"{optimizer}"
-        )
-
-    else:
-        logger.info("Created Hierarchical Reasoning Model (uncompiled)")
-
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-051: build() here, not a dummy forward
-    # pass. A forward pass advances the ACT carry and drops variables under a StatelessScope.
-    if not model.built:
-        model.build()
-
-    return model
 
 # ---------------------------------------------------------------------

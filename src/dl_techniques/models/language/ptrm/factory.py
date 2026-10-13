@@ -1,30 +1,14 @@
-"""Factory functions for creating PTRM models with preset configurations."""
+"""Preset configurations for PTRM, one per benchmark of Sghaier et al. (2026).
 
-from typing import Optional, Dict, Any
+Each helper returns the variant and data shape a benchmark uses plus the
+inference settings (``K`` rollouts, ``D`` supervision steps, noise ``sigma``).
+Build the model with :func:`dl_techniques.models.language.ptrm.create_ptrm`
+from the ``variant``, ``vocab_size``, ``seq_len`` and ``puzzle_emb_len`` keys,
+and pass the ``"inference"`` entry to
+:class:`dl_techniques.models.language.ptrm.PTRMInference`.
+"""
 
-from .model import PTRM, create_ptrm
-
-
-def create_ptrm_from_variant(
-    variant: str,
-    vocab_size: int,
-    seq_len: int,
-    puzzle_emb_len: int = 16,
-    **kwargs: Any
-) -> PTRM:
-    """Create a PTRM model from a predefined variant.
-
-    :param variant: One of "mlp_tiny", "mlp_small", "mlp_base", "att_small", "att_base", "att_large".
-    :param vocab_size: Vocabulary size.
-    :param seq_len: Sequence length.
-    :param puzzle_emb_len: Puzzle embedding length.
-    :param **kwargs: Additional arguments to override variant config.
-    :return: PTRM instance.
-    """
-    model = PTRM.from_variant(variant, vocab_size, seq_len, puzzle_emb_len, **kwargs)
-    if not model.built:
-        model.build()
-    return model
+from typing import Dict, Any
 
 
 # Preset configurations matching paper experiments

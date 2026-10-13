@@ -79,9 +79,12 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   `X.from_variant` and returns the class itself, and the head comes from
   `include_top` + `task_config` + `head_config_overrides` in `__init__`,
   never from the factory. Some keep a named argument that is only
-  forwarded: `vocab_size` (BERT, TreeTransformer, GPT2, WaveFieldLLM; required
-  by Mamba and Mamba2) and `weights_dataset` / `cache_dir` (BERT, DistilBERT,
-  ModernBERT, FNet, TreeTransformer). Build a headed model with
+  forwarded: `vocab_size` (required by Mamba and Mamba2) and
+  `weights_dataset` / `cache_dir` (BERT, DistilBERT, ModernBERT, FNet,
+  TreeTransformer). For BERT, TreeTransformer, GPT2 and WaveFieldLLM,
+  `vocab_size` is an ordinary `**kwargs` override laid over the variant (omit
+  it to keep the variant's, or the class default; `vocab_size=None` is no
+  longer accepted). Build a headed model with
   `create_<model>(variant, include_top=True, task_config=...)`; there is no
   per-task factory and no functional head wrapper.
 - Zamba2 and HNet own a head too, with one difference: headless, `call()` returns the
@@ -221,9 +224,13 @@ contract, on purpose; none was changed by the head work.
 | Package | Why it has no `include_top` / `task_config` |
 |---|---|
 | `hrm`, `trm`, `ptrm` | Carry-based ACT puzzle solvers: the `lm_head` IS the task (per-cell prediction) and is trained jointly with the Q-halting head; the state is a recurrence, not a backbone a classification head would read. Their trainers use bespoke carry loops |
+| `hrm`, `ptrm` factories | Uniform: `create_hierarchical_reasoning_model(variant, vocab_size, seq_len, ..., pretrained=False, **kwargs)` and `create_ptrm(variant, vocab_size, seq_len, puzzle_emb_len=16, pretrained=False, **kwargs)` only delegate to `from_variant`, which returns a built, UNCOMPILED model (`pretrained=True` raises; a path restores a same-shape checkpoint strictly). HRM's old compile is the caller's: `loss={"logits": StableMaxCrossEntropy()}` trains the LM head only, `src/train/hrm/train_hrm.py` trains the Q head. `trm` has no variant table and keeps `create_trm(vocab_size, hidden_size, ...)` |
 | `mini_vec2vec` | Not a sequence model: embeddings in, one fitted matrix `W` (numpy `align()`), nothing to put a head on |
+| `mini_vec2vec` factory | `create_mini_vec2vec_aligner(embedding_dim, **kwargs)` takes no `variant`: the aligner has no named sizes, and models/AGENTS.md forbids inventing a `MODEL_VARIANTS` table |
 | `colbert` | Output is per-token masked L2-normalised embeddings scored by MaxSim; every `layers/heads/nlp` head pools to one vector, which would destroy late interaction. Its encoder is a `BERT` (so the backbone side of reuse is already met) |
+| `colbert` factories | `create_colbert`, `create_colbert_v1` and `create_colbert_v2` all have the uniform shape and build the same network; the `_v1`/`_v2` names only record which training recipe the caller targets |
 | `blt` | Byte LM with its own entropy model, patcher, `train_step` and `generate`; logits come from an untied `Dense` inside `LocalDecoder`. The per-byte hidden state exists inside `LocalDecoder`, which the whole-layer load rule compares as one unit, so a head would need a layer change |
+| `blt` factory | `create_blt_model(variant, vocab_size=260, max_sequence_length=2048, entropy_threshold=1.5, **kwargs)` delegates to `from_variant` but has no `pretrained`: nothing in `blt/` loads weights (no `from_variant` argument, no load method), so the argument would have no route to reach; a load route is its own design, not a factory edit |
 | `qwen` (`Qwen3EmbeddingModel`) | An embedding tower, not a head host: last-non-pad pooling, optional MRL truncation and L2 normalisation ARE the output. Its own `TransformerLayer` trunk, not `Qwen3`; no variant table, no `create_*` factory. No `layers/heads/nlp` head has the truncate/normalise options (`TextSimilarityHead` adds a norm, an intermediate block and a biased `Dense`) |
 | `qwen` (`Qwen3RerankerModel`) | The score is `softmax([no, yes])` over the LM head's last-token logits, so the LM head IS the task; a `TextClassificationHead(2)` would be a different, freshly initialised model |
 

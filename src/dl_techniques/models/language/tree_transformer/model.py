@@ -39,7 +39,6 @@ References:
 
 import os
 import keras
-from keras import ops
 from typing import Optional, Union, Dict, Any, List, Sequence
 
 # ---------------------------------------------------------------------
@@ -525,19 +524,19 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
         )
 
         if explicit_attention_mask is not None:
-            token_mask = ops.cast(explicit_attention_mask, "int32")
+            token_mask = keras.ops.cast(explicit_attention_mask, "int32")
         else:
-            token_mask = ops.cast(
-                ops.not_equal(input_ids, self.pad_token_id), "int32"
+            token_mask = keras.ops.cast(
+                keras.ops.not_equal(input_ids, self.pad_token_id), "int32"
             )
-        mask = ops.expand_dims(token_mask, axis=1)
+        mask = keras.ops.expand_dims(token_mask, axis=1)
 
         x = self.embedding(input_ids)
-        x *= ops.cast(self.hidden_size, x.dtype) ** 0.5
+        x *= keras.ops.cast(self.hidden_size, x.dtype) ** 0.5
         x = self.pos_encoding(x, training=training)
 
         # A tensor, not a float, so Keras can trace the first block.
-        group_prob: keras.KerasTensor = ops.convert_to_tensor(
+        group_prob: keras.KerasTensor = keras.ops.convert_to_tensor(
             0.0, dtype=self.compute_dtype
         )
         all_break_probs = []
@@ -556,7 +555,7 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
             head_outputs = self.task_head(
                 {
                     "hidden_states": last_hidden_state,
-                    "attention_mask": ops.cast(
+                    "attention_mask": keras.ops.cast(
                         token_mask, last_hidden_state.dtype
                     ),
                 },
@@ -565,7 +564,7 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
             return finalize_head_outputs(head_outputs)
 
         logits = self.lm_head(last_hidden_state)
-        stacked_break_probs = ops.stack(all_break_probs, axis=1)
+        stacked_break_probs = keras.ops.stack(all_break_probs, axis=1)
 
         return {
             "last_hidden_state": last_hidden_state,
@@ -615,7 +614,7 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
         if not self.built:
             seq_len = min(64, self.max_len)
             dummy_input = {
-                "input_ids": ops.cast(
+                "input_ids": keras.ops.cast(
                     keras.random.uniform(
                         (1, seq_len), 0, self.vocab_size
                     ),
@@ -802,7 +801,6 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
 
 def create_tree_transformer(
         variant: str = "base",
-        vocab_size: Optional[int] = None,
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "uncased",
         cache_dir: Optional[str] = None,
@@ -815,11 +813,10 @@ def create_tree_transformer(
     :func:`dl_techniques.models.vision.resnet.model.create_resnet`.
 
     :param variant: String, model variant ("tiny", "small", "base", "large").
-    :param vocab_size: Optional integer; override the variant default vocabulary size. With ``pretrained=<path>``, a value different from the CHECKPOINT's ``vocab_size`` skips the vocab-dependent layers (embedding, LM head); an equal one restores them.
     :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` archive (a bare ``.weights.h5`` file is not accepted).
     :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
     :param cache_dir: Optional string, directory to cache downloaded weights.
-    :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``, or ``include_top=True`` with a ``task_config`` for a model with a task head). A local ``pretrained`` path never restores a checkpoint's task head.
+    :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` through :meth:`TreeTransformer.from_variant`, laid over the variant's entry. ``vocab_size`` overrides the variant's vocabulary; with ``pretrained=<path>``, a value different from the CHECKPOINT's ``vocab_size`` skips the vocab-dependent layers (embedding, LM head) and an equal one restores them. Others: ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``, or ``include_top=True`` with a ``task_config`` for a model with a task head. A local ``pretrained`` path never restores a checkpoint's task head.
 
     :return: TreeTransformer instance.
     :raises ValueError: If ``variant`` is unknown, or a forwarded argument is invalid (including inconsistent head knobs, see :class:`TreeTransformer`).
@@ -842,8 +839,6 @@ def create_tree_transformer(
         ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
         ...         num_classes=9))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return TreeTransformer.from_variant(
         variant,
         pretrained=pretrained,

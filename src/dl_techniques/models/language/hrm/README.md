@@ -149,28 +149,26 @@ The orchestrator.
 
 ### Your First HRM Model (30 seconds)
 
-Create a "base" variant model for a vocabulary of 32k.
+Create the paper's architecture (`"small"`, sapientinc/HRM `hrm_v1.yaml`) for a
+vocabulary of 32k.
 
 ```python
 import keras
+from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.models.language.hrm.model import create_hierarchical_reasoning_model
 
-# 1. Create Model
-# "base" variant matches the configuration from research papers
+# 1. Create Model (built, not compiled)
 model = create_hierarchical_reasoning_model(
+    "small",
     vocab_size=32000,
     seq_len=512,
-    variant="base",
-    halt_max_steps=10
 )
 
-# 2. Compilation is already done for you.
-# The factory compiles unless you pass `optimizer=None`; its default loss is
-# {"logits": StableMaxCrossEntropy()}, so `fit(batch, {"logits": labels})` works
-# with the stock `fit`. Recompile only to change that:
+# 2. Compile for the stock `fit`: `fit(batch, {"logits": labels})`.
+# The factory does not compile; it only delegates to `from_variant`.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss={"logits": "sparse_categorical_crossentropy"},
+    loss={"logits": StableMaxCrossEntropy()},
 )
 # The Q-value halting term is NOT part of any compiled loss and cannot be: it
 # couples `q_halt_logits` with `target_q_continue`, and both are model OUTPUTS,
@@ -213,14 +211,22 @@ model = HierarchicalReasoningModel(
 
 ### 6.2 Factory Function
 
-#### `create_hierarchical_reasoning_model(variant, ...)`
-The recommended way to instantiate.
+#### `create_hierarchical_reasoning_model(variant, vocab_size, seq_len, num_puzzle_identifiers=1000, pretrained=False, **kwargs)`
+The recommended way to instantiate. It only delegates to
+`HierarchicalReasoningModel.from_variant`, which returns a **built, uncompiled**
+model.
 *   `variant`: `'micro'`, `'tiny'`, `'small'`, `'base'`, `'large'`, `'xlarge'`.
-*   `optimizer` / `learning_rate` / `loss`: the returned model **is compiled**
-    unless `optimizer=None`. It used to build the optimizer, log it and throw it
-    away while claiming to return an "optionally compiled" model, so following
-    the docstring got you `ValueError: You must call compile() before using the
-    model.` on `.fit()`.
+    `'small'` is `hrm_v1.yaml` and equals the constructor defaults; the others
+    are this repository's size tiers.
+*   `**kwargs`: constructor arguments laid over the variant (`embed_dim`,
+    `h_layers`, `halt_max_steps`, ...).
+*   `pretrained`: `True` raises `NotImplementedError` (no HRM weights are
+    distributed); a path restores a checkpoint of the same architecture, all
+    variables or a `ValueError`.
+*   The factory no longer takes `optimizer` / `learning_rate` / `loss` (passing
+    one raises). Compile the model yourself for `fit()`, as above, or train it
+    with `src/train/hrm/train_hrm.py`, whose loop is the one that trains the
+    Q-halting head.
 
 The core's `h_init` / `l_init` are **non-trainable** and always were in effect:
 they are read only when a halted sequence's carry is reset, and `call` applies
@@ -236,13 +242,19 @@ for and will not resume cleanly.
 
 Variants are tuned based on parameter efficiency and reasoning depth.
 
-| Variant | Embed Dim | Heads | H-Layers | L-Layers | Max Steps | Params |
+Read from `HierarchicalReasoningModel.MODEL_VARIANTS`. `small` is the paper's
+only published architecture (`hrm_v1.yaml`); the other rows have no published
+counterpart. The parameter count depends on `vocab_size`, `seq_len` and
+`puzzle_emb_dim`, so it is not listed.
+
+| Variant | Embed Dim | Heads | H-Layers | L-Layers | H/L Cycles | Max Steps |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **`micro`** | 256 | 4 | 2 | 2 | 4 | ~1.2M |
-| **`small`** | 512 | 8 | 6 | 6 | 8 | ~18M |
-| **`base`** | 768 | 12 | 8 | 8 | 10 | ~52M |
-| **`large`** | 1024 | 16 | 12 | 12 | 12 | ~156M |
-| **`xlarge`**| 1536 | 24 | 16 | 16 | 16 | ~420M |
+| **`micro`** | 256 | 4 | 2 | 2 | 2 / 2 | 4 |
+| **`tiny`** | 384 | 6 | 4 | 4 | 2 / 2 | 6 |
+| **`small`** | 512 | 8 | 4 | 4 | 2 / 2 | 16 |
+| **`base`** | 768 | 12 | 8 | 8 | 3 / 3 | 10 |
+| **`large`** | 1024 | 16 | 12 | 12 | 3 / 4 | 12 |
+| **`xlarge`**| 1536 | 24 | 16 | 16 | 4 / 4 | 16 |
 
 ---
 
@@ -259,7 +271,7 @@ from dl_techniques.models.language.hrm import (
 )
 
 model = create_hierarchical_reasoning_model(
-    vocab_size=1000, seq_len=64, variant="micro"
+    "micro", vocab_size=1000, seq_len=64
 )
 
 # Dummy Data
@@ -361,7 +373,7 @@ loaded = keras.models.load_model("hrm_model.keras")
 ```python
 def test_hrm_shapes():
     model = create_hierarchical_reasoning_model(
-        vocab_size=100, seq_len=10, variant="micro"
+        "micro", vocab_size=100, seq_len=10
     )
     x = {
         "token_ids": keras.ops.ones((2, 10), dtype="int32"),

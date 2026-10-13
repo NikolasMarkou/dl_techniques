@@ -1346,8 +1346,8 @@ _extra("thera", _b_thera, _thera_inputs)
 
 def _b_ptrm():
     from dl_techniques.models.language.ptrm import create_ptrm
-    return create_ptrm(vocab_size=64, hidden_size=32, num_heads=2,
-                       expansion=2.0, seq_len=16, puzzle_emb_len=4,
+    return create_ptrm("mlp_tiny", vocab_size=64, seq_len=16, puzzle_emb_len=4,
+                       hidden_size=32, num_heads=2, expansion=2.0,
                        h_layers=1, l_layers=1, halt_max_steps=2)
 
 

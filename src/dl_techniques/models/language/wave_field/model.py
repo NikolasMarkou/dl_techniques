@@ -1026,7 +1026,6 @@ class WaveFieldLLM(RecordedBuildShapeMixin, keras.Model):
 
 def create_wave_field_llm(
     variant: str = "small",
-    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> "WaveFieldLLM":
@@ -1039,18 +1038,15 @@ def create_wave_field_llm(
     :param variant: Variant name (``"tiny"``, ``"small"``, ``"medium"``,
         ``"large"``, ``"xl"``). Defaults to ``"small"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override. No variant entry
-        sets one, so ``None`` (the default) leaves the class default of
-        ``DEFAULT_VOCAB_SIZE`` in place. A value is forwarded as
-        ``vocab_size=...`` in ``kwargs``.
-    :type vocab_size: Optional[int]
     :param pretrained: If ``True``, raises ``NotImplementedError`` — no public
         WaveFieldLLM weights are distributed by this library. If a string path,
         loads local weights from that path. If ``False`` (default), random
         init.
     :type pretrained: Union[bool, str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`WaveFieldLLM.from_variant` (e.g. ``dropout_rate``,
+        :meth:`WaveFieldLLM.from_variant` (e.g. ``vocab_size``: no variant
+        entry sets one, so omitting it keeps the class default
+        ``DEFAULT_VOCAB_SIZE``; ``dropout_rate``,
         ``tie_word_embeddings``, or ``include_top=True`` with a
         ``task_config`` for a model with a task head). A local ``pretrained``
         path never restores a checkpoint's task head.
@@ -1077,8 +1073,6 @@ def create_wave_field_llm(
         ...         name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
         ...         num_classes=2))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return WaveFieldLLM.from_variant(
         variant,
         pretrained=pretrained,

@@ -6,7 +6,7 @@
 
 A Keras 3 implementation of the **Probabilistic Tiny Recursive Model (PTRM)**, a test-time compute scaling framework for Tiny Recursive Models (TRM) that introduces stochastic exploration via parallel rollouts with Gaussian noise injection.
 
-This adapts the method from "[Probabilistic Tiny Recursive Model](https://arxiv.org/abs/XXXX.XXXXX)" by Sghaier et al. (2026) to Keras 3, building on the TRM architecture from "[Less is More: Recursive Reasoning with Tiny Networks](https://arxiv.org/abs/2510.04871)".
+This adapts the method from "[Probabilistic Tiny Recursive Model](https://arxiv.org/abs/2605.19943)" by Sghaier et al. (2026) to Keras 3, building on the TRM architecture from "[Less is More: Recursive Reasoning with Tiny Networks](https://arxiv.org/abs/2510.04871)".
 
 ---
 
@@ -50,22 +50,41 @@ The Q-head (`q_halt`, `q_continue`) is trained jointly as a correctness classifi
 
 ### PTRM Inference Algorithm
 
-PTRM leverages the Q-head at inference time:
+PTRM leverages the Q-head at inference time. The paper's procedure
+(Sghaier et al. 2026, arXiv:2605.19943, Figure 4 left, "PTRM Inference"), in its
+notation, where `z` is the reasoning latent and `y` the answer state:
 
-```python
-# PTRM Inference (Algorithm 1 from paper)
-for k in 1..K parallel rollouts:
-    Initialize z_H, z_L
-    for t in 1..D supervision steps:
-        z_H += N(0, σ²I)      # Inject noise
-        z_L += N(0, σ²I)      # Inject noise
-        z_H, z_L = rec(x, z_H, z_L)  # One TRM step
-    y_hat_k = argmax lm_head(z_H)
-    q_k = q_continue(z_H[:, 0])      # Q-head score
-    
-Select k* = argmax_k q_k
-Return y_hat_{k*}
 ```
+1: Input: puzzle x, rollouts K, supervision steps D, noise scale σ
+3: for k = 1..K in parallel do
+4:     Initialize z_0, y_0
+5:     for t = 1..D do
+6:         z_{t-1} += ε,  ε ~ N(0, σ²I)
+7:         z_t, y_t ← rec(x, z_{t-1}, y_{t-1})     # one deep recursion step
+8:     end for
+9:     ŷ_k ← argmax f_O(y_D);   10: q̂_k ← f_Q(y_D)
+12: return ŷ_{k*},  k* = argmax_k q̂_k
+```
+
+**Every rollout runs exactly `D` supervision steps; nothing halts early.** The
+inner loop of Algorithm 1 has no halting condition, Sec. 5 ("Models and
+inference") says each of the `K` rollouts runs `D` supervision steps, and Sec. 2
+says that at inference "the Q head is not used, and the model performs N_sup
+supervision steps". The reference TRM code agrees: `halted = is_last_step`, and
+Q-based halting is added only under `self.training`
+([trm.py](https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py)).
+`PTRMInference._rollout` follows this: it starts from `H_init`/`L_init` (the
+state the reference resets a fresh carry to), adds noise before each of the `D`
+steps and clears the model's `halted` flag after each one, so the ACT reset never
+discards the injected noise.
+
+How this implementation maps the paper, and where it differs:
+
+| Paper | Here |
+|---|---|
+| `y` (answer state), `z` (reasoning latent) | `z_H`, `z_L` (TRM code names; `lm_head` reads `z_H`) |
+| noise on `z` only (line 6) | noise on BOTH `z_H` and `z_L` (`_inject_noise`) |
+| `q̂ = f_Q(y_D)`, the halting logit trained against answer correctness (Sec. 2) | `q_continue` by default; `use_q_continue=False` selects by `q_halt` |
 
 **Two complementary benefits:**
 1. **Escape bad basins** — Noise allows rollouts to explore diverse solution basins; some escape traps where deterministic TRM fails.
@@ -90,17 +109,15 @@ from dl_techniques.models.language.ptrm import (
     PTRM, create_ptrm, PTRMInference, get_ppbench_config
 )
 
-# 1. Create a PTRM model (same as TRM architecture)
+# 1. Create a PTRM model (same as TRM architecture), built
 config = get_ppbench_config()
-model = create_ptrm_from_variant(
-    variant=config["variant"],
+model = create_ptrm(
+    config["variant"],
     vocab_size=config["vocab_size"],
     seq_len=config["seq_len"],
     puzzle_emb_len=config["puzzle_emb_len"],
+    # pretrained="path/to/trm_checkpoint.keras",  # a same-shape checkpoint
 )
-
-# 2. Load pretrained weights (TRM checkpoint works directly)
-# model.load_weights("path/to/trm_checkpoint.keras")
 
 # 3. Run PTRM inference
 inference = PTRMInference(model, noise_scale=0.2)
@@ -124,19 +141,19 @@ from dl_techniques.models.language.ptrm import PRESET_CONFIGS
 
 # Sudoku-Extreme (5M params, MLP variant)
 config = PRESET_CONFIGS["sudoku_extreme"]()
-model = create_ptrm_from_variant(**{k: v for k, v in config.items() if k != "inference"})
+model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
 # PPBench puzzles (7M params, Attention variant)
 config = PRESET_CONFIGS["ppbench"]()
-model = create_ptrm_from_variant(**{k: v for k, v in config.items() if k != "inference"})
+model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
 # Maze-Hard
 config = PRESET_CONFIGS["maze_hard"]()
-model = create_ptrm_from_variant(**{k: v for k, v in config.items() if k != "inference"})
+model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
 # ARC-AGI-2
 config = PRESET_CONFIGS["arc_agi"]()
-model = create_ptrm_from_variant(**{k: v for k, v in config.items() if k != "inference"})
+model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 ```
 
 ---
@@ -148,8 +165,7 @@ model = create_ptrm_from_variant(**{k: v for k, v in config.items() if k != "inf
 | **`PTRM`** | `...ptrm.model` | The `keras.Model` (thin TRM subclass). Identical architecture. |
 | **`PTRMInference`** | `...ptrm.inference` | Stochastic rollout engine with Q-head selection. |
 | **`run_ptrm_inference`** | `...ptrm.inference` | Convenience function for one-off inference. |
-| **`create_ptrm`** | `...ptrm.model` | Factory for custom PTRM configurations. |
-| **`create_ptrm_from_variant`** | `...ptrm.factory` | Factory from preset variant. |
+| **`create_ptrm`** | `...ptrm.model` | `create_ptrm(variant, vocab_size, seq_len, puzzle_emb_len=16, pretrained=False, **kwargs)`: delegates to `PTRM.from_variant`, returns a built model. A fully custom architecture is the `PTRM` constructor. (`create_ptrm_from_variant` was folded into it.) |
 | **`PRESET_CONFIGS`** | `...ptrm.factory` | Paper-matched configurations. |
 | **`TRMReasoningModule`** | `...ptrm.components` | Re-exported TRM reasoning stack. |
 | **`TRMInner`** | `...ptrm.components` | Re-exported TRM inner step. |
@@ -274,7 +290,7 @@ def test_ptrm_inference():
 @article{sghaier2026probabilistic,
   title={Probabilistic Tiny Recursive Model},
   author={Sghaier, Amin and Parviz, Ali and Jolicoeur-Martineau, Alexia},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  journal={arXiv preprint arXiv:2605.19943},
   year={2026}
 }
 

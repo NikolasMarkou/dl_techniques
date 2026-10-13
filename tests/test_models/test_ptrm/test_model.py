@@ -12,7 +12,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.models.language.ptrm import (
-    PTRM, PTRMInference, create_ptrm, create_ptrm_from_variant,
+    PTRM, PTRMInference, create_ptrm,
     get_ppbench_config, get_sudoku_extreme_config
 )
 
@@ -146,7 +146,7 @@ class TestPTRMModelConfigurations:
         """Test MLP variant configurations."""
         variants = ["mlp_tiny", "mlp_small", "mlp_base"]
         for variant in variants:
-            model = create_ptrm_from_variant(
+            model = create_ptrm(
                 variant=variant,
                 vocab_size=100,
                 seq_len=50,
@@ -158,7 +158,7 @@ class TestPTRMModelConfigurations:
         """Test Attention variant configurations."""
         variants = ["att_small", "att_base", "att_large"]
         for variant in variants:
-            model = create_ptrm_from_variant(
+            model = create_ptrm(
                 variant=variant,
                 vocab_size=100,
                 seq_len=50,
@@ -169,7 +169,35 @@ class TestPTRMModelConfigurations:
     def test_invalid_variant_raises(self):
         """Test that invalid variant raises ValueError."""
         with pytest.raises(ValueError, match="Unknown variant"):
-            create_ptrm_from_variant("nonexistent", vocab_size=100, seq_len=50)
+            create_ptrm("nonexistent", vocab_size=100, seq_len=50)
+
+    def test_pretrained_true_raises(self):
+        """No PTRM weights are distributed; a random model must not come back."""
+        with pytest.raises(NotImplementedError):
+            create_ptrm("mlp_tiny", vocab_size=100, seq_len=16, pretrained=True)
+
+    def test_a_local_checkpoint_is_restored(self, tmp_path):
+        """``pretrained=<path>`` restores every variable of a same-shape model."""
+        small = dict(vocab_size=100, seq_len=16, puzzle_emb_len=4,
+                     hidden_size=32, num_heads=4, h_layers=1, l_layers=1)
+        keras.utils.set_random_seed(1)
+        source = create_ptrm("mlp_tiny", **small)
+        path = str(tmp_path / "ptrm.weights.h5")
+        source.save_weights(path)
+        keras.utils.set_random_seed(2)
+        target = create_ptrm("mlp_tiny", pretrained=path, **small)
+        assert len(target.weights) == len(source.weights)
+        for a, b in zip(source.weights, target.weights):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b))
+
+    def test_a_checkpoint_of_another_width_is_refused(self, tmp_path):
+        small = dict(vocab_size=100, seq_len=16, puzzle_emb_len=4,
+                     num_heads=4, h_layers=1, l_layers=1)
+        path = str(tmp_path / "ptrm.weights.h5")
+        create_ptrm("mlp_tiny", hidden_size=32, **small).save_weights(path)
+        with pytest.raises(ValueError):
+            create_ptrm("mlp_tiny", pretrained=path, hidden_size=64, **small)
 
     def test_different_layer_configs(self):
         """Test that h_layers/l_layers build the requested layer stacks."""
@@ -398,7 +426,7 @@ class TestPTRMPresets:
         for preset_fn in [get_ppbench_config, get_sudoku_extreme_config]:
             config = preset_fn()
             model_config = {k: v for k, v in config.items() if k != "inference"}
-            model = create_ptrm_from_variant(**model_config)
+            model = create_ptrm(**model_config)
             assert isinstance(model, PTRM)
             assert model.built
 

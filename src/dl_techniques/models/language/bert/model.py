@@ -1167,7 +1167,6 @@ class BERT(RecordedBuildShapeMixin, keras.Model):
 
 def create_bert(
     variant: str = "base",
-    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     weights_dataset: str = "uncased",
     cache_dir: Optional[str] = None,
@@ -1182,10 +1181,6 @@ def create_bert(
     :param variant: BERT variant name (``"tiny"``, ``"small"``, ``"base"``,
         ``"large"``). Defaults to ``"base"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override. If ``None`` (default),
-        the variant's default vocab size is used. If provided, forwarded as
-        ``vocab_size=...`` in ``kwargs``.
-    :type vocab_size: Optional[int]
     :param pretrained: If ``True``, attempts to load pretrained weights — note
         that no public BERT weights are distributed by this library, so
         ``True`` will raise ``NotImplementedError``. If a string path, loads
@@ -1200,8 +1195,10 @@ def create_bert(
     :param cache_dir: unreachable for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`BERT.from_variant` (e.g. ``max_position_embeddings``, or
+        :meth:`BERT.from_variant`, which lays them over the variant's entry
+        (e.g. ``vocab_size``, ``max_position_embeddings``, or
         ``include_top=True`` with a ``task_config`` for a model with a head).
+        Omit ``vocab_size`` to keep the variant's own.
     :type kwargs: Any
 
     :returns: Configured ``BERT`` instance.
@@ -1222,8 +1219,6 @@ def create_bert(
         ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
         ...         num_classes=9))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return BERT.from_variant(
         variant,
         pretrained=pretrained,

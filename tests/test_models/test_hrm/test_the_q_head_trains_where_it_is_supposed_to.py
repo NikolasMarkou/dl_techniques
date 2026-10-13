@@ -3,7 +3,7 @@
 Plan ``plan-2026-08-22T035419-a11304c8``, ruling **D-056**.
 
 The R-038 inventory (MG-13) classified this REAL DEFECT: the shipped factory
-compiles ``loss={"logits": StableMaxCrossEntropy()}`` and nothing on
+compiled ``loss={"logits": StableMaxCrossEntropy()}`` and nothing on
 ``q_halt_logits`` / ``q_continue_logits``, so the advertised adaptive-halting
 head "receives exactly zero gradient under the model's own default compile".
 
@@ -24,8 +24,9 @@ for exactly that purpose. The factory's logits-only default is deliberate: the
 Q term couples ``q_halt_logits`` with ``target_q_continue`` and BOTH are model
 *outputs*, so Keras 3's ``CompileLoss``, which broadcasts a ``Loss`` across
 output keys and pairs it with a same-keyed target, cannot express it. That is
-already recorded verbatim in the factory's ``loss:`` docstring and in the D-032
-anchor at the compile site.
+recorded in the factory's docstring. (Since D-015 of
+plan-2026-10-13T035756-5dd4d94d the factory no longer compiles; the logits-only
+compile is the caller's, and this file makes it explicitly.)
 
 So this file does NOT change behaviour. It pins BOTH readings so that neither
 can drift silently: the deliberate deadness under ``fit()`` (which someone will
@@ -41,8 +42,8 @@ from typing import Dict
 import numpy as np
 import pytest
 import keras
-from keras import ops
 
+from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.models.language.hrm.model import (
     create_hierarchical_reasoning_model,
 )
@@ -66,12 +67,12 @@ def _batch():
 
 
 def _snapshot(model) -> Dict[str, np.ndarray]:
-    return {v.path: ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
+    return {v.path: keras.ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
 
 
 def _movement(model, before) -> Dict[str, float]:
     return {
-        v.path: float(np.max(np.abs(ops.convert_to_numpy(v) - before[v.path])))
+        v.path: float(np.max(np.abs(keras.ops.convert_to_numpy(v) - before[v.path])))
         for v in model.trainable_variables
     }
 
@@ -86,18 +87,20 @@ def _train_hrm_module():
     return module
 
 
-def test_the_factory_compile_leaves_the_q_head_dead_and_that_is_documented():
+def test_the_logits_only_compile_leaves_the_q_head_dead_and_that_is_documented():
     """The deliberate half. Pinned so nobody 'fixes' it into a broken compile.
 
-    Do NOT make this pass by adding a Q term to the factory's default `loss=`:
+    Do NOT make this pass by adding a Q term to the documented `loss=`:
     measured, Keras 3's `CompileLoss` raises
     `KeyError: The path: ('logits',) ... can't be found` for any single `Loss`
     object over this output dict, and the Q term needs two model OUTPUTS, not a
-    label. See the D-032 anchor at the compile site.
+    label (D-032).
     """
     keras.utils.set_random_seed(0)
-    model = create_hierarchical_reasoning_model(
-        optimizer="adam", learning_rate=1.0, **_MODEL_KWARGS
+    model = create_hierarchical_reasoning_model("small", **_MODEL_KWARGS)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1.0),
+        loss={"logits": StableMaxCrossEntropy()},
     )
     ids, puzzle_ids, labels = _batch()
     before = _snapshot(model)
@@ -115,10 +118,9 @@ def test_the_factory_compile_leaves_the_q_head_dead_and_that_is_documented():
 
     assert len(q_head) == 2, f"expected a q_head kernel and bias, got {q_head}"
     assert all(v == 0.0 for v in q_head.values()), (
-        "the q_head moved under the factory's logits-only compile. If ACT "
-        "supervision has genuinely been wired into `compile()`, update D-056, "
-        "the factory's `loss:` docstring and the D-032 anchor in the same "
-        f"change. Movement: {q_head}"
+        "the q_head moved under the documented logits-only compile. If ACT "
+        "supervision has genuinely been wired into `compile()`, update D-056 "
+        f"and the factory's docstring in the same change. Movement: {q_head}"
     )
     live = sum(1 for v in moved.values() if v > 0.0)
     assert live == len(moved) - 2, (

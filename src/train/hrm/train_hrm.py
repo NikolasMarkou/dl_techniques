@@ -11,12 +11,8 @@ from typing import Dict, Tuple, Optional, Any
 
 import keras
 import tensorflow as tf
-from keras import optimizers
 
-from dl_techniques.models.language.hrm.model import (
-    create_hierarchical_reasoning_model,
-    HierarchicalReasoningModel
-)
+from dl_techniques.models.language.hrm.model import HierarchicalReasoningModel
 from dl_techniques.losses.hrm_loss import create_hrm_loss
 from dl_techniques.metrics.hrm_metrics import HRMMetrics
 from dl_techniques.optimization import (
@@ -62,7 +58,9 @@ class HRMTrainer:
 
     def _create_model(self) -> HierarchicalReasoningModel:
         model_config = self.config.get("model", {})
-        model = create_hierarchical_reasoning_model(
+        # Every hyperparameter is explicit here, so this is the constructor and
+        # not the variant factory. Uncompiled: this loop owns its optimizer.
+        model = HierarchicalReasoningModel(
             vocab_size=model_config["vocab_size"],
             seq_len=model_config["seq_len"],
             embed_dim=model_config.get("embed_dim", 512),
@@ -97,7 +95,7 @@ class HRMTrainer:
         model.build()
         return model
 
-    def _create_optimizer(self) -> Tuple[optimizers.Optimizer, Any]:
+    def _create_optimizer(self) -> Tuple[keras.optimizers.Optimizer, Any]:
         lr_config = self.config.get("learning_rate", {})
         lr_schedule = learning_rate_schedule_builder({
             "type": lr_config.get("type", "cosine_decay"),

@@ -7,7 +7,7 @@ selects the final answer using the model's Q-head.
 
 References:
     - Sghaier et al., 2026. Probabilistic Tiny Recursive Model.
-      (https://arxiv.org/abs/XXXX.XXXXX)
+      (https://arxiv.org/abs/2605.19943)
 """
 
 import keras
@@ -18,7 +18,8 @@ import numpy as np
 class PTRMInference:
     """PTRM inference engine: K parallel stochastic rollouts with Q-head selection.
 
-    Implements Algorithm 1 from Sghaier et al. (2026):
+    Implements the "PTRM Inference" procedure of Sghaier et al. (2026),
+    arXiv:2605.19943, Figure 4 (left):
 
     PTRM Inference
     --------------
@@ -41,8 +42,10 @@ class PTRMInference:
     :param noise_scale: Standard deviation σ of Gaussian noise injected at each
         supervision step. Default 0.2 (matches paper's PPBench setting).
     :param use_q_continue: If True, use q_continue logit for selection (higher
-        = more confident correct). If False, use q_halt. Paper uses q_head
-        which outputs both; we default to q_continue as the "correctness" score.
+        = more confident correct). If False, use q_halt. The paper selects by
+        ``q̂ = f_Q(y_D)``, the halting logit TRM trains against answer
+        correctness (Sec. 2), which is ``q_halt`` here; the default
+        ``q_continue`` is this implementation's choice, not the paper's.
     """
 
     def __init__(
@@ -118,8 +121,16 @@ class PTRMInference:
     ) -> Dict[str, keras.KerasTensor]:
         """Run one noisy rollout of exactly ``supervision_steps`` deep recursions.
 
-        Algorithm 1 has no halting: every rollout runs all ``D`` steps from the
-        learned init states, with noise added before each step. The model's own
+        The paper's procedure has no halting: its inner loop runs ``t = 1..D``
+        with no exit (Sghaier et al. 2026, arXiv:2605.19943, Figure 4 left,
+        lines 5-8), Sec. 5 "Models and inference" has each rollout run ``D``
+        supervision steps, and Sec. 2 states that at inference "the Q head is
+        not used, and the model performs N_sup supervision steps". The reference
+        TRM agrees (SamsungSAILMontreal/TinyRecursiveModels,
+        ``models/recursive_reasoning/trm.py``: ``halted = is_last_step``, Q-based
+        halting only under ``self.training``). So every rollout runs all ``D``
+        steps from the init states the reference resets a fresh carry to,
+        ``H_init``/``L_init``, with noise added before each step. The model's own
         ACT logic would get in the way twice. ``initial_carry`` marks every item
         halted, so the first call resets it to ``H_init``/``L_init`` and discards
         noise added to the zero carry. And at inference the model halts an item
@@ -180,6 +191,9 @@ class PTRMInference:
         The paper adds noise at each deep recursion step to the latent state
         input. In TRM, the latent states are in carry["inner_carry"]["z_H"] and
         carry["inner_carry"]["z_L"], each of shape (B, seq_len + puzzle_emb_len, hidden_size).
+        The paper's line 6 perturbs ``z`` only, the reasoning latent, which is
+        ``z_L`` in TRM's code (``z_H`` is the answer state ``y`` that ``lm_head``
+        reads); this implementation perturbs both.
 
         :param carry: Current carry state.
         :return: Updated carry with noise added to latent states.

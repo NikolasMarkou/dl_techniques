@@ -21,10 +21,8 @@ from typing import Dict, Tuple, Optional, Any
 
 import keras
 import tensorflow as tf
-from keras import optimizers
 
 from dl_techniques.models.language.ptrm import (
-    create_ptrm,
     PTRM,
     get_ppbench_config,
     get_sudoku_extreme_config,
@@ -76,7 +74,9 @@ class PTRMTrainer:
 
     def _create_model(self) -> PTRM:
         model_config = self.config.get("model", {})
-        model = create_ptrm(
+        # Every hyperparameter is explicit here, so this is the constructor and
+        # not the variant factory (`create_ptrm(variant, ...)`).
+        model = PTRM(
             vocab_size=model_config["vocab_size"],
             seq_len=model_config["seq_len"],
             hidden_size=model_config.get("hidden_size", 512),
@@ -102,7 +102,7 @@ class PTRMTrainer:
 
         return model
 
-    def _create_optimizer(self) -> Tuple[optimizers.Optimizer, Any]:
+    def _create_optimizer(self) -> Tuple[keras.optimizers.Optimizer, Any]:
         lr_config = self.config.get("learning_rate", {})
         lr_schedule = learning_rate_schedule_builder({
             "type": lr_config.get("type", "cosine_decay"),
