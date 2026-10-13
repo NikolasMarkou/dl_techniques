@@ -4,6 +4,8 @@ Tests cover PTRMInference stochastic rollouts, noise injection, Q-head selection
 and pass@k metrics.
 """
 
+import itertools
+
 import pytest
 import numpy as np
 from typing import Dict, Any
@@ -344,6 +346,154 @@ class TestPTRMInferencePassAtK:
         
         # pass_at_1 and pass_at_k should be same (all rollouts identical)
         np.testing.assert_allclose(metrics["pass_at_1"], metrics["pass_at_k"], atol=1e-6)
+
+
+class _RecordingModel:
+    """Delegates to a PTRM and records the outputs of every step call."""
+
+    def __init__(self, model):
+        self._model = model
+        self.step_outputs = []
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def __call__(self, carry, batch, training=False):
+        carry, outputs = self._model(carry, batch, training=training)
+        self.step_outputs.append(outputs)
+        return carry, outputs
+
+
+class TestPassAtKReportsBestQFromItsOwnRollouts:
+    """``compute_pass_at_k`` scores the K rollouts it ran, and runs them once.
+
+    It used to run a second, discarded K-rollout inference and never return the
+    best-Q@k metric its comments promised.
+    """
+
+    K = 4
+    D = 2
+    # Eight items, so it is very unlikely that rollout 0 is the best-Q rollout
+    # for every one of them (which would make pass@1 equal best-Q@k).
+    INPUTS = np.random.default_rng(0).integers(0, 100, size=(8, 16)).astype("int32")
+
+    @pytest.fixture
+    def pinned_noise(self, monkeypatch):
+        """Replace the noise draw with a seeded NumPy one.
+
+        ``keras.utils.set_random_seed`` does not reproduce a later
+        ``keras.random`` draw on this backend, so two runs only see the same
+        rollouts if the draw itself is pinned.
+        """
+
+        def install(seed):
+            rng = np.random.default_rng(seed)
+
+            def normal(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
+                draw = rng.normal(mean, stddev, size=tuple(int(d) for d in shape))
+                dtype = keras.backend.standardize_dtype(dtype or "float32")
+                return keras.ops.convert_to_tensor(draw.astype(dtype))
+
+            monkeypatch.setattr(keras.random, "normal", normal)
+
+        return install
+
+    def _run(self, model, batch, labels, use_q_continue):
+        recorder = _RecordingModel(model)
+        inference = PTRMInference(
+            recorder, noise_scale=1.0, use_q_continue=use_q_continue
+        )
+        metrics = inference.compute_pass_at_k(
+            batch, labels, num_rollouts=self.K, supervision_steps=self.D
+        )
+        return metrics, recorder
+
+    def _rollouts(self, recorder, use_q_continue):
+        """Each rollout's last step: predictions (K, B, S), the selection Q
+        (K, B), and the other Q head (K, B)."""
+        keys = ["q_halt_logits", "q_continue_logits"]
+        if use_q_continue:
+            keys.reverse()
+        last = [recorder.step_outputs[(k + 1) * self.D - 1] for k in range(self.K)]
+        predictions = np.stack(
+            [np.argmax(keras.ops.convert_to_numpy(o["logits"]), axis=-1) for o in last]
+        )
+        selected, other = (
+            np.stack([keras.ops.convert_to_numpy(o[key]) for o in last])
+            for key in keys
+        )
+        return predictions, selected, other
+
+    @staticmethod
+    def _labels(predictions, selected, other):
+        """Labels under which pass@1, pass@k and best-Q@k all differ.
+
+        Each item's label is one rollout's prediction, or ``-1``, which no
+        rollout predicts. A choice adds to five totals: rollout 0 right, any
+        right, best-Q right, and two wrong selections right (the lowest Q, and
+        the highest Q of the other head). The first combination wins whose
+        first three totals all differ and whose best-Q total differs from both
+        wrong selections, so selecting by either of them fails too. ``None`` if
+        the rollouts allow none.
+        """
+        picks = [
+            np.argmax(selected, axis=0),
+            np.argmin(selected, axis=0),
+            np.argmax(other, axis=0),
+        ]
+        options = []
+        for item in range(predictions.shape[1]):
+            by_effect = {(0,) * 5: np.full(predictions.shape[2], -1)}
+            for k in range(predictions.shape[0]):
+                right = np.all(predictions[:, item] == predictions[k, item], axis=-1)
+                effect = (int(right[0]), 1) + tuple(
+                    int(right[pick[item]]) for pick in picks
+                )
+                by_effect.setdefault(effect, predictions[k, item])
+            options.append(list(by_effect.items()))
+        for choice in itertools.product(*options):
+            first, any_, top, lowest, other_top = np.sum(
+                [effect for effect, _ in choice], axis=0
+            )
+            if len({first, any_, top}) == 3 and top not in (lowest, other_top):
+                return np.stack([label for _, label in choice]).astype("int32")
+        return None
+
+    @pytest.mark.parametrize("use_q_continue", [True, False])
+    def test_best_q_at_k_is_the_q_selected_rollouts_exact_match(
+        self, tiny_model, pinned_noise, use_q_continue
+    ):
+        batch = {"inputs": keras.ops.convert_to_tensor(self.INPUTS, dtype="int32")}
+        pinned_noise(7)
+        _, first = self._run(tiny_model, batch, self.INPUTS, use_q_continue)
+        first_predictions = self._rollouts(first, use_q_continue)[0]
+        labels = self._labels(*self._rollouts(first, use_q_continue))
+        assert labels is not None, (
+            "anti-vacuity: no labels tell best-Q@k apart from pass@1, pass@k "
+            "and the two wrong selections"
+        )
+
+        pinned_noise(7)
+        metrics, recorder = self._run(tiny_model, batch, labels, use_q_continue)
+        predictions, q_values, _ = self._rollouts(recorder, use_q_continue)
+        assert np.array_equal(predictions, first_predictions), (
+            "anti-vacuity: the pinned noise did not reproduce the rollouts"
+        )
+
+        exact = np.all(predictions == labels[None], axis=-1)  # (K, B)
+        best = np.argmax(q_values, axis=0)
+        expected = {
+            "pass_at_1": float(np.mean(exact[0])),
+            "pass_at_k": float(np.mean(np.any(exact, axis=0))),
+            "best_q_at_k": float(np.mean(exact[best, np.arange(exact.shape[1])])),
+        }
+        assert metrics == expected
+
+    def test_one_pass_runs_k_rollouts_of_d_steps(self, tiny_model, sample_batch):
+        _, recorder = self._run(
+            tiny_model, sample_batch, sample_batch["inputs"], use_q_continue=True
+        )
+        assert len(recorder.step_outputs) == self.K * self.D
 
 
 class TestPTRMInferenceMultipleBatchSizes:

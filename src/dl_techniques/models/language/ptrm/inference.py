@@ -92,15 +92,8 @@ class PTRMInference:
             outputs = self._rollout(batch, supervision_steps, training)
 
             # Get final logits and Q value for this rollout
-            logits = outputs["logits"]  # (B, seq_len, vocab_size)
-
-            if self.use_q_continue:
-                q_value = outputs["q_continue_logits"]  # (B,)
-            else:
-                q_value = outputs["q_halt_logits"]  # (B,)
-
-            all_logits.append(logits)
-            all_q_values.append(q_value)
+            all_logits.append(outputs["logits"])  # (B, seq_len, vocab_size)
+            all_q_values.append(self._selection_q(outputs))  # (B,)
 
         # Stack rollouts: (K, B, seq_len, vocab_size) and (K, B)
         all_logits = keras.ops.stack(all_logits, axis=0)
@@ -168,6 +161,18 @@ class PTRMInference:
             carry, outputs = self.model(carry, batch, training=training)
             carry = dict(carry, halted=not_halted)
         return outputs
+
+    def _selection_q(
+        self, outputs: Dict[str, keras.KerasTensor]
+    ) -> keras.KerasTensor:
+        """The Q value a rollout is selected by, as set by ``use_q_continue``.
+
+        :param outputs: Model outputs of a rollout's last step.
+        :return: Q values, shape (B,).
+        """
+        if self.use_q_continue:
+            return outputs["q_continue_logits"]
+        return outputs["q_halt_logits"]
 
     def _inject_noise(self, carry: Dict[str, Any]) -> Dict[str, Any]:
         """Inject Gaussian noise into latent states z_H and z_L.
@@ -264,33 +269,33 @@ class PTRMInference:
         num_rollouts: int = 100,
         supervision_steps: int = 48,
     ) -> Dict[str, float]:
-        """Compute pass@k metrics (oracle upper bound).
+        """Compute pass@1, pass@k and best-Q@k over one set of K rollouts.
 
-        Useful for evaluation to measure how many correct solutions exist
-        among the K rollouts, regardless of Q-head selection.
+        Useful for evaluation: pass@k is the oracle upper bound (how many items
+        have a correct solution among the K rollouts), and best-Q@k is what the
+        Q-head selection of :meth:`__call__` actually achieves on the same
+        rollouts. The gap between the two measures the Q head as a verifier.
 
         :param batch: Input batch.
         :param labels: Ground truth labels, shape (B, seq_len).
         :param num_rollouts: Number of rollouts K.
         :param supervision_steps: Number of supervision steps D.
-        :return: Dictionary with pass@k metrics.
+        :return: Dictionary with three exact-match rates in [0, 1]:
+            ``pass_at_1`` (rollout 0 is correct), ``pass_at_k`` (any rollout is
+            correct) and ``best_q_at_k`` (the rollout with the highest selection
+            Q, as in :meth:`__call__`, is correct).
         """
-        # Run inference but keep all rollouts
-        # We'll use the internal method to get all logits
-        # Re-run with return_all=True logic
-        batch_size = keras.ops.shape(batch["inputs"])[0]
-        all_logits = []
         all_predictions = []
+        all_q_values = []
 
         for k in range(num_rollouts):
             outputs = self._rollout(batch, supervision_steps, training=False)
-
-            logits = outputs["logits"]  # (B, seq_len, vocab_size)
-            predictions = keras.ops.argmax(logits, axis=-1)  # (B, seq_len)
-            all_logits.append(logits)
-            all_predictions.append(predictions)
+            # (B, seq_len)
+            all_predictions.append(keras.ops.argmax(outputs["logits"], axis=-1))
+            all_q_values.append(self._selection_q(outputs))  # (B,)
 
         all_predictions = keras.ops.stack(all_predictions, axis=0)  # (K, B, seq_len)
+        all_q_values = keras.ops.stack(all_q_values, axis=0)  # (K, B)
 
         # Compute exact match accuracy per rollout
         # Expand labels to (K, B, seq_len)
@@ -309,15 +314,17 @@ class PTRMInference:
         any_correct = keras.ops.any(exact_match, axis=0)  # (B,)
         pass_at_k = keras.ops.mean(keras.ops.cast(any_correct, "float32"))
 
-        # best-Q@k: rollout with highest Q correct
-        _, best_q, _ = self(batch, num_rollouts, supervision_steps, training=False)
-        # We need to re-run to get the best-Q predictions... 
-        # For efficiency, compute inline
-        # This is a simplified version; full implementation would return predictions too
-        
+        # best-Q@k: the rollout with the highest selection Q is correct
+        best_rollout_indices = keras.ops.argmax(all_q_values, axis=0)  # (B,)
+        best_correct = self._gather_best_q(
+            keras.ops.cast(exact_match, "float32"), best_rollout_indices
+        )  # (B,)
+        best_q_at_k = keras.ops.mean(best_correct)
+
         return {
             "pass_at_1": float(pass_at_1),
             "pass_at_k": float(pass_at_k),
+            "best_q_at_k": float(best_q_at_k),
         }
 
 

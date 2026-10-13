@@ -262,7 +262,7 @@ def test_ptrm_inference():
 ## 10. Troubleshooting & FAQs
 
 - **PTRM is slower than TRM** — Expected. K rollouts multiply inference cost. The paper notes width scaling is more practical than depth scaling because rollouts are parallelizable. For production, vectorize the rollout loop with `tf.vectorized_map`.
-- **Q-head doesn't select correct rollout** — On some tasks (Maze-Hard, ARC-AGI-2), the gap between `best-Q@K` and `pass@K` indicates the Q-head is an imperfect verifier. This is a known limitation; future work on stronger verifiers is suggested.
+- **Q-head doesn't select correct rollout** — On some tasks (Maze-Hard, ARC-AGI-2), the gap between `best-Q@K` and `pass@K` indicates the Q-head is an imperfect verifier. This is a known limitation; future work on stronger verifiers is suggested. `PTRMInference.compute_pass_at_k(batch, labels, ...)` returns both, scored on the same K rollouts, as `best_q_at_k` and `pass_at_k` (plus `pass_at_1`).
 - **Noise scale σ** — If accuracy doesn't improve, try sweeping σ. Paper shows optimal σ varies by task (Appendix B).
 - **Using TRM checkpoints** — PTRM is a thin subclass of TRM. Load any TRM `.keras` checkpoint directly into a PTRM instance with matching config.
 
