@@ -29,7 +29,11 @@ Guards (SC5), each through the shared oracle with its real signature:
   a VALID step drives the log-likelihood to the sentinel's scale and the loss to a huge
   finite value with finite gradients; at a padded step it stays ignored;
 * factories: ``from_variant`` overrides, ``pretrained=True``, unknown variants,
-  ``create_neural_hmm`` == ``from_variant``.
+  ``create_neural_hmm`` == ``from_variant``;
+* ignored arguments (D-025): a non-default value for an argument the configuration does
+  not read is refused, naming it, its value and the reason, one row per rule branch; the
+  same argument at its default is accepted; every preset sets only what it reads; a
+  stale unread value in an old config is reset by ``from_config``.
 
 Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDNN on a GPU.
 """
@@ -37,6 +41,7 @@ Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDN
 import inspect
 import itertools
 import os
+import re
 
 import keras
 import numpy as np
@@ -135,14 +140,19 @@ def _labels(seed=0, lengths=LENGTHS, steps=T):
     return np.where(_mask(lengths, steps) > 0, states, -1).astype("int32")
 
 
-def _kwargs(obs_type="gaussian", **overrides):
+def _kwargs(obs_type="gaussian", variant="neural-hmm", **overrides):
+    """Constructor arguments for ``variant``: the data shape, the SMALL widths the
+    configuration reads (the model refuses a non-default unread one, D-025) and
+    ``overrides``, which are passed as given."""
     shape = {"vocab_size": V} if obs_type == "categorical" else {"obs_dim": D}
-    return {"n_states": K, "obs_type": obs_type, **shape, **SMALL, **overrides}
+    config = {"n_states": K, "obs_type": obs_type, **shape, **overrides}
+    unread = NeuralHMM.unread_arguments({**NeuralHMM.MODEL_VARIANTS[variant], **config})
+    return {**{k: v for k, v in SMALL.items() if k not in unread}, **config}
 
 
 def _model(variant="neural-hmm", obs_type="gaussian", seed=1, **overrides):
     keras.utils.set_random_seed(seed)
-    return create_neural_hmm(variant, **_kwargs(obs_type, **overrides))
+    return create_neural_hmm(variant, **_kwargs(obs_type, variant, **overrides))
 
 
 def _y(model, seed=0, lengths=LENGTHS, steps=T):
@@ -253,10 +263,8 @@ VALUE_KNOBS = [
 def _knob_builders(knob, values, variant, obs_type, extra):
     def build(value):
         overrides = {**extra, knob: value}
-        kind = value if knob == "obs_type" else obs_type
-        if knob == "obs_type" and value != obs_type:
-            overrides.pop("vocab_size", None)
-        return lambda: create_neural_hmm(variant, **{**_kwargs(kind), **overrides})
+        kind = overrides.pop("obs_type", obs_type)
+        return lambda: create_neural_hmm(variant, **_kwargs(kind, variant, **overrides))
 
     return {value: build(value) for value in values}
 
@@ -407,21 +415,61 @@ def test_a_trained_model_reloads_exactly(variant, tmp_path):
     assert _loss(model, x, y) == _loss(loaded, x, y)
 
 
-def test_get_config_round_trips_every_argument():
-    """Every argument set OFF its default, so a dropped key changes the rebuilt config."""
-    overrides = {
+#: Three complete argument sets that together put EVERY argument off its default, each
+#: holding only arguments its configuration reads (no one configuration reads them all:
+#: kernel_size is conv-only, num_heads transformer-only, D-025).
+ROUND_TRIP_CONFIGS = [
+    {
         "n_states": 5, "mode": "generative", "obs_type": "poisson", "obs_dim": 3, "vocab_size": None,
         "emission_context": "autoregressive", "transition": "input_dependent", "topology": "banded",
         "band_width": 2, "self_loop_init": 1.5, "min_scale": 0.01, "hidden_dim": 12, "state_emb_dim": 5,
-        "encoder_type": "gru", "num_layers": 3, "num_heads": 3, "intermediate_size": 20, "max_seq_len": 40,
-        "kernel_size": 5, "ffn_type": "glu", "normalization_type": "rms_norm", "dropout_rate": 0.1,
-        "attention_dropout_rate": 0.2,
+        "encoder_type": "transformer", "num_layers": 3, "num_heads": 3, "intermediate_size": 20,
+        "max_seq_len": 40, "kernel_size": 3, "ffn_type": "glu", "normalization_type": "rms_norm",
+        "dropout_rate": 0.1, "attention_dropout_rate": 0.2,
+    },
+    {
+        "n_states": 4, "mode": "generative", "obs_type": "categorical", "obs_dim": None, "vocab_size": 7,
+        "emission_context": "autoregressive", "transition": "static", "topology": "left_to_right",
+        "band_width": 1, "self_loop_init": 0.5, "min_scale": 1e-3, "hidden_dim": 10, "state_emb_dim": 4,
+        "encoder_type": "conv", "num_layers": 3, "num_heads": 4, "intermediate_size": 128,
+        "max_seq_len": 512, "kernel_size": 5, "ffn_type": "mlp", "normalization_type": "rms_norm",
+        "dropout_rate": 0.2, "attention_dropout_rate": 0.0,
+    },
+    {
+        "n_states": 3, "mode": "discriminative", "obs_type": "gaussian", "obs_dim": 2, "vocab_size": None,
+        "emission_context": "none", "transition": "static", "topology": "ergodic",
+        "band_width": 1, "self_loop_init": 2.5, "min_scale": 1e-3, "hidden_dim": 6, "state_emb_dim": 16,
+        "encoder_type": "gru", "num_layers": 1, "num_heads": 4, "intermediate_size": 128,
+        "max_seq_len": 512, "kernel_size": 3, "ffn_type": "mlp", "normalization_type": "layer_norm",
+        "dropout_rate": 0.0, "attention_dropout_rate": 0.0,
+    },
+]
+
+
+def _defaults():
+    return {
+        name: p.default for name, p in inspect.signature(NeuralHMM.__init__).parameters.items()
+        if p.default is not p.empty
     }
+
+
+def test_the_round_trip_configs_put_every_argument_off_its_default():
     params = set(inspect.signature(NeuralHMM.__init__).parameters) - {"self", "kwargs"}
-    assert set(overrides) == params
-    model = NeuralHMM(**overrides)
+    defaults = _defaults()
+    off = set()
+    for config in ROUND_TRIP_CONFIGS:
+        assert set(config) == params
+        off |= {k for k, v in config.items() if k not in defaults or v != defaults[k]}
+    assert off == params
+
+
+@pytest.mark.parametrize("arguments", ROUND_TRIP_CONFIGS, ids=["transformer", "conv", "gru-crf"])
+def test_get_config_round_trips_every_argument(arguments):
+    """Arguments OFF their defaults, so a dropped key changes the rebuilt config."""
+    params = set(arguments)
+    model = NeuralHMM(**arguments)
     config = model.get_config()
-    assert {k: config[k] for k in params} == overrides
+    assert {k: config[k] for k in params} == arguments
     assert NeuralHMM.from_config(config).get_config() == config
 
 
@@ -864,7 +912,7 @@ def test_the_float64_arm():
 
 def test_from_variant_honours_an_override_and_leaves_the_table_alone():
     before = {k: dict(v) for k, v in NeuralHMM.MODEL_VARIANTS.items()}
-    model = NeuralHMM.from_variant("io-hmm", **_kwargs(encoder_type="gru", topology="banded"))
+    model = NeuralHMM.from_variant("io-hmm", **_kwargs(variant="io-hmm", encoder_type="gru", topology="banded"))
     assert model.encoder_type == "gru" and model.topology == "banded"
     assert model.encoder.encoder_type == "gru"
     assert NeuralHMM.MODEL_VARIANTS == before
@@ -877,13 +925,14 @@ def _config(model):
 
 def test_create_neural_hmm_equals_from_variant():
     for variant in VARIANTS:
-        assert _config(create_neural_hmm(variant, **_kwargs())) == _config(NeuralHMM.from_variant(variant, **_kwargs()))
+        kwargs = _kwargs(variant=variant)
+        assert _config(create_neural_hmm(variant, **kwargs)) == _config(NeuralHMM.from_variant(variant, **kwargs))
     assert _config(create_neural_hmm(**_kwargs())) == _config(NeuralHMM.from_variant("neural-hmm", **_kwargs()))
 
 
 def test_pretrained_raises_naming_the_variant():
     with pytest.raises(NotImplementedError, match="io-hmm"):
-        create_neural_hmm("io-hmm", pretrained=True, **_kwargs())
+        create_neural_hmm("io-hmm", pretrained=True, **_kwargs(variant="io-hmm"))
     with pytest.raises(NotImplementedError, match="neural-hmm"):
         NeuralHMM.from_variant("neural-hmm", pretrained=True)
 
@@ -910,6 +959,108 @@ def test_bad_arguments_raise_naming_the_value(overrides, match):
     kwargs = {"n_states": K, "obs_type": "gaussian", "obs_dim": D, **overrides}
     with pytest.raises(ValueError, match=match):
         NeuralHMM(**kwargs)
+
+
+#: (preset, extra overrides, knob, non-default value, words of the reason): one row per
+#: rule branch of D-025, written out by hand from the wiring in model.py, encoders.py,
+#: transitions.py and emissions.py (not generated from the rule under test).
+_NO_ENCODER = "no encoder is built"
+INAPPLICABLE = [
+    # no encoder at all: every encoder argument
+    ("neural-hmm", {}, "encoder_type", "gru", _NO_ENCODER),
+    ("neural-hmm", {}, "num_layers", 3, _NO_ENCODER),
+    ("neural-hmm", {}, "num_heads", 2, _NO_ENCODER),
+    ("neural-hmm", {}, "intermediate_size", 12, _NO_ENCODER),
+    ("neural-hmm", {}, "max_seq_len", 16, _NO_ENCODER),
+    ("neural-hmm", {}, "kernel_size", 5, _NO_ENCODER),
+    ("neural-hmm", {}, "ffn_type", "glu", _NO_ENCODER),
+    ("neural-hmm", {}, "normalization_type", "rms_norm", _NO_ENCODER),
+    ("neural-hmm", {}, "dropout_rate", 0.1, _NO_ENCODER),
+    ("neural-hmm", {}, "attention_dropout_rate", 0.1, _NO_ENCODER),
+    # an lstm / gru encoder: the transformer-, mlp- and conv-only arguments
+    ("autoregressive-neural-hmm", {}, "num_heads", 2, "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {}, "max_seq_len", 16, "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {}, "ffn_type", "glu", "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {}, "attention_dropout_rate", 0.1, "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {}, "intermediate_size", 12, "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {}, "kernel_size", 5, "encoder_type='lstm'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "gru"}, "num_heads", 2, "encoder_type='gru'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "gru"}, "kernel_size", 5, "encoder_type='gru'"),
+    # an mlp encoder reads intermediate_size, nothing transformer- or conv-only
+    ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "num_heads", 2, "encoder_type='mlp'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "max_seq_len", 16, "encoder_type='mlp'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "ffn_type", "glu", "encoder_type='mlp'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "attention_dropout_rate", 0.1, "encoder_type='mlp'"),
+    ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "kernel_size", 5, "encoder_type='mlp'"),
+    # a conv encoder (io-hmm)
+    ("io-hmm", {}, "num_heads", 2, "encoder_type='conv'"),
+    ("io-hmm", {}, "intermediate_size", 12, "encoder_type='conv'"),
+    ("io-hmm", {}, "max_seq_len", 16, "encoder_type='conv'"),
+    ("io-hmm", {}, "ffn_type", "glu", "encoder_type='conv'"),
+    ("io-hmm", {}, "attention_dropout_rate", 0.1, "encoder_type='conv'"),
+    # a transformer encoder, generative and discriminative
+    ("left-to-right-segmenter", {}, "kernel_size", 5, "encoder_type='transformer'"),
+    ("neural-crf-tagger", {}, "kernel_size", 5, "encoder_type='transformer'"),
+    # band_width off the banded topology
+    ("neural-hmm", {}, "band_width", 2, "topology='ergodic'"),
+    ("neural-hmm", {"topology": "left_to_right"}, "band_width", 2, "topology='left_to_right'"),
+    # the emission: no density floor for symbols or CRF potentials, no state embeddings in a CRF
+    ("neural-hmm", {"obs_type": "categorical"}, "min_scale", 0.5, "categorical emission"),
+    ("neural-crf-tagger", {}, "min_scale", 0.5, "mode='discriminative'"),
+    ("neural-crf-tagger", {"obs_type": "categorical"}, "min_scale", 0.5, "mode='discriminative'"),
+    ("neural-crf-tagger", {}, "state_emb_dim", 9, "mode='discriminative'"),
+]
+INAPPLICABLE_IDS = [
+    f"{variant}-{'-'.join(f'{k}={v}' for k, v in extra.items()) or 'preset'}-{knob}"
+    for variant, extra, knob, _, _ in INAPPLICABLE
+]
+
+
+def _shape_kwargs(extra):
+    obs_type = extra.get("obs_type", "gaussian")
+    shape = {"vocab_size": V} if obs_type == "categorical" else {"obs_dim": D}
+    return {"n_states": K, "obs_type": obs_type, **shape, **extra}
+
+
+@pytest.mark.parametrize("variant,extra,knob,value,reason", INAPPLICABLE, ids=INAPPLICABLE_IDS)
+def test_an_inapplicable_knob_with_a_non_default_value_is_refused(variant, extra, knob, value, reason):
+    """D-025: the error names the knob, its value and why nothing reads it."""
+    assert value != _defaults()[knob]
+    with pytest.raises(ValueError, match=re.escape(f"{knob}={value!r}")) as info:
+        create_neural_hmm(variant, **_shape_kwargs(extra), **{knob: value})
+    assert reason in str(info.value) and "would be ignored" in str(info.value), str(info.value)
+    assert knob in NeuralHMM.unread_arguments({**NeuralHMM.MODEL_VARIANTS[variant], **_shape_kwargs(extra)})
+
+
+@pytest.mark.parametrize("variant,extra,knob,value,reason", INAPPLICABLE, ids=INAPPLICABLE_IDS)
+def test_the_same_inapplicable_knob_at_its_default_is_accepted(variant, extra, knob, value, reason):
+    """from_config passes every argument back, so a default-valued unread knob must pass."""
+    default = _defaults()[knob]
+    model = create_neural_hmm(variant, **_shape_kwargs(extra), **{knob: default})
+    assert model.get_config()[knob] == default
+
+
+@pytest.mark.parametrize("obs_type", ["gaussian", "poisson", "categorical"])
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_every_preset_constructs_and_sets_only_what_it_reads(variant, obs_type):
+    """No preset carries a value for an argument its own configuration ignores."""
+    preset = NeuralHMM.MODEL_VARIANTS[variant]
+    unread = NeuralHMM.unread_arguments({**preset, **_shape_kwargs({"obs_type": obs_type})})
+    assert not set(preset) & set(unread), sorted(set(preset) & set(unread))
+    model = create_neural_hmm(variant, **_shape_kwargs({"obs_type": obs_type}))
+    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
+
+
+def test_from_config_resets_a_stale_unread_value_to_its_default():
+    """An archive written before D-025 (the trainer passed max_seq_len=50 to every model)
+    still loads, into the model it was: the stale value never reached a layer."""
+    reference = create_neural_hmm("io-hmm", **_shape_kwargs({}))
+    stale = {**reference.get_config(), "max_seq_len": 50, "num_heads": 2}
+    with pytest.raises(ValueError, match="would be ignored"):
+        NeuralHMM(**{k: v for k, v in stale.items() if k != "name"})
+    restored = NeuralHMM.from_config(stale)
+    assert restored.max_seq_len == 512 and restored.num_heads == 4
+    assert _config(restored) == _config(reference)
 
 
 def test_build_refuses_a_non_dict_or_wrong_rank_shape():

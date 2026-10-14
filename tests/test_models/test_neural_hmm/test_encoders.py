@@ -39,7 +39,11 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.time_series.neural_hmm.encoders import ENCODER_TYPES, NeuralHMMEncoder
+from dl_techniques.models.time_series.neural_hmm.encoders import (
+    ARGUMENT_READERS,
+    ENCODER_TYPES,
+    NeuralHMMEncoder,
+)
 from tests.numerics import reassociation_atol
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
@@ -277,6 +281,51 @@ def test_dropout_moves_the_output_in_training_only(encoder_type, knob):
     np.testing.assert_array_equal(_np(on(x, training=False)), _np(off(x, training=False)))
     np.testing.assert_array_equal(_np(off(x, training=True)), _np(off(x, training=False)))
     assert np.abs(_np(on(x, training=True)) - _np(on(x, training=False))).max() > 0.0
+
+
+# ---------------------------------------------------------------------
+# ARGUMENT_READERS is the wiring (D-025: the model refuses what it says is unread)
+# ---------------------------------------------------------------------
+
+#: A non-default probe value per listed argument, valid for every encoder type.
+UNREAD_PROBES = {
+    "num_layers": 3, "normalization_type": "rms_norm", "dropout_rate": 0.5, "intermediate_size": 20,
+    "num_heads": 4, "max_seq_len": 24, "ffn_type": "glu", "attention_dropout_rate": 0.5, "kernel_size": 5,
+}
+UNREAD_PAIRS = [
+    (encoder_type, name) for name, readers in ARGUMENT_READERS.items()
+    for encoder_type in ENCODER_TYPES if encoder_type not in readers
+]
+
+
+def test_the_reader_table_lists_every_knob_and_matches_the_read_side_tests():
+    """Every argument but the always-read ones is listed, and the (type, argument) pairs
+    it calls read are exactly the pairs the knob tests above prove move something."""
+    import inspect
+
+    params = set(inspect.signature(NeuralHMMEncoder.__init__).parameters)
+    assert set(ARGUMENT_READERS) == params - {"self", "kwargs", "encoder_type", "causal", "hidden_dim"}
+    assert set(UNREAD_PROBES) == set(ARGUMENT_READERS)
+    tested = {(t, k) for t, k, _ in STRUCTURAL_KNOBS + VALUE_KNOBS} | set(DROPOUT_KNOBS)
+    listed = {(t, k) for k, readers in ARGUMENT_READERS.items() for t in readers}
+    assert {pair for pair in tested if pair[1] in ARGUMENT_READERS} == listed
+
+
+@pytest.mark.parametrize("encoder_type, knob", UNREAD_PAIRS, ids=[f"{t}-{k}" for t, k in UNREAD_PAIRS])
+def test_an_argument_the_table_calls_unread_changes_nothing(encoder_type, knob):
+    """Same seed, the argument off its default: identical weights and identical outputs in
+    BOTH modes (training=True would expose a dropout rate that is read)."""
+    plain = _encoder(encoder_type, True)
+    probed = _encoder(encoder_type, True, **{knob: UNREAD_PROBES[knob]})
+    assert [w.shape for w in plain.weights] == [w.shape for w in probed.weights]
+    for a, b in zip(plain.get_weights(), probed.get_weights()):
+        np.testing.assert_array_equal(a, b)
+    x = _x()
+    for training in (False, True):
+        keras.utils.set_random_seed(7)
+        expected = _np(plain(x, training=training))
+        keras.utils.set_random_seed(7)
+        np.testing.assert_allclose(_np(probed(x, training=training)), expected, rtol=0, atol=1e-6)
 
 
 # ---------------------------------------------------------------------

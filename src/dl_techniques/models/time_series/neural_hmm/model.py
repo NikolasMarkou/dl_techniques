@@ -61,7 +61,8 @@ References:
       Named Entity Recognition. NAACL-HLT. (https://arxiv.org/abs/1603.01360)
 """
 
-from typing import Any, Dict, Optional, Tuple
+import inspect
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import keras
 
@@ -75,7 +76,7 @@ from dl_techniques.utils.logger import logger
 
 from . import inference
 from .emissions import OBS_TYPES, DiscriminativeEmission, GenerativeEmission
-from .encoders import ENCODER_TYPES, NeuralHMMEncoder
+from .encoders import ARGUMENT_READERS, ENCODER_TYPES, NeuralHMMEncoder
 from .inference import LogSpaceOutputSpec
 from .transitions import InputDependentTransition, StaticTransition
 
@@ -100,6 +101,12 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     The encoder is built only when something reads its context: an autoregressive
     emission, input-dependent transitions, or the discriminative mode. Otherwise
     ``self.encoder`` is ``None`` and every argument read only by the encoder is unused.
+
+    An argument the configuration does not read must keep its default:
+    :meth:`unread_arguments` names those arguments (the encoder's without an encoder, the
+    other encoder types' with one, ``band_width`` off ``banded``, ``min_scale`` for a
+    categorical or discriminative emission, ``state_emb_dim`` in discriminative mode),
+    and a non-default value for one raises ``ValueError`` rather than being ignored.
 
     :param n_states: Number of hidden states ``K``; positive.
     :param mode: ``generative`` (unsupervised, maximizes ``log p(x)``) or
@@ -140,7 +147,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         encoder, in ``[0, 1)``.
     :param kwargs: Base ``keras.Model`` arguments.
     :raises ValueError: If an argument is out of range, unknown, missing for the
-        ``obs_type``, or the combination is invalid.
+        ``obs_type``, the combination is invalid, or an argument the configuration does
+        not read has a non-default value.
     """
 
     # Each preset carries only the structural choices; the caller supplies the data
@@ -272,6 +280,26 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
 
+        arguments = self._arguments()
+        defaults = self._argument_defaults()
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-025: refuse a NON-DEFAULT value for an
+        # argument this configuration never reads. Do NOT ignore it silently (a caller who
+        # sets num_heads on an lstm model believes it took effect), and do NOT refuse a
+        # DEFAULT value: get_config returns every argument, so from_config must accept them.
+        ignored = {
+            name: reason for name, reason in self.unread_arguments(arguments).items()
+            if arguments[name] != defaults[name]
+        }
+        if ignored:
+            details = "; ".join(
+                f"{name}={arguments[name]!r} (default {defaults[name]!r}): {reason}"
+                for name, reason in sorted(ignored.items())
+            )
+            raise ValueError(
+                f"These arguments would be ignored by this configuration: {details}. Leave them "
+                f"at their defaults, or pick a configuration that reads them."
+            )
+
         generative = mode == "generative"
         reads_context = emission_context == "autoregressive"
         # DECISION plan-2026-10-13T192257-1bb3bf1f/D-005: build the encoder ONLY when its
@@ -280,7 +308,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         # counted and never receive a gradient (the old package's default variant did this).
         self.encoder = None
         self.obs_embedding = None
-        if reads_context or transition == "input_dependent" or not generative:
+        if self._builds_encoder(arguments):
             self.encoder = NeuralHMMEncoder(
                 encoder_type,
                 hidden_dim=hidden_dim,
@@ -603,34 +631,130 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         :return: The model config.
         """
         config = super().get_config()
-        config.update(
-            {
-                "n_states": self.n_states,
-                "mode": self.mode,
-                "obs_type": self.obs_type,
-                "obs_dim": self.obs_dim,
-                "vocab_size": self.vocab_size,
-                "emission_context": self.emission_context,
-                "transition": self.transition_type,
-                "topology": self.topology,
-                "band_width": self.band_width,
-                "self_loop_init": self.self_loop_init,
-                "min_scale": self.min_scale,
-                "hidden_dim": self.hidden_dim,
-                "state_emb_dim": self.state_emb_dim,
-                "encoder_type": self.encoder_type,
-                "num_layers": self.num_layers,
-                "num_heads": self.num_heads,
-                "intermediate_size": self.intermediate_size,
-                "max_seq_len": self.max_seq_len,
-                "kernel_size": self.kernel_size,
-                "ffn_type": self.ffn_type,
-                "normalization_type": self.normalization_type,
-                "dropout_rate": self.dropout_rate,
-                "attention_dropout_rate": self.attention_dropout_rate,
-            }
-        )
+        config.update(self._arguments())
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], custom_objects: Optional[Dict[str, Any]] = None) -> "NeuralHMM":
+        """Rebuild a model from :meth:`get_config`, resetting arguments it never read.
+
+        A config written before the constructor refused ignored arguments (D-025) can hold
+        a non-default value for one, e.g. the trainer's ``max_seq_len`` on a model without
+        a ``transformer`` encoder. Such a value never reached a layer, so it is reset to
+        its default, with a warning, and the rebuilt model is the one that was saved.
+
+        :param config: A :meth:`get_config` dict.
+        :param custom_objects: Forwarded to ``keras.Model.from_config``.
+        :return: The model.
+        """
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-025: reset, do NOT refuse, here. The
+        # step-6 archives (neural-hmm, io-hmm) hold max_seq_len=50, which no layer read;
+        # refusing it would make a saved model unloadable for a value that changed nothing.
+        config = dict(config)
+        defaults = cls._argument_defaults()
+        stale = sorted(
+            name for name in cls.unread_arguments(config) if name in config and config[name] != defaults[name]
+        )
+        if stale:
+            logger.warning(
+                f"NeuralHMM.from_config: resetting arguments this configuration never read to their "
+                f"defaults: {', '.join(f'{name}={config[name]!r}' for name in stale)}."
+            )
+            config.update({name: defaults[name] for name in stale})
+        return super().from_config(config, custom_objects=custom_objects)
+
+    @classmethod
+    def _argument_defaults(cls) -> Dict[str, Any]:
+        """Return the default of every constructor argument that has one.
+
+        :return: Argument name to default (``n_states`` has none and is absent).
+        """
+        return {
+            name: param.default for name, param in inspect.signature(cls.__init__).parameters.items()
+            if param.default is not param.empty
+        }
+
+    @staticmethod
+    def _builds_encoder(config: Mapping[str, Any]) -> bool:
+        """Whether a configuration builds the encoder: whether anything reads its context.
+
+        :param config: Constructor arguments with ``mode``, ``emission_context`` and
+            ``transition`` present.
+        :return: ``True`` for an autoregressive emission, input-dependent transitions or
+            the discriminative mode.
+        """
+        return (
+            config["emission_context"] == "autoregressive" or config["transition"] == "input_dependent"
+            or config["mode"] == "discriminative"
+        )
+
+    @classmethod
+    def unread_arguments(cls, config: Mapping[str, Any]) -> Dict[str, str]:
+        """Return the constructor arguments a configuration does not read, with the reason.
+
+        Interface contract: the one source of "not read" for this model, shared by the
+        constructor's refusal, :meth:`from_config` and the trainer's model arguments. The
+        encoder half is derived from :data:`~.encoders.ARGUMENT_READERS`.
+
+        :param config: Constructor arguments; a missing one takes its constructor default.
+            Values are not validated here (the constructor does that).
+        :return: Argument name to a short reason it is not read; every other argument is
+            read by some layer. Never raises for a config holding the structural keys'
+            known values or their defaults.
+        """
+        resolved = {**cls._argument_defaults(), **config}
+        unread: Dict[str, str] = {}
+        if not cls._builds_encoder(resolved):
+            reason = (
+                "no encoder is built, since nothing reads its context (emission_context='none', "
+                "transition='static', mode='generative')"
+            )
+            unread.update({name: reason for name in ("encoder_type", *ARGUMENT_READERS)})
+        else:
+            encoder_type = resolved["encoder_type"]
+            for name, readers in ARGUMENT_READERS.items():
+                if encoder_type not in readers:
+                    unread[name] = f"encoder_type='{encoder_type}' does not read it (only {', '.join(readers)})"
+        if resolved["topology"] != "banded":
+            unread["band_width"] = f"topology='{resolved['topology']}' has no band (only 'banded' reads it)"
+        if resolved["mode"] == "discriminative":
+            unread["state_emb_dim"] = "mode='discriminative' scores states with Dense(K) on the encoder context"
+            unread["min_scale"] = "mode='discriminative' has no emission density to floor"
+        elif resolved["obs_type"] == "categorical":
+            unread["min_scale"] = "a categorical emission has no scale or rate to floor"
+        return unread
+
+    def _arguments(self) -> Dict[str, Any]:
+        """Return every constructor argument, from the stored attributes.
+
+        :return: Argument name to value, for :meth:`get_config` and the refusal of
+            ignored arguments.
+        """
+        return {
+            "n_states": self.n_states,
+            "mode": self.mode,
+            "obs_type": self.obs_type,
+            "obs_dim": self.obs_dim,
+            "vocab_size": self.vocab_size,
+            "emission_context": self.emission_context,
+            "transition": self.transition_type,
+            "topology": self.topology,
+            "band_width": self.band_width,
+            "self_loop_init": self.self_loop_init,
+            "min_scale": self.min_scale,
+            "hidden_dim": self.hidden_dim,
+            "state_emb_dim": self.state_emb_dim,
+            "encoder_type": self.encoder_type,
+            "num_layers": self.num_layers,
+            "num_heads": self.num_heads,
+            "intermediate_size": self.intermediate_size,
+            "max_seq_len": self.max_seq_len,
+            "kernel_size": self.kernel_size,
+            "ffn_type": self.ffn_type,
+            "normalization_type": self.normalization_type,
+            "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+        }
 
     @classmethod
     def from_variant(cls, variant: str, pretrained: bool = False, **kwargs: Any) -> "NeuralHMM":

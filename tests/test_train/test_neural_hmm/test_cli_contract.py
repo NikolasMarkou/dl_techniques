@@ -216,11 +216,13 @@ def test_an_unread_data_flag_that_is_not_given_is_none(argv, nulls) -> None:
 # ---------------------------------------------------------------------
 
 #: Every data, model and optimization flag off its default. A gaussian run with an
-#: encoder the override can replace (io-hmm: conv -> mlp), and a categorical run for
-#: the two flags only a categorical run reads (--obs-type, --vocab-size).
+#: encoder the override can replace (io-hmm: conv -> transformer, the one encoder that
+#: reads --seq-len as its position table), and a categorical run for the two flags only
+#: a categorical run reads (--obs-type, --vocab-size), whose conv encoder must NOT be
+#: handed max_seq_len (the model refuses an unread non-default argument, D-025).
 WIRED_RUNS: Dict[str, Tuple[str, ...]] = {
     "gaussian": (
-        "--variant", "io-hmm", "--encoder", "mlp", "--n-states", "3", "--obs-dim", "3",
+        "--variant", "io-hmm", "--encoder", "transformer", "--n-states", "3", "--obs-dim", "3",
         "--hidden-dim", "12", "--seq-len", "7", "--min-seq-len", "3", "--num-train", "13",
         "--num-val", "5", "--num-test", "6", "--separation", "2.5", "--stay-prob", "0.75",
         "--epochs", "2", "--batch-size", "7", "--learning-rate", "0.004",
@@ -297,7 +299,7 @@ def _only(calls: list):
 #: check -> (what the callee received, what the CLI asked for).
 WIRED_CHECKS = {
     "--variant": lambda s: (_only(s["gaussian"]["create"]).get("variant", "<not passed>"), "io-hmm"),
-    "--encoder": lambda s: (_only(s["gaussian"]["create"]).get("encoder_type", "<not passed>"), "mlp"),
+    "--encoder": lambda s: (_only(s["gaussian"]["create"]).get("encoder_type", "<not passed>"), "transformer"),
     "--n-states (data)": lambda s: (_only(s["gaussian"]["splits"]).get("n_states", "<not passed>"), 3),
     "--n-states (model)": lambda s: (_only(s["gaussian"]["create"]).get("n_states", "<not passed>"), 3),
     "--obs-dim (data)": lambda s: (_only(s["gaussian"]["splits"]).get("obs_dim", "<not passed>"), 3),
@@ -305,6 +307,8 @@ WIRED_CHECKS = {
     "--hidden-dim": lambda s: (_only(s["gaussian"]["create"]).get("hidden_dim", "<not passed>"), 12),
     "--seq-len (data)": lambda s: (_only(s["gaussian"]["splits"]).get("seq_len", "<not passed>"), 7),
     "--seq-len (model position table)": lambda s: (_only(s["gaussian"]["create"]).get("max_seq_len", "<not passed>"), 7),
+    "--seq-len (not handed to a conv encoder)": lambda s: (
+        _only(s["categorical"]["create"]).get("max_seq_len", "<not passed>"), "<not passed>"),
     "--min-seq-len": lambda s: (_only(s["gaussian"]["splits"]).get("min_seq_len", "<not passed>"), 3),
     "--num-train/--num-val/--num-test": lambda s: (
         _only(s["gaussian"]["splits"]).get("sizes", "<not passed>"), {"train": 13, "val": 5, "test": 6}),

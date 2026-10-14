@@ -76,7 +76,7 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--vocab-size` | 8 (categorical), `null` (gaussian) | the data and the model, categorical only; must be `>= --n-states`; refused with gaussian |
 | `--encoder` | the preset's | the model (`mlp`, `transformer`, `lstm`, `gru`, `conv`); refused for a preset that builds no encoder (`neural-hmm`) |
 | `--hidden-dim` | 32 | the model (encoder, observation embedding, emission head); divisible by 4 for a transformer encoder |
-| `--seq-len` | 50 | the data (padded length) and the model (transformer position table) |
+| `--seq-len` | 50 | the data (padded length) and, with a `transformer` encoder only, the model (its position table, `max_seq_len`) |
 | `--min-seq-len` | 25 | the data (shortest valid length) |
 | `--num-train`, `--num-val`, `--num-test` | 2000, 200, 500 | the data |
 | `--separation` | 4.0 (gaussian, `K > 1`), `null` otherwise | the data, gaussian with `K > 1` only; refused with categorical or `--n-states 1` |
@@ -116,6 +116,9 @@ default that played no part in the run. Every other flag is read by every
 configuration (`--hidden-dim` sizes the emission head even without an encoder). The
 model's own transformer knobs (`num_heads`, `ffn_type` and the like) are not trainer
 flags.
+The model refuses a non-default value for an argument its configuration does not read
+(`NeuralHMM.unread_arguments`), so the trainer hands `--seq-len` to the model as
+`max_seq_len` only when the model builds a `transformer` encoder.
 
 ## 5. Run directory
 

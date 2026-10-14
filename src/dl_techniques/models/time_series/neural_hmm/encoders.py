@@ -56,7 +56,7 @@ References:
     - Vaswani et al., 2017. Attention Is All You Need. NeurIPS. arXiv:1706.03762.
 """
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 
@@ -75,6 +75,23 @@ from dl_techniques.utils.masking.factory import create_causal_attend_mask
 
 #: Encoder types :class:`NeuralHMMEncoder` accepts.
 ENCODER_TYPES: Tuple[str, ...] = ("mlp", "transformer", "lstm", "gru", "conv")
+
+#: The encoder types that read each constructor argument; every other type ignores it.
+#: The one record of the wiring in :meth:`NeuralHMMEncoder.__init__` below, read by
+#: :meth:`~.model.NeuralHMM.unread_arguments` to refuse a model knob that would be
+#: ignored. Not listed: ``encoder_type``, ``causal`` (set by the model, not a knob) and
+#: ``hidden_dim`` (every path; the model's emission head reads it too).
+ARGUMENT_READERS: Dict[str, Tuple[str, ...]] = {
+    "num_layers": ENCODER_TYPES,
+    "normalization_type": ENCODER_TYPES,
+    "dropout_rate": ENCODER_TYPES,
+    "intermediate_size": ("mlp", "transformer"),
+    "num_heads": ("transformer",),
+    "max_seq_len": ("transformer",),
+    "ffn_type": ("transformer",),
+    "attention_dropout_rate": ("transformer",),
+    "kernel_size": ("conv",),
+}
 
 #: Activation of each ``conv`` block.
 _CONV_ACTIVATION: str = "gelu"

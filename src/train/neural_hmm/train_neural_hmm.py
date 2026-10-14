@@ -246,6 +246,9 @@ def load_splits(args: argparse.Namespace) -> Dict[str, HMMDataset]:
 def build_model(args: argparse.Namespace) -> NeuralHMM:
     """Construct an unbuilt `NeuralHMM` preset from the parsed arguments.
 
+    ``--seq-len`` becomes ``max_seq_len`` only when the model builds a ``transformer``
+    encoder, the one configuration that reads it (``NeuralHMM.unread_arguments``).
+
     :param args: Parsed arguments.
     :type args: argparse.Namespace
     :return: The model.
@@ -257,7 +260,6 @@ def build_model(args: argparse.Namespace) -> NeuralHMM:
         "n_states": args.n_states,
         "obs_type": args.obs_type,
         "hidden_dim": args.hidden_dim,
-        "max_seq_len": args.seq_len,
     }
     if args.obs_type == "categorical":
         kwargs["vocab_size"] = args.vocab_size
@@ -265,13 +267,18 @@ def build_model(args: argparse.Namespace) -> NeuralHMM:
         kwargs["obs_dim"] = args.obs_dim
     if args.encoder is not None:
         kwargs["encoder_type"] = args.encoder
-    model = create_neural_hmm(args.variant, **kwargs)
-    if args.encoder is not None and model.encoder is None:
+    # The model refuses a non-default value for an argument it does not read (D-025), and
+    # its own rule says which: --seq-len sizes only a transformer's position table, and
+    # --encoder is refused even at the default type when the preset builds no encoder.
+    unread = NeuralHMM.unread_arguments({**NeuralHMM.MODEL_VARIANTS[args.variant], **kwargs})
+    if args.encoder is not None and "encoder_type" in unread:
         raise ValueError(
             f"--encoder {args.encoder} would be ignored: variant '{args.variant}' builds no "
             "encoder (nothing reads its context). Drop --encoder or pick a variant with one."
         )
-    return model
+    if "max_seq_len" not in unread:
+        kwargs["max_seq_len"] = args.seq_len
+    return create_neural_hmm(args.variant, **kwargs)
 
 
 def _inputs(split: HMMDataset, start: int = 0, stop: Optional[int] = None) -> Dict[str, np.ndarray]:

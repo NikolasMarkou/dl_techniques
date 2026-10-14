@@ -167,7 +167,22 @@ gamma = model.posteriors(inputs)       # (8, 20, 3); rows sum to 1 at valid step
 | `dropout_rate` | `float` | `0.0` | Encoder dropout, `[0, 1)`; active only with `training=True`. |
 | `attention_dropout_rate` | `float` | `0.0` | Attention-probability dropout (`transformer`), `[0, 1)`. |
 
-Methods: `call(inputs, training=None) -> dict`; `compute_loss(x, y, y_pred, sample_weight, training)`; `log_likelihood(inputs, states=None) -> (B,)` (`log p(x)`, or `log p(states | x)` in discriminative mode); `viterbi(inputs) -> (path, score)`; `posteriors(inputs) -> (B, T, K)`; `compute_output_shape` (valid before `build`); `from_variant(variant, pretrained=False, **kwargs)`. Module-level `create_neural_hmm(variant="neural-hmm", pretrained=False, **kwargs)` delegates to `from_variant`.
+**An argument the configuration does not read must keep its default.** A non-default value for one raises `ValueError` naming the argument, its value and why it is not read, instead of being silently ignored. The rule lives in one place, `NeuralHMM.unread_arguments(config) -> {name: reason}`, whose encoder half is the table `ARGUMENT_READERS` in `encoders.py`:
+
+| Configuration | Arguments it does not read |
+|:---|:---|
+| no encoder (`emission_context="none"`, `transition="static"`, `mode="generative"`) | `encoder_type`, `num_layers`, `num_heads`, `intermediate_size`, `max_seq_len`, `kernel_size`, `ffn_type`, `normalization_type`, `dropout_rate`, `attention_dropout_rate` |
+| encoder `lstm` or `gru` | `num_heads`, `intermediate_size`, `max_seq_len`, `ffn_type`, `attention_dropout_rate`, `kernel_size` |
+| encoder `mlp` | `num_heads`, `max_seq_len`, `ffn_type`, `attention_dropout_rate`, `kernel_size` |
+| encoder `conv` | `num_heads`, `intermediate_size`, `max_seq_len`, `ffn_type`, `attention_dropout_rate` |
+| encoder `transformer` | `kernel_size` |
+| `topology` other than `banded` | `band_width` |
+| `obs_type="categorical"` (generative) | `min_scale` |
+| `mode="discriminative"` | `min_scale`, `state_emb_dim` |
+
+The same argument at its default is accepted, because `get_config` returns every argument. `from_config` resets a stale non-default value of an unread argument to its default, with a warning, so an archive saved before this rule (the trainer used to pass `max_seq_len` to every model) still loads into the same model. `hidden_dim`, `self_loop_init`, `topology` and the data shape are read by every configuration; `obs_dim`/`vocab_size` and `emission_context` have their own checks.
+
+Methods: `call(inputs, training=None) -> dict`; `compute_loss(x, y, y_pred, sample_weight, training)`; `log_likelihood(inputs, states=None) -> (B,)` (`log p(x)`, or `log p(states | x)` in discriminative mode); `viterbi(inputs) -> (path, score)`; `posteriors(inputs) -> (B, T, K)`; `compute_output_shape` (valid before `build`); `from_variant(variant, pretrained=False, **kwargs)`; `unread_arguments(config)` (class method, above). Module-level `create_neural_hmm(variant="neural-hmm", pretrained=False, **kwargs)` delegates to `from_variant`.
 
 ### `NeuralHMMEncoder` (`encoders.py`)
 
@@ -337,6 +352,8 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 ### Troubleshooting / FAQs
 
 **Q. `ValueError: mode='generative' is trained without labels`.** Pass `y=None` to `fit` in generative mode; labels are for `mode="discriminative"`.
+
+**Q. `ValueError: These arguments would be ignored by this configuration`.** An argument was set to a non-default value that nothing in the chosen configuration reads, e.g. `num_heads` with an `lstm` encoder, or any encoder argument for `neural-hmm`, which builds no encoder (§7 lists every case). Drop it, or choose the configuration that reads it (`encoder_type="transformer"`, a preset with an encoder, `topology="banded"`).
 
 **Q. `compile(loss=...)` seems to have no effect.** It has none: the objective is `compute_loss` (§5).
 

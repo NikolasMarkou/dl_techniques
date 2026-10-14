@@ -411,6 +411,45 @@ class TestNeuralHMMReadme:
         documented = set(re.findall(r"^\| `([a-z0-9-]+)` \|", section, flags=re.MULTILINE))
         assert documented == set(NeuralHMM.MODEL_VARIANTS)
 
+    def test_the_neural_hmm_unread_argument_table_is_the_rule(self):
+        """§7's table of unread arguments, row by row, against ``NeuralHMM.unread_arguments``.
+
+        Each row is evaluated on a base that reads as much as possible (banded, gaussian,
+        generative, autoregressive, transformer: only ``kernel_size`` unread). An encoder row
+        (including "no encoder") lists the full unread set of its configuration; any other
+        row lists what its condition ADDS to the base's unread set.
+        """
+        import re
+
+        from dl_techniques.models.time_series.neural_hmm import NeuralHMM
+
+        base = {"mode": "generative", "obs_type": "gaussian", "emission_context": "autoregressive",
+                "transition": "static", "topology": "banded", "encoder_type": "transformer"}
+        rows = {  # row label prefix -> (configs, the row is a full encoder row)
+            "no encoder": ([{"emission_context": "none", "encoder_type": "lstm"}], True),
+            "encoder `lstm` or `gru`": ([{"encoder_type": "lstm"}, {"encoder_type": "gru"}], True),
+            "encoder `mlp`": ([{"encoder_type": "mlp"}], True),
+            "encoder `conv`": ([{"encoder_type": "conv"}], True),
+            "encoder `transformer`": ([{}], True),
+            "`topology` other than `banded`": ([{"topology": "ergodic"}, {"topology": "left_to_right"}], False),
+            "`obs_type=\"categorical\"`": ([{"obs_type": "categorical"}], False),
+            "`mode=\"discriminative\"`": ([{"mode": "discriminative", "emission_context": "none"}], False),
+        }
+        table = _neural_hmm_readme().split("| Configuration | Arguments it does not read |", 1)[1]
+        table = table.split("\n\n", 1)[0]
+        seen = set()
+        for line in table.strip().splitlines()[1:]:
+            label, listed = [cell.strip() for cell in line.strip("|").split("|")]
+            prefix = next(p for p in rows if label.startswith(p))
+            seen.add(prefix)
+            configs, full = rows[prefix]
+            for config in configs:
+                unread = set(NeuralHMM.unread_arguments({**base, **config}))
+                if not full:
+                    unread -= set(NeuralHMM.unread_arguments(base))
+                assert set(re.findall(r"`(\w+)`", listed)) == unread, (label, config)
+        assert seen == set(rows)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
