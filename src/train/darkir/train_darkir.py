@@ -119,6 +119,16 @@ def _create_synthetic_dataset(img_size, batch_size):
 
 # ---------------------------------------------------------------------
 
+#: The history key EarlyStopping and ModelCheckpoint watch, with or without
+#: the side output. ``DarkIR`` is a subclassed model, which has no
+#: ``output_names``, so Keras does not prefix per-output metrics with an
+#: output name: the main output's PSNR is ``val_psnr`` under one output and
+#: under two (measured on a two-output ``use_side_loss=True`` fit). The old
+#: ``f"val_{model.output_names[0]}_psnr"`` was written for the functional
+#: model and raised ``AttributeError`` on the subclass.
+PSNR_MONITOR = 'val_psnr'
+
+
 def side_output_downsample_factor(model_config: Dict[str, Any]) -> int:
     """Spatial factor between the main output and the side output.
 
@@ -331,14 +341,13 @@ def train_model(args: argparse.Namespace):
                 [],
             ],
         )
-        monitor = f"val_{model.output_names[0]}_psnr"
     else:
         model.compile(
             optimizer=optimizer,
             loss=loss_fn,
             metrics=[PsnrMetric(max_val=1.0, name='psnr'), SsimMetric(max_val=1.0)],
         )
-        monitor = 'val_psnr'
+    monitor = PSNR_MONITOR
     model.build((None, args.img_size, args.img_size, 3))
     model.summary(print_fn=logger.info)
 

@@ -12,14 +12,21 @@ Classes
 * :class:`BaseVisionHead` -- shared construction. Six heads inherit from it.
   It has no ``call``.
 * :class:`DetectionHead` -- class scores and box offsets, per anchor.
-* :class:`SegmentationHead` -- one class map, upsampled towards input size.
-  The only head here that returns a bare tensor.
+* :class:`SegmentationHead` -- one map of per-pixel class logits, upsampled
+  towards input size. The only head here that returns a bare tensor.
 * :class:`DepthEstimationHead` -- one depth map, plus the tensor it was
   scaled from.
 * :class:`ClassificationHead` -- one label for the whole image. Returns
   pre-softmax ``'logits'`` and their softmax under ``'probabilities'``.
-* :class:`InstanceSegmentationHead` -- detection outputs plus instance masks.
+* :class:`InstanceSegmentationHead` -- detection outputs plus per-instance
+  mask logits.
 * :class:`EnhancementHead` -- a restored or upscaled image.
+
+No head applies an activation to a class score. The class map, the instance
+masks and the detection scores are logits; compile with ``from_logits=True``
+or apply ``softmax``/``sigmoid`` yourself. The one output squashed inside a
+head is :class:`DepthEstimationHead`'s sigmoid, a range map that the depth is
+scaled from, not a class score.
 * :class:`MultiTaskHead` -- several heads behind one layer. It does not
   inherit from :class:`BaseVisionHead`.
 
@@ -31,8 +38,8 @@ Helpers
   a default scale factor for super-resolution.
 * :func:`create_multi_task_head` -- build a :class:`MultiTaskHead` from any
   of three configuration formats.
-* :class:`HeadConfiguration` -- three keyword-argument presets per task type:
-  default, efficient and high-performance.
+* :class:`HeadConfiguration` -- two keyword-argument presets per task type:
+  default and efficient.
 * :func:`merge_head_config_overrides` -- merge a model's
   ``head_config_overrides`` into its head config, refusing the keys the model
   owns (``name``, ``num_classes``, ``task_type``).
@@ -78,6 +85,60 @@ from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+# Common-layer flag refusal
+# ---------------------------------------------------------------------
+
+def _refuse_common_layers_call_never_runs(
+        kwargs: Dict[str, Any],
+        head_name: str,
+        flags: Tuple[str, ...]
+) -> None:
+    """
+    Default each common-layer argument a head's ``call`` never applies to
+    off (``False`` or ``0.0``), and refuse a value that would turn it on.
+
+    Interface contract, shared by :class:`ClassificationHead` (``use_ffn``)
+    and :class:`EnhancementHead` (``use_attention``, ``use_ffn``,
+    ``dropout_rate``):
+
+    * ``kwargs`` is the head's ``**kwargs`` before they reach
+      :class:`BaseVisionHead`. Each name in ``flags`` that is absent is set to
+      ``False`` in place (``0.0`` for ``dropout_rate``), so the base class
+      builds and applies nothing for it.
+    * A name passed with a truthy value (``True``, or a rate above 0) raises
+      ``ValueError`` naming the head and the argument. Nothing is built then.
+    * Returns ``None``.
+
+    Call it BEFORE ``super().__init__``: the base class builds the common
+    layers inside its own ``__init__``.
+
+    :param kwargs: The head's keyword arguments, mutated in place.
+    :type kwargs: Dict[str, Any]
+    :param head_name: Class name, for the error message.
+    :type head_name: str
+    :param flags: Argument names the head's ``call`` never applies.
+    :type flags: Tuple[str, ...]
+    :return: None.
+    :rtype: None
+    :raises ValueError: If any name in ``flags`` is passed as truthy.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-020
+    # Refuse, do NOT accept-and-ignore: a stored flag that builds nothing is a
+    # dead knob (it silently changed no architecture for every caller that
+    # passed it), and a built-but-unapplied layer is weight no gradient
+    # reaches. See decisions.md D-020.
+    for flag in flags:
+        off = 0.0 if flag == 'dropout_rate' else False
+        value = kwargs.setdefault(flag, off)
+        if value:
+            raise ValueError(
+                f"{head_name} never applies what {flag}={value!r} asks for: "
+                f"its call() runs no such layer. Pass {flag}={off!r} or leave "
+                f"it unset."
+            )
+
+
+# ---------------------------------------------------------------------
 # Base Head Class
 # ---------------------------------------------------------------------
 
@@ -90,21 +151,20 @@ class BaseVisionHead(keras.layers.Layer):
     configuration they read. It has no ``call``. Each subclass applies the
     stages it wants, then runs its own task layers.
 
-    ``__init__`` calls ``_create_common_layers``, which always builds
-    ``norm`` and builds ``attention``, ``ffn`` and ``dropout`` only when the
-    matching flag or rate asks for them.
+    ``__init__`` calls ``_create_common_layers``, which builds ``attention``
+    and ``ffn`` only when the matching flag asks for them. Every subclass
+    ``call`` applies both when they exist, so the head carries no layer its
+    forward pass skips.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        _create_common_layers builds these four:
+        _create_common_layers builds these two:
 
         ┌─────────────────────────────────┐
-        │ norm                     always │
         │ attention      if use_attention │
         │ ffn                  if use_ffn │
-        │ dropout     if dropout_rate > 0 │
         └─────────────────────────────────┘
 
         _common_processed_shape predicts this much of a
@@ -123,19 +183,14 @@ class BaseVisionHead(keras.layers.Layer):
                          ▼
         the subclass task layers
 
-    Two warnings about that picture.
+    There is no common normalization or dropout stage. Each head normalizes
+    and drops inside its own ``ConvBlock`` or ``DenseBlock``, and those read
+    ``normalization_type`` and ``dropout_rate`` from this class.
 
-    ``norm`` and ``dropout`` are built, and ``norm`` carries weights, but no
-    ``call`` in this module applies either one. Each head normalizes and
-    drops inside its own ``ConvBlock`` or ``DenseBlock``, and those read
-    ``normalization_type`` and ``dropout_rate`` from this class. So the two
-    common layers are weight the forward pass never reaches, not a stage.
-
-    The other two stages are not uniform either. :class:`ClassificationHead`
-    overrides ``_create_common_layers`` and builds ``attention`` only: no
-    ``norm``, no ``ffn`` and no ``dropout``, whatever ``use_ffn`` and
-    ``dropout_rate`` say. :class:`EnhancementHead` applies none of the four.
-    :class:`MultiTaskHead` does not inherit from this class at all. Read the
+    Two heads run less than this picture. :class:`ClassificationHead` runs
+    ``attention`` only and refuses ``use_ffn=True``. :class:`EnhancementHead`
+    runs neither, applies no dropout, and refuses ``use_attention=True``,
+    ``use_ffn=True`` and ``dropout_rate > 0``. :class:`MultiTaskHead` does not inherit from this class at all. Read the
     subclass diagram, not this one, for what a given head runs.
 
     :param hidden_dim: Working width of the head. The sub-blocks and the FFN
@@ -146,15 +201,16 @@ class BaseVisionHead(keras.layers.Layer):
     :type normalization_type: NormalizationType
     :param activation_type: Activation each sub-block uses.
     :type activation_type: ActivationType
-    :param dropout_rate: Dropout rate handed to the sub-blocks. Any value
-        above 0 also builds the unused common ``dropout`` layer.
+    :param dropout_rate: Dropout rate handed to the sub-blocks, the FFN and
+        the attention layer.
     :type dropout_rate: float
     :param use_attention: Whether to build an attention layer.
     :type use_attention: bool
     :param attention_type: Which registered attention type to build.
     :type attention_type: AttentionType
-    :param use_ffn: Whether to build an FFN block. It defaults to ``True``.
-        :class:`ClassificationHead` builds no FFN whatever it says.
+    :param use_ffn: Whether to build an FFN block. It defaults to ``True``
+        here; :class:`ClassificationHead` and :class:`EnhancementHead`
+        default it to ``False`` and refuse ``True``.
     :type use_ffn: bool
     :param ffn_type: Which registered FFN type to build.
     :type ffn_type: FFNType
@@ -163,15 +219,10 @@ class BaseVisionHead(keras.layers.Layer):
     :type ffn_expansion_factor: int
     :param kwargs: Additional arguments for the base Layer class.
 
-    :ivar norm: Normalization layer. Always built, never applied.
-    :vartype norm: keras.layers.Layer
     :ivar attention: Attention layer, built when ``use_attention`` is set.
     :vartype attention: keras.layers.Layer
     :ivar ffn: FFN block, built when ``use_ffn`` is set.
     :vartype ffn: keras.layers.Layer
-    :ivar dropout: Dropout layer, built when ``dropout_rate > 0``. Never
-        applied.
-    :vartype dropout: keras.layers.Dropout
     """
 
     def __init__(
@@ -233,11 +284,11 @@ class BaseVisionHead(keras.layers.Layer):
 
     def _create_common_layers(self) -> None:
         """
-        Build the four layers every vision head shares.
+        Build the common layers the head's ``call`` applies.
 
-        ``norm`` is always built. ``attention``, ``ffn`` and ``dropout`` are
-        built only when their flag or rate asks for them. The attention
-        branch lives in ``_create_attention_layer``.
+        ``attention`` is built when ``use_attention`` is set and ``ffn`` when
+        ``use_ffn`` is set; nothing else. The attention branch lives in
+        ``_create_attention_layer``.
 
         Called from ``__init__``, following the package rule that layers are
         created in ``__init__``.
@@ -245,12 +296,11 @@ class BaseVisionHead(keras.layers.Layer):
         :return: None.
         :rtype: None
         """
-
-        # Normalization layer
-        self.norm = create_normalization_layer(
-            self.normalization_type,
-            name=f'{self.name}_norm'
-        )
+        # DECISION plan-2026-10-14T062616-81938e81/D-020
+        # Do NOT build a common norm or Dropout here again: no head's call()
+        # applied either (measured per head at step 6), the norm carried
+        # weights no gradient reached, and creating a Dropout draws a default
+        # seed that shifts every later initializer. See decisions.md D-020.
 
         # Optional attention mechanism
         self._create_attention_layer()
@@ -274,17 +324,12 @@ class BaseVisionHead(keras.layers.Layer):
                     name=f'{self.name}_ffn'
                 )
 
-        # Dropout layer
-        if self.dropout_rate > 0:
-            self.dropout = layers.Dropout(self.dropout_rate)
-
     def _create_attention_layer(self) -> None:
         """
         Build ``attention`` when ``use_attention`` is set, else nothing.
 
-        The one place the attention branch is written. Both
-        ``_create_common_layers`` and :class:`ClassificationHead`'s override
-        of it call this.
+        The one place the attention branch is written;
+        ``_create_common_layers`` calls it.
 
         The attention branch has three cases. ``'multi_head'`` and ``'cbam'``
         get their own argument sets. Every other type goes through
@@ -337,9 +382,8 @@ class BaseVisionHead(keras.layers.Layer):
         block that most subclass ``call`` methods run before their task
         layers. Subclass ``build`` methods use it to size what comes next.
 
-        ``norm`` and ``dropout`` are not in this chain, because no ``call``
-        applies them. :class:`ClassificationHead` and
-        :class:`EnhancementHead` do not use this method at all.
+        :class:`ClassificationHead` and :class:`EnhancementHead` do not use
+        this method at all.
 
         :param input_shape: Input feature-map shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -355,11 +399,10 @@ class BaseVisionHead(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the four common layers.
+        Build the common layers that exist.
 
         Each is built on the raw input shape, because each stage is
-        shape-preserving in the width the head runs at. ``norm`` and
-        ``dropout`` are built even though no ``call`` applies them.
+        shape-preserving in the width the head runs at.
 
         :param input_shape: Input feature-map shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -367,13 +410,10 @@ class BaseVisionHead(keras.layers.Layer):
         :rtype: None
         """
         # The common layers each consume the raw input feature map.
-        self.norm.build(input_shape)
         if self.use_attention:
             self.attention.build(input_shape)
         if self.use_ffn:
             self.ffn.build(input_shape)
-        if self.dropout_rate > 0:
-            self.dropout.build(input_shape)
 
         super().build(input_shape)
 
@@ -548,60 +588,6 @@ class DetectionHead(BaseVisionHead):
         # Create detection-specific layers
         self._create_detection_layers()
 
-    def _create_common_layers(self) -> None:
-        """
-        Override base class to not create unused norm/dropout layers.
-
-        DetectionHead uses ConvBlocks which have their own normalization.
-        The base class's norm and dropout are never applied in DetectionHead.call(),
-        so we skip creating them to avoid dead weights that don't receive gradients.
-        """
-        # Only create attention and ffn if enabled
-        if self.use_attention:
-            if self.attention_type == 'multi_head':
-                self.attention = create_attention_layer(
-                    'multi_head',
-                    dim=self.hidden_dim,
-                    num_heads=8,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_attention'
-                )
-            elif self.attention_type == 'cbam':
-                self.attention = create_attention_layer(
-                    'cbam',
-                    channels=self.hidden_dim,
-                    ratio=8,
-                    name=f'{self.name}_cbam'
-                )
-            else:
-                self.attention = create_attention_layer(
-                    self.attention_type,
-                    name=f'{self.name}_attention',
-                    **assemble_attention_config(
-                        self.attention_type, {'dim': self.hidden_dim}
-                    )
-                )
-
-        if self.use_ffn:
-            if self.ffn_type == 'swiglu':
-                self.ffn = create_ffn_layer(
-                    'swiglu',
-                    output_dim=self.hidden_dim,
-                    ffn_expansion_factor=self.ffn_expansion_factor,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-            else:
-                self.ffn = create_ffn_layer(
-                    self.ffn_type,
-                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
-                    output_dim=self.hidden_dim,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-
-        # Skip norm and dropout creation - ConvBlocks handle their own normalization
-
     def _create_detection_layers(self) -> None:
         """
         Build the classification and regression branches.
@@ -659,8 +645,6 @@ class DetectionHead(BaseVisionHead):
         (before reshaping), so they are built on the sequence shape.
         The conv branches are built on the spatial shape after reshaping.
 
-        This overrides BaseVisionHead.build to avoid building the unused norm layer.
-
         :param input_shape: Input feature-map shape (spatial) or sequence shape.
         :type input_shape: Tuple[Optional[int], ...]
         :return: None.
@@ -698,7 +682,8 @@ class DetectionHead(BaseVisionHead):
             self.reg_conv.build(feature_shape)
             self.reg_head.build(self.reg_conv.compute_output_shape(feature_shape))
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        # attention and ffn are built above, on the sequence or spatial shape
+        # call() applies them to, so only the Layer bookkeeping remains.
         keras.layers.Layer.build(self, input_shape)
 
     def call(
@@ -822,11 +807,13 @@ class DetectionHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class SegmentationHead(BaseVisionHead):
     """
-    One class map, upsampled towards the input resolution.
+    One map of per-pixel class logits, upsampled towards the input resolution.
 
     Three ``ConvBlock`` stages refine the features, then transposed convs
-    double the resolution once per stage, then a 1x1 softmax conv emits one
-    channel per class.
+    double the resolution once per stage, then a linear 1x1 conv emits one
+    channel per class. The output is pre-softmax: compile a per-pixel
+    cross-entropy with ``from_logits=True``, or apply
+    ``keras.ops.softmax(out, axis=-1)`` for class probabilities.
 
     This head accepts a single feature map or a list of them. With a list and
     ``use_skip_connections``, the last map is the one refined and the rest
@@ -876,7 +863,7 @@ class SegmentationHead(BaseVisionHead):
         └────────────────┬────────────────┘
                          ▼ int(sqrt(upsampling_factor)) of them
         ┌─────────────────────────────────┐
-        │ seg_head: Conv2D 1x1    softmax │
+        │ seg_head: Conv2D 1x1     linear │
         └────────────────┬────────────────┘
                          ▼
         (B, H*s, W*s, num_classes), s = 2 ** the count above
@@ -919,7 +906,8 @@ class SegmentationHead(BaseVisionHead):
     :vartype refine_blocks: List[ConvBlock]
     :ivar upsample_layers: The stride-2 ``Conv2DTranspose`` layers.
     :vartype upsample_layers: List[keras.layers.Conv2DTranspose]
-    :ivar seg_head: Output ``Conv2D(num_classes)`` with softmax.
+    :ivar seg_head: Output ``Conv2D(num_classes)``, linear: it emits the
+        class logits.
     :vartype seg_head: keras.layers.Conv2D
     """
 
@@ -1052,12 +1040,17 @@ class SegmentationHead(BaseVisionHead):
                 )
             )
 
-        # Final segmentation layer
+        # Final segmentation layer.
+        # DECISION plan-2026-10-14T062616-81938e81/D-003
+        # Linear: the class map is logits. Do NOT put activation='softmax'
+        # back: a from_logits=True loss would double-softmax, and a
+        # from_logits=False one hides the probabilities inside the head where
+        # no consumer can choose. Range maps (the depth sigmoid) are the only
+        # squashed outputs in this module. See decisions.md D-003.
         self.seg_head = layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
             padding='same',
-            activation='softmax',
             name='seg_head'
         )
 
@@ -1164,7 +1157,8 @@ class SegmentationHead(BaseVisionHead):
         :type inputs: Union[keras.KerasTensor, List[keras.KerasTensor]]
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
-        :return: Class map tensor. This head returns no dict.
+        :return: Per-pixel class logits, pre-softmax. This head returns no
+            dict.
         :rtype: keras.KerasTensor
         """
 
@@ -1428,61 +1422,6 @@ class DepthEstimationHead(BaseVisionHead):
 
         self._create_depth_layers()
 
-    def _create_common_layers(self) -> None:
-        """
-        Override base class to not create unused norm/dropout layers.
-
-        DepthEstimationHead uses ConvBlocks (which have their own normalization)
-        and applies attention/ffn directly on inputs. The base class's norm and
-        dropout are never applied in DepthEstimationHead.call(), so we skip
-        creating them to avoid dead weights that don't receive gradients.
-        """
-        # Only create attention and ffn if enabled
-        if self.use_attention:
-            if self.attention_type == 'multi_head':
-                self.attention = create_attention_layer(
-                    'multi_head',
-                    dim=self.hidden_dim,
-                    num_heads=8,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_attention'
-                )
-            elif self.attention_type == 'cbam':
-                self.attention = create_attention_layer(
-                    'cbam',
-                    channels=self.hidden_dim,
-                    ratio=8,
-                    name=f'{self.name}_cbam'
-                )
-            else:
-                self.attention = create_attention_layer(
-                    self.attention_type,
-                    name=f'{self.name}_attention',
-                    **assemble_attention_config(
-                        self.attention_type, {'dim': self.hidden_dim}
-                    )
-                )
-
-        if self.use_ffn:
-            if self.ffn_type == 'swiglu':
-                self.ffn = create_ffn_layer(
-                    'swiglu',
-                    output_dim=self.hidden_dim,
-                    ffn_expansion_factor=self.ffn_expansion_factor,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-            else:
-                self.ffn = create_ffn_layer(
-                    self.ffn_type,
-                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
-                    output_dim=self.hidden_dim,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-
-        # Skip norm and dropout creation - ConvBlocks handle their own normalization
-
     def _create_depth_layers(self) -> None:
         """
         Build the refinement stack and the depth conv.
@@ -1646,8 +1585,8 @@ class DepthEstimationHead(BaseVisionHead):
                     shape = up.compute_output_shape(shape)
             self.dpt_output_conv.build(shape)
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
-        keras.layers.Layer.build(self, input_shape)
+        # The common attention and ffn, on the raw input shape.
+        super().build(input_shape)
 
     def call(
             self,
@@ -1805,11 +1744,10 @@ class ClassificationHead(BaseVisionHead):
     model's own knobs govern its head.
 
     This head builds and applies ``attention`` (when ``use_attention`` is
-    set) and nothing else from :class:`BaseVisionHead`. Its
-    ``_create_common_layers`` override builds no ``norm``, no ``ffn`` and no
-    ``dropout``, so the head carries exactly the weights its ``call`` runs.
-    ``use_ffn`` is stored and serialized but builds nothing here. ``build``
-    matches ``call``: it propagates the attention shape only.
+    set) and nothing else from :class:`BaseVisionHead`, so it carries exactly
+    the weights its ``call`` runs. Its ``call`` runs no FFN, so ``use_ffn``
+    defaults to ``False`` and ``use_ffn=True`` raises ``ValueError``.
+    ``build`` matches ``call``: it propagates the attention shape only.
 
     **Architecture Overview:**
 
@@ -1992,8 +1930,11 @@ class ClassificationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         :raises ValueError: If a ``block_dims`` entry is not a positive int,
-            or ``classifier_dropout_rate`` is outside ``[0, 1)``.
+            ``classifier_dropout_rate`` is outside ``[0, 1)``, or
+            ``use_ffn`` is ``True``.
         """
+        _refuse_common_layers_call_never_runs(
+            kwargs, type(self).__name__, ('use_ffn',))
         super().__init__(**kwargs)
 
         if block_dims is not None:
@@ -2036,26 +1977,6 @@ class ClassificationHead(BaseVisionHead):
         if self.block_dims is None:
             return (self.hidden_dim, self.hidden_dim // 2)
         return self.block_dims
-
-    def _create_common_layers(self) -> None:
-        """
-        Build ``attention`` only, the one common layer this head's ``call``
-        applies.
-
-        Overrides :meth:`BaseVisionHead._create_common_layers`, which would
-        also build ``norm``, ``ffn`` and ``dropout``. None of those runs in
-        :meth:`call`, so building them would add weights the forward pass
-        never reaches.
-
-        :return: None.
-        :rtype: None
-        """
-        # DECISION plan-2026-10-14T062616-81938e81/D-004
-        # Do NOT call super()._create_common_layers() here: its norm, ffn and
-        # dropout never run in this head's call(), and the Dropout seed
-        # generators they create shift every later weight's default seed.
-        # See decisions.md D-004.
-        self._create_attention_layer()
 
     def _create_classification_layers(self) -> None:
         """
@@ -2184,8 +2105,9 @@ class ClassificationHead(BaseVisionHead):
             self.classifier_dropout.build(shape)
         self.classifier.build(shape)
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
-        keras.layers.Layer.build(self, input_shape)
+        # The common attention (the only common layer this head has), on the
+        # raw input shape.
+        super().build(input_shape)
 
     def call(
             self,
@@ -2321,7 +2243,13 @@ class InstanceSegmentationHead(BaseVisionHead):
     Two branches run on the same common-processed features. One is a full
     :class:`DetectionHead` instance held as a sub-layer, which supplies
     ``'classifications'`` and ``'regressions'``. The other is three
-    ``ConvBlock`` stages and a 1x1 conv, which supplies ``'instance_masks'``.
+    ``ConvBlock`` stages and a linear 1x1 conv, which supplies
+    ``'instance_masks'``.
+
+    Every class-like output here is a logit. ``'instance_masks'`` holds mask
+    logits: apply ``keras.ops.sigmoid`` for per-pixel mask probabilities, or
+    compile a binary cross-entropy with ``from_logits=True``. The key keeps
+    its name; its values are not in ``[0, 1]``.
 
     The inner detection head is built with ``use_attention=False`` and
     ``use_ffn=False``, because this head has already applied both. Without
@@ -2351,7 +2279,7 @@ class InstanceSegmentationHead(BaseVisionHead):
                  │                    ▼
                  │           ┌──────────────────┐
                  │           │ mask_head 1x1    │
-                 │           │ sigmoid          │
+                 │           │ linear           │
                  │           └────────┬─────────┘
                  ▼                    ▼
          'classifications'     'instance_masks'
@@ -2390,7 +2318,8 @@ class InstanceSegmentationHead(BaseVisionHead):
     :vartype detection_head: DetectionHead
     :ivar mask_conv_blocks: The three mask ``ConvBlock`` layers.
     :vartype mask_conv_blocks: List[ConvBlock]
-    :ivar mask_head: Output ``Conv2D(num_instances)`` with sigmoid.
+    :ivar mask_head: Output ``Conv2D(num_instances)``, linear: it emits the
+        mask logits.
     :vartype mask_head: keras.layers.Conv2D
     """
 
@@ -2430,7 +2359,8 @@ class InstanceSegmentationHead(BaseVisionHead):
             # Attention and the FFN have already run in this head, so the
             # inner detection head must not repeat them.
             use_attention=False,
-            use_ffn=False
+            use_ffn=False,
+            name='detection_head'
         )
 
         self._create_mask_layers()
@@ -2439,29 +2369,35 @@ class InstanceSegmentationHead(BaseVisionHead):
         """
         Build the mask branch.
 
-        Three ``ConvBlock`` stages at ``hidden_dim`` channels, then a 1x1
-        conv with sigmoid emitting ``num_instances`` channels.
+        Three ``ConvBlock`` stages at ``hidden_dim`` channels, then a linear
+        1x1 conv emitting ``num_instances`` channels of mask logits.
 
         :return: None.
         :rtype: None
         """
 
-        # Mask feature extraction
+        # Mask feature extraction. Named explicitly, as in EnhancementHead:
+        # an auto-suffixed name makes the weight paths process-dependent.
         self.mask_conv_blocks = [
             ConvBlock(
                 filters=self.hidden_dim,
                 kernel_size=3,
                 normalization_type=self.normalization_type,
-                activation_type=self.activation_type
+                activation_type=self.activation_type,
+                name=f'mask_conv_{i}'
             )
-            for _ in range(3)
+            for i in range(3)
         ]
 
-        # Mask prediction head
+        # Mask prediction head.
+        # DECISION plan-2026-10-14T062616-81938e81/D-003
+        # Linear: 'instance_masks' carries mask logits under its old name. Do
+        # NOT put activation='sigmoid' back: the sigmoid belongs to the loss
+        # (from_logits=True) or the caller, as for every class-like output of
+        # layers/heads. See decisions.md D-003.
         self.mask_head = layers.Conv2D(
             filters=self.num_instances,
             kernel_size=1,
-            activation='sigmoid',
             name='mask_head'
         )
 
@@ -2470,7 +2406,8 @@ class InstanceSegmentationHead(BaseVisionHead):
         Build the detection sub-head and the mask branch.
 
         Both consume the shape ``_common_processed_shape`` predicts, not the
-        raw input shape. The common layers are built last, by the base class.
+        raw input shape. The common attention and FFN are built last, by the
+        base class, on the raw input shape.
 
         :param input_shape: Input feature-map shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -2488,8 +2425,8 @@ class InstanceSegmentationHead(BaseVisionHead):
             shape = tuple(mask_conv.compute_output_shape(shape))
         self.mask_head.build(shape)
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
-        keras.layers.Layer.build(self, input_shape)
+        # The common attention and ffn, on the raw input shape.
+        super().build(input_shape)
 
     def call(
             self,
@@ -2504,8 +2441,8 @@ class InstanceSegmentationHead(BaseVisionHead):
         :type inputs: keras.KerasTensor
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
-        :return: Dict with ``'classifications'``, ``'regressions'`` and
-            ``'instance_masks'``.
+        :return: Dict with ``'classifications'`` (class logits),
+            ``'regressions'`` and ``'instance_masks'`` (mask logits).
         :rtype: Dict[str, keras.KerasTensor]
         """
 
@@ -2589,12 +2526,14 @@ class EnhancementHead(BaseVisionHead):
     produces the image: a transposed conv when ``scale_factor > 1``, and a
     same-resolution conv otherwise.
 
-    This head applies none of the common stages. ``norm``, ``dropout``,
-    ``attention`` and ``ffn`` are all built by :class:`BaseVisionHead`, and
-    ``call`` reaches none of them. ``build`` does not call
+    This head applies none of the common stages and no dropout, so it builds
+    none: ``use_attention`` and ``use_ffn`` default to ``False``,
+    ``dropout_rate`` to ``0.0``, and any other value raises ``ValueError``
+    (its ``ConvBlock`` stages take no dropout). ``build`` does not call
     ``_common_processed_shape`` either. The head does read ``hidden_dim``,
     ``normalization_type`` and ``activation_type``, which it hands to its own
-    ``ConvBlock`` stages.
+    ``ConvBlock`` stages. Its output is unactivated: a restored image, not a
+    score.
 
     **Architecture Overview:**
 
@@ -2645,6 +2584,9 @@ class EnhancementHead(BaseVisionHead):
     :type scale_factor: int
     :param kwargs: Forwarded to :class:`BaseVisionHead`.
 
+    :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``, or
+        ``dropout_rate`` is above 0.
+
     :ivar enhance_blocks: The three refinement ``ConvBlock`` layers.
     :vartype enhance_blocks: List[ConvBlock]
     :ivar upsample: Transposed conv, built only when ``scale_factor > 1``.
@@ -2657,9 +2599,9 @@ class EnhancementHead(BaseVisionHead):
         """
         Store the configuration and build the enhancement layers.
 
-        The base class builds the four common layers, which this head never
-        applies. Only one of ``upsample`` and ``output_conv`` is built, chosen
-        by ``scale_factor``.
+        No common layer is built: this head's ``call`` applies none. Only one
+        of ``upsample`` and ``output_conv`` is built, chosen by
+        ``scale_factor``.
 
         :param output_channels: Channel count of the output image.
         :type output_channels: int
@@ -2668,20 +2610,29 @@ class EnhancementHead(BaseVisionHead):
         :param kwargs: Forwarded to :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``,
+            or ``dropout_rate`` is above 0.
         """
+        _refuse_common_layers_call_never_runs(
+            kwargs, type(self).__name__,
+            ('use_attention', 'use_ffn', 'dropout_rate'))
         super().__init__(**kwargs)
         self.output_channels = output_channels
         self.scale_factor = scale_factor
 
-        # Enhancement-specific layers
+        # Enhancement-specific layers. Named explicitly: unnamed, each took
+        # Keras' process-global auto suffix (`conv_block_102`, `conv2d_20`),
+        # so two instances of one model disagreed by weight path and a
+        # `.keras` reload drifted every path under the head.
         self.enhance_blocks = [
             ConvBlock(
                 filters=self.hidden_dim,
                 kernel_size=3,
                 normalization_type=self.normalization_type,
-                activation_type=self.activation_type
+                activation_type=self.activation_type,
+                name=f'enhance_block_{i}'
             )
-            for _ in range(3)
+            for i in range(3)
         ]
 
         if self.scale_factor > 1:
@@ -2690,14 +2641,16 @@ class EnhancementHead(BaseVisionHead):
                 filters=self.output_channels,
                 kernel_size=3,
                 strides=self.scale_factor,
-                padding='same'
+                padding='same',
+                name='upsample'
             )
         else:
             # For denoising and other tasks
             self.output_conv = layers.Conv2D(
                 filters=self.output_channels,
                 kernel_size=3,
-                padding='same'
+                padding='same',
+                name='output_conv'
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -2705,8 +2658,8 @@ class EnhancementHead(BaseVisionHead):
         Build the refinement stack and the output conv.
 
         Each ``ConvBlock`` is built on the shape the previous one returns.
-        The common layers are built afterwards by the base class, even though
-        this head never applies them.
+        The head owns no common layer, so the base ``build`` only marks it
+        built.
 
         :param input_shape: Input feature-map shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -2723,14 +2676,15 @@ class EnhancementHead(BaseVisionHead):
         else:
             self.output_conv.build(shape)
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
-        keras.layers.Layer.build(self, input_shape)
+        # This head owns no common layer, so this only marks it built.
+        super().build(input_shape)
 
     def call(self, inputs, training=None):
         """
         Refine the features, then produce the output image.
 
-        None of the four common stages runs here. See the class docstring.
+        No common stage runs here, and none is built. See the class
+        docstring.
 
         :param inputs: Feature map of shape ``(batch, height, width,
             channels)``.
@@ -2960,8 +2914,7 @@ class MultiTaskHead(keras.layers.Layer):
                 task_input_shape = input_shape
             task_head.build(task_input_shape)
 
-        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
-        keras.layers.Layer.build(self, input_shape)
+        super().build(input_shape)
 
     def call(
             self,
@@ -3228,13 +3181,32 @@ def create_multi_task_head(
 # Configuration Helpers
 # ---------------------------------------------------------------------
 
+#: Head-config keys every :class:`HeadConfiguration` preset forces, per task
+#: type, because that task's head never applies the layer the key would
+#: build and refuses ``True`` (:func:`_refuse_common_layers_call_never_runs`).
+#: Applied last by both presets, so a preset never builds an unusable
+#: config.
+PRESET_FIXED_KEYS: Dict[VisionTaskType, Dict[str, Any]] = {
+    VisionTaskType.CLASSIFICATION: {'use_ffn': False},
+    VisionTaskType.DENOISING: {
+        'use_attention': False, 'use_ffn': False, 'dropout_rate': 0.0},
+    VisionTaskType.SUPER_RESOLUTION: {
+        'use_attention': False, 'use_ffn': False, 'dropout_rate': 0.0},
+}
+
 class HeadConfiguration:
     """
-    Three keyword-argument presets for the vision heads.
+    Two keyword-argument presets for the vision heads.
 
     This class builds no layer. Each static method returns a dict you pass to
     a head constructor or to :func:`create_vision_head`. The presets differ in
-    width, dropout, attention and FFN choice.
+    width, dropout, attention and FFN choice. Every head either preset
+    configures builds and runs (pinned by the head tests).
+
+    A third, ``get_high_performance_config``, was deleted on 2026-10-14: its
+    ``attention_type='differential'`` needs ``num_heads`` and ``head_dim``,
+    which the heads' attention builder never passes, so it raised
+    ``ValueError`` for every task type and had built no head.
 
     **Architecture Overview:**
 
@@ -3248,13 +3220,22 @@ class HeadConfiguration:
                   ▼
         + the task_specific entry, for 5 of the task types
                   │
-        ┌─────────┴─────────┐
-        ▼                   ▼
-        get_efficient_config          get_high_performance_config
-        overrides 6 keys              overrides 8 keys
+                  ▼
+        get_efficient_config
+        overrides 6 keys
+                  │
+                  ▼
+        both presets, last: the PRESET_FIXED_KEYS entry for the task
 
-    Both of the lower two call ``get_default_config`` first, so they inherit
-    the task-specific keys and then override the shared ones.
+    ``get_efficient_config`` calls ``get_default_config`` first, so it
+    inherits the task-specific keys and then overrides the shared ones.
+
+    Both presets then apply :data:`PRESET_FIXED_KEYS` for their task type,
+    last, so no preset asks a head for a layer its ``call`` never runs:
+    classification gets ``use_ffn=False`` and the two enhancement tasks get
+    ``use_attention=False``, ``use_ffn=False`` and ``dropout_rate=0.0``.
+    Those heads refuse the other values. For them the FFN keys
+    (``ffn_type``, ``ffn_expansion_factor``) are inert.
 
     Example:
         >>> cfg = HeadConfiguration.get_default_config(
@@ -3270,8 +3251,10 @@ class HeadConfiguration:
 
         Seven shared keys are always returned. Five task types add their own
         keys on top: detection, segmentation, depth estimation,
-        classification and instance segmentation. Any other task type gets
-        the seven shared keys and nothing more.
+        classification and instance segmentation. Then the task's
+        :data:`PRESET_FIXED_KEYS` entry is applied, which turns off the
+        common layers classification and the two enhancement tasks never
+        run. Any other task type gets the seven shared keys and nothing more.
 
         :param task_type: Task the preset is for.
         :type task_type: VisionTaskType
@@ -3313,12 +3296,14 @@ class HeadConfiguration:
                 'use_attention': False
             },
             VisionTaskType.CLASSIFICATION: {
-                # 1000 classes is the ImageNet default.
+                # 1000 classes is the ImageNet default. No attention: the
+                # 'multi_head' this preset once named takes a (B, N, D)
+                # sequence and raised ValueError on the 4D map that 'avg'
+                # pooling expects (measured 2026-10-14).
                 'num_classes': 1000,
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
-                'use_attention': True,
-                'attention_type': 'multi_head'
+                'use_attention': False,
             },
             VisionTaskType.INSTANCE_SEGMENTATION: {
                 'num_classes': 80,
@@ -3332,6 +3317,7 @@ class HeadConfiguration:
         config = base_config.copy()
         if task_type in task_specific:
             config.update(task_specific[task_type])
+        config.update(PRESET_FIXED_KEYS.get(task_type, {}))
 
         return config
 
@@ -3342,7 +3328,7 @@ class HeadConfiguration:
 
         Starts from :meth:`get_default_config` and overrides six keys: a
         narrower ``hidden_dim``, no dropout, no attention, and a GLU FFN with
-        a smaller expansion.
+        a smaller expansion. :data:`PRESET_FIXED_KEYS` is applied last.
 
         :param task_type: Task the preset is for.
         :type task_type: VisionTaskType
@@ -3360,38 +3346,7 @@ class HeadConfiguration:
             'ffn_type': 'glu',
             'ffn_expansion_factor': 2
         })
-        return config
-
-
-    @staticmethod
-    def get_high_performance_config(task_type: VisionTaskType) -> Dict[str, Any]:
-        """
-        Get the high-performance preset for a task type.
-
-        Starts from :meth:`get_default_config` and overrides eight keys.
-        They give a wider ``hidden_dim``, more dropout, differential attention,
-        a SwiGLU FFN with a larger expansion, and a zero-centred RMS norm.
-
-        :param task_type: Task the preset is for.
-        :type task_type: VisionTaskType
-        :return: Keyword arguments for the matching head class.
-        :rtype: Dict[str, Any]
-        """
-
-        config = HeadConfiguration.get_default_config(task_type)
-        config.update({
-            'hidden_dim': 512,
-            'dropout_rate': 0.2,
-            'use_attention': True,
-            # 'differential' is the most capable registered attention type.
-            'attention_type': 'differential',
-            'use_ffn': True,
-            # 'swiglu' is the best performing registered FFN type.
-            'ffn_type': 'swiglu',
-            'ffn_expansion_factor': 8,
-            # A zero-centred RMS norm is the more stable choice here.
-            'normalization_type': 'zero_centered_rms_norm'
-        })
+        config.update(PRESET_FIXED_KEYS.get(task_type, {}))
         return config
 
 

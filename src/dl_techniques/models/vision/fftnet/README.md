@@ -63,7 +63,20 @@ For `create_fftnet("tiny", image_size=32, patch_size=16)` (4 patches + CLS,
 5,336,832 parameters.
 
 Heads are attached externally, via `create_fftnet_with_head` or
-`create_fftnet_classifier`.
+`create_fftnet_classifier`. Every class-score output they produce is a logit,
+with no activation inside the model:
+
+| `task_type` | output |
+|:---|:---|
+| `classification` | one `(B, num_classes)` tensor of class logits (a dropout and one linear `Dense` on the CLS token) |
+| `detection` | `{"classifications": (B, H/p, W/p, A*C), "regressions": (B, H/p, W/p, A*4)}`, class logits and raw box offsets from `DetectionHead` |
+| `segmentation` | one `(B, out_H, out_W, num_classes)` tensor of per-pixel class logits from `SegmentationHead`; `out_H = (H/p) * 2**int(sqrt(p))`, which is `H` at the default `p=16` |
+
+Compile a classifier or segmenter with `from_logits=True`
+(`SparseCategoricalCrossentropy(from_logits=True)` works on both) and apply
+`keras.ops.softmax` to read probabilities. Before 2026-10-14 the classifier
+returned a `{"logits": ...}` dict and the segmenter a softmax map; archives saved
+before that date do not load and are not supported.
 
 ## Variants
 

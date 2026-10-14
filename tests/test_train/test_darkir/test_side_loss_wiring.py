@@ -20,8 +20,10 @@ import tensorflow as tf
 from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
 from dl_techniques.losses.image_restoration_loss import DarkIRCompositeLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
+from tests.numerics import reassociation_atol
 
 from train.darkir.train_darkir import (
+    PSNR_MONITOR,
     attach_side_targets,
     create_darkir_config,
     side_output_downsample_factor,
@@ -33,11 +35,16 @@ DEC = [1, 1]
 
 
 def _model(use_side_loss: bool):
-    return create_darkir_model(
+    """A tiny DarkIR, built. ``DarkIR`` is a subclassed model, unbuilt until
+    ``build``; the weight snapshots below need every weight to exist first."""
+    model = create_darkir_model(
         img_channels=3, width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
         enc_blk_nums=ENC, dec_blk_nums=DEC, dilations=[1],
         use_side_loss=use_side_loss,
     )
+    model.build((None, SPATIAL, SPATIAL, 3))
+    assert model.weights, "DarkIR.build() materialized no weight"
+    return model
 
 
 def _pairs(n=2):
@@ -141,10 +148,15 @@ class TestSideLossTrainability:
         assert moved > 0.0, "no weight moved: the fit() step was a no-op"
 
     def test_the_monitored_metric_name_exists_under_two_outputs(self):
-        """Keras prefixes per-output metrics with the output name, so the
-        trainer's `val_psnr` monitor silently stops matching anything the
-        moment a second output appears — EarlyStopping and ModelCheckpoint
-        then track nothing. Pin the name the trainer derives."""
+        """The trainer's monitor must name a key the two-output fit records,
+        and that key must be the MAIN output's PSNR, or EarlyStopping and
+        ModelCheckpoint track nothing (or the wrong head).
+
+        A functional model prefixes per-output metrics with the output name;
+        the subclassed ``DarkIR`` has no output names, so the key stays
+        ``val_psnr`` (measured). The value is checked against the main
+        output's PSNR recomputed from ``predict``, so a monitor that tracked
+        the side head, or nothing, fails here."""
         x, y = _pairs()
         factor = side_output_downsample_factor({'enc_blk_nums': ENC})
         ds = attach_side_targets(
@@ -158,9 +170,25 @@ class TestSideLossTrainability:
             metrics=[[PsnrMetric(max_val=1.0, name='psnr')], []],
         )
         history = model.fit(ds, validation_data=ds, epochs=1, verbose=0)
-        monitor = f"val_{model.output_names[0]}_psnr"
-        assert monitor in history.history, sorted(history.history)
-        assert 'val_psnr' not in history.history
+        assert PSNR_MONITOR in history.history, sorted(history.history)
+
+        main, _ = model.predict(ds, verbose=0)
+        reference = PsnrMetric(max_val=1.0, name='psnr')
+        reference.update_state(y, main)
+        # Evaluate and predict run the same forward; they differ only in how
+        # the backend accumulates the MSE over n pixels. PSNR = 10*log10(1/mse),
+        # so a reassociation error d(mse) moves it by (10/ln 10) * d(mse)/mse.
+        # (Measured 0.0 and 2.4e-07 over three seeds; the side head's PSNR sits
+        # 0.3 to 6.8 dB away, so the bound still tells the two heads apart.)
+        squared = (np.asarray(main, dtype=np.float64) - y) ** 2
+        mse_atol = reassociation_atol([squared.size], 1, float(squared.max()))
+        atol = 10.0 / np.log(10.0) * mse_atol / float(squared.mean())
+        np.testing.assert_allclose(
+            history.history[PSNR_MONITOR][-1],
+            float(reference.result()),
+            rtol=0, atol=atol,
+            err_msg=f"{PSNR_MONITOR} is not the main output's PSNR",
+        )
 
     def test_side_gradient_reaches_the_encoder(self):
         """Anti-vacuity for the step above: the SIDE loss alone must train the

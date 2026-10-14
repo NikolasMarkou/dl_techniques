@@ -26,21 +26,12 @@ from dl_techniques.models.vision.image_restoration.darkir.model import (
 )
 
 
-# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
-# Keras `models/functional.py:237`. The probes here build throwaway
-# `keras.Model(model.inputs, <intermediate>)` views and call them with a bare
-# array while `model.inputs` is a one-element LIST, which Keras flags and then
-# handles correctly. The advisory is about the probe's calling convention, not
-# about darkir.
-# MEASURED 2026-08-23: fires twice, in
-# `TestDegenerateMiddleSection::test_a_real_middle_residual_is_not_a_doubling`.
-# The paired positive arm lives in
-# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
-# anywhere needs one there in the same commit.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:The structure of `inputs` doesn't match:UserWarning"),
-]
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. Until 2026-10-14 a
+# `pytestmark` here ignored Keras' "The structure of `inputs` doesn't match"
+# advisory, provoked by functional `keras.Model(model.inputs, ...)` views. The
+# middle-residual probe now spies on the Add layer of the subclassed model,
+# builds no view and provokes nothing, so the ignore is gone (the paired arm in
+# `tests/test_the_deliberate_advisories_still_fire.py` stays).
 
 TINY = dict(img_channels=3, width=8, enc_blk_nums=[1], dec_blk_nums=[1], dilations=[1])
 
@@ -56,7 +47,6 @@ class TestDegenerateMiddleSection:
         out = model(np.zeros((1, 32, 32, 3), dtype="float32"))
         assert np.all(np.isfinite(np.asarray(out)))
 
-    @pytest.mark.skip(reason="Requires functional model API for intermediate tapping; subclass model needs different approach")
     def test_a_real_middle_residual_is_not_a_doubling(self):
         """Anti-vacuity: with dec >= 1 the Add sees two genuinely different tensors.
 
@@ -65,27 +55,40 @@ class TestDegenerateMiddleSection:
         identity and this assertion reads 0.0 for a reason that has nothing to
         do with F-63 -- the first draft of this test failed for exactly that
         reason and would have "proved" the degenerate case at every block count.
+
+        The two operands are read off the ``middle_residual`` Add itself, by
+        wrapping its ``call`` on this instance. Until 2026-10-10 the probe built
+        functional views from ``model.input``; ``DarkIR`` is a subclassed model
+        since then, which has no symbolic graph to tap, and the test was skipped
+        until 2026-10-14 instead of being moved to a probe that works on it.
         """
         keras.utils.set_random_seed(0)
         model = create_darkir_model(middle_blk_num_enc=1, middle_blk_num_dec=1, **TINY)
+        model.build((None, 32, 32, 3))
         for w in model.get_layer("mid_dec_0").weights:
             if w.path.rsplit("/", 1)[-1] in ("beta", "gamma") and tuple(w.shape)[:3] == (1, 1, 1):
                 w.assign(np.full(w.shape, 0.5, dtype="float32"))
+
+        seen = {}
+        add = model.middle_residual
+        original_call = add.call
+
+        def spy(inputs, *args, **kwargs):
+            out = original_call(inputs, *args, **kwargs)
+            seen["operands"] = [np.asarray(t) for t in inputs]
+            seen["out"] = np.asarray(out)
+            return out
+
+        add.call = spy
         x = np.random.RandomState(0).randn(1, 32, 32, 3).astype("float32")
-        # Build model
-        _ = model(x, training=False)
-        # Get intermediate outputs by creating a functional model that taps them
-        # Use the model's call with a Keras Input to trace the graph
-        inp = keras.Input(shape=(32, 32, 3))
-        _ = model(inp, training=False)
-        # Now extract intermediate tensors from the traced graph
-        mid_enc_out = model.get_layer("mid_enc_0").output
-        middle_res_out = model.get_layer("middle_residual").output
-        light_model = keras.Model(model.input, mid_enc_out)
-        res_model = keras.Model(model.input, middle_res_out)
-        light = np.asarray(light_model(x))
-        res = np.asarray(res_model(x))
-        assert float(np.max(np.abs(res - 2 * light))) > 1e-6
+        model(x, training=False)
+
+        decoded, light = seen["operands"]
+        assert float(np.max(np.abs(light))) > 1e-3, "degenerate probe: x_light ~ 0"
+        assert float(np.max(np.abs(seen["out"] - 2 * light))) > 1e-6, (
+            "the middle residual is 2 * x_light: the decoder blocks never ran")
+        assert float(np.max(np.abs(decoded - light))) > 1e-6, (
+            "the two operands of the middle residual are the same tensor")
 
 
 @pytest.mark.parametrize("cls", [DarkIREncoderBlock, DarkIRDecoderBlock], ids=["enc", "dec"])

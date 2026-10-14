@@ -334,3 +334,46 @@ class TestDarkIRBlockTowerIsLoadBearing:
             f"TRAINED model (max|delta| = {delta:.6e}): the tower is carrying "
             "no signal"
         )
+
+
+# ---------------------------------------------------------------------
+# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 step 6)
+# ---------------------------------------------------------------------
+
+from dl_techniques.models.vision.image_restoration.darkir.model import DarkIR  # noqa: E402
+
+_HEAD_TINY = dict(width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
+                  enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2])
+
+
+class TestTheEnhancementHeadKnobs:
+    """``head_config_preset`` was stored and never read: every preset built the
+    same weights and the bit-identical output (measured at step 6), so it is
+    gone and Keras refuses it. ``head_config_overrides`` may not rename the
+    head, whose fixed name keeps its weight paths stable."""
+
+    def test_the_dead_preset_is_refused(self):
+        with pytest.raises(ValueError, match="head_config_preset"):
+            DarkIR(head_config_preset="default", **_HEAD_TINY)
+
+    @pytest.mark.parametrize("key", ["name", "task_type"])
+    def test_a_reserved_override_is_refused(self, key):
+        with pytest.raises(ValueError, match="may not set"):
+            DarkIR(head_config_overrides={key: "x"}, **_HEAD_TINY)
+
+    def test_the_head_name_does_not_depend_on_the_process(self):
+        first, second = DarkIR(**_HEAD_TINY), DarkIR(**_HEAD_TINY)
+        assert first.enhancement_head.name == second.enhancement_head.name == "enhancement_head"
+
+    def test_an_explicit_build_materializes_every_weight(self):
+        model = DarkIR(**_HEAD_TINY)
+        model.build((None, 32, 32, 3))
+        built = sorted(w.path for w in model.weights)
+        model(np.zeros((1, 32, 32, 3), dtype="float32"))
+        assert built and sorted(w.path for w in model.weights) == built
+
+    @pytest.mark.parametrize("include_top", [True, False])
+    def test_compute_output_shape_is_the_call_shape(self, include_top):
+        model = DarkIR(include_top=include_top, **_HEAD_TINY)
+        out = model(np.zeros((2, 32, 48, 3), dtype="float32"))
+        assert tuple(model.compute_output_shape((2, 32, 48, 3))) == tuple(out.shape)

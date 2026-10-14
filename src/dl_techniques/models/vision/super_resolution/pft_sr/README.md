@@ -250,17 +250,29 @@ the official training YAMLs in [CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/P
 The third is this repository's own and is named so it does not read as a published
 size: the official repo ships exactly two configs, PFT and PFT_light.
 
-| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Trainable params (4x) |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 636,691 |
-| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 18,656,163 |
-| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,744,483 |
+| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Params, `include_top=True` (4x) | Params, `include_top=False` |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 515,063 | 440,180 |
+| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 16,064,403 | 14,500,560 |
+| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,456,563 | 2,280,880 |
 
-Parameter counts are measured at `scale=4` on a `(1, 32, 32, 3)` input. Quote the
-*trainable* count: `count_params()` also counts each shifted block's
-`(1, window^2, window^2)` non-trainable attention-mask buffer, which at window 32
-dominates the total (13,219,603 for `light`, 34,384,803 for `base`) while adding no
-model capacity.
+Measured 2026-10-14 at `scale=4` on a `(1, 32, 32, 3)` input, every weight
+trainable (`count_params()` equals the trainable count; the shifted-window mask
+is no longer a weight):
+
+```python
+m = create_pft_sr(4, variant, include_top=top); m(keras.ops.zeros((1, 32, 32, 3)))
+sum(int(np.prod(w.shape)) for w in m.trainable_weights)
+```
+
+`include_top=True` (the default) ends in an `EnhancementHead` (three `ConvBlock`s
+at `embed_dim`, then a stride-`scale` transposed conv), not in the paper's
+pixel-shuffle upsampler and `conv_last`. The figures this table carried before,
+636,691 / 18,656,163 / 2,744,483, were the pixel-shuffle tail's; `call` has not
+applied that tail in either mode since 2026-10-10. `include_top=False` returns
+the features before any upsampling. `head_config_preset` was deleted on
+2026-10-14 (it was stored and never read) and `head_config_overrides` may not
+set `name` or `task_type`.
 
 `repo_medium` is 80-wide, i.e. it sits *between* the two published sizes, which is
 why it is not called "large".

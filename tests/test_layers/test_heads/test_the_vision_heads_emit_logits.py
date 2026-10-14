@@ -22,6 +22,16 @@ bound, because the head's softmax runs in float16.
 
 The file also pins :func:`merge_head_config_overrides`, the helper every model
 that owns a vision head merges its ``head_config_overrides`` through.
+
+Step 6 (decisions D-003, D-020) extends the contract to the sibling heads. The
+``SegmentationHead`` class map and the ``InstanceSegmentationHead`` masks are
+logits (their ``seg_head``/``mask_head`` convs are linear); the one squashed
+output kept is ``DepthEstimationHead``'s sigmoid, a range map, pinned here as
+the documented exception. ``BaseVisionHead`` no longer builds a common norm or
+Dropout (no head's ``call`` applied either, measured per head), and a head
+refuses the common-layer flags its ``call`` never applies:
+``ClassificationHead(use_ffn=True)`` and ``EnhancementHead(use_attention=True
+or use_ffn=True)`` raise ``ValueError``.
 """
 
 from typing import Dict, Tuple
@@ -32,10 +42,20 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.heads.vision.factory import (
+    PRESET_FIXED_KEYS,
     RESERVED_HEAD_OVERRIDE_KEYS,
     ClassificationHead,
+    DepthEstimationHead,
+    DetectionHead,
+    EnhancementHead,
+    HeadConfiguration,
+    InstanceSegmentationHead,
+    MultiTaskHead,
+    SegmentationHead,
+    create_vision_head,
     merge_head_config_overrides,
 )
+from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 from tests.numerics import reassociation_atol
 
 NUM_CLASSES = 7
@@ -66,7 +86,7 @@ def _inputs(shape: Tuple[int, ...]) -> np.ndarray:
 
 
 def _head(**kwargs) -> ClassificationHead:
-    """Build a small head. ``use_ffn=True`` on purpose: it must build nothing.
+    """Build a small head, with a block dropout so a common Dropout would show.
 
     :return: The head.
     :rtype: ClassificationHead
@@ -75,7 +95,6 @@ def _head(**kwargs) -> ClassificationHead:
     config = dict(
         num_classes=NUM_CLASSES,
         hidden_dim=HIDDEN_DIM,
-        use_ffn=True,
         dropout_rate=0.1,
     )
     config.update(kwargs)
@@ -199,7 +218,7 @@ def test_probabilities_are_the_softmax_of_the_logits(
 # ---------------------------------------------------------------------
 
 def test_the_head_builds_no_norm_ffn_or_dropout() -> None:
-    head = _head()  # use_ffn=True, dropout_rate=0.1: both ignored
+    head = _head()  # dropout_rate=0.1 reaches the blocks only
     head(_inputs(FEATURE_SHAPE))
     present = [a for a in ("norm", "ffn", "dropout") if hasattr(head, a)]
     assert not present, (
@@ -628,3 +647,233 @@ def test_block_use_bias_false_builds_a_bias_free_hidden_dense() -> None:
     assert head.get_config()["block_use_bias"] is False
     clone = ClassificationHead.from_config(head.get_config())
     assert clone.dense_blocks[0].dense.use_bias is False
+
+
+# ---------------------------------------------------------------------
+# Step 6 (D-003, D-020): the sibling heads emit logits, the one range map
+# stays, and no head builds a layer its call() skips
+# ---------------------------------------------------------------------
+
+def _class_logit_check(values: np.ndarray, what: str) -> None:
+    """A per-pixel class map is logits: some value is negative, and the
+    channel rows do not all sum to 1 (a softmax row does, within rounding).
+
+    :param values: Output, channels last.
+    :type values: np.ndarray
+    :param what: Name for the message.
+    :type what: str
+    """
+    values = values.astype(np.float64)
+    assert np.isfinite(values).all(), f"{what}: non-finite values"
+    assert (values < 0).any(), (
+        f"{what}: no value is negative (min {values.min()}); a softmax or a "
+        f"sigmoid output never is, so this looks activated"
+    )
+    rows = values.sum(axis=-1)
+    atol = reassociation_atol([values.shape[-1]], 1, 1.0)
+    assert np.abs(rows - 1.0).max() > 1e3 * atol, (
+        f"{what}: every channel row sums to 1 within {1e3 * atol:.2e}; the "
+        f"map is normalized"
+    )
+
+
+def test_the_segmentation_class_map_is_logits() -> None:
+    keras.utils.set_random_seed(3)
+    head = SegmentationHead(num_classes=NUM_CLASSES, hidden_dim=HIDDEN_DIM)
+    assert head.seg_head.activation is keras.activations.linear, (
+        f"seg_head.activation is {head.seg_head.activation}; the class map "
+        f"must be logits"
+    )
+    out = keras.ops.convert_to_numpy(head(_inputs((2, 6, 10, HIDDEN_DIM))))
+    assert out.shape == (2, 24, 40, NUM_CLASSES)
+    _class_logit_check(out, "SegmentationHead")
+
+
+def test_the_instance_masks_are_logits() -> None:
+    keras.utils.set_random_seed(3)
+    head = InstanceSegmentationHead(num_classes=3, num_instances=4,
+                                    hidden_dim=HIDDEN_DIM)
+    assert head.mask_head.activation is keras.activations.linear, (
+        f"mask_head.activation is {head.mask_head.activation}; the masks "
+        f"must be logits"
+    )
+    out = head(_inputs((2, 6, 10, HIDDEN_DIM)))
+    masks = keras.ops.convert_to_numpy(out["instance_masks"]).astype(np.float64)
+    assert masks.shape == (2, 6, 10, 4)
+    # Per-instance sigmoid masks, not a distribution over instances: the
+    # check is that the values leave [0, 1] on both sides.
+    assert masks.min() < 0.0 and masks.max() > 1.0, (
+        f"instance_masks span [{masks.min()}, {masks.max()}], inside [0, 1]: "
+        f"they look sigmoid'ed"
+    )
+    _class_logit_check(keras.ops.convert_to_numpy(out["classifications"]),
+                       "InstanceSegmentationHead classifications")
+
+
+@pytest.mark.parametrize("use_log_depth", [True, False])
+def test_the_depth_head_keeps_its_sigmoid_range_map(use_log_depth: bool) -> None:
+    """The documented exception: the depth map is a range map, squashed to
+    [0, 1] by a sigmoid and scaled into [min_depth, max_depth]. Pinned so the
+    logits rule above is not 'applied' to it by mistake."""
+    keras.utils.set_random_seed(3)
+    head = DepthEstimationHead(hidden_dim=HIDDEN_DIM, min_depth=0.5,
+                               max_depth=20.0, use_log_depth=use_log_depth)
+    assert head.depth_head.activation is keras.activations.sigmoid
+    out = head(_inputs((2, 4, 6, HIDDEN_DIM)))
+    confidence = keras.ops.convert_to_numpy(out["confidence"]).astype(np.float64)
+    depth = keras.ops.convert_to_numpy(out["depth"]).astype(np.float64)
+    assert confidence.min() >= 0.0 and confidence.max() <= 1.0
+    assert confidence.std() > 0.0, "degenerate probe: a constant depth map"
+    if use_log_depth:
+        expected = np.exp(confidence * (np.log(20.0) - np.log(0.5)) + np.log(0.5))
+    else:
+        expected = confidence * (20.0 - 0.5) + 0.5
+    np.testing.assert_allclose(
+        depth, expected, rtol=0,
+        atol=reassociation_atol([2], 1, float(np.abs(expected).max())))
+
+
+def test_classification_head_refuses_use_ffn() -> None:
+    with pytest.raises(ValueError, match="use_ffn"):
+        ClassificationHead(num_classes=NUM_CLASSES, use_ffn=True)
+    assert ClassificationHead(num_classes=NUM_CLASSES).use_ffn is False
+    assert ClassificationHead(num_classes=NUM_CLASSES).get_config()["use_ffn"] is False
+
+
+@pytest.mark.parametrize("flag,on,off", [("use_attention", True, False),
+                                          ("use_ffn", True, False),
+                                          ("dropout_rate", 0.1, 0.0)])
+def test_enhancement_head_refuses_the_layers_it_never_runs(flag, on, off) -> None:
+    with pytest.raises(ValueError, match=flag):
+        EnhancementHead(output_channels=3, hidden_dim=HIDDEN_DIM, **{flag: on})
+    head = EnhancementHead(output_channels=3, hidden_dim=HIDDEN_DIM)
+    assert getattr(head, flag) == off and type(getattr(head, flag)) is type(off)
+    assert head.get_config()[flag] == off
+
+
+PRESETS = {
+    "default": HeadConfiguration.get_default_config,
+    "efficient": HeadConfiguration.get_efficient_config,
+}
+
+#: Every task type create_vision_head dispatches, by the head it builds.
+PRESET_TASKS = [
+    VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION,
+    VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.CLASSIFICATION,
+    VisionTaskType.INSTANCE_SEGMENTATION, VisionTaskType.DENOISING,
+    VisionTaskType.SUPER_RESOLUTION,
+]
+
+
+@pytest.mark.parametrize("preset", sorted(PRESETS))
+@pytest.mark.parametrize("task", PRESET_TASKS, ids=lambda t: t.value)
+def test_every_preset_builds_and_runs_its_head(preset: str, task) -> None:
+    """A preset must never hand a head a flag it refuses, or a layer that
+    cannot run on the head's 4D input. Before step 6 the default
+    classification preset named 'multi_head' attention (a (B, N, D) layer)
+    and raised on the 4D map its own 'avg' pooling expects, and a third
+    preset raised for every task."""
+    config = PRESETS[preset](task)
+    for key, value in PRESET_FIXED_KEYS.get(task, {}).items():
+        assert config[key] == value, (preset, task, key)
+    # The presets' widths are ImageNet-sized; the input carries hidden_dim
+    # channels so a 'cbam' attention sees its own width.
+    config["hidden_dim"] = HIDDEN_DIM
+    keras.utils.set_random_seed(3)
+    head = create_vision_head(task, **config)
+    for flag in ("use_attention", "use_ffn"):
+        if not getattr(head, flag):
+            assert not hasattr(head, flag[4:]), (
+                f"{type(head).__name__} built {flag[4:]} with {flag}=False")
+    head(_inputs((2, 4, 6, HIDDEN_DIM)))
+
+
+def test_the_high_performance_preset_is_gone() -> None:
+    assert not hasattr(HeadConfiguration, "get_high_performance_config")
+
+
+def test_a_multi_task_classification_entry_builds_without_an_ffn() -> None:
+    keras.utils.set_random_seed(3)
+    head = MultiTaskHead(
+        {"cls": {"task_type": VisionTaskType.CLASSIFICATION,
+                 "num_classes": NUM_CLASSES, "block_dims": ()}},
+        shared_backbone_dim=HIDDEN_DIM, use_task_specific_attention=False)
+    out = head(_inputs(FEATURE_SHAPE))
+    assert not hasattr(head.task_heads["cls"], "ffn")
+    assert out["cls"]["logits"].shape == (FEATURE_SHAPE[0], NUM_CLASSES)
+
+
+#: Every head class, built with every common flag it accepts switched on, so
+#: a common norm or Dropout would be created if the base class still built
+#: one. Inputs are channels-last at hidden_dim width.
+ALL_HEADS = {
+    "DetectionHead": lambda: DetectionHead(
+        num_classes=3, num_anchors=2, hidden_dim=HIDDEN_DIM, dropout_rate=0.1,
+        use_attention=True, attention_type="cbam", use_ffn=True),
+    "SegmentationHead": lambda: SegmentationHead(
+        num_classes=3, hidden_dim=HIDDEN_DIM, dropout_rate=0.1,
+        use_attention=True, attention_type="cbam", use_ffn=True),
+    "DepthEstimationHead": lambda: DepthEstimationHead(
+        hidden_dim=HIDDEN_DIM, dropout_rate=0.1, use_attention=True,
+        attention_type="cbam", use_ffn=True),
+    "ClassificationHead": lambda: ClassificationHead(
+        num_classes=3, hidden_dim=HIDDEN_DIM, dropout_rate=0.1,
+        use_attention=True, attention_type="cbam"),
+    "InstanceSegmentationHead": lambda: InstanceSegmentationHead(
+        num_classes=3, num_instances=4, hidden_dim=HIDDEN_DIM, dropout_rate=0.1,
+        use_attention=True, attention_type="cbam", use_ffn=True),
+    # Refuses attention, an FFN and a dropout (none runs in its call()).
+    "EnhancementHead": lambda: EnhancementHead(
+        output_channels=3, hidden_dim=HIDDEN_DIM),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ALL_HEADS))
+def test_no_vision_head_owns_a_common_norm_or_dropout(name: str) -> None:
+    keras.utils.set_random_seed(3)
+    head = ALL_HEADS[name]()
+    head(_inputs((2, 6, 10, HIDDEN_DIM)), training=True)
+    present = [a for a in ("norm", "dropout") if hasattr(head, a)]
+    assert not present, (
+        f"{name} owns {present}; no vision head's call() applies a common "
+        f"norm or Dropout"
+    )
+    stray = [w.path for w in head.weights if f"{head.name}_norm/" in w.path]
+    assert not stray, f"{name} carries common-norm weights {stray}"
+
+
+@pytest.mark.parametrize("name", sorted(ALL_HEADS))
+def test_every_built_head_weight_receives_a_gradient(name: str) -> None:
+    """The head carries only weights its call() runs."""
+    keras.utils.set_random_seed(3)
+    head = ALL_HEADS[name]()
+    x = keras.ops.convert_to_tensor(_inputs((2, 6, 10, HIDDEN_DIM)))
+    with tf.GradientTape() as tape:
+        out = head(x, training=True)
+        leaves = out.values() if isinstance(out, dict) else [out]
+        loss = sum(keras.ops.mean(keras.ops.square(v)) for v in leaves)
+    weights = head.trainable_weights
+    grads = tape.gradient(loss, weights)
+    dead = [w.path for w, g in zip(weights, grads)
+            if g is None or not np.any(keras.ops.convert_to_numpy(g))]
+    assert weights and not dead, f"{name}: weights with no gradient {dead}"
+
+
+@pytest.mark.parametrize("name", sorted(ALL_HEADS))
+def test_two_instances_of_a_head_share_every_weight_path(name: str) -> None:
+    """Every sublayer is named, so a head's weight paths do not depend on how
+    many layers the process built before it. Before step 6
+    ``EnhancementHead``'s blocks and output conv and
+    ``InstanceSegmentationHead``'s mask blocks and inner detection head took
+    Keras' process-global auto suffix (``conv_block_102``), which made two
+    instances of DarkIR, SCUNet and PFT-SR disagree by weight path."""
+    def relative_paths():
+        keras.utils.set_random_seed(3)
+        head = ALL_HEADS[name]()
+        head(_inputs((2, 6, 10, HIDDEN_DIM)))
+        # The head's own name is the caller's to fix (every model passes one);
+        # the attention and FFN derive theirs from it. Everything below it
+        # must be the same in both instances.
+        return sorted(w.path.replace(head.name, "<head>") for w in head.weights)
+    first, second = relative_paths(), relative_paths()
+    assert first == second, sorted(set(first) ^ set(second))[:6]

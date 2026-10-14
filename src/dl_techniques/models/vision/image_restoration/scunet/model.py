@@ -16,9 +16,9 @@ extent it pads, so heights or widths below 33 raise, and no pretrained weights
 ship with this port.
 
 The :class:`SCUNet` class supports an ``include_top`` parameter: when ``True``
-(default), it uses an :class:`EnhancementHead` from the vision heads factory for
-denoising; when ``False``, it returns the encoder-decoder features before the
-final tail convolution for custom heads.
+(default), an :class:`EnhancementHead` from the vision heads factory replaces
+the paper's tail and runs on the ``up1`` output; when ``False``, the model ends
+in the paper's tail, ``tail(up1 + x1)``, and returns that restored image.
 
 References:
     - Zhang et al., 2022. Practical Blind Denoising via Swin-Conv-UNet and
@@ -27,7 +27,7 @@ References:
 
 import keras
 from keras import ops
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -42,6 +42,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -190,15 +191,16 @@ class SCUNet(keras.Model):
         geometry. ``build`` also traces the graph at this resolution, so give
         it a value a real input could have. Defaults to 256.
     :type input_resolution: int
-    :param include_top: Whether to include the EnhancementHead for denoising.
-        When True (default), the model outputs the restored image.
-        When False, the model returns features before the tail convolution
-        for custom heads. Defaults to True.
+    :param include_top: When True (default), an :class:`EnhancementHead`
+        (named ``enhancement_head``) runs on the ``up1`` output in place of
+        the diagram's ``(+) x1`` and tail conv, and the tail is not built.
+        When False, the model is the diagram above: ``tail(up1 + x1)``,
+        cropped. Either way the output is the restored image,
+        ``(B, H, W, in_nc)``.
     :type include_top: bool
-    :param head_config_preset: Enhancement head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into the
+        ``EnhancementHead`` config. It may not set ``name`` or ``task_type``
+        (``ValueError``).
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Model base class.
 
@@ -209,9 +211,9 @@ class SCUNet(keras.Model):
         >>> # Full denoising model
         >>> model = SCUNet(dim=64, include_top=True)
         >>>
-        >>> # Feature extractor for custom head
+        >>> # The paper's network, ending in its own tail conv
         >>> backbone = SCUNet(dim=64, include_top=False)
-        >>> features = backbone(inputs)
+        >>> restored = backbone(inputs)
     """
 
     def __init__(
@@ -224,7 +226,6 @@ class SCUNet(keras.Model):
             stochastic_depth_rate: float = 0.0,
             input_resolution: int = 256,
             include_top: bool = True,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
@@ -251,7 +252,6 @@ class SCUNet(keras.Model):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.input_resolution = input_resolution
         self.include_top = include_top
-        self.head_config_preset = str(head_config_preset)
         self.head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         logger.info(f"Initializing SCUNet with config: {config}, dim: {dim}, "
@@ -340,7 +340,8 @@ class SCUNet(keras.Model):
             )
 
     def _build_network(self, dpr: List[float]) -> None:
-        """Create the head, the seven stages and the tail.
+        """Create the head conv, the seven stages, and either the
+        ``EnhancementHead`` (``include_top``) or the tail conv.
 
         Each down stage ends with its own strided convolution and each up stage
         begins with its transposed one, so a stage's Sequential carries the
@@ -505,14 +506,39 @@ class SCUNet(keras.Model):
             )
         )
 
-        self.m_tail = keras.layers.Conv2D(
-            self.in_nc,
-            kernel_size=3,
-            strides=1,
-            padding="same",
-            use_bias=False,
-            name="tail"
-        )
+        # The tail runs only without the head (see `call`), so it is built
+        # only then: a headed model would otherwise carry a layer its forward
+        # pass never reaches.
+        self.m_tail = None
+        self.enhancement_head = None
+        if self.include_top:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
+            head_config.update({
+                'scale_factor': 1,
+                'output_channels': self.in_nc,
+                'hidden_dim': self.dim,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+                # Deterministic layer name: an unnamed head takes Keras' auto
+                # suffix in process-creation order, which breaks the by-name
+                # matching that weight transfer relies on.
+                'name': 'enhancement_head',
+            })
+            head_config = merge_head_config_overrides(
+                head_config, self.head_config_overrides
+            )
+            self.enhancement_head = create_vision_head(
+                VisionTaskType.DENOISING, **head_config
+            )
+        else:
+            self.m_tail = keras.layers.Conv2D(
+                self.in_nc,
+                kernel_size=3,
+                strides=1,
+                padding="same",
+                use_bias=False,
+                name="tail"
+            )
 
         self.m_down1 = keras.Sequential(self.m_down1, name="down1")
         self.m_down2 = keras.Sequential(self.m_down2, name="down2")
@@ -659,30 +685,10 @@ class SCUNet(keras.Model):
         x = self.m_up1(x + x2, training=training)
 
         if self.include_top:
-            # Use EnhancementHead for denoising (apply before tail conv)
-            if not hasattr(self, 'enhancement_head') or self.enhancement_head is None:
-                # Build enhancement head lazily if not already built
-                head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
-                head_config.update({
-                    'scale_factor': 1,
-                    'output_channels': self.in_nc,
-                    'hidden_dim': self.dim,
-                    'normalization_type': 'layer_norm',
-                    'activation_type': 'gelu',
-                })
-                if self.head_config_overrides:
-                    head_config.update(self.head_config_overrides)
-
-                self.enhancement_head = create_vision_head(
-                    VisionTaskType.DENOISING, **head_config
-                )
-                # Build the head
-                self.enhancement_head.build((None, None, None, self.dim))
-
-            head_output = self.enhancement_head(x, training=training)
-            x = head_output['enhanced']
+            # The head takes the place of the paper's `(+) x1` and tail conv.
+            x = self.enhancement_head(x, training=training)['enhanced']
         else:
-            # Return features before tail convolution for custom heads
+            # The paper's tail, as in the class diagram.
             x = self.m_tail(x + x1)
 
         # A no-op when nothing was padded.
@@ -706,7 +712,6 @@ class SCUNet(keras.Model):
             "input_resolution": self.input_resolution,
             "stochastic_depth_rate": self.stochastic_depth_rate,
             "include_top": self.include_top,
-            "head_config_preset": self.head_config_preset,
             "head_config_overrides": self.head_config_overrides,
         })
         return config
@@ -723,7 +728,6 @@ def create_scunet(
         stochastic_depth_rate: float = 0.0,
         input_resolution: int = 256,
         include_top: bool = True,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> SCUNet:
@@ -754,15 +758,13 @@ def create_scunet(
         ``SwinConvBlock``, where it changes no attention geometry, and used as
         the spatial size of ``build``'s trace.
     :type input_resolution: int
-    :param include_top: Whether to include the EnhancementHead for denoising.
-        When True (default), the model outputs the restored image.
-        When False, the model returns features before the tail convolution
-        for custom heads.
+    :param include_top: When True (default), an ``EnhancementHead`` replaces
+        the paper's ``(+) x1`` and tail conv; when False, the model ends in
+        the paper's tail. The output is the restored image either way. See
+        :class:`SCUNet`.
     :type include_top: bool
-    :param head_config_preset: Enhancement head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into the
+        ``EnhancementHead`` config; ``name`` and ``task_type`` are refused.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments forwarded to the model constructor.
 
@@ -775,7 +777,7 @@ def create_scunet(
         >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
         >>> model(keras.random.normal((1, 64, 64, 3))).shape
         (1, 64, 64, 3)
-        >>> # Feature extractor for custom head
+        >>> # The paper's network, ending in its own tail conv
         >>> backbone = create_scunet(dim=64, include_top=False)
     """
     return SCUNet(
@@ -787,7 +789,6 @@ def create_scunet(
         stochastic_depth_rate=stochastic_depth_rate,
         input_resolution=input_resolution,
         include_top=include_top,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
         **kwargs
     )

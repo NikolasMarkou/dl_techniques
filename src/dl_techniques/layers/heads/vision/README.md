@@ -24,8 +24,8 @@ package; import them from `.task_types`.
 |---|---|---|
 | `detection` | `DetectionHead` | `{'classifications': (B, H, W, A*C), 'regressions': (B, H, W, A*4)}` |
 | `keypoint_detection` | `DetectionHead` | same two keys |
-| `segmentation` | `SegmentationHead` | one tensor `(B, H*4, W*4, num_classes)` (no dict) |
-| `instance_segmentation` | `InstanceSegmentationHead` | detection's two keys plus `'instance_masks'` |
+| `segmentation` | `SegmentationHead` | one tensor `(B, H*4, W*4, num_classes)` of class logits (no dict, no softmax) |
+| `instance_segmentation` | `InstanceSegmentationHead` | detection's two keys plus `'instance_masks'`, mask logits (no sigmoid) |
 | `classification` | `ClassificationHead` | `{'logits': (B, C), 'probabilities': (B, C)}` |
 | `depth_estimation` | `DepthEstimationHead` | `{'depth': (B, 8H, 8W, 1), 'confidence': same}` |
 | `surface_normals` | `DepthEstimationHead(output_channels=3)` | same keys, 3 channels |
@@ -62,16 +62,31 @@ Every head also takes the shared `BaseVisionHead` options:
 | `hidden_dim` | `256` | Internal width. |
 | `normalization_type` | `'layer_norm'` | Any `norms/` factory key. |
 | `activation_type` | `'gelu'` | Any `activations/` factory key. |
-| `dropout_rate` | `0.1` | |
+| `dropout_rate` | `0.1` | `0.0` and refused above 0 in `EnhancementHead`, which applies no dropout. |
 | `use_attention` | `False` | See the gotchas — the default `attention_type` needs 3D input. |
 | `attention_type` | `'multi_head'` | Any `ATTENTION_REGISTRY` key. |
-| `use_ffn` | `True` | |
+| `use_ffn` | `True` | `False` and refused in `ClassificationHead` and `EnhancementHead`. |
 | `ffn_type` | `'mlp'` | Any `FFN_REGISTRY` key. |
 | `ffn_expansion_factor` | `4` | |
 
-`HeadConfiguration` supplies presets for those: `get_default_config(task)`,
-`get_efficient_config(task)` and `get_high_performance_config(task)`, each returning a plain dict you
-can splat into a head.
+`HeadConfiguration` supplies presets for those: `get_default_config(task)` and
+`get_efficient_config(task)`, each returning a plain dict you can splat into a head. Both apply
+`PRESET_FIXED_KEYS` last, so a classification preset carries `use_ffn=False` and a denoising or
+super-resolution preset `use_attention=False, use_ffn=False, dropout_rate=0.0`. A third preset,
+`get_high_performance_config`, was deleted on 2026-10-14: its `attention_type='differential'`
+needs `num_heads` and `head_dim`, which the heads never pass, so it raised `ValueError` for every
+task type.
+
+## Output contract: logits, one range map
+
+No head applies an activation to a class score. `ClassificationHead`'s `'logits'`, the
+`SegmentationHead` map, `DetectionHead`'s `'classifications'` and `InstanceSegmentationHead`'s
+`'instance_masks'` are pre-activation: compile with `from_logits=True`, or apply
+`keras.ops.softmax` (classes) / `keras.ops.sigmoid` (masks) yourself. `ClassificationHead` also
+returns `'probabilities' = softmax('logits')`. The one squashed output is
+`DepthEstimationHead`'s sigmoid, a range map the depth is scaled from. Archives saved before
+2026-10-14 with a softmax `seg_head`, a sigmoid `mask_head` or the common `norm` weights do not load
+and are not supported.
 
 ## Input contract
 
@@ -118,11 +133,12 @@ cheap_det = create_vision_head('detection', **cfg)
 
 ## Gotchas
 
-- **`BaseVisionHead` is exported but is not a usable head.** It defines no `call`. It builds four
-  sub-layers — `norm`, `dropout`, `attention`, `ffn` — but only `attention` and `ffn` are ever
-  applied by a subclass `call`. `norm` carries weights that no forward pass reaches; each head
-  normalizes and drops inside its own `ConvBlock` / `DenseBlock` instead. Use one of the seven task
-  heads.
+- **`BaseVisionHead` is exported but is not a usable head.** It defines no `call`. It builds
+  `attention` and `ffn` when their flags ask, and nothing else; each head normalizes and drops
+  inside its own `ConvBlock` / `DenseBlock`. Use one of the seven task heads.
+- **`ClassificationHead(use_ffn=True)` and `EnhancementHead(use_attention=True, use_ffn=True or
+  dropout_rate > 0)` raise `ValueError`.** Their `call` never runs those layers, so the arguments
+  default to off there and any other value is refused rather than stored and ignored.
 - **`use_attention=True` fails on a 4D feature map with the default `attention_type='multi_head'`**,
   which requires `(batch, seq_len, dim)`. For a feature map choose a 4D attention type
   (`cbam`, `channel`, `spatial`, `tripse*`, `non_local`).

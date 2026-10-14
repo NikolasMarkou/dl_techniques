@@ -33,6 +33,13 @@ One row per consumer class, four arms per row:
 
 Adding a consumer is one entry in :data:`SUBJECTS`.
 
+Step 6 added the FFTNet classifier (``create_fftnet_classifier``, a functional
+``keras.Model`` around the ``FFTNet`` encoder with a ``Sequential``
+``classification_head`` on the CLS token: an optional dropout, then one linear
+``Dense``). It returned ``{"logits": ...}`` before that step. It is not a
+``ClassificationHead`` consumer; its rows locate the classifier as
+``classification_head/classifier``.
+
 Step 5 added FastVLM (``models/vision_language``, decision D-005), the one
 ``ClassificationHead`` consumer outside ``models/vision``. Its head is FastViT's
 reference classifier: a model-owned ``conv_exp`` (a depthwise 3x3
@@ -189,6 +196,14 @@ def _squeezenet_v2(**knobs) -> keras.Model:
                                            input_shape=(48, 64, 3), **knobs)
 
 
+def _fftnet(**knobs) -> keras.Model:
+    # Square only: the factory takes one image_size. 32 px at patch 16 is a
+    # 2 x 2 patch grid plus the CLS token.
+    from dl_techniques.models.vision.fftnet import create_fftnet_classifier
+    return create_fftnet_classifier("tiny", num_classes=NUM_CLASSES,
+                                    image_size=32, patch_size=16, **knobs)
+
+
 def _fastvlm(**knobs) -> keras.Model:
     # 32 x 48 gives a 2 x 3 stage-3 map, so conv_exp's BatchNorms see 6
     # values per channel even at batch 1.
@@ -219,11 +234,17 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "SqueezeNetV1": (_squeezenet_v1, (48, 64, 3)),
     "SqueezeNoduleNetV2": (_squeezenet_v2, (48, 64, 3)),
     "FastVLM": (_fastvlm, (32, 48, 3)),
+    "FFTNet": (_fftnet, (32, 32, 3)),
 }
 
 #: The classes whose classifier is the paper's ``conv10`` layer, not a
 #: ``ClassificationHead`` (decision D-017).
 CONV10_HEADS = {"SqueezeNetV1", "SqueezeNoduleNetV2"}
+
+#: The classes whose head is a ``keras.Sequential`` named
+#: ``classification_head`` inside a functional model, with the classifier
+#: ``Dense`` named ``classifier`` in it.
+SEQUENTIAL_HEADS = {"FFTNet"}
 
 
 def _head_layer(model: keras.Model):
@@ -253,9 +274,12 @@ def _classifier(model: keras.Model) -> keras.layers.Layer:
     :rtype: keras.layers.Layer
     """
     head = _head_layer(model)
-    if head is None:
-        return model.get_layer("conv10")
-    return head.classifier
+    if head is not None:
+        return head.classifier
+    names = [layer.name for layer in model.layers]
+    if "classification_head" in names:
+        return model.get_layer("classification_head").get_layer("classifier")
+    return model.get_layer("conv10")
 
 
 def _images(shape: Tuple[int, int, int], seed: int = 0) -> np.ndarray:
@@ -405,6 +429,9 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     # classifier, conv_exp -> gap -> head (nn.Linear); timm final_conv ->
     # ClassifierHead (pool, drop_rate, fc). conv_exp is the model's own layer.
     "FastVLM": {"classifier"},
+    # FFTNet: the factory's own head on the CLS token, an optional dropout
+    # and one linear Dense (no reference head is claimed for it).
+    "FFTNet": {"classifier"},
 }
 
 
@@ -447,6 +474,15 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
     model(_images(shape), training=False)
     if subject in CONV10_HEADS:
         _assert_the_conv10_head(subject, model)
+        return
+    if subject in SEQUENTIAL_HEADS:
+        head = model.get_layer("classification_head")
+        owners = _head_owners(head)
+        assert owners == REFERENCE_HEAD_OWNERS[subject], (
+            f"{subject} head weight owners {sorted(owners)}, expected "
+            f"{sorted(REFERENCE_HEAD_OWNERS[subject])}"
+        )
+        assert model.layers[-1] is head, subject
         return
     head = _head_layer(model)
     owners = _head_owners(head)
@@ -567,6 +603,10 @@ KNOBS: Dict[str, Dict[str, object]] = {
     # conv and Dense kernel, conv_exp and the classifier included.
     "FastVLM": {"dropout_rate": 0.3,
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    # FFTNet's classifier factory forwards its keywords to the ENCODER, and
+    # its head draws from a fixed TruncatedNormal(0.02): no knob reaches the
+    # classifier, which the arm pins instead.
+    "FFTNet": {},
 }
 
 #: Where each class's ``dropout_rate`` must land in its reference head.
@@ -630,6 +670,10 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
         assert config["config"]["stddev"] == pytest.approx(0.02), (
             f"{subject}: the reference head draws at trunc_normal_(std=.02)"
         )
+    if subject == "FFTNet":
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "TruncatedNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.02)
     if subject == "FastVLM":
         config = keras.initializers.serialize(model.conv_exp.kernel_initializer)
         assert config["class_name"] == "RandomNormal", (subject, config)

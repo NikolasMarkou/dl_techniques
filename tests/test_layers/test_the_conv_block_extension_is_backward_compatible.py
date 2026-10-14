@@ -9,7 +9,9 @@ packages already consume the class:
 set itself and not only to the constructor.
 
 The pinned numbers below (``29416`` / ``94762`` and the two epsilon censuses) were
-measured at commit ``607ffcea9``, BEFORE the widening. They are the whole point of
+measured at commit ``607ffcea9``, BEFORE the widening. The head's pin is now
+``29352``: the 607ffcea9 build minus its never-applied common norm, re-derived on a
+worktree of that commit (see ``VISION_HEAD_PARAMS_WITHOUT_THE_DEAD_NORM``). They are the whole point of
 this module: a difference of one parameter means a default changed. The census is
 read with the repo's own oracle ``tests/norm_epsilon_oracle.py::_epsilon_of`` over
 ``_flatten_layers(include_self=True)`` — a hand-rolled walker was tried first and
@@ -109,15 +111,30 @@ def test_a_non_positive_groups_is_rejected() -> None:
 # (b) the two foreign consumers are bit-for-bit the same build
 # --------------------------------------------------------------------------
 
+#: The pre-widening build at 607ffcea9 counted 29,416 parameters and three
+#: 1e-6 norms. One of each was the head's common ``detection_head_norm``
+#: (gamma + beta at hidden_dim 32 = 64 parameters), which no ``call`` ever
+#: applied; 20225bf71 stopped building it in ``DetectionHead`` and
+#: plan-2026-10-14T062616-81938e81 step 6 (D-020) removed it from every
+#: vision head. Re-derived by running the same build on a worktree of
+#: 607ffcea9 (``head.count_params() - sum(norm weight sizes)``: 29416 - 64 =
+#: 29352) and on the current tree (29352, no common norm). The ConvBlock
+#: part this guard exists for is unchanged; only the dead norm is gone.
+VISION_HEAD_PARAMS_WITHOUT_THE_DEAD_NORM = 29352
+
+
 def test_the_vision_head_reproduces_its_pre_widening_build() -> None:
     head = _build_vision_head()
-    assert head.count_params() == 29416, (
-        f"vision head count_params() is {head.count_params()}, "
-        f"pinned at 29416 (measured pre-widening at 607ffcea9)"
+    assert head.count_params() == VISION_HEAD_PARAMS_WITHOUT_THE_DEAD_NORM, (
+        f"vision head count_params() is {head.count_params()}, pinned at "
+        f"{VISION_HEAD_PARAMS_WITHOUT_THE_DEAD_NORM} (the 607ffcea9 "
+        f"pre-widening build, 29416, minus its never-applied 64-parameter "
+        f"common norm)"
     )
-    assert _norm_epsilon_census(head) == {"1e-06": 3}, (
+    assert _norm_epsilon_census(head) == {"1e-06": 2}, (
         f"vision head norm-epsilon census is {_norm_epsilon_census(head)}, "
-        f"pinned at {{'1e-06': 3}}"
+        f"pinned at {{'1e-06': 2}} (cls_conv and reg_conv; the third 1e-6 "
+        f"norm at 607ffcea9 was the dead common norm)"
     )
 
 

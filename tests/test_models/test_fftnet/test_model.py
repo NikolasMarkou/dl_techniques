@@ -127,3 +127,51 @@ class TestFFTNetGradientFlow:
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
         assert max(v for v in report.values() if v is not None) > 0.0
+
+
+# ---------------------------------------------------------------------
+# The task models emit logits (plan-2026-10-14T062616-81938e81 step 6)
+# ---------------------------------------------------------------------
+
+from dl_techniques.models.vision.fftnet.model import (  # noqa: E402
+    create_fftnet_classifier,
+    create_fftnet_with_head,
+)
+from tests.numerics import reassociation_atol  # noqa: E402
+
+
+class TestTheTaskModelsEmitLogits:
+    """``create_fftnet_with_head`` classification returned ``{"logits": ...}``
+    and segmentation a softmax map before step 6. Both are now one tensor of
+    logits; the census row in ``test_a_vision_classifier_emits_logits.py``
+    covers the classifier's fit step."""
+
+    def test_the_classifier_returns_bare_logits_and_round_trips(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        model = create_fftnet_classifier("tiny", num_classes=5, image_size=32,
+                                         patch_size=16)
+        x = _images(3)
+        out = model(x, training=False)
+        assert not isinstance(out, dict), type(out)
+        logits = np.asarray(out)
+        assert logits.shape == (3, 5)
+        # A softmax row sums to 1 within this float32 rounding bound.
+        atol = reassociation_atol([5], 1, 1.0)
+        assert (logits < 0).any() and np.abs(logits.sum(axis=-1) - 1.0).max() > atol
+
+        path = os.path.join(tmp_path, "fftnet_classifier.keras")
+        model.save(path)
+        # Default safe_mode: an identity Lambda in the head made this raise.
+        loaded = keras.models.load_model(path)
+        np.testing.assert_array_equal(np.asarray(loaded(x, training=False)), logits)
+
+    def test_the_segmenter_returns_per_pixel_logits(self):
+        keras.utils.set_random_seed(0)
+        model = create_fftnet_with_head("tiny", task_type="segmentation",
+                                        num_classes=4, image_size=32,
+                                        patch_size=16)
+        out = np.asarray(model(_images(2), training=False)).astype(np.float64)
+        assert out.shape == (2, 32, 32, 4)
+        assert (out < 0).any(), "no negative value: the map looks softmaxed"
+        assert np.abs(out.sum(axis=-1) - 1.0).max() > reassociation_atol([4], 1, 1.0), (
+            "every pixel's channels sum to 1: the map is normalized")

@@ -170,35 +170,26 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 class TestPFTSRGradientFlow:
     """Every trainable weight must be on the backward graph.
 
-    232 trainable weights across permuted-attention blocks and a pixel-shuffle
-    upsampler. This is the size at which an AGGREGATE gradient-norm assertion
-    stops meaning anything -- one dead attention projection among 232 live
-    tensors moves a global norm by nothing measurable. The oracle asserts per
-    weight, keyed by ``Variable.path``.
+    Hundreds of trainable weights across permuted-attention blocks and the
+    ``include_top`` EnhancementHead. This is the size at which an AGGREGATE
+    gradient-norm assertion stops meaning anything -- one dead attention
+    projection among hundreds of live tensors moves a global norm by nothing
+    measurable. The oracle asserts per weight, keyed by ``Variable.path``.
 
-    NOTE: The EnhancementHead (added via include_top=True) introduces
-    additional weights that do not receive gradients in this test setup.
-    These are waived via expect_zero.
+    Skipped from 2026-10-10 to 2026-10-14 as an "isolation issue" with six
+    ``expect_zero`` waivers. The measured cause: the waived paths named the
+    head's common norm and FFN, which its ``call`` never applied, under the
+    head's auto-suffixed name, which depends on how many heads the process had
+    built. The head is now named ``enhancement_head`` and owns neither
+    (plan-2026-10-14T062616-81938e81 step 6, D-020): no waiver.
     """
 
-    @pytest.mark.skip(reason="Test isolation issue with TF global state; passes in isolation")
     def test_gradients_reach_every_trainable_weight(self):
         model = _model()
         x = _images()
         model(x, training=False)  # a subclassed model is unbuilt until first call
 
-        # EnhancementHead weights that don't receive gradients in this test setup
-        eh_prefix = "enhancement_head"
-        expect_zero = (
-            f"{eh_prefix}/{eh_prefix}_norm/gamma",
-            f"{eh_prefix}/{eh_prefix}_norm/beta",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc1/kernel",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc1/bias",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc2/kernel",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc2/bias",
-        )
-
-        report = assert_gradients_reach_every_trainable_weight(model, x, expect_zero=expect_zero)
+        report = assert_gradients_reach_every_trainable_weight(model, x)
 
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
@@ -301,3 +292,30 @@ def test_a_factory_override_does_not_write_back_into_the_variant_table():
     create_pft_sr(4, "base", num_blocks=[1, 1])
     assert PFTSR.MODEL_VARIANTS["base"]["num_blocks"] == before
     assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 240
+
+
+# ---------------------------------------------------------------------
+# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 step 6)
+# ---------------------------------------------------------------------
+
+class TestTheEnhancementHeadKnobs:
+    """``head_config_preset`` was stored and never read (measured at step 6:
+    every preset gave the same weights and the bit-identical output), so it is
+    gone and Keras refuses it."""
+
+    def test_the_dead_preset_is_refused(self):
+        with pytest.raises(ValueError, match="head_config_preset"):
+            create_pft_sr(scale=SCALE, variant="light", head_config_preset="default")
+
+    @pytest.mark.parametrize("key", ["name", "task_type"])
+    def test_a_reserved_override_is_refused(self, key):
+        model = create_pft_sr(scale=SCALE, variant="light",
+                              head_config_overrides={key: "x"})
+        with pytest.raises(ValueError, match="may not set"):
+            model(_images(1))
+
+    def test_the_head_name_does_not_depend_on_the_process(self):
+        first, second = _model(), _model()
+        first(_images(1))
+        second(_images(1))
+        assert first.enhancement_head.name == second.enhancement_head.name == "enhancement_head"

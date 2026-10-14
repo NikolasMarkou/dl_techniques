@@ -50,6 +50,27 @@ def test_boxes_in_unit_range(tiny_inputs: tuple) -> None:
 
 
 def test_context_changes_output(tiny_inputs: tuple) -> None:
+    """Incoming context reaches the frames, and the frames reach the context.
+
+    The defects this guards are PATH defects: under a tail-append framing the
+    causal scan gives the frames no path to the context, and a bridge that
+    ignored the frames would return the context unchanged. Either makes the
+    two compared outputs bit-identical. So the assertion is the house
+    dead-component convention (``dead_component_oracle.component_response``,
+    ``atol=0.0``): on a deterministic forward, any difference at all is a
+    response.
+
+    Until plan-2026-10-14T062616-81938e81 step 6 this compared against a pasted
+    ``1e-4`` on an unseeded model. MEASURED over 20 init seeds on GPU 1
+    (``scratchpad/step6/probes/b6.py``): box difference 5.6e-05 .. 4.3e-04
+    (median 2.1e-04), BELOW 1e-4 for 3 of 20 seeds; context-history difference
+    3.9e-03 .. 1.1e-02; the same input twice differed by exactly 0.0 in every
+    output for all 20. The 1e-4 bar sat inside the effect's own spread, so the
+    verdict was decided by the init draw (baseline B-6 red at 3.2e-05, green
+    8/8 at step 1). The premise is now asserted, the model is seeded, and the
+    bar is the bit-identity the defect produces.
+    """
+    keras.utils.set_random_seed(0)
     model = _tiny_model()
     template, search = tiny_inputs
     rng = np.random.default_rng(7)
@@ -58,21 +79,30 @@ def test_context_changes_output(tiny_inputs: tuple) -> None:
     ctx_a = rng.normal(0, 1, size=(1, 1, 512)).astype(np.float32)
     ctx_b = rng.normal(0, 1, size=(1, 1, 512)).astype(np.float32)
     out_a = model([template, search, ctx_a], training=False)
+    out_a_again = model([template, search, ctx_a], training=False)
     out_b = model([template, search, ctx_b], training=False)
+
+    # The premise of a zero bar: the forward is deterministic.
+    for key in out_a:
+        np.testing.assert_array_equal(
+            np.asarray(out_a[key]), np.asarray(out_a_again[key]),
+            err_msg=f"the same input gave two {key!r}; a difference below "
+                    f"would be noise, not a response")
+
     # Incoming context must reach the frames: under a tail-append framing
     # the causal scan gives frames no path to later tokens, so this would be
     # bit-identical.
     box_diff = np.abs(np.asarray(out_a["boxes"]) - np.asarray(out_b["boxes"])).max()
-    assert box_diff > 1e-4
+    assert box_diff > 0.0, "the boxes do not depend on the incoming context"
     # History aggregation: different frames with the same context must move
-    # the update substantially (the bridge output is the history summary).
+    # the update (the bridge output is the history summary).
     rng2 = np.random.default_rng(9)
     other_search = rng2.uniform(0, 1, size=(1, 2, 64, 64, 3)).astype(np.float32)
     out_c = model([template, other_search, ctx_a], training=False)
     hist_diff = np.abs(
         np.asarray(out_a["updated_context"]) - np.asarray(out_c["updated_context"])
     ).max()
-    assert hist_diff > 1e-4
+    assert hist_diff > 0.0, "the updated context does not depend on the frames"
     assert np.all(np.isfinite(np.asarray(out_c["updated_context"])))
 
 

@@ -27,6 +27,20 @@ import tensorflow as tf
 
 from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
+# The graph-vs-eager and static-vs-dynamic bounds below (D-031) were derived
+# on CPU, i.e. in true float32. On GPU 1 with TF32 at its TensorFlow default
+# (ON) both assertions are RED by 2-3 orders of magnitude (MEASURED
+# 2026-10-14: max |delta| 6.6e-03 and 3.0e-04 on this tree, 1.3e-02 and 9.1e-04
+# on a worktree of 3b281907a^, before the EnhancementHead existed); TF32
+# truncates the conv mantissa to 10 bits, which is a precision regime, not
+# reassociation. From 2026-10-10 to 2026-10-14 the two tests were skipped as
+# "flaky"; they were never flaky on CPU and never green on GPU. The repo's one
+# TF32-off fixture is re-exported, not copied (the lightglue conftest
+# precedent).
+from tests.test_layers.conftest import tf32_disabled  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
 
 def _tiny() -> SCUNet:
     return SCUNet(in_nc=3, config=[1] * 7, dim=16, head_dim=8,
@@ -47,7 +61,6 @@ _GRAPH_VS_EAGER_ATOL = 1e-4
 
 
 class TestDynamicTrace:
-    @pytest.mark.skip(reason="Pre-existing flaky test: float32 reassociation noise between graph and eager paths (D-031)")
     def test_one_dynamic_trace_serves_two_different_sizes(self) -> None:
         model = _tiny()
 
@@ -124,7 +137,6 @@ class TestDynamicTrace:
         assert (-100) % 64 == 28
         assert (-128) % 64 == 0
 
-    @pytest.mark.skip(reason="Pre-existing flaky test: float32 reassociation noise between graph and eager paths (D-031)")
     def test_dynamic_and_static_builds_agree(self) -> None:
         """The static path is plain Python ints; the dynamic path is tensors.
         They must produce the same numbers on the same input."""

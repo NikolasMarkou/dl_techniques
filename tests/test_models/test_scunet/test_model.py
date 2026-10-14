@@ -190,7 +190,7 @@ class TestSCUNetInitialization:
         """Test that head and tail convolution layers are properly configured."""
         in_nc = 3
         dim = 64
-        model = SCUNet(in_nc=in_nc, dim=dim)
+        model = SCUNet(in_nc=in_nc, dim=dim, include_top=False)
 
         # Head should output dim channels
         assert isinstance(model.m_head, keras.layers.Conv2D)
@@ -199,6 +199,12 @@ class TestSCUNetInitialization:
         # Tail should output in_nc channels
         assert isinstance(model.m_tail, keras.layers.Conv2D)
         assert model.m_tail.filters == in_nc
+
+        # With the default include_top the EnhancementHead takes the tail's
+        # place and the tail is not built (it would never run).
+        headed = SCUNet(in_nc=in_nc, dim=dim)
+        assert headed.m_tail is None
+        assert headed.enhancement_head.output_channels == in_nc
 
 
 class TestSCUNetForwardPass:
@@ -907,3 +913,42 @@ class TestSCUNetOutputQuality:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 step 6)
+# ---------------------------------------------------------------------
+
+_HEAD_TINY = dict(in_nc=3, config=[1] * 7, dim=8, head_dim=4, window_size=4,
+                  input_resolution=64)
+
+
+class TestTheEnhancementHeadKnobs:
+    """``head_config_preset`` was stored and never read (measured at step 6:
+    every preset gave the same weights and the bit-identical output), so it is
+    gone and Keras refuses it. The head is built in ``__init__`` under a fixed
+    name; before step 6 it was created inside ``call`` on the first forward,
+    unnamed."""
+
+    def test_the_dead_preset_is_refused(self):
+        with pytest.raises(ValueError, match="head_config_preset"):
+            SCUNet(head_config_preset="default", **_HEAD_TINY)
+
+    @pytest.mark.parametrize("key", ["name", "task_type"])
+    def test_a_reserved_override_is_refused(self, key):
+        with pytest.raises(ValueError, match="may not set"):
+            SCUNet(head_config_overrides={key: "x"}, **_HEAD_TINY)
+
+    def test_the_head_exists_before_the_first_call_under_a_fixed_name(self):
+        first, second = SCUNet(**_HEAD_TINY), SCUNet(**_HEAD_TINY)
+        assert first.enhancement_head is not None
+        assert first.enhancement_head.name == second.enhancement_head.name == "enhancement_head"
+
+    @pytest.mark.parametrize("include_top", [True, False])
+    def test_only_the_applied_output_layer_is_built(self, include_top):
+        """The headed model has no tail conv and the headless one no head."""
+        model = SCUNet(include_top=include_top, **_HEAD_TINY)
+        model(np.zeros((1, 64, 64, 3), dtype="float32"))
+        owners = {w.path.split("/")[1] for w in model.weights}
+        assert ("enhancement_head" in owners) is include_top
+        assert ("tail" in owners) is (not include_top)
+        assert (model.m_tail is None) is include_top

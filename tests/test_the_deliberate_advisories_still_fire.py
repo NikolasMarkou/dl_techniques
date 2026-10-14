@@ -20,14 +20,15 @@ So each advisory gets two arms here:
 * a **control** arm asserting the non-provoking configuration does NOT warn, so
   the positive arm cannot pass by the advisory having become unconditional.
 
-Coverage: **6 of 6** suppressed families, over 30 ``pytestmark`` sites -- zero
+Coverage: **6 of 6** suppressed families, over 29 ``pytestmark`` sites -- zero
 suppressions in this tree are unpaired. Two families are emitted by this repo's
 own ``src/`` (W-03, retired; W-14, which no module suppresses any more: it fires
 only on a real MoE expert-width fallback or on ``ffn_type``/``ffn_args`` that
 ``moe_config`` makes unused). The other four are emitted by Keras and are reached
 here through the public API: softmax-over-a-size-1-axis (22 sites),
 input-ran-out-of-data (6 sites), model-not-yet-built-on-save (1 site) and
-input-structure-mismatch (1 site).
+input-structure-mismatch (0 sites since 2026-10-14, when its one darkir site
+stopped provoking it; the arm stays, as W-14's does).
 
 **A new ``ignore:`` mark anywhere under ``tests/`` needs a positive arm here in
 the same commit.** That is the whole contract; there is no other instrument.
@@ -290,11 +291,12 @@ class TestTheInputRanOutOfDataAdvisory:
 
 
 class TestTheInputStructureMismatchAdvisory:
-    """`keras/src/models/functional.py:237`. Suppressed once, in
+    """`keras/src/models/functional.py:237`. Suppressed until 2026-10-14 in
     `tests/test_models/test_darkir/test_degenerate_middle_and_gate_shape.py`,
-    where the probes build throwaway `keras.Model(model.inputs, <intermediate>)`
-    views -- `model.inputs` is a one-element LIST -- and call them with a bare
-    array. The advisory is about the probe's calling convention."""
+    where the probes built throwaway `keras.Model(model.inputs, <intermediate>)`
+    views -- `model.inputs` is a one-element LIST -- and called them with a bare
+    array. That probe now spies on a layer of the subclassed model and the
+    suppression is gone; the arms stay so a future site has its pair."""
 
     @staticmethod
     def _list_input_model():

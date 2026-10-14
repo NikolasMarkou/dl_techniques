@@ -1123,9 +1123,13 @@ def create_fftnet_with_head(
         configuration; ``dropout_rate`` is the recognized key.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :return: A complete ``keras.Model`` whose output depends on task:
-        - classification: ``{"logits": (batch, num_classes)}``
-        - detection: ``{"classifications": (B, H, W, A*C), "regressions": (B, H, W, A*4)}``
-        - segmentation: ``(batch, out_H, out_W, num_classes)``
+        - classification: one ``(batch, num_classes)`` tensor of class logits
+          (no softmax; compile with ``from_logits=True``)
+        - detection: ``{"classifications": (B, H, W, A*C), "regressions": (B, H, W, A*4)}``,
+          class logits and raw box offsets
+        - segmentation: one ``(batch, out_H, out_W, num_classes)`` tensor of
+          per-pixel class logits (no softmax; compile with
+          ``from_logits=True``)
     :rtype: keras.Model
     :raises ValueError: If ``num_classes`` is omitted, or if ``task_type`` is unrecognized.
 
@@ -1176,16 +1180,23 @@ def create_fftnet_with_head(
         if num_classes is None:
             raise ValueError("num_classes must be provided for classification tasks")
 
-        # Simple classification head (uses CLS token)
+        # Simple classification head (uses CLS token): an optional dropout,
+        # then one linear Dense. No identity placeholder at rate 0: a
+        # Lambda(lambda x: x) there made the model's .keras archive need
+        # safe_mode=False to load.
         head_dropout_rate = head_config_overrides.get("dropout_rate", 0.0)
-        classification_head = keras.Sequential([
-            keras.layers.Dropout(head_dropout_rate) if head_dropout_rate > 0 else keras.layers.Lambda(lambda x: x),
+        head_layers = []
+        if head_dropout_rate > 0:
+            head_layers.append(
+                keras.layers.Dropout(head_dropout_rate, name="classifier_dropout"))
+        head_layers.append(
             keras.layers.Dense(
                 num_classes,
                 kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
                 name="classifier"
             )
-        ], name="classification_head")
+        )
+        classification_head = keras.Sequential(head_layers, name="classification_head")
 
         # 3. Build the end-to-end model
         inputs = keras.Input(
@@ -1199,10 +1210,11 @@ def create_fftnet_with_head(
         # Use CLS token for classification
         logits = classification_head(encoder_outputs["cls_token"])
 
-        # Create the final model
+        # The bare logits tensor, the language-model pattern: a stock
+        # compile(loss=SparseCategoricalCrossentropy(from_logits=True)) fits it.
         model = keras.Model(
             inputs=inputs,
-            outputs={"logits": logits},
+            outputs=logits,
             name=f"fftnet_{fftnet_variant}_classifier"
         )
 
@@ -1358,8 +1370,9 @@ def create_fftnet_classifier(
     :type patch_size: int
     :param kwargs: Additional encoder configuration overrides.
     :type kwargs: Any
-    :return: Complete classification model whose output is
-        ``{"logits": (batch, num_classes)}``.
+    :return: Complete classification model whose output is one
+        ``(batch, num_classes)`` tensor of class logits; compile with
+        ``from_logits=True``.
     :rtype: keras.Model
 
     Example:

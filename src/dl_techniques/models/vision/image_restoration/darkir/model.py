@@ -16,11 +16,11 @@ two residual branches by zero-initialized per-channel weights (``beta``,
 without warmup.
 
 The :class:`DarkIR` class is a ``keras.Model`` subclass with an ``include_top``
-parameter: when ``True`` it uses :class:`EnhancementHead` from the vision heads
-factory for the output head (denoising/super-resolution mode); when ``False``
-it returns the encoder-decoder features for custom heads. The functional
-``create_darkir_model`` is retained for backward compatibility and wraps the
-subclass.
+parameter: when ``True`` an :class:`EnhancementHead` from the vision heads
+factory runs on the restored image (denoising mode); when ``False`` the model
+returns the restored image itself, the U-Net output after the global residual,
+with ``img_channels`` channels. ``create_darkir_model`` is a keyword-for-keyword
+wrapper around the subclass.
 
 References:
     - Feijoo et al., 2025. DarkIR: Robust Low-Light Image Restoration. CVPR 2025.
@@ -41,7 +41,7 @@ References:
 
 import keras
 from keras import layers, ops
-from typing import List, Optional, Tuple, Dict, Any, Union, Literal
+from typing import List, Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -54,9 +54,11 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 
 from .components import FreMLP, DilatedBranch, SimpleGate, _add_list
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -787,18 +789,19 @@ class DarkIR(keras.Model):
 
     A U-Net architecture with parallel dilated branches and frequency-domain
     modulation, wrapped as a keras.Model subclass supporting the ``include_top``
-    pattern. When ``include_top=True`` (default), the model uses an
-    :class:`EnhancementHead` from the vision heads factory for image restoration
-    (denoising mode). When ``include_top=False``, it returns the encoder-decoder
-    features for custom heads.
+    pattern. When ``include_top=True`` (default), an :class:`EnhancementHead`
+    from the vision heads factory runs on the restored image (denoising
+    mode). When ``include_top=False``, the model returns the restored image
+    itself: the U-Net output after the global residual, ``img_channels``
+    channels.
 
     Architecture:
         - Intro 3x3 convolution
         - Encoder stages with DarkIREncoderBlock + stride-2 downsampling
         - Middle section with encoder/decoder blocks and residual
         - Decoder stages with PixelShuffle upsampling + DarkIRDecoderBlock
-        - Optional EnhancementHead (denoising) or feature output
-        - Global residual connection (input added to output)
+        - Ending 3x3 convolution and the global residual (input added)
+        - With ``include_top``: an EnhancementHead on the restored image
 
     :param img_channels: Number of input and output image channels. Defaults to 3.
     :type img_channels: int
@@ -816,13 +819,13 @@ class DarkIR(keras.Model):
     :type dilations: List[int]
     :param extra_depth_wise: Whether blocks use extra depthwise convolution. Defaults to True.
     :type extra_depth_wise: bool
-    :param include_top: Whether to include the EnhancementHead for image restoration.
-        When False, returns encoder-decoder features. Defaults to True.
+    :param include_top: Whether to run the EnhancementHead on the restored
+        image. When False, the model returns the restored image (the U-Net
+        output after the global residual). Defaults to True.
     :type include_top: bool
-    :param head_config_preset: Enhancement head preset: 'default', 'efficient',
-        or 'high_performance'. Defaults to 'default'.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into the
+        ``EnhancementHead`` config. It may not set ``name`` or ``task_type``
+        (``ValueError``); the head is always named ``enhancement_head``.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param use_side_loss: Whether to return an intermediate output for deep
         supervision. When True the model returns ``[main_output, side_output]``
@@ -840,16 +843,18 @@ class DarkIR(keras.Model):
         must be multiples of ``2 ** len(enc_blk_nums)``. Values expected in ``[0, 1]``.
 
     Output shape:
-        - ``include_top=True``: ``(batch, height, width, img_channels)`` restored image.
-        - ``include_top=False``: ``(batch, height, width, feature_channels)`` features.
+        - ``include_top=True``: ``(batch, height, width, img_channels)``, the
+          head's output on the restored image.
+        - ``include_top=False``: ``(batch, height, width, img_channels)``, the
+          restored image.
 
     Example:
         >>> # Full restoration model
         >>> model = DarkIR(img_channels=3, width=32, include_top=True)
         >>>
-        >>> # Feature extractor for custom head
+        >>> # The U-Net without the head
         >>> backbone = DarkIR(img_channels=3, width=32, include_top=False)
-        >>> features = backbone(inputs)
+        >>> restored = backbone(inputs)
     """
 
     def __init__(
@@ -863,7 +868,6 @@ class DarkIR(keras.Model):
         dilations: Optional[List[int]] = None,
         extra_depth_wise: bool = True,
         include_top: bool = True,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         use_side_loss: bool = False,
         **kwargs: Any
@@ -913,7 +917,6 @@ class DarkIR(keras.Model):
         self.extra_depth_wise = extra_depth_wise
         self.include_top = include_top
         self.use_side_loss = use_side_loss
-        self.head_config_preset = str(head_config_preset)
         self.head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.num_stages = len(enc_blk_nums)
@@ -1058,13 +1061,36 @@ class DarkIR(keras.Model):
                 'hidden_dim': self.width,  # Match base feature width
                 'normalization_type': 'layer_norm',
                 'activation_type': 'gelu',
+                # Deterministic layer name: an unnamed head takes Keras' auto
+                # suffix in process-creation order, which breaks the by-name
+                # matching that weight transfer relies on.
+                'name': 'enhancement_head',
             })
-            if self.head_config_overrides:
-                head_config.update(self.head_config_overrides)
+            head_config = merge_head_config_overrides(
+                head_config, self.head_config_overrides
+            )
 
             self.enhancement_head = create_vision_head(
                 VisionTaskType.DENOISING, **head_config
             )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Materialize every sub-layer by tracing ``call`` symbolically.
+
+        Without this, ``model.build(shape)`` marked the model built with no
+        weight created (measured: 0 weights after ``build``, 164 after one
+        call), so ``summary()`` and ``get_weights()`` saw an empty model until
+        the first forward pass.
+
+        :param input_shape: Shape of ``call``'s input, ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Nothing.
+        :rtype: None
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -1075,7 +1101,9 @@ class DarkIR(keras.Model):
 
         :param inputs: Input images of shape (batch, H, W, img_channels).
         :param training: Whether the call is in training mode.
-        :return: Restored images (include_top=True) or features (include_top=False).
+        :return: The head's output on the restored image (include_top=True)
+            or the restored image itself (include_top=False); with
+            ``use_side_loss``, ``[main_output, side_output]``.
         """
         # Intro convolution
         x = self.intro_conv(inputs)
@@ -1149,11 +1177,10 @@ class DarkIR(keras.Model):
                           input_shape[2] // factor if input_shape[2] else None,
                           self.img_channels)
             return [main_shape, side_shape]
-        elif self.include_top:
-            return input_shape
-        else:
-            # Feature output shape matches input spatial dims, channels = width
-            return (input_shape[0], input_shape[1], input_shape[2], self.width)
+        # Headed or not, the main output has the input's shape: the global
+        # residual adds the input itself, and the head maps img_channels back
+        # to img_channels at scale 1.
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return model configuration for serialization."""
@@ -1169,7 +1196,6 @@ class DarkIR(keras.Model):
             "extra_depth_wise": self.extra_depth_wise,
             "include_top": self.include_top,
             "use_side_loss": self.use_side_loss,
-            "head_config_preset": self.head_config_preset,
             "head_config_overrides": self.head_config_overrides,
         })
         return config
@@ -1181,7 +1207,7 @@ class DarkIR(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Functional Factory (backward compatibility)
+# Factory
 # ---------------------------------------------------------------------
 
 
@@ -1195,16 +1221,13 @@ def create_darkir_model(
     dilations: List[int] = None,
     extra_depth_wise: bool = True,
     include_top: bool = True,
-    head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
     head_config_overrides: Optional[Dict[str, Any]] = None,
     use_side_loss: bool = False
 ) -> DarkIR:
     """Build the DarkIR model for low-light image restoration.
 
-    A functional builder, not a subclass: it returns
-    ``keras.Model(inputs, outputs)`` over a ``(None, None, img_channels)``
-    input, so the model is fully convolutional and resolution-agnostic at call
-    time. Encoder stages downsample with a stride-2 2x2 convolution; decoder
+    Returns a :class:`DarkIR` instance. The model is fully convolutional and
+    resolution-agnostic at call time. Encoder stages downsample with a stride-2 2x2 convolution; decoder
     stages upsample with a 1x1 channel expansion followed by pixel shuffle and
     add the matching encoder skip. A global residual carries the input to the
     output, so the network learns only the correction to apply.
@@ -1321,21 +1344,22 @@ def create_darkir_model(
         (before the 1x1 in the encoder, after it in the decoder). Defaults to
         True.
     :type extra_depth_wise: bool
-    :param include_top: Whether to include the EnhancementHead for image restoration.
-        When False, returns encoder-decoder features for custom heads. Defaults to True.
+    :param include_top: Whether to run the EnhancementHead on the restored
+        image. When False, the model returns the restored image. Defaults to
+        True.
     :type include_top: bool
-    :param head_config_preset: Enhancement head preset: 'default', 'efficient',
-        or 'high_performance'. Defaults to 'default'.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into the
+        ``EnhancementHead`` config; ``name`` and ``task_type`` are refused.
     :type head_config_overrides: Optional[Dict[str, Any]]
-    :param use_side_loss: DEPRECATED. Use a custom training loop or model subclass
-        for deep supervision. This parameter is ignored.
+    :param use_side_loss: Return ``[main_output, side_output]``, the side
+        output at bottleneck resolution, for deep supervision. See
+        :class:`DarkIR`.
     :type use_side_loss: bool
 
-    :return: The constructed DarkIR model (keras.Model subclass).
-        With ``include_top=True``: outputs restored image or dict with 'enhanced' key.
-        With ``include_top=False``: outputs encoder-decoder features.
+    :return: The constructed DarkIR model (keras.Model subclass). Its output
+        is one ``(batch, height, width, img_channels)`` tensor either way:
+        the head's output with ``include_top=True``, the restored image
+        with ``include_top=False``.
     :rtype: DarkIR
 
     :raises ValueError: If ``img_channels`` or ``width`` is not positive, if
@@ -1349,8 +1373,9 @@ def create_darkir_model(
         ``[0, 1]``.
 
     Output shape:
-        - ``include_top=True``: ``(batch, height, width, img_channels)`` or dict with 'enhanced'.
-        - ``include_top=False``: ``(batch, height, width, feature_channels)`` features.
+        - ``include_top=True``: ``(batch, height, width, img_channels)``.
+        - ``include_top=False``: ``(batch, height, width, img_channels)``, the
+          restored image.
 
     Example:
         .. code-block:: python
@@ -1374,7 +1399,7 @@ def create_darkir_model(
                 extra_depth_wise=True
             )
 
-            # Feature extractor for custom head
+            # The U-Net without the head
             backbone = create_darkir_model(
                 img_channels=3,
                 width=32,
@@ -1385,7 +1410,7 @@ def create_darkir_model(
             )
 
             x = ops.random.normal((1, 256, 256, 3))
-            y = model(x)  # (1, 256, 256, 3) or {'enhanced': ...}
+            y = model(x)  # (1, 256, 256, 3)
 
     Note:
         Channel progression is ``width -> 2*width -> 4*width -> ...``; the
@@ -1403,7 +1428,6 @@ def create_darkir_model(
         extra_depth_wise=extra_depth_wise,
         include_top=include_top,
         use_side_loss=use_side_loss,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
     )
 

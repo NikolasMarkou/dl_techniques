@@ -230,6 +230,8 @@ A utility layer often used in modern vision architectures (e.g., NAFNet, DarkIR)
 | `dilations` | List[int] | `[1, 4, 9]` | Dilation rates for the parallel branches in every block. |
 | `extra_depth_wise`| bool | `True` | Adds an extra depthwise conv layer for better inductive bias. |
 | `use_side_loss` | bool | `False` | If True, returns `[final_output, side_output]` for deep supervision. **`side_output` is at BOTTLENECK resolution** — `H / 2**len(enc_blk_nums)`, i.e. 1/8 at the defaults — so its target must be downsampled by the same factor. See §8 Example 2. |
+| `include_top` | bool | `True` | `True`: an `EnhancementHead` (named `enhancement_head`, three `ConvBlock`s and a 3x3 conv at `width`) runs on the restored image, after the global residual. `False`: the model returns the restored image itself (`img_channels` channels). |
+| `head_config_overrides` | dict | `None` | Merged into the head config; `name` and `task_type` raise `ValueError`. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
 
 ---
 

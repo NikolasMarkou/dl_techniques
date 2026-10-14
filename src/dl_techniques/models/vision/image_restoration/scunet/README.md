@@ -232,8 +232,10 @@ The `SCUNet` model is configured via its constructor. Key parameters include:
 | `dim`                | `int`       | `64`                | The base channel dimension. Controls the model's width and capacity.           |
 | `head_dim`           | `int`       | `32`                | Dimension of each attention head in the Swin blocks.                           |
 | `window_size`        | `int`       | `8`                 | The size of the attention windows (e.g., 8x8 pixels).                          |
-| `drop_path_rate`     | `float`     | `0.0`               | Stochastic depth rate for regularization. Linearly increases from 0 to this value. |
+| `stochastic_depth_rate` | `float`  | `0.0`               | Stochastic depth rate for regularization. Linearly increases from 0 to this value. |
 | `input_resolution`   | `int`       | `256`               | The expected input image resolution. Used to optimize windowing.               |
+| `include_top`        | `bool`      | `True`              | `True`: an `EnhancementHead` (named `enhancement_head`, three `ConvBlock`s and a 3x3 conv) runs on the `up1` output in place of the paper's `(+) x1` skip and tail conv, and the tail is not built. `False`: the paper's network, `tail(up1 + x1)`. The output is the restored image either way. |
+| `head_config_overrides` | `dict`   | `None`              | Merged into the head config; `name` and `task_type` raise `ValueError`. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
 
 ---
 

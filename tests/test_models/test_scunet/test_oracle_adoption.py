@@ -76,8 +76,14 @@ SHAPE = (64, 64, 3)
 MIN_EXTENT = 33
 BUILD_SEED = 0
 
-#: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = 167
+#: Measured 2026-08-21, one Adam step, ramp loss: 148, the paper's network.
+#: Re-measured 2026-10-14 (plan-2026-10-14T062616-81938e81 step 6): 161 =
+#: 147 U-Net weights + the 14 of the default ``include_top`` EnhancementHead,
+#: which replaces the 1-weight tail conv (3 ConvBlock x conv kernel/bias +
+#: LayerNorm gamma/beta, plus the output conv kernel/bias). The 167 pinned on
+#: 2026-10-10 also counted the head's six never-applied common norm and FFN
+#: weights.
+GF_WEIGHTS = 161
 
 
 def ramp_loss(outputs: Any) -> Any:
@@ -126,33 +132,30 @@ class TestSCUNetGradientFlow:
         stochastic = [
             (layer.name, attr, getattr(layer, attr))
             for layer in model._flatten_layers(include_self=False)
-            # Skip EnhancementHead layers which have dropout by design
-            if "enhancement_head" not in layer.name and "dropout" not in layer.name
             for attr in ("rate", "drop_path_rate", "dropout_rate")
             if isinstance(getattr(layer, attr, None), float)
             and getattr(layer, attr) > 0.0
         ]
         assert stochastic == [], f"a non-zero stochastic rate is live: {stochastic}"
 
-    @pytest.mark.skip(reason="Test isolation issue: passes in isolation but fails in full suite due to TF global state pollution")
     def test_gradients_reach_every_trainable_weight_after_one_step(self):
+        """Every weight, the head's included, with no waiver.
+
+        Skipped from 2026-10-10 to 2026-10-14 as an "isolation issue". The
+        measured cause: the head was unnamed, so its auto-suffix
+        (``enhancement_head``, ``enhancement_head_3``, ...) depended on how many
+        heads the process had built, and the ``expect_zero`` paths below were
+        spelled for the first one only; the six paths named the head's common
+        norm and FFN, which its ``call`` never applied. The head is now named
+        ``enhancement_head`` and owns neither (plan-2026-10-14T062616-81938e81
+        step 6, D-020), so no weight needs a waiver.
+        """
         model = _built()
         x = _images(batch=1)
         _one_adam_step(model, x)
 
-        # EnhancementHead weights that don't receive gradients in this test setup
-        eh_prefix = "enhancement_head"
-        expect_zero = (
-            f"scu_net/{eh_prefix}/{eh_prefix}_norm/gamma",
-            f"scu_net/{eh_prefix}/{eh_prefix}_norm/beta",
-            f"scu_net/{eh_prefix}/{eh_prefix}_ffn/fc1/kernel",
-            f"scu_net/{eh_prefix}/{eh_prefix}_ffn/fc1/bias",
-            f"scu_net/{eh_prefix}/{eh_prefix}_ffn/fc2/kernel",
-            f"scu_net/{eh_prefix}/{eh_prefix}_ffn/fc2/bias",
-        )
-
         report = assert_gradients_reach_every_trainable_weight(
-            model, x, loss_fn=ramp_loss, expect_zero=expect_zero)
+            model, x, loss_fn=ramp_loss)
 
         assert len(report) == GF_WEIGHTS == len(model.trainable_weights)
 

@@ -33,7 +33,9 @@ The waiver is retired (plan ``plan-2026-08-23T091307-9a110062``)
 ``video_jepa``, ``latent_gmm_registration``, ``lewm``, ``qwen`` and ``scunet``
 used to sit in an ``UNFIXED`` table here, pinned by name as un-materializable.
 They are all five in :data:`FIXED` now (97 / 148 / 26 / 188 / 161 weights from
-``.build(shape)`` alone, each equal to what a real forward call materializes),
+``.build(shape)`` alone when the waiver was retired, each equal to what a real
+forward call materializes; ``scunet`` reads 161 since its headed default, see
+the :data:`FIXED` notes),
 and :data:`UNFIXED` is empty. The reasons the waiver gave were real failures but
 none of them was a property of the model:
 
@@ -107,8 +109,27 @@ from tests.optimizer_state import build_optimizer_state
 #: GAP + one ``Dense`` again (``block_dims=()``), 2 weights: cbam 20 backbone +
 #: 2 ``classification_head/classifier`` = 22, resnet 30 + 2 = 32, listed the
 #: same way.
+#:
+#: RE-MEASURED 2026-10-14 (same plan, step 6, D-020): ``scunet`` 148 -> 161,
+#: the headed build. The 148 was pinned when SCUNet ended in the paper's tail
+#: conv (one bias-free kernel) and had no ``include_top``; ``3b281907a``
+#: (2026-10-10) made the default ``include_top=True`` replace that tail with an
+#: ``EnhancementHead`` (3 ``ConvBlock`` x conv kernel/bias + LayerNorm
+#: gamma/beta, plus the output conv kernel/bias = 14). Listed by top-level
+#: owner after ``build((None, 64, 64, 3))``: 147 backbone + 14
+#: ``enhancement_head/`` = 161 now; 147 + 1 ``tail/`` = 148 on a worktree of
+#: ``3b281907a^`` and for ``include_top=False`` today. ``build()`` and a forward
+#: call still materialize the identical set.
+#:
+#: ADDED 2026-10-14 (same plan, step 6): ``darkir``. ``DarkIR`` became a
+#: subclassed model on 2026-10-10 with no ``build()``, so ``.build(shape)``
+#: created 0 weights (164 after one call, measured on the trainer-test
+#: configuration); its ``build()`` now traces ``call``. 156 = the
+#: ``EXTRA_SUBJECTS`` configuration's 142 U-Net weights + 14
+#: ``enhancement_head/``, listed the same way.
 FIXED = {
     "cbam": 22,
+    "darkir": 156,
     "distilbert": 24,
     "fnet": 23,
     "gemma": 22,
@@ -137,7 +158,7 @@ FIXED = {
     "qwen": 104,
     "relgt": 49,
     "resnet": 32,
-    "scunet": 148,
+    "scunet": 161,
     "sd3_mmdit": 124,
     "tabm": 5,
     "tree_transformer": 34,
@@ -373,7 +394,7 @@ def test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build(name):
             "scunet",
             (None, None, None, 3),
             [(1, 96, 96, 3), (1, 64, 128, 3)],
-            148,
+            161,
             id="scunet",
         ),
     ],
