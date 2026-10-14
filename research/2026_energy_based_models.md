@@ -11,8 +11,8 @@
 ## Table of Contents
 
 1. [Why this family, why now](#1-why-this-family-why-now)
-2. [EBM primer distilled for this repo](#2-ebm-primer-distilled-for-this-repo) + [Math and operations required to implement](#21-math-and-operations-required-to-implement-normative)
-3. [Paper-by-paper digest](#3-paper-by-paper-digest)
+2. [EBM primer distilled for this repo](#2-ebm-primer-distilled-for-this-repo) + [Math and operations required to implement](#21-math-and-operations-required-to-implement-normative) + [Rule-compiler math (normative)](#22-rule-compiler-math-normative-general-purpose-tool)
+3. [Paper-by-paper digest](#3-paper-by-paper-digest) (incl. [Kona / Logical Intelligence synthesis](#39-kona--logical-intelligence-ebrm-bytebytego-oct-2026-synthesis))
 4. [What the repo already owns](#4-what-the-repo-already-owns)
 5. [Gaps: what does not exist yet](#5-gaps-what-does-not-exist-yet)
 6. [Where the family should live](#6-where-the-family-should-live)
@@ -135,6 +135,33 @@ This subsection is the implementability checklist. A build that cannot tick ever
 - Calibration: bin energies, plot `P(correct | E in bin)`; assert monotone decreasing (higher energy → less often correct) before any IBL/threshold use.
 - Cost accounting per run: forward passes, wall time, (N, K, temperatures) — the family's claim is accuracy-per-compute, never accuracy alone.
 
+### 2.2 Rule-compiler math (normative, general-purpose tool)
+
+This subsection makes outside rules a data problem, not a code problem. One YAML ruleset compiles twice: soft penalties for gradient descent (training + search) and exact checkers for the stage-2 verify loop (§3.9). Nothing here executes arbitrary code; the compiler only emits terms from the allowlist below.
+
+**A. Ruleset form.** `ruleset: <name>-<major>.<minor>` + `variables: [{name, shape, domain, dtype}]` + `rules: [{id, type, scope, params, weight, enforce: soft|hard|both}]`. `weight` defaults to 1.0. `enforce: soft` contributes only to `E_global`; `hard` only to the verifier; `both` to each. Weights live in YAML so a sweep never touches `.py`.
+
+**B. Global energy.** `E_global(y) = sum_i weight_i * E_i(y_{|i})`, each `E_i` returning per-sample `(B,)` float32. Shared scale is load-bearing for PEM composition (§2.1 I): no per-term LayerNorm on energies, plus L2 on energies beside the loss (§2.1 D) to stop runaway scale. Log per-term means split (Pattern 8), never as one number.
+
+**C. Soft-penalty catalogue (v1, closed).** All penalties are differentiable in continuous scores (logits / 9-scores-per-cell / vocab vectors); projection (`argmax`/sample) happens only after convergence (§2.1 C).
+- `all_different(scores (..., M, V))`: pairwise repulsion `sum_{a<b} sum_v p_{a,v} * p_{b,v}`, with `p = softmax(scores)`. Sudoku row/col/box, chip no-overlap.
+- `all_equal / equals / not_equals`: `||p_a - p_b||^2` (equal) or its negation with margin (not-equal).
+- `sum_equals(fields, target)`: `||sum(fields) - target||^2`. Finance `money-in == money-out`, physics conservation.
+- `lt / le / gt / ge (a, b, margin m)`: hinge `max(0, m + s*(b - a))` with sign `s`. Latency / cost soft constraints.
+- `count / cardinality (mask, lo, hi)`: `max(0, lo - c)^2 + max(0, c - hi)^2` over soft count `c = sum sigmoid(scores)`.
+- `membership (x, set S)`: `-logsumexp over S` (NCE form, §2.1 D).
+- `clause (literals)`: fuzzy-SAT DL2 style — `OR = p + q - p*q` chained, penalty `1 - P(clause true)`. CNF body; implications reuse `max(1-p, q)`.
+- `adjacency / path_continuous`: pairwise terms from row C restricted by a rank-3 mask (graph-ET precedent, §4.1) — Maze connectivity, chip adjacency.
+- `smoothness / anchor`: `sum_t ||z_{t+1} - z_t||^2`, `lambda_a * ||z_T - h_x||^2` (§2.1 H). Reuse `regularizers/sigreg.py::SIGRegLayer` evaluation before promoting to loss.
+
+**D. T-norm table (fuzzy compilation).** The compiler lowers `and/or/implies` through `layers/logic/logic_operators.py::LearnableLogicOperator`'s 18 gates (read at HEAD): product `and = p*q`, probabilistic `or = p+q-p*q`, `xor = p+q-2*p*q`, `nand/nor` negations, Lukasiewicz (`max(0,p+q-1)` / `min(1,p+q)`), Gödel (`min`/`max`), `implies = max(1-p,q)`, Lukasiewicz/Reichenbach/Goguen implications, Hamacher pair (limit 0 at (0,0) for AND, 1 at (1,1) for OR), Yager pair with `S(a,b) = (a^w + b^w)^(1/w)`, `w = yager_p` (default 2.0). Gate selection `alpha_i = softmax(w_i / T)`; rule compilation pins one gate per rule (no learned selection at compile time — learned selection stays inside `neural_circuit`, not in the YAML path).
+
+**E. Hard verifiers.** Each rule type ships a NumPy exact predicate `(y_discrete) -> bool`; the ruleset verdict is `AND` over `enforce: hard|both`. Verdict `no` routes back to search up to `max_rounds` with a fresh init (cheap because search settles in ms, §3.9). The verifier never sees gradients and never imports TF.
+
+**F. Validation (factory-first copy).** Mirror `layers/logic/factory.py::validate_logic_config`: unknown `type`, missing required `params`, undeclared key, non-positive `weight`, or out-of-set enum → `ValueError` naming the key and accepted set, carrying a strict marker. Never filter-and-drop. Schema version pinned in file; compiler rejects major-version mismatch.
+
+**G. Calibration protocol.** Sweep each `weight_i` over ≥1 order of magnitude; assert violation magnitude moves monotonically in it (anchor-weight precedent §2.1 H). Then assert `P(correct | E_global in bin)` monotone decreasing before any threshold/IBL use (§2.1 K).
+
 ---
 
 ## 3. Paper-by-paper digest
@@ -195,6 +222,18 @@ This subsection is the implementability checklist. A build that cannot tick ever
 - Overviews: Shekhar *EBMs: From Basics to LLMs* (`https://www.shashankshekhar.com/blog/ebm-talk`), Logical Intelligence *EBMs for Reasoning* (`https://logicalintelligence.com/blog/energy-based-models-for-reasoning`), Yilun Du lab page (`https://yilundu.github.io/`).
 - Keras/TF templates: `https://github.com/raoulnormand/mnist_distribution` (Langevin + contrastive loop), Foster *Generative Deep Learning* 2nd ed. EBM chapter.
 
+### 3.9 Kona / Logical Intelligence EBRM (ByteByteGo Oct 2026 synthesis)
+
+Secondary source only — credit numbers to it, never to this repo until measured (`tests/test_docs_make_no_unearned_performance_claims.py` rule).
+
+- **Demo as reported:** frontier LLM panel (GPT-5.2, Claude Opus 4.5 / Sonnet 4.5, Gemini 3 Pro, DeepSeek V3.2) ~2% Sudoku solve for ~$11k API; Kona (~1/1000th size, tens–low-hundreds M params) 96.2% for ~$4 GPU, ~313 ms/puzzle vs up to 90 s/LLM attempt. Best LLM 6.9%. Treat all as unmeasured claims.
+- **Why LLMs fail (maps to §2.1 C):** (1) left-to-right token lock-in — early commit (row 2) collides late (row 7 same column) and repair means regenerating the prefix; (2) discrete tokens — a cell is right/wrong with no downhill direction. Both are foundational for constraint-satisfaction problems (chess/Go, chip layout, grid optimization), not Sudoku-specific.
+- **Kona mechanism as described:** learns `E(x, y)` (§2.1 C), trains contrastive positives-down/negatives-up on unfinished Sudoku (half grid hidden, no RL) with corrupted + self-generated negatives (truncated search outputs as `y-`), infers by noise-init GD `y <- y - alpha*dE/dy` to settling with adaptive steps (easy = few steps), continuous candidates (9 scores/cell; vocab score-vectors for text) projected only at the end, latent-trajectory variant scoring `(x, z_t)` per step and decoding `z_T` via a small head (§2.1 H).
+- **Two-stage safety (port as the verifier loop):** Stage 1 probabilistic search (learned energy pulls toward rule-satisfying basins) → Stage 2 exact check (Sudoku rules program; Lean 4 proof assistant for theorems). `No` re-seeds search up to `max_rounds`. The check guarantees constraint satisfaction, never that the constraints captured user intent — constraint authorship stays human.
+- **Division of labor (locked direction):** EBRM for checkable-constraint parts, LLM for judgment/expression/interface. Kona does reasoning; LLM reads problem / writes result. This confirms `ebm_lm` = `TextDecoder` trunk + `Dense(1)` head, not a poem-writing EBM.
+- **Port deltas vs the article:** article omits the CNF 95→56 drift collapse — this doc's §2.1 H dual-path decoder + anchor requirement stands and governs the build. Article's hardware/business speculation (post-GPU, per-customer small models) is out of scope, noted here only.
+- **Sources:** ByteByteGo Oct 12 2026 article (secondary); Logical Intelligence *What Sudoku Reveals* [1], *The Art of Knowing* [2], *Energy-Based Models for Reasoning, LLMs for the Interface* [3]; LeCun 2006 tutorial [4]; Kona size/coverage interviews [5][6]; Lean 4 [7][8]. Full URLs in §13.
+
 ---
 
 ## 4. What the repo already owns
@@ -243,8 +282,16 @@ Energy-specific duck-typed trio convention (`energy(g) -> (B,)`, `update(g) -> (
 - `src/train/hrm/train_hrm.py::HRMTrainer`: custom GradientTape ACT loop, owns optimizer via `optimizer_builder` + `learning_rate_schedule_builder`, `HRMLoss` + `HRMMetrics`. Template for any energy-guided ACT trainer.
 - `src/train/AGENTS.md` Patterns 3 (NLP pretrain/finetune via `train.common.nlp`), 6 (byte LM via `datasets/byte_lm.py`), 8 (auxiliary `add_loss` + `aggregate_backbone_losses=True` + split loss logging, TopoLM exemplar). EBT language training is Pattern 3 + Pattern 8 (energy term rides `add_loss`).
 - `src/train/common/`: `setup_gpu`, `create_callbacks` / `create_nlp_callbacks`, `resolve_monitor_mode` (token registry, never substring), `optimizer_builder` (note: clipping keys are `clipvalue`/`clipnorm`/`global_clipnorm`, literal `clipnorm` key otherwise silently ignored; name hard-coded `AdamW`), `load_dataset` (mnist/cifar/imagenet only), `compare_runs`, `StepCheckpointCallback`, `set_seeds`, run-dir contract (`config.json`, `run.log`, `training_log.csv`, `training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`, `visualizations/`, `model_analysis/`).
-- Datasets (`src/dl_techniques/datasets/`): `nlp.py::load_wikipedia_train_val` (+ `byte_lm.py` byte sibling), `arc/` (ARC reasoning corpus — closest in-tree data to Sudoku/Maze-style puzzles), `vision/masked_patches.py::make_masked_patch_map_fn` (MIM map fn), `simple_2d.py` (synthetic 2D generators for landscape debugging), `graphs/`, `time_series/`. No Sudoku/Maze/PPBench loader exists yet — new loaders belong here, NumPy-first, TF/TFDS lazily imported.
+- Datasets (`src/dl_techniques/datasets/`): `nlp.py::load_wikipedia_train_val` (+ `byte_lm.py` byte sibling), `arc/` (`arc_utilities.py`, `arc_keras.py`, `arc_converters.py` — ARC reasoning corpus, the closest in-tree precedent for puzzle loaders: NumPy-first converters + Keras adapters, seed-everything convention), `vision/masked_patches.py::make_masked_patch_map_fn` (MIM map fn), `simple_2d.py` (synthetic 2D generators for landscape debugging), `graphs/`, `time_series/`. No Sudoku/Maze/PPBench loader exists yet — new loaders belong in `datasets/puzzles/`, NumPy-first, TF/TFDS lazily imported.
 - Callbacks: reusable in `src/dl_techniques/callbacks/`, shared trainer-side in `src/train/common/callbacks.py`, tightly-coupled beside the thing they serve. Energy-trace logging / convergence early-stopping are new callbacks, not trainer inline code.
+- NLP trainer substrate (`src/train/common/nlp.py`): `preprocess_clm_dataset`, `estimate_clm_steps_per_epoch`, `create_warmup_lr_schedule` — EBT-LM reuses these verbatim (Pattern 3); energy term rides `add_loss` (Pattern 8).
+
+### 4.6 Ready-made rule-tool parts (do not reimplement)
+
+- Fuzzy-gate library: `layers/logic/logic_operators.py::LearnableLogicOperator` (18 gates read at HEAD: and/or/xor/not/nand/nor + lukasiewicz_and/or + godel_and/or + implies/lukasiewicz_implies/reichenbach_implies/goguen_implies + hamacher_and/or with 0/0 limits + yager_and/or with `S(a,b)=(a^w+b^w)^(1/w)`), `layers/logic/arithmetic_operators.py::LearnableArithmeticOperator`, `layers/logic/factory.py::create_logic_layer` + `validate_logic_config` + `LOGIC_REGISTRY` (strict `ValueError` on undeclared keys — the validation pattern §2.2 F copies). Note: `constraints/` (`value_range_constraint.py`, `soft_value_range_constraint.py`) is Keras *weight* clipping, not task rules — never extend it for this.
+- Sampler substrate: `optimization/sgld_optimizer.py::SGLD` (`w - lr*g + s*sqrt(2*lr)*eps`, `s^2 = T`, SeedGenerator graph-safe, wired as `"sgld"` in `optimizer_builder`) for Langevin phases; `models/common/power_sampling/` (`sampler.py::PowerSampler` over injected `LogitsFn` + `TokenizerProtocol`, `config.py::PowerSamplingConfig`, `forward.py`, `ops.py`, `protocols.py`) as the model-agnostic MCMC home — energy rerank / tempered sampler / verifier-loop wrappers extend this, per §12.4.
+- Scoring substrate: `metrics/pass_at_k.py` (unbiased `1 - C(n-c,k)/C(n,k)` + plug-in, plain NumPy functions over `(n_problems, n_samples)` outcome matrix, `>0` = solved, consumed by `optimization/ssp` — do not duplicate) for width/coverage; `losses/hrm_loss.py::StableMaxCrossEntropy` per-token `(batch, seq_len)` shape precedent + `(batch,)`-per-sample rule (`losses/AGENTS.md`) for new `ebt_loss` / `trajectory_energy_loss` / `hopfield_energy_loss`.
+- What is genuinely missing (§5): the YAML schema + compiler (§2.2), the scalar verifier head, nested-tape `train_step`, trajectory planner with dual-path decoder, tempered/PEM samplers, puzzle loaders, IBL allocator.
 
 ---
 
@@ -258,6 +305,7 @@ Energy-specific duck-typed trio convention (`energy(g) -> (B,)`, `update(g) -> (
 6. **Energy-aware losses.** No contrastive energy shaping loss with hard negatives, no EBT-style supervised+contrastive composite, no calibration of energy→uncertainty.
 7. **Puzzle benchmarks.** No Sudoku / Maze / PPBench / CNF loaders, no pass@k-over-energy evaluation harness, no energy-vs-accuracy calibration plots.
 8. **Metacognitive allocator.** No IBL-style compute allocator; no energy-threshold early-exit callback.
+9. **Rule compiler.** No YAML ruleset schema, no soft-penalty compiler (§2.2 C–D), no exact-verifier registry (§2.2 E), no `validate_rule_config` strict-reject copy (§2.2 F). This is the §2.2 + `ebm/rules/` build; nothing above depends on inventing a new gate library (`LearnableLogicOperator` 18 gates already exist).
 
 ---
 
@@ -308,7 +356,7 @@ Why this shape:
 - `losses/ebt_loss.py`, `losses/trajectory_energy_loss.py`, `losses/hopfield_energy_loss.py` — energy-shaping losses, `(batch,)` shape, registered.
 - `models/common/power_sampling/` extensions — energy rerank, tempered sampling, convergence early-exit as inference wrappers, not model changes.
 - `datasets/puzzles/` (new under `datasets/`) — Sudoku, Maze, PPBench, CNF loaders. NumPy-first, matching `arc/` precedent.
-- `datasets/puzzles/` (new under `datasets/`) — Sudoku, Maze, PPBench, CNF loaders. NumPy-first, matching `arc/` precedent.
+- `ebm/rules/` (new, general-purpose tool) — YAML ruleset schema + compiler (§2.2): soft penalties into `layers/energy/`, exact NumPy verifiers for the stage-2 loop. Versioned `ruleset-x.y`, strict `validate_rule_config` copy, no arbitrary code.
 - `tests/test_models/test_ebm_lm/`, `test_erm/`, `test_eqr/`, `test_ebrm/` (flat, per ruling — never `test_vision/test_*`), plus `tests/test_layers/test_energy/`, `tests/test_losses/test_ebt*/`, trainer tests in `tests/test_train/test_ebm/` (single dir matching `train/ebm/`).
 
 What NOT to do: do not add a `models/`-level re-export; do not register `HopfieldNetwork` as an FFN type; do not invent `MODEL_VARIANTS` without genuine named variants; do not convert docstring styles wholesale; do not delete `# DECISION` anchors.
@@ -344,7 +392,8 @@ Distilled from the user's porting notes plus house constraints in `models/GUIDE.
 
 - **Depth knob:** N thinking / fixed-point steps, exposed as a call-time argument (like ET `num_steps`), not baked into config. Convergence monitor (energy delta) drives adaptive exit.
 - **Width knob:** K stochastic trajectories (PTRM precedent: noise in `z_L`; EqR: multiple inits; ERM: tempering) + energy selection (min-energy or tempered rerank). Evaluate with `pass_at_k` over the pool (`metrics/pass_at_k.py`), not mean accuracy.
-- **Composition:** energies sum across subproblems (PEM). Keep head scales compatible; document the summation contract in the head's docstring.
+- **Composition:** energies sum across subproblems (PEM). Keep head scales compatible; document the summation contract in the head's docstring. Rule-compiled terms (§2.2 B) sum the same way: `E_global = sum weight_i * E_i`.
+- **Verify loop (two-stage, §3.9):** Stage 1 probabilistic search (energy descent over continuous scores) → Stage 2 exact check (ruleset verifier AND over `enforce: hard|both`; Sudoku rules program now, Lean 4 stub Phase 5). Verdict `no` re-seeds search up to `max_rounds`. Lives as a `power_sampling/` wrapper, not model inline code; log rounds-to-accept + per-term violation means.
 - **Metacognition (later):** IBL allocator as an inference wrapper mapping pre-response uncertainty (initial energy / energy slope) to (N, K, temperature). Log (uncertainty, cost, correctness) instances per run to bootstrap it.
 
 ---
@@ -370,7 +419,8 @@ Per `models/AGENTS.md` verification conventions + `models/GUIDE.md` §8 (write g
 - **Drift (EBRM):** assert decoder trained dual-path outperforms encoder-only-path on planner outputs; assert anchor weight moves `||z_T - h_x||` monotonically.
 - **Serialization:** `.keras` round-trip + `load_weights_or_raise` whole-restore + `load_weights_from_checkpoint` warm-start (ET backbone-name precedent); colliding bare names pinned by `test_the_legacy_alias_namespace_has_no_collisions.py`.
 - **Precision:** `dtype_policy` fixture over float32 / mixed_float16 / float64; `tf32_disabled` where needed; energy trace stays float32 under fp16 heads.
-- **Docs:** `tests/test_docs_make_no_unearned_performance_claims.py` — credit papers for numbers, never this code until measured.
+- **Docs:** `tests/test_docs_make_no_unearned_performance_claims.py` — credit papers for numbers, never this code until measured. Kona figures (§3.9) stay quoted-as-reported until this repo measures them.
+- **Rules:** schema rejects unknown `type`/undeclared key (strict marker, RED-proved by typo injection); each rule type pins soft-penalty-vs-exact-verifier agreement on a synthetic case; weight sweep moves violation monotonically (§2.2 G); `.keras` round-trip keeps ruleset hash.
 - **Collection:** `pytest tests/test_models/ -q --collect-only` after any public-surface change; scope runs to touched modules (full suite ~1.5h, never parallel pytest jobs).
 
 ---
@@ -403,6 +453,9 @@ Each phase lands a leaf `README.md`, flat tests (`tests/test_models/test_ebm_lm/
 4. **Sampler home:** extend `models/common/power_sampling/` vs new `layers/energy/samplers.py`? Recommendation: extend `power_sampling/` (model-agnostic inference is its charter).
 5. **Puzzle data scope:** minimal Sudoku/Maze loaders vs full PPBench/CNF upfront? Recommendation: Sudoku + Maze first, PPBench/CNF in Phase 5.
 6. **EBT backbone:** `TextDecoder` + `Dense(1)` vs bespoke verifier stack? Recommendation: `TextDecoder` reuse; bespoke only if the energy/gradient taps need pre-add branch tensors (TopoLM precedent).
+7. **Rule-tool home — DECIDED (2026-10-14, §2.2/§6.2):** new `ebm/rules/` (schema + compiler + verifier registry) beside `ebm/ebm_lm/`; soft terms live in `layers/energy/`, verifier loop wraps `power_sampling/`. Rejected: extending `constraints/` (weight clippers, wrong semantics) and external MiniZinc/CP-SAT dependency (heavy) and raw Python callables (unsafe, unserializable).
+8. **Rule scope — DECIDED:** general-purpose v1 catalogue (§2.2 C: all_different/equality/sum_equals/hinges/count/membership/clause/adjacency/smoothness/anchor). Sudoku/Maze prove it first; finance (`conservation`) and CNF (`clause`) ride the same compiler, no second tool.
+9. **Verifier backend:** NumPy exact predicates now; Lean 4 proof-assistant hook Phase 5 (EBRM theorem path, §3.9). Constraint authorship stays human — the check guarantees satisfaction, never intent capture.
 
 ---
 
@@ -430,6 +483,8 @@ Each phase lands a leaf `README.md`, flat tests (`tests/test_models/test_ebm_lm/
 
 - Shekhar 2026. Energy-Based Models: From Basics to LLMs. `https://www.shashankshekhar.com/blog/ebm-talk`.
 - Logical Intelligence 2026. Energy-Based Models for Reasoning. `https://logicalintelligence.com/blog/energy-based-models-for-reasoning`.
+- Logical Intelligence 2026. What Sudoku Reveals About AI Reasoning Architectures and the Future of Our Economy (§3.9 [1]); The Art of Knowing (§3.9 [2]); Energy-Based Models for Reasoning, LLMs for the Interface: Scaling Reasoning with Agentic AI (§3.9 [3]).
+- ByteByteGo Oct 12 2026. How to Build Models Without Language, with Logical Intelligence (§3.9 secondary source; Kona demo figures quoted-as-reported).
 - Du lab overview. `https://yilundu.github.io/`.
 
 **Code references:**
@@ -439,3 +494,5 @@ Each phase lands a leaf `README.md`, flat tests (`tests/test_models/test_ebm_lm/
 - `https://github.com/raoulnormand/mnist_distribution` (TF 2.8 / Keras 2.8 Langevin + contrastive loop template).
 - Foster, Generative Deep Learning 2nd ed., EBM chapter (Keras energy + Langevin).
 - Sghaier et al. 2026. PTRM. `https://arxiv.org/abs/2605.19943`; Jolicoeur-Martineau 2025 TRM. `https://arxiv.org/abs/2510.04871`; Wang et al. 2025 HRM. `https://arxiv.org/abs/2506.21734`.
+- Lean 4 programming language and proof assistant (§3.9 [7]). `https://lean-lang.org` — Phase-5 verifier hook for theorem path.
+- Interviews covering Kona size/coverage claims (§3.9 [5][6], quoted-as-reported until measured in this repo).
