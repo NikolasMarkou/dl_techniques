@@ -1,20 +1,14 @@
-"""MambaLCT visual tracker: long-term context via a selective state space.
+"""MambaLCT single-object tracker with long-term context in a state space.
 
-Tracking is reframed as appearance-plus-change modeling: a shared
-hierarchical encoder (:class:`UcaEncoder`) maps the template and each
-search frame of a clip into one token space, a unidirectional
-:class:`ContextMambaLayer` scans the search flow and rolls target-change
-cues from the first frame to the current one into the context tokens
-(``Y_i^T = C H_i^T`` updating ``c_p``), a cross-attention fuses template
-information into the enhanced search tokens, and a per-frame global head
-emits a presence score plus a box in normalized search-crop coordinates.
-
-This package ships the ``mambalct-256`` / ``mambalct-384`` variants, which
-share the backbone configuration and differ in template/search resolution
-(paper Tab. 1: both HiViT-B, 72M). The v1 head predicts one box per frame
-from mean-pooled fused tokens; a dense OSTrack-style map head is deferred
-and recorded in the README. ``pretrained=True`` raises
-``NotImplementedError``; pass a local ``.keras`` path instead.
+:class:`MambaLCT` takes a template and a clip of search frames and returns a
+presence score and a box per frame, plus an updated context for the next
+call. Instead of matching each frame to the template in isolation, it scans
+the search tokens of the whole clip causally with a Mamba-style layer that
+carries target-change cues forward through a few context tokens, then fuses
+the template in with one cross-attention layer. Inputs must be square at the
+configured ``template_size`` and ``search_size``. Boxes leave the model
+sigmoid-normalized. ``pretrained=True`` raises ``NotImplementedError``; pass
+a local checkpoint path instead.
 
 References:
     - Li et al., 2024. MambaLCT: Boosting Tracking via Long-term Context
@@ -35,7 +29,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
@@ -51,6 +44,7 @@ TEMPLATE_SIZE_256 = 128
 SEARCH_SIZE_256 = 256
 TEMPLATE_SIZE_384 = 192
 SEARCH_SIZE_384 = 384
+# Token width of the encoder output, SSM and fusion; not configurable.
 EMBED_DIM = 512
 CONTEXT_LEN = 1
 
@@ -59,15 +53,104 @@ CONTEXT_LEN = 1
 
 @register_dl_technique("dl_techniques.models.mambalct.model")
 class MambaLCT(keras.Model):
-    """Single-object tracker with SSM-carried long-term context.
+    """Track one object through a search clip with SSM-carried context.
 
-    One shared :class:`UcaEncoder` embeds the template and every search
-    frame; :class:`ContextMambaLayer` scans the search flow with the
-    context tokens prepended (so the causal scan carries their cues
-    forward into every frame) and one learnable bridge token appended,
-    whose output becomes the history-aggregated context update;
-    cross-attention reads the template into each enhanced frame; a global
-    head predicts per-frame scores and boxes.
+    The template and every search frame pass through one shared
+    :class:`UcaEncoder`. :class:`ContextMambaLayer` scans the search tokens
+    of all ``T`` frames with the context tokens and returns enhanced tokens
+    plus an updated context. One cross-attention layer reads the template
+    tokens into each enhanced frame. The detection head sees one mean-pooled
+    token per frame. Boxes pass through a sigmoid in ``call``; scores come
+    from the head's classification output with no activation added here.
+    The token width is fixed at 512, so the last ``stage_dims`` entry must
+    be 512.
+
+    Search path:
+
+    .. code-block:: text
+
+        search [B, T, Hs, Ws, 3]
+                 │
+                 ▼
+        reshape [B*T, Hs, Ws, 3]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ uca_encoder         │  shared with template
+        └─────────────────────┘
+                 │  [B*T, N, D]
+                 ▼
+        reshape [B, T, N, D]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ context_mamba       │◄── context [B, Nc, D], or zeros
+        │                     │──► updated_context [B, Nc, D]
+        └─────────────────────┘
+                 │  [B, T, N, D]
+                 ▼
+        reshape [B*T, N, D]  (query)
+                 │
+                 ├─────────────────┐ residual
+                 ▼                 │
+        ┌─────────────────────┐    │
+        │ fusion_attn         │◄───┼── key [B*T, Nt, D]
+        └─────────────────────┘    │
+                 │                 │
+                 ▼                 │
+                 + ◄───────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ fusion_norm         │
+        └─────────────────────┘
+                 │  [B*T, N, D]
+                 ▼
+        mean over N, expand dims
+                 │  [B*T, 1, 1, D]
+                 ▼
+        ┌─────────────────────┐
+        │ detection_head      │
+        └─────────────────────┘
+                 │
+           ┌─────┴──────────┐
+           ▼                ▼
+        classifications  regressions
+        [B*T, 1, 1, 1]   [B*T, 1, 1, 4]
+           │                │
+           ▼                ▼
+        reshape          reshape, sigmoid
+           │                │
+           ▼                ▼
+        scores           boxes
+        [B, T, 1]        [B, T, 4]
+
+    D is embed_dim (512); Nc is context_len; N, Nt are token counts.
+
+    Template key path:
+
+    .. code-block:: text
+
+        template [B, Ht, Wt, 3]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ uca_encoder         │  shared with search
+        └─────────────────────┘
+                 │  [B, Nt, D]
+                 ▼
+        einsum with ones [B, T]
+                 │  [B, T, Nt, D]
+                 ▼
+        reshape [B*T, Nt, D]  (key)
+
+    Variants:
+
+    .. code-block:: text
+
+        variant       template_size  search_size
+        mambalct-256  128            256
+        mambalct-384  192            384
 
     :param template_size: Square template extent in pixels. Must be positive.
     :type template_size: int
@@ -75,11 +158,12 @@ class MambaLCT(keras.Model):
     :type search_size: int
     :param context_len: Number of context tokens. Must be positive.
     :type context_len: int
-    :param stage_dims: Encoder channel widths per stage.
+    :param stage_dims: Encoder channel widths per stage. Defaults to
+        ``[128, 256, 512]``. The last entry must be 512.
     :type stage_dims: List[int] or None
-    :param stage_depths: Encoder blocks per stage.
+    :param stage_depths: Encoder blocks per stage. Defaults to ``[2, 2, 6]``.
     :type stage_depths: List[int] or None
-    :param num_heads: Encoder heads per stage.
+    :param num_heads: Encoder heads per stage. Defaults to ``[4, 8, 8]``.
     :type num_heads: List[int] or None
     :param mlp_ratio: Encoder FFN expansion ratio.
     :type mlp_ratio: float
@@ -89,13 +173,17 @@ class MambaLCT(keras.Model):
     :type d_conv: int
     :param expand: SSM expansion factor.
     :type expand: int
-    :param fusion_heads: Cross-attention fusion heads. Must divide embed dim.
+    :param fusion_heads: Cross-attention fusion heads. Must divide 512.
     :type fusion_heads: int
-    :param head_hidden_dim: Hidden width of the score/box MLPs.
+    :param head_hidden_dim: Hidden width of the detection head. Must be
+        positive.
     :type head_hidden_dim: int
-    :param dropout_rate: Dropout rate.
+    :param dropout_rate: Dropout rate for the encoder, fusion attention and
+        detection head. ``context_mamba`` has none. Must be in ``[0, 1)``.
     :type dropout_rate: float
-    :param kwargs: Passthrough to ``keras.Model``.
+    :param **kwargs: Passed to ``keras.Model``.
+    :ivar embed_dim: Token width, fixed at 512.
+    :vartype embed_dim: int
     """
 
     MODEL_VARIANTS = {
@@ -128,6 +216,15 @@ class MambaLCT(keras.Model):
         dropout_rate: float = 0.0,
         **kwargs: Any,
     ) -> None:
+        """Validate arguments and create the sub-layers.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``template_size``, ``search_size``,
+            ``context_len`` or ``head_hidden_dim`` is not positive, the last
+            ``stage_dims`` entry is not 512, 512 is not divisible by
+            ``fusion_heads``, or ``dropout_rate`` is outside ``[0, 1)``.
+        """
         super().__init__(**kwargs)
         if template_size <= 0:
             raise ValueError(f"template_size must be positive, got {template_size}")
@@ -172,12 +269,12 @@ class MambaLCT(keras.Model):
         self.dropout_rate = dropout_rate
         self.embed_dim = EMBED_DIM
 
-        # Detection head using factory (replaces custom score/box MLPs)
-        # Created FIRST to ensure its internal layers get deterministic names
+        # Created first so its internal layers get deterministic names.
+        # One class and one anchor give one score and one box per frame.
         self.detection_head = create_vision_head(
             VisionTaskType.DETECTION,
-            num_classes=1,  # binary: object / no object
-            num_anchors=1,  # one prediction per frame
+            num_classes=1,
+            num_anchors=1,
             bbox_dims=4,
             input_format="spatial",
             hidden_dim=self.head_hidden_dim,
@@ -202,7 +299,6 @@ class MambaLCT(keras.Model):
             expand=self.expand,
             name="context_mamba",
         )
-        # Routed through the attention factory (strict kwargs), not hand-rolled.
         self.fusion_attn = create_attention_layer(
             "multi_head_cross",
             dim=self.embed_dim,
@@ -220,52 +316,54 @@ class MambaLCT(keras.Model):
         )
 
     def build(self, input_shape: Any) -> None:
-        """Materialize the encoder, SSM, fusion, and head sub-layers.
+        """Build the encoder, SSM, fusion and head sub-layers.
 
-        :param input_shape: Nest of ``(template, search, context)`` shapes.
+        The shared encoder is built once, on the template shape.
+        ``context_mamba`` is built with a ``(None, context_len, D)`` context
+        whatever the third input shape says, and ``detection_head`` on
+        ``(None, 1, 1, D)``. Returns at once if the model is already built.
+
+        :param input_shape: Sequence of ``(template, search[, context])``
+            shapes. Any other value falls back to ``template_size`` and
+            ``search_size`` with ``None`` batch and frame axes.
         """
         if self.built:
             return
-        
-        # Parse input shapes for proper sub-layer building
+
         if isinstance(input_shape, (tuple, list)) and len(input_shape) >= 2:
             template_shape = input_shape[0]
             search_shape = input_shape[1]
         else:
             template_shape = (None, self.template_size, self.template_size, 3)
             search_shape = (None, None, self.search_size, self.search_size, 3)
-        
-        # Build encoder first
+
         if not self.encoder.built:
             self.encoder.build(template_shape)
-        
-        # Build search encoder
+
         encoder_out_shape = self.encoder.compute_output_shape(template_shape)
         flat_search_shape = (None, search_shape[2], search_shape[3], 3)
+        # No-op: the shared encoder is already built on the template shape.
         if not self.encoder.built:
             self.encoder.build(flat_search_shape)
-        
+
         search_tokens_shape = self.encoder.compute_output_shape(flat_search_shape)
         tokens_per_frame = search_tokens_shape[1]
         search_flow_shape = (None, search_shape[1], tokens_per_frame, self.embed_dim)
-        
-        # Build context_mamba
+
         if not self.context_mamba.built:
             context_shape = (None, self.context_len, self.embed_dim)
             self.context_mamba.build([search_flow_shape, context_shape])
-        
-        # Build fusion
+
         if not self.fusion_attn.built:
             self.fusion_attn.build(search_tokens_shape)
         if not self.fusion_norm.built:
             self.fusion_norm.build(search_tokens_shape)
-        
-        # Build detection head on the pooled feature shape (B, 1, 1, embed_dim)
-        # The call() reshapes pooled to (B, 1, 1, D) before passing to detection_head
+
+        # call() feeds the head pooled tokens reshaped to (B*T, 1, 1, D).
         pooled_shape = (None, 1, 1, self.embed_dim)
         if not self.detection_head.built:
             self.detection_head.build(pooled_shape)
-        
+
         super().build(input_shape)
 
     def call(
@@ -273,20 +371,21 @@ class MambaLCT(keras.Model):
         inputs: Union[Tuple[Any, Any, Any], List[Any]],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        """Track a template against a search clip with carried context.
+        """Score and box every search frame against the template.
 
-        :param inputs: Pair ``(template, search)`` or triple
-            ``(template, search, context)`` with template
-            ``(B, Ht, Wt, 3)``, search ``(B, T, Hs, Ws, 3)`` with
-            ``Hs == Ws == search_size``, context ``(B, Nc, D)``.
-            A missing context becomes zeros.
-        :param training: Training flag forwarded to sub-layers.
-        :return: Dict with ``scores`` ``(B, T, 1)``, ``boxes`` ``(B, T, 4)``
-            in normalized search-crop ``(cx, cy, w, h)``, and
-            ``updated_context`` ``(B, Nc, D)``.
-        :raises ValueError: If the inputs are not a pair/triple, or a
-            statically-known search/template extent disagrees with the
-            configured sizes.
+        :param inputs: ``(template, search)`` or ``(template, search,
+            context)``. ``template`` is ``(B, Ht, Wt, 3)`` with
+            ``Ht == Wt == template_size``; ``search`` is
+            ``(B, T, Hs, Ws, 3)`` with ``Hs == Ws == search_size``;
+            ``context`` is ``(B, Nc, D)`` and defaults to zeros.
+        :param training: Forwarded to every sub-layer.
+        :return: Dict with ``scores`` ``(B, T, 1)`` taken from the head's
+            classification output with no activation added here, ``boxes``
+            ``(B, T, 4)`` as sigmoid-normalized ``(cx, cy, w, h)`` in
+            search-crop coordinates, and ``updated_context`` ``(B, Nc, D)``.
+        :raises ValueError: If ``inputs`` is not a 2- or 3-element tuple or
+            list, or a static template or search extent differs from the
+            configured size.
         """
         if isinstance(inputs, (tuple, list)) and len(inputs) == 2:
             template, search, context = inputs[0], inputs[1], None
@@ -304,9 +403,7 @@ class MambaLCT(keras.Model):
         search_w = ops.shape(search)[3]
 
         template_tokens = self.encoder(template, training=training)
-        # Dynamic reshape: no Python arithmetic on shape tensors, so this
-        # traces with symbolic (None) batch/frames axes (build_from_config,
-        # inference with carried context).
+        # -1 keeps the reshape traceable with symbolic batch and frame axes.
         flat_search = ops.reshape(search, (-1, search_h, search_w, 3))
         search_tokens = self.encoder(flat_search, training=training)
         tokens_per_frame = ops.shape(search_tokens)[1]
@@ -327,10 +424,8 @@ class MambaLCT(keras.Model):
         query = ops.reshape(
             enhanced, (flat_frames, tokens_per_frame, self.embed_dim)
         )
-        # Broadcast tiling without materializing a shaped canvas: ones
-        # derived from the search tensor carry the dynamic (B, T) shape, so
-        # this traces with symbolic frames (ops.tile/zeros need static
-        # repeats/extents and fail the build_from_config trace instead).
+        # Tile over T with ones taken from search, so a symbolic T still traces;
+        # ops.tile needs static repeats and fails the build_from_config trace.
         template_tokens_len = ops.shape(template_tokens)[1]
         frame_ones = ops.ones_like(search[:, :, 0, 0, 0])
         template_tiled = ops.einsum(
@@ -345,14 +440,11 @@ class MambaLCT(keras.Model):
             query + fused, training=training
         )
         pooled = ops.mean(fused, axis=1)
-        # DetectionHead expects spatial input (B, H, W, C) but we have (B, D)
-        # Reshape to (B, 1, 1, D) for spatial format
+        # The head takes spatial (B, H, W, C) input.
         pooled_spatial = ops.expand_dims(ops.expand_dims(pooled, axis=1), axis=1)
         det_outputs = self.detection_head(pooled_spatial, training=training)
-        # det_outputs: {'classifications': (B, 1, 1, 1), 'regressions': (B, 1, 1, 4)}
         scores = ops.reshape(det_outputs['classifications'], (batch, frames, 1))
         boxes = ops.reshape(det_outputs['regressions'], (batch, frames, 4))
-        # Apply sigmoid to boxes as the original did
         boxes = ops.sigmoid(boxes)
         return {
             "scores": scores,
@@ -363,16 +455,15 @@ class MambaLCT(keras.Model):
     def _check_spatial_contract(
         self, template: keras.KerasTensor, search: keras.KerasTensor
     ) -> None:
-        """Fail loudly when a statically-known extent breaks the geometry.
+        """Raise when a static input extent differs from the configured size.
 
-        The encoder downsamples by a fixed stride and the head reads
-        ``search_size``-shaped frames; a mismatched static extent would
-        otherwise die in an opaque reshape. Dynamic (``None``) extents skip
-        the check — they cannot be judged at trace time.
+        Extents that are ``None`` at trace time are skipped.
 
         :param template: Template input ``(B, Ht, Wt, 3)``.
         :param search: Search input ``(B, T, Hs, Ws, 3)``.
-        :raises ValueError: On a known-bad static extent.
+        :raises ValueError: If a static ``Hs`` or ``Ws`` differs from
+            ``search_size``, or a static ``Ht`` or ``Wt`` differs from
+            ``template_size``.
         """
         static_search = (search.shape[2], search.shape[3])
         for extent, name in zip(static_search, ("Hs", "Ws")):
@@ -390,9 +481,12 @@ class MambaLCT(keras.Model):
                 )
 
     def get_config(self) -> Dict[str, Any]:
-        """Return model configuration for serialization.
+        """Return the constructor arguments for serialization.
 
-        :return: Dictionary containing all constructor arguments.
+        ``embed_dim`` is not included; it is fixed at 512.
+
+        :return: The base ``keras.Model`` config updated with every
+            constructor argument.
         """
         config = super().get_config()
         config.update({
@@ -410,7 +504,7 @@ class MambaLCT(keras.Model):
             "head_hidden_dim": self.head_hidden_dim,
             "dropout_rate": self.dropout_rate,
         })
-        # Note: detection_head is serialized as a sub-layer via Keras standard mechanism
+        # __init__ rebuilds every sub-layer, detection_head included, from this.
         return config
 
     @classmethod
@@ -420,15 +514,23 @@ class MambaLCT(keras.Model):
         pretrained: Union[bool, str] = False,
         **kwargs: Any,
     ) -> "MambaLCT":
-        """Create a MambaLCT model from a predefined variant.
+        """Create a model from a named variant, optionally loading weights.
 
-        :param variant: One of ``"mambalct-256"`` / ``"mambalct-384"``.
-        :param pretrained: Local checkpoint path to load, or True to raise
-            since no weights ship here.
-        :param kwargs: Overrides for the variant defaults.
+        Keyword overrides take precedence over the variant's values. A string
+        ``pretrained`` builds the model on ``(template, search, context)``
+        shapes with ``None`` batch and frame axes, then loads the checkpoint
+        with ``strict=True``. Errors from ``load_weights_from_checkpoint``
+        propagate.
+
+        :param variant: ``"mambalct-256"`` or ``"mambalct-384"``.
+        :param pretrained: Path to a local checkpoint, or ``False`` to skip
+            loading. ``True`` raises.
+        :param **kwargs: Constructor arguments that override the variant's
+            values.
         :return: A MambaLCT instance.
-        :raises ValueError: If the variant is unknown.
-        :raises NotImplementedError: If ``pretrained`` is True.
+        :raises ValueError: If the variant is unknown or the constructor
+            rejects the merged arguments.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -470,12 +572,15 @@ def create_mambalct(
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> MambaLCT:
-    """Create a :class:`MambaLCT` tracker with no logic beyond construction.
+    """Create a :class:`MambaLCT` through :meth:`MambaLCT.from_variant`.
 
-    :param variant: Variant name, ``"mambalct-256"`` or ``"mambalct-384"``.
-    :param pretrained: Local checkpoint path, or True to raise.
-    :param kwargs: Overrides forwarded to :class:`MambaLCT`.
+    :param variant: ``"mambalct-256"`` or ``"mambalct-384"``.
+    :param pretrained: Path to a local checkpoint, or ``False``. ``True``
+        raises.
+    :param **kwargs: Constructor arguments forwarded to :class:`MambaLCT`.
     :return: A MambaLCT instance.
+    :raises ValueError: If the variant is unknown or an argument is invalid.
+    :raises NotImplementedError: If ``pretrained`` is ``True``.
     """
     return MambaLCT.from_variant(variant, pretrained=pretrained, **kwargs)
 
