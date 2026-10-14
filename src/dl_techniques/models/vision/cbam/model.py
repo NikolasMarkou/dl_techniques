@@ -11,9 +11,11 @@ never invert or amplify it. The backbone stacks one
 `Conv2D -> BatchNorm -> CBAM -> MaxPooling2D` stage per entry in `dims`, with
 CBAM between the normalization and the pooling. Every stage halves both
 spatial axes, so an input needs to survive `2 ** len(dims)` reductions. The
-classification head applies softmax itself, so the output is probabilities
-rather than logits, and no pretrained weights ship with this model:
-`pretrained=True` raises `NotImplementedError`.
+classification head is the shared vision `ClassificationHead` (global average
+pool, two dense blocks, a linear `Dense(num_classes)`), so the output is
+pre-softmax logits: compile with `from_logits=True` and apply
+`keras.ops.softmax` to read probabilities. No pretrained weights ship with
+this model: `pretrained=True` raises `NotImplementedError`.
 
 References:
     - Woo et al., 2018. CBAM: Convolutional Block Attention Module. ECCV 2018.
@@ -72,11 +74,17 @@ class CBAMNet(keras.Model):
               │ [B, dims[-1]]
               ▼
         ┌──────────────────────────────┐
-        │ dense num_classes, softmax   │
+        │ 2 x DenseBlock (256, 128),   │
+        │ batch norm, relu             │
+        └──────────────────────────────┘
+              │ [B, 128]
+              ▼
+        ┌──────────────────────────────┐
+        │ dense num_classes, linear    │
         └──────────────────────────────┘
               │
               ▼
-        probabilities [B, num_classes]
+        logits [B, num_classes]
 
     Stage internals:
 
@@ -124,9 +132,12 @@ class CBAMNet(keras.Model):
     :type attention_ratio: int
     :param attention_kernel_size: Kernel size for the spatial-attention convolution in each CBAM block. Checked here for positivity; oddness is left to ``CBAM``.
     :type attention_kernel_size: int
-    :param kernel_initializer: Initializer for Conv2D and Dense kernels.
+    :param kernel_initializer: Initializer for the stage Conv2D kernels. The
+        ``ClassificationHead`` takes no initializer and uses its own defaults.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for Conv2D and Dense kernels.
+    :param kernel_regularizer: Optional regularizer for the stage Conv2D
+        kernels. The ``ClassificationHead`` takes no regularizer, so its dense
+        kernels are not regularized.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param include_top: Whether to include the classification head. If False, returns the final stage's feature maps.
     :type include_top: bool
@@ -135,7 +146,7 @@ class CBAMNet(keras.Model):
     :param kwargs: Additional keyword arguments for `keras.Model` (e.g. `name`).
     :ivar stages: One list of layers per stage (Conv2D, BatchNormalization, CBAM, MaxPooling2D).
     :vartype stages: List[List[keras.layers.Layer]]
-    :ivar head: Classification-head layers (GlobalAveragePooling2D, Dense). Empty if `include_top` is False.
+    :ivar head: ``[classification_head]``, the one ``ClassificationHead``. Empty if `include_top` is False.
     :vartype head: List[keras.layers.Layer]
     :raises ValueError: If `num_classes` is not positive when `include_top` is True, if `dims` is empty or non-positive, if `attention_ratio` is not positive, or if `attention_kernel_size` is not positive.
 
@@ -143,13 +154,17 @@ class CBAMNet(keras.Model):
         4D tensor, shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        2D tensor ``(batch_size, num_classes)`` if `include_top` is True, otherwise 4D tensor ``(batch_size, H', W', dims[-1])``.
+        2D logits tensor ``(batch_size, num_classes)`` if `include_top` is True, otherwise 4D tensor ``(batch_size, H', W', dims[-1])``.
 
     Example:
         .. code-block:: python
 
             model = CBAMNet(num_classes=10, dims=[64, 128], input_shape=(32, 32, 3))
-            model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+            model.compile(
+                optimizer='adam',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                metrics=['accuracy'],
+            )
 
             # Feature extractor, no classification head.
             model = CBAMNet(dims=[128, 256, 512], include_top=False, input_shape=(224, 224, 3))
@@ -240,7 +255,6 @@ class CBAMNet(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': False,
-                'use_ffn': False,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
                 # by-name matching that weight transfer relies on.
@@ -283,7 +297,7 @@ class CBAMNet(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode. Affects BatchNormalization.
         :type training: Optional[bool]
-        :return: Class probabilities ``(batch_size, num_classes)`` if `include_top` is True, otherwise feature maps ``(batch_size, H', W', dims[-1])``.
+        :return: Logits ``(batch_size, num_classes)`` if `include_top` is True, otherwise feature maps ``(batch_size, H', W', dims[-1])``.
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -293,9 +307,8 @@ class CBAMNet(keras.Model):
                 x = layer(x, training=training)
 
         if self.include_top:
-            # Factory head returns {'logits': ..., 'probabilities': ...}
             head_output = self.head[0](x, training=training)
-            x = head_output['probabilities']
+            x = head_output['logits']
 
         return x
 

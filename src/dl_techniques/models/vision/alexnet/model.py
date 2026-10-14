@@ -5,6 +5,14 @@ five convolutional stages -- each convolution followed by ReLU, with a local
 response normalization and a max pool on the first two -- and three fully connected
 stages.
 
+The fully connected stages are the shared vision ``ClassificationHead``, not a
+transcription of the paper's. fc6 is a 4096-wide ``DenseBlock`` (Dense,
+BatchNorm, ReLU, dropout), fc7 a 2048-wide one (the head's second block is
+always ``hidden_dim // 2``), and fc8 a linear ``Dense(num_classes)``. The paper
+has a 4096-4096 stack with no BatchNorm. The model returns the pre-softmax
+LOGITS of fc8; the paper's softmax belongs in the loss, so compile with
+``SparseCategoricalCrossentropy(from_logits=True)``.
+
 Padding
 -------
 
@@ -26,13 +34,14 @@ pool -- is exactly what produces the paper's figure.
 Parameter count
 ---------------
 
-Measured **60,597,608** at the default ``input_shape=(227, 227, 3)`` and
+Measured **50,183,528** at the default ``input_shape=(227, 227, 3)`` and
 ``num_classes=1000``: 1,891,712 convolutional, 74,752 of non-trainable LRN band
-weights, and 58,631,144 fully connected. The "about 62 million" in circulation is
-slightly high; this port prints its own measured figure rather than the folklore
-one. **97%** of the total sits in the three fully connected layers, which is the
-whole point of the architecture and also its main cost -- see the README for what
-that means for fine-tuning.
+weights, and 48,217,064 in the fully connected head (12,288 of them the
+non-trainable BatchNorm moving statistics). The paper's own 4096-4096 stack would
+total 60,597,608; the gap is fc7's 2048 width. **96%** of the total sits in the
+fully connected stages, which is the main cost of the architecture -- see the
+README for what that means for fine-tuning. Re-derive with
+``create_alexnet().build((None, 227, 227, 3))`` then ``count_params()``.
 
 Grouped convolutions
 --------------------
@@ -111,9 +120,9 @@ class AlexNet(keras.Model):
           -> conv5 3x3/1  pad 1, 256 g2  ->  13 x 13 x 256
           -> pool3 3x3/2 pad 0           ->   6 x 6 x 256
           -> flatten 9216
-          -> fc6 4096, ReLU, dropout 0.5
-          -> fc7 4096, ReLU, dropout 0.5
-          -> fc8 1000, softmax
+          -> fc6 4096, BatchNorm, ReLU, dropout 0.5   (ClassificationHead)
+          -> fc7 2048, BatchNorm, ReLU, dropout 0.5   (hidden_dim // 2)
+          -> fc8 1000, linear: the output is logits
 
     Every output spatial extent above is measured, not copied from the paper's
     diagram, and each matches it.
@@ -121,8 +130,8 @@ class AlexNet(keras.Model):
     **No pretrained weights ship with this port.** ``pretrained=True`` raises
     ``NotImplementedError`` rather than returning random weights under that name.
 
-    :param num_classes: Width of the final softmax. The paper uses 1000, one per
-        ImageNet class.
+    :param num_classes: Width of fc8, the linear logits layer. The paper uses 1000,
+        one per ImageNet class.
     :type num_classes: int
     :param input_shape: Spatial shape plus channels. The default is the paper's
         227, which is the crop of a 256-pixel image. It is the paper's own number
@@ -137,7 +146,7 @@ class AlexNet(keras.Model):
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for every conv and dense bias.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param include_top: Whether to build the three fully connected layers. With
+    :param include_top: Whether to build the fully connected head. With
         ``False`` the model ends at ``pool3`` and returns a ``(batch, h, w, 256)``
         feature map, which is the useful form for dense prediction.
     :type include_top: bool
@@ -184,11 +193,11 @@ class AlexNet(keras.Model):
         conv5          (None, 13, 13, 256)          442,624
         pool3          (None, 6, 6, 256)                   0
         flatten        (None, 9216)                       0
-        fc6            (None, 4096)               37,752,832
-        fc7            (None, 4096)               16,781,312
-        fc8            (None, 1000)                4,097,000
+        fc6 dense_block    (None, 4096)           37,769,216
+        fc7 dense_block_1  (None, 2048)            8,398,848
+        fc8 classifier     (None, 1000)            2,049,000
         ----------------------------------------------------
-        Total                                     60,597,608
+        Total                                     50,183,528
 
     ``conv3`` reads 442,752 rather than the 885,120 an ungrouped ``conv3`` would
     need, because it is grouped like the rest: 384 filters x (256/2) input channels
@@ -199,7 +208,8 @@ class AlexNet(keras.Model):
     bare tensor built in ``build()`` does not survive being built inside a parent's
     ``scratch_graph``. Those are 74,752 of the total and they are **not**
     learnable; ``count_params()`` counts them, ``trainable_parameters`` does not.
-    Dropping them would give 60,522,856.
+    fc6 and fc7 each count their BatchNorm's 2 x width trainable and 2 x width
+    non-trainable values.
     """
 
     def __init__(
@@ -220,7 +230,7 @@ class AlexNet(keras.Model):
         ``get_config()`` round trip reproduces the same architecture whatever the
         input rank turns out to be.
 
-        :param num_classes: Width of the final softmax.
+        :param num_classes: Width of fc8, the linear logits layer.
         :type num_classes: int
         :param input_shape: ``(height, width, channels)``.
         :type input_shape: Tuple[int, int, int]
@@ -396,10 +406,7 @@ class AlexNet(keras.Model):
             'activation_type': 'relu',
             'use_global_pooling': False,  # AlexNet uses flatten, not pooling
             'use_attention': False,
-            'use_ffn': True,
-            'ffn_type': 'mlp',
-            'ffn_expansion_factor': 1,  # 4096 -> 4096 (no expansion)
-            'hidden_dim': 4096,  # fc6/fc7 width
+            'hidden_dim': 4096,  # fc6 width; the head makes fc7 hidden_dim // 2
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
@@ -438,7 +445,7 @@ class AlexNet(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Training-mode flag, forwarded to the dropout layers.
         :type training: Optional[bool]
-        :return: Class probabilities of shape ``(batch, num_classes)``, or the
+        :return: Logits of shape ``(batch, num_classes)``, or the
             ``(batch, h, w, 256)`` feature map when ``include_top=False``.
         :rtype: keras.KerasTensor
         """
@@ -462,9 +469,8 @@ class AlexNet(keras.Model):
         if not self.include_top:
             return x
 
-        # Factory head returns {'logits': ..., 'probabilities': ...}
         head_output = self.classification_head(x, training=training)
-        return head_output['probabilities']
+        return head_output['logits']
 
     def get_feature_extent(self) -> int:
         """Per-axis extent of the feature map entering the flatten.
@@ -524,7 +530,7 @@ def create_alexnet(
 ) -> AlexNet:
     """Build an :class:`AlexNet`.
 
-    :param num_classes: Width of the final softmax.
+    :param num_classes: Width of fc8, the linear logits layer.
     :type num_classes: int
     :param input_shape: ``(height, width, channels)``. 227 is the paper's own
         extent; 224 through 227 give the identical ``6 x 6 x 256`` result.

@@ -111,7 +111,16 @@ def _b_resnet():
                   filters_per_stage=[8, 16], block_type="basic")
 
 
-_sub("resnet", _b_resnet, lambda: _f32(1, 32, 32, 3))
+# Batch 2, not 1: the head is the shared ClassificationHead, whose two
+# DenseBlocks carry a BatchNorm. The backward part runs in training mode, where
+# a batch of ONE normalizes every feature to exactly 0, so the logits are the
+# constant classifier bias and the ramp loss and every gradient are exactly 0
+# (MEASURED 2026-10-14, plan-2026-10-14T062616-81938e81 step 2: loss 0.0,
+# grad_norm_sum 0 under both policies). The arm only passed at batch 1 while the
+# head ended in a softmax, whose uniform output still has a ramp gradient. At
+# batch 2: grad_norm_sum 11.01 float32 / 10.16 mixed_float16, absmax 1.102742 /
+# 1.103516.
+_sub("resnet", _b_resnet, lambda: _f32(2, 32, 32, 3))
 
 
 def _b_vit():
@@ -190,7 +199,16 @@ def _b_cbam():
     return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 
-_sub("cbam", _b_cbam, lambda: _f32(1, 32, 32, 3))
+# Batch 2, not 1: the head is the shared ClassificationHead, whose two
+# DenseBlocks carry a BatchNorm. The backward part runs in training mode, where
+# a batch of ONE normalizes every feature to exactly 0, so the logits are the
+# constant classifier bias and the ramp loss and every gradient are exactly 0
+# (MEASURED 2026-10-14, plan-2026-10-14T062616-81938e81 step 2: loss 0.0,
+# grad_norm_sum 0 under both policies). The arm only passed at batch 1 while the
+# head ended in a softmax, whose uniform output still has a ramp gradient. At
+# batch 2: grad_norm_sum 111.6 float32 / 142.4 mixed_float16, absmax 0.018658 /
+# 0.018646.
+_sub("cbam", _b_cbam, lambda: _f32(2, 32, 32, 3))
 
 
 def _b_fractalnet():

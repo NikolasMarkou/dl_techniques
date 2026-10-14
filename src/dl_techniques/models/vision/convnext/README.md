@@ -57,9 +57,17 @@ Input (H, W, 3)
    ├─► Downsample
    ├─► Stage 3: N3 x ConvNeXt block                              (H/S⁴, W/S⁴, D3)
    │
-   └─► Head (include_top): GlobalAveragePooling -> LayerNorm -> Dense
-                                                                 (B, num_classes)
+   └─► Head (include_top): ClassificationHead
+         GlobalAveragePooling -> DenseBlock(256) -> DenseBlock(128)
+         -> Dense(num_classes), linear                           (B, num_classes) logits
 ```
+
+The head is the shared vision `ClassificationHead` (each `DenseBlock` is Dense, LayerNorm,
+GELU), not the paper's GAP -> LayerNorm -> Dense. Its last layer is linear, so the model returns
+**logits**: compile with `from_logits=True` and apply `keras.ops.softmax` to read probabilities.
+`head_config_overrides` (for example `{'hidden_dim': 512}`) resizes it; `name`, `num_classes`
+and `task_type` are owned by the model and raise `ValueError`. Archives saved before 2026-10-14,
+when the head still ended in a softmax, are not supported.
 
 `S` is the `strides` argument, default 4. Note the **divergence from the paper**: the inter-stage
 downsamples here reuse the stem stride, so with the default `S = 4` a four-stage model reduces

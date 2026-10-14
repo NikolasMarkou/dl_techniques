@@ -42,7 +42,15 @@ package               MEASURED census                      ruling
                                                            checkpoint exists
                                                            to adjudicate)
 ``masked_autoencoder`` 4 sites, all ``1e-03``              STATED
-``cbam``              2 sites, all ``1e-03``               STATED
+``cbam``              2x ``1e-03`` + 2x ``1e-06``         STATED -- split
+                                                           by construction:
+                                                           the two stage
+                                                           BatchNorms are
+                                                           bare Keras
+                                                           (D-111), the two
+                                                           head DenseBlock
+                                                           norms come from
+                                                           the factory
 ``time_series`` (MDN) 4 sites, all ``1e-03``               STATED
 ``blt``               5x ``1e-03`` + 14x ``1e-06``         STATED -- an eleventh
                                                           package, charged
@@ -194,7 +202,18 @@ CENSUS = {
     "qwen": (_qwen, {"1e-05": 6, "1e-06": 11}),
     "accunet": (_accunet, {"1e-03": 119}),
     "masked_autoencoder": (_masked_autoencoder, {"1e-03": 4}),
-    "cbam": (_cbam, {"1e-03": 2}),
+    # RE-MEASURED 2026-10-14: {"1e-03": 2, "1e-06": 2}, not {"1e-03": 2}.
+    # Provenance (plan-2026-10-14T062616-81938e81 D-012): the two new sites
+    # are `dense_block_norm` and `dense_block_1_norm`, the BatchNorms inside the
+    # shared ClassificationHead's two DenseBlocks, which the user's commit
+    # aaccdf2c2 (2026-10-09) put in place of CBAM's GAP + Dense head. They are
+    # built by `create_normalization_layer('batch_norm')` at the factory's
+    # 1e-6 default; the head takes no normalization kwargs, so the model
+    # cannot forward its own value. The two `stage_N_bn` sites stay at Keras'
+    # 1e-3 (plan-2026-08-22T035419-a11304c8/D-111). The same factory-vs-bare
+    # split as mobilenet/vit_hmlp/fastvlm. Measured by naming each norm layer
+    # of `_cbam()` beside `_epsilon_of`.
+    "cbam": (_cbam, {"1e-03": 2, "1e-06": 2}),
     "time_series": (_mdn, {"1e-03": 4}),
     # ``blt`` is a DELIBERATE two-epsilon package, split by construction style
     # and not by choice: the five stack-final norms are built by
@@ -257,8 +276,8 @@ def test_the_census_can_actually_observe_a_moved_epsilon():
 def test_the_two_epsilon_split_packages_really_carry_two_values():
     """The 'two epsilons three orders apart in one model' shape, asserted.
 
-    ``mobilenet``, ``vit_hmlp``, ``fastvlm``, ``mobile_clip`` and ``blt`` each
-    split along factory-vs-bare construction. A future refactor that unified
+    ``mobilenet``, ``vit_hmlp``, ``fastvlm``, ``mobile_clip``, ``blt`` and
+    ``cbam`` each split along factory-vs-bare construction. A future refactor that unified
     them would be a real change and must not pass silently as "still green".
 
     ``blt``'s split is the one this file's own history created: routing
@@ -268,7 +287,8 @@ def test_the_two_epsilon_split_packages_really_carry_two_values():
     someone who makes that change has to update the ``CENSUS`` row above,
     where the reasoning is recorded.
     """
-    for package in ("mobilenet", "vit_hmlp", "fastvlm", "mobile_clip", "blt"):
+    for package in ("mobilenet", "vit_hmlp", "fastvlm", "mobile_clip", "blt",
+                    "cbam"):
         _build, expected = CENSUS[package]
         assert len(expected) == 2, (
             f"{package} is recorded as a two-epsilon package but its census "

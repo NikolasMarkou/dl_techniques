@@ -14,7 +14,9 @@ block rather than one per convolution. `ConvNextV1Block` is transform-only: it r
 the schedule does not reset at each stage boundary. Downsampling uses `padding="same"`
 between stages so small CIFAR-scale inputs do not collapse to a 0x0 feature map; the
 stem keeps `"valid"` padding at `stem_stride > 1` to preserve the spatial geometry
-existing checkpoints were trained with. No pretrained weights are distributed:
+existing checkpoints were trained with. With `include_top=True` the model returns
+the pre-softmax logits of the shared vision `ClassificationHead`; compile with
+`from_logits=True`. No pretrained weights are distributed:
 `pretrained=True` raises `NotImplementedError`.
 
 References:
@@ -29,7 +31,7 @@ References:
 
 import os
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any, Literal
+from typing import List, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -50,6 +52,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -126,15 +129,14 @@ class ConvNeXtV1(keras.Model):
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  GAP → LayerNorm → Dense(num_classes)│
-        │  (if include_top)                    │
+        │  ClassificationHead (include_top):   │
+        │  GAP → 2×DenseBlock → Dense, logits  │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  Output: [B, num_classes]            │
+        │  Output: logits [B, num_classes]     │
         │   include_top=False → [B, H', W', d₃]│
-        │   num_classes=0     → [B, d₃] pooled │
         └──────────────────────────────────────┘
 
     Block internals (ConvNextV1Block, transform only, returns F(x)):
@@ -179,8 +181,7 @@ class ConvNeXtV1(keras.Model):
         xlarge    [3, 3, 27, 3]  [256, 512, 1024, 2048]
 
     :param num_classes: Number of output classes. Only used when
-        ``include_top=True``. A value of 0 returns pooled, normalized features
-        from the head. Defaults to 1000.
+        ``include_top=True``, where it must be positive. Defaults to 1000.
     :type num_classes: int
     :param depths: Number of ConvNeXt blocks in each stage. Must have the same
         length as ``dims``. ``None`` resolves to ``[3, 3, 9, 3]``
@@ -208,8 +209,9 @@ class ConvNeXtV1(keras.Model):
     :param use_bias: Whether convolutions and the classifier use a bias, and
         whether every LayerNormalization centers. Defaults to True.
     :type use_bias: bool
-    :param kernel_regularizer: Optional regularizer applied to all convolution
-        and dense kernels.
+    :param kernel_regularizer: Optional regularizer applied to the stem, the
+        downsampling layers and the blocks. The ``ClassificationHead`` takes no
+        regularizer, so the head's dense kernels are not regularized.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param dropout_rate: Dropout rate applied within blocks. Defaults to 0.0.
     :type dropout_rate: float
@@ -237,26 +239,27 @@ class ConvNeXtV1(keras.Model):
         consumer needs static spatial dims; a checkpoint load with unspecified
         spatial dims materializes weights at ``PRETRAINED_BUILD_SPATIAL`` (224).
     :type input_shape: Tuple[int, ...]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param head_config_overrides: Optional dict merged into the
+        ``ClassificationHead`` configuration (e.g.,
+        ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). ``name``,
+        ``num_classes`` and ``task_type`` are owned by the model and raise
+        ``ValueError``. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``depths`` and ``dims`` differ in length, if
+    :raises ValueError: If ``include_top`` is True and ``num_classes`` is not
+        positive, if ``depths`` and ``dims`` differ in length, if
         ``strides`` is not positive, if ``stochastic_mode`` is not ``'depth'``
-        or ``'gradient'``, or if ``input_shape`` is not 3D.
+        or ``'gradient'``, if ``input_shape`` is not 3D, or if
+        ``head_config_overrides`` names ``name``, ``num_classes`` or
+        ``task_type``.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        - ``include_top=True``: 2D tensor ``(batch_size, num_classes)``.
-        - ``include_top=True, num_classes=0``: 2D tensor
-          ``(batch_size, dims[-1])`` of pooled, normalized features.
+        - ``include_top=True``: 2D logits tensor ``(batch_size, num_classes)``.
         - ``include_top=False``: 4D tensor ``(batch_size, H', W', dims[-1])``.
 
     Example:
@@ -310,11 +313,15 @@ class ConvNeXtV1(keras.Model):
             use_softorthonormal_regularizer: bool = False,
             include_top: bool = True,
             input_shape: Tuple[int, ...] = (None, None, 3),
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         super().__init__(**kwargs)
+
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
 
         depths = list(depths) if depths is not None else [3, 3, 9, 3]
         dims = list(dims) if dims is not None else [96, 192, 384, 768]
@@ -370,7 +377,6 @@ class ConvNeXtV1(keras.Model):
         self.input_shape = input_shape
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.input_height, self.input_width, self.input_channels = input_shape
@@ -514,9 +520,6 @@ class ConvNeXtV1(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',  # GAP for ConvNeXt
                 'use_attention': False,
-                'use_ffn': True,
-                'ffn_type': 'mlp',
-                'ffn_expansion_factor': 4,
                 # An unnamed head is named `classification_head` in whichever
                 # process creates it first and `classification_head_1`, `_2`, ...
                 # afterwards. Weight transfer matches layers BY NAME, so a
@@ -525,8 +528,9 @@ class ConvNeXtV1(keras.Model):
                 # read as a success. Naming it makes the path stable.
                 'name': 'classification_head',
             })
-            if self._head_config_overrides:
-                head_config.update(self._head_config_overrides)
+            head_config = merge_head_config_overrides(
+                head_config, self._head_config_overrides
+            )
 
             self.classification_head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
@@ -569,11 +573,10 @@ class ConvNeXtV1(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode.
         :type training: Optional[bool]
-        :return: Output tensor. Dict ``{'logits': ..., 'probabilities': ...}`` with
-            ``include_top=True``, ``(batch_size, dims[-1])`` when additionally
-            ``num_classes == 0``, otherwise the final stage's feature maps
+        :return: The pre-softmax logits ``(batch_size, num_classes)`` with
+            ``include_top=True``, otherwise the final stage's feature maps
             ``(batch_size, H', W', dims[-1])``.
-        :rtype: keras.KerasTensor or Dict[str, keras.KerasTensor]
+        :rtype: keras.KerasTensor
         """
         x = self.stem_conv(inputs)
         x = self.stem_norm(x)
@@ -593,7 +596,7 @@ class ConvNeXtV1(keras.Model):
 
         if self.include_top:
             head_output = self.classification_head(x, training=training)
-            return head_output['probabilities']
+            return head_output['logits']
 
         return x
 
@@ -861,9 +864,8 @@ class ConvNeXtV1(keras.Model):
         # 3. Head.
         if self.include_top:
             current_shape = self.classification_head.compute_output_shape(current_shape)
-            # classification_head returns dict, we want the logits shape
-            if isinstance(current_shape, dict):
-                current_shape = current_shape['logits']
+            # The head reports both keys; call() returns the 'logits' one.
+            current_shape = current_shape['logits']
 
         return current_shape
 
@@ -890,7 +892,6 @@ class ConvNeXtV1(keras.Model):
             "include_top": self.include_top,
             "input_shape": self.input_shape,
             "strides": self.strides,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
@@ -909,13 +910,7 @@ class ConvNeXtV1(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
+        return cls(**config)
 
     def summary(self, **kwargs) -> None:
         """Print the model summary with additional ConvNeXt-specific information.
@@ -955,7 +950,6 @@ def create_convnext_v1(
         weights_dataset: str = "imagenet",
         weights_input_shape: Optional[Tuple[int, ...]] = None,
         cache_dir: Optional[str] = None,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
 ) -> ConvNeXtV1:
@@ -984,10 +978,9 @@ def create_convnext_v1(
     :type weights_input_shape: Optional[Tuple[int, ...]]
     :param cache_dir: Directory to cache downloaded weights.
     :type cache_dir: Optional[str]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration; ``name``, ``num_classes`` and ``task_type`` raise
+        ``ValueError``.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments passed to the model constructor.
     :return: ConvNeXtV1 model instance.
@@ -1021,7 +1014,6 @@ def create_convnext_v1(
         weights_dataset=weights_dataset,
         weights_input_shape=weights_input_shape,
         cache_dir=cache_dir,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
         **kwargs
     )

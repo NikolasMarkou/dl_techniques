@@ -31,16 +31,26 @@ MEASURED, GPU 1 (RTX 4070), TF32 on by default -- the regime this gate runs in
 ``ResNet(num_classes=4, blocks_per_stage=[1,1,1,1], filters_per_stage=[8,16,32,64],
 block_type='bottleneck', enable_deep_supervision=True, input_shape=(32,32,3))``:
 
+RE-MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81 step 2), batch 2,
+after the heads became the shared ``ClassificationHead`` emitting logits:
+
 * ``mixed_float16``: 4 output tensors, dtypes
   ``['float16','float16','float16','float16']``, ``absmax``
-  ``[17.515625, 18.96875, 6.109375, 4.2734375]``, all finite;
+  ``[9.023438, 2.457031, 1.481445, 0.902344]``, all finite;
 * ``float32`` control: same arity, ``absmax``
-  ``[17.498203, 18.970032, 6.109206, 4.271974]``;
+  ``[9.016292, 2.457358, 1.483411, 0.902183]``;
 * the largest fp16-vs-float32 relative disagreement across the four heads is
-  **1.0e-3** (head 0), so ``rtol_against_float32=1e-2`` carries a 10x margin
-  and was chosen FROM the measurement, not to make it pass;
+  **1.3e-3** (head 2), so ``rtol_against_float32=1e-2`` carries a 7.5x margin;
+  the bound was chosen from the first measurement (1.0e-3) and not widened;
 * backward under ``mixed_float16``: 0 ``None`` gradients, 0 non-finite,
-  ``grad_norm_sum`` 217.27.
+  ``grad_norm_sum`` 32740.2 (float32 37021.7).
+
+Batch 2, not 1: each head's two ``DenseBlock`` layers carry a BatchNorm, and
+the backward part runs in training mode, where a batch of one normalizes every
+feature to exactly 0. At batch 1 every head output is its constant bias and
+the loss and every gradient are exactly 0 (measured: loss 0.0,
+``grad_norm_sum`` 0 under both policies). That passed while the heads ended
+in a softmax only because a uniform softmax still has a ramp-loss gradient.
 
 GREEN on every one of the four parts. Nothing here is xfailed and nothing was
 relaxed after the numbers were seen.
@@ -89,7 +99,9 @@ def _build() -> ResNet:
 
 
 def _images() -> np.ndarray:
-    return np.random.RandomState(0).randn(1, 32, 32, 3).astype("float32")
+    # Batch 2: see the module docstring (a batch of one zeroes every
+    # BatchNorm-headed output in training mode).
+    return np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
 
 
 def test_the_subject_is_actually_multi_output() -> None:

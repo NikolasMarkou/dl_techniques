@@ -47,6 +47,11 @@ def _manual(logits: np.ndarray, labels: np.ndarray, a: float) -> float:
     return float(np.mean(-(target * log_softmax).sum(axis=-1)))
 
 
+def _penalty(model: keras.Model) -> float:
+    """``sum(model.losses)`` of a called model: the penalties ``evaluate`` adds to the loss."""
+    return float(sum(keras.ops.convert_to_numpy(loss) for loss in model.losses))
+
+
 # ---------------------------------------------------------------------
 # The loss value
 # ---------------------------------------------------------------------
@@ -216,16 +221,22 @@ def test_a_run_with_smoothing_records_it_notes_the_loss_scale_and_reloads(monkey
 
     # The reported test loss is the SMOOTHED cross-entropy of the best model's own logits:
     # the loss reaches compile, evaluate and the summary, not just the config. ``evaluate``
-    # (XLA) and ``predict`` differ by about 0.4% on this untrained-scale model (the plain run
-    # below shows the same gap), so the value is checked at 2% AND must sit closer to the
-    # smoothed manual value than to the unsmoothed one. The run uses a = 0.5 because at 0.1 the
-    # two manual values differ by only 0.03, about twice that noise.
+    # also adds the model's regularization penalties: every ConvNeXt block's layer-scale
+    # ``gamma`` carries an L2, ten of them here, summing to about 0.0143. That constant, not
+    # XLA noise, is the "about 0.4%" gap this check used to absorb with ``rel=2e-2``, which
+    # was wider than the smoothed-vs-plain difference once the model emits real logits
+    # (measured 2026-10-14: reported 2.94994, smoothed 2.93561, plain 2.93663). With the
+    # penalty added the manual value matches the reported one to a relative 2e-8 (plain run
+    # 4e-8), measured on GPU 1, so ``rel=1e-5`` keeps a 250x margin and the smoothed and
+    # plain values (0.035 apart in that measurement) separate cleanly.
     data = common.prepare_data(_config(tmp_path, "unused", epochs=1, max_samples=64))
     logits = best.predict(data.x_test, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
     labels = np.asarray(data.y_test).reshape(-1)
     reported = summary["test_metrics_best"]["loss"]
-    smoothed, plain = _manual(logits, labels, 0.5), _manual(logits, labels, 0.0)
-    assert reported == pytest.approx(smoothed, rel=2e-2)
+    penalty = _penalty(best)
+    smoothed = _manual(logits, labels, 0.5) + penalty
+    plain = _manual(logits, labels, 0.0) + penalty
+    assert reported == pytest.approx(smoothed, rel=1e-5), (reported, smoothed, plain)
     assert abs(reported - smoothed) < abs(reported - plain), (reported, smoothed, plain)
     # The initial-loss guard: a near-uniform model reads a ratio near 1 either way.
     assert 0.5 < summary["initial_loss_ratio"] < 3.0
@@ -242,5 +253,8 @@ def test_a_run_without_smoothing_uses_the_stock_loss_and_has_no_note(monkeypatch
     logits = best.predict(data.x_test, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
     labels = np.asarray(data.y_test).reshape(-1)
     reported = summary["test_metrics_best"]["loss"]
-    assert reported == pytest.approx(_manual(logits, labels, 0.0), rel=2e-2)
-    assert abs(reported - _manual(logits, labels, 0.0)) < abs(reported - _manual(logits, labels, 0.5))
+    penalty = _penalty(best)
+    plain = _manual(logits, labels, 0.0) + penalty
+    smoothed = _manual(logits, labels, 0.5) + penalty
+    assert reported == pytest.approx(plain, rel=1e-5), (reported, plain, smoothed)
+    assert abs(reported - plain) < abs(reported - smoothed)

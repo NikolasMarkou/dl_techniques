@@ -60,8 +60,9 @@ Input (B, H, W, 3)
    ├─► Stage 1: Conv2D(D1) -> BN -> CBAM -> MaxPool2x2     (B, H/4,  W/4,  D1)
    ├─► ...                                                  one stage per entry of `dims`
    │
-   └─► Head (include_top): GlobalAveragePooling2D -> Dense(num_classes, softmax)
-                                                            (B, num_classes)
+   └─► Head (include_top): ClassificationHead
+         GlobalAveragePooling2D -> DenseBlock(256) -> DenseBlock(128)
+         -> Dense(num_classes), linear                     (B, num_classes) logits
 ```
 
 Inside one CBAM block:
@@ -70,8 +71,11 @@ Inside one CBAM block:
 F ──► ChannelAttention ──► Mc ──► multiply ──► F' ──► SpatialAttention ──► Ms ──► multiply ──► F''
 ```
 
-The head ends in **softmax**, so the model outputs probabilities, not logits — compile with
-`from_logits=False`. With `include_top=False` the final stage's 4-D feature map is returned.
+The head is the shared vision `ClassificationHead` (each `DenseBlock` is Dense, BatchNorm,
+ReLU) and its last layer is **linear**, so the model outputs **logits** — compile with
+`from_logits=True` and apply `keras.ops.softmax` to read probabilities. With
+`include_top=False` the final stage's 4-D feature map is returned. Archives saved before
+2026-10-14, when the head still ended in a softmax, are not supported.
 
 ---
 
@@ -117,10 +121,10 @@ model = CBAMNet.from_variant(
     input_shape=(32, 32, 3),
 )
 
-# 2. Compile. The head ends in softmax, so from_logits=False.
+# 2. Compile. The model outputs logits, so from_logits=True.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3),
-    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
 model.summary()
@@ -272,8 +276,9 @@ custom_cbam = CBAM(
 )
 ```
 
-`CBAMNet` itself exposes a single `kernel_regularizer`, which reaches its `Conv2D` and `Dense`
-layers; per-branch control means building the blocks yourself.
+`CBAMNet` itself exposes a single `kernel_regularizer`, which reaches the stage `Conv2D`
+layers only: the `ClassificationHead` takes no regularizer, so its dense kernels are not
+regularized. Per-branch control means building the blocks yourself.
 
 ---
 
@@ -290,9 +295,9 @@ model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
 # model.fit() applies loss scaling automatically.
 ```
 
-Set the policy before constructing the model, and restore `"float32"` afterwards. Note that the
-softmax head runs in the compute dtype; if you need a float32 output layer, build the head yourself
-with an explicit `dtype="float32"`.
+Set the policy before constructing the model, and restore `"float32"` afterwards. The logits
+come out in the compute dtype (float16); Keras' cross-entropy losses upcast them, so no float32
+output layer is needed for training.
 
 ---
 
@@ -335,7 +340,7 @@ None are distributed and none are downloadable: setting the `pretrained` argumen
 
 -   **`model.input` raises `AttributeError`** — this is a subclassed model with no functional graph. See Example 2 for the multi-scale pattern.
 -   **`count_params()` says the layer isn't built** — call the model on one batch first.
--   **Loss looks wrong / accuracy stuck at chance** — the head already applies softmax; compile with `from_logits=False`.
+-   **Loss looks wrong / accuracy stuck at chance** — the model outputs logits; compile with `from_logits=True`.
 -   **`ValueError` on a variant name** — only `tiny`, `small`, `base` exist; use `dims` for anything else.
 -   **`NotImplementedError` from the `pretrained` flag** — no trained weights ship with this package.
 -   **Input too small** — each stage halves the resolution, so a 3-stage variant needs at least 8 pixels per side.

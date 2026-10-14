@@ -98,28 +98,38 @@ from dl_techniques.models.vision.resnet.model import ResNet
 INPUT_SHAPE = (32, 32, 3)
 SEED = 1234
 
-# Golden reference for arm (a), captured by EXECUTING
-# `models/vision/resnet/model.py` as of commit 1ffc1ff8e -- the commit before
-# `stem_type` existed -- on the golden reference device at seed 1234, with
-# `ResNet.from_variant("resnet18", num_classes=10, input_shape=(32, 32, 3))`
-# and `np.random.default_rng(0).random((1, 32, 32, 3))` as input.
-# Reproduce with:
-#   git show 1ffc1ff8e:src/dl_techniques/models/vision/resnet/model.py > /tmp/pre.py
-#   # then importlib-load /tmp/pre.py and hash as below.
-# UPDATED 2026-10-12: Vision heads factory (ClassificationHead with DenseBlocks)
-# changed the head architecture. Using model.weights (not _flatten_layers) which
-# returns 114 weights for the current architecture.
-PRE_KNOB_WEIGHT_COUNT = 114
+# Golden reference for arm (a), captured by EXECUTING the ResNet module as of
+# commit 1ffc1ff8e -- the commit before `stem_type` existed, where it lived at
+# `src/dl_techniques/models/resnet/model.py` -- on the golden reference device
+# (CPU) at seed 1234, with
+# `ResNet.from_variant("resnet18", num_classes=10, input_shape=(32, 32, 3),
+# include_top=False)` and `np.random.default_rng(0).random((1, 32, 32, 3))` as
+# input. HEADLESS, because the property is the STEM: the head has changed twice
+# since that commit (the 2026-10-09 move to the shared ClassificationHead, then
+# its 2026-10-14 switch to logits), and a headed digest can then only be
+# re-captured from the CURRENT code -- which is what the 2026-10-12 update did,
+# silently turning this external reference into a self-reference.
+#
+# Re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 2). Reproduce:
+#   git worktree add --detach <wt> 1ffc1ff8e
+#   CUDA_VISIBLE_DEVICES="" python capture.py <wt>/src dl_techniques.models.resnet.model
+#   CUDA_VISIBLE_DEVICES="" python capture.py src dl_techniques.models.vision.resnet.model
+# where capture.py puts argv[1] first on sys.path, imports argv[2], builds the
+# model above inside `keras.device("cpu")` after `set_random_seed(1234)`, and
+# hashes exactly as `_weight_shape_signature` and the arm below do. BOTH trees
+# printed: count 100, signature
+# 31f58b25a4b2b4c1f82f26e7d66fc5ded2b93de546d1d9728ac3d87528d6e35d, output
+# (1, 1, 1, 512) digest
+# 8cf5f44680c939b43d6e1997b18d1fdff833b08771aa57fe784fe2e538f544c5, first six
+# values [15.713892 0.637421 0. 0.259139 0. 0.].
+PRE_KNOB_WEIGHT_COUNT = 100
 PRE_KNOB_WEIGHT_SIGNATURE_SHA256 = (
-    "38b4146b6bae18a14a18825786c75e4b4bdf48086b3d9375f7115007396c1ea9"
+    "31f58b25a4b2b4c1f82f26e7d66fc5ded2b93de546d1d9728ac3d87528d6e35d"
 )
 PRE_KNOB_OUTPUT_SHA256 = (
-    "ca0c78a48b3d36ae6a1f123a00538d0c8e5ac3805dc46eb315a07d2c93328403"
+    "8cf5f44680c939b43d6e1997b18d1fdff833b08771aa57fe784fe2e538f544c5"
 )
-PRE_KNOB_OUTPUT_HEAD = (
-    "[[3.210097e-02 1.787775e-03 1.249336e-01 2.036685e-03 7.808805e-01 "
-    "4.563436e-04 3.383038e-04 8.806068e-06 5.745009e-02 6.949783e-06]]"
-)
+PRE_KNOB_OUTPUT_HEAD = "[15.713892  0.637421  0.        0.259139  0.        0.      ]"
 
 
 def _resnet18(stem_type=None, **kwargs) -> ResNet:
@@ -195,6 +205,10 @@ def test_the_imagenet_stem_reproduces_the_pre_knob_model_exactly(
     ``importlib``, on the golden reference device, at seed 1234. The post-knob
     code reproduces both, and the capture is stable across repeated runs.
 
+    The arm runs HEADLESS (``include_top=False``) since 2026-10-14: the stem is
+    what it defends, and only a headless digest can still be captured from the
+    pre-knob commit itself (see the constants above).
+
     Device: pinned to the golden reference device because
     ``test_basic_blocks_work_at_any_stage0_width.py`` records that the same
     ResNet forward on GPU 1 is NOT reproducible run-to-run at this size (two
@@ -204,11 +218,11 @@ def test_the_imagenet_stem_reproduces_the_pre_knob_model_exactly(
     images = _images()
 
     with keras.device(golden_reference_device):
-        default_model = _resnet18(stem_type=None)
+        default_model = _resnet18(stem_type=None, include_top=False)
         default_out = keras.ops.convert_to_numpy(
             default_model(images, training=False)
         )
-        explicit_model = _resnet18(stem_type="imagenet")
+        explicit_model = _resnet18(stem_type="imagenet", include_top=False)
         explicit_out = keras.ops.convert_to_numpy(
             explicit_model(images, training=False)
         )
@@ -235,8 +249,9 @@ def test_the_imagenet_stem_reproduces_the_pre_knob_model_exactly(
     assert output_digest == PRE_KNOB_OUTPUT_SHA256, (
         f"the default forward output is no longer bit-identical to the "
         f"pre-knob model: {output_digest} != {PRE_KNOB_OUTPUT_SHA256}. "
-        f"Got {np.array2string(default_out, precision=6)}, pre-knob "
-        f"{PRE_KNOB_OUTPUT_HEAD}."
+        f"Got first six "
+        f"{np.array2string(default_out.reshape(-1)[:6], precision=6)}, "
+        f"pre-knob {PRE_KNOB_OUTPUT_HEAD}."
     )
 
     # Secondary: an EXPLICIT 'imagenet' must equal the unspecified default.

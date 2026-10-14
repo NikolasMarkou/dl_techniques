@@ -88,8 +88,21 @@ from tests.optimizer_state import build_optimizer_state
 #: ``tree_transformer``, kernel and bias: +6). Headless they were distilbert
 #: 16, fnet 15, gemma 15, gpt2 18, mamba 14, modern_bert 12, qwen 97 and
 #: tree_transformer 28.
+#:
+#: RE-MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81 step 2, D-012):
+#: ``cbam`` 22 -> 34 and ``resnet`` 32 -> 44. Diagnosis: the PIN was stale,
+#: not the build. Both counts were pinned on 2026-08-22, when each model's head
+#: was ``GlobalAveragePooling2D`` + one ``Dense`` (2 weights). The user's
+#: 2026-10-09 commits (``aaccdf2c2`` for CBAM, ``728c33e3b`` for ResNet) moved
+#: both to the shared ``ClassificationHead``, whose two ``DenseBlock`` layers
+#: add 12 weights (Dense kernel/bias plus BatchNorm gamma/beta/moving_mean/
+#: moving_variance, twice). Re-derived by building each ``roundtrip_subject``
+#: and listing ``relative_path`` over ``model.weights``: cbam 20 backbone +
+#: 14 ``classification_head/`` = 34, resnet 30 + 14 = 44. ``build()`` and a
+#: forward call still materialize the identical set, which is the property
+#: this file defends.
 FIXED = {
-    "cbam": 22,
+    "cbam": 34,
     "distilbert": 24,
     "fnet": 23,
     "gemma": 22,
@@ -117,7 +130,7 @@ FIXED = {
     "pw_fnet": 100,
     "qwen": 104,
     "relgt": 49,
-    "resnet": 32,
+    "resnet": 44,
     "scunet": 148,
     "sd3_mmdit": 124,
     "tabm": 5,

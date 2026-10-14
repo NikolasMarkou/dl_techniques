@@ -19,6 +19,7 @@ from dl_techniques.models.vision.cbam.model import CBAMNet, create_cbam_net
 from dl_techniques.layers.attention.channel_attention import ChannelAttention
 from dl_techniques.layers.attention.spatial_attention import SpatialAttention
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
+from tests.numerics import reassociation_atol
 
 
 class TestCBAMNet:
@@ -84,9 +85,14 @@ class TestCBAMNet:
         output = model(sample_data)
         assert model.built
         assert output.shape == (sample_data.shape[0], model_config["num_classes"])
-        # Output should be probabilities from softmax
-        assert tf.reduce_all(output >= 0.0) and tf.reduce_all(output <= 1.0)
-        assert np.allclose(tf.reduce_sum(output, axis=-1), 1.0)
+        # The output is logits, not a softmax: a softmax row would sum to 1
+        # within the float32 rounding bound of a num_classes-long reduction.
+        rows = keras.ops.convert_to_numpy(keras.ops.sum(output, axis=-1))
+        atol = reassociation_atol([model_config["num_classes"]], 1, 1.0)
+        assert np.any(np.abs(rows - 1.0) > atol), (
+            f"every row sums to 1 within {atol:.2e}: {rows}; CBAMNet re-applied a softmax")
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(output, axis=-1))
+        np.testing.assert_allclose(probs.sum(axis=-1), 1.0, rtol=0, atol=atol)
 
     def test_forward_pass_without_top(self, model_config: Dict[str, Any], sample_data: tf.Tensor):
         """Test a forward pass as a feature extractor (headless)."""
@@ -175,7 +181,7 @@ class TestCBAMNet:
         model = CBAMNet(**model_config)
         model.compile(
             optimizer="adam",
-            loss="sparse_categorical_crossentropy",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"]
         )
 

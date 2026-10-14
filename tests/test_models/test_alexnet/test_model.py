@@ -28,6 +28,7 @@ from dl_techniques.models.vision.alexnet.model import (
 )
 from dl_techniques.models.vision.alexnet.spatial_guard import STAGES, conv_out
 from dl_techniques.layers.norms.local_response_norm import LocalResponseNormalization
+from tests.numerics import reassociation_atol
 
 
 def _sample(batch=2, size=227, channels=3, seed=0):
@@ -301,16 +302,26 @@ class TestConstructionValidatesEarly:
 
 
 class TestForwardPassAndShapes:
-    def test_the_default_model_emits_class_probabilities(self):
+    def test_the_default_model_emits_one_logit_per_class(self):
         model = AlexNet()
         out = model(_sample(batch=2))
         assert out.shape == (2, 1000)
 
-    def test_the_output_is_a_probability_distribution(self):
+    def test_the_output_is_logits_not_a_probability_distribution(self):
+        """fc8 is linear: the rows are not normalized, their softmax is.
+
+        A softmax row sums to 1 within the float32 rounding bound of a
+        1000-long reduction, ``reassociation_atol([1000], 1, 1.0)``. Before the
+        head emitted logits every row sat inside it.
+        """
         model = AlexNet()
-        out = np.asarray(model(_sample(batch=4)))
-        assert np.all(out >= 0.0)
-        np.testing.assert_allclose(out.sum(axis=1), np.ones(4), rtol=0, atol=1e-5)
+        out = keras.ops.convert_to_numpy(model(_sample(batch=4)))
+        atol = reassociation_atol([1000], 1, 1.0)
+        rows = out.sum(axis=1)
+        assert np.any(np.abs(rows - 1.0) > atol), (
+            f"every row sums to 1 within {atol:.2e}: {rows}")
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(out, axis=-1))
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(4), rtol=0, atol=atol)
 
     def test_num_classes_changes_the_output_width(self):
         model = AlexNet(num_classes=37)
@@ -354,7 +365,8 @@ class TestGradientsReachEveryStage:
     def test_one_fit_step_updates_the_convolutions_and_the_head(self):
         model = create_alexnet(num_classes=4)
         model.compile(
-            optimizer="sgd", loss="sparse_categorical_crossentropy",
+            optimizer="sgd",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"],
         )
         rng = np.random.default_rng(4)
@@ -385,7 +397,10 @@ class TestGradientsReachEveryStage:
     def test_the_lrn_band_is_not_updated_by_training(self):
         """It is a constant; a gradient step must leave it untouched."""
         model = create_alexnet(num_classes=4)
-        model.compile(optimizer="sgd", loss="sparse_categorical_crossentropy")
+        model.compile(
+            optimizer="sgd",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
         rng = np.random.default_rng(5)
         _ = model(rng.normal(size=(1, 227, 227, 3)).astype("float32"))
         before = keras.ops.convert_to_numpy(model.lrn1.band).copy()
@@ -421,7 +436,7 @@ class TestParameterAccounting:
         assert head.dense_blocks[1].count_params() == 8_398_848   # dense_block_1 (2048 units)
         assert head.classifier.count_params() == 2_049_000         # classifier (1000 units)
 
-    def test_ninety_seven_percent_of_the_parameters_are_fully_connected(self):
+    def test_ninety_six_percent_of_the_parameters_are_fully_connected(self):
         """The architecture's defining cost, recorded as a number."""
         model = AlexNet()
         _ = model(_sample(batch=1))

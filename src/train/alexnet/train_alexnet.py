@@ -364,7 +364,8 @@ def train_alexnet(
 
     model.compile(
         optimizer=optimizer,
-        loss="sparse_categorical_crossentropy",
+        # AlexNet returns logits (its fc8 is linear).
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     # `kernel_reg` is reported rather than applied: the AdamW branch above is the

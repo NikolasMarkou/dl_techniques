@@ -436,7 +436,7 @@ class TestConvNeXtV1:
         for optimizer in optimizers:
             model.compile(
                 optimizer=optimizer,
-                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=["accuracy"]
             )
             assert model.optimizer == optimizer
@@ -489,7 +489,7 @@ class TestConvNeXtV1:
         )
         model.compile(
             optimizer="adam",
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"]
         )
 
@@ -678,7 +678,7 @@ class TestConvNeXtV1:
         )
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=0.01),
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"]
         )
 
@@ -713,7 +713,7 @@ class TestConvNeXtV1:
 
         with tf.GradientTape() as tape:
             outputs = model(cifar_sample_data, training=True)
-            loss = keras.losses.sparse_categorical_crossentropy(labels, outputs, from_logits=False)
+            loss = keras.losses.sparse_categorical_crossentropy(labels, outputs, from_logits=True)
             loss = tf.reduce_mean(loss)
 
         # Get gradients

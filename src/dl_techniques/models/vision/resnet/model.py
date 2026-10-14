@@ -12,9 +12,13 @@ choice matters on small inputs. A shortcut carries a projection only where
 identity cannot apply directly (a stride-2 stage boundary, or stage 0
 under the bottleneck design); everywhere else it is parameter-free.
 
-With deep supervision on, every stage but the last gets its own pooling
-and classification head, and the model returns
-`[final_output, stage3, stage2, stage1]` (deepest head first). BatchNorm
+The head is the shared vision `ClassificationHead` (global average pool,
+two dense blocks, a linear `Dense(num_classes)`), and the model returns its
+pre-softmax LOGITS: compile with `from_logits=True` and apply
+`keras.ops.softmax` to read probabilities. With deep supervision on, every
+stage but the last gets its own head of the same kind, and the model returns
+the logits list `[final_output, stage3, stage2, stage1]` (deepest head
+first). BatchNorm
 momentum defaults to `0.9` (Keras convention) to match torchvision's
 `momentum=0.1` (`keras_momentum = 1 - torch_momentum`), a training-only
 constant that does not affect the `training=False` forward pass. No
@@ -56,6 +60,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -77,9 +82,12 @@ class ResNet(keras.Model):
     3x3, 1x1 expand). Shortcut projections are inserted only where the identity
     cannot be taken verbatim: at the first block of every stage after the first
     (stride-2 shape change), plus stage 0's first block under the bottleneck
-    design (channel widening at stride 1). With ``enable_deep_supervision=True``
-    every stage but the last receives its own GAP + Dense head (the last stage is
-    the main head's own), and the model returns
+    design (channel widening at stride 1). The head is the shared
+    ``ClassificationHead``: GAP, two ``DenseBlock`` layers (``hidden_dim`` and
+    ``hidden_dim // 2`` wide) and a linear ``Dense(num_classes)``, and the model
+    returns its logits. With ``enable_deep_supervision=True`` every stage but
+    the last receives its own head of the same kind (the last stage is the main
+    head's own), and the model returns the logits list
     ``[final_output, stage3, stage2, stage1]``.
 
     Architecture:
@@ -122,13 +130,13 @@ class ResNet(keras.Model):
             └───────────┬──────────┘            │  │  │
                         ▼                       ▼  ▼  ▼ (deep supervision)
         ┌──────────────────────────────────────┐ ┌──────────────┐
-        │  GAP → Dense(num_classes)            │ │ GAP → Dense  │
-        │  (if include_top)                    │ │ per stage    │
+        │  ClassificationHead (if include_top) │ │ Classific.   │
+        │  GAP → 2×DenseBlock → Dense, logits  │ │ Head / stage │
         └───────────────┬──────────────────────┘ └──────┬───────┘
                         │                               │
                         ▼                               ▼
         ┌───────────────────────────────────────────────────────┐
-        │  Output: [B, num_classes]                             │
+        │  Output: logits [B, num_classes]                      │
         │   include_top=False        → [B, H', W', f₄·expansion]│
         │   deep_supervision=True    → [final, s3, s2, s1]      │
         └───────────────────────────────────────────────────────┘
@@ -144,7 +152,7 @@ class ResNet(keras.Model):
         resnet152  [3, 8, 36, 3]  [64, 128, 256, 512]   bottleneck
 
     :param num_classes: Number of output classes. Only used when
-        ``include_top=True``. A value of 0 returns pooled features from the head.
+        ``include_top=True``, where it must be positive.
     :type num_classes: int
     :param blocks_per_stage: Number of residual blocks in each stage. Must have
         the same length as ``filters_per_stage``. Defaults to ``[3, 4, 6, 3]``.
@@ -155,8 +163,9 @@ class ResNet(keras.Model):
     :param block_type: Residual block design, ``'basic'`` or ``'bottleneck'``.
         Defaults to ``'bottleneck'``.
     :type block_type: Literal['basic', 'bottleneck']
-    :param kernel_regularizer: Optional regularizer applied to all convolution
-        and dense kernels.
+    :param kernel_regularizer: Optional regularizer applied to every convolution
+        kernel of the stem and the blocks. The ``ClassificationHead`` takes no
+        regularizer, so the head's dense kernels are not regularized.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param normalization_type: Normalization layer identifier passed to
         ``create_normalization_layer``. Defaults to ``'batch_norm'``.
@@ -194,26 +203,28 @@ class ResNet(keras.Model):
         last two stages stride an already-collapsed map. Both stems take their
         width from ``filters_per_stage[0]``.
     :type stem_type: Literal['imagenet', 'cifar']
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param head_config_overrides: Optional dict merged into the configuration of
+        the main and every supervision ``ClassificationHead`` (e.g.,
+        ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). ``name``,
+        ``num_classes`` and ``task_type`` are owned by the model and raise
+        ``ValueError``. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
-    :raises ValueError: If ``blocks_per_stage`` and ``filters_per_stage`` differ
+    :raises ValueError: If ``include_top`` is True and ``num_classes`` is not
+        positive, if ``blocks_per_stage`` and ``filters_per_stage`` differ
         in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
-        ``stem_type`` is not ``'imagenet'`` or ``'cifar'``, or if
-        ``input_shape`` is not 3D.
+        ``stem_type`` is not ``'imagenet'`` or ``'cifar'``, if
+        ``input_shape`` is not 3D, or if ``head_config_overrides`` names
+        ``name``, ``num_classes`` or ``task_type``.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        - ``include_top=True``: 2D tensor ``(batch_size, num_classes)``.
+        - ``include_top=True``: 2D logits tensor ``(batch_size, num_classes)``.
         - ``include_top=False``: 4D tensor ``(batch_size, H', W', channels)``.
-        - ``enable_deep_supervision=True``: list of 2D tensors, ordered
+        - ``enable_deep_supervision=True``: list of 2D logits tensors, ordered
           ``[final_output, stage3, stage2, stage1]`` (reversed, matching the
           BFUNet output convention). Inference typically uses index 0 alone.
 
@@ -277,11 +288,15 @@ class ResNet(keras.Model):
             enable_deep_supervision: bool = False,
             input_shape: Tuple[int, ...] = (224, 224, 3),
             stem_type: Literal["imagenet", "cifar"] = "imagenet",
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         super().__init__(**kwargs)
+
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
 
         blocks_per_stage = list(blocks_per_stage) if blocks_per_stage is not None else [3, 4, 6, 3]
         filters_per_stage = list(filters_per_stage) if filters_per_stage is not None else [64, 128, 256, 512]
@@ -330,7 +345,6 @@ class ResNet(keras.Model):
         self.input_height, self.input_width, self.input_channels = input_shape
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_stem()
@@ -436,23 +450,21 @@ class ResNet(keras.Model):
             'use_global_pooling': True,
             'pooling_type': 'avg',  # GAP for ResNet
             'use_attention': False,
-            'use_ffn': True,
-            'ffn_type': 'mlp',
-            'ffn_expansion_factor': 4,
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
             'name': 'classification_head',
         })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
         self.classification_head = create_vision_head(
             VisionTaskType.CLASSIFICATION, **head_config
         )
 
     def _build_supervision_heads(self) -> None:
-        """Build one ClassificationHead per stage except the last.
+        """Build one ClassificationHead per stage except the last; each emits logits.
 
         The final stage is already served by the main head; stage 0 is
         supervised since it is the one stage where deep supervision
@@ -470,17 +482,15 @@ class ResNet(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': False,
-                'use_ffn': True,
-                'ffn_type': 'mlp',
-                'ffn_expansion_factor': 4,
                 # Per-stage suffix: this model builds N heads, so they need
                 # distinct names. Deterministic, because an unnamed head takes
                 # Keras' auto suffix in process-creation order, which breaks
                 # the by-name matching that weight transfer relies on.
                 'name': f'supervision_head_{stage_idx}',
             })
-            if self._head_config_overrides:
-                head_config.update(self._head_config_overrides)
+            head_config = merge_head_config_overrides(
+                head_config, self._head_config_overrides
+            )
 
             sup_head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
@@ -514,9 +524,9 @@ class ResNet(keras.Model):
         :param inputs: Input tensor of shape `(batch_size, height, width, channels)`.
         :param training: Whether batch norm and dropout run in training mode.
         :return:
-            A single tensor `(batch_size, num_classes)` (`include_top=True`)
+            The logits `(batch_size, num_classes)` (`include_top=True`)
             or `(batch_size, H', W', channels)` (`include_top=False`), or,
-            with deep supervision, the list
+            with deep supervision, the logits list
             `[final_output, stage3, stage2, stage1]`.
         """
         x = self.stem_conv(inputs)
@@ -534,7 +544,7 @@ class ResNet(keras.Model):
 
         if self.include_top:
             head_output = self.classification_head(x, training=training)
-            final_output = head_output['probabilities']
+            final_output = head_output['logits']
         else:
             final_output = x
 
@@ -544,7 +554,7 @@ class ResNet(keras.Model):
             for sup_head in reversed(self.supervision_heads):
                 feat = stage_features[sup_head["stage_idx"]]
                 sup_output = sup_head["head"](feat, training=training)
-                supervision_outputs.append(sup_output['probabilities'])
+                supervision_outputs.append(sup_output['logits'])
             return [final_output] + supervision_outputs
 
         return final_output
@@ -730,7 +740,6 @@ class ResNet(keras.Model):
             "include_top": self.include_top,
             "enable_deep_supervision": self.enable_deep_supervision,
             "input_shape": self.input_shape_config,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
@@ -743,13 +752,7 @@ class ResNet(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -763,7 +766,6 @@ def create_resnet(
         weights_dataset: str = "imagenet",
         weights_input_shape: Optional[Tuple[int, ...]] = None,
         cache_dir: Optional[str] = None,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
 ) -> ResNet:
@@ -778,10 +780,9 @@ def create_resnet(
     :param weights_dataset: Dataset the pretrained weights were trained on.
     :param weights_input_shape: Input shape used during pretraining.
     :param cache_dir: Directory to cache downloaded weights.
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
+    :param head_config_overrides: Optional dict merged into every head's
+        configuration; ``name``, ``num_classes`` and ``task_type`` raise
+        ``ValueError``.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to the constructor.
     :return: A configured `ResNet` instance.
@@ -800,7 +801,6 @@ def create_resnet(
         weights_dataset=weights_dataset,
         weights_input_shape=weights_input_shape,
         cache_dir=cache_dir,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
         **kwargs
     )

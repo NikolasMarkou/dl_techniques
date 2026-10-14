@@ -122,7 +122,8 @@ def test_the_documented_list_indexed_pattern_trains() -> None:
     num_outputs = info["num_outputs"]
     assert num_outputs == 4, f"expected 4 supervision heads, got {num_outputs}"
 
-    losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=False)] * num_outputs
+    # The heads emit logits, as the README says.
+    losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
     loss_weights = [1.0, 0.3, 0.2, 0.1]
     metrics = [[keras.metrics.SparseCategoricalAccuracy(name="primary_accuracy")]]
     metrics += [[] for _ in range(num_outputs - 1)]
@@ -161,7 +162,10 @@ def test_the_dict_keyed_pattern_the_readme_used_to_teach_raises() -> None:
     model = _deep_supervised_model()
     x, y = _synthetic_batch()
 
-    keyed_losses = {f"output_{i}": "sparse_categorical_crossentropy" for i in range(4)}
+    keyed_losses = {
+        f"output_{i}": keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        for i in range(4)
+    }
     keyed_weights = {"output_0": 1.0, "output_1": 0.3, "output_2": 0.2, "output_3": 0.1}
     keyed_labels = {f"output_{i}": y for i in range(4)}
 
@@ -243,7 +247,8 @@ def test_the_documented_fine_tuning_wrapper_trains() -> None:
     inputs = keras.Input(shape=INPUT_SHAPE)
     x = base_model(inputs)
     x = keras.layers.GlobalAveragePooling2D()(x)
-    outputs = keras.layers.Dense(100, activation="softmax", name="new_predictions")(x)
+    # Linear, as in the README: the new head emits logits.
+    outputs = keras.layers.Dense(100, name="new_predictions")(x)
     model = keras.Model(inputs, outputs)
 
     # The load-bearing claim of the README's note: `model.layers` holds the
@@ -268,7 +273,7 @@ def test_the_documented_fine_tuning_wrapper_trains() -> None:
 
     model.compile(
         optimizer=keras.optimizers.Adam(1e-4),
-        loss="categorical_crossentropy",
+        loss=keras.losses.CategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     rng = np.random.default_rng(1)
@@ -283,7 +288,7 @@ def test_the_documented_fine_tuning_wrapper_trains() -> None:
         layer.trainable = True
     model.compile(
         optimizer=keras.optimizers.Adam(1e-5),
-        loss="categorical_crossentropy",
+        loss=keras.losses.CategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     thawed_count = len(model.trainable_weights)

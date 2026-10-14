@@ -29,6 +29,8 @@ from ..gradient_flow_oracle import (
     stop_all_gradients,
 )
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from tests.numerics import reassociation_atol
+
 from ..smoke_contract_oracle import (
     assert_contract_rejects_a_broken_forward,
     assert_finite,
@@ -139,8 +141,13 @@ class TestCBAMSmokeContract:
                 f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}"
             )
             assert_finite(out)
+            # Logits, not probabilities: some row must miss 1 by more than the
+            # float32 rounding bound a softmax row would sit inside.
             rows = keras.ops.convert_to_numpy(keras.ops.sum(out, axis=-1))
-            np.testing.assert_allclose(rows, np.ones_like(rows), atol=1e-5)
+            atol = reassociation_atol([NUM_CLASSES], 1, 1.0)
+            assert np.any(np.abs(rows - 1.0) > atol), (
+                f"every row sums to 1 within {atol:.2e}: {rows}; the output "
+                f"is a softmax, not logits")
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)
         assert set(rejections) == {

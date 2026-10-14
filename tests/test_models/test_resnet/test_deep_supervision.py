@@ -23,6 +23,7 @@ import tensorflow as tf
 
 from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.optimization.deep_supervision import schedule_builder
+from tests.numerics import reassociation_atol
 
 
 BLOCKS = [1, 1, 1, 1]
@@ -110,19 +111,14 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         """Anti-vacuity for the assertion above: the zero is a property of the
         auxiliary heads, not of the probe.
 
-        The probe used `tf.reduce_sum(output[0])`, which is vacuous here and
-        has been since the head became the factory `ClassificationHead`: that
-        head's classifier applies softmax, so a row of its `'probabilities'`
-        output sums to the CONSTANT 1.0 and `d(sum)/d(weights)` is identically
-        zero for any softmax model -- the probe could not have passed, and its
-        passing before the head migration was the only thing that ever made it
-        look meaningful. Verified directly: a one-layer
-        `Dense(5, activation='softmax')` fed to `reduce_sum` yields
-        `[None, None]` gradients.
-
-        The claim is made on the LOSS instead, which is what training actually
-        differentiates: cross-entropy against a one-hot target is a function of
-        the probabilities whose gradient is not degenerate.
+        The claim is made on the LOSS, which is what training actually
+        differentiates: ``from_logits=True`` cross-entropy against a one-hot
+        target. Every output in the list is logits (plan
+        plan-2026-10-14T062616-81938e81, D-002). Between the factory-head
+        migration and that plan the outputs were softmax probabilities, and a
+        ``tf.reduce_sum`` probe over a probability row is the CONSTANT 1.0 with
+        an identically zero gradient -- which is why this file never went back
+        to ``reduce_sum`` for its positive claims.
         """
         model = _model()
         x = tf.constant(np.random.rand(2, *INPUT_SHAPE).astype("float32"))
@@ -130,9 +126,9 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         labels = tf.one_hot([0, 1], NUM_CLASSES)
 
         with tf.GradientTape() as tape:
-            probs = model(x, training=False)[0]
+            logits = model(x, training=False)[0]
             loss = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(labels, probs)
+                keras.losses.categorical_crossentropy(labels, logits, from_logits=True)
             )
         grads = tape.gradient(loss, last_weights)
         total = sum(
@@ -146,9 +142,8 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         supervision shortens the backprop path. The last auxiliary output (the
         list is reversed, deepest first) must reach stage 0's weights.
 
-        Cross-entropy rather than `reduce_sum`, for the reason spelled out in
-        `test_the_main_head_does_depend_on_the_final_stage`: these outputs are
-        softmax probabilities, and summing a probability row is the constant 1.
+        ``from_logits=True`` cross-entropy, the training loss, for the reason
+        spelled out in `test_the_main_head_does_depend_on_the_final_stage`.
         """
         model = _model()
         assert 0 in [h["stage_idx"] for h in model.supervision_heads]
@@ -159,7 +154,8 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         with tf.GradientTape() as tape:
             shallowest_aux = model(x, training=False)[-1]
             loss = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(labels, shallowest_aux)
+                keras.losses.categorical_crossentropy(
+                    labels, shallowest_aux, from_logits=True)
             )
         grads = tape.gradient(loss, first_weights)
         total = sum(
@@ -173,9 +169,9 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         a shallow supervision signal at all.
 
         Cross-entropy, for the same reason as its two siblings: this asserts a
-        ZERO, so a vacuous probe would satisfy it. `reduce_sum` over a softmax
-        row is the constant 1.0 and would have reported zero here no matter what
-        the graph looked like — the assertion passed while proving nothing. The
+        ZERO, so a vacuous probe would satisfy it. Under the former softmax
+        head a `reduce_sum` probe was the constant 1.0 and reported zero here no
+        matter what the graph looked like. The
         cross-entropy probe is the one that has a nonzero gradient for the
         stage-0 weights (see
         `test_the_shallowest_stage_is_supervised`), so a zero against the
@@ -193,7 +189,8 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         with tf.GradientTape() as tape:
             shallowest_aux = model(x, training=False)[-1]
             loss = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(labels, shallowest_aux)
+                keras.losses.categorical_crossentropy(
+                    labels, shallowest_aux, from_logits=True)
             )
         grads = tape.gradient(loss, deeper)
         total = sum(
@@ -221,20 +218,41 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
         """The docstrings promise ``[final, stage3, stage2, stage1]``; the layer
         names must actually come out in that order.
 
-        With the vision heads factory, the head names are auto-generated.
-        We verify the structure and that the reversed iteration produces the
-        correct stage order.
-
-        With 4 stages (0,1,2,3), supervision heads are created for stages 0,1,2
+        Each supervision head is named ``supervision_head_{stage_idx}``, a
+        deterministic name the model sets for by-name weight transfer. With 4
+        stages (0,1,2,3), supervision heads are created for stages 0,1,2
         (stage 3 is handled by the main head). Reversed order should be [2,1,0]."""
         model = _model()
-        stage_indices = [
-            h["stage_idx"] for h in reversed(model.supervision_heads)
-        ]
+        reversed_heads = list(reversed(model.supervision_heads))
+        stage_indices = [h["stage_idx"] for h in reversed_heads]
         assert stage_indices == [2, 1, 0], (
             f"supervision heads in reversed order should be stages 2,1,0 "
             f"but got {stage_indices}"
         )
+        assert [h["head"].name for h in reversed_heads] == [
+            "supervision_head_2", "supervision_head_1", "supervision_head_0"
+        ]
+
+    def test_every_output_in_the_list_is_logits(self):
+        """Main and supervision heads all emit logits, not probabilities.
+
+        A softmax row sums to 1 within ``reassociation_atol([NUM_CLASSES], 1,
+        1.0)``; each output must have a row outside that bound, and its own
+        softmax must sum to 1 inside it.
+        """
+        model = _model()
+        x = tf.constant(
+            np.random.default_rng(7).standard_normal((3, *INPUT_SHAPE)).astype("float32"))
+        outputs = model(x, training=False)
+        assert len(outputs) == len(BLOCKS)
+        atol = reassociation_atol([NUM_CLASSES], 1, 1.0)
+        for idx, out in enumerate(outputs):
+            assert tuple(out.shape) == (3, NUM_CLASSES)
+            rows = keras.ops.convert_to_numpy(keras.ops.sum(out, axis=-1))
+            assert np.any(np.abs(rows - 1.0) > atol), (
+                f"output {idx}: every row sums to 1 within {atol:.2e}: {rows}")
+            probs = keras.ops.convert_to_numpy(keras.ops.softmax(out, axis=-1))
+            np.testing.assert_allclose(probs.sum(axis=-1), 1.0, rtol=0, atol=atol)
 
     def test_output_count_matches_the_schedule_width_the_trainer_builds(self):
         """`src/train/resnet/train_resnet.py` derives ``num_outputs`` from

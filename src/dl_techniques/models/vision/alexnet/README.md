@@ -59,10 +59,18 @@ with Batch Normalization.
   ├─ pool3   3×3 / 2    pad 0                    →   6 × 6 × 256
   │
   ├─ flatten 9216
-  ├─ fc6     4096 → ReLU → dropout 0.5
-  ├─ fc7     4096 → ReLU → dropout 0.5
-  └─ fc8     1000 → softmax
+  ├─ fc6     4096 → BatchNorm → ReLU → dropout 0.5    (ClassificationHead dense_block)
+  ├─ fc7     2048 → BatchNorm → ReLU → dropout 0.5    (dense_block_1, hidden_dim // 2)
+  └─ fc8     1000, linear → LOGITS                    (classifier)
 ```
+
+**The fully connected stages are the shared vision `ClassificationHead`, not the
+paper's.** The paper has fc6 4096 → fc7 4096 with no BatchNorm; the head's second block
+is always `hidden_dim // 2` wide and each block carries a BatchNorm. fc8 is linear, so
+the model returns **logits**: the paper's softmax belongs in the loss — compile with
+`SparseCategoricalCrossentropy(from_logits=True)` and apply `keras.ops.softmax` to read
+probabilities. Archives saved before 2026-10-14, when the head still ended in a
+softmax, are not supported.
 
 Every spatial extent above is **measured**, not copied from the paper's diagram, and
 each one matches it.
@@ -82,16 +90,22 @@ each one matches it.
 | `conv5` | (None, 13, 13, 256) | 442,624 |
 | `pool3` | (None, 6, 6, 256) | 0 |
 | `flatten` | (None, 9216) | 0 |
-| `fc6` | (None, 4096) | 37,752,832 |
-| `fc7` | (None, 4096) | 16,781,312 |
-| `fc8` | (None, 1000) | 4,097,000 |
-| **Total** | | **60,597,608** |
+| `fc6` (`dense_block`) | (None, 4096) | 37,769,216 |
+| `fc7` (`dense_block_1`) | (None, 2048) | 8,398,848 |
+| `fc8` (`classifier`) | (None, 1000) | 2,049,000 |
+| **Total** | | **50,183,528** |
+
+Re-derive with `m = create_alexnet(); m.build((None, 227, 227, 3)); m.count_params()`
+and each layer's `count_params()` (the fc rows are
+`m.classification_head.dense_blocks[0]`, `[1]` and `.classifier`). fc6 and fc7 include
+their BatchNorm's 4 x width values, half of them non-trainable moving statistics.
 
 Three things about those numbers are worth stating plainly, because each one is
 usually reported incorrectly:
 
 - **The folklore figure is high.** "About 62 million" is in wide circulation; the
-  exact sum for this architecture at this configuration is **60,597,608**. This
+  exact sum for the paper's 4096-4096 stack at this configuration is **60,597,608**,
+  and this port, with its 2048-wide fc7, totals **50,183,528**. This
   package prints its own measured figure rather than the folklore one.
 - **`lrn1`/`lrn2` are not free.** Each LRN holds its `C × C` neighbourhood band as a
   **non-trainable** weight — 96² and 256², i.e. **74,752** parameters of the total.
@@ -203,12 +217,14 @@ architecture: `conv3` takes 384 × (256/2) × 9 + 384 parameters rather than
 ## 6. Quick start
 
 ```python
+import keras
 from dl_techniques.models.vision.alexnet import create_alexnet
 
 model = create_alexnet(num_classes=1000, input_shape=(227, 227, 3))
 model.compile(
     optimizer="adam",
-    loss="sparse_categorical_crossentropy",
+    # The model returns logits.
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
 model.fit(images, labels, epochs=90, batch_size=256)
@@ -218,10 +234,10 @@ model.fit(images, labels, epochs=90, batch_size=256)
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `num_classes` | 1000 | Width of the final softmax |
+| `num_classes` | 1000 | Width of fc8, the linear logits layer |
 | `input_shape` | (227, 227, 3) | Spatial shape plus channels |
 | `dropout_rate` | 0.5 | After fc6 and fc7 |
-| `kernel_initializer` | `'glorot_uniform'` | All five convolutions and the dense layers |
+| `kernel_initializer` | `'glorot_uniform'` | All five convolutions (the head uses its own) |
 | `bias_initializer` | `'zeros'` | Every bias |
 | `include_top` | `True` | `False` stops at `pool3` and returns a feature map |
 | `lrn_hyperparameters` | paper's | Forwarded to both LRN layers |
@@ -241,7 +257,7 @@ backbone = create_alexnet(include_top=False)
 features = backbone(images)   # (batch, 6, 6, 256)
 ```
 
-This drops the 58.6M fully connected parameters and leaves **1,966,464**. It is the
+This drops the 48.2M fully connected parameters and leaves **1,966,464**. It is the
 form to reach for when you want AlexNet's convolution stack as a generic encoder.
 
 Note that the resulting map is small — 6×6 at input 227. For dense prediction you
@@ -283,7 +299,7 @@ schedule is aggressive; expect to tune it.
 
 ## 10. Performance and cost
 
-- **60.6M parameters, 97% of them fully connected.** fc6 alone is 37.8M. This is the
+- **50.2M parameters, 96% of them fully connected.** fc6 alone is 37.8M. This is the
   architecture's defining cost and the reason it is rarely trained from scratch today.
 - **Memory during training** is dominated by activations at 56×56×96 and
   26×26×256, not by parameters.
