@@ -1620,9 +1620,13 @@ def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], 
 # ``inspect.signature(type(model).__init__)`` -- 32 of the 85 subjects,
 # re-derived 2026-10-13 (the comment read "13 of the 72" when written) -- and
 # ``test_the_no_head_sibling_set_is_the_include_top_set`` re-derives it, so a
-# package that GAINS the knob cannot stay out of the arm. 26 of the 32 have a
-# sibling; that test names the 6 that do not (beit, darkir, depth_anything,
-# fftnet, pft_sr, scunet).
+# package that GAINS the knob cannot stay out of the arm. On 2026-10-13 26 of
+# the 32 had a sibling and that test was RED, naming the 6 that did not (beit,
+# darkir, depth_anything, fftnet, pft_sr, scunet); it is only ever selected
+# unfiltered, so ``-k <package>`` runs never saw it. Since
+# plan-2026-10-14T062616-81938e81 step 6.1 all 31 have one: ``fftnet`` left the
+# set (its ``include_top`` built and returned the same thing either way, a dead
+# knob, deleted) and the other five gained a sibling below.
 
 NO_HEAD_SIBLINGS: Dict[str, Callable[[], Any]] = {}
 
@@ -1768,3 +1772,44 @@ def _b_vit_siglip_no_head():
     return create_siglip_vision_transformer(
         input_shape=(32, 32, 3), num_classes=4, scale="tiny", patch_size=16,
         include_top=False)
+
+
+@_no_head("beit")
+def _b_beit_no_head():
+    from dl_techniques.models.vision.beit import create_beit_classifier
+    return create_beit_classifier("tiny", (32, 32, 3), 16, num_classes=4,
+                                  include_top=False)
+
+
+@_no_head("depth_anything")
+def _b_depth_anything_no_head():
+    from dl_techniques.models.vision.depth_anything import create_depth_anything
+    return create_depth_anything(encoder_type="vit_s", image_shape=(64, 64, 3),
+                                 encoder_kind="placeholder",
+                                 decoder_dims=[16, 16, 16, 16], include_top=False)
+
+
+# The three restoration models: ``include_top=False`` builds no tail and
+# returns the features the tail reads (plan-2026-10-14T062616-81938e81 step
+# 6.1, D-022). Same configurations as their round-trip subjects above.
+@_no_head("scunet")
+def _b_scunet_no_head():
+    from dl_techniques.models.vision.image_restoration.scunet import SCUNet
+    return SCUNet(in_nc=3, config=[1, 1, 1, 1, 1, 1, 1], dim=8, head_dim=4,
+                  window_size=4, input_resolution=64, include_top=False)
+
+
+@_no_head("pft_sr")
+def _b_pft_sr_no_head():
+    from dl_techniques.models.vision.super_resolution.pft_sr import create_pft_sr
+    return create_pft_sr(scale=2, variant="light", include_top=False)
+
+
+@_no_head("darkir")
+def _b_darkir_no_head():
+    from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
+    return create_darkir_model(
+        width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
+        enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2],
+        include_top=False,
+    )

@@ -302,7 +302,16 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # test_composite.py::TestPretrainedRaisesOnAllThree) and by the
         # behavioural arm of test_package_api_contract.py, not by grepping for
         # the word. Both halves checked.
-        "doc_scanner", "fnet",
+        "doc_scanner",
+        # fastvlm: README:228 names `pretrained=True` only to say it raises
+        # (added at plan-2026-10-14T062616-81938e81 step 5, which never ran
+        # this file); `FastVLM.from_variant` really does raise
+        # `NotImplementedError` via `pretrained_path_or_raise`, verified by
+        # EXECUTING `FastVLM.from_variant('nano', ..., pretrained=True)` and
+        # `create_fastvlm('nano', ..., pretrained=True)` at step 6.1 and
+        # reading the raise. Both halves checked.
+        "fastvlm",
+        "fnet",
         # hnet: README:14 and :185 both name `pretrained=True` only to say it
         # raises; model.py:702 really does `raise NotImplementedError`, verified
         # by EXECUTING `HNet.from_variant('hnet_1stage_L', pretrained=True)` and

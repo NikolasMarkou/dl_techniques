@@ -168,6 +168,15 @@ NO_HEAD_MARKERS = {
     "vit": "head/",
     "vit_hmlp": "head/",
     "vit_siglip": "head/",
+    "beit": "mean_pooling_classification_head/",
+    "depth_anything": "depth_estimation_head/",
+    # The restoration models' tails (plan-2026-10-14T062616-81938e81 step 6.1):
+    # SCUNet's and DarkIR's are an EnhancementHead with block_dims=() (1 and 2
+    # weights); PFT-SR's light variant ends in its official
+    # 'pixelshuffledirect' conv (2 weights).
+    "scunet": "enhancement_head/",
+    "darkir": "enhancement_head/",
+    "pft_sr": "upsample_conv/",
     # The language classes' in-model task head (``layers/heads/nlp``
     # ``TASK_HEAD_NAME``). MEASURED 2026-10-11: 8 weights under ``task_head/``
     # in every enabled build, 0 in every headless one.

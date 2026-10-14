@@ -746,7 +746,6 @@ class FFTNet(keras.Model):
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             use_bias_in_modrelu: bool = True,
-            include_top: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize the encoder and build its architecture.
@@ -771,9 +770,6 @@ class FFTNet(keras.Model):
         :type normalization_type: str
         :param use_bias_in_modrelu: Whether modReLU carries a learnable bias.
         :type use_bias_in_modrelu: bool
-        :param include_top: Whether to include the final classification features.
-            When False, returns encoder features for custom heads. Defaults to True.
-        :type include_top: bool
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any configuration value is invalid.
         """
@@ -795,7 +791,6 @@ class FFTNet(keras.Model):
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.use_bias_in_modrelu = use_bias_in_modrelu
-        self.include_top = include_top
 
         # Calculate number of patches
         self.num_patches = (image_size // patch_size) ** 2
@@ -805,7 +800,7 @@ class FFTNet(keras.Model):
 
         logger.info(
             f"Created FFTNet foundation model: {self.num_layers} layers, "
-            f"embed_dim={self.embed_dim}, patches={self.num_patches}, include_top={self.include_top}"
+            f"embed_dim={self.embed_dim}, patches={self.num_patches}"
         )
 
     def _validate_config(
@@ -941,7 +936,9 @@ class FFTNet(keras.Model):
             - ``cls_token``: the CLS features, shape ``(batch, embed_dim)``.
             - ``patch_features``: the patch features excluding CLS, shape
               ``(batch, num_patches, embed_dim)``.
-            When ``include_top=False``, only encoder features are returned.
+
+            FFTNet is an encoder: it has no task head and no ``include_top``.
+            A task head is attached by :func:`create_fftnet_with_head`.
 
         :rtype: Dict[str, keras.KerasTensor]
         """
@@ -968,14 +965,6 @@ class FFTNet(keras.Model):
         # 6. Extract features
         cls_token_output = x[:, 0]  # (B, D)
         patch_features = x[:, 1:]  # (B, N, D)
-
-        if not self.include_top:
-            # Return encoder features for custom heads
-            return {
-                "last_hidden_state": x,
-                "cls_token": cls_token_output,
-                "patch_features": patch_features
-            }
 
         return {
             "last_hidden_state": x,
@@ -1031,7 +1020,6 @@ class FFTNet(keras.Model):
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
             "use_bias_in_modrelu": self.use_bias_in_modrelu,
-            "include_top": self.include_top,
         })
         return config
 
@@ -1078,7 +1066,7 @@ def create_fftnet_with_head(
     """Factory function to create a complete FFTNet model with a task head.
 
     This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational :class:`FFTNet` model with ``include_top=False``.
+    1. Instantiate a foundational :class:`FFTNet` encoder.
     2. Create a task-specific head from ``dl_techniques.layers.heads.vision``.
     3. Combine them into a single, end-to-end ``keras.Model``.
 
@@ -1091,7 +1079,7 @@ def create_fftnet_with_head(
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
-        │  FFTNet encoder (include_top=False)  │
+        │  FFTNet encoder                      │
         │  → last_hidden_state / cls_token /   │
         │    patch_features                    │
         └───────────────┬──────────────────────┘
@@ -1161,12 +1149,11 @@ def create_fftnet_with_head(
 
     logger.info(f"Creating FFTNet-{fftnet_variant} with '{task_type}' head.")
 
-    # 1. Create the foundational FFTNet model (include_top=False for feature extraction)
+    # 1. Create the foundational FFTNet encoder
     fftnet_encoder = FFTNet.from_variant(
         fftnet_variant,
         image_size=image_size,
         patch_size=patch_size,
-        include_top=False,
         **fftnet_config_overrides
     )
 
