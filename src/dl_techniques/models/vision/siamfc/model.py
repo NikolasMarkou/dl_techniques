@@ -1,21 +1,18 @@
-"""SiamFC, a fully-convolutional Siamese tracker, plus the ``create_siamfc`` factory.
+"""SiamFC fully-convolutional Siamese tracker and the ``create_siamfc`` factory.
 
-Tracking is reframed as similarity learning: one shared embedding network maps
-both the small exemplar patch ``z`` and the larger search region ``x`` into a
-common feature space, and a cross-correlation ``f(z) * f(x)`` emits a
-single-channel score map whose peak marks the target, `response = corr(f(z),
-f(x)) + bias`. Because the embedding is fully convolutional with total stride
-8 and no padding, a larger search image yields a larger score map with no
-architectural change, so translation search is a single forward pass rather
-than an enumeration of shifted crops. The backbone is the paper's AlexNet
-variant (11x11/2, 5x5, three 3x3 stages, two 3x3/2 pools, ``valid`` everywhere)
-with BatchNorm added as in the modern ports; the final convolution is linear.
-With the paper sizes (exemplar 127, search 255) the features are 6x6 and
-22x22 over 256 channels and the response is 17x17. Training uses centered
-pairs with a radius-based logistic label; inference adds a 3-scale pyramid, a
-Hann window and a scale penalty outside the graph. This package has no
-``MODEL_VARIANTS`` table because the paper ships one architecture; width and
-input sizes are constructor arguments instead.
+:class:`SiamFC` embeds an exemplar patch ``z`` and a search region ``x`` with
+one shared AlexNet-style :class:`SiamFCBackbone`, then cross-correlates the
+two feature maps into a single-channel score map whose peak marks the target:
+
+    response = corr(f(z), f(x)) + bias
+
+Instead of scoring shifted crops one at a time, one forward pass scores every
+offset of the exemplar inside the search region. Input sizes are fixed at
+construction: the score-map extent is computed from ``exemplar_size`` and
+``search_size``, and ``call`` does not grow it for larger inputs. The output
+is logits, 17x17 at the default 127 / 255 sizes. The Hann window helper runs
+outside the graph. There is no variant table, and ``pretrained=True`` raises
+``NotImplementedError``.
 
 References:
     - Bertinetto et al., 2016. Fully-Convolutional Siamese Networks for
@@ -46,15 +43,17 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
-# constants and pure shape helpers (single source of truth)
+# constants and shape helpers
 # ---------------------------------------------------------------------
 
 EXEMPLAR_SIZE = 127
 SEARCH_SIZE = 255
+# Reference values for the default sizes; nothing in this file reads them.
 TOTAL_STRIDE = 8
 SCORE_SIZE = 17
 BACKBONE_OUT_CHANNELS = 256
 
+# ---------------------------------------------------------------------
 
 def _valid_out(length: int, kernel: int, stride: int) -> int:
     """Output extent of one ``valid`` convolution/pool stage.
@@ -70,14 +69,16 @@ def _valid_out(length: int, kernel: int, stride: int) -> int:
     """
     return (length - kernel) // stride + 1
 
+# ---------------------------------------------------------------------
 
 def siamfc_backbone_feature_size(input_size: int) -> int:
-    """Spatial extent of the SiamFC embedding for a square input.
+    """Return the spatial extent of the SiamFC embedding for a square input.
 
-    Applies the backbone reduction chain ``conv11/2, pool3/2, conv5/1,
-    pool3/2, conv3/1, conv3/1, conv3/1`` with ``valid`` padding throughout,
-    which is the single encoding of this architecture's geometry used by
-    ``build()``, ``call()`` and ``compute_output_shape`` alike.
+    Applies the backbone chain ``conv11/2, pool3/2, conv5/1, pool3/2,
+    conv3/1, conv3/1, conv3/1`` with ``valid`` padding. :class:`SiamFC` uses
+    it to size the score map and :meth:`SiamFCBackbone.compute_output_shape`
+    to report shapes. Small inputs give zero or negative values; nothing here
+    checks for that.
 
     :param input_size: Square input extent in pixels.
     :type input_size: int
@@ -93,9 +94,12 @@ def siamfc_backbone_feature_size(input_size: int) -> int:
     n = _valid_out(n, 3, 1)
     return n
 
+# ---------------------------------------------------------------------
 
 def siamfc_score_size(exemplar_size: int = EXEMPLAR_SIZE, search_size: int = SEARCH_SIZE) -> int:
-    """Response-map extent for an exemplar/search size pair.
+    """Return the response-map extent for an exemplar/search size pair.
+
+    The defaults give 17.
 
     :param exemplar_size: Exemplar patch extent.
     :type exemplar_size: int
@@ -110,23 +114,26 @@ def siamfc_score_size(exemplar_size: int = EXEMPLAR_SIZE, search_size: int = SEA
         + 1
     )
 
+# ---------------------------------------------------------------------
 
 def create_hann_window(score_size: int) -> np.ndarray:
-    """Separable 2D Hann window penalizing large displacements at inference.
+    """Build a separable 2D Hann window for inference post-processing.
 
-    Pure NumPy post-processing outside the graph, matching the paper's
-    ``response = (1 - w) * response + w * hann`` blending.
+    NumPy only, outside the graph. The window is returned unblended; the
+    caller applies ``response = (1 - w) * response + w * hann``.
 
-    :param score_size: Square score-map extent.
+    :param score_size: Square score-map extent. Must be positive.
     :type score_size: int
     :return: Array of shape ``(score_size, score_size)`` in ``float32``.
     :rtype: numpy.ndarray
+    :raises ValueError: If ``score_size`` is not positive.
     """
     if score_size <= 0:
         raise ValueError(f"score_size must be positive, got {score_size}")
     window_1d = np.hanning(score_size).astype("float32")
     return np.outer(window_1d, window_1d).astype("float32")
 
+# ---------------------------------------------------------------------
 
 def _cross_correlate(
     template_features: keras.KerasTensor,
@@ -135,15 +142,17 @@ def _cross_correlate(
     template_extent: int,
     bias: keras.KerasTensor,
 ) -> keras.KerasTensor:
-    """Single-channel batched cross-correlation over static extents.
+    """Cross-correlate template features over search features, one channel out.
 
-    For each batch element and each valid offset, dots the template feature
-    volume against the aligned search patch and adds a scalar bias. The loop
-    bounds are Python ints derived from the constructor configuration, so the
-    body stays symbolic: slicing with integer bounds and ``ops.sum`` /
-    ``ops.stack`` trace cleanly.
+    For each of the ``score_size ** 2`` offsets, dots the template feature
+    volume with the aligned search patch, then adds a scalar bias. Loop bounds
+    are Python ints from the constructor, so the graph holds one slice and
+    sum per offset. Only offsets up to ``score_size`` are scored: a larger
+    search map is read from its top-left corner, and a template map that is
+    not ``template_extent`` square fails to broadcast.
 
-    :param template_features: Tensor of shape ``(B, hz, wz, C)``.
+    :param template_features: Tensor of shape
+        ``(B, template_extent, template_extent, C)``.
     :type template_features: keras.KerasTensor
     :param search_features: Tensor of shape ``(B, hx, wx, C)``.
     :type search_features: keras.KerasTensor
@@ -176,25 +185,73 @@ def _cross_correlate(
 
 @register_dl_technique("dl_techniques.models.siamfc.model")
 class SiamFCBackbone(keras.layers.Layer):
-    """Shared SiamFC embedding trunk with total stride 8.
+    """Embed an image with the SiamFC AlexNet-style trunk, total stride 8.
 
-    The paper's AlexNet variant with ``valid`` padding everywhere: 11x11/2
-    (96) + pool 3x3/2, 5x5 (256) + pool 3x3/2, then 384, 384, 256 over 3x3.
-    BatchNorm + ReLU follow every convolution except the last, which is
-    linear so the correlation reads raw embedding magnitudes. The two
-    MaxPool stages give the total stride of 8; the reference baseline that
-    keeps the second pool at stride 1 (total stride 4, 33x33 map) is a
-    different experiment and is not reproduced here.
+    Five ``valid`` convolutions and two 3x3/2 max pools. ReLU follows every
+    convolution but ``conv5``, which is linear; BatchNorm sits between the
+    convolution and the ReLU when ``use_batch_norm`` is set. The 1606.05233
+    baseline keeps the second pool at stride 1 (total stride 4); this layer
+    does not.
 
-    :param use_batch_norm: Whether to keep BatchNorm after the first four convolutions.
+    Block internals:
+
+    .. code-block:: text
+
+        input [B, H, W, 3]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ conv1  11x11/2, 96  │  bn1*, relu
+        └─────────────────────┘
+                 │  59 / 123
+                 ▼
+        ┌─────────────────────┐
+        │ pool1  3x3/2        │
+        └─────────────────────┘
+                 │  29 / 61
+                 ▼
+        ┌─────────────────────┐
+        │ conv2  5x5/1, 256   │  bn2*, relu
+        └─────────────────────┘
+                 │  25 / 57
+                 ▼
+        ┌─────────────────────┐
+        │ pool2  3x3/2        │
+        └─────────────────────┘
+                 │  12 / 28
+                 ▼
+        ┌─────────────────────┐
+        │ conv3  3x3/1, 384   │  bn3*, relu
+        └─────────────────────┘
+                 │  10 / 26
+                 ▼
+        ┌─────────────────────┐
+        │ conv4  3x3/1, 384   │  bn4*, relu
+        └─────────────────────┘
+                 │  8 / 24
+                 ▼
+        ┌─────────────────────┐
+        │ conv5  3x3/1, 256   │  linear
+        └─────────────────────┘
+                 │  6 / 22
+                 ▼
+        output [B, H', W', 256]
+
+    Edges give the extent for a 127 / 255 input. * only when use_batch_norm.
+
+    :param use_batch_norm: Apply BatchNorm after the first four convolutions.
+        When off, ``bn1`` to ``bn4`` are still created but never built or
+        called.
     :type use_batch_norm: bool
-    :param bn_momentum: BatchNorm momentum in the Keras convention (torch 0.1 maps to 0.9 here).
+    :param bn_momentum: BatchNorm momentum in the Keras convention (torch 0.1
+        maps to 0.9 here). Must be in ``(0, 1)``.
     :type bn_momentum: float
-    :param bn_epsilon: BatchNorm epsilon, matching the torch default rather than the Keras one.
+    :param bn_epsilon: BatchNorm epsilon; the default 1e-5 is the torch
+        default. Must be positive.
     :type bn_epsilon: float
     :param kernel_initializer: Initializer for all convolutions.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param kwargs: Passthrough to ``keras.layers.Layer``.
+    :param **kwargs: Passed to ``keras.layers.Layer``.
     """
 
     def __init__(
@@ -205,6 +262,13 @@ class SiamFCBackbone(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
+        """Validate arguments and create the sub-layers.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``bn_momentum`` is outside ``(0, 1)`` or
+            ``bn_epsilon`` is not positive.
+        """
         super().__init__(**kwargs)
         if not 0.0 < bn_momentum < 1.0:
             raise ValueError(f"bn_momentum must be in (0, 1), got {bn_momentum}")
@@ -227,9 +291,7 @@ class SiamFCBackbone(keras.layers.Layer):
             )
 
         def _bn(name: str) -> keras.layers.Layer:
-            # Routed through the norms factory, which honors an explicitly
-            # passed epsilon (its 1e-6 is only the default): the transcribed
-            # torch-default epsilon is kept.
+            # The factory default epsilon is 1e-6; passing bn_epsilon overrides it.
             return create_normalization_layer(
                 "batch_norm",
                 momentum=self.bn_momentum,
@@ -250,6 +312,13 @@ class SiamFCBackbone(keras.layers.Layer):
         self.conv5 = _conv(BACKBONE_OUT_CHANNELS, 3, 1, "conv5")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build each sub-layer in order, threading the shape through.
+
+        BatchNorm layers are built only when ``use_batch_norm`` is set.
+
+        :param input_shape: Shape ``(B, H, W, 3)``.
+        :type input_shape: tuple
+        """
         shape = input_shape
         self.conv1.build(shape)
         shape = self.conv1.compute_output_shape(shape)
@@ -281,7 +350,7 @@ class SiamFCBackbone(keras.layers.Layer):
 
         :param inputs: Tensor of shape ``(B, H, W, 3)``.
         :type inputs: keras.KerasTensor
-        :param training: Training flag forwarded to BatchNorm explicitly.
+        :param training: Forwarded to the BatchNorm layers.
         :type training: bool or None
         :return: Features of shape ``(B, H', W', 256)``.
         :rtype: keras.KerasTensor
@@ -308,6 +377,16 @@ class SiamFCBackbone(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Return the feature shape for a square input shape.
+
+        Only ``input_shape[1]`` is read; the output height and width both
+        take its feature extent. A ``None`` channel axis stays ``None``.
+
+        :param input_shape: Shape ``(B, H, W, C)`` with ``H == W``.
+        :type input_shape: tuple
+        :return: Shape ``(B, H', H', 256)``.
+        :rtype: tuple
+        """
         extent = input_shape[1]
         channels = input_shape[-1]
         if extent is None:
@@ -317,6 +396,12 @@ class SiamFCBackbone(keras.layers.Layer):
         return (input_shape[0], height_out, height_out, BACKBONE_OUT_CHANNELS if channels is not None else None)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the layer configuration for serialization.
+
+        :return: Base config plus every constructor argument, with
+            ``kernel_initializer`` serialized.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update(
             {
@@ -330,6 +415,15 @@ class SiamFCBackbone(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SiamFCBackbone":
+        """Rebuild the layer, deserializing a dict ``kernel_initializer``.
+
+        ``config`` is modified in place.
+
+        :param config: Output of :meth:`get_config`.
+        :type config: dict
+        :return: A new layer.
+        :rtype: SiamFCBackbone
+        """
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
         return cls(**config)
@@ -337,28 +431,50 @@ class SiamFCBackbone(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.siamfc.model")
 class SiamFC(keras.Model):
-    """Fully-convolutional Siamese tracker over an exemplar/search pair.
+    """Score every offset of an exemplar inside a search region.
 
-    One shared :class:`SiamFCBackbone` embeds both inputs; the exemplar
-    becomes the correlation filter and the search region the signal, so the
-    output is a single-channel similarity map. ``call()`` takes a ``(z, x)``
-    pair of image batches and returns ``(B, score, score, 1)`` logits trained
-    with a radius-based logistic label, not probabilities. The response carries
-    a learned scalar bias; the PyTorch reference port instead normalizes the
-    map with a 1-channel BatchNorm (``match_batchnorm``). The bias form is the
-    paper's parameterization and keeps inference independent of batch
-    statistics, so it is kept deliberately.
+    One :class:`SiamFCBackbone` embeds both inputs. The exemplar features act
+    as the correlation filter and the search features as the signal, giving
+    a single-channel map of logits, not probabilities. A learned scalar
+    ``response_bias``, zero-initialized, is added to the map; the PyTorch
+    port normalizes it with a 1-channel BatchNorm instead. The backbone runs
+    with its default ``bn_momentum`` and ``bn_epsilon``; this class does not
+    expose them. Inputs must match ``exemplar_size`` and ``search_size``;
+    ``call`` does not check this.
 
-    :param exemplar_size: Square exemplar extent in pixels.
+    Architecture:
+
+    .. code-block:: text
+
+        z [B, Ez, Ez, 3]         x [B, Sx, Sx, 3]
+                │                        │
+                ▼                        ▼
+        ┌──────────────────┐     ┌──────────────────┐
+        │ backbone         │     │ backbone         │
+        │ (shared weights) │     │ (shared weights) │
+        └──────────────────┘     └──────────────────┘
+                │  [B, hz, hz, 256]      │  [B, hx, hx, 256]
+                └───────────┬────────────┘
+                            ▼
+                 ┌─────────────────────┐
+                 │ _cross_correlate    │◄── response_bias (scalar)
+                 └─────────────────────┘
+                            │
+                            ▼
+               logits [B, score, score, 1]
+
+    Defaults 127 / 255 give hz = 6, hx = 22, score = 17.
+
+    :param exemplar_size: Square exemplar extent in pixels. Must be positive.
     :type exemplar_size: int
-    :param search_size: Square search extent in pixels, must exceed ``exemplar_size``.
+    :param search_size: Square search extent in pixels. Must exceed
+        ``exemplar_size``.
     :type search_size: int
     :param use_batch_norm: Forwarded to the shared backbone.
     :type use_batch_norm: bool
     :param kernel_initializer: Forwarded to the shared backbone.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param kwargs: Passthrough to ``keras.Model``.
-    :raises ValueError: If the sizes are not positive, unordered, or collapse the score map.
+    :param **kwargs: Passed to ``keras.Model``.
     """
 
     def __init__(
@@ -369,6 +485,14 @@ class SiamFC(keras.Model):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
+        """Validate the sizes, derive the extents and create the backbone.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``exemplar_size`` is not positive,
+            ``search_size`` does not exceed it, or either feature extent or
+            the score extent is not positive.
+        """
         super().__init__(**kwargs)
         if exemplar_size <= 0:
             raise ValueError(f"exemplar_size must be positive, got {exemplar_size}")
@@ -400,6 +524,13 @@ class SiamFC(keras.Model):
         self.response_bias = None
 
     def build(self, input_shape: Any) -> None:
+        """Create ``response_bias`` and build the sub-layers.
+
+        Returns at once if the model is already built.
+
+        :param input_shape: Pair of exemplar and search shapes.
+        :type input_shape: list or tuple
+        """
         if self.built:
             return
         self.response_bias = self.add_weight(
@@ -413,12 +544,17 @@ class SiamFC(keras.Model):
     ) -> keras.KerasTensor:
         """Correlate an exemplar batch against a search batch.
 
-        :param inputs: Pair ``(z, x)`` with shapes ``(B, Ez, Ez, 3)`` and ``(B, Sx, Sx, 3)``.
+        :param inputs: Pair ``(z, x)`` with shapes ``(B, Ez, Ez, 3)`` and
+            ``(B, Sx, Sx, 3)``, where ``Ez == exemplar_size`` and
+            ``Sx == search_size``. Not checked here: a wrong ``Ez`` fails in
+            the correlation, a larger ``Sx`` is scored from its top-left
+            corner only.
         :type inputs: tuple or list of two tensors
-        :param training: Training flag forwarded to the backbone explicitly.
+        :param training: Forwarded to the backbone.
         :type training: bool or None
         :return: Logit response of shape ``(B, score, score, 1)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``inputs`` is not a tuple or list of two.
         """
         if not isinstance(inputs, (tuple, list)) or len(inputs) != 2:
             raise ValueError("SiamFC expects a (exemplar, search) pair of two tensors")
@@ -434,6 +570,12 @@ class SiamFC(keras.Model):
         )
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the model configuration for serialization.
+
+        :return: Base config plus every constructor argument, with
+            ``kernel_initializer`` serialized.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update(
             {
@@ -447,6 +589,15 @@ class SiamFC(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SiamFC":
+        """Rebuild the model, deserializing a dict ``kernel_initializer``.
+
+        ``config`` is modified in place.
+
+        :param config: Output of :meth:`get_config`.
+        :type config: dict
+        :return: A new model.
+        :rtype: SiamFC
+        """
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
         return cls(**config)
@@ -463,7 +614,10 @@ def create_siamfc(
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> SiamFC:
-    """Create a :class:`SiamFC` tracker with no logic of its own beyond construction.
+    """Create a :class:`SiamFC` tracker and optionally load local weights.
+
+    A string ``pretrained`` builds the model on the configured sizes, then
+    loads the checkpoint with ``strict=True``; loader errors propagate.
 
     :param exemplar_size: Square exemplar extent.
     :type exemplar_size: int
@@ -473,12 +627,14 @@ def create_siamfc(
     :type use_batch_norm: bool
     :param kernel_initializer: Forwarded to the shared backbone.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param pretrained: A local checkpoint path to load, or True to raise since no weights ship here.
+    :param pretrained: Path to a local checkpoint, or ``False`` to skip
+        loading. ``True`` raises.
     :type pretrained: bool or str
-    :param kwargs: Additional arguments for :class:`SiamFC`.
+    :param **kwargs: Additional arguments for :class:`SiamFC`.
     :return: A :class:`SiamFC` instance.
     :rtype: SiamFC
-    :raises NotImplementedError: If ``pretrained`` is True.
+    :raises ValueError: If :class:`SiamFC` rejects the sizes.
+    :raises NotImplementedError: If ``pretrained`` is ``True``.
     """
     model = SiamFC(
         exemplar_size=exemplar_size,
@@ -510,3 +666,5 @@ def create_siamfc(
             f"score={model._score_size})."
         )
     return model
+
+# ---------------------------------------------------------------------
