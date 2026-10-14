@@ -1,27 +1,21 @@
-"""
-One HKAN layer: a bank of one-dimensional basis-function regressors (the
-expanding stage) followed by one linear combination per output (the connecting
-stage), with a float64 closed-form solve for both.
+"""HKAN layer, :class:`HKANLayer`, and the float64 closed-form solve that fits it.
 
-For a layer with ``n_in`` inputs, ``n_out`` outputs and ``m`` basis functions:
+Each output is a linear combination of per-input blocks, and each block is a
+weighted sum of ``m`` one-dimensional basis functions of one input. Instead of
+backpropagation, both stages are fit by batched ridge or least-squares solves
+in float64; the same weights also train under a stock optimizer. Basis names
+map to ``KERAS_BASIS`` for ``call`` and ``NUMPY_BASIS`` for the solve. The two
+tables must describe the same functions; the numpy forms are overflow-free
+because hidden-layer inputs leave ``[0, 1]`` and the slope can reach 50. The
+layer builds only under a float32 or float64 compute dtype.
 
 .. code-block:: text
 
-    block       phi[q, p](x_p) = sum_r coef[q, p, r] * g(slope * (x_p - centers[q, p, r]))
-                                 + block_bias[q, p]
-    connecting  h[q]           = sum_p mix[q, p] * phi[q, p] + bias[q]
+    phi[q, p] = sum_r coef[q, p, r] * g(slope * (x_p - centers[q, p, r]))
+                + block_bias[q, p]
+    h[q]      = sum_p mix[q, p] * phi[q, p] + bias[q]
 
-``q`` indexes outputs, ``p`` inputs, ``r`` basis functions. ``centers`` is fixed
-(non-trainable) in every training mode; ``coef``, ``block_bias``, ``mix`` and
-``bias`` are ordinary trainable weights, so the same layer trains by the
-closed-form solve of :meth:`HKANLayer.solve_closed_form` or by a stock
-optimizer.
-
-The basis ``g`` is chosen by name. Two tables map each name to a function: one
-in ``keras.ops`` for ``call()`` and one in float64 numpy for the solve. They
-must describe the same functions; the numpy table uses overflow-free forms
-because hidden-layer inputs are not confined to ``[0, 1]`` and the slope can
-be 50.
+``q`` indexes outputs, ``p`` inputs, ``r`` basis functions.
 
 References:
     - Dudek and Rodak, 2025. HKAN: Hierarchical Kolmogorov-Arnold Network
@@ -69,27 +63,21 @@ NUMPY_BASIS: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
 #: when the caller does not give a chunk size.
 AUTO_CHUNK_BYTES: int = 256 * 1024 * 1024
 
-#: Default of ``slope`` for :class:`HKANLayer` and for ``HKAN``: defined once
-#: and used in both signatures. The reference code's value is 1.0, at which a
-#: sigmoid or tanh is almost linear over ``[0, 1]`` (decisions.md D-039).
+#: Default ``slope`` of :class:`HKANLayer` and ``HKAN``. The reference code
+#: uses 1.0, at which a sigmoid or tanh is almost linear over ``[0, 1]``
+#: (decisions.md D-039).
 DEFAULT_SLOPE: float = 5.0
 
 #: Compute dtypes a layer builds under (the float32 and float64 policies).
 SUPPORTED_COMPUTE_DTYPES: Tuple[str, ...] = ("float32", "float64")
 
-#: A target whose range is at most this many float64 epsilons times its
-#: largest magnitude is constant (:func:`is_constant_target`). 4 covers a
-#: target one ulp away from a constant in either direction at any normal
-#: (not subnormal) magnitude; a range of 5 epsilons is not constant.
+#: Range, in float64 epsilons times max ``|y|``, at or under which a target is
+#: constant (:func:`is_constant_target`). 4 covers one ulp off a constant at
+#: any normal magnitude; 5 epsilons is not constant.
 CONSTANT_TARGET_EPSILONS: float = 4.0
 
-# DECISION plan-2026-09-30T082355-4d999dbc/D-035
-# The tag is NON-ZERO and goes LAST in every seed list of this package. Do
-# NOT drop it, set it to 0, or move it to the front: numpy ignores trailing
-# zeros of a seed list, so `default_rng([seed, 0, 0])` IS `default_rng(seed)`
-# and layer 0's "random" centers were bit for bit the first values a caller
-# draws from `default_rng(seed)` (typically the training inputs). See
-# decisions.md D-035.
+# DECISION plan-2026-09-30T082355-4d999dbc/D-035: tag stays non-zero and last.
+# numpy drops trailing zero seeds, so a zero tag gives default_rng(seed). See decisions.md.
 #: Last entry of every seed list of this package: the bytes of ``"HKAN"``.
 SEED_DOMAIN_TAG: int = 0x484B414E
 
@@ -99,12 +87,10 @@ SEED_DOMAIN_TAG: int = 0x484B414E
 def is_integer(value: Any) -> bool:
     """Tell whether ``value`` is an integer a size or a seed may be given as.
 
-    Interface contract (call sites: the argument validation of
-    :class:`HKANLayer` and of ``HKAN``): true for a Python ``int`` and for a
-    numpy integer scalar (anything registered as ``numbers.Integral``), false
-    for ``bool`` and for every float, including an integral-valued one. It
-    never raises. The caller stores ``int(value)``, so a config holds plain
-    Python integers.
+    True for a Python ``int`` and a numpy integer scalar (anything registered
+    as ``numbers.Integral``); false for ``bool`` and every float, including an
+    integral-valued one. Never raises. Used by the argument checks of
+    :class:`HKANLayer` and ``HKAN``, which then store ``int(value)``.
 
     :param value: The candidate.
     :type value: Any
@@ -120,28 +106,19 @@ def is_integer(value: Any) -> bool:
 def is_constant_target(y: np.ndarray) -> bool:
     """Tell whether a regression target is constant up to float64 rounding.
 
-    Interface contract (call sites: :meth:`HKANLayer.solve_closed_form`, which
-    reports block R^2 0.0 for a constant target, and ``HKAN.fit_closed_form``,
-    whose forward check uses an absolute floor for one): true when the range
-    of ``y`` is at most ``CONSTANT_TARGET_EPSILONS`` float64 epsilons times
-    its largest magnitude, which includes an exact constant and a constant
-    with one entry one ulp away in either direction. It never raises for a
-    non-empty finite array; the caller has checked finiteness.
+    True when the range of ``y`` is at most ``CONSTANT_TARGET_EPSILONS``
+    float64 epsilons times its largest magnitude. That includes an exact
+    constant and a constant with one entry one ulp off. Used by
+    :meth:`HKANLayer.solve_closed_form` and ``HKAN.fit_closed_form``. Never
+    raises for a non-empty finite array; an empty one raises from ``np.max``.
 
     :param y: Target, shape ``(N,)``, N at least 1.
     :type y: np.ndarray
     :return: Whether ``y`` is constant.
     :rtype: bool
     """
-    # DECISION plan-2026-09-30T082355-4d999dbc/D-051
-    # "Constant" is RELATIVE: range <= a few float64 epsilons times max |y|.
-    # Do NOT go back to `max == min` (or `np.ptp(y) > 0`): a target of 0.7
-    # with one entry one ulp above it was then "not constant", its bias-free
-    # block R^2 came out at -2.05e+30, and the forward check measured a
-    # float32 model against 1e-3 of a standard deviation of 1e-16 and warned
-    # on a perfect fit. Do NOT widen it to a loose relative tolerance either:
-    # a target that really varies at 1e-12 has variance to explain. See
-    # decisions.md D-051.
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-051: constant is relative to max |y|.
+    # Not max == min (one ulp breaks it), not a loose tolerance. See decisions.md.
     y = np.asarray(y, dtype=np.float64)
     scale = float(np.max(np.abs(y)))
     return bool(float(np.ptp(y)) <= CONSTANT_TARGET_EPSILONS * np.finfo(np.float64).eps * scale)
@@ -155,18 +132,19 @@ def solve_linear_float64(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Solve a batch of ridge or least-squares problems onto one target, in float64.
 
-    Interface contract (call sites: the expanding stage and the connecting
-    stage of :meth:`HKANLayer.solve_closed_form`): every leading axis of
-    ``features`` is a batch axis; the last two are ``(N, k)``. All problems
-    share ``target``. With ``fit_intercept`` the columns and the target are
-    centered first, so the penalty never touches the intercept (the semantics
-    of scikit-learn's ``Ridge`` and ``LinearRegression``).
+    Every leading axis of ``features`` is a batch axis; the last two are
+    ``(N, k)``. All problems share ``target``. With ``fit_intercept`` the
+    columns and the target are centered first, so the penalty never touches
+    the intercept, as in scikit-learn's ``Ridge`` and ``LinearRegression``.
+    A positive ``l2`` solves the normal equations; otherwise each problem
+    goes through ``np.linalg.lstsq`` with ``rcond=None``.
 
     :param features: Design matrices, shape ``(..., N, k)``, dtype float64.
     :type features: np.ndarray
     :param target: Regression target, shape ``(N,)``, dtype float64.
     :type target: np.ndarray
-    :param l2: Ridge strength. ``0`` selects minimum-norm least squares.
+    :param l2: Ridge strength. ``0`` or below selects minimum-norm least
+        squares.
     :type l2: float
     :param fit_intercept: Whether to fit an intercept by centering.
     :type fit_intercept: bool
@@ -174,15 +152,10 @@ def solve_linear_float64(
         intercept is all zeros when ``fit_intercept`` is ``False``.
     :rtype: Tuple[np.ndarray, np.ndarray]
     :raises TypeError: If either array is not float64.
-    :raises numpy.linalg.LinAlgError: Propagated from the solver; nothing is
-        returned in that case.
+    :raises numpy.linalg.LinAlgError: Propagated from the solver.
     """
-    # DECISION plan-2026-09-30T082355-4d999dbc/D-005
-    # The solve is float64 and refuses anything else. Do NOT cast to the
-    # model dtype here "for speed" and do NOT move it to keras.ops at the
-    # compute dtype: the Gram matrices reach condition numbers of 1e6 to 1e18
-    # and a float32 normal-equation solve was measured wrong by up to 8.7 in
-    # the predictions. See decisions.md D-005.
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-005: the solve stays float64 numpy.
+    # Do not cast to the model dtype; Gram conditions reach 1e18. See decisions.md.
     if features.dtype != np.float64 or target.dtype != np.float64:
         raise TypeError(
             "the closed-form solve runs in float64 only, got features "
@@ -209,20 +182,8 @@ def solve_linear_float64(
         rhs = np.matmul(transposed, centered_target)
         coef = np.linalg.solve(gram, rhs[..., None])[..., 0]
     else:
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-022
-        # At zero ridge the answer is the MINIMUM-NORM least-squares solution,
-        # with the rank cut at eps * max(N, k) times the largest singular
-        # value: numpy's rcond=None, and the cutoff scikit-learn's
-        # LinearRegression passes to LAPACK (cond = max(X.shape) * eps).
-        # Do NOT pass a bare machine epsilon as the cutoff: on a
-        # rank-deficient design (an identity basis, whose features are all
-        # x_p minus a constant, or a connecting stage whose block outputs are
-        # the same fit) the near-null directions sit at 2e-15 to 1e-14 of the
-        # largest singular value, survive a cutoff of 2.2e-16, and come back
-        # as weights of order 1e13 where the minimum-norm answer is 0.2.
-        # Do NOT solve the normal equations here either (np.linalg.solve
-        # raises on duplicated centers and is off by 1e-3 in the predictions
-        # at cond 1e15). See decisions.md D-022 (supersedes D-019) and D-005.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-022: min-norm lstsq, rcond=None.
+        # A bare-eps cutoff or the normal equations fail rank-deficient designs. See decisions.md.
         flat = centered.reshape((-1, n_rows, n_cols))
         coef = np.stack([
             np.linalg.lstsq(matrix, centered_target, rcond=None)[0]
@@ -240,34 +201,80 @@ def solve_linear_float64(
 
 @register_dl_technique("dl_techniques.models.hkan.hkan_layer")
 class HKANLayer(keras.layers.Layer):
-    """
-    One HKAN layer: ``n_out * n_in`` one-dimensional blocks, then one linear
-    combination per output.
+    """Map ``n_in`` inputs to ``units`` outputs through per-input basis blocks.
 
-    **Data flow**:
+    The layer holds ``units * n_in`` one-dimensional blocks, each a weighted
+    sum of ``num_basis`` basis functions of one input, and one linear
+    combination of the blocks per output. Set the weights either with
+    :meth:`solve_closed_form` followed by :meth:`assign_solution` (the
+    paper's training), or with a stock optimizer on ``coef``, ``block_bias``,
+    ``mix`` and ``bias``. ``centers`` never trains, and
+    :meth:`assign_solution` does not write it.
+
+    The ``identity`` basis is ``g(d) = d`` on the unscaled difference
+    ``x_p - center``; it ignores ``slope``, as in the paper. With more than
+    one basis function it is degenerate: every feature is ``x_p`` minus a
+    constant, so ``num_basis`` only rescales the effective ridge strength.
+
+    ``units``, ``num_basis``, ``seed`` and ``layer_index`` accept numpy
+    integers as well as Python ones, reject ``bool`` and floats, and are
+    stored as Python ``int``.
+
+    Forward pass:
 
     .. code-block:: text
 
-        x (B, n_in)
-           │  slope * (x_p - centers[q, p, r])          (B, n_out, n_in, m)
-           ▼
-        basis g, weighted by coef, summed over r, + block_bias
-           │                                             (B, n_out, n_in)  = phi
-           ▼
-        weighted by mix, summed over p, + bias
-           │
-           ▼
-        h (B, n_out)
+        x [B, n_in]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ x_p - centers       │  centers non-trainable
+        └─────────────────────┘
+                 │  [B, n_out, n_in, m]
+                 ▼
+        times slope, then basis g
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ * coef, sum over r  │  + block_bias (if use_block_bias)
+        └─────────────────────┘
+                 │  phi [B, n_out, n_in]
+                 ▼
+        ┌─────────────────────┐
+        │ * mix, sum over p   │  + bias (if use_bias)
+        └─────────────────────┘
+                 │
+                 ▼
+        h [B, n_out]
 
-    Two ways to set the weights: :meth:`solve_closed_form` followed by
-    :meth:`assign_solution` (the paper's training), or a stock optimizer on
-    ``coef``, ``block_bias``, ``mix`` and ``bias``. ``centers`` never trains.
+    identity multiplies by 1.0 instead of slope.
 
-    The ``identity`` basis is ``g(d) = d`` on the unscaled difference
-    ``x_p - center``: it ignores ``slope``, as in the paper, where the slope
-    is a parameter of the non-linear basis functions only. With more than one
-    basis function it is degenerate: every feature is ``x_p`` minus a
-    constant, so ``num_basis`` only rescales the effective ridge strength.
+    Closed-form fit, per chunk of ``k`` outputs:
+
+    .. code-block:: text
+
+        x [N, n_in], y [N], centers [k, n_in, m]
+                 │
+                 ▼
+        g(slope * (x_p - centers))
+                 │  features [k, n_in, N, m]
+                 ▼
+        ┌─────────────────────┐
+        │ solve per block     │  l2_block, use_block_bias
+        └─────────────────────┘
+                 │  coef, block_bias
+                 ▼
+        phi [k, n_in, N] ──► block_r2 [k, n_in]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ solve per output    │  l2_mix, use_bias
+        └─────────────────────┘
+                 │  mix, bias
+                 ▼
+        output [N, k]
+
+    Both solves regress onto the same ``y``.
 
     :param units: Number of outputs ``n_out``. Must be at least 1.
     :type units: int
@@ -277,42 +284,40 @@ class HKANLayer(keras.layers.Layer):
         ``relu``, ``tanh``, ``softplus``, ``identity``.
     :type basis: str
     :param slope: Multiplier applied to ``x_p - center`` before the basis.
-        Must be finite and positive. Ignored by ``identity``. The default is
-        ``DEFAULT_SLOPE`` (5.0); the reference code's is 1.0.
+        Must be finite and positive, and not a ``bool``. Ignored by
+        ``identity``. The default is ``DEFAULT_SLOPE`` (5.0); the reference
+        code's is 1.0.
     :type slope: float
-    :param centers: How the centers are set. ``random``: uniform on
-        ``[0, 1]``. ``equally_spaced``: ``linspace(0, 1, num_basis)`` for
-        every block. ``data``: drawn later from the layer's own input by
-        :meth:`sample_data_centers`; until then the weight holds a uniform
-        draw as a placeholder.
+    :param centers: How the centers are set, stored as ``centers_mode``.
+        ``random``: uniform on ``[0, 1]``. ``equally_spaced``:
+        ``linspace(0, 1, num_basis)`` for every block. ``data``: drawn later
+        from the layer's own input by :meth:`sample_data_centers`; until
+        then the weight holds a uniform draw.
     :type centers: str
     :param use_block_bias: Whether each block has an intercept.
     :type use_block_bias: bool
     :param use_bias: Whether the connecting stage has an intercept.
     :type use_bias: bool
-    :param coef_initializer: Initializer for ``coef``. It is what a
-        gradient-only run starts from; the closed-form solve overwrites it.
+    :param coef_initializer: Initializer for ``coef``. A gradient-only run
+        starts from it; the closed-form solve overwrites it.
     :type coef_initializer: Union[str, keras.initializers.Initializer]
     :param mix_initializer: Initializer for ``mix``. ``None`` selects the
         constant ``1 / n_in``.
     :type mix_initializer: Optional[Union[str, keras.initializers.Initializer]]
-    :param seed: Seed for the centers. ``None`` draws from the global numpy
-        generator (which ``keras.utils.set_random_seed`` seeds). ``0`` is a
-        seed like any other.
+    :param seed: Seed for the centers, ``None`` or a non-negative integer.
+        ``None`` draws from the global numpy generator (which
+        ``keras.utils.set_random_seed`` seeds). ``0`` is a seed like any
+        other.
     :type seed: Optional[int]
-    :param layer_index: Position of this layer in its model; mixed into the
-        seed so that two layers of one model draw different centers.
+    :param layer_index: Position of this layer in its model, non-negative;
+        mixed into the seed so that two layers of one model draw different
+        centers.
     :type layer_index: int
-    :param kwargs: Additional arguments for the ``keras.layers.Layer`` base.
-    :raises ValueError: If an argument is out of range or a name is unknown.
-        ``build`` raises it for a compute dtype other than float32 or
-        float64, and ``call`` for an input whose width is not the ``n_in``
-        the layer was built with.
+    :param **kwargs: Additional arguments for the ``keras.layers.Layer`` base.
 
-    ``units``, ``num_basis``, ``seed`` and ``layer_index`` accept numpy
-    integers as well as Python ones and are stored as Python ``int``.
-
-    :ivar centers: Basis centers, shape ``(n_out, n_in, m)``, non-trainable.
+    :ivar centers: Basis centers weight, shape ``(n_out, n_in, m)``,
+        non-trainable. Not the ``centers`` argument.
+    :ivar centers_mode: The ``centers`` argument.
     :ivar coef: Basis coefficients, shape ``(n_out, n_in, m)``.
     :ivar block_bias: Block intercepts, shape ``(n_out, n_in)``; ``None``
         when ``use_block_bias`` is ``False``.
@@ -342,6 +347,16 @@ class HKANLayer(keras.layers.Layer):
             layer_index: int = 0,
             **kwargs: Any,
     ) -> None:
+        """Validate and store the arguments.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``units`` or ``num_basis`` is not a positive
+            integer, ``basis`` or ``centers`` is not a known name, ``slope``
+            is a ``bool``, non-finite or not positive, ``seed`` is neither
+            ``None`` nor a non-negative integer, or ``layer_index`` is not a
+            non-negative integer.
+        """
         super().__init__(**kwargs)
 
         if not is_integer(units) or units < 1:
@@ -376,12 +391,8 @@ class HKANLayer(keras.layers.Layer):
         self.seed = None if seed is None else int(seed)
         self.layer_index = int(layer_index)
 
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-018
-        # `identity` is g(d) = d on the UNSCALED difference. Do NOT multiply
-        # it by `slope`: a model-wide slope of 50 with an identity top layer
-        # (the authors' tutorial configuration) would then scale the top
-        # layer's features by 50 and its ridge strength by 1/2500, which is a
-        # different model from the paper's. See decisions.md D-018.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-018: identity ignores slope.
+        # Scaling it would scale its ridge strength by 1 / slope**2. See decisions.md.
         self._effective_slope = 1.0 if basis == "identity" else self.slope
 
         self.centers = None
@@ -399,8 +410,9 @@ class HKANLayer(keras.layers.Layer):
             data-driven draw.
         :type stream: int
         :return: A generator seeded by ``(seed, layer_index, stream,
-            SEED_DOMAIN_TAG)``, or by the global numpy generator when ``seed``
-            is ``None``. No seeded stream of this package equals
+            SEED_DOMAIN_TAG)``. When ``seed`` is ``None``, a fresh seed is
+            drawn from the global numpy generator on every call and
+            ``stream`` has no effect. No seeded stream equals
             ``np.random.default_rng(seed)``.
         :rtype: np.random.Generator
         """
@@ -412,6 +424,9 @@ class HKANLayer(keras.layers.Layer):
     def _initial_centers(self, shape: Tuple[int, int, int]) -> np.ndarray:
         """Compute the build-time centers in float64.
 
+        ``equally_spaced`` gives ``linspace(0, 1, m)`` for every block;
+        ``random`` and ``data`` both draw uniform on ``[0, 1]`` from stream 0.
+
         :param shape: ``(n_out, n_in, m)``.
         :type shape: Tuple[int, int, int]
         :return: The centers, shape ``shape``.
@@ -422,7 +437,10 @@ class HKANLayer(keras.layers.Layer):
         return self._generator(0).uniform(0.0, 1.0, size=shape)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the stacked weights of the layer.
+        """Create the stacked weights of the layer and fix ``n_in``.
+
+        Sets ``input_spec`` so every later input must have width ``n_in``.
+        ``block_bias`` and ``bias`` are created only when their flag is set.
 
         :param input_shape: ``(batch_size, n_in)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -434,17 +452,8 @@ class HKANLayer(keras.layers.Layer):
                 f"HKANLayer {self.name!r} needs an input of shape (batch, n_in) "
                 f"with a known n_in, got {tuple(input_shape)}"
             )
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-037
-        # A float16 compute dtype is REFUSED here. Do NOT let it through
-        # "because the variables are float32 under mixed_float16": the forward
-        # pass then runs in float16, and at slope 50 it was measured up to
-        # 2.3e-02 away from the fit's own train predictions on a fit whose
-        # RMSE is 0.154 (0.126 on the reviewer's data), with no error. See
-        # decisions.md D-037.
-        # Correction to the parenthesis above (decisions.md D-055): 0.126 was
-        # the deviation the review measured on its own data, on a fit of RMSE
-        # 0.160, not a fit RMSE. `HKAN(dtype=...)` reaches this check through
-        # the dtype the model passes to its layers (D-049).
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-037: float16 compute is refused.
+        # Under mixed_float16 the forward pass drifts from the fit at slope 50. See decisions.md.
         compute_dtype = keras.backend.standardize_dtype(self.compute_dtype)
         if compute_dtype not in SUPPORTED_COMPUTE_DTYPES:
             raise ValueError(
@@ -453,14 +462,12 @@ class HKANLayer(keras.layers.Layer):
                 "Supported dtype policies: 'float32' and 'float64'."
             )
         n_in = int(input_shape[-1])
-        # Without this a (B, 1) input broadcasts against the centers of a
-        # layer built for more columns and returns a (B, units) answer.
+        # Without this a (B, 1) input broadcasts against the centers silently.
         self.input_spec = keras.layers.InputSpec(ndim=2, axes={-1: n_in})
         block_shape = (self.units, n_in, self.num_basis)
 
-        # The value is produced INSIDE the initializer: an assign after
-        # add_weight is discarded when the build is reached through a parent's
-        # call(), and a tensor made here would bind to the tracing graph.
+        # Values come from the initializer: an assign after add_weight is lost when
+        # a parent's call() triggers the build, and a tensor made here binds to the trace.
         def centers_initializer(shape: Any, dtype: Any = None) -> Any:
             return keras.ops.convert_to_tensor(
                 self._initial_centers(tuple(shape)),
@@ -480,12 +487,8 @@ class HKANLayer(keras.layers.Layer):
                 name="block_bias", shape=(self.units, n_in),
                 initializer="zeros", trainable=True,
             )
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-007
-        # `mix` starts at 1/n_in and `coef` at a random draw. Do NOT
-        # initialize both to zeros (or `mix` to zeros "because the solve
-        # overwrites it"): d h / d coef carries `mix` and d h / d mix carries
-        # `phi`, so a zero start is a dead point for the gradient-trained
-        # modes. See decisions.md D-007.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-007: mix starts at 1/n_in, not 0.
+        # A zero mix or zero coef is a dead point for gradient training. See decisions.md.
         self.mix = self.add_weight(
             name="mix", shape=(self.units, n_in),
             initializer=(
@@ -507,6 +510,8 @@ class HKANLayer(keras.layers.Layer):
 
     def block_outputs(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Evaluate every block of the expanding stage.
+
+        ``identity`` uses a slope of 1.0.
 
         :param inputs: Input tensor of shape ``(batch_size, n_in)``.
         :type inputs: keras.KerasTensor
@@ -536,6 +541,8 @@ class HKANLayer(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor of shape ``(batch_size, units)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: From ``input_spec``, when the input width is not
+            the ``n_in`` the layer was built with.
         """
         outputs = keras.ops.sum(self.block_outputs(inputs) * self.mix, axis=-1)
         if self.use_bias:
@@ -560,8 +567,9 @@ class HKANLayer(keras.layers.Layer):
         """Draw data-driven centers from this layer's own input.
 
         For every block ``(q, p)`` independently, ``num_basis`` values are
-        sampled with replacement from column ``p`` of ``x``. Nothing is
-        assigned; the caller assigns the result to :attr:`centers`.
+        sampled with replacement from column ``p`` of ``x``. With a seed,
+        every call draws the same rows (stream 1). Nothing is assigned; the
+        caller assigns the result to :attr:`centers`.
 
         :param x: The layer's input, shape ``(N, n_in)``.
         :type x: np.ndarray
@@ -585,12 +593,12 @@ class HKANLayer(keras.layers.Layer):
     ) -> int:
         """Return how many outputs :meth:`solve_closed_form` solves at once.
 
-        Interface contract (call sites: :meth:`solve_closed_form`, and
-        ``HKAN.fit_closed_form``, which sizes its forward check from the same
-        byte budget): the float64 feature tensor of one solve chunk is
+        The float64 feature tensor of one chunk is
         ``outputs * n_in * n_rows * num_basis * 8`` bytes. A given
-        ``chunk_size`` is used as it is, capped at ``units``; ``None`` picks
-        the largest count whose tensor fits in ``AUTO_CHUNK_BYTES``, at least 1.
+        ``chunk_size`` is used as it is, capped at ``units``, with no byte
+        check. ``None`` picks the largest count whose tensor fits in
+        ``AUTO_CHUNK_BYTES``, at least 1. ``HKAN.fit_closed_form`` sizes its
+        forward check from the same budget.
 
         :param n_rows: Rows ``N`` of the layer input.
         :type n_rows: int
@@ -622,17 +630,19 @@ class HKANLayer(keras.layers.Layer):
 
         Every block is a ridge regression of its ``m`` basis features onto
         ``y``; then every output is a regression of its ``n_in`` block outputs
-        onto ``y``. Nothing is assigned: pass the result to
+        onto ``y``. Outputs are solved in chunks; see the closed-form diagram
+        on the class. Nothing is assigned: pass the result to
         :meth:`assign_solution`.
 
         :param x: Layer input, shape ``(N, n_in)``, dtype float64.
         :type x: np.ndarray
         :param y: Target, shape ``(N,)``, dtype float64.
         :type y: np.ndarray
-        :param l2_block: Ridge strength of the block regressions; ``0`` is
-            minimum-norm least squares.
+        :param l2_block: Ridge strength of the block regressions; ``0`` or
+            below is minimum-norm least squares.
         :type l2_block: float
-        :param l2_mix: Ridge strength of the connecting regressions.
+        :param l2_mix: Ridge strength of the connecting regressions; ``0`` or
+            below is minimum-norm least squares.
         :type l2_mix: float
         :param centers: Centers to fit against, shape ``(units, n_in, m)``,
             dtype float64. Pass the values the ``centers`` weight holds, so
@@ -652,8 +662,11 @@ class HKANLayer(keras.layers.Layer):
             where scikit-learn's ``r2_score`` gives ``1.0`` for an exact fit).
         :rtype: Dict[str, np.ndarray]
         :raises TypeError: If ``x``, ``y`` or ``centers`` is not float64.
-        :raises ValueError: If a shape is wrong, ``chunk_size`` is below 1,
-            or the solution is not finite.
+        :raises ValueError: If ``x`` is not rank 2, ``y`` is not ``(N,)``,
+            ``centers`` is not ``(units, n_in, m)``, ``chunk_size`` is below
+            1, or the solution is not finite.
+        :raises numpy.linalg.LinAlgError: Propagated from
+            :func:`solve_linear_float64`.
         """
         for label, array in (("x", x), ("y", y), ("centers", centers)):
             if array.dtype != np.float64:
@@ -677,11 +690,8 @@ class HKANLayer(keras.layers.Layer):
         basis = NUMPY_BASIS[self.basis]
         columns = x.T[None, :, :, None]
         total = float(np.sum(np.square(y - y.mean())))
-        # "Constant" is decided on the range, relative to the magnitude
-        # (is_constant_target). The centered sum of squares alone cannot
-        # tell: the mean of 96 copies of 0.7 is not 0.7, that sum is 1e-30,
-        # and R^2 computed against it was measured at -2e+30. `total > 0`
-        # stays for a range whose squares underflow to 0.
+        # total alone misreads 96 copies of 0.7 (rounding leaves 1e-30), hence the
+        # range test; `total > 0` catches a range whose squares underflow to 0.
         constant_target = is_constant_target(y) or not total > 0
 
         coef = np.empty((self.units, n_in, self.num_basis), dtype=np.float64)
@@ -705,12 +715,8 @@ class HKANLayer(keras.layers.Layer):
             del features
 
             residual = np.sum(np.square(phi - y), axis=-1)
-            # DECISION plan-2026-09-30T082355-4d999dbc/D-036
-            # A CONSTANT target has no variance to explain: block R^2 is 0.0.
-            # Do NOT return 1.0 for an exact fit there (scikit-learn's
-            # `r2_score` convention): the importance of every input would
-            # then read 1.0, "every input explains everything", for a target
-            # no input explains. See decisions.md D-036.
+            # DECISION plan-2026-09-30T082355-4d999dbc/D-036: constant target gives R^2 0.0.
+            # r2_score's 1.0 would mark every input as fully important. See decisions.md.
             if constant_target:
                 block_r2[start:stop] = 0.0
             else:
@@ -751,13 +757,16 @@ class HKANLayer(keras.layers.Layer):
     def assign_solution(self, solution: Dict[str, np.ndarray]) -> None:
         """Write a solution of :meth:`solve_closed_form` into the weights.
 
-        Values are cast to each weight's dtype. If the cast overflows, nothing
-        is assigned.
+        Writes ``coef`` and ``mix``, plus ``block_bias`` and ``bias`` when
+        their flag is set. ``centers``, ``output`` and ``block_r2`` are not
+        written. Values are cast to each weight's dtype; if any cast value is
+        not finite, nothing is assigned.
 
         :param solution: The dict returned by :meth:`solve_closed_form`.
         :type solution: Dict[str, np.ndarray]
         :raises ValueError: If the layer is not built, or a cast value is not
             finite.
+        :raises KeyError: If ``solution`` lacks a key that is written.
         """
         if not self.built:
             raise ValueError(
@@ -782,7 +791,8 @@ class HKANLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: Every constructor argument.
+        :return: Every constructor argument; ``centers`` holds the mode
+            string.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

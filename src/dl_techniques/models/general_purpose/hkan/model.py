@@ -1,64 +1,16 @@
-"""
-HKAN is a Kolmogorov-Arnold style regressor over ``(B, n_in)`` features whose
-weights can be fitted layer by layer by least squares, with no gradient, and
-whose same weights can also be trained by a stock optimizer.
+"""HKAN, a Kolmogorov-Arnold regressor fit layer by layer without gradients.
 
-A Kolmogorov-Arnold network replaces the fixed activation of an MLP by a
-learned one-dimensional function on every edge. Training those functions by
-backpropagation is slow and non-convex. HKAN removes the non-convex part by
-fixing the non-linear parameters: every edge function is
-``phi[q, p](x_p) = sum_r coef[q, p, r] * g(slope * (x_p - centers[q, p, r]))``
-with the centers drawn once at random (uniformly, equally spaced, or from the
-data) and never trained. What is left is linear in ``coef``, so each edge
-function is one ridge regression of its basis features onto the target ``y``.
-A layer then combines its edge functions per output,
-``h[q] = sum_p mix[q, p] * phi[q, p]``, which is again one linear regression
-onto ``y``. Layers are stacked: the outputs ``h`` of one layer are the inputs
-of the next, and every stage of every layer regresses onto the SAME ``y``.
-Depth therefore refines an approximation of ``y`` greedily; no stage is ever
-optimized jointly with another.
-
-The model is a list of :class:`HKANLayer`, one per paper layer, the last of
-width 1. The output is ``(B, 1)``; a single target only, because every block
-regresses onto one ``y``.
-
-Deliberate choices, each with its reason:
-
-- The closed-form training is the method :meth:`HKAN.fit_closed_form`, not an
-  override of ``fit`` or ``train_step``. ``keras.Model.fit`` stays the stock
-  gradient loop, so the two procedures can be used alone or one after the
-  other (closed form first, then gradient fine-tuning of all stages jointly).
-- The solve runs in float64 numpy whatever the model dtype, because the Gram
-  matrices are badly conditioned (1e6 to 1e18 measured). The result is cast
-  into the Keras weights. How far the model's forward pass then is from the
-  float64 fit depends on the size of the fitted weights: about the largest
-  weight times the resolution of the model dtype. Measured in float32: 6e-7
-  at most on the authors' tutorial configuration (weights up to 13), but
-  3.2e-03 RMS against a fit of RMSE 3.4e-08 with the hyperparameters of the
-  paper's Table V row for TF1 on a smooth two-input probe target, not on TF1
-  (connecting weights up to 6e3), and 2.6e+02 against 8.5e-02 at the
-  reference code's defaults (slope 1, no ridge, coefficients up to 5e9).
-  This constructor's defaults (``slope=5.0``, ``l2_block=0.01``,
-  ``l2_mix=0.01``) are chosen so that the default model stays under 1e-3 of
-  the target's standard deviation; the paper's and the reference code's
-  behaviour is ``slope=1.0, l2_block=0.0, l2_mix=0.0``, passed explicitly.
-  :meth:`HKAN.fit_closed_form` therefore runs the model once on the training
-  rows, reports the gap and logs a warning when it is large.
-- Intercepts are on by default in both stages (``use_block_bias``,
-  ``use_bias``). The paper's equations have none; the authors' reference
-  configuration fits them. Both forms are reachable.
-- A hidden layer of width 1 is allowed.
-- The centers are seeded (``seed``; ``0`` is a seed). With ``centers="data"``
-  they are drawn inside :meth:`HKAN.fit_closed_form`, or by
-  :meth:`HKAN.initialize_centers` for a gradient-only run; until one of the
-  two runs the weights hold a uniform placeholder.
-- The centers and the slope are not trainable in any mode.
-- There is no variants table and no ``pretrained`` argument: the paper
-  defines no named sizes and no weights are distributed.
-- Supported dtype policies are float32 and float64, set globally or by the
-  constructor's ``dtype`` argument, which every layer receives. Any other
-  compute dtype (``mixed_float16``, ``float16``, ``bfloat16`` and
-  ``mixed_bfloat16`` included) raises ``ValueError`` at build.
+:class:`HKAN` stacks :class:`HKANLayer` blocks over ``(B, n_in)`` features
+and returns one prediction per row, ``(B, 1)``. Instead of training learned
+edge functions by backpropagation, it fixes the non-linear parameters (basis
+centers and slope), so every block and every connecting stage is a linear
+regression onto the target. :meth:`HKAN.fit_closed_form` solves them in
+float64, layer by layer, all onto the same ``y``; ``keras.Model.fit`` stays
+the stock gradient loop and can fine-tune the same weights afterwards. The
+model fits one target only. Only the float32 and float64 dtype policies
+build. The defaults ``slope=5.0`` and ``l2_block=l2_mix=0.01`` differ from
+the reference code's ``1.0, 0.0, 0.0``. There is no variants table and no
+``pretrained`` argument.
 
 References:
     - Dudek and Rodak, 2025. HKAN: Hierarchical Kolmogorov-Arnold Network
@@ -82,37 +34,25 @@ from .hkan_layer import DEFAULT_SLOPE, HKANLayer, is_constant_target, is_integer
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-30T082355-4d999dbc/D-039
-# The defaults of `slope`, `l2_block` and `l2_mix` are 5.0, 0.01 and 0.01. Do
-# NOT restore the reference code's defaults (slope 1, no ridge on either
-# stage) as DEFAULTS "for fidelity to the paper": with them the float32 model
-# does not compute the fit it reports (fit RMSE 8.5e-02, model RMSE 2.6e+02
-# with no hidden layer), and a block ridge alone does not repair it once there
-# is a hidden layer, because the unpenalized connecting weights reach 2.5e+04
-# at width 64. Do NOT drop the `l2_mix` default to 0 on its own for the same
-# reason. The reference behaviour stays available by passing the three values
-# explicitly. See decisions.md D-039 and D-034.
+# DECISION plan-2026-09-30T082355-4d999dbc/D-039: defaults stay 5.0, 0.01, 0.01.
+# The reference 1, 0, 0 leaves a float32 model far from its own fit. See decisions.md.
 #: Default ridge strength of the block regressions.
 DEFAULT_L2_BLOCK: float = 0.01
 #: Default ridge strength of the connecting regressions.
 DEFAULT_L2_MIX: float = 0.01
 
 #: Rows per forward batch when :meth:`HKAN.initialize_centers` propagates
-#: activations; the feature tensor of a layer is ``(B, n_out, n_in, m)``. The
-#: forward check of :meth:`HKAN.fit_closed_form` sizes its batch from the
-#: solve's byte budget instead (:meth:`HKAN._forward_batch_rows`).
+#: activations. The forward check of :meth:`HKAN.fit_closed_form` sizes its
+#: batch from the solve's byte budget instead.
 _PROPAGATION_BATCH: int = 256
 
-#: :meth:`HKAN.fit_closed_form` warns when the RMS difference between the
-#: model's own forward pass and the float64 fit exceeds this fraction of the
-#: target's standard deviation. A float32 forward pass of a well-scaled fit
-#: sits near 1e-7 of it; 1e-3 is a gap a user would see in a reported RMSE.
+#: :meth:`HKAN.fit_closed_form` warns when the RMS gap between the model's
+#: forward pass and the float64 fit exceeds this fraction of the target's
+#: standard deviation. A well-scaled float32 fit sits near 1e-7.
 FORWARD_DEVIATION_FRACTION: float = 1e-3
 
-#: The limit used instead when the target is constant (``is_constant_target``):
-#: an RMS difference of this much times ``max(1, max |y|)``, about ten float32
-#: steps at the target's own scale. A fixed absolute value warned on a perfect
-#: fit of a constant near 1000, whose float32 rounding alone is about 6e-5.
+#: Warning limit for a constant target (``is_constant_target``): this much
+#: times ``max(1, max |y|)``, about ten float32 steps at the target's scale.
 FORWARD_DEVIATION_FLOOR: float = 1e-6
 
 # ---------------------------------------------------------------------
@@ -120,33 +60,76 @@ FORWARD_DEVIATION_FLOOR: float = 1e-6
 
 @register_dl_technique("dl_techniques.models.hkan.model")
 class HKAN(keras.Model):
-    """
-    Hierarchical Kolmogorov-Arnold Network for single-target regression.
+    """Regress one target through a stack of :class:`HKANLayer` blocks.
 
-    **Architecture**:
+    The model holds ``len(hidden_units) + 1`` layers, the last of width 1.
+    Train it by :meth:`fit_closed_form`, by ``keras.Model.fit``, or by the
+    first followed by the second; :meth:`fit_closed_form` is a separate
+    method and does not override ``fit`` or ``train_step``. Centers and
+    slopes never train. With ``centers="data"`` the centers are drawn inside
+    :meth:`fit_closed_form`, or by :meth:`initialize_centers` for a
+    gradient-only run; until then they hold a uniform placeholder.
+    Intercepts are on by default in both stages; the paper's equations have
+    none. A hidden layer of width 1 is allowed.
+
+    Every per-layer setting (``num_basis``, ``basis``, ``slope``, ``centers``,
+    ``l2_block``, ``l2_mix``) takes one value for all layers or a list or
+    tuple with one value per layer, ``len(hidden_units) + 1`` long. Integer
+    arguments may be numpy integers; ``get_config`` returns plain Python
+    numbers and lists.
+
+    Architecture:
 
     .. code-block:: text
 
-        x (B, n_in)
-           │
-           ▼
-        HKANLayer 0   n_in            -> hidden_units[0]
-           ▼
-        HKANLayer 1   hidden_units[0] -> hidden_units[1]
-           ▼
-          ...
-           ▼
-        HKANLayer L   hidden_units[-1] -> 1
-           │
-           ▼
-        y_hat (B, 1)
+        x [B, n_in]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ hkan_layer_0        │  n_in -> hidden_units[0]
+        └─────────────────────┘
+                 │  [B, hidden_units[0]]
+                 ▼
+                ...
+                 │  [B, hidden_units[-1]]
+                 ▼
+        ┌─────────────────────┐
+        │ hkan_layer_L        │  hidden_units[-1] -> 1
+        └─────────────────────┘
+                 │
+                 ▼
+        y_hat [B, 1]
 
-    Every per-layer setting (``num_basis``, ``basis``, ``slope``, ``centers``,
-    ``l2_block``, ``l2_mix``) takes either one value for all layers or a
-    sequence with one value per layer, ``len(hidden_units) + 1`` long.
+    L is len(hidden_units); with none, hkan_layer_0 maps n_in -> 1.
 
-    :param hidden_units: Widths of the hidden layers. Empty for a one-layer
-        model. The output layer of width 1 is added automatically.
+    Closed-form fit (:meth:`fit_closed_form`):
+
+    .. code-block:: text
+
+        x [N, n_in] as float64
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ hkan_layer_0        │◄── y, centers read from weight
+        └─────────────────────┘
+                 │  output [N, units of layer 0]
+                 ├──► assign_solution, block_r2
+                 ▼
+                ...
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ hkan_layer_L        │◄── y
+        └─────────────────────┘
+                 │  train_predictions [N]
+                 ▼
+        model forward pass on x ──► forward_rmse, warning
+
+    A data-mode layer draws its centers from its input before its solve.
+
+    :param hidden_units: Widths of the hidden layers, a list or tuple of
+        positive integers. Empty for a one-layer model. The output layer of
+        width 1 is added automatically.
     :type hidden_units: Sequence[int]
     :param num_basis: Basis functions per block.
     :type num_basis: Union[int, Sequence[int]]
@@ -159,18 +142,16 @@ class HKAN(keras.Model):
     :param centers: ``random``, ``equally_spaced`` or ``data``.
     :type centers: Union[str, Sequence[str]]
     :param l2_block: Ridge strength of the block regressions in
-        :meth:`fit_closed_form`. Default 0.01. ``0``, the reference code's
-        default, is minimum-norm least squares, which on a smooth basis
-        returns coefficients a float32 model cannot carry
-        (:meth:`fit_closed_form` warns when that happens). It has no effect
-        on gradient training.
+        :meth:`fit_closed_form`. Must be finite and non-negative. Default
+        0.01. ``0``, the reference code's default, is minimum-norm least
+        squares, which on a smooth basis returns coefficients a float32
+        model cannot carry. No effect on gradient training.
     :type l2_block: Union[float, Sequence[float]]
     :param l2_mix: Ridge strength of the connecting regressions in
-        :meth:`fit_closed_form`. Default 0.01. The paper fits the connecting
-        stage by plain least squares (``0``); on a wide layer the block
-        outputs are nearly collinear and ``0`` gave connecting weights of
-        4e2 to 5e8 in the measured cases. It has no effect on gradient
-        training.
+        :meth:`fit_closed_form`. Must be finite and non-negative. Default
+        0.01. The paper uses ``0``; on a wide layer the block outputs are
+        nearly collinear and ``0`` gives very large connecting weights. No
+        effect on gradient training.
     :type l2_mix: Union[float, Sequence[float]]
     :param use_block_bias: Whether every block has an intercept.
     :type use_block_bias: bool
@@ -182,20 +163,12 @@ class HKAN(keras.Model):
     :param mix_initializer: Initializer of the connecting weights. ``None``
         selects the constant ``1 / n_in`` of each layer.
     :type mix_initializer: Optional[Union[str, keras.initializers.Initializer]]
-    :param seed: Seed of the centers. ``None`` draws from the global numpy
-        generator. ``0`` is a seed.
+    :param seed: Seed of the centers, shared by every layer and mixed with
+        its index. ``None`` draws from the global numpy generator. ``0`` is a
+        seed.
     :type seed: Optional[int]
-    :param kwargs: Additional arguments for the ``keras.Model`` base. A
+    :param **kwargs: Additional arguments for the ``keras.Model`` base. A
         ``dtype`` given here is the dtype policy of every layer too.
-    :raises ValueError: If a width is not a positive integer, a per-layer
-        sequence has the wrong length, a ridge strength is negative, or a
-        layer rejects its setting. Building under a dtype policy other than
-        float32 or float64 (global or given as ``dtype``) raises it too, and
-        so does calling the model on an input of another width than it was
-        built for.
-
-    Integer arguments (``hidden_units`` entries, ``num_basis``, ``seed``) may
-    be numpy integers; ``get_config`` returns plain Python numbers.
 
     :ivar hkan_layers: The layers, in order.
     :vartype hkan_layers: List[HKANLayer]
@@ -234,6 +207,15 @@ class HKAN(keras.Model):
             seed: Optional[int] = None,
             **kwargs: Any,
     ) -> None:
+        """Validate the arguments and create one layer per stage.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``hidden_units`` is not a list or tuple of
+            positive integers, a per-layer sequence has the wrong length,
+            ``l2_block`` or ``l2_mix`` is not finite or is negative, or a
+            layer rejects its setting.
+        """
         super().__init__(**kwargs)
 
         if isinstance(hidden_units, (str, bytes)) or not isinstance(
@@ -278,17 +260,9 @@ class HKAN(keras.Model):
                         f"{label} must be finite and non-negative, got {value!r}"
                     )
 
-        # A keras.Model-owned flat list keeps weight tracking through a
-        # .keras save.
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-049
-        # Every layer gets the MODEL's dtype policy. Do NOT drop `dtype=` below
-        # "because the global policy already reaches the layers": a policy
-        # given to the constructor (`HKAN(dtype="float64")`, the standard Keras
-        # way) then never reached them. Measured: `dtype="float64"` left
-        # float32 layers and the same 3.6e+07 forward deviation as float32,
-        # and `dtype="mixed_float16"` built, fitted and predicted with no
-        # error, inputs rounded to float16, past the refusal of D-037. See
-        # decisions.md D-049.
+        # A model-owned flat list keeps weight tracking through a .keras save.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-049: every layer gets dtype=self.dtype_policy.
+        # Without it HKAN(dtype=...) skips the layers and their dtype check. See decisions.md.
         self.hkan_layers: List[HKANLayer] = [
             HKANLayer(
                 units=self._units[index],
@@ -336,12 +310,12 @@ class HKAN(keras.Model):
         return [value] * n_layers
 
     def _forward_batch_rows(self, n_rows: int, chunk_size: Optional[int]) -> int:
-        """Rows per batch of the forward check, from the solve's byte budget.
+        """Return rows per batch of the forward check, from the solve's byte budget.
 
-        For every layer, the batch whose feature tensor ``(B, n_out, n_in, m)``
-        at the compute dtype is no larger than the float64 feature tensor of
-        one solve chunk of that layer (``HKANLayer.solve_chunk_outputs``); the
-        smallest over the layers, at least 1 and at most ``n_rows``.
+        For each layer, the batch whose feature tensor ``(B, n_out, n_in, m)``
+        at the compute dtype fits in the float64 feature tensor of one solve
+        chunk (``HKANLayer.solve_chunk_outputs``). Returns the smallest over
+        the layers, at least 1 and at most ``n_rows``. Needs a built model.
 
         :param n_rows: Rows of the fit.
         :type n_rows: int
@@ -350,14 +324,8 @@ class HKAN(keras.Model):
         :return: The batch size.
         :rtype: int
         """
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-050
-        # The forward check's batch comes from the SAME byte budget as the
-        # solve. Do NOT go back to a fixed row count (it was 256): the feature
-        # tensor is (B, n_out, n_in, m) whatever `chunk_size` is, so a fixed
-        # batch made `chunk_size` stop bounding memory. Measured (64 inputs,
-        # width 1024, m 10, 300 rows, chunk_size 16, CPU): peak RSS 3322 MB
-        # with the fixed batch against 745 MB with the check stubbed out. See
-        # decisions.md D-050.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-050: batch from the solve's byte budget.
+        # A fixed row count stops chunk_size from bounding memory. See decisions.md.
         rows = n_rows
         for layer in self.hkan_layers:
             n_in = int(layer.centers.shape[1])
@@ -370,6 +338,8 @@ class HKAN(keras.Model):
 
     def _forward_numpy(self, x: np.ndarray, batch_rows: int) -> np.ndarray:
         """Run the built model on ``x`` in batches, at the model's own dtype.
+
+        Calls the model with ``training=False``.
 
         :param x: Inputs, shape ``(N, n_in)``.
         :type x: np.ndarray
@@ -392,7 +362,9 @@ class HKAN(keras.Model):
 
         :param input_shape: ``(batch_size, n_in)``.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If the input is not rank 2 or ``n_in`` is unknown.
+        :raises ValueError: If the input is not rank 2, ``n_in`` is unknown,
+            or the compute dtype is not float32 or float64 (from
+            :meth:`HKANLayer.build`).
         """
         input_shape = tuple(input_shape)
         if len(input_shape) != 2 or input_shape[-1] is None:
@@ -419,6 +391,8 @@ class HKAN(keras.Model):
         :type training: Optional[bool]
         :return: Predictions of shape ``(batch_size, 1)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: From the first layer's ``input_spec``, when the
+            input width is not the one the model was built with.
         """
         outputs = inputs
         for layer in self.hkan_layers:
@@ -466,30 +440,23 @@ class HKAN(keras.Model):
     ) -> Dict[str, Any]:
         """Train every layer by least squares, without gradients.
 
-        Layer by layer: the centers are drawn from the layer's input when its
-        mode is ``data``; every block is fitted to ``y`` by ridge regression
-        and every output by a linear regression of its blocks, in float64;
-        the result is assigned into the layer's weights (cast to their
-        dtype); the float64 layer output becomes the next layer's input. An
-        unbuilt model is built from ``x`` first. If a layer's solution is not
-        finite, a ``ValueError`` names it; earlier layers keep their new
-        weights and that layer and the later ones keep their old ones.
+        Layer by layer: a ``data``-mode layer draws its centers from its
+        input; every block is fit to ``y`` by ridge regression and every
+        output by a regression of its blocks, in float64; the result is cast
+        into the layer's weights; the float64 layer output becomes the next
+        layer's input. An unbuilt model is built from ``x`` first. If a
+        layer's solution is not finite, ``ValueError`` names it. Earlier
+        layers keep their new weights; that layer and later ones keep their
+        old ``coef``, ``mix`` and intercepts, but a ``data``-mode layer has
+        already overwritten its centers.
 
-        The returned train predictions are the float64 fit's own. The model
-        holds the solution cast to its dtype, and its forward pass differs
-        from the fit by about the weight magnitude times the resolution of
-        that dtype: 1e-7 for weights of order 1 in float32, and arbitrarily
-        much for the block coefficients of 1e7 to 1e11 that a zero ridge
-        gives on a smooth basis, or for the connecting weights that
-        ``l2_mix = 0`` gives on a wide layer (4e2 to 5e8 in the measured
-        cases). The fit therefore ends with one
-        batched forward pass of the model on ``x`` and reports it
-        (``forward_rmse``, ``forward_deviation_rms``). When the deviation
-        exceeds ``FORWARD_DEVIATION_FRACTION`` of the target's standard
-        deviation (``FORWARD_DEVIATION_FLOOR`` times ``max(1, max |y|)`` for a
-        target that ``is_constant_target`` calls constant), or is not a
-        finite number, a warning is logged; it is not an exception, because
-        the float64 diagnostics are still correct.
+        The fit ends with one batched forward pass of the model on ``x``.
+        The model holds the solution at its own dtype, so its output differs
+        from the float64 fit by about the largest weight times that dtype's
+        resolution. A warning is logged, not raised, when the RMS gap is not
+        at most ``FORWARD_DEVIATION_FRACTION`` of the standard deviation of
+        ``y``, or ``FORWARD_DEVIATION_FLOOR * max(1, max |y|)`` for a target
+        that :func:`is_constant_target` calls constant. A NaN gap warns.
 
         :param x: Training inputs, shape ``(N, n_in)``.
         :type x: np.ndarray
@@ -497,25 +464,25 @@ class HKAN(keras.Model):
         :type y: np.ndarray
         :param chunk_size: Number of outputs of a layer solved at once. It
             bounds memory and does not change the result. ``None`` picks it
-            per layer. The forward check runs in batches sized from the same
-            byte budget, so it bounds that pass's memory too.
+            per layer. The forward check sizes its batches from the same
+            byte budget.
         :type chunk_size: Optional[int]
-        :return: ``layer_rmse``: list of the train RMSE of every layer's
-            outputs against ``y`` (mean over the layer's outputs of the
-            squared error, then the root); ``block_r2``: array
-            ``(n_hidden_1, n_in)``, the coefficient of determination of every
-            first-layer block against ``y``; ``importance``: array
-            ``(n_in,)``, its mean over the outputs (paper equation 14), which
-            is ``0.0`` for every input when ``y`` is constant (a departure
-            from scikit-learn's ``r2_score``, which gives ``1.0`` for an exact
-            fit of a constant); ``train_predictions``: float64 array ``(N,)``;
-            ``forward_rmse``: the RMSE of the model's own forward pass on
-            ``x`` against ``y``, the number a later ``predict`` reproduces;
-            ``forward_deviation_rms``: the RMS difference between that forward
-            pass and ``train_predictions``.
+        :return: A dict with ``layer_rmse``, a list with each layer's train
+            RMSE against ``y``, averaged over rows and the layer's outputs;
+            ``block_r2``, array ``(units of layer 0, n_in)``, the R^2 of every
+            first-layer block against ``y``; ``importance``, array
+            ``(n_in,)``, its mean over the outputs (paper equation 14), all
+            ``0.0`` when ``y`` is constant; ``train_predictions``, the float64
+            fit's array ``(N,)``; ``forward_rmse``, the RMSE of the model's
+            own forward pass, which a later ``predict`` reproduces; and
+            ``forward_deviation_rms``, the RMS gap between that pass and
+            ``train_predictions``.
         :rtype: Dict[str, Any]
-        :raises ValueError: If a shape is wrong, ``y`` has more than one
-            column, an input is not finite, or a solution is not finite.
+        :raises ValueError: If ``x`` is not a non-empty ``(N, n_in)`` array or
+            its width differs from the built model, ``y`` is not ``(N,)`` or
+            ``(N, 1)``, the row counts differ, an input is not finite,
+            ``chunk_size`` is below 1, or a solution is not finite.
+        :raises numpy.linalg.LinAlgError: Propagated from a layer's solve.
         """
         x = np.asarray(x, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
@@ -540,12 +507,8 @@ class HKAN(keras.Model):
         for index, layer in enumerate(self.hkan_layers):
             if layer.centers_mode == "data":
                 layer.centers.assign(layer.sample_data_centers(activations))
-            # DECISION plan-2026-09-30T082355-4d999dbc/D-020
-            # The solve reads the centers BACK from the weight. Do NOT fit
-            # against the float64 draw and store its cast: at slope 50 the
-            # float32 rounding of a center moves the basis argument by about
-            # 1e-6, and the fitted coefficients would then belong to centers
-            # the model does not hold. See decisions.md D-020.
+            # DECISION plan-2026-09-30T082355-4d999dbc/D-020: solve against centers read back.
+            # Fitting the float64 draw fits centers the model does not hold. See decisions.md.
             stored_centers = np.asarray(
                 keras.ops.convert_to_numpy(layer.centers), dtype=np.float64)
             solution = layer.solve_closed_form(
@@ -559,20 +522,13 @@ class HKAN(keras.Model):
             if index == 0:
                 block_r2 = solution["block_r2"]
 
-        # DECISION plan-2026-09-30T082355-4d999dbc/D-034
-        # The fit ends by running the MODEL on the training rows. Do NOT
-        # remove this pass or report `layer_rmse` alone "because the solve is
-        # exact": at zero ridge with a sigmoid basis the float64 fit had RMSE
-        # 8.5e-02 while the float32 model it left behind had 2.6e+02, and
-        # nothing said so. Do NOT turn the warning into an exception either:
-        # the float64 diagnostics are correct and the float64 policy is a
-        # valid remedy. See decisions.md D-034.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-034: always run the model on x.
+        # Warn, never raise: layer_rmse alone hides a model far from its fit. See decisions.md.
         train_predictions = activations[:, 0]
         forward = self._forward_numpy(x, self._forward_batch_rows(x.shape[0], chunk_size))
         forward_rmse = float(np.sqrt(np.mean(np.square(forward - y))))
         deviation = float(np.sqrt(np.mean(np.square(forward - train_predictions))))
-        # is_constant_target decides "constant": the standard deviation of 96
-        # copies of 0.7 is 1e-16, not 0, and a fraction of that always warns.
+        # np.std of 96 copies of 0.7 is 1e-16, not 0, hence is_constant_target.
         spread = 0.0 if is_constant_target(y) else float(np.std(y))
         if spread > 0:
             limit = FORWARD_DEVIATION_FRACTION * spread
@@ -585,9 +541,7 @@ class HKAN(keras.Model):
                 f"the floor {limit:.3e} ({FORWARD_DEVIATION_FLOOR:g} times the "
                 "target's scale) used for a constant target")
         if not deviation <= limit:
-            # Over every weight, with a default: a frozen model has no
-            # trainable weights and max() of nothing raised here, after the
-            # weights were assigned and before the warning (decisions.md D-050).
+            # default=0.0 covers an empty weight list.
             largest = max(
                 (float(np.abs(keras.ops.convert_to_numpy(weight)).max())
                  for weight in self.weights),
@@ -622,18 +576,20 @@ class HKAN(keras.Model):
     def initialize_centers(self, x: np.ndarray) -> None:
         """Draw the ``data`` centers without a closed-form fit.
 
-        For a gradient-only run. Layer by layer, every layer whose mode is
-        ``data`` draws its centers from its own current input: the first
-        layer from ``x``, a deeper layer from the model's activations at its
-        current weights, with the earlier layers' centers already drawn.
-        Layers in another mode are left untouched. An unbuilt model is built
-        from ``x`` first. Drawing deeper centers from activations at the
-        initial weights is this implementation's choice; the paper defines
-        the data draw only inside its layer-by-layer fit.
+        For a gradient-only run. Each ``data``-mode layer draws its centers
+        from its own current input: the first layer from ``x``, a deeper one
+        from the activations at the current weights, after the earlier
+        layers' centers are drawn. Other layers are left untouched, and
+        propagation stops at the last ``data``-mode layer. An unbuilt model
+        is built from ``x`` first. The paper defines the data draw only
+        inside its layer-by-layer fit; the deeper-layer draw is this
+        implementation's.
 
-        :param x: Inputs to draw from, shape ``(N, n_in)``.
+        :param x: Inputs to draw from, shape ``(N, n_in)``. Not checked for
+            finiteness.
         :type x: np.ndarray
-        :raises ValueError: If ``x`` has the wrong shape.
+        :raises ValueError: If ``x`` is not a non-empty ``(N, n_in)`` array
+            or its width differs from the built model.
         """
         x = np.asarray(x)
         self._ensure_built(x)
@@ -662,7 +618,7 @@ class HKAN(keras.Model):
         the ``.keras`` archive.
 
         :return: Every constructor argument, numpy scalars converted to
-            plain Python numbers.
+            plain Python numbers and tuples to lists.
         :rtype: Dict[str, Any]
         """
         def scalar(value: Any) -> Any:
@@ -708,10 +664,12 @@ def create_hkan(
     :param input_dim: When given, the model is built for ``(None, input_dim)``
         so its weights exist before the first call.
     :type input_dim: Optional[int]
-    :param kwargs: Any other :class:`HKAN` constructor argument. An unknown
-        name raises from the constructor.
+    :param **kwargs: Any other :class:`HKAN` constructor argument. An
+        unknown name raises from the constructor.
     :return: The model.
     :rtype: HKAN
+    :raises ValueError: If the constructor rejects an argument, or the build
+        rejects ``input_dim`` or the dtype policy.
     """
     model = HKAN(hidden_units=hidden_units, **kwargs)
     if input_dim is not None:
