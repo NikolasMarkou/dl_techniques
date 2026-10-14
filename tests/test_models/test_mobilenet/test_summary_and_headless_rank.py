@@ -24,6 +24,7 @@ from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
 from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
+from tests.numerics import reassociation_atol
 
 
 SMALL_SHAPE = (32, 32, 3)
@@ -75,19 +76,20 @@ class TestHeadlessReturnsAFeatureMap:
             f"{cls.__name__} headless output has no spatial extent: {shape}"
         )
 
-    def test_v1_top_still_returns_class_probabilities(self):
+    def test_v1_top_still_returns_class_logits(self):
         """Anti-vacuity: gating the pool must not disturb the classifier path.
 
-        ``return_dict`` defaults to True, so the probabilities are the dict's
-        ``'probabilities'`` entry.
+        The model returns the head's logits as one tensor; their softmax rows
+        sum to 1 within ``reassociation_atol([7], 1, 1.0)``.
         """
         model = MobileNetV1(num_classes=7, input_shape=SMALL_SHAPE)
         result = model(np.random.rand(3, *SMALL_SHAPE).astype("float32"))
-        out = keras.ops.convert_to_numpy(
-            result["probabilities"] if isinstance(result, dict) else result
-        )
+        assert not isinstance(result, dict)
+        out = keras.ops.convert_to_numpy(result)
         assert out.shape == (3, 7)
-        np.testing.assert_allclose(out.sum(axis=-1), np.ones(3), rtol=1e-5, atol=1e-5)
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(result, axis=-1))
+        atol = reassociation_atol([7], 1, 1.0)
+        np.testing.assert_allclose(probs.sum(axis=-1), np.ones(3), rtol=0, atol=atol)
 
     def test_v1_headless_pooled_manually_matches_the_old_output(self):
         """The pooled vector is still one `GlobalAveragePooling2D` away, so the

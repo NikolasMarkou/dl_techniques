@@ -145,7 +145,8 @@ def train_model(args) -> None:
             learning_rate=lr,
             weight_decay=args.weight_decay,
         ),
-        loss="sparse_categorical_crossentropy",
+        # The model returns logits (its head's classifier is linear).
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
 

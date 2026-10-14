@@ -27,6 +27,8 @@ import keras
 from keras import ops
 import tensorflow as tf
 
+from tests.numerics import reassociation_atol
+
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4, create_mobilenetv4
 
 
@@ -110,9 +112,8 @@ class TestMobileNetV4:
         # First call should trigger building
         output = model(sample_inputs['cifar'])
         assert model.built
-        assert isinstance(output, dict)
-        assert 'logits' in output and 'probabilities' in output
-        assert output['logits'].shape == (4, default_config['num_classes'])
+        assert not isinstance(output, dict)
+        assert output.shape == (4, default_config['num_classes'])
 
     # ============================================================================
     # Critical Serialization Tests
@@ -135,8 +136,8 @@ class TestMobileNetV4:
 
             # Verify identical predictions (compare logits)
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_pred['logits']),
-                keras.ops.convert_to_numpy(loaded_pred['logits']),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Conv-only model predictions differ after serialization"
             )
@@ -158,8 +159,8 @@ class TestMobileNetV4:
 
             # Verify identical predictions (compare logits)
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_pred['logits']),
-                keras.ops.convert_to_numpy(loaded_pred['logits']),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Hybrid model predictions differ after serialization"
             )
@@ -341,16 +342,15 @@ class TestMobileNetV4:
         x = keras.random.normal(shape=(2, 32, 32, 3))
 
         out = model(x)
-        assert isinstance(out, dict)
-        assert 'logits' in out and 'probabilities' in out
-        assert out['logits'].shape == (2, 4)
-        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out['logits'])))
+        assert not isinstance(out, dict)
+        assert out.shape == (2, 4)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
 
         rebuilt = MobileNetV4.from_config(model.get_config())
         assert rebuilt.block_types == [block_type]
         rebuilt_out = rebuilt(x)
-        assert isinstance(rebuilt_out, dict)
-        assert rebuilt_out['logits'].shape == (2, 4)
+        assert not isinstance(rebuilt_out, dict)
+        assert rebuilt_out.shape == (2, 4)
 
     # ============================================================================
     # Forward Pass and Output Shape Tests
@@ -361,9 +361,8 @@ class TestMobileNetV4:
         # Conv-only model
         model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
-        assert isinstance(output, dict)
-        assert 'logits' in output and 'probabilities' in output
-        assert output['logits'].shape == (4, 10)
+        assert not isinstance(output, dict)
+        assert output.shape == (4, 10)
 
         # Feature extractor
         model = MobileNetV4.from_variant("small", include_top=False, input_shape=(32, 32, 3))
@@ -384,9 +383,8 @@ class TestMobileNetV4:
             sample_input = keras.random.normal(shape=sample_shape)
 
             output = model(sample_input)
-            assert isinstance(output, dict)
-            assert 'logits' in output
-            assert output['logits'].shape == (sample_shape[0], 5)
+            assert not isinstance(output, dict)
+            assert output.shape == (sample_shape[0], 5)
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
@@ -396,9 +394,8 @@ class TestMobileNetV4:
         for batch_size in batch_sizes:
             sample_input = keras.random.normal(shape=(batch_size, 32, 32, 3))
             output = model(sample_input)
-            assert isinstance(output, dict)
-            assert 'logits' in output
-            assert output['logits'].shape == (batch_size, 10)
+            assert not isinstance(output, dict)
+            assert output.shape == (batch_size, 10)
 
     # ============================================================================
     # Training and Gradient Tests
@@ -410,17 +407,17 @@ class TestMobileNetV4:
 
         with tf.GradientTape() as tape:
             output = model(sample_inputs['cifar'], training=True)
-            loss = ops.mean(ops.square(output['logits']))
+            loss = ops.mean(ops.square(output))
 
         gradients = tape.gradient(loss, model.trainable_variables)
 
-        # Note: ClassificationHead builds a norm layer that is not used in forward pass,
-        # so its gamma/beta params will have None gradients. Check that at least
-        # some gradients are non-None and non-zero.
-        non_none_grads = [g for g in gradients if g is not None]
-        assert len(non_none_grads) > 0, "All gradients are None"
-        non_zero_grads = [g for g in non_none_grads if ops.max(ops.abs(g)) > 1e-8]
-        assert len(non_zero_grads) > 0, "All non-None gradients are zero"
+        # The head builds only what its call() applies (plan-2026-10-14
+        # step 1), so every trainable weight is on the gradient path.
+        missing = [v.path for v, g in zip(model.trainable_variables, gradients)
+                   if g is None]
+        assert not missing, f"trainable weights with no gradient: {missing}"
+        non_zero_grads = [g for g in gradients if ops.max(ops.abs(g)) > 1e-8]
+        assert len(non_zero_grads) > 0, "All gradients are zero"
 
     @pytest.mark.parametrize("training", [True, False, None])
     def test_training_modes(self, default_config, sample_inputs, training):
@@ -428,9 +425,8 @@ class TestMobileNetV4:
         model = MobileNetV4(**default_config)
 
         output = model(sample_inputs['cifar'], training=training)
-        assert isinstance(output, dict)
-        assert 'logits' in output
-        assert output['logits'].shape == (4, default_config['num_classes'])
+        assert not isinstance(output, dict)
+        assert output.shape == (4, default_config['num_classes'])
 
         # Test with attention model too
         hybrid_config = default_config.copy()
@@ -440,18 +436,17 @@ class TestMobileNetV4:
         })
         hybrid_model = MobileNetV4(**hybrid_config)
         output = hybrid_model(sample_inputs['cifar'], training=training)
-        assert isinstance(output, dict)
-        assert 'logits' in output
-        assert output['logits'].shape == (4, default_config['num_classes'])
+        assert not isinstance(output, dict)
+        assert output.shape == (4, default_config['num_classes'])
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
-        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3), return_dict=False)
+        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
 
         # Compile model
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -529,36 +524,36 @@ class TestMobileNetV4:
 
         sample_input = keras.random.normal(shape=(2, 16, 16, 1))
         output = model(sample_input)
-        assert isinstance(output, dict)
-        assert 'logits' in output
-        assert output['logits'].shape == (2, 2)
+        assert not isinstance(output, dict)
+        assert output.shape == (2, 2)
 
     # ============================================================================
     # Performance and Memory Tests
     # ============================================================================
 
     def test_model_parameter_counts(self):
-        """Test parameter counts are reasonable for different variants."""
-        # Updated for ClassificationHead migration (no FFN, just 2 dense blocks + classifier)
-        # Actual measured counts (no FFN): small=837k, medium=1.95M, large=3.33M, hybrid_medium=2.27M, hybrid_large=3.78M
-        variants_expected_range = {
-            'small': (0.8e6, 0.9e6),      # ~837k params
-            'medium': (1.9e6, 2.1e6),     # ~1.95M params
-            'large': (3.2e6, 3.5e6),      # ~3.33M params
-            'hybrid_medium': (2.2e6, 2.4e6),  # ~2.27M params
-            'hybrid_large': (3.6e6, 4.0e6),   # ~3.78M params
+        """Exact counts at 224 x 224 x 3, 1000 classes, re-derived by command.
+
+        These ladders are not the paper's tables, so there is no external
+        total to match; the head is timm's MobileNetV4 head (GAP, bias-free
+        Dense 1280, BatchNorm, ReLU, dropout, Dense; D-015), ``C * 1280 +
+        5,120 + 1,281,000`` values at 1000 classes for a last stage of width
+        ``C`` (1,490,920 for ``small``, C = 160). MEASURED 2026-10-14
+        (plan-2026-10-14T062616-81938e81 step 3) on CPU with
+        ``MobileNetV4.from_variant(v, num_classes=1000)`` and one forward pass.
+        """
+        expected = {
+            'small': 2_124_024,
+            'medium': 3_407_112,
+            'large': 4_849_736,
+            'hybrid_medium': 3_722_250,
+            'hybrid_large': 5_296_538,
         }
-
-        for variant, (min_params, max_params) in variants_expected_range.items():
+        for variant, count in expected.items():
             model = MobileNetV4.from_variant(variant, num_classes=1000)
-            # Build model to count parameters
             model(keras.random.normal(shape=(1, 224, 224, 3)))
-
-            param_count = model.count_params()
-            assert min_params <= param_count <= max_params, (
-                f"{variant} has {param_count} parameters, "
-                f"expected between {min_params} and {max_params}"
-            )
+            assert model.count_params() == count, (
+                f"{variant}: {model.count_params():,} != {count:,}")
 
     def test_model_summary_execution(self):
         """Test that model summary executes without errors."""
@@ -579,10 +574,10 @@ class TestMobileNetV4:
 
     def test_model_in_training_loop(self):
         """Test model in a realistic training scenario."""
-        model = MobileNetV4.from_variant("small", num_classes=2, input_shape=(32, 32, 3), return_dict=False)
+        model = MobileNetV4.from_variant("small", num_classes=2, input_shape=(32, 32, 3))
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -607,9 +602,8 @@ class TestMobileNetV4:
 
     def test_model_evaluation_and_prediction(self):
         """Test model evaluation and prediction methods."""
-        # Test with return_dict=False for Keras compatibility
-        model = MobileNetV4.from_variant("small", num_classes=5, input_shape=(32, 32, 3), return_dict=False)
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        model = MobileNetV4.from_variant("small", num_classes=5, input_shape=(32, 32, 3))
+        model.compile(optimizer='adam', loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
 
         # Test data
         x_test = keras.random.normal(shape=(10, 32, 32, 3))
@@ -623,27 +617,14 @@ class TestMobileNetV4:
         predictions = model.predict(x_test, verbose=0)
         assert predictions.shape == (10, 5)
 
-        # Test predictions sum to 1 (softmax)
-        pred_sums = ops.sum(predictions, axis=1)
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(pred_sums),
-            np.ones(10),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Softmax predictions don't sum to 1"
-        )
-
-        # Test with return_dict=True (default) for full dict output
-        model_dict = MobileNetV4.from_variant("small", num_classes=5, input_shape=(32, 32, 3), return_dict=True)
-        predictions_dict = model_dict(x_test, training=False)
-        assert isinstance(predictions_dict, dict)
-        assert 'logits' in predictions_dict and 'probabilities' in predictions_dict
-        prob_sums = ops.sum(predictions_dict['probabilities'], axis=1)
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(prob_sums),
-            np.ones(10),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Softmax predictions don't sum to 1"
-        )
+        # The model returns logits: the rows are not normalized, their softmax
+        # is. A softmax row sums to 1 within reassociation_atol([5], 1, 1.0).
+        atol = reassociation_atol([5], 1, 1.0)
+        rows = np.asarray(predictions, dtype=np.float64).sum(axis=1)
+        assert np.any(np.abs(rows - 1.0) > atol), (
+            f"every predicted row sums to 1 within {atol:.2e}: {rows}")
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(10), rtol=0, atol=atol)
 
 
 # ============================================================================

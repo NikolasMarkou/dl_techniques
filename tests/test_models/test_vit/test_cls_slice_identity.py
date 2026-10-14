@@ -79,7 +79,7 @@ class TestViTClsSliceIdentity:
         model = self._built_model()
         x = _x(1)
 
-        logits = model(x, training=False)['probabilities']
+        logits = model(x, training=False)
         logits = _np(logits)
 
         # Same weights, sequence output: ``call`` branches on include_top.
@@ -92,7 +92,7 @@ class TestViTClsSliceIdentity:
 
         # Pass the full sequence to the head; it will extract the CLS token (position 0)
         seq_tensor = ops.convert_to_tensor(sequence)
-        from_cls = model.classification_head(seq_tensor)['probabilities']
+        from_cls = model.classification_head(seq_tensor)['logits']
         from_cls = _np(from_cls)
         np.testing.assert_allclose(
             logits, from_cls, rtol=0, atol=0,
@@ -104,7 +104,7 @@ class TestViTClsSliceIdentity:
         # Create a sequence where position 0 and -1 are swapped
         swapped_seq = sequence.copy()
         swapped_seq[:, [0, -1], :] = swapped_seq[:, [-1, 0], :]
-        from_swapped = model.classification_head(ops.convert_to_tensor(swapped_seq))['probabilities']
+        from_swapped = model.classification_head(ops.convert_to_tensor(swapped_seq))['logits']
         from_swapped = _np(from_swapped)
         assert not np.allclose(logits, from_swapped, atol=1e-6), (
             "the classification head produces the same output for swapped CLS token; "
@@ -116,7 +116,7 @@ class TestViTClsSliceIdentity:
         model = self._built_model()
         x = _x(2)
 
-        logits = model(x, training=False)['probabilities']
+        logits = model(x, training=False)
         logits = _np(logits)
         model.include_top = False
         sequence = _np(model(x, training=False))
@@ -128,7 +128,7 @@ class TestViTClsSliceIdentity:
         ):
             # Reshape pooled (batch, dim) to (batch, 1, dim) for ClassificationHead
             pooled_tensor = ops.convert_to_tensor(pooled[:, None, :])
-            alt = _np(model.classification_head(pooled_tensor)['probabilities'])
+            alt = _np(model.classification_head(pooled_tensor)['logits'])
             assert not np.allclose(logits, alt, atol=1e-6), (
                 f"the head's input is indistinguishable from a {name}-pool of "
                 "the sequence; the CLS slice is not pinned"

@@ -1795,9 +1795,14 @@ class ClassificationHead(BaseVisionHead):
     GAP + FC), ``pooled_normalization_type='layer_norm'`` with
     ``block_dims=()`` is ConvNeXt's GAP + LayerNorm + FC, and
     ``block_dims=(4096, 4096)`` with ``normalization_type=None`` is AlexNet's
-    fc6/fc7. ``kernel_initializer``, ``bias_initializer`` and
-    ``kernel_regularizer`` reach every ``Dense`` the head builds, the
-    classifier included, so a model's own knobs govern its head.
+    fc6/fc7. ``classifier_dropout_rate`` puts a dropout right before the
+    classifier (MobileNetV2's ``Dropout(0.2)`` then ``Linear``).
+    ``normalization_kwargs`` reaches every norm the head builds (MobileNetV4's
+    BatchNorm epsilon). ``block_use_bias=False`` drops the hidden Dense bias
+    that a following BatchNorm would leave untrained. ``kernel_initializer``,
+    ``bias_initializer``, ``kernel_regularizer`` and ``bias_regularizer``
+    reach every ``Dense`` the head builds, the classifier included, so a
+    model's own knobs govern its head.
 
     This head builds and applies ``attention`` (when ``use_attention`` is
     set) and nothing else from :class:`BaseVisionHead`. Its
@@ -1833,6 +1838,10 @@ class ClassificationHead(BaseVisionHead):
         ┌─────────────────────────────────┐
         │ dense_blocks: one DenseBlock    │
         │ per block_dims entry (0 or more)│
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ classifier_dropout   (optional) │
         └────────────────┬────────────────┘
                          ▼
         ┌─────────────────────────────────┐
@@ -1884,6 +1893,21 @@ class ClassificationHead(BaseVisionHead):
         (or flattened) vector before the first block or the classifier.
         ``None`` (the default) builds none.
     :type pooled_normalization_type: Optional[NormalizationType]
+    :param normalization_kwargs: Extra arguments for every norm the head
+        builds: the pooled norm and each block's norm (for example
+        ``{'epsilon': 1e-3}``). ``None`` passes nothing, so the norms factory
+        default epsilon (1e-6) applies.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param classifier_dropout_rate: Dropout applied to the classifier's input,
+        after the last block (or the pooled vector when there is none). 0
+        (the default) builds no dropout.
+    :type classifier_dropout_rate: float
+    :param block_use_bias: Whether each hidden block's ``Dense`` has a bias.
+        Set ``False`` when the blocks use ``batch_norm``: the norm subtracts
+        the per-feature batch mean, so a bias before it receives an
+        identically-zero gradient and never trains. The classifier always
+        has a bias.
+    :type block_use_bias: bool
     :param kernel_initializer: Initializer for every ``Dense`` kernel in the
         head, the classifier included. Each ``Dense`` gets its own
         ``clone_initializer`` copy, so no two kernels replay one draw.
@@ -1893,10 +1917,14 @@ class ClassificationHead(BaseVisionHead):
     :param kernel_regularizer: Regularizer for every ``Dense`` kernel in the
         head, the classifier included. ``None`` adds no loss.
     :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
+    :param bias_regularizer: Regularizer for every ``Dense`` bias in the head,
+        the classifier included. ``None`` adds no loss.
+    :type bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :raises ValueError: If ``block_dims`` holds a width that is not a
-        positive integer.
+        positive integer, or ``classifier_dropout_rate`` is outside
+        ``[0, 1)``.
 
     :ivar pooling: Global pooling layer, built only when
         ``use_global_pooling`` is set.
@@ -1907,6 +1935,9 @@ class ClassificationHead(BaseVisionHead):
     :ivar dense_blocks: One ``DenseBlock`` per ``block_dims`` entry, named
         ``dense_block``, ``dense_block_1``, ... in order.
     :vartype dense_blocks: List[DenseBlock]
+    :ivar classifier_dropout: Dropout before the classifier, built only when
+        ``classifier_dropout_rate > 0``.
+    :vartype classifier_dropout: keras.layers.Dropout
     :ivar classifier: Output ``Dense(num_classes)``, linear (no activation).
     :vartype classifier: keras.layers.Dense
     """
@@ -1918,9 +1949,13 @@ class ClassificationHead(BaseVisionHead):
             pooling_type: Literal['avg', 'max', 'cls_token'] = 'avg',
             block_dims: Optional[Sequence[int]] = None,
             pooled_normalization_type: Optional[NormalizationType] = None,
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
+            classifier_dropout_rate: float = 0.0,
+            block_use_bias: bool = True,
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
+            bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -1938,16 +1973,26 @@ class ClassificationHead(BaseVisionHead):
         :param pooled_normalization_type: Normalization of the pooled vector,
             or ``None``.
         :type pooled_normalization_type: Optional[NormalizationType]
+        :param normalization_kwargs: Extra arguments for every head norm.
+        :type normalization_kwargs: Optional[Dict[str, Any]]
+        :param classifier_dropout_rate: Dropout on the classifier's input.
+        :type classifier_dropout_rate: float
+        :param block_use_bias: Whether each hidden block's ``Dense`` has a
+            bias.
+        :type block_use_bias: bool
         :param kernel_initializer: Initializer for every ``Dense`` kernel.
         :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
         :param bias_initializer: Initializer for every ``Dense`` bias.
         :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
         :param kernel_regularizer: Regularizer for every ``Dense`` kernel.
         :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
+        :param bias_regularizer: Regularizer for every ``Dense`` bias.
+        :type bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
-        :raises ValueError: If a ``block_dims`` entry is not a positive int.
+        :raises ValueError: If a ``block_dims`` entry is not a positive int,
+            or ``classifier_dropout_rate`` is outside ``[0, 1)``.
         """
         super().__init__(**kwargs)
 
@@ -1959,15 +2004,24 @@ class ClassificationHead(BaseVisionHead):
                 raise ValueError(
                     f"block_dims must hold positive integers, got {block_dims}"
                 )
+        if not 0.0 <= classifier_dropout_rate < 1.0:
+            raise ValueError(
+                f"classifier_dropout_rate must be in [0, 1), got "
+                f"{classifier_dropout_rate}"
+            )
 
         self.num_classes = num_classes
         self.use_global_pooling = use_global_pooling
         self.pooling_type = pooling_type
         self.block_dims = block_dims
         self.pooled_normalization_type = pooled_normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
+        self.classifier_dropout_rate = classifier_dropout_rate
+        self.block_use_bias = bool(block_use_bias)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self._create_classification_layers()
 
@@ -2031,7 +2085,8 @@ class ClassificationHead(BaseVisionHead):
         if self.pooled_normalization_type is not None:
             self.pooled_norm = create_normalization_layer(
                 self.pooled_normalization_type,
-                name='pooled_norm'
+                name='pooled_norm',
+                **self.normalization_kwargs
             )
 
         # Dense layers for classification.
@@ -2062,10 +2117,18 @@ class ClassificationHead(BaseVisionHead):
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                use_bias=self.block_use_bias,
+                normalization_kwargs=dict(self.normalization_kwargs),
                 name='dense_block' if index == 0 else f'dense_block_{index}'
             )
             for index, units in enumerate(self._resolved_block_dims())
         ]
+
+        if self.classifier_dropout_rate > 0.0:
+            self.classifier_dropout = layers.Dropout(
+                self.classifier_dropout_rate, name='classifier_dropout'
+            )
 
         # Final classifier: linear. The softmax for 'probabilities' is
         # applied in call(), so 'logits' stays the pre-softmax score.
@@ -2074,6 +2137,7 @@ class ClassificationHead(BaseVisionHead):
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name='classifier'
         )
 
@@ -2116,6 +2180,8 @@ class ClassificationHead(BaseVisionHead):
             dense_block.build(shape)
             shape = tuple(dense_block.compute_output_shape(shape))
 
+        if self.classifier_dropout_rate > 0.0:
+            self.classifier_dropout.build(shape)
         self.classifier.build(shape)
 
         # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
@@ -2166,6 +2232,9 @@ class ClassificationHead(BaseVisionHead):
         for dense_block in self.dense_blocks:
             x = dense_block(x, training=training)
 
+        if self.classifier_dropout_rate > 0.0:
+            x = self.classifier_dropout(x, training=training)
+
         # DECISION plan-2026-10-14T062616-81938e81/D-001
         # Linear logits, then their softmax in the COMPUTE dtype, exactly as the
         # NLP TextClassificationHead does. Do NOT put activation='softmax' back on
@@ -2205,9 +2274,11 @@ class ClassificationHead(BaseVisionHead):
         Return the constructor arguments for serialization.
 
         :return: Config dict carrying ``num_classes``, ``use_global_pooling``,
-            ``pooling_type``, ``block_dims``, ``pooled_normalization_type``
-            and the serialized initializers and regularizer, on top of the
-            base configuration.
+            ``pooling_type``, ``block_dims``, ``pooled_normalization_type``,
+            ``normalization_kwargs``, ``classifier_dropout_rate``,
+            ``block_use_bias`` and the
+            serialized initializers and regularizers, on top of the base
+            configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -2219,6 +2290,9 @@ class ClassificationHead(BaseVisionHead):
                 None if self.block_dims is None else list(self.block_dims)
             ),
             'pooled_normalization_type': self.pooled_normalization_type,
+            'normalization_kwargs': dict(self.normalization_kwargs),
+            'classifier_dropout_rate': self.classifier_dropout_rate,
+            'block_use_bias': self.block_use_bias,
             'kernel_initializer': keras.initializers.serialize(
                 self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(
@@ -2226,6 +2300,10 @@ class ClassificationHead(BaseVisionHead):
             'kernel_regularizer': (
                 keras.regularizers.serialize(self.kernel_regularizer)
                 if self.kernel_regularizer is not None else None
+            ),
+            'bias_regularizer': (
+                keras.regularizers.serialize(self.bias_regularizer)
+                if self.bias_regularizer is not None else None
             ),
         })
         return config

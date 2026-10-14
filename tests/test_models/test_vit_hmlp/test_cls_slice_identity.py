@@ -36,15 +36,8 @@ def _x(seed: int = 0) -> np.ndarray:
 
 
 def _np(t) -> np.ndarray:
-    """`convert_to_numpy`, unwrapping the head's output dict.
-
-    With ``return_dict=True`` (the default) the model returns
-    ``{'logits', 'probabilities'}``, and ``convert_to_numpy`` on a dict yields
-    a 0-d OBJECT array -- which then fails subscripting with an ``IndexError``
-    about integer indices. Callers in this file want the probability tensor.
-    """
-    if isinstance(t, dict):
-        t = t["probabilities"] if "probabilities" in t else next(iter(t.values()))
+    """`convert_to_numpy` of one tensor: the model returns its logits bare."""
+    assert not isinstance(t, dict), "the model returns one logits tensor"
     return keras.ops.convert_to_numpy(t)
 
 
@@ -111,7 +104,7 @@ class TestViTHmlpClsSliceIdentity:
 
         # Pass the full sequence to the head; it will extract the CLS token (position 0)
         seq_tensor = ops.convert_to_tensor(sequence)
-        from_cls = _np(model.classification_head(seq_tensor)['probabilities'])
+        from_cls = _np(model.classification_head(seq_tensor)['logits'])
         np.testing.assert_allclose(
             logits, from_cls, rtol=0, atol=0,
             err_msg="vit_hmlp's head is NOT fed x[:, 0, :]",
@@ -119,7 +112,7 @@ class TestViTHmlpClsSliceIdentity:
         # Anti-vacuity: the rejected slice must give a different answer
         swapped_seq = sequence.copy()
         swapped_seq[:, [0, -1], :] = swapped_seq[:, [-1, 0], :]
-        from_swapped = _np(model.classification_head(ops.convert_to_tensor(swapped_seq))['probabilities'])
+        from_swapped = _np(model.classification_head(ops.convert_to_tensor(swapped_seq))['logits'])
         assert not np.allclose(logits, from_swapped, atol=1e-6), (
             "vit_hmlp's head produces the same output for swapped CLS token; "
             "it is not pinned to position 0"

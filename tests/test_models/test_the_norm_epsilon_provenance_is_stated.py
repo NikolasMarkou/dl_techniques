@@ -31,8 +31,12 @@ package               MEASURED census                      ruling
                                                            BatchNorms, whose
                                                            checkpoints were
                                                            TRAINED at ``1e-3``
-``mobilenet`` (v2)    51x ``1e-06`` + 2x ``1e-03``         STATED -- the split
-``vit_hmlp``          25x ``1e-06`` + 3x ``1e-03``         is factory-vs-bare
+``mobilenet`` (v2)    53 sites, all ``1e-03``              STATED (D-203; the
+                                                           51x ``1e-06`` the
+                                                           audit read was the
+                                                           pre-D-203 bug)
+``vit_hmlp``          25x ``1e-06`` + 3x ``1e-03``         STATED -- the split
+                                                           is factory-vs-bare
 ``fastvlm``           34x ``1e-03`` + 12x ``1e-06``        construction, not a
                                                            per-site choice
 ``qwen``              6x ``1e-05`` + 11x ``1e-06``         STATED
@@ -267,8 +271,8 @@ def test_the_census_can_actually_observe_a_moved_epsilon():
 def test_the_two_epsilon_split_packages_really_carry_two_values():
     """The 'two epsilons three orders apart in one model' shape, asserted.
 
-    ``mobilenet``, ``vit_hmlp``, ``fastvlm``, ``mobile_clip`` and ``blt`` each
-    split along factory-vs-bare construction. A future refactor that unified
+    ``vit_hmlp``, ``fastvlm``, ``mobile_clip`` and ``blt`` each split along
+    factory-vs-bare construction. A future refactor that unified
     them would be a real change and must not pass silently as "still green".
 
     ``blt``'s split is the one this file's own history created: routing
@@ -278,7 +282,11 @@ def test_the_two_epsilon_split_packages_really_carry_two_values():
     someone who makes that change has to update the ``CENSUS`` row above,
     where the reasoning is recorded.
     """
-    for package in ("mobilenet", "vit_hmlp", "fastvlm", "mobile_clip", "blt"):
+    # ``mobilenet`` left this list on 2026-10-14 (plan-2026-10-14T062616-
+    # 81938e81 step 3): its census has been the single value {"1e-03": 53}
+    # since the 2026-09-04 re-measurement (D-203), so listing it here made
+    # this test red against its own CENSUS row.
+    for package in ("vit_hmlp", "fastvlm", "mobile_clip", "blt"):
         _build, expected = CENSUS[package]
         assert len(expected) == 2, (
             f"{package} is recorded as a two-epsilon package but its census "

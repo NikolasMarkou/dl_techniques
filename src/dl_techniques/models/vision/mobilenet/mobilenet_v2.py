@@ -15,8 +15,8 @@ not scaled down for `width_multiplier <= 1.0`, only widened above it. The
 paper's first stage uses expansion factor 1 and skips the expansion
 convolution; this implementation reuses one universal block that always
 expands, so that stage carries a small extra `C -> C` projection. The
-classifier ends in softmax, so this model outputs probabilities, not
-logits. No pretrained checkpoints ship with this package;
+classifier is linear, so this model outputs logits: compile with
+`from_logits=True`. No pretrained checkpoints ship with this package;
 `pretrained=True` raises `NotImplementedError`.
 
 References:
@@ -33,7 +33,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import Tuple, Optional, Dict, Any, Union, Literal
+from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -52,6 +52,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -81,16 +82,21 @@ class MobileNetV2(keras.Model):
            v                      v
         GlobalAvgPool         feature map (returned as-is)
            |
-        Dropout -> Dense (softmax)
+        Dropout -> Dense (linear)   (ClassificationHead)
            |
            v
-        class probabilities  [num_classes]
+        logits  [num_classes]
 
     :param num_classes: Number of output classes.
     :param width_multiplier: Channel-count multiplier (alpha).
     :param dropout_rate: Dropout rate before the classifier.
-    :param weight_decay: L2 regularization factor for conv and dense layers.
-    :param kernel_initializer: Weight initialization strategy.
+    :param weight_decay: L2 regularization factor for conv and dense layers,
+        the classifier included.
+    :param kernel_initializer: Weight initialization strategy, the
+        classifier's included.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration. `name`, `num_classes` and `task_type` raise
+        `ValueError`.
     :param include_top: Whether to include the pooling and classification head.
     :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param kwargs: Passthrough to `keras.Model`.
@@ -132,9 +138,7 @@ class MobileNetV2(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -151,11 +155,9 @@ class MobileNetV2(keras.Model):
         self.weight_decay = weight_decay
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
-        self.return_dict = return_dict
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_model_layers()
@@ -231,32 +233,35 @@ class MobileNetV2(keras.Model):
             self.classification_head = None
 
     def _build_head(self) -> None:
-        """Build classification head using standardized vision head factory."""
-        # Select preset based on head_config_preset
-        if self._head_config_preset == 'efficient':
-            head_config = HeadConfiguration.get_efficient_config(VisionTaskType.CLASSIFICATION)
-        elif self._head_config_preset == 'high_performance':
-            head_config = HeadConfiguration.get_high_performance_config(VisionTaskType.CLASSIFICATION)
-        else:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        """Build the reference classifier on the shared ``ClassificationHead``.
 
-        # Apply MobileNet-specific overrides
+        The paper's classifier (Sandler et al. 2018, Table 2: ``avgpool 7x7``,
+        then ``conv2d 1x1 k``) as torchvision ``mobilenet_v2`` builds it:
+        global average pool, ``Dropout(dropout_rate)`` (0.2 there and here),
+        one linear ``Dense``. The model returns logits.
+        """
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
         head_config.update({
             'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            'normalization_type': 'layer_norm',
-            'activation_type': 'gelu',
             'use_global_pooling': True,
             'pooling_type': 'avg',
             'use_attention': False,
-            'use_ffn': False,
+            # No hidden block: the pooled vector, a dropout, then the
+            # classifier.
+            'block_dims': (),
+            'classifier_dropout_rate': self.dropout_rate,
+            # No hidden block, so no block dropout either.
+            'dropout_rate': 0.0,
+            'kernel_initializer': self.kernel_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
             'name': 'classification_head',
         })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
         self.classification_head = create_vision_head(
             VisionTaskType.CLASSIFICATION, **head_config
@@ -280,7 +285,7 @@ class MobileNetV2(keras.Model):
 
         :param inputs: Input images, shape `(B, H, W, C)`.
         :param training: Passed to batch norm and dropout.
-        :return: Class probabilities, or the 4-D feature map if `include_top=False`.
+        :return: Logits, or the 4-D feature map if `include_top=False`.
         """
         x = self.initial_conv(inputs)
         x = self.initial_bn(x, training=training)
@@ -294,8 +299,7 @@ class MobileNetV2(keras.Model):
         x = self.last_relu(x)
 
         if self.include_top:
-            out = self.classification_head(x, training=training)
-            return out if self.return_dict else out['logits']
+            return self.classification_head(x, training=training)['logits']
 
         return x
 
@@ -306,9 +310,7 @@ class MobileNetV2(keras.Model):
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
             width_multiplier: float = 1.0,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs: Any
     ) -> "MobileNetV2":
         """Create a MobileNetV2 model from a predefined variant.
@@ -317,11 +319,9 @@ class MobileNetV2(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Extra multiplier applied on top of the variant default.
-        :param head_config_preset: Classification head preset: `"default"`,
-            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-        :param head_config_overrides: Optional dict to override head configuration.
-        :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
+        :param head_config_overrides: Optional dict merged into the head
+            configuration (e.g. `{'block_dims': (512,)}`). `name`,
+            `num_classes` and `task_type` raise `ValueError`.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV2` instance.
         """
@@ -336,9 +336,7 @@ class MobileNetV2(keras.Model):
             num_classes=num_classes,
             width_multiplier=effective_width,
             input_shape=input_shape,
-            head_config_preset=head_config_preset,
             head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
             **kwargs
         )
 
@@ -353,28 +351,10 @@ class MobileNetV2(keras.Model):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
-            "return_dict": self.return_dict,
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MobileNetV2":
-        """Create model from configuration."""
-        if isinstance(config.get("kernel_initializer"), dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return_dict = config.pop("return_dict", True)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
-            **config
-        )
 
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the model."""
@@ -396,9 +376,9 @@ class MobileNetV2(keras.Model):
 
         # Head
         if self.include_top and self.classification_head is not None:
-            current_shape = self.classification_head.compute_output_shape(current_shape)
-            if isinstance(current_shape, dict):
-                current_shape = current_shape['logits']
+            # The head reports both keys; the model returns the logits.
+            current_shape = self.classification_head.compute_output_shape(
+                current_shape)['logits']
 
         return current_shape
 
@@ -433,9 +413,7 @@ def create_mobilenetv2(
         input_shape: Optional[Tuple[int, ...]] = None,
         width_multiplier: float = 1.0,
         pretrained: bool = False,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-        return_dict: bool = True,
         **kwargs: Any
 ) -> MobileNetV2:
     """Create a MobileNetV2 model.
@@ -446,11 +424,9 @@ def create_mobilenetv2(
     :param width_multiplier: Extra multiplier applied on top of the variant default.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV2 checkpoints ship with this package.
-    :param head_config_preset: Classification head preset: `"default"`,
-        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-    :param head_config_overrides: Optional dict to override head configuration.
-    :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-        If False, return only the logits tensor for backward compatibility.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (e.g. `{'block_dims': (512,)}`). `name`,
+        `num_classes` and `task_type` raise `ValueError`.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV2` instance.
 
@@ -478,9 +454,7 @@ def create_mobilenetv2(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
-        return_dict=return_dict,
         **kwargs
     )
 

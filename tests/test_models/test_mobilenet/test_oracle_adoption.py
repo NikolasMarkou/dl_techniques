@@ -77,6 +77,7 @@ from ..gradient_flow_oracle import (
     stop_all_gradients,
 )
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from tests.numerics import reassociation_atol
 # `_asymmetric_loss` is imported rather than re-typed on purpose: it is the
 # ramp D-059 installed, and a second copy is a second thing that can drift back
 # into a symmetric loss. `test_precision_arm_oracle.py` imports it the same way.
@@ -92,13 +93,16 @@ SMALL = (32, 32, 3)
 #: MobileNetV2 runs here instead -- see the module docstring's second trap.
 V2_SHAPE = (64, 64, 3)
 
-#: Measured 2026-08-21, one Adam step, ramp loss. Re-derived 2026-10-13 after
-#: the factory ``ClassificationHead`` replaced the bespoke top: each variant's
-#: head now contributes exactly 10 trainable weights (two ``DenseBlock``s at
-#: 4 each -- kernel, bias, norm gamma, norm beta -- plus the classifier's
-#: kernel and bias), which the old ``GlobalAveragePooling2D`` + ``Dense`` pair
-#: did not. Backbone counts are unchanged at 81 / 159 / 123 / 33.
-GF_WEIGHTS = {"v1": 91, "v2": 169, "v3": 133, "v4": 43}
+#: Measured 2026-08-21, one Adam step, ramp loss. Backbone counts 81 / 159 /
+#: 123 / 33. Re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 3,
+#: D-015) for each generation's reference head: V1 and V2 add the classifier's
+#: kernel and bias (+2); V3 adds a bias-carrying hidden Dense and the
+#: classifier (+4); V4 adds a bias-free hidden Dense kernel, its BatchNorm's
+#: gamma and beta, and the classifier (+5). The two-DenseBlock head of
+#: 2026-10-09..14 added 10 to each. A V4 hidden Dense WITH a bias measured that
+#: bias at an identically-zero gradient (the BatchNorm after it subtracts the
+#: batch mean), which is why the head's block_use_bias is False there.
+GF_WEIGHTS = {"v1": 83, "v2": 161, "v3": 127, "v4": 38}
 
 #: The four MobileNetV2 weights that read EXACTLY 0.0 at a 32x32 input, and the
 #: only ones. Each names a block whose output is 1x1 at that input size.
@@ -445,20 +449,22 @@ class TestMobileNetSmokeContract:
         x = _images(shape)
 
         def contract(out):
-            # `return_dict=True` is the default, and the factory
-            # ClassificationHead's dict is that model's documented output. The
-            # probabilities row is what the sum-to-one claim is about.
-            probs = out["probabilities"] if isinstance(out, dict) else out
-            assert not isinstance(probs, (dict, list, tuple)), (
-                f"a MobileNet with include_top=True returns one probability "
-                f"tensor, got {type(probs)}"
+            # The model returns the head's logits as one tensor; their
+            # softmax is what sums to one, within the float32 rounding bound
+            # of a NUM_CLASSES-long reduction.
+            assert not isinstance(out, (dict, list, tuple)), (
+                f"a MobileNet with include_top=True returns one logits "
+                f"tensor, got {type(out)}"
             )
-            assert tuple(probs.shape) == (x.shape[0], NUM_CLASSES), (
-                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(probs.shape)}"
+            assert tuple(out.shape) == (x.shape[0], NUM_CLASSES), (
+                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}"
             )
-            assert_finite(probs)
+            assert_finite(out)
+            probs = keras.ops.softmax(out, axis=-1)
             rows = keras.ops.convert_to_numpy(keras.ops.sum(probs, axis=-1))
-            np.testing.assert_allclose(rows, np.ones_like(rows), atol=1e-5)
+            np.testing.assert_allclose(
+                rows, np.ones_like(rows), rtol=0,
+                atol=reassociation_atol([NUM_CLASSES], 1, 1.0))
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)
         assert set(rejections) == {

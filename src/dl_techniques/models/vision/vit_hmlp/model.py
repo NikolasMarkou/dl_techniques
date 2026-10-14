@@ -51,6 +51,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -224,13 +225,10 @@ class ViTHMLP(keras.Model):
     :param name: Model name; auto-generated as
         ``vision_transformer_hmlp_<scale>`` when None.
     :type name: Optional[str]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (e.g. ``{'block_dims': (512,)}`` adds a hidden block).
+        ``name``, ``num_classes`` and ``task_type`` raise ``ValueError``.
+        Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
@@ -324,9 +322,7 @@ class ViTHMLP(keras.Model):
             use_stochastic_depth: bool = False,
             stochastic_depth_rate: float = 0.1,
             name: Optional[str] = None,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize Vision Transformer model with Hierarchical MLP stem."""
@@ -429,9 +425,7 @@ class ViTHMLP(keras.Model):
         self.stochastic_depth_rate = float(stochastic_depth_rate)
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
-        self._return_dict = return_dict
 
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
@@ -521,19 +515,29 @@ class ViTHMLP(keras.Model):
             head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
             head_config.update({
                 'num_classes': self.num_classes,
-                'dropout_rate': self.dropout_rate,
-                'normalization_type': self.normalization_type,
-                'activation_type': 'gelu',  # ViT uses gelu
                 'use_global_pooling': True,
                 'pooling_type': 'cls_token',  # Extract CLS token from sequence
                 'use_attention': False,  # ViT transformer already applies attention
+                # The reference fine-tuning head (Dosovitskiy et al. 2020,
+                # Sec. 3.1: "a single linear layer at fine-tuning time"; timm
+                # VisionTransformer: head_drop then head): the CLS token of the
+                # final norm, a dropout, one linear Dense. No hidden block.
+                'block_dims': (),
+                'classifier_dropout_rate': self.dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_regularizer': self.bias_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
                 # by-name matching that weight transfer relies on.
                 'name': 'classification_head',
             })
-            if self._head_config_overrides:
-                head_config.update(self._head_config_overrides)
+            head_config = merge_head_config_overrides(
+                head_config, self._head_config_overrides
+            )
 
             self.classification_head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
@@ -647,11 +651,7 @@ class ViTHMLP(keras.Model):
 
         if self.include_top:
             # The ClassificationHead expects the full sequence and handles CLS token internally
-            head_output = self.classification_head(x, training=training)
-            if self._return_dict:
-                return head_output
-            else:
-                return head_output['logits']
+            return self.classification_head(x, training=training)['logits']
         else:
             # cls / mean / max all route through SequencePooling, built without
             # exclude_positions, so the CLS token is included in mean/max.
@@ -715,9 +715,7 @@ class ViTHMLP(keras.Model):
             "activation": serialize_activation(self.activation),
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
-            "return_dict": self._return_dict,
         })
         return config
 
@@ -764,26 +762,6 @@ class ViTHMLP(keras.Model):
             **kwargs
         )
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ViTHMLP":
-        """Recreate a model from its serialized configuration.
-
-        :param config: Configuration dictionary from :meth:`get_config`.
-        :type config: Dict[str, Any]
-        :return: A new ``ViTHMLP`` instance.
-        :rtype: ViTHMLP
-        """
-        config = dict(config)
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return_dict = config.pop("return_dict", True)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
-            **config
-        )
-
     def get_feature_extractor(self) -> "ViTHMLP":
         """Return a feature-extractor twin of this model.
 
@@ -820,7 +798,6 @@ class ViTHMLP(keras.Model):
             activation=self.activation,
             use_stochastic_depth=self.use_stochastic_depth,
             stochastic_depth_rate=self.stochastic_depth_rate,
-            head_config_preset=self._head_config_preset,
             head_config_overrides=self._head_config_overrides,
             name=f"{self.name}_feature_extractor"
         )
@@ -887,9 +864,7 @@ def create_vit_hmlp(
         activation: Union[str, callable] = "gelu",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
         **kwargs: Any
 ) -> ViTHMLP:
     """Create a Vision Transformer with a hierarchical MLP stem.
@@ -1024,7 +999,6 @@ def create_vit_hmlp(
         activation=activation,
         use_stochastic_depth=use_stochastic_depth,
         stochastic_depth_rate=stochastic_depth_rate,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
         **kwargs
     )

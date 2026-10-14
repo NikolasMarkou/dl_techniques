@@ -27,6 +27,8 @@ import keras
 from keras import ops
 import tensorflow as tf
 
+from tests.numerics import reassociation_atol
+
 from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2, create_mobilenetv2
 
 
@@ -113,9 +115,8 @@ class TestMobileNetV2:
         # First call should trigger building with default shape
         output = model(sample_inputs['imagenet'])
         assert model.built
-        assert isinstance(output, dict)
-        assert 'logits' in output and 'probabilities' in output
-        assert output['logits'].shape == (2, default_config['num_classes'])
+        assert not isinstance(output, dict)
+        assert output.shape == (2, default_config['num_classes'])
 
     # ============================================================================
     # Critical Serialization Tests
@@ -135,8 +136,8 @@ class TestMobileNetV2:
             loaded_pred = loaded_model(sample_inputs['cifar'])
 
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_pred['logits']),
-                keras.ops.convert_to_numpy(loaded_pred['logits']),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Default model predictions differ after serialization"
             )
@@ -155,8 +156,8 @@ class TestMobileNetV2:
             loaded_pred = loaded_model(sample_inputs['custom'])
 
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_pred['logits']),
-                keras.ops.convert_to_numpy(loaded_pred['logits']),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Small variant predictions differ after serialization"
             )
@@ -243,9 +244,8 @@ class TestMobileNetV2:
         """Test forward pass produces correct output shapes."""
         model = MobileNetV2.from_variant("medium", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
-        assert isinstance(output, dict)
-        assert 'logits' in output and 'probabilities' in output
-        assert output['logits'].shape == (4, 10)
+        assert not isinstance(output, dict)
+        assert output.shape == (4, 10)
 
         model = MobileNetV2.from_variant("nano", include_top=False, input_shape=(32, 32, 3))
         features = model(sample_inputs['cifar'])
@@ -263,9 +263,8 @@ class TestMobileNetV2:
             model = MobileNetV2.from_variant("nano", num_classes=5, input_shape=input_shape)
             sample_input = keras.random.normal(shape=sample_shape)
             output = model(sample_input)
-            assert isinstance(output, dict)
-            assert 'logits' in output
-            assert output['logits'].shape == (sample_shape[0], 5)
+            assert not isinstance(output, dict)
+            assert output.shape == (sample_shape[0], 5)
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
@@ -273,9 +272,8 @@ class TestMobileNetV2:
         for batch_size in [1, 4, 8]:
             sample_input = keras.random.normal(shape=(batch_size, 32, 32, 3))
             output = model(sample_input)
-            assert isinstance(output, dict)
-            assert 'logits' in output
-            assert output['logits'].shape == (batch_size, 10)
+            assert not isinstance(output, dict)
+            assert output.shape == (batch_size, 10)
 
     # ============================================================================
     # Training and Gradient Tests
@@ -286,32 +284,31 @@ class TestMobileNetV2:
         model = MobileNetV2(**default_config)
         with tf.GradientTape() as tape:
             output = model(sample_inputs['cifar'], training=True)
-            loss = ops.mean(ops.square(output['logits']))
+            loss = ops.mean(ops.square(output))
 
         gradients = tape.gradient(loss, model.trainable_variables)
         assert len(gradients) > 0
-        # Note: ClassificationHead builds a norm layer that is not used in forward pass,
-        # so its gamma/beta params will have None gradients. Check that at least
-        # some gradients are non-None and non-zero.
-        non_none_grads = [g for g in gradients if g is not None]
-        assert len(non_none_grads) > 0, "All gradients are None"
-        non_zero_grads = [g for g in non_none_grads if ops.max(ops.abs(g)) > 1e-8]
-        assert len(non_zero_grads) > 0, "All non-None gradients are zero"
+        # The head builds only what its call() applies (plan-2026-10-14
+        # step 1), so every trainable weight is on the gradient path.
+        missing = [v.path for v, g in zip(model.trainable_variables, gradients)
+                   if g is None]
+        assert not missing, f"trainable weights with no gradient: {missing}"
+        non_zero_grads = [g for g in gradients if ops.max(ops.abs(g)) > 1e-8]
+        assert len(non_zero_grads) > 0, "All gradients are zero"
 
     @pytest.mark.parametrize("training", [True, False, None])
     def test_training_modes(self, default_config, sample_inputs, training):
         """Test behavior in different training modes."""
         model = MobileNetV2(**default_config)
         output = model(sample_inputs['cifar'], training=training)
-        assert isinstance(output, dict)
-        assert 'logits' in output
-        assert output['logits'].shape == (4, default_config['num_classes'])
+        assert not isinstance(output, dict)
+        assert output.shape == (4, default_config['num_classes'])
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
-        model = MobileNetV2.from_variant("pico", num_classes=10, input_shape=(32, 32, 3), return_dict=False)
+        model = MobileNetV2.from_variant("pico", num_classes=10, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        model.compile(optimizer='adam', loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
         x_train = sample_inputs['cifar']
         y_train = np.random.randint(0, 10, size=(4,))
         history = model.fit(x_train, y_train, epochs=1, verbose=0)
@@ -340,20 +337,29 @@ class TestMobileNetV2:
     # ============================================================================
 
     def test_model_parameter_counts(self):
-        """Test parameter counts are reasonable for different variants."""
-        # Updated for ClassificationHead migration (adds 2 dense blocks + classifier)
-        variants_expected_range = {
-            'large': (4.8e6, 5.2e6),
-            'medium': (2.6e6, 2.9e6),
-            'small': (1.8e6, 2.0e6),
-            'nano': (1.1e6, 1.3e6),
-            'pico': (0.8e6, 1.0e6),
+        """Exact counts at 224 x 224 x 3, 1000 classes, re-derived by command.
+
+        Each is ``keras.applications.MobileNetV2(weights=None, alpha=a)``'s
+        count plus the documented first-stage extra: this port's universal
+        block always builds the expansion conv, so stage 1 (t=1) carries a
+        ``C x C`` 1x1 conv and its BatchNorm, ``C*C + 4*C`` with
+        ``C = _make_divisible(32 * alpha)``: 2,496 (C=48), 1,152 (32), 672
+        (24), 320 (16), 320 (16). The head itself (GAP, dropout, one Dense;
+        D-015) matches. MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81
+        step 3) on CPU.
+        """
+        expected = {
+            'large': 6_159_208,   # keras 6,156,712 + 2,496
+            'medium': 3_540_136,  # keras 3,538,984 + 1,152
+            'small': 2_663_736,   # keras 2,663,064 + 672
+            'nano': 1_987_544,    # keras 1,987,224 + 320
+            'pico': 1_691_528,    # keras 1,691,208 + 320
         }
-        for variant, (min_p, max_p) in variants_expected_range.items():
+        for variant, count in expected.items():
             model = MobileNetV2.from_variant(variant, num_classes=1000)
             model(keras.random.normal(shape=(1, 224, 224, 3)))
-            param_count = model.count_params()
-            assert min_p <= param_count <= max_p, f"{variant} params out of range"
+            assert model.count_params() == count, (
+                f"{variant}: {model.count_params():,} != {count:,}")
 
     def test_model_summary_execution(self):
         """Test that model summary executes without errors."""
@@ -370,9 +376,9 @@ class TestMobileNetV2:
 
     def test_model_in_training_loop(self):
         """Test model in a realistic training scenario."""
-        model = MobileNetV2.from_variant("nano", num_classes=2, input_shape=(32, 32, 3), return_dict=False)
+        model = MobileNetV2.from_variant("nano", num_classes=2, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        model.compile(optimizer='adam', loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
         x_train = keras.random.normal(shape=(20, 32, 32, 3))
         y_train = np.random.randint(0, 2, size=(20,))
         x_val = keras.random.normal(shape=(10, 32, 32, 3))
@@ -387,34 +393,24 @@ class TestMobileNetV2:
 
     def test_model_evaluation_and_prediction(self):
         """Test model evaluation and prediction methods."""
-        # Test with return_dict=False for Keras compatibility
-        model = MobileNetV2.from_variant("nano", num_classes=5, input_shape=(32, 32, 3), return_dict=False)
+        model = MobileNetV2.from_variant("nano", num_classes=5, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        model.compile(optimizer='adam', loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
         x_test = keras.random.normal(shape=(10, 32, 32, 3))
         y_test = np.random.randint(0, 5, size=(10,))
         results = model.evaluate(x_test, y_test, verbose=0)
         assert len(results) == 2
         predictions = model.predict(x_test, verbose=0)
         assert predictions.shape == (10, 5)
-        prob_sums = ops.sum(predictions, axis=1)
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(prob_sums),
-            np.ones(10),
-            rtol=1e-6, atol=1e-6
-        )
 
-        # Test with return_dict=True (default) for full dict output
-        model_dict = MobileNetV2.from_variant("nano", num_classes=5, input_shape=(32, 32, 3), return_dict=True)
-        predictions_dict = model_dict(x_test, training=False)
-        assert isinstance(predictions_dict, dict)
-        assert 'logits' in predictions_dict and 'probabilities' in predictions_dict
-        prob_sums = ops.sum(predictions_dict['probabilities'], axis=1)
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(prob_sums),
-            np.ones(10),
-            rtol=1e-6, atol=1e-6
-        )
+        # The model returns logits: the rows are not normalized, their softmax
+        # is. A softmax row sums to 1 within reassociation_atol([5], 1, 1.0).
+        atol = reassociation_atol([5], 1, 1.0)
+        rows = np.asarray(predictions, dtype=np.float64).sum(axis=1)
+        assert np.any(np.abs(rows - 1.0) > atol), (
+            f"every predicted row sums to 1 within {atol:.2e}: {rows}")
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(10), rtol=0, atol=atol)
 
 
 if __name__ == "__main__":

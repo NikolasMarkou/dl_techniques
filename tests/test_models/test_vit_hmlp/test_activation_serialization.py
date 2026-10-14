@@ -87,10 +87,20 @@ class TestViTHMLPActivationSerialization:
         remains fully supported via the real ``model.save()`` /
         ``keras.models.load_model(path, custom_objects=...)`` round trip --
         see ``test_an_unregistered_callable_survives_save_and_load_with_custom_objects``
-        below, which still passes unchanged."""
+        below, which still passes unchanged.
+
+        The reported error moved on 2026-10-14 (plan-2026-10-14T062616-81938e81
+        step 3): ``ViTHMLP`` lost its own ``from_config``, which only popped
+        the deleted ``return_dict``/``head_config_preset`` keys. Its
+        ``(cls, config)`` signature had refused ``custom_objects`` with a
+        ``TypeError``; ``keras.Model.from_config`` accepts the argument and does
+        not thread it into ``resolve_activation``, so the same unresolved
+        callable now fails one frame later, in ``__init__``, as the
+        ``ValueError`` Keras raises for an unknown activation. The capability
+        is unchanged: still not supported on this narrow path."""
         config = _build(unregistered_scaled_relu).get_config()
         config["activation"] = json.loads(json.dumps(config["activation"]))
-        with pytest.raises(TypeError, match="unexpected keyword argument 'custom_objects'"):
+        with pytest.raises(ValueError, match="Could not interpret activation function identifier"):
             ViTHMLP.from_config(
                 config,
                 custom_objects={"unregistered_scaled_relu": unregistered_scaled_relu},

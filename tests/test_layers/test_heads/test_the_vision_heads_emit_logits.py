@@ -493,3 +493,138 @@ def test_the_new_options_round_trip_by_value(tmp_path) -> None:
             keras.ops.convert_to_numpy(w0), keras.ops.convert_to_numpy(w1))
     np.testing.assert_array_equal(
         keras.ops.convert_to_numpy(loaded(x, training=False)), before)
+
+
+# ---------------------------------------------------------------------
+# D-015: a dropout before the classifier, norm arguments, bias regularizer
+# ---------------------------------------------------------------------
+
+def test_the_classifier_dropout_is_built_only_when_asked_and_runs_in_training() -> None:
+    assert not hasattr(_head(block_dims=()), "classifier_dropout")
+
+    head = _head(block_dims=(), classifier_dropout_rate=0.5)
+    x = _inputs(FEATURE_SHAPE)
+    inference = keras.ops.convert_to_numpy(head(x, training=False)["logits"])
+    pooled = x.astype(np.float64).mean(axis=(1, 2))
+    kernel = keras.ops.convert_to_numpy(head.classifier.kernel).astype(np.float64)
+    bias = keras.ops.convert_to_numpy(head.classifier.bias).astype(np.float64)
+    # Inference: the dropout is the identity, so logits are pool @ W + b.
+    expected = pooled @ kernel + bias
+    atol = reassociation_atol(
+        [FEATURE_SHAPE[1] * FEATURE_SHAPE[2], FEATURE_SHAPE[3]], 1,
+        float(np.abs(expected).max()))
+    np.testing.assert_allclose(inference, expected, rtol=0, atol=atol)
+
+    # Training: the classifier reads a dropped-out vector, so the logits move.
+    training = keras.ops.convert_to_numpy(head(x, training=True)["logits"])
+    assert np.abs(training - inference).max() > 1e3 * atol, (
+        "classifier_dropout_rate=0.5 changed nothing in training mode: the "
+        "dropout is not on the classifier's input"
+    )
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.0])
+def test_the_classifier_dropout_rate_is_range_checked(bad: float) -> None:
+    with pytest.raises(ValueError, match="classifier_dropout_rate"):
+        _head(classifier_dropout_rate=bad)
+
+
+def test_normalization_kwargs_reach_every_head_norm() -> None:
+    head = _head(block_dims=(10, 6), normalization_type="batch_norm",
+                 pooled_normalization_type="layer_norm",
+                 normalization_kwargs={"epsilon": 1e-3})
+    head(_inputs(FEATURE_SHAPE))
+    norms = [head.pooled_norm] + [b.norm for b in head.dense_blocks]
+    assert [n.epsilon for n in norms] == [1e-3, 1e-3, 1e-3], (
+        f"head norm epsilons {[n.epsilon for n in norms]}; the factory default "
+        f"is 1e-6, so a norm did not take normalization_kwargs"
+    )
+
+
+def test_the_bias_regularizer_adds_one_loss_per_dense() -> None:
+    l2 = 0.01
+    head = _head(block_dims=(8,), bias_initializer=keras.initializers.Constant(0.3),
+                 bias_regularizer=keras.regularizers.L2(l2))
+    head(_inputs(FEATURE_SHAPE))
+    biases = [w for w in head.weights if w.path.endswith("bias")]
+    assert {w.path.split("/")[1] for w in biases} == {"dense_block", "classifier"}
+    losses = sorted(float(keras.ops.convert_to_numpy(v)) for v in head.losses)
+    expected = sorted(
+        l2 * float(np.sum(np.square(keras.ops.convert_to_numpy(b).astype(np.float64))))
+        for b in biases
+    )
+    assert len(losses) == 2, f"{len(losses)} bias losses for 2 Dense biases"
+    np.testing.assert_allclose(losses, expected, rtol=1e-5)
+
+
+def test_the_d015_options_round_trip() -> None:
+    head = _head(block_dims=(9,), normalization_type="batch_norm",
+                 normalization_kwargs={"epsilon": 1e-3, "momentum": 0.9},
+                 classifier_dropout_rate=0.2,
+                 bias_regularizer=keras.regularizers.L2(1e-3))
+    config = head.get_config()
+    assert config["normalization_kwargs"] == {"epsilon": 1e-3, "momentum": 0.9}
+    assert config["classifier_dropout_rate"] == 0.2
+    assert config["bias_regularizer"]["config"]["l2"] == pytest.approx(1e-3)
+    clone = ClassificationHead.from_config(config)
+    clone(_inputs(FEATURE_SHAPE))
+    assert clone.classifier_dropout.rate == 0.2
+    assert clone.dense_blocks[0].norm.epsilon == 1e-3
+    assert clone.dense_blocks[0].norm.momentum == 0.9
+    assert len(clone.losses) == 2
+
+
+def _block_bias_gradient(block_use_bias: bool):
+    head = _head(block_dims=(8,), normalization_type="batch_norm",
+                 dropout_rate=0.0, block_use_bias=block_use_bias)
+    x = keras.ops.convert_to_tensor(_inputs(FEATURE_SHAPE))
+    labels = keras.ops.convert_to_tensor(np.arange(FEATURE_SHAPE[0]) % NUM_CLASSES)
+    with tf.GradientTape() as tape:
+        out = head(x, training=True)
+        loss = keras.ops.mean(keras.losses.sparse_categorical_crossentropy(
+            labels, out["logits"], from_logits=True))
+    weights = head.trainable_weights
+    return head, dict(zip([w.path for w in weights], tape.gradient(loss, weights)))
+
+
+def test_a_bias_before_batch_norm_never_trains() -> None:
+    """Why block_use_bias exists: BatchNorm subtracts the batch mean per
+    feature, so a Dense bias in front of it gets a zero gradient.
+
+    The bias gradient is the batch sum of the per-sample gradients at the
+    Dense output ``z``, and BatchNorm's backward makes that sum exactly 0. In
+    float32 it is 0 up to the rounding of a ``batch``-long sum, bounded by
+    ``reassociation_atol([batch], 1, max|dL/dz|)``. The per-sample gradients
+    themselves are far from 0, so the zero is the norm's doing.
+    """
+    head, _ = _block_bias_gradient(block_use_bias=True)
+    block = head.dense_blocks[0]
+    x = keras.ops.convert_to_tensor(_inputs(FEATURE_SHAPE))
+    labels = keras.ops.convert_to_tensor(np.arange(FEATURE_SHAPE[0]) % NUM_CLASSES)
+    z = block.dense(head.pooling(x))
+    with tf.GradientTape() as tape:
+        tape.watch(z)
+        h = block.activation(block.norm(z, training=True))
+        loss = keras.ops.mean(keras.losses.sparse_categorical_crossentropy(
+            labels, head.classifier(h), from_logits=True))
+    per_sample = keras.ops.convert_to_numpy(tape.gradient(loss, z)).astype(np.float64)
+    scale = float(np.abs(per_sample).max())
+    assert scale > 1e-3, f"degenerate probe: max|dL/dz| = {scale}"
+    batch_sum = np.abs(per_sample.sum(axis=0)).max()
+    bound = reassociation_atol([FEATURE_SHAPE[0]], 1, scale)
+    assert batch_sum <= bound, (
+        f"the bias gradient {batch_sum:.3e} exceeds the rounding bound "
+        f"{bound:.3e}: BatchNorm is not removing the batch mean"
+    )
+
+
+def test_block_use_bias_false_builds_a_bias_free_hidden_dense() -> None:
+    head, grads = _block_bias_gradient(block_use_bias=False)
+    assert head.dense_blocks[0].dense.bias is None
+    assert head.classifier.bias is not None, "the classifier keeps its bias"
+    dead = [p for p, g in grads.items()
+            if g is None or not np.any(keras.ops.convert_to_numpy(g))]
+    assert not dead, f"weights with a dead gradient: {dead}"
+    assert head.get_config()["block_use_bias"] is False
+    clone = ClassificationHead.from_config(head.get_config())
+    assert clone.dense_blocks[0].dense.use_bias is False

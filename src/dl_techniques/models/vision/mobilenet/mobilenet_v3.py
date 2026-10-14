@@ -16,8 +16,8 @@ The squeeze-and-excitation gate here is a plain sigmoid; the paper
 specifies hard-sigmoid. The shared universal block always builds its
 expansion convolution, so Large's first row (expansion 16 into 16
 channels, no expansion in the paper) carries an extra `C -> C` projection.
-The classifier ends in softmax, so this model outputs probabilities, not
-logits. No pretrained checkpoints ship with this package;
+The classifier is linear, so this model outputs logits: compile with
+`from_logits=True`. No pretrained checkpoints ship with this package;
 `pretrained=True` raises `NotImplementedError`.
 
 References:
@@ -54,6 +54,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -85,17 +86,21 @@ class MobileNetV3(keras.Model):
            v                      v
         GlobalAvgPool         feature map (returned as-is)
            |
-        Dense -> hard-swish -> Dropout -> Dense (softmax)
+        Dense(1280 Large / 1024 Small) -> hard-swish -> Dropout -> Dense (linear)
            |
            v
-        class probabilities  [num_classes]
+        logits  [num_classes]
 
     :param num_classes: Number of output classes.
     :param variant: `"large"` or `"small"`.
     :param width_multiplier: Channel-count multiplier.
     :param dropout_rate: Dropout rate before the classifier.
-    :param weight_decay: L2 regularization factor.
-    :param kernel_initializer: Weight initialization strategy.
+    :param weight_decay: L2 regularization factor, the head's included.
+    :param kernel_initializer: Weight initialization strategy, the head's
+        included.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration. `name`, `num_classes` and `task_type` raise
+        `ValueError`.
     :param include_top: Whether to include the classification head.
     :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param kwargs: Passthrough to `keras.Model`.
@@ -166,9 +171,7 @@ class MobileNetV3(keras.Model):
             kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, int, int]] = None,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -187,20 +190,18 @@ class MobileNetV3(keras.Model):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.include_top = include_top
         self.input_shape_config = input_shape or (224, 224, 3)
-        self.return_dict = return_dict
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         if variant == "large":
             self.block_configs = self.LARGE_CONFIG
             self.last_block_filters = 960
-            self.last_conv_filters = 1280
+            last_point = 1280
         else:
             self.block_configs = self.SMALL_CONFIG
             self.last_block_filters = 576
-            self.last_conv_filters = 1024
+            last_point = 1024
 
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
 
@@ -210,6 +211,13 @@ class MobileNetV3(keras.Model):
             if new_value < 0.9 * value:
                 new_value += divisor
             return new_value
+
+        # The head's hidden width ("last point"): widened only above
+        # width_multiplier 1.0, as Keras Applications MobileNetV3 does.
+        self.last_point_filters = (
+            make_divisible(last_point * width_multiplier)
+            if width_multiplier > 1.0 else last_point
+        )
 
         first_filter = make_divisible(16 * width_multiplier)
         self.stem_conv = layers.Conv2D(
@@ -284,32 +292,38 @@ class MobileNetV3(keras.Model):
             self.classification_head = None
 
     def _build_head(self) -> None:
-        """Build classification head using standardized vision head factory."""
-        # Select preset based on head_config_preset
-        if self._head_config_preset == 'efficient':
-            head_config = HeadConfiguration.get_efficient_config(VisionTaskType.CLASSIFICATION)
-        elif self._head_config_preset == 'high_performance':
-            head_config = HeadConfiguration.get_high_performance_config(VisionTaskType.CLASSIFICATION)
-        else:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        """Build the reference classifier on the shared ``ClassificationHead``.
 
-        # Apply MobileNet-specific overrides
+        The paper's classifier (Howard et al. 2019, Table 1/2: ``pool 7x7``,
+        ``conv2d 1x1, NBN, 1280`` (Large) or ``1024`` (Small) with
+        hard-swish, ``conv2d 1x1, NBN, k``), as Keras Applications
+        ``MobileNetV3`` builds it: global average pool, a biased ``Dense`` of
+        ``last_point_filters`` with no normalization, hard-swish,
+        ``Dropout(dropout_rate)``, one linear ``Dense``. The model returns
+        logits.
+        """
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
         head_config.update({
             'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            'normalization_type': 'layer_norm',
-            'activation_type': 'gelu',
             'use_global_pooling': True,
             'pooling_type': 'avg',
             'use_attention': False,
-            'use_ffn': False,
+            # One hidden block: Dense(last point) -> hard-swish -> dropout,
+            # no normalization ("NBN" in the paper's tables).
+            'block_dims': (self.last_point_filters,),
+            'normalization_type': None,
+            'activation_type': 'hard_swish',
+            'dropout_rate': self.dropout_rate,
+            'kernel_initializer': self.kernel_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
             'name': 'classification_head',
         })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
         self.classification_head = create_vision_head(
             VisionTaskType.CLASSIFICATION, **head_config
@@ -320,7 +334,7 @@ class MobileNetV3(keras.Model):
 
         :param x: Input images, shape `(B, H, W, C)`.
         :param training: Passed to batch norm and dropout.
-        :return: Class probabilities, or the 4-D feature map if `include_top=False`.
+        :return: Logits, or the 4-D feature map if `include_top=False`.
         """
         x = self.stem_conv(x)
         x = self.stem_bn(x, training=training)
@@ -334,8 +348,7 @@ class MobileNetV3(keras.Model):
         x = self.last_activation(x)
 
         if self.include_top:
-            out = self.classification_head(x, training=training)
-            return out if self.return_dict else out['logits']
+            return self.classification_head(x, training=training)['logits']
 
         return x
 
@@ -346,9 +359,7 @@ class MobileNetV3(keras.Model):
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, int, int]] = None,
             width_multiplier: float = 1.0,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs
     ) -> "MobileNetV3":
         """Create a MobileNetV3 model from a predefined variant.
@@ -357,11 +368,9 @@ class MobileNetV3(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Channel-count multiplier.
-        :param head_config_preset: Classification head preset: `"default"`,
-            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-        :param head_config_overrides: Optional dict to override head configuration.
-        :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
+        :param head_config_overrides: Optional dict merged into the head
+            configuration (e.g. `{'block_dims': (512,)}`). `name`,
+            `num_classes` and `task_type` raise `ValueError`.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV3` instance.
 
@@ -383,9 +392,7 @@ class MobileNetV3(keras.Model):
             variant=variant,
             width_multiplier=width_multiplier,
             input_shape=input_shape,
-            head_config_preset=head_config_preset,
             head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
             **kwargs
         )
 
@@ -401,28 +408,10 @@ class MobileNetV3(keras.Model):
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
-            "return_dict": self.return_dict,
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MobileNetV3":
-        """Create model from configuration."""
-        if isinstance(config.get("kernel_initializer"), dict):
-            config["kernel_initializer"] = initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return_dict = config.pop("return_dict", True)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
-            **config
-        )
 
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the model."""
@@ -444,9 +433,9 @@ class MobileNetV3(keras.Model):
 
         # Head
         if self.include_top and self.classification_head is not None:
-            current_shape = self.classification_head.compute_output_shape(current_shape)
-            if isinstance(current_shape, dict):
-                current_shape = current_shape['logits']
+            # The head reports both keys; the model returns the logits.
+            current_shape = self.classification_head.compute_output_shape(
+                current_shape)['logits']
 
         return current_shape
 
@@ -479,9 +468,7 @@ def create_mobilenetv3(
         input_shape: Optional[Tuple[int, int, int]] = None,
         width_multiplier: float = 1.0,
         pretrained: bool = False,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-        return_dict: bool = True,
         **kwargs
 ) -> MobileNetV3:
     """Create a MobileNetV3 model.
@@ -492,11 +479,9 @@ def create_mobilenetv3(
     :param width_multiplier: Channel-count multiplier.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV3 checkpoints ship with this package.
-    :param head_config_preset: Classification head preset: `"default"`,
-        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-    :param head_config_overrides: Optional dict to override head configuration.
-    :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-        If False, return only the logits tensor for backward compatibility.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (e.g. `{'block_dims': (512,)}`). `name`,
+        `num_classes` and `task_type` raise `ValueError`.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV3` instance.
 
@@ -524,9 +509,7 @@ def create_mobilenetv3(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
-        return_dict=return_dict,
         **kwargs
     )
 

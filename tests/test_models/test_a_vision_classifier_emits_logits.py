@@ -33,7 +33,7 @@ One row per consumer class, four arms per row:
 
 Adding a consumer is one entry in :data:`SUBJECTS`.
 
-Step 3 of the same plan (decision D-013) added two more arms. Each consumer's
+Step 3 of the same plan (decisions D-013 to D-015) added two more arms. Each consumer's
 head is configured as its paper's or reference implementation's
 (``test_the_head_has_the_reference_shape``, one row per class in
 :data:`REFERENCE_HEAD_OWNERS`), and the model's own initializer and regularizer
@@ -89,6 +89,42 @@ def _cbam(**knobs) -> keras.Model:
 
 
 #: class name -> (builder, per-sample input shape).
+def _mobilenet_v1(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.mobilenet import MobileNetV1
+    return MobileNetV1(num_classes=NUM_CLASSES, width_multiplier=0.25,
+                       input_shape=(32, 48, 3), **knobs)
+
+
+def _mobilenet_v2(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.mobilenet import MobileNetV2
+    return MobileNetV2(num_classes=NUM_CLASSES, width_multiplier=0.35,
+                       input_shape=(32, 48, 3), **knobs)
+
+
+def _mobilenet_v3(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.mobilenet import MobileNetV3
+    return MobileNetV3(num_classes=NUM_CLASSES, variant="small",
+                       width_multiplier=0.5, input_shape=(32, 48, 3), **knobs)
+
+
+def _mobilenet_v4(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.mobilenet import MobileNetV4
+    return MobileNetV4.from_variant("small", num_classes=NUM_CLASSES,
+                                    input_shape=(32, 48, 3), **knobs)
+
+
+def _vit(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.vit import ViT
+    return ViT(input_shape=(32, 48, 3), num_classes=NUM_CLASSES, scale="pico",
+               patch_size=16, **knobs)
+
+
+def _vit_hmlp(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.vit_hmlp import ViTHMLP
+    return ViTHMLP(input_shape=(32, 48, 3), num_classes=NUM_CLASSES,
+                   scale="tiny", patch_size=16, **knobs)
+
+
 #: Each builder takes extra constructor keywords (``**knobs``).
 SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
@@ -96,6 +132,12 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ConvNeXtV2": (_convnext_v2, (32, 48, 3)),
     "AlexNet": (_alexnet, (67, 67, 3)),
     "CBAMNet": (_cbam, (32, 48, 3)),
+    "MobileNetV1": (_mobilenet_v1, (32, 48, 3)),
+    "MobileNetV2": (_mobilenet_v2, (32, 48, 3)),
+    "MobileNetV3": (_mobilenet_v3, (32, 48, 3)),
+    "MobileNetV4": (_mobilenet_v4, (32, 48, 3)),
+    "ViT": (_vit, (32, 48, 3)),
+    "ViTHMLP": (_vit_hmlp, (32, 48, 3)),
 }
 
 
@@ -211,6 +253,22 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     "ConvNeXtV1": {"pooled_norm", "classifier"},
     "ConvNeXtV2": {"pooled_norm", "classifier"},
     "AlexNet": {"dense_block", "dense_block_1", "classifier"},
+    # MobileNetV1: Howard et al. 2017 Table 1 (Avg Pool, FC, Softmax) as Keras
+    # Applications builds it (dropout 1e-3, then the classifier).
+    "MobileNetV1": {"classifier"},
+    # MobileNetV2: Sandler et al. 2018 Table 2 (avgpool, conv2d 1x1 k), as
+    # torchvision builds it (Dropout(0.2), Linear).
+    "MobileNetV2": {"classifier"},
+    # MobileNetV3: Howard et al. 2019 Tables 1/2 (pool, conv2d 1x1 NBN
+    # 1280/1024, hard-swish, conv2d 1x1 NBN k), Keras Applications layout.
+    "MobileNetV3": {"dense_block", "classifier"},
+    # MobileNetV4: Qin et al. 2024 / timm head_norm=True (pool, 1x1 conv 1280,
+    # BatchNorm, ReLU, classifier).
+    "MobileNetV4": {"dense_block", "classifier"},
+    # ViT and ViT-HMLP: Dosovitskiy et al. 2020 Sec. 3.1, "a single linear
+    # layer at fine-tuning time", on the final norm's CLS token.
+    "ViT": {"classifier"},
+    "ViTHMLP": {"classifier"},
 }
 
 
@@ -227,8 +285,20 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
         f"{subject} head weight owners {sorted(owners)}, the reference head "
         f"has {sorted(REFERENCE_HEAD_OWNERS[subject])}"
     )
-    # No normalization inside any hidden block of these reference heads.
-    assert all(block.norm is None for block in head.dense_blocks), subject
+    # No normalization inside any hidden block of these reference heads,
+    # except MobileNetV4's BatchNorm at the family epsilon.
+    if subject == "MobileNetV4":
+        (block,) = head.dense_blocks
+        assert block.units == 1280
+        assert isinstance(block.norm, keras.layers.BatchNormalization)
+        assert block.norm.epsilon == pytest.approx(1e-3)
+    else:
+        assert all(block.norm is None for block in head.dense_blocks), subject
+    if subject == "MobileNetV3":
+        (block,) = head.dense_blocks
+        # Small's last point is 1024; width_multiplier <= 1 does not narrow it.
+        assert block.units == 1024
+        assert block.activation_type == "hard_swish"
     if subject.startswith("ConvNeXt"):
         assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
         assert head.pooled_norm.epsilon == pytest.approx(1e-6)
@@ -250,7 +320,30 @@ KNOBS: Dict[str, Dict[str, object]] = {
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "AlexNet": {"kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
                 "bias_initializer": keras.initializers.Constant(0.5)},
+    # MobileNet: ``weight_decay`` is the family's L2 knob; ``dropout_rate`` is
+    # the dropout before the classifier (V1/V2) or after the hidden block
+    # (V3/V4).
+    "MobileNetV1": {"weight_decay": _L2, "dropout_rate": 0.3,
+                    "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "MobileNetV2": {"weight_decay": _L2, "dropout_rate": 0.3,
+                    "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "MobileNetV3": {"weight_decay": _L2, "dropout_rate": 0.3,
+                    "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "MobileNetV4": {"weight_decay": _L2, "dropout_rate": 0.3,
+                    "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "ViT": {"kernel_regularizer": keras.regularizers.L2(_L2),
+            "bias_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
+            "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+            "bias_initializer": keras.initializers.Constant(0.5)},
+    "ViTHMLP": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                "bias_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
+                "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+                "bias_initializer": keras.initializers.Constant(0.5)},
 }
+
+#: Where each class's ``dropout_rate`` must land in its reference head.
+CLASSIFIER_DROPOUT = {"MobileNetV1", "MobileNetV2", "ViT", "ViTHMLP"}
+BLOCK_DROPOUT = {"MobileNetV3", "MobileNetV4"}
 
 
 def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
@@ -258,13 +351,23 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
     keras.utils.set_random_seed(0)
     model = builder(**KNOBS[subject])
     model(_images(shape), training=False)
-    classifier = model.classification_head.classifier
+    head = model.classification_head
+    classifier = head.classifier
     knobs = KNOBS[subject]
-    if "kernel_regularizer" in knobs:
+    if "kernel_regularizer" in knobs or "weight_decay" in knobs:
         assert isinstance(classifier.kernel_regularizer, keras.regularizers.L2), (
-            f"{subject}: kernel_regularizer did not reach the classifier"
+            f"{subject}: the model's kernel L2 did not reach the classifier"
         )
         assert classifier.kernel_regularizer.l2 == pytest.approx(_L2)
+    if "bias_regularizer" in knobs:
+        assert isinstance(classifier.bias_regularizer, keras.regularizers.L2), (
+            f"{subject}: bias_regularizer did not reach the classifier"
+        )
+        assert classifier.bias_regularizer.l2 == pytest.approx(_L2)
+    if subject in CLASSIFIER_DROPOUT:
+        assert head.classifier_dropout.rate == pytest.approx(0.3), subject
+    if subject in BLOCK_DROPOUT:
+        assert [b.dropout_rate for b in head.dense_blocks] == [0.3], subject
     if "kernel_initializer" in knobs:
         config = keras.initializers.serialize(classifier.kernel_initializer)
         assert config["class_name"] == "RandomNormal", (subject, config)
@@ -320,6 +423,19 @@ def test_resnet50_has_the_torchvision_parameter_count() -> None:
     assert _trainable_count(model) == TORCHVISION_RESNET50_PARAMETERS
 
 
+#: timm ``vit_base_patch16_224`` (and the ViT README's measured table): ViT-B/16
+#: at 224 px with a single ``Linear(768, 1000)`` head on the CLS token.
+TIMM_VIT_BASE_PATCH16_224_PARAMETERS = 86_567_656
+
+
+def test_vit_base_has_the_timm_parameter_count() -> None:
+    from dl_techniques.models.vision.vit import ViT
+    model = ViT(input_shape=(224, 224, 3), num_classes=1000, scale="base",
+                patch_size=16)
+    model.build((None, 224, 224, 3))
+    assert model.count_params() == TIMM_VIT_BASE_PATCH16_224_PARAMETERS
+
+
 def test_alexnet_has_the_paper_parameter_count() -> None:
     from dl_techniques.models.vision.alexnet import create_alexnet
     expected = _alexnet_paper_parameter_count()
@@ -327,3 +443,48 @@ def test_alexnet_has_the_paper_parameter_count() -> None:
     model = create_alexnet()
     model.build((None, 227, 227, 3))
     assert _trainable_count(model) == expected
+
+
+# ---------------------------------------------------------------------
+# return_dict is gone (plan-2026-10-14T062616-81938e81 step 3, D-002)
+# ---------------------------------------------------------------------
+
+#: The classes that took ``return_dict`` until step 3, plus their factories.
+RETURN_DICT_REMOVED = (
+    "MobileNetV1", "MobileNetV2", "MobileNetV3", "MobileNetV4", "ViT", "ViTHMLP",
+)
+
+
+@pytest.mark.parametrize("name", RETURN_DICT_REMOVED)
+def test_return_dict_is_refused(name: str) -> None:
+    """The argument is deleted, not ignored.
+
+    Keras 3.8's ``Layer.__init__`` refuses an unknown keyword with
+    ``ValueError("Unrecognized keyword arguments passed to <Class>: ...")``
+    (measured), so the refusal is a ``ValueError`` naming the argument, not
+    a ``TypeError``.
+    """
+    builder, _ = SUBJECTS[name]
+    with pytest.raises(ValueError, match="return_dict"):
+        builder(return_dict=False)
+
+
+@pytest.mark.parametrize("factory", [
+    "dl_techniques.models.vision.mobilenet:create_mobilenetv1",
+    "dl_techniques.models.vision.mobilenet:create_mobilenetv2",
+    "dl_techniques.models.vision.mobilenet:create_mobilenetv3",
+    "dl_techniques.models.vision.mobilenet:create_mobilenetv4",
+    "dl_techniques.models.vision.vit:create_vit",
+    "dl_techniques.models.vision.vit_hmlp:create_vit_hmlp",
+])
+def test_no_factory_takes_return_dict(factory: str) -> None:
+    import importlib
+    import inspect
+    module, attr = factory.split(":")
+    fn = getattr(importlib.import_module(module), attr)
+    assert "return_dict" not in inspect.signature(fn).parameters, (
+        f"{attr} still declares return_dict"
+    )
+    assert "head_config_preset" not in inspect.signature(fn).parameters, (
+        f"{attr} still declares the dead head_config_preset"
+    )

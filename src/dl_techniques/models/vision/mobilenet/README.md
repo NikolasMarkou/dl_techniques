@@ -62,22 +62,24 @@ MobileNet answers this by redesigning the building block itself rather than by p
 ### 4.1 `MobileNetV1`
 - **Stem**: one standard `3x3` convolution.
 - **Body**: 13 `DepthwiseSeparableBlock` layers (`MobileNetV1.ARCHITECTURE`), some with stride 2.
-- **Head**: global average pooling, dropout, then a dense classifier.
+- **Head**: the paper's classifier (Table 1, "Avg Pool, FC, Softmax") as Keras Applications builds it: global average pooling, `Dropout(dropout_rate)` (1e-3), one linear `Dense(num_classes)` (`block_dims=()`, `classifier_dropout_rate`).
 
 ### 4.2 `MobileNetV2`
 - **Stem**: one standard `3x3` convolution.
 - **Body**: 17 inverted residual blocks in 7 stages, from the paper's `(t, c, n, s)` table. The first stage has expansion factor `t=1`. Residual connections apply to stride-1 blocks whose input and output widths match.
-- **Head**: a `1x1` convolution expanding to 1280 channels, then pooling, dropout and a dense classifier.
+- **Head**: a `1x1` convolution expanding to 1280 channels (backbone), then the torchvision classifier: global average pooling, `Dropout(dropout_rate)` (0.2), one linear `Dense(num_classes)`.
 
 ### 4.3 `MobileNetV3`
 - **Stem**: an efficiency-tuned `3x3` convolution.
 - **Body**: NAS-derived inverted residual blocks — `5x5` kernels in some layers, squeeze-and-excite in some, and ReLU or hard-swish depending on depth.
-- **Head**: the paper's "efficient last stage", which moves work before the final pooling.
+- **Head**: the paper's "efficient last stage", which pools before the wide projection: global average pooling, `Dense(1280)` (Large) or `Dense(1024)` (Small) with no normalization (the paper's "NBN"), hard-swish, `Dropout(dropout_rate)`, one linear `Dense(num_classes)`, as Keras Applications builds it. The projection widens only for `width_multiplier > 1`.
 
 ### 4.4 `MobileNetV4`
 - **Stem**: a `3x3` convolution.
 - **Body**: seven stages of UIB blocks; the `block_types` entry for each stage selects the block shape. Hybrid variants insert `MobileMQA` attention at `attention_stages` (5 and 6 by default).
-- **Head**: global average pooling, then `Dense(1280) -> ReLU -> Dropout -> Dense(num_classes, softmax)`.
+- **Head**: the paper's classifier as timm builds it (`head_norm=True`): global average pooling, `Dense(1280) -> BatchNorm -> ReLU -> Dropout -> Dense(num_classes)`, the BatchNorm at the family's reference epsilon 1e-3.
+
+Every version returns **logits** (the classifier is linear): compile with `from_logits=True` and apply `keras.ops.softmax` to read probabilities. The model's `kernel_initializer` and its `weight_decay` L2 reach the head's `Dense` layers. The `return_dict` and `head_config_preset` arguments are gone; `head_config_overrides` still reshapes the head, and `name`, `num_classes` and `task_type` in it raise `ValueError`. Archives saved before 2026-10-14 (a dict output, a softmax head, or the two-`DenseBlock` head) do not load and are not supported.
 
 ---
 
@@ -100,10 +102,10 @@ model = create_mobilenetv4(
     input_shape=(32, 32, 3),
 )
 
-# 2. Compile. The V4 head ends in softmax, so from_logits=False.
+# 2. Compile. The model returns logits, so from_logits=True.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5),
-    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
 model.summary()

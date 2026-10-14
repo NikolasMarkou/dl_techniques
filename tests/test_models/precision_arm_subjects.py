@@ -111,15 +111,13 @@ def _b_resnet():
                   filters_per_stage=[8, 16], block_type="basic")
 
 
-# Batch 2, not 1: the head is the shared ClassificationHead, whose two
-# DenseBlocks carry a BatchNorm. The backward part runs in training mode, where
-# a batch of ONE normalizes every feature to exactly 0, so the logits are the
-# constant classifier bias and the ramp loss and every gradient are exactly 0
-# (MEASURED 2026-10-14, plan-2026-10-14T062616-81938e81 step 2: loss 0.0,
-# grad_norm_sum 0 under both policies). The arm only passed at batch 1 while the
-# head ended in a softmax, whose uniform output still has a ramp gradient. At
-# batch 2: grad_norm_sum 11.01 float32 / 10.16 mixed_float16, absmax 1.102742 /
-# 1.103516.
+# Batch 2 since plan-2026-10-14T062616-81938e81 step 2, when the head's two
+# DenseBlocks carried a BatchNorm: in the training-mode backward part a batch of
+# ONE normalized every head feature to exactly 0, so the logits were the
+# constant classifier bias and every gradient was exactly 0. Step 3 (D-013)
+# made the head the paper's GAP + FC, which holds no norm, so batch 1 is no
+# longer degenerate here (MEASURED: grad_norm_sum 9.443 float32 / 9.239
+# mixed_float16). Batch 2 is kept: grad_norm_sum 7.927 / 7.929.
 _sub("resnet", _b_resnet, lambda: _f32(2, 32, 32, 3))
 
 
@@ -172,10 +170,20 @@ _sub("fastvit", _b_fastvit, lambda: _f32(1, 64, 64, 3))
 def _b_mobilenet():
     from dl_techniques.models.vision.mobilenet import create_mobilenetv2
     return create_mobilenetv2(variant="small", num_classes=4,
-                              input_shape=(32, 32, 3))
+                              input_shape=(64, 64, 3))
 
 
-_sub("mobilenet", _b_mobilenet, lambda: _f32(1, 32, 32, 3))
+# 64 x 64, not 32 x 32: MobileNetV2 strides 32x, so at 32 x 32 its last
+# feature map is 1 x 1 and the training-mode BatchNorm before the pool sees ONE
+# value per channel at batch 1 and normalizes it to exactly 0. With the logits
+# head (plan-2026-10-14T062616-81938e81 step 3) the ramp loss and every
+# gradient were then exactly 0 (MEASURED: loss 0.0, grad_norm_sum 0, both
+# policies); batch 2 at 32 x 32 instead blew the gradients up (grad_norm_sum
+# 1.6e6 float32, inf mixed_float16) because the norm divides by the spread of
+# two values. 64 x 64 leaves a 2 x 2 map: grad_norm_sum 7540.8 float32 /
+# 6917.3 mixed_float16, all finite. test_mobilenet runs V2 at 64 x 64 for the
+# same trap (its V2_SHAPE).
+_sub("mobilenet", _b_mobilenet, lambda: _f32(1, 64, 64, 3))
 
 
 def _b_swin():
@@ -199,15 +207,10 @@ def _b_cbam():
     return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 
-# Batch 2, not 1: the head is the shared ClassificationHead, whose two
-# DenseBlocks carry a BatchNorm. The backward part runs in training mode, where
-# a batch of ONE normalizes every feature to exactly 0, so the logits are the
-# constant classifier bias and the ramp loss and every gradient are exactly 0
-# (MEASURED 2026-10-14, plan-2026-10-14T062616-81938e81 step 2: loss 0.0,
-# grad_norm_sum 0 under both policies). The arm only passed at batch 1 while the
-# head ended in a softmax, whose uniform output still has a ramp gradient. At
-# batch 2: grad_norm_sum 111.6 float32 / 142.4 mixed_float16, absmax 0.018658 /
-# 0.018646.
+# Batch 2 for the same step-2 reason as ``resnet`` above. Since step 3 the
+# head is GAP + FC with no norm and batch 1 is no longer degenerate (MEASURED:
+# grad_norm_sum 1.777 float32 / 1.774 mixed_float16); batch 2 is kept:
+# 1.618 / 1.618.
 _sub("cbam", _b_cbam, lambda: _f32(2, 32, 32, 3))
 
 
@@ -1719,7 +1722,7 @@ def _b_fractalnet_no_head():
 def _b_mobilenet_no_head():
     from dl_techniques.models.vision.mobilenet import create_mobilenetv2
     return create_mobilenetv2(variant="small", num_classes=4,
-                              input_shape=(32, 32, 3), include_top=False)
+                              input_shape=(64, 64, 3), include_top=False)
 
 
 @_no_head("resnet")

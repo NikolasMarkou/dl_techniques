@@ -65,7 +65,11 @@ Input image (B, H, W, C)
     +-- include_top=False -> pooling: 'cls' | 'mean' | 'max' -> (B, D), or None -> (B, N+1, D)
 ```
 
-The head emits **logits**, so compile with `from_logits=True`.
+The head emits **logits**, so compile with `from_logits=True`. It is the shared `ClassificationHead` configured as the paper's
+fine-tuning head (Dosovitskiy et al., Sec. 3.1, "a single linear layer at fine-tuning time"): the CLS token, `Dropout(dropout_rate)`,
+one `Dense` drawn from the model's `kernel_initializer` and regularized by its `kernel_regularizer`/`bias_regularizer`. The model
+returns that tensor directly; the `return_dict` and `head_config_preset` arguments are gone, and archives saved before 2026-10-14
+(a dict output or the two-`DenseBlock` head) do not load and are not supported.
 
 ---
 
@@ -214,7 +218,10 @@ Weight loading goes through `dl_techniques.utils.weight_transfer.load_weights_fr
 
 ## 7. Configuration & Model Variants
 
-Parameter counts below were measured by building each model at `input_shape=(224, 224, 3)`, `patch_size=16`, `num_classes=1000`.
+Parameter counts below were measured by building each model at `input_shape=(224, 224, 3)`, `patch_size=16`, `num_classes=1000`
+(re-measured 2026-10-14: `ViT(input_shape=(224, 224, 3), num_classes=1000, scale=s, patch_size=16)`, `build`, `count_params()`).
+The head is the paper's fine-tuning head, one `Dense` on the final norm's CLS token, so `tiny`, `small`, `base` and `large`
+equal timm's `vit_*_patch16_224` counts; `tests/test_models/test_a_vision_classifier_emits_logits.py` pins `base`.
 
 | Scale | Variant key | Embed dim | Heads | Layers | MLP ratio | Params |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |

@@ -37,7 +37,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import List, Tuple, Optional, Dict, Any, Sequence, Literal
+from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -56,6 +56,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -80,10 +81,10 @@ class MobileNetV4(keras.Model):
            MobileMQA (only stages in attention_stages, hybrid variants)
            |
            v
-        GlobalAvgPool -> Dense(1280) -> ReLU -> Dropout -> Dense (softmax)
+        GlobalAvgPool -> Dense(1280) -> BatchNorm -> ReLU -> Dropout -> Dense (linear)
            |
            v
-        class probabilities  [num_classes]
+        logits  [num_classes]
 
     :param num_classes: Number of output classes; used only if `include_top=True`.
     :param depths: UIB block count per stage.
@@ -94,8 +95,13 @@ class MobileNetV4(keras.Model):
     :param use_attention: Add Mobile MQA to `attention_stages`.
     :param attention_stages: Stage indices to add attention to, when `use_attention=True`.
     :param dropout_rate: Dropout rate in the classifier head.
-    :param weight_decay: L2 regularization factor for all layers.
-    :param kernel_initializer: Weight initialization strategy.
+    :param weight_decay: L2 regularization factor for all layers, the head's
+        included.
+    :param kernel_initializer: Weight initialization strategy, the head's
+        included.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration. `name`, `num_classes` and `task_type` raise
+        `ValueError`.
     :param include_top: Whether to include the classification head.
     :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param kwargs: Passthrough to `keras.Model`.
@@ -168,9 +174,7 @@ class MobileNetV4(keras.Model):
         kernel_initializer: str = "he_normal",
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (224, 224, 3),
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-        return_dict: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -224,10 +228,8 @@ class MobileNetV4(keras.Model):
         self.kernel_initializer = kernel_initializer
         self.include_top = include_top
         self._input_shape = input_shape
-        self.return_dict = return_dict
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.actual_dims = [int(dim * width_multiplier) for dim in dims]
@@ -251,7 +253,7 @@ class MobileNetV4(keras.Model):
 
         :param x: Input images, shape `(B, H, W, C)`.
         :param training: Passed to batch norm and dropout.
-        :return: Class probabilities, or the 4-D feature map if `include_top=False`.
+        :return: Logits, or the 4-D feature map if `include_top=False`.
         """
         x = self.stem_conv(x)
         x = self.stem_bn(x, training=training)
@@ -262,8 +264,7 @@ class MobileNetV4(keras.Model):
                 x = layer(x, training=training)
 
         if self.include_top:
-            out = self.classification_head(x, training=training)
-            return out if self.return_dict else out['logits']
+            return self.classification_head(x, training=training)['logits']
 
         return x
 
@@ -345,32 +346,46 @@ class MobileNetV4(keras.Model):
         return stage_layers
 
     def _build_head(self) -> None:
-        """Build classification head using standardized vision head factory."""
-        # Select preset based on head_config_preset
-        if self._head_config_preset == 'efficient':
-            head_config = HeadConfiguration.get_efficient_config(VisionTaskType.CLASSIFICATION)
-        elif self._head_config_preset == 'high_performance':
-            head_config = HeadConfiguration.get_high_performance_config(VisionTaskType.CLASSIFICATION)
-        else:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        """Build the reference classifier on the shared ``ClassificationHead``.
 
-        # Apply MobileNet-specific overrides
+        The paper's classifier (Qin et al. 2024: global pool, then a ``1x1``
+        conv to 1280 with BatchNorm and ReLU, then the classifier), as timm's
+        ``mobilenetv4`` builds it (``head_norm=True``: ``conv_head`` 1280,
+        ``norm_head`` BatchNorm + ReLU, dropout before ``classifier``): global
+        average pool, a bias-free ``Dense(HEAD_HIDDEN_DIM)``, BatchNorm at the family's
+        reference epsilon and momentum, ReLU, ``Dropout(dropout_rate)``, one
+        linear ``Dense``. The model returns logits.
+        """
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
         head_config.update({
             'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            'normalization_type': 'layer_norm',
-            'activation_type': 'gelu',
             'use_global_pooling': True,
             'pooling_type': 'avg',
             'use_attention': False,
-            'use_ffn': False,
+            # One hidden block: Dense(1280) -> BatchNorm -> ReLU -> dropout.
+            'block_dims': (self.HEAD_HIDDEN_DIM,),
+            'normalization_type': 'batch_norm',
+            # The family rule (common.py, D-111 of plan-2026-08-22): every
+            # BatchNorm runs at the reference epsilon, the head's too.
+            'normalization_kwargs': {
+                'epsilon': REFERENCE_BN_EPSILON,
+                'momentum': REFERENCE_BN_MOMENTUM,
+            },
+            # timm's conv_head is "never a bias": the BatchNorm after it would
+            # leave a bias with an identically-zero gradient (measured).
+            'block_use_bias': False,
+            'activation_type': 'relu',
+            'dropout_rate': self.dropout_rate,
+            'kernel_initializer': self.kernel_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
             'name': 'classification_head',
         })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
         self.classification_head = create_vision_head(
             VisionTaskType.CLASSIFICATION, **head_config
@@ -383,9 +398,7 @@ class MobileNetV4(keras.Model):
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
         width_multiplier: float = 1.0,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-        return_dict: bool = True,
         **kwargs
     ) -> "MobileNetV4":
         """Create a MobileNetV4 model from a predefined variant.
@@ -394,11 +407,9 @@ class MobileNetV4(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Channel-count multiplier.
-        :param head_config_preset: Classification head preset: `"default"`,
-            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-        :param head_config_overrides: Optional dict to override head configuration.
-        :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
+        :param head_config_overrides: Optional dict merged into the head
+            configuration (e.g. `{'block_dims': (512,)}`). `name`,
+            `num_classes` and `task_type` raise `ValueError`.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV4` instance.
         :raises ValueError: If `variant` is not recognized.
@@ -432,9 +443,7 @@ class MobileNetV4(keras.Model):
             use_attention=config["use_attention"],
             attention_stages=config.get("attention_stages", cls.DEFAULT_ATTENTION_STAGES),
             input_shape=input_shape,
-            head_config_preset=head_config_preset,
             head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
             **kwargs
         )
 
@@ -454,25 +463,11 @@ class MobileNetV4(keras.Model):
             "kernel_initializer": self.kernel_initializer,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
-            "return_dict": self.return_dict,
         }
         base_config = super().get_config()
         return {**base_config, **config}
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MobileNetV4":
-        """Create a model from its `get_config()` output."""
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return_dict = config.pop("return_dict", True)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            return_dict=return_dict,
-            **config
-        )
 
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the model."""
@@ -490,9 +485,9 @@ class MobileNetV4(keras.Model):
 
         # Head
         if self.include_top and self.classification_head is not None:
-            current_shape = self.classification_head.compute_output_shape(current_shape)
-            if isinstance(current_shape, dict):
-                current_shape = current_shape['logits']
+            # The head reports both keys; the model returns the logits.
+            current_shape = self.classification_head.compute_output_shape(
+                current_shape)['logits']
 
         return current_shape
 
@@ -533,9 +528,7 @@ def create_mobilenetv4(
     input_shape: Optional[Tuple[int, ...]] = None,
     width_multiplier: float = 1.0,
     pretrained: bool = False,
-    head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
     head_config_overrides: Optional[Dict[str, Any]] = None,
-    return_dict: bool = True,
     **kwargs
 ) -> MobileNetV4:
     """Create a MobileNetV4 model.
@@ -546,11 +539,9 @@ def create_mobilenetv4(
     :param width_multiplier: Channel-count multiplier.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV4 checkpoints ship with this package.
-    :param head_config_preset: Classification head preset: `"default"`,
-        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
-    :param head_config_overrides: Optional dict to override head configuration.
-    :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-        If False, return only the logits tensor for backward compatibility.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (e.g. `{'block_dims': (512,)}`). `name`,
+        `num_classes` and `task_type` raise `ValueError`.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV4` instance.
 
@@ -578,9 +569,7 @@ def create_mobilenetv4(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
-        return_dict=return_dict,
         **kwargs
     )
 

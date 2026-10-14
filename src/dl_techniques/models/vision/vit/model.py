@@ -62,6 +62,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -288,13 +289,10 @@ class ViT(keras.Model):
     :param name: Model name; auto-generated as ``vision_transformer_<scale>``
         when None.
     :type name: Optional[str]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (e.g. ``{'block_dims': (512,)}`` adds a hidden block).
+        ``name``, ``num_classes`` and ``task_type`` raise ``ValueError``.
+        Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
@@ -416,9 +414,7 @@ class ViT(keras.Model):
             use_layer_scale: bool = False,
             layer_scale_init_value: float = 1e-5,
             name: Optional[str] = None,
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize the Vision Transformer and create every sub-layer.
@@ -466,13 +462,10 @@ class ViT(keras.Model):
         :type layer_scale_init_value: float
         :param name: Model name; auto-generated when None.
         :type name: Optional[str]
-        :param head_config_preset: Classification head preset: ``'default'``,
-            ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-        :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-        :param head_config_overrides: Optional dict to override head configuration
-            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
-            (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+        :param head_config_overrides: Optional dict merged into the head
+            configuration (e.g. ``{'block_dims': (512,)}`` adds a hidden block).
+            ``name``, ``num_classes`` and ``task_type`` raise ``ValueError``.
+            Defaults to None.
         :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any configuration value is invalid.
@@ -560,9 +553,7 @@ class ViT(keras.Model):
         self.layer_scale_init_value = float(layer_scale_init_value)
 
         # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
-        self._return_dict = return_dict
 
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
@@ -646,19 +637,29 @@ class ViT(keras.Model):
             head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
             head_config.update({
                 'num_classes': self.num_classes,
-                'dropout_rate': self.dropout_rate,
-                'normalization_type': self.normalization_type,
-                'activation_type': 'gelu',  # ViT uses gelu
                 'use_global_pooling': True,
                 'pooling_type': 'cls_token',  # Extract CLS token from sequence
                 'use_attention': False,  # ViT transformer already applies attention
+                # The reference fine-tuning head (Dosovitskiy et al. 2020,
+                # Sec. 3.1: "a single linear layer at fine-tuning time"; timm
+                # VisionTransformer: head_drop then head): the CLS token of the
+                # final norm, a dropout, one linear Dense. No hidden block.
+                'block_dims': (),
+                'classifier_dropout_rate': self.dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_regularizer': self.bias_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
                 # by-name matching that weight transfer relies on.
                 'name': 'classification_head',
             })
-            if self._head_config_overrides:
-                head_config.update(self._head_config_overrides)
+            head_config = merge_head_config_overrides(
+                head_config, self._head_config_overrides
+            )
 
             self.classification_head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
@@ -776,11 +777,7 @@ class ViT(keras.Model):
             # --- Classification Head Logic ---
             # The ClassificationHead expects the full sequence and handles CLS token internally
             # when use_global_pooling=False (default for classification), or pools globally
-            head_output = self.classification_head(x_norm, training=training)
-            if self._return_dict:
-                return head_output
-            else:
-                return head_output['logits']
+            return self.classification_head(x_norm, training=training)['logits']
         else:
             # --- Feature Extraction Logic ---
             # cls / mean / max all route through SequencePooling. For mean/max the
@@ -847,9 +844,7 @@ class ViT(keras.Model):
             "activation": serialize_activation(self.activation),
             "use_layer_scale": self.use_layer_scale,
             "layer_scale_init_value": self.layer_scale_init_value,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
-            "return_dict": self._return_dict,
         })
         return config
 
@@ -883,16 +878,7 @@ class ViT(keras.Model):
             config["activation"] = deserialize_activation(
                 activation, custom_objects=custom_objects
             )
-        # Extract head config parameters (new)
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return_dict = config.pop("return_dict", True)
-        return cls(
-            return_dict=return_dict,
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
+        return cls(**config)
 
     def get_feature_extractor(self) -> "ViT":
         """Return a feature-extractor twin of this model.
@@ -929,7 +915,6 @@ class ViT(keras.Model):
             activation=self.activation,
             use_layer_scale=self.use_layer_scale,
             layer_scale_init_value=self.layer_scale_init_value,
-            head_config_preset=self._head_config_preset,
             head_config_overrides=self._head_config_overrides,
             name=f"{self.name}_feature_extractor"
         )
@@ -1186,9 +1171,7 @@ def create_vit(
         normalization_position: Literal['pre', 'post'] = "post",
         ffn_type: FFNType = "mlp",
         activation: Union[str, callable] = "gelu",
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
-            return_dict: bool = True,
         **kwargs: Any
 ) -> ViT:
     """Create a Vision Transformer with the specified configuration.
@@ -1251,12 +1234,9 @@ def create_vit(
     :type ffn_type: FFNType
     :param activation: FFN activation.
     :type activation: Union[str, callable]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
-            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
-            If False, return only the logits tensor for backward compatibility.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration; ``name``, ``num_classes`` and ``task_type`` raise
+        ``ValueError``.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments forwarded to the :class:`ViT`
         constructor.
@@ -1312,7 +1292,6 @@ def create_vit(
         normalization_position=normalization_position,
         ffn_type=ffn_type,
         activation=activation,
-        head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
         **kwargs,
     )

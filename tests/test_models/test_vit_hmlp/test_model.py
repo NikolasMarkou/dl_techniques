@@ -485,11 +485,10 @@ class TestViTHMLPForwardPass:
             output = model(input_tensor, training=False)
 
             # Check output shape and properties (output is dict with logits/probabilities)
-            assert isinstance(output, dict)
-            assert 'logits' in output and 'probabilities' in output
-            assert output['logits'].shape == (batch_size, num_classes)
-            assert not np.any(np.isnan(output['logits'].numpy()))
-            assert not np.any(np.isinf(output['logits'].numpy()))
+            assert not isinstance(output, dict)
+            assert output.shape == (batch_size, num_classes)
+            assert not np.any(np.isnan(output.numpy()))
+            assert not np.any(np.isinf(output.numpy()))
 
     def test_forward_pass_without_top(self, sample_inputs):
         """Test forward pass without classification head."""
@@ -562,7 +561,7 @@ class TestViTHMLPForwardPass:
 
     def test_training_vs_inference_mode(self):
         """Test different behavior in training vs inference mode."""
-        model = ViTHMLP(scale="tiny", dropout_rate=0.5, return_dict=False)  # High dropout for testing
+        model = ViTHMLP(scale="tiny", dropout_rate=0.5)  # High dropout for testing
         input_tensor = np.random.rand(2, 224, 224, 3).astype('float32')
 
         # Get outputs in both modes
@@ -584,7 +583,6 @@ class TestViTHMLPForwardPass:
             scale="tiny",
             use_stochastic_depth=True,
             stochastic_depth_rate=0.3,
-            return_dict=False
         )
 
         input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
@@ -610,7 +608,6 @@ class TestViTHMLPForwardPass:
             use_stochastic_depth=False,  # No randomness
             include_top=True,
             num_classes=2,
-            return_dict=False
         )
 
         # Controlled input (all ones)
@@ -733,8 +730,8 @@ class TestViTHMLPSerialization:
 
             # Outputs should match exactly (compare logits)
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_output['logits']),
-                keras.ops.convert_to_numpy(loaded_output['logits']),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Loaded model predictions should match original"
             )
@@ -825,7 +822,7 @@ class TestViTHMLPTrainingIntegration:
         # Compile model
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -841,12 +838,11 @@ class TestViTHMLPTrainingIntegration:
             num_classes=2,
             scale="tiny",
             patch_size=16,
-            return_dict=False
         )
 
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -1016,7 +1012,6 @@ class TestViTHMLPEdgeCases:
             patch_size=8,
             scale="tiny",
             num_classes=2,
-            return_dict=False
         )
 
         input_tensor = np.random.rand(1, 16, 16, 1).astype('float32')
@@ -1032,7 +1027,6 @@ class TestViTHMLPEdgeCases:
             patch_size=32,  # Results in 8x8 = 64 patches
             scale="tiny",
             num_classes=10,
-            return_dict=False
         )
 
         # Should have 64 patches + 1 CLS = 65 sequence length
@@ -1052,7 +1046,6 @@ class TestViTHMLPEdgeCases:
             patch_size=(16, 16),  # Patches must be square
             scale="tiny",
             num_classes=10,
-            return_dict=False
         )
 
         expected_patches = (128 // 16) * (256 // 16)  # 8 * 16 = 128
@@ -1074,7 +1067,6 @@ class TestViTHMLPEdgeCases:
                 scale="tiny",
                 num_classes=5,
                 stem_norm_layer=norm_type,
-                return_dict=False
             )
             model(np.zeros((1, 64, 64, 3), 'float32'))
             return model
@@ -1156,7 +1148,6 @@ class TestViTHMLPEdgeCases:
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=5,
-                return_dict=False,
                 **config
             )
 
@@ -1182,7 +1173,6 @@ class TestViTHMLPEdgeCases:
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type,
-                return_dict=False
             )
             model(np.zeros((1, 64, 64, 3), 'float32'))
             return model
@@ -1215,7 +1205,6 @@ class TestViTHMLPEdgeCases:
             attention_dropout_rate=0.8,
             pos_dropout_rate=0.7,
             num_classes=10,
-            return_dict=False
         )
 
         input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
@@ -1234,7 +1223,6 @@ class TestViTHMLPEdgeCases:
             use_stochastic_depth=True,
             stochastic_depth_rate=0.9,  # Very high drop rate
             num_classes=10,
-            return_dict=False
         )
 
         input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
@@ -1250,7 +1238,7 @@ class TestViTHMLPEdgeCases:
 
     def test_numerical_stability_with_extreme_inputs(self):
         """Test numerical stability with extreme input values."""
-        model = ViTHMLP(input_shape=(64, 64, 3), scale="tiny", num_classes=2, return_dict=False)
+        model = ViTHMLP(input_shape=(64, 64, 3), scale="tiny", num_classes=2)
 
         test_cases = [
             np.zeros((1, 64, 64, 3), dtype='float32'),  # All zeros
@@ -1278,7 +1266,6 @@ class TestViTHMLPRegularizationIntegration:
             num_classes=5,
             kernel_regularizer=keras.regularizers.L2(0.01),
             bias_regularizer=keras.regularizers.L1(0.01),
-            return_dict=False
         )
 
         # Build the model to create regularization losses
@@ -1417,7 +1404,6 @@ class TestViTHMLPArchitectureValidation:
             ffn_type="swiglu",
             use_stochastic_depth=True,
             stochastic_depth_rate=0.2,
-            return_dict=False
         )
 
         # Test input
@@ -1439,7 +1425,7 @@ class TestViTHMLPArchitectureValidation:
             loaded_output = loaded_model(test_input, training=False)
 
             # Outputs should be valid (though may differ due to training mode)
-            # With return_dict=False, output is a tensor (logits)
+            # The model returns its logits as one tensor.
             assert not isinstance(loaded_output, dict)
             assert loaded_output.shape == output.shape
             assert not np.any(np.isnan(loaded_output.numpy()))
@@ -1558,7 +1544,7 @@ class TestViTHMLPGradientFlow:
     """Every trainable weight is on the backward graph."""
 
     def test_gradients_reach_every_trainable_weight(self):
-        model = ViTHMLP(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16, return_dict=False)
+        model = ViTHMLP(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16)
         x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
         model(x, training=False)  # subclassed model: unbuilt until first call
 
@@ -1567,16 +1553,19 @@ class TestViTHMLPGradientFlow:
         # `ClassificationHead` builds but never applies. 20225bf71 stopped
         # building them, so the paths no longer exist and the oracle correctly
         # rejects a waiver matching nothing ("a stale waiver silently widens
-        # this oracle"). The head's 10 REAL weights -- two DenseBlocks and the
-        # classifier -- are on the backward graph and are covered below.
+        # this oracle"). The head's weights -- since plan-2026-10-14T062616-
+        # 81938e81 step 3 (D-013) only the reference head's classifier kernel
+        # and bias -- are on the backward graph and are covered below.
         report = assert_gradients_reach_every_trainable_weight(model, x)
 
         assert len(report) == len(model.trainable_weights)
-        assert len(report) == 170, (
+        assert len(report) == 162, (
             "the tiny variant's weight set changed shape; re-measure before "
-            "editing this number. 176 -> 170 is the six EnhancementHead-style "
+            "editing this number. 176 -> 170 was the six EnhancementHead-style "
             "tensors 20225bf71 stopped building (norm gamma/beta, FFN "
-            "fc1/fc2 kernel+bias)."
+            "fc1/fc2 kernel+bias); 170 -> 162 is the two DenseBlocks' eight "
+            "(Dense kernel/bias, LayerNorm gamma/beta, twice) that the "
+            "single-Dense reference head does not have: 160 trunk + 2."
         )
         assert max(v for v in report.values() if v is not None) > 0.0
 
@@ -1594,4 +1583,5 @@ class TestViTHMLPGradientFlow:
 
         report = assert_gradients_reach_every_trainable_weight(model, x)
         assert len(report) == len(model.trainable_weights)
-        assert len(report) > 0
+        # The trunk alone: the headed arm's 162 less the classifier's 2.
+        assert len(report) == 160

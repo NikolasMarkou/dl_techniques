@@ -93,8 +93,8 @@ class TestTheDivergenceIsRealAndNotCosmetic:
         keras.utils.set_random_seed(0)
         pre = vit_model.ViT(**common, normalization_position="pre")
         x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
-        a = post(x, training=False)['probabilities']
-        b = pre(x, training=False)['probabilities']
+        a = post(x, training=False)
+        b = pre(x, training=False)
         a = keras.ops.convert_to_numpy(a)
         b = keras.ops.convert_to_numpy(b)
         assert float(np.max(np.abs(a - b))) > 1e-4, (

@@ -49,7 +49,10 @@ _INPUT_SHAPE = (64, 64, 3)
 
 #: BatchNorm layer count per generation at ``_INPUT_SHAPE``, MEASURED 2026-08-23.
 #: Pinned so that "all norms are at 1e-3" cannot pass by finding zero norms.
-_EXPECTED_BN_COUNT = {"V1": 27, "V2": 53, "V3": 47, "V4": 62}
+# V4 is 63 since plan-2026-10-14T062616-81938e81 step 3 (D-015): its reference
+# head (timm head_norm=True) adds one BatchNorm after the 1280-wide Dense, and
+# that BatchNorm must run at the reference epsilon like every other.
+_EXPECTED_BN_COUNT = {"V1": 27, "V2": 53, "V3": 47, "V4": 63}
 
 _MODELS = {
     "V1": MobileNetV1,
@@ -61,7 +64,7 @@ _MODELS = {
 
 def _build(cls) -> keras.Model:
     keras.utils.set_random_seed(7)
-    model = cls(num_classes=10, input_shape=_INPUT_SHAPE, return_dict=False)
+    model = cls(num_classes=10, input_shape=_INPUT_SHAPE)
     model(keras.ops.zeros((1, *_INPUT_SHAPE)))
     return model
 
