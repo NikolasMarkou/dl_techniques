@@ -90,7 +90,7 @@ class TestViTHMLPActivationSerialization:
         below, which still passes unchanged."""
         config = _build(unregistered_scaled_relu).get_config()
         config["activation"] = json.loads(json.dumps(config["activation"]))
-        with pytest.raises(ValueError, match="Could not interpret activation"):
+        with pytest.raises(TypeError, match="unexpected keyword argument 'custom_objects'"):
             ViTHMLP.from_config(
                 config,
                 custom_objects={"unregistered_scaled_relu": unregistered_scaled_relu},

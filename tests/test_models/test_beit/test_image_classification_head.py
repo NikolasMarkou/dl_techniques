@@ -42,9 +42,9 @@ def _head(model):
 
 
 def _logits(model, x):
-    """The model's own output, unwrapped from the head's dict."""
+    """The model's own output (probabilities tensor, not logits since head applies softmax)."""
     out = model(x, training=False)
-    return ops.convert_to_numpy(out["logits"] if isinstance(out, dict) else out)
+    return ops.convert_to_numpy(out)
 
 
 class TestBeitForImageClassification:
@@ -53,10 +53,9 @@ class TestBeitForImageClassification:
     def test_output_shape(self, variant):
         model = _classifier(variant)
         out = model(_images(), training=False)
-        # The factory ClassificationHead returns {'logits', 'probabilities'}.
-        assert set(out) == {"logits", "probabilities"}
-        assert tuple(out["logits"].shape) == (2, 7)
-        assert tuple(out["probabilities"].shape) == (2, 7)
+        # Model unwraps ClassificationHead dict to return probabilities tensor
+        assert out.shape == (2, 7)
+        assert np.all(np.isfinite(out))
         assert model.compute_output_shape((2,) + IMG) == (2, 7)
 
     def test_output_is_logits_not_probabilities(self):
@@ -126,7 +125,7 @@ class TestBeitForImageClassification:
         )
         assert model.backbone.final_norm is not None
         out = model(_images(), training=False)
-        assert tuple(out["logits"].shape) == (2, 7)
+        assert out.shape == (2, 7)
         names = {w.path.split("/", 1)[-1] for w in model.weights}
         assert not any("head_norm" in n for n in names), names
         assert not any("head_pool" in n for n in names), names
@@ -168,8 +167,8 @@ class TestBeitForImageClassification:
         x = tf.constant(_images())
         with tf.GradientTape() as tape:
             out = model(x, training=True)
-            logits = out["logits"] if isinstance(out, dict) else out
-            loss = tf.reduce_mean(tf.square(logits))
+            probs = out
+            loss = tf.reduce_mean(tf.square(probs))
         grads = tape.gradient(loss, model.trainable_variables)
         dead = [v.path for g, v in zip(grads, model.trainable_variables) if g is None]
         assert len(dead) == 1, f"unexpected dead weights: {dead}"
@@ -196,11 +195,9 @@ class TestBeitForImageClassification:
             model.save(path)
             restored = keras.models.load_model(path)
             after = restored(x, training=False)
-        assert set(after) == set(before)
-        for key in before:
-            np.testing.assert_allclose(
-                ops.convert_to_numpy(before[key]), ops.convert_to_numpy(after[key]),
-                atol=1e-6, rtol=0, err_msg=key,
-            )
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(before), ops.convert_to_numpy(after),
+            atol=1e-6, rtol=0,
+        )
         assert restored.num_classes == 7
         assert restored.backbone.name == BACKBONE_NAME

@@ -292,8 +292,8 @@ class TestFastVLM:
         """RED-proof for `test_keras_roundtrip_bit_for_bit_with_string_activation`.
 
         Repeats the same save/load round trip with `activation='relu'`,
-        then perturbs the reloaded model's classification head kernel by a
-        known, clearly-detectable amount before comparing. Asserts the
+        then perturbs the reloaded model's classification head classifier kernel
+        by a known, clearly-detectable amount before comparing. Asserts the
         bit-for-bit comparison DOES raise `AssertionError` against the
         perturbed reload, proving the comparison above is not vacuously
         passing.
@@ -313,8 +313,12 @@ class TestFastVLM:
             loaded_model = keras.models.load_model(filepath)
 
             head_layer = loaded_model.head
-            head_kernel, head_bias = head_layer.get_weights()
-            head_layer.set_weights([head_kernel + 1.0, head_bias])
+            # ClassificationHead has multiple sub-layers; the final classifier
+            # is the last Dense layer. Its weights are the last two arrays.
+            weights = head_layer.get_weights()
+            classifier_kernel = weights[-2]
+            classifier_bias = weights[-1]
+            head_layer.set_weights(weights[:-2] + [classifier_kernel + 1.0, classifier_bias])
 
             perturbed_prediction = keras.ops.convert_to_numpy(
                 loaded_model(sample_input, training=False)

@@ -1427,7 +1427,10 @@ class BeitForImageClassification(keras.Model):
 
         if self.include_top:
             # Factory head handles pooling, norm, dropout, classifier internally
-            return self.classification_head(tokens, training=training)
+            # ClassificationHead returns {'logits': ..., 'probabilities': ...}
+            # Unwrap to return just the probabilities tensor
+            head_output = self.classification_head(tokens, training=training)
+            return head_output["probabilities"]
 
         # include_top=False: return backbone features per use_mean_pooling
         if self.use_mean_pooling:

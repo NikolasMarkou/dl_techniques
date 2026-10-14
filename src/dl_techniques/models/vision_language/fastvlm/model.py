@@ -463,9 +463,12 @@ class FastVLM(keras.Model):
                 head_config.update(self._head_config_overrides)
 
             self.head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
+                VisionTaskType.CLASSIFICATION, name='classification_head', **head_config
             )
-            x = self.head(x, training=None)
+            head_output = self.head(x, training=None)
+            # ClassificationHead returns {"logits": ..., "probabilities": ...}
+            # Unwrap to return just the tensor for the functional model
+            x = head_output["probabilities"]
         else:
             self.head = None
 
@@ -485,7 +488,8 @@ class FastVLM(keras.Model):
         x = self.stages[2](x, training=training)
 
         if self.head is not None:
-            x = self.head(x, training=training)
+            head_output = self.head(x, training=training)
+            x = head_output["probabilities"]
 
         return x
 

@@ -617,7 +617,10 @@ class SwinTransformer(keras.Model):
             classification_head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
             )
-            x = classification_head(x)
+            # ClassificationHead returns {'logits': ..., 'probabilities': ...}
+            # Unwrap to return just the tensor for the functional model
+            head_output = classification_head(x)
+            x = head_output["probabilities"]
             self.head_layers = [classification_head]
         else:
             self.head_layers = []

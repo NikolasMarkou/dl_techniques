@@ -48,11 +48,10 @@ class TestSwinRoundTrip:
     def test_forward_shape(self):
         model = create_swin_transformer("tiny", 10, input_shape=(224, 224, 3))
         out = model(_images(), training=False)
-        # The factory ClassificationHead returns a dict of logits and
-        # probabilities; both are (2, 10) here.
-        assert set(out) == {"logits", "probabilities"}
-        assert out["logits"].shape == (2, 10)
-        assert out["probabilities"].shape == (2, 10)
+        # The model unwraps the ClassificationHead dict to return just the
+        # probabilities tensor (shape (2, 10)), matching ResNet/ConvNeXt/MobileNet behavior.
+        assert out.shape == (2, 10)
+        assert np.all(np.isfinite(out))
 
     def test_keras_round_trip(self):
         model = create_swin_transformer("tiny", 10, input_shape=(224, 224, 3))
@@ -65,12 +64,10 @@ class TestSwinRoundTrip:
             reloaded = keras.models.load_model(path)
             y1 = reloaded(x, training=False)
 
-        assert set(y1) == set(y0)
-        for key in y0:
-            np.testing.assert_allclose(
-                ops.convert_to_numpy(y0[key]), ops.convert_to_numpy(y1[key]),
-                rtol=1e-5, atol=1e-5, err_msg=key,
-            )
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(y0), ops.convert_to_numpy(y1),
+            rtol=1e-5, atol=1e-5,
+        )
 
 
 if __name__ == "__main__":
