@@ -29,19 +29,19 @@ A classical HMM has exact, cheap inference (likelihood, decoding, posteriors in 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  1. Discrete latent states with exact inference: the         │
-│     likelihood, the Viterbi path and the posteriors are      │
-│     computed exactly, never sampled or approximated.         │
-│                                                              │
-│  2. Neural parametrization: emissions come from learned      │
-│     state embeddings through a feed-forward head (Tran et    │
-│     al., 2016), optionally conditioned on the history;       │
-│     transitions can depend on the input (Bengio and          │
-│     Frasconi, 1995).                                         │
-│                                                              │
-│  3. One model, two regimes: unsupervised (segment and        │
-│     cluster sequences) or supervised (a CRF tagger, Lample   │
-│     et al., 2016).                                           │
+│  1. Discrete latent states with exact inference: the        │
+│     likelihood, the Viterbi path and the posteriors are     │
+│     computed exactly, never sampled or approximated.        │
+│                                                             │
+│  2. Neural parametrization: emissions come from learned     │
+│     state embeddings through a feed-forward head (Tran et   │
+│     al., 2016), optionally conditioned on the history;      │
+│     transitions can depend on the input (Bengio and         │
+│     Frasconi, 1995).                                        │
+│                                                             │
+│  3. One model, two regimes: unsupervised (segment and       │
+│     cluster sequences) or supervised (a CRF tagger, Lample  │
+│     et al., 2016).                                          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -73,11 +73,11 @@ Input:  {"obs": (B, T, obs_dim) | (B, T) int,  "mask": (B, T)}
                      │
      padded steps neutralized (floats -> 0, symbols -> -1)
                      │
-     ┌───────────────┴───────────────── only when an encoder is built ─┐
+     ┌───────────────┴───────────────── only when an encoder is built ──┐
      │  categorical: Embedding(vocab_size, hidden_dim)                  │
      │  generative:  shift right one step (step t sees x_{<t})          │
-     │  NeuralHMMEncoder: mlp | transformer | lstm | gru | conv          │
-     │     causal in generative mode, non-causal in discriminative       │
+     │  NeuralHMMEncoder: mlp | transformer | lstm | gru | conv         │
+     │     causal in generative mode, non-causal in discriminative      │
      └───────────────┬──────────────────────────────────────────────────┘
                      │  h (B, T, hidden_dim)
           ┌──────────┴───────────┐
