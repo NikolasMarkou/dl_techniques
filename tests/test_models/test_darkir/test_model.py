@@ -1,10 +1,10 @@
 """
 Test suite for the DarkIR low-light image restoration model.
 
-DarkIR is a pure functional U-Net (create_darkir_model) using FreMLP (FFT path).
-Covers a forward pass, the use_side_loss variant, and the M2 full .keras
-save -> load -> identical-output round-trip. NHWC float32 input -> restored
-image (B, H, W, 3).
+DarkIR is a ``keras.Model`` subclass (``create_darkir_model`` wraps it) using
+FreMLP (FFT path). Covers a forward pass, the use_side_loss variant, and the M2
+full .keras save -> load -> identical-output round-trip. NHWC float32 input ->
+restored image (B, H, W, 3).
 """
 
 import os
@@ -114,8 +114,17 @@ from ..gradient_flow_oracle import (
 #: 20225bf71 stopped building inside ``EnhancementHead`` (its ``norm`` and
 #: ``ffn``, which ``call`` never applies -- see the pft_sr and scunet pins for
 #: the same accounting). 393 -> 387 total, 336 -> 330 dead at init.
-GF_N_WEIGHTS = 387
-GF_N_DEAD_AT_INIT = 330
+#:
+#: Re-derived 2026-10-15 (plan-2026-10-14T062616-81938e81 step 6.1) by
+#: ``len(model.trainable_weights)`` and ``gradient_report`` on ``_gf_model()``:
+#: 387 -> 341 total, 330 -> 298 dead at init. The 46 tensors, accounted for:
+#: the old 3-ConvBlock head (14) plus the separate ``ending`` conv (2) became
+#: one head that IS the ending conv (2), -14 live; and the 8 encoder blocks
+#: (enc [1, 2, 3] + 2 middle) dropped their dilation-4 and -9 branches
+#: (kernel + bias each), -32, all behind the zero-init gate, hence dead at
+#: init (D-023: the official ``EBlock`` runs one undilated branch).
+GF_N_WEIGHTS = 341
+GF_N_DEAD_AT_INIT = 298
 
 
 def _gf_model():
@@ -150,9 +159,9 @@ class TestDarkIRGradientFlow:
         # `enhancement_head_{norm,ffn}/...` -- that received no gradient because
         # `EnhancementHead.call` never applies them. 20225bf71 stopped building
         # them, so those paths no longer exist and the oracle correctly rejects
-        # a waiver that matches nothing. The head's 14 REAL weights (three
-        # ConvBlocks and the output conv) are on the backward graph and are
-        # covered by the no-waiver assertion below.
+        # a waiver that matches nothing. The head's 2 weights (it is the
+        # paper's ending conv since step 6.1: kernel and bias) are on the
+        # backward graph and are covered by the no-waiver assertion below.
         model = _gf_model()
         x = _gf_batch()
         model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
@@ -183,7 +192,7 @@ class TestDarkIRGradientFlow:
             w for w in model.trainable_weights
             if w.path.endswith("/beta") or w.path.endswith("/gamma")
         ]
-        gates = [w for w in gates if "layer_normalization" not in w.path and "enhancement_head" not in w.path]
+        gates = [w for w in gates if "layer_normalization" not in w.path]
         assert gates, "no per-branch scale weights found -- has the block changed?"
         for w in gates:
             arr = keras.ops.convert_to_numpy(w)
@@ -314,7 +323,6 @@ class TestDarkIRBlockTowerIsLoadBearing:
             w for w in model.trainable_weights
             if (w.path.endswith("/beta") or w.path.endswith("/gamma"))
             and "layer_normalization" not in w.path
-            and "enhancement_head" not in w.path
         ]
         gate_max = max(
             float(np.max(np.abs(keras.ops.convert_to_numpy(w)))) for w in gates
@@ -337,7 +345,7 @@ class TestDarkIRBlockTowerIsLoadBearing:
 
 
 # ---------------------------------------------------------------------
-# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 step 6)
+# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 steps 6, 6.1)
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.vision.image_restoration.darkir.model import DarkIR  # noqa: E402
@@ -377,3 +385,5 @@ class TestTheEnhancementHeadKnobs:
         model = DarkIR(include_top=include_top, **_HEAD_TINY)
         out = model(np.zeros((2, 32, 48, 3), dtype="float32"))
         assert tuple(model.compute_output_shape((2, 32, 48, 3))) == tuple(out.shape)
+        channels = 3 if include_top else _HEAD_TINY["width"]
+        assert tuple(out.shape) == (2, 32, 48, channels)

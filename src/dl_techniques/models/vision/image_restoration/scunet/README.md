@@ -158,6 +158,7 @@ This "split-transform-merge" design allows the network to learn complementary fe
 -   **Encoder**: A series of `SwinConvBlock` stages that progressively downsample the feature maps (using strided convolutions), increasing the receptive field and channel depth.
 -   **Bottleneck**: A final stage of `SwinConvBlock`s at the lowest resolution to process the most abstract features.
 -   **Decoder**: A series of stages that upsample the feature maps (using `Conv2DTranspose`) and merge them with high-resolution features from the corresponding encoder stage via skip connections. This allows the model to reconstruct fine details while using contextual information from the deeper layers.
+-   **Tail**: the last decoder stage's output is added to the stem conv's output (the long skip, `up1 + x1`), and one bias-free 3x3 conv maps it to `in_nc` channels. That is `x = self.m_tail(x + x1)` with `m_tail = nn.Conv2d(dim, in_nc, 3, 1, 1, bias=False)` in the official code ([cszn/SCUNet](https://github.com/cszn/SCUNet), `models/network_scunet.py`). Here the tail conv is an `EnhancementHead` named `enhancement_head` with `block_dims=()` and `output_use_bias=False`: exactly that one conv, with the model applying the long skip.
 
 ---
 
@@ -234,8 +235,8 @@ The `SCUNet` model is configured via its constructor. Key parameters include:
 | `window_size`        | `int`       | `8`                 | The size of the attention windows (e.g., 8x8 pixels).                          |
 | `stochastic_depth_rate` | `float`  | `0.0`               | Stochastic depth rate for regularization. Linearly increases from 0 to this value. |
 | `input_resolution`   | `int`       | `256`               | The expected input image resolution. Used to optimize windowing.               |
-| `include_top`        | `bool`      | `True`              | `True`: an `EnhancementHead` (named `enhancement_head`, three `ConvBlock`s and a 3x3 conv) runs on the `up1` output in place of the paper's `(+) x1` skip and tail conv, and the tail is not built. `False`: the paper's network, `tail(up1 + x1)`. The output is the restored image either way. |
-| `head_config_overrides` | `dict`   | `None`              | Merged into the head config; `name` and `task_type` raise `ValueError`. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
+| `include_top`        | `bool`      | `True`              | `True`: the paper's network, tail included, `tail(up1 + x1)`, the tail being an `EnhancementHead` (`enhancement_head`, `block_dims=()`, no bias); output `(B, H, W, in_nc)`. `False`: no tail is built and the model returns the features the tail reads, `up1 + x1` cropped, `(B, H, W, dim)`. |
+| `head_config_overrides` | `dict`   | `None`              | Merged into the head config; `name` and `task_type` raise `ValueError`. Any other key departs from the paper's tail. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
 
 ---
 
@@ -390,6 +391,35 @@ A traditional Vision Transformer (ViT) computes self-attention across all patche
 ### Cross-Window Communication via Shifting
 
 To prevent the model from only learning within isolated windows, the **Shifted Window (SW-MSA)** mechanism is used. In every second `SwinTransformerBlock`, the grid of windows is shifted by half a window size (`M/2`). This forces the new windows to be composed of patches from adjacent windows in the previous layer, effectively mixing information across the entire feature map as the network deepens.
+
+### The default head, and what changed on 2026-10-15
+
+From 2026-10-10 (commit `3b281907a`) to 2026-10-15 the default `include_top=True`
+head was a 3-`ConvBlock` `EnhancementHead` on the `up1` output, which replaced both
+the long skip and the tail conv: the default model was not SCUNet, only
+`include_top=False` was. The default is the paper's network again
+(plan-2026-10-14T062616-81938e81 step 6.1). Evidence, all executed in
+`tests/test_models/test_scunet/`:
+
+- `test_golden_values.py`: the default model reproduces, at `atol=1e-8`, the
+  output references pinned before `3b281907a` (max difference 0.0 on CPU).
+- `test_the_default_output_is_the_paper_network.py`: the headed output is the
+  head's single bias-free conv on the headless features, and the headless
+  features are `up1 + x1` recomputed from the model's own stages, both exact.
+- Weight tensors at `config=[1]*7, dim=16, head_dim=8`: 148 (147 + the tail
+  kernel), 348,918 parameters at `window_size=4` and 352,790 at 8
+  (`test_oracle_adoption.py`), the 2026-08-21 pins.
+
+Archives saved with the 2026-10-10 head do not load into this model; that head
+is gone, not kept for compatibility.
+
+### Known difference from the official code
+
+The official forward pads the input to a multiple of 64 with
+`nn.ReplicationPad2d` (edge replication); this port uses a reflect pad
+(`keras.ops.pad(..., mode="REFLECT")`), which is why it refuses heights or
+widths below 33. On inputs that are already a multiple of 64 the two agree; on
+others the cropped output differs near the bottom and right borders.
 
 ---
 

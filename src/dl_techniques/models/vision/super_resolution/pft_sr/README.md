@@ -42,10 +42,10 @@ It utilizes **Progressive Focused Attention (PFA)** to multiply the current laye
 
 ### Key Innovations of this Implementation
 
-1.  **Faithful Architecture**: Accurately implements the `PFTBlock`, `ProgressiveFocusedAttention`, and **LePE** (Locally-Enhanced Positional Encoding) as described in the paper.
-2.  **Keras 3 Native**: Built using modern Keras 3 functional patterns, ensuring compatibility with TensorFlow, JAX, and PyTorch backends.
-3.  **Flexible Upsampling**: Supports multiple upsampling strategies (`pixelshuffle`, `pixelshuffledirect`, `nearest+conv`) to trade off between quality and speed.
-4.  **Factory Methods**: Includes `create_pft_sr` with presets (`light`, `base`, `large`) for immediate deployment.
+1.  **The official reconstruction tail**: the default output ends in the tail of the official code ([CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/PFT-SR), `basicsr/archs/pft_arch.py`), chosen by `upsampler` exactly as there (§4.2). The body is a simplified port; §4.3 lists every difference.
+2.  **Keras 3 Native**: a `keras.Model` subclass built from `keras.ops`.
+3.  **The official upsamplers**: `pixelshuffle` (the PFT config), `pixelshuffledirect` (the PFT_light config) and `nearest+conv` (x4 only).
+4.  **Factory**: `create_pft_sr` with the variants `light`, `base` and `repo_medium`, each carrying its official upsampler.
 
 ### Why PFT-SR Matters
 
@@ -179,10 +179,30 @@ The fundamental building block.
 
 A Keras `Model` subclass that orchestrates the stages.
 -   **Stages**: The model is divided into stages. Each stage contains a defined number of PFT Blocks.
--   **Upsampler**:
-    -   `pixelshuffle`: Conv -> PixelShuffle -> Conv -> PixelShuffle (for 4x). Standard high-quality approach.
-    -   `pixelshuffledirect`: Single Conv -> PixelShuffle (faster, slightly lower quality).
-    -   `nearest+conv`: Nearest neighbor resizing followed by convolution.
+-   **Tail** (`include_top=True`, the default), the official `PFT.forward` branches with `num_feat = F = 64`. A biased 3x3 conv is written `conv(i -> o)`:
+    -   `pixelshuffle` (scale a power of two, or 3): `conv_before_upsample` `conv(embed_dim -> F)` + LeakyReLU(0.01), then `conv(F -> 4F)` + pixel shuffle 2 per factor of two (or `conv(F -> 9F)` + pixel shuffle 3), then `conv_last` `conv(F -> 3)`.
+    -   `pixelshuffledirect` (any scale): `conv(embed_dim -> scale^2 * 3)` + pixel shuffle `scale`, nothing after it.
+    -   `nearest+conv` (x4 only, as the official `assert`): `conv_before_upsample` + LeakyReLU(0.01), two stages of nearest 2x + `conv(F -> F)` + LeakyReLU(0.2), `conv_hr` + LeakyReLU(0.2), `conv_last`.
+
+    The 0.01 is torch `nn.LeakyReLU()`'s default, passed explicitly (Keras' default is 0.3). The model builds this tail itself rather than through the shared `EnhancementHead`, whose super-resolution path is a stride-`scale` transposed conv that none of the official tails use (the SqueezeNet precedent: a reference head the shared head cannot express is model-owned).
+-   **`include_top=False`**: no tail is built, and the model returns the features the tail reads, `conv_after_body(body(x)) + x`, `(B, H, W, embed_dim)`.
+
+### 4.3 Differences from the official code
+
+The tail above is the official one, layer for layer (pinned by a hand sum and a
+hand-composed forward in `tests/test_models/test_pft_sr/test_model.py`). The
+rest is a simplified port, and these differences are deliberate scope, not
+oversights to rely on:
+
+| Official `PFT` | This port |
+|:---|:---|
+| Subtracts the DIV2K RGB mean `(0.4488, 0.4371, 0.4040)` at the input and adds it back at the output (`img_range = 1`) | No mean shift; `conv_first`'s and the tail's biases are free to absorb it |
+| `PatchEmbed` LayerNorm after `conv_first`, and a final LayerNorm before `conv_after_body` | Neither |
+| Each stage (`PFTB`) ends in its own `conv(dim -> dim)` and a residual around the stage | No per-stage conv or residual; one `conv_after_body` and one long skip |
+| `ConvFFN` (Linear, GELU, depthwise conv with `convffn_kernel_size=7`, Linear) | An MLP |
+| Top-k sparse attention (`num_topk` per layer) | Dense attention; `sparsity_mode` other than `'none'` raises |
+| Pads the input to a multiple of `window_size` by mirroring, crops the output | Requires the input to be a multiple already |
+| torch `PixelShuffle` channel order `(c, i, j)` | `PixelShuffle2D`'s `(i, j, c)`, a fixed permutation of the preceding conv's output channels (same function class; matters only when porting torch weights) |
 
 ---
 
@@ -200,11 +220,11 @@ from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft
 model = create_pft_sr(scale=4, variant='base')
 
 # 2. Generate dummy low-res data (Batch, H, W, C)
-# Height/Width must be divisible by window_size (default 8)
-lr_image = keras.random.normal((1, 48, 48, 3))
+# Height/Width must be divisible by the variant's window_size (32 for 'base')
+lr_image = keras.random.normal((1, 64, 64, 3))
 
 # 3. Inference
-# Output shape will be (1, 192, 192, 3)
+# Output shape will be (1, 256, 256, 3)
 sr_image = model(lr_image)
 
 print(f"LR Shape: {lr_image.shape}")
@@ -235,10 +255,11 @@ model = PFTSR(
 
 ### 6.2 Factory Function
 
-#### `create_pft_sr(scale, variant)`
+#### `create_pft_sr(scale, variant, include_top=True, **kwargs)`
 The recommended way to instantiate models.
--   `scale`: 2, 3, or 4.
--   `variant`: `'light'`, `'base'`, or `'repo_medium'`.
+-   `scale`: what the variant's upsampler supports (§4.2).
+-   `variant`: `'light'` (`pixelshuffledirect`), `'base'` (`pixelshuffle`), or `'repo_medium'` (`pixelshuffle`).
+-   `**kwargs`: any `PFTSR` argument, overriding the variant table (for example another `upsampler`).
 
 ---
 
@@ -250,29 +271,32 @@ the official training YAMLs in [CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/P
 The third is this repository's own and is named so it does not read as a published
 size: the official repo ships exactly two configs, PFT and PFT_light.
 
-| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Params, `include_top=True` (4x) | Params, `include_top=False` |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 515,063 | 440,180 |
-| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 16,064,403 | 14,500,560 |
-| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,456,563 | 2,280,880 |
+| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Upsampler | Params, `include_top=True` (4x) | Params, `include_top=False` |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | `pixelshuffledirect` | 462,692 | 440,180 |
+| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | `pixelshuffle` | 14,936,019 | 14,500,560 |
+| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | `pixelshuffle` | 2,624,179 | 2,280,880 |
 
-Measured 2026-10-14 at `scale=4` on a `(1, 32, 32, 3)` input, every weight
-trainable (`count_params()` equals the trainable count; the shifted-window mask
-is no longer a weight):
+Measured 2026-10-15 at `scale=4` on a `(1, 32, 32, 3)` input, every weight
+trainable (`count_params()` equals the trainable count):
 
 ```python
 m = create_pft_sr(4, variant, include_top=top); m(keras.ops.zeros((1, 32, 32, 3)))
 sum(int(np.prod(w.shape)) for w in m.trainable_weights)
 ```
 
-`include_top=True` (the default) ends in an `EnhancementHead` (three `ConvBlock`s
-at `embed_dim`, then a stride-`scale` transposed conv), not in the paper's
-pixel-shuffle upsampler and `conv_last`. The figures this table carried before,
-636,691 / 18,656,163 / 2,744,483, were the pixel-shuffle tail's; `call` has not
-applied that tail in either mode since 2026-10-10. `include_top=False` returns
-the features before any upsampling. `head_config_preset` was deleted on
-2026-10-14 (it was stored and never read) and `head_config_overrides` may not
-set `name` or `task_type`.
+The difference between the two columns is the official tail's hand sum at
+`scale=4` (`c(i, o) = 9*i*o + o`, `F = 64`): light `c(52, 48)` = 22,512; base
+`c(240, F) + 2*c(F, 4F) + c(F, 3)` = 435,459; repo_medium `c(80, F) + 2*c(F, 4F)
++ c(F, 3)` = 343,299. The body is unchanged from the step-6 measurement.
+
+From 2026-10-10 to 2026-10-15 `include_top=True` ended in an `EnhancementHead`
+(three `ConvBlock`s at `embed_dim`, then a stride-`scale` transposed conv) in
+place of the official tail, while `upsample` and `conv_last` were built and
+applied in neither mode, and the `upsampler` knob only checked the scale. That
+head is gone with `head_config_overrides` (passing it raises `ValueError`), and
+archives saved with it do not load into this model. The light variant also
+used `pixelshuffle` until then; its official config is `pixelshuffledirect`.
 
 `repo_medium` is 80-wide, i.e. it sits *between* the two published sizes, which is
 why it is not called "large".
@@ -358,13 +382,16 @@ model = PFTSR(
 )
 ```
 
-### Pattern 2: Custom Upsamplers
+### Pattern 2: Another Official Upsampler
 
-If deployment speed is critical, change the upsampler to `pixelshuffledirect` or `nearest+conv`.
+Each variant carries its official upsampler; any `PFTSR` argument overrides it.
 
 ```python
-# Fastest inference, slightly lower quality
-fast_model = PFTSR(..., upsampler='nearest+conv') 
+# The lightweight tail on the base body
+model = create_pft_sr(scale=4, variant='base', upsampler='pixelshuffledirect')
+
+# The real-world tail (x4 only, as in the official code)
+model = create_pft_sr(scale=4, variant='base', upsampler='nearest+conv')
 ```
 
 ---
@@ -457,8 +484,8 @@ test_pft_sr_shapes()
 *   **Solution**: Pad inputs. `h_new = ceil(h / window_size) * window_size`.
 
 **Issue 3: Checkerboard artifacts.**
-*   **Cause**: Can happen with `pixelshuffledirect`.
-*   **Solution**: Use the default `pixelshuffle` upsampler which includes an extra convolution after upsampling to smooth artifacts.
+*   **Cause**: Can happen with `pixelshuffledirect`, the light variant's official tail.
+*   **Solution**: Use `upsampler='pixelshuffle'`, which ends in a `conv_last` after the pixel shuffles.
 
 ---
 

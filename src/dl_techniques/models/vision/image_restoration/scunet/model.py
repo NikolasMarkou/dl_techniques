@@ -15,10 +15,13 @@ function of ``window_size``. A reflect pad must be strictly smaller than the
 extent it pads, so heights or widths below 33 raise, and no pretrained weights
 ship with this port.
 
-The :class:`SCUNet` class supports an ``include_top`` parameter: when ``True``
-(default), an :class:`EnhancementHead` from the vision heads factory replaces
-the paper's tail and runs on the ``up1`` output; when ``False``, the model ends
-in the paper's tail, ``tail(up1 + x1)``, and returns that restored image.
+The :class:`SCUNet` class supports an ``include_top`` parameter. When ``True``
+(default) the model is the paper's network, tail included: the long skip
+``up1 + x1`` and then the tail, a single bias-free 3x3 conv to ``in_nc``
+(``m_tail`` in cszn/SCUNet ``models/network_scunet.py``), which is an
+:class:`EnhancementHead` with ``block_dims=()`` and ``output_use_bias=False``.
+When ``False`` the model returns the backbone features the tail reads,
+``up1 + x1`` cropped, with ``dim`` channels.
 
 References:
     - Zhang et al., 2022. Practical Blind Denoising via Swin-Conv-UNet and
@@ -26,7 +29,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import List, Optional, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -101,17 +103,18 @@ class SCUNet(keras.Model):
         │ up2: conv-t stride 2, blocks │
         └──────────────────────────────┘
               │
-             (+)◄── x1 ... no: x2
+             (+)◄── x2
               ▼
         ┌──────────────────────────────┐
         │ up1: conv-t stride 2, blocks │
         └──────────────────────────────┘
               │
-             (+)◄── x1
+             (+)◄── x1              long skip; include_top=False
+              │                     returns this, cropped
               ▼
         ┌──────────────────────────────┐
-        │ tail conv 3x3                │
-        └──────────────────────────────┘
+        │ tail conv 3x3, no bias       │  EnhancementHead,
+        └──────────────────────────────┘  block_dims=()
               │
               ▼
         crop to [H, W]
@@ -191,16 +194,18 @@ class SCUNet(keras.Model):
         geometry. ``build`` also traces the graph at this resolution, so give
         it a value a real input could have. Defaults to 256.
     :type input_resolution: int
-    :param include_top: When True (default), an :class:`EnhancementHead`
-        (named ``enhancement_head``) runs on the ``up1`` output in place of
-        the diagram's ``(+) x1`` and tail conv, and the tail is not built.
-        When False, the model is the diagram above: ``tail(up1 + x1)``,
-        cropped. Either way the output is the restored image,
-        ``(B, H, W, in_nc)``.
+    :param include_top: When True (default), the model is the diagram
+        above, the paper's network: the tail conv is an
+        :class:`EnhancementHead` named ``enhancement_head`` with
+        ``block_dims=()`` and ``output_use_bias=False``, applied to
+        ``up1 + x1``, and the output is the restored image
+        ``(B, H, W, in_nc)``. When False, no tail is built and the model
+        returns the features the tail reads, ``up1 + x1`` cropped,
+        ``(B, H, W, dim)``.
     :type include_top: bool
     :param head_config_overrides: Optional dict merged into the
         ``EnhancementHead`` config. It may not set ``name`` or ``task_type``
-        (``ValueError``).
+        (``ValueError``). Any other override departs from the paper's tail.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Model base class.
 
@@ -208,12 +213,13 @@ class SCUNet(keras.Model):
         see :meth:`_validate_config`.
 
     Example:
-        >>> # Full denoising model
-        >>> model = SCUNet(dim=64, include_top=True)
+        >>> # The paper's denoiser, tail included
+        >>> model = SCUNet(dim=64)
+        >>> restored = model(inputs)  # (B, H, W, 3)
         >>>
-        >>> # The paper's network, ending in its own tail conv
+        >>> # Backbone features for a custom tail
         >>> backbone = SCUNet(dim=64, include_top=False)
-        >>> restored = backbone(inputs)
+        >>> features = backbone(inputs)  # (B, H, W, 64)
     """
 
     def __init__(
@@ -340,8 +346,8 @@ class SCUNet(keras.Model):
             )
 
     def _build_network(self, dpr: List[float]) -> None:
-        """Create the head conv, the seven stages, and either the
-        ``EnhancementHead`` (``include_top``) or the tail conv.
+        """Create the head conv, the seven stages and, with ``include_top``,
+        the paper's tail conv as an ``EnhancementHead``.
 
         Each down stage ends with its own strided convolution and each up stage
         begins with its transposed one, so a stage's Sequential carries the
@@ -506,10 +512,9 @@ class SCUNet(keras.Model):
             )
         )
 
-        # The tail runs only without the head (see `call`), so it is built
-        # only then: a headed model would otherwise carry a layer its forward
-        # pass never reaches.
-        self.m_tail = None
+        # The paper's tail is the head: `nn.Conv2d(dim, in_nc, 3, 1, 1,
+        # bias=False)`, applied by `call` to `up1 + x1`. Built only with
+        # include_top, so a headless model carries no layer it never runs.
         self.enhancement_head = None
         if self.include_top:
             head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
@@ -517,8 +522,12 @@ class SCUNet(keras.Model):
                 'scale_factor': 1,
                 'output_channels': self.in_nc,
                 'hidden_dim': self.dim,
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
+                # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
+                # paper's `m_tail` (one bias-free 3x3 conv on `up1 + x1`); do NOT
+                # drop block_dims=()/output_use_bias=False for the default head,
+                # which replaced the long skip and tail. See decisions.md.
+                'block_dims': (),
+                'output_use_bias': False,
                 # Deterministic layer name: an unnamed head takes Keras' auto
                 # suffix in process-creation order, which breaks the by-name
                 # matching that weight transfer relies on.
@@ -529,15 +538,6 @@ class SCUNet(keras.Model):
             )
             self.enhancement_head = create_vision_head(
                 VisionTaskType.DENOISING, **head_config
-            )
-        else:
-            self.m_tail = keras.layers.Conv2D(
-                self.in_nc,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=False,
-                name="tail"
             )
 
         self.m_down1 = keras.Sequential(self.m_down1, name="down1")
@@ -632,8 +632,9 @@ class SCUNet(keras.Model):
             training mode or inference mode.
         :type training: Optional[bool]
 
-        :return: Output tensor of shape (B, H, W, C), the same spatial size as
-            the input.
+        :return: The restored image ``(B, H, W, in_nc)`` with
+            ``include_top``, else the features ``(B, H, W, dim)``; the same
+            spatial size as the input either way.
         :rtype: keras.KerasTensor
 
         :raises ValueError: If a statically-known spatial extent is so small that
@@ -660,7 +661,7 @@ class SCUNet(keras.Model):
                 )
 
         # Captured before the pad, so the crop below restores the input size.
-        h, w = ops.shape(x)[1], ops.shape(x)[2]
+        h, w = keras.ops.shape(x)[1], keras.ops.shape(x)[2]
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-045: compute the pad with
         # `ops`, never numpy, which raises on the symbolic None extent from
@@ -669,7 +670,7 @@ class SCUNet(keras.Model):
         padding_right = (-w) % 64
 
         paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
-        x = ops.pad(x, paddings, mode="REFLECT")
+        x = keras.ops.pad(x, paddings, mode="REFLECT")
 
         x1 = self.m_head(x)
         x2 = self.m_down1(x1, training=training)
@@ -684,12 +685,10 @@ class SCUNet(keras.Model):
         x = self.m_up2(x + x3, training=training)
         x = self.m_up1(x + x2, training=training)
 
+        # The long skip belongs to the backbone; the tail conv is the head.
+        x = x + x1
         if self.include_top:
-            # The head takes the place of the paper's `(+) x1` and tail conv.
             x = self.enhancement_head(x, training=training)['enhanced']
-        else:
-            # The paper's tail, as in the class diagram.
-            x = self.m_tail(x + x1)
 
         # A no-op when nothing was padded.
         x = x[:, :h, :w, :]
@@ -758,9 +757,10 @@ def create_scunet(
         ``SwinConvBlock``, where it changes no attention geometry, and used as
         the spatial size of ``build``'s trace.
     :type input_resolution: int
-    :param include_top: When True (default), an ``EnhancementHead`` replaces
-        the paper's ``(+) x1`` and tail conv; when False, the model ends in
-        the paper's tail. The output is the restored image either way. See
+    :param include_top: When True (default), the paper's network, ending in
+        its bias-free tail conv (an ``EnhancementHead`` with
+        ``block_dims=()``), returns the restored image; when False, the model
+        returns the ``dim``-channel features the tail reads. See
         :class:`SCUNet`.
     :type include_top: bool
     :param head_config_overrides: Optional dict merged into the
@@ -777,7 +777,7 @@ def create_scunet(
         >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
         >>> model(keras.random.normal((1, 64, 64, 3))).shape
         (1, 64, 64, 3)
-        >>> # The paper's network, ending in its own tail conv
+        >>> # Backbone features (64 channels) for a custom tail
         >>> backbone = create_scunet(dim=64, include_top=False)
     """
     return SCUNet(

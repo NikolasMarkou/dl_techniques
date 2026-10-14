@@ -41,6 +41,13 @@ def test_darkir_runs_under_mixed_float16():
     and ``ffn``, which its ``call`` never applies). With them unbuilt, the
     backward pass sees 162 vars where it saw 168, and every one of them gets a
     gradient, so there is nothing left to waive. The tolerance is unchanged.
+
+    156 -> 136 at plan-2026-10-14T062616-81938e81 step 6.1, re-derived from
+    this test's own report: the 3-ConvBlock head (14 tensors) and the separate
+    ``ending`` conv (2) became one head that IS the ending conv (2), -14; the 3
+    encoder blocks (enc [1, 1] + 1 middle) dropped their dilation-2 branch
+    (kernel + bias), -6, because the official ``EBlock`` runs one undilated
+    branch (D-023). The tolerance is unchanged.
     """
     reports = assert_precision_arm(
         build=_build,
@@ -49,4 +56,4 @@ def test_darkir_runs_under_mixed_float16():
         allowed_none_grads=0,
     )
     assert reports["mixed_float16"]["dtypes"] == ["float16"]
-    assert reports["backward_mixed_float16"]["n_vars"] == 156
+    assert reports["backward_mixed_float16"]["n_vars"] == 136

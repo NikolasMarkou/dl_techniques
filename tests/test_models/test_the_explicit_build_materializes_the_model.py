@@ -34,8 +34,8 @@ The waiver is retired (plan ``plan-2026-08-23T091307-9a110062``)
 used to sit in an ``UNFIXED`` table here, pinned by name as un-materializable.
 They are all five in :data:`FIXED` now (97 / 148 / 26 / 188 / 161 weights from
 ``.build(shape)`` alone when the waiver was retired, each equal to what a real
-forward call materializes; ``scunet`` reads 161 since its headed default, see
-the :data:`FIXED` notes),
+forward call materializes; ``scunet`` read 161 from 2026-10-10 to 2026-10-15
+and reads its paper network's 148 again, see the :data:`FIXED` notes),
 and :data:`UNFIXED` is empty. The reasons the waiver gave were real failures but
 none of them was a property of the model:
 
@@ -121,6 +121,16 @@ from tests.optimizer_state import build_optimizer_state
 #: ``3b281907a^`` and for ``include_top=False`` today. ``build()`` and a forward
 #: call still materialize the identical set.
 #:
+#: RE-MEASURED 2026-10-15 (same plan, step 6.1, D-022): ``scunet`` 161 -> 148
+#: and ``darkir`` 156 -> 136, listed by top-level owner after
+#: ``build((None, H, W, 3))``. Each default head is now its paper's tail conv
+#: (``EnhancementHead`` with ``block_dims=()``): scunet 147 backbone + 1
+#: ``enhancement_head/output_conv/kernel`` = 148, the pre-3b281907a pin; darkir
+#: 134 backbone + 2 ``enhancement_head/output_conv/{kernel,bias}`` = 136, the
+#: separate ``ending/`` conv (2) folded into the head and the 3 encoder blocks'
+#: dilation-2 branches (6) gone (D-023, the official ``EBlock`` runs one
+#: undilated branch). ``include_top=False`` builds no head in either model.
+#:
 #: ADDED 2026-10-14 (same plan, step 6): ``darkir``. ``DarkIR`` became a
 #: subclassed model on 2026-10-10 with no ``build()``, so ``.build(shape)``
 #: created 0 weights (164 after one call, measured on the trainer-test
@@ -129,7 +139,7 @@ from tests.optimizer_state import build_optimizer_state
 #: ``enhancement_head/``, listed the same way.
 FIXED = {
     "cbam": 22,
-    "darkir": 156,
+    "darkir": 136,
     "distilbert": 24,
     "fnet": 23,
     "gemma": 22,
@@ -158,7 +168,7 @@ FIXED = {
     "qwen": 104,
     "relgt": 49,
     "resnet": 32,
-    "scunet": 161,
+    "scunet": 148,
     "sd3_mmdit": 124,
     "tabm": 5,
     "tree_transformer": 34,
@@ -390,11 +400,13 @@ def test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build(name):
         ),
         # H/W genuinely None -- the fully-convolutional build the SCUNet module
         # docstring advertises. Called at a larger square and at a non-square.
+        # 148 = 147 backbone + the paper's tail kernel (the FIXED notes, step
+        # 6.1); it read 161 while the default head was the 3-ConvBlock one.
         pytest.param(
             "scunet",
             (None, None, None, 3),
             [(1, 96, 96, 3), (1, 64, 128, 3)],
-            161,
+            148,
             id="scunet",
         ),
     ],

@@ -97,20 +97,18 @@ if __name__ == "__main__":
 
 
 class TestNearestUpsamplerScaleValidation:
-    """`_build_nearest_upsampler` stacks `int(log2(scale))` doubling stages.
+    """``'nearest+conv'`` is the official real-world tail, and it is x4 only.
 
-    At `scale=3` that is ONE stage — a 2x output for a 3x request. The module docstring
-    named the defect and the model shipped it anyway; `_build_pixelshuffle_upsampler`
-    has always raised for unsupported scales, so only this branch was unguarded.
-    `create_pft_sr` hardcodes `upsampler='pixelshuffle'`, which is why the hole was
-    reachable only through direct `PFTSR(...)` construction.
+    The official ``PFT.__init__`` asserts ``self.upscale == 4`` for it: the
+    tail has exactly two nearest 2x stages (``conv_up1``, ``conv_up2``). This
+    port used to stack ``int(log2(scale))`` stages and accept any power of two
+    (anchor ``plan-2026-08-14T233721-d4f9beb2/D-078``, retired at
+    plan-2026-10-14T062616-81938e81 step 6.1), a generalization the official
+    code does not have. The refusal now fires at construction.
     """
 
     @staticmethod
     def _build(scale):
-        """The upsampler is constructed in `build()`, not `__init__` — same as the
-        pixelshuffle branch, whose `raise` has always fired at the same moment. So the
-        guard must be reached through a build, not a bare constructor call."""
         model = PFTSR(
             scale=scale,
             upsampler="nearest+conv",
@@ -122,42 +120,36 @@ class TestNearestUpsamplerScaleValidation:
         model.build((None, 16, 16, 3))
         return model
 
-    @pytest.mark.parametrize("scale", [3, 5, 6, 7, 12])
-    def test_a_non_power_of_two_scale_raises(self, scale):
+    @pytest.mark.parametrize("scale", [2, 3, 5, 8])
+    def test_any_scale_but_four_raises(self, scale):
         with pytest.raises(ValueError, match=r"nearest\+conv"):
             self._build(scale)
 
-    @pytest.mark.parametrize("scale", [2, 4, 8])
-    def test_a_power_of_two_scale_still_builds(self, scale):
-        """Anti-vacuity: the guard must not simply reject everything."""
-        assert self._build(scale).scale == scale
-
-    def test_the_realized_scale_is_the_requested_one(self):
-        """The property the raise protects: what built must actually upsample by
-        `scale`. A guard that admits a scale it cannot realize is no guard."""
-        model = PFTSR(
-            scale=4,
-            upsampler="nearest+conv",
-            embed_dim=16,
-            num_blocks=[1],
-            num_heads=2,
-            window_size=8,
-        )
+    def test_four_builds_and_realizes_four(self):
+        """Anti-vacuity: the guard must not reject everything, and what built
+        must upsample by 4."""
+        model = self._build(4)
         x = np.random.default_rng(0).random((1, 16, 16, 3)).astype("float32")
-        out = model(x, training=False)
-        assert tuple(out.shape[1:3]) == (64, 64)
+        assert tuple(model(x, training=False).shape[1:3]) == (64, 64)
 
-    def test_the_pixelshuffle_upsampler_still_supports_three(self):
-        """The guard is specific to `nearest+conv`; scale=3 remains legal elsewhere."""
-        model = PFTSR(
-            scale=3,
-            upsampler="pixelshuffle",
-            embed_dim=16,
-            num_blocks=[1],
-            num_heads=2,
-            window_size=8,
-        )
-        assert model.scale == 3
+    @pytest.mark.parametrize("upsampler, scale", [
+        ("pixelshuffle", 3), ("pixelshuffle", 8), ("pixelshuffledirect", 3),
+    ])
+    def test_the_other_tails_keep_their_official_scales(self, upsampler, scale):
+        """The x4 rule is specific to ``nearest+conv``: the official
+        ``Upsample`` takes powers of two and 3, ``UpsampleOneStep`` any scale."""
+        model = PFTSR(scale=scale, upsampler=upsampler, embed_dim=16,
+                      num_blocks=[1], num_heads=2, window_size=8)
+        x = np.random.default_rng(0).random((1, 16, 16, 3)).astype("float32")
+        assert tuple(model(x, training=False).shape[1:3]) == (16 * scale, 16 * scale)
+
+    @pytest.mark.parametrize("upsampler, scale", [
+        ("pixelshuffle", 5), ("pixelshuffle", 6), ("bicubic", 2),
+    ])
+    def test_a_tail_the_official_code_does_not_build_is_refused(self, upsampler, scale):
+        with pytest.raises(ValueError, match="upsampler"):
+            PFTSR(scale=scale, upsampler=upsampler, embed_dim=16,
+                  num_blocks=[1], num_heads=2, window_size=8)
 
 
 # ---------------------------------------------------------------------
@@ -171,7 +163,7 @@ class TestPFTSRGradientFlow:
     """Every trainable weight must be on the backward graph.
 
     Hundreds of trainable weights across permuted-attention blocks and the
-    ``include_top`` EnhancementHead. This is the size at which an AGGREGATE
+    ``include_top`` upsampler tail. This is the size at which an AGGREGATE
     gradient-norm assertion stops meaning anything -- one dead attention
     projection among hundreds of live tensors moves a global norm by nothing
     measurable. The oracle asserts per weight, keyed by ``Variable.path``.
@@ -181,7 +173,9 @@ class TestPFTSRGradientFlow:
     head's common norm and FFN, which its ``call`` never applied, under the
     head's auto-suffixed name, which depends on how many heads the process had
     built. The head is now named ``enhancement_head`` and owns neither
-    (plan-2026-10-14T062616-81938e81 step 6, D-020): no waiver.
+    (plan-2026-10-14T062616-81938e81 step 6, D-020): no waiver. Since step 6.1
+    there is no head at all: the model applies the official upsampler tail,
+    and every one of its weights is covered here too.
     """
 
     def test_gradients_reach_every_trainable_weight(self):
@@ -246,11 +240,23 @@ class TestPFTSRGradientFlow:
 #   light       537_059 - 515_063 =  21_996 = ffn(52->208->52) + norm(52)
 #   base      16_526_883 - 16_064_403 = 462_480 = ffn(240->960->240) + norm(240)
 #   repo_medium 2_508_323 - 2_456_563 =  51_760 = ffn(80->320->80) + norm(80)
+#
+# 2026-10-15 (plan-2026-10-14T062616-81938e81 step 6.1, D-022): the
+# EnhancementHead is gone and each variant ends in its OFFICIAL tail (light:
+# 'pixelshuffledirect', base and repo_medium: 'pixelshuffle'). The body is
+# untouched: the headless counts are the step-6 ones, 440_180 / 14_500_560 /
+# 2_280_880. Each new total is that body plus the official tail's hand sum at
+# scale 4 (c(i, o) = 9*i*o + o for a biased 3x3 conv, F = 64):
+#   light       c(52, 16*3)                         =  22_512 -> 462_692
+#   base        c(240, F) + 2*c(F, 4F) + c(F, 3)    = 435_459 -> 14_936_019
+#   repo_medium c(80, F)  + 2*c(F, 4F) + c(F, 3)    = 343_299 -> 2_624_179
+# Measured by the command below and by summing np.prod over model.weights
+# (scratchpad step61/probes/pft_counts.py), both agreeing.
 # ---------------------------------------------------------------------------
 _PFT_VARIANT_PARAMS = {
-    "light": 515_063,
-    "base": 16_064_403,
-    "repo_medium": 2_456_563,
+    "light": 462_692,
+    "base": 14_936_019,
+    "repo_medium": 2_624_179,
 }
 
 
@@ -295,27 +301,121 @@ def test_a_factory_override_does_not_write_back_into_the_variant_table():
 
 
 # ---------------------------------------------------------------------
-# The EnhancementHead knobs (plan-2026-10-14T062616-81938e81 step 6)
+# The official reconstruction tail (plan-2026-10-14T062616-81938e81 step 6.1)
 # ---------------------------------------------------------------------
 
-class TestTheEnhancementHeadKnobs:
-    """``head_config_preset`` was stored and never read (measured at step 6:
-    every preset gave the same weights and the bit-identical output), so it is
-    gone and Keras refuses it."""
+def _conv_params(i, o):
+    """A biased 3x3 conv, ``nn.Conv2d(i, o, 3, 1, 1)``."""
+    return 9 * i * o + o
 
-    def test_the_dead_preset_is_refused(self):
-        with pytest.raises(ValueError, match="head_config_preset"):
-            create_pft_sr(scale=SCALE, variant="light", head_config_preset="default")
 
-    @pytest.mark.parametrize("key", ["name", "task_type"])
-    def test_a_reserved_override_is_refused(self, key):
-        model = create_pft_sr(scale=SCALE, variant="light",
-                              head_config_overrides={key: "x"})
-        with pytest.raises(ValueError, match="may not set"):
-            model(_images(1))
+#: CVL-UESTC/PFT-SR basicsr/archs/pft_arch.py, transcribed: the parameters of
+#: each ``PFT`` reconstruction branch, ``num_feat = 64``, ``num_out_ch = 3``.
+def _official_tail_params(upsampler, embed_dim, scale, out=3, feat=64):
+    if upsampler == "pixelshuffledirect":    # UpsampleOneStep
+        return _conv_params(embed_dim, scale * scale * out)
+    if upsampler == "pixelshuffle":          # conv_before_upsample, Upsample, conv_last
+        stages = (_conv_params(feat, 9 * feat) if scale == 3
+                  else (scale.bit_length() - 1) * _conv_params(feat, 4 * feat))
+        return _conv_params(embed_dim, feat) + stages + _conv_params(feat, out)
+    # nearest+conv: conv_before_upsample, conv_up1, conv_up2, conv_hr, conv_last
+    return _conv_params(embed_dim, feat) + 3 * _conv_params(feat, feat) + _conv_params(feat, out)
 
-    def test_the_head_name_does_not_depend_on_the_process(self):
-        first, second = _model(), _model()
-        first(_images(1))
-        second(_images(1))
-        assert first.enhancement_head.name == second.enhancement_head.name == "enhancement_head"
+
+def _count(model):
+    return sum(int(np.prod(w.shape)) for w in model.weights)
+
+
+_TINY = dict(embed_dim=16, num_blocks=[1], num_heads=2, window_size=8)
+
+
+class TestTheOfficialTail:
+    """The default output is the official network's tail, selected by
+    ``upsampler``; the headless model builds no tail and returns the features
+    the tail reads. Before step 6.1 an ``EnhancementHead`` (three ConvBlocks
+    and a stride-``scale`` transposed conv) replaced the tail, and the
+    ``upsample``/``conv_last`` layers were built but applied in neither
+    mode."""
+
+    @pytest.mark.parametrize("upsampler, scale", [
+        ("pixelshuffle", 2), ("pixelshuffle", 3), ("pixelshuffle", 4),
+        ("pixelshuffledirect", 2), ("pixelshuffledirect", 3),
+        ("nearest+conv", 4),
+    ])
+    def test_the_tail_is_the_official_hand_sum(self, upsampler, scale):
+        x = np.zeros((1, 16, 16, 3), dtype="float32")
+        headed = PFTSR(scale=scale, upsampler=upsampler, **_TINY)
+        headless = PFTSR(scale=scale, upsampler=upsampler, include_top=False, **_TINY)
+        headed(x)
+        headless(x)
+        assert _count(headed) - _count(headless) == _official_tail_params(
+            upsampler, _TINY["embed_dim"], scale)
+
+    @pytest.mark.parametrize("upsampler, scale", [
+        ("pixelshuffle", 4), ("pixelshuffledirect", 2), ("nearest+conv", 4),
+    ])
+    def test_the_output_is_the_official_branch_applied_to_the_features(
+            self, upsampler, scale, golden_reference_device):
+        """Recompute the official ``PFT.forward`` branch by hand, with the
+        slopes written out (torch ``nn.LeakyReLU()`` is 0.01; the
+        ``nearest+conv`` stages use 0.2), on the headless model's features and
+        the headed model's own tail weights. Exact: same ops, same device."""
+        rng = np.random.default_rng(3)
+        x = rng.random((1, 16, 16, 3)).astype("float32")
+        with keras.device(golden_reference_device):
+            keras.utils.set_random_seed(0)
+            headed = PFTSR(scale=scale, upsampler=upsampler, **_TINY)
+            y = keras.ops.convert_to_numpy(headed(x, training=False))
+            headless = PFTSR(scale=scale, upsampler=upsampler, include_top=False, **_TINY)
+            headless(x)
+            for w in headless.weights:
+                w.assign(next(v for v in headed.weights if v.path.split("/", 1)[1]
+                              == w.path.split("/", 1)[1]))
+            f = headless(x, training=False)
+            layers = {layer.name: layer for layer in headed.tail_layers}
+
+            def conv(name, t):
+                return keras.ops.conv(t, layers[name].kernel, padding="same") + layers[name].bias
+
+            def shuffle(t, r):
+                b, h, w, c = t.shape
+                t = keras.ops.reshape(t, (b, h, w, r, r, c // (r * r)))
+                t = keras.ops.transpose(t, (0, 1, 3, 2, 4, 5))
+                return keras.ops.reshape(t, (b, h * r, w * r, c // (r * r)))
+
+            def lrelu(t, slope):
+                return keras.ops.where(t >= 0, t, slope * t)
+
+            if upsampler == "pixelshuffledirect":
+                ref = shuffle(conv("upsample_conv", f), scale)
+            elif upsampler == "pixelshuffle":
+                t = lrelu(conv("conv_before_upsample", f), 0.01)
+                for i in range(scale.bit_length() - 1):
+                    t = shuffle(conv(f"upsample_conv_{i}", t), 2)
+                ref = conv("conv_last", t)
+            else:
+                t = lrelu(conv("conv_before_upsample", f), 0.01)
+                for i in (1, 2):
+                    t = keras.ops.repeat(keras.ops.repeat(t, 2, axis=1), 2, axis=2)
+                    t = lrelu(conv(f"conv_up{i}", t), 0.2)
+                ref = conv("conv_last", lrelu(conv("conv_hr", t), 0.2))
+            ref = keras.ops.convert_to_numpy(ref)
+        assert y.shape == (1, 16 * scale, 16 * scale, 3)
+        assert float(np.abs(y).max()) > 1e-3
+        np.testing.assert_array_equal(y, ref)
+
+    def test_each_variant_carries_its_official_upsampler(self):
+        assert PFTSR.MODEL_VARIANTS["light"]["upsampler"] == "pixelshuffledirect"
+        assert PFTSR.MODEL_VARIANTS["base"]["upsampler"] == "pixelshuffle"
+        assert create_pft_sr(scale=SCALE, variant="light").upsampler == "pixelshuffledirect"
+
+    def test_the_headless_model_builds_no_tail_and_returns_the_features(self):
+        model = create_pft_sr(scale=SCALE, variant="light", include_top=False)
+        out = model(_images(1))
+        assert model.tail_layers == []
+        assert tuple(out.shape) == (1, SIZE, SIZE, PFTSR.MODEL_VARIANTS["light"]["embed_dim"])
+
+    def test_the_deleted_head_knobs_are_refused(self):
+        for knob in ("head_config_overrides", "head_config_preset"):
+            with pytest.raises(ValueError, match=knob):
+                create_pft_sr(scale=SCALE, variant="light", **{knob: {}})

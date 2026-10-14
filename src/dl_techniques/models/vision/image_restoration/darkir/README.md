@@ -99,7 +99,7 @@ DarkIR uses a U-Net structure with skip connections, processing features at mult
 │             │                                                    │
 │    ┌────────▼─────────┐      ┌─────────┐                         │
 │    │ Encoder Levels   │─────►│ Skip    │                         │
-│    │ (FreMLP + Dil)   │      │ Connect │                         │
+│    │ (FreMLP + DW)    │      │ Connect │                         │
 │    └────────┬─────────┘      └────┬────┘                         │
 │             │ Downsample          │                              │
 │    ┌────────▼─────────┐      ┌────▼────┐                         │
@@ -107,7 +107,7 @@ DarkIR uses a U-Net structure with skip connections, processing features at mult
 │    └────────┬─────────┘      │ Levels  │                         │
 │             │ Upsample       │ (Gated) │                         │
 │    ┌────────▼─────────┐      └─────────┘                         │
-│    │ Output Conv      │                                          │
+│    │ Output Conv      │  (the head; include_top=True)            │
 │    └────────┬─────────┘                                          │
 │             │                                                    │
 │  ┌──────────▼──────────┐                                         │
@@ -119,7 +119,7 @@ DarkIR uses a U-Net structure with skip connections, processing features at mult
 ### The Block Workflow
 
 Inside a **DarkIREncoderBlock**:
-1.  **Multi-Scale Path**: Input splits into parallel branches with varying dilation rates. Results are summed.
+1.  **Spatial Path**: one undilated depthwise branch (the official `EBlock(chan, extra_depth_wise=...)` takes its default `dilations=[1]`; only the decoder blocks get the parallel `[1, 4, 9]` bank).
 2.  **Gating**: `SimpleGate` activates features.
 3.  **Frequency Path**: Features are transformed via FFT, processed, and transformed back via IFFT to capture global context.
 4.  **Dual Residual**: Both paths have learnable residual connections ($\beta$ and $\gamma$).
@@ -210,8 +210,8 @@ model = create_darkir_model(
 
 **Location**: `dl_techniques.models.vision.image_restoration.darkir`
 
-*   **Encoder Block**: Contains Normalization -> Dilated Branches -> SimpleGate -> **FreMLP**.
-*   **Decoder Block**: Contains Normalization -> Dilated Branches -> SimpleGate -> **Inverted FFN**.
+*   **Encoder Block**: Contains Normalization -> one undilated depthwise branch -> SimpleGate -> **FreMLP**.
+*   **Decoder Block**: Contains Normalization -> Dilated Branches (`dilations`) -> SimpleGate -> **Inverted FFN**.
 
 ### 6.3 `SimpleGate`
 
@@ -227,11 +227,43 @@ A utility layer often used in modern vision architectures (e.g., NAFNet, DarkIR)
 | `width` | int | 32 | Base feature width. Doubled at every encoder downsampling. |
 | `enc_blk_nums` | List[int] | `[1, 2, 3]` | Number of blocks per encoder stage. Length defines network depth. |
 | `dec_blk_nums` | List[int] | `[3, 1, 1]` | Number of blocks per decoder stage. Should match encoder length. |
-| `dilations` | List[int] | `[1, 4, 9]` | Dilation rates for the parallel branches in every block. |
+| `dilations` | List[int] | `[1, 4, 9]` | Dilation rates of the parallel branches in every DECODER block (middle and decoder stages). Encoder blocks always run one undilated branch, as in the official code. |
 | `extra_depth_wise`| bool | `True` | Adds an extra depthwise conv layer for better inductive bias. |
 | `use_side_loss` | bool | `False` | If True, returns `[final_output, side_output]` for deep supervision. **`side_output` is at BOTTLENECK resolution** — `H / 2**len(enc_blk_nums)`, i.e. 1/8 at the defaults — so its target must be downsampled by the same factor. See §8 Example 2. |
-| `include_top` | bool | `True` | `True`: an `EnhancementHead` (named `enhancement_head`, three `ConvBlock`s and a 3x3 conv at `width`) runs on the restored image, after the global residual. `False`: the model returns the restored image itself (`img_channels` channels). |
-| `head_config_overrides` | dict | `None` | Merged into the head config; `name` and `task_type` raise `ValueError`. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
+| `include_top` | bool | `True` | `True`: the paper's network, tail included: the `ending` 3x3 conv (an `EnhancementHead` named `enhancement_head`, `block_dims=()`, bias kept) and the global residual; output `(B, H, W, img_channels)`. `False`: neither is built and the model returns the last decoder stage's features, `(B, H, W, width)`. |
+| `head_config_overrides` | dict | `None` | Merged into the head config; `name` and `task_type` raise `ValueError`. Any other key departs from the paper's ending conv. `head_config_preset` was deleted on 2026-10-14 (it was stored and never read). |
+
+### Parameter counts, and what changed on 2026-10-15
+
+The model now equals a hand sum of the official module list
+([cidautai/DarkIR](https://github.com/cidautai/DarkIR), `archs/DarkIR.py` and
+`archs/arch_model.py`), transcribed and executed in
+`tests/test_models/test_darkir/test_the_default_output_is_the_paper_network.py`:
+
+| Configuration | `include_top=True` | with `use_side_loss=True` | `include_top=False` |
+|:---|---:|---:|---:|
+| DarkIR-m (`width=32`, defaults) | 3,314,723 | 3,321,638 | 3,313,856 |
+| DarkIR-l (`width=64`, defaults) | 12,943,427 | 12,957,254 | 12,941,696 |
+
+Measured with `DarkIR(width=w, include_top=t, use_side_loss=s)`,
+`model.build((None, 64, 64, 3))`, then summing `np.prod(w.shape)` over
+`model.weights`. The paper reports 3.31 M and 12.96 M; the official code
+always builds the 6,915 / 13,827-parameter `side_out` conv, which this port
+builds only with `use_side_loss`.
+
+Two corrections landed on 2026-10-15 (plan-2026-10-14T062616-81938e81 step 6.1):
+
+- **The default head is the paper's `ending` conv.** From 2026-10-10
+  (`3b281907a`) the default `include_top=True` head was a 3-`ConvBlock`
+  `EnhancementHead` appended AFTER the global residual, an extra network on top
+  of the paper's output. Now the head is the ending conv itself and the model
+  adds the input after it. With the head conv zeroed the output is the input,
+  exactly.
+- **Encoder blocks run one undilated branch.** The port gave every encoder
+  block the model's `dilations`; the official `EBlock` is built with its
+  default `dilations=[1]`. That was 42,240 extra parameters at `width=32`.
+
+Archives saved before either change do not load into this model.
 
 ---
 

@@ -11,6 +11,24 @@ runs dense attention, and any ``sparsity_mode`` other than ``'none'`` raises
 ``window_size`` and must be statically known, with no ``None`` dims, because
 the shifted-window mask is built once at build time.
 
+The default output (``include_top=True``) ends in the official reconstruction
+tail of CVL-UESTC/PFT-SR ``basicsr/archs/pft_arch.py``, selected by
+``upsampler`` exactly as there: ``'pixelshuffle'`` (the PFT config:
+``conv_before_upsample`` 3x3 to 64 + LeakyReLU(0.01), then a 3x3 conv and a
+pixel shuffle per factor of 2, or one of each for 3, then ``conv_last``),
+``'pixelshuffledirect'`` (the PFT_light config: one 3x3 conv to
+``scale**2 * in_channels`` and one pixel shuffle) and ``'nearest+conv'`` (x4
+only: two nearest x2 stages with LeakyReLU(0.2), ``conv_hr``, ``conv_last``).
+The model builds this tail itself: the shared ``EnhancementHead`` upsamples
+with a transposed conv and cannot express any of the three.
+``include_top=False`` returns the backbone features the tail reads,
+``conv_after_body(body(x)) + x``, at the input resolution.
+
+The body is a simplified port, not the official code; the README lists the
+differences (no patch-embed or final LayerNorm, no per-stage residual conv, an
+MLP instead of the ConvFFN, dense instead of top-k attention, no RGB mean
+shift).
+
 References:
     - Long et al., 2025. Progressive Focused Transformer for Single Image
       Super-Resolution. CVPR. (https://arxiv.org/abs/2503.20337)
@@ -28,8 +46,7 @@ References:
 """
 
 import keras
-from keras import layers
-from typing import Any, Dict, Optional, List, Literal, Union
+from typing import Any, Dict, Optional, List, Literal, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -38,14 +55,17 @@ from typing import Any, Dict, Optional, List, Literal, Union
 from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
+
+#: The three reconstruction tails of the official ``PFT`` class.
+UPSAMPLERS: Tuple[str, ...] = ('pixelshuffle', 'pixelshuffledirect', 'nearest+conv')
+
+#: The official tail's working width, ``num_feat = 64`` in ``PFT.__init__``,
+#: used by ``'pixelshuffle'`` and ``'nearest+conv'`` whatever ``embed_dim`` is.
+NUM_FEAT = 64
 
 # ---------------------------------------------------------------------
 
@@ -84,16 +104,11 @@ class PFTSR(keras.Model):
             │             │
             └─────────────┤
                           ▼
-                         add
-                          │
+                         add ──────────► include_top=False returns this,
+                          │              [B, H, W, embed_dim]
                           ▼
                 ┌───────────────────┐
-                │     upsample      │
-                └───────────────────┘
-                          │
-                          ▼
-                ┌───────────────────┐
-                │     conv_last     │
+                │  upsampler tail   │  include_top=True, see below
                 └───────────────────┘
                           │
                           ▼
@@ -123,27 +138,36 @@ class PFTSR(keras.Model):
 
     The map crosses stage boundaries; stages only group the blocks.
 
-    Upsamplers:
+    Upsampler tails (the official ``PFT.forward`` branches; F = 64):
 
     .. code-block:: text
 
-        upsampler           stages                       scale
-        pixelshuffle        conv, shuffle (twice at 4x)  2, 3, 4
-        pixelshuffledirect  conv, shuffle                unchecked
-        nearest+conv        (upsample 2x, conv) x log2   powers of two
+        upsampler           layers                                     scale
+        pixelshuffle        conv_before_upsample 3x3 -> F, LReLU(0.01) 2^n, 3
+                            (conv 3x3 -> 4F, shuffle 2) x n,
+                            or conv 3x3 -> 9F, shuffle 3
+                            conv_last 3x3 -> in_channels
+        pixelshuffledirect  conv 3x3 -> scale^2 * in_channels,         any
+                            shuffle scale
+        nearest+conv        conv_before_upsample 3x3 -> F, LReLU(0.01) 4 only
+                            (nearest 2x, conv 3x3 -> F, LReLU(0.2)) x 2
+                            conv_hr 3x3 -> F, LReLU(0.2)
+                            conv_last 3x3 -> in_channels
 
     Named variants:
 
     .. code-block:: text
 
-        variant     embed_dim  num_blocks     heads  mlp_ratio  window
-        light       52         [2,4,6,6,6]    4      1.0        32
-        base        240        [4,4,4,6,6,6]  6      2.0        32
-        repo_medium 80         [6,6,6,8,8,8]  8      2.0        8
+        variant     embed_dim  num_blocks     heads  mlp_ratio  window  upsampler
+        light       52         [2,4,6,6,6]    4      1.0        32      pixelshuffledirect
+        base        240        [4,4,4,6,6,6]  6      2.0        32      pixelshuffle
+        repo_medium 80         [6,6,6,8,8,8]  8      2.0        8       pixelshuffle
 
     `window` is each variant's own `window_size`, not the constructor default.
 
-    :param scale: Upsampling scale factor (2, 3, or 4).
+    :param scale: Upsampling scale factor. ``'pixelshuffle'`` takes a power
+        of two or 3, ``'pixelshuffledirect'`` any positive integer,
+        ``'nearest+conv'`` only 4.
     :type scale: int
     :param in_channels: Number of input image channels.
     :type in_channels: int
@@ -173,21 +197,21 @@ class PFTSR(keras.Model):
     :type norm_type: str
     :param use_lepe: Whether to add locally-enhanced positional encoding.
     :type use_lepe: bool
-    :param upsampler: Upsampling method: ``'pixelshuffle'``,
-        ``'pixelshuffledirect'``, or ``'nearest+conv'``.
+    :param upsampler: Which official reconstruction tail ``include_top``
+        builds: ``'pixelshuffle'``, ``'pixelshuffledirect'`` or
+        ``'nearest+conv'`` (see the table above). The ``light`` variant uses
+        ``'pixelshuffledirect'`` and ``base`` ``'pixelshuffle'``, as their
+        official configs do.
     :type upsampler: str
-    :param include_top: Whether to include the EnhancementHead for super-resolution.
-        When ``True`` (default), the model outputs the super-resolved image.
-        When ``False``, the model returns the features before upsampling for
-        custom heads. Defaults to True.
+    :param include_top: When ``True`` (default), the model builds and applies
+        the ``upsampler`` tail and outputs the super-resolved image. When
+        ``False``, no tail is built and the model returns the backbone
+        features at the input resolution. Defaults to True.
     :type include_top: bool
-    :param head_config_overrides: Optional dict merged into the
-        ``EnhancementHead`` config (named ``enhancement_head``). It may not
-        set ``name`` or ``task_type`` (``ValueError``).
-    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Keras ``Model`` base class.
-    :raises ValueError: At build time, if ``scale`` is not 2, 3 or 4 under
-        ``'pixelshuffle'``, or not a power of two under ``'nearest+conv'``.
+    :raises ValueError: At construction, if ``upsampler`` is not one of
+        :data:`UPSAMPLERS`, or ``scale`` is one that upsampler does not
+        support.
 
     Input shape:
         4D tensor with shape: `(batch_size, height, width, in_channels)`.
@@ -197,7 +221,8 @@ class PFTSR(keras.Model):
         - ``include_top=True``: 4D tensor with shape
           `(batch_size, height * scale, width * scale, in_channels)`.
         - ``include_top=False``: 4D tensor with shape
-          `(batch_size, height, width, embed_dim)` (features before upsampling).
+          `(batch_size, height, width, embed_dim)`, the features the tail
+          reads.
 
     Example:
         >>> import keras
@@ -224,6 +249,7 @@ class PFTSR(keras.Model):
             'num_heads': 4,
             'mlp_ratio': 1.0,
             'window_size': 32,
+            'upsampler': 'pixelshuffledirect',
         },
         # PFT, 001_PFT_SRx2_scratch.yml network_g
         'base': {
@@ -232,6 +258,7 @@ class PFTSR(keras.Model):
             'num_heads': 6,
             'mlp_ratio': 2.0,
             'window_size': 32,
+            'upsampler': 'pixelshuffle',
         },
         # Repo-original mid-size tier, with no published counterpart.
         'repo_medium': {
@@ -240,6 +267,7 @@ class PFTSR(keras.Model):
             'num_heads': 8,
             'mlp_ratio': 2.0,
             'window_size': 8,
+            'upsampler': 'pixelshuffle',
         }
     }
 
@@ -260,14 +288,19 @@ class PFTSR(keras.Model):
             use_lepe: bool = True,
             upsampler: Literal['pixelshuffle', 'pixelshuffledirect', 'nearest+conv'] = 'pixelshuffle',
             include_top: bool = True,
-            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
-        """Store the configuration and the per-block drop-path schedule."""
+        """Validate the tail choice, store the configuration and the per-block
+        drop-path schedule.
+
+        :raises ValueError: If ``upsampler`` is unknown or ``scale`` is one it
+            does not support.
+        """
         super().__init__(**kwargs)
 
         if num_blocks is None:
             num_blocks = [4, 4, 4, 6, 6, 6]
+        self._validate_upsampler(upsampler, scale)
 
         self.scale = scale
         self.in_channels = in_channels
@@ -284,19 +317,55 @@ class PFTSR(keras.Model):
         self.use_lepe = use_lepe
         self.upsampler = upsampler
         self.include_top = include_top
-        self.head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.total_blocks = sum(num_blocks)
 
         # Plain floats, since a tensor linspace breaks under TF eager.
         self.dpr = linear_drop_path_rates(self.total_blocks, drop_path_rate)
 
+    @staticmethod
+    def _validate_upsampler(upsampler: str, scale: int) -> None:
+        """
+        Refuse a tail the official code does not build.
+
+        :param upsampler: One of :data:`UPSAMPLERS`.
+        :type upsampler: str
+        :param scale: The requested upsampling factor.
+        :type scale: int
+        :raises ValueError: If ``upsampler`` is unknown, ``scale`` is not a
+            positive integer, or ``scale`` is one the upsampler cannot realize.
+        """
+        if upsampler not in UPSAMPLERS:
+            raise ValueError(
+                f"upsampler must be one of {UPSAMPLERS}, got {upsampler!r}"
+            )
+        if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
+            raise ValueError(f"scale must be a positive integer, got {scale!r}")
+        if upsampler == 'pixelshuffle':
+            # The official `Upsample`: `scale & (scale - 1) == 0`, or 3.
+            if (scale & (scale - 1)) != 0 and scale != 3:
+                raise ValueError(
+                    f"Unsupported scale for upsampler='pixelshuffle': {scale}. "
+                    f"The official Upsample supports powers of two and 3."
+                )
+        elif upsampler == 'nearest+conv':
+            # DECISION plan-2026-10-14T062616-81938e81/D-022: x4 ONLY, as the
+            # official `assert self.upscale == 4`; do NOT stack log2(scale)
+            # stages, an invented generalization. See decisions.md.
+            if scale != 4:
+                raise ValueError(
+                    f"Unsupported scale for upsampler='nearest+conv': {scale}. "
+                    f"The official tail has exactly two nearest 2x stages "
+                    f"(conv_up1, conv_up2), so it realizes 4 only. Use "
+                    f"upsampler='pixelshuffle' (powers of two and 3) or "
+                    f"'pixelshuffledirect' (any scale) instead."
+                )
+
     def build(self, input_shape):
         """
-        Build model layers.
+        Build model layers, the ``upsampler`` tail only with ``include_top``.
 
         :param input_shape: Shape tuple of the input.
-        :raises ValueError: If ``scale`` is unsupported by the chosen upsampler.
         """
         self.conv_first = keras.layers.Conv2D(
             filters=self.embed_dim,
@@ -344,46 +413,11 @@ class PFTSR(keras.Model):
             name="conv_after_body"
         )
 
-        # NOT applied by call() in either mode: the head upsamples when
-        # include_top=True, and include_top=False returns the features before
-        # upsampling. Built for the scale validation it performs.
-        if self.upsampler == 'pixelshuffle':
-            self.upsample = self._build_pixelshuffle_upsampler()
-        elif self.upsampler == 'pixelshuffledirect':
-            self.upsample = self._build_pixelshuffledirect_upsampler()
-        else:
-            self.upsample = self._build_nearest_upsampler()
-
-        self.conv_last = keras.layers.Conv2D(
-            filters=self.in_channels,
-            kernel_size=3,
-            strides=1,
-            padding='same',
-            name="conv_last"
-        )
-
-        # Enhancement head for super-resolution (when include_top=True)
-        self.enhancement_head = None
-        if self.include_top:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.SUPER_RESOLUTION)
-            head_config.update({
-                'scale_factor': self.scale,
-                'output_channels': self.in_channels,
-                'hidden_dim': self.embed_dim,
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
-                # Deterministic layer name: an unnamed head takes Keras' auto
-                # suffix in process-creation order, which breaks the by-name
-                # matching that weight transfer relies on.
-                'name': 'enhancement_head',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self.head_config_overrides
-            )
-
-            self.enhancement_head = create_vision_head(
-                VisionTaskType.SUPER_RESOLUTION, **head_config
-            )
+        # The tail is the model's own, not an EnhancementHead (the SqueezeNet
+        # D-017 precedent): that head upsamples with a transposed conv, which
+        # no official tail uses. Built only with include_top, so nothing built
+        # here goes unapplied.
+        self.tail_layers = self._build_tail() if self.include_top else []
 
         # Force sublayers to build now: build_from_config reloads them unbuilt,
         # and weight loading fails on layers "never built".
@@ -393,132 +427,82 @@ class PFTSR(keras.Model):
 
         super().build(input_shape)
 
-    def _build_pixelshuffle_upsampler(self) -> keras.Sequential:
+    @staticmethod
+    def _conv3x3(filters: int, name: str) -> keras.layers.Conv2D:
         """
-        Build pixel shuffle upsampler.
+        A 3x3, stride-1, ``'same'`` conv with bias: the official
+        ``nn.Conv2d(in, out, 3, 1, 1)`` every tail layer uses.
 
-        :return: Sequential model for upsampling.
-        :rtype: keras.Sequential
-        :raises ValueError: If ``scale`` is not 2, 3 or 4.
+        :param filters: Output channels.
+        :type filters: int
+        :param name: Layer name.
+        :type name: str
+        :return: The conv layer.
+        :rtype: keras.layers.Conv2D
         """
-        layers = []
+        return keras.layers.Conv2D(
+            filters=filters, kernel_size=3, strides=1, padding='same', name=name
+        )
 
-        if self.scale == 2 or self.scale == 3:
-            layers.append(
-                keras.layers.Conv2D(
-                    self.embed_dim * (self.scale ** 2),
-                    kernel_size=3,
-                    strides=1,
-                    padding='same',
-                    name=f"upsample_conv"
-                )
-            )
-            # DECISION plan_2026-06-15_39a31d4a/D-003: PixelShuffle2D, not
-            # keras.ops.nn.depth_to_space, absent in Keras 3.8. See decisions.md.
-            layers.append(
-                PixelShuffle2D(block_size=self.scale, name="pixel_shuffle")
-            )
-        elif self.scale == 4:
-            # 4x runs as two 2x stages.
-            layers.append(
-                keras.layers.Conv2D(
-                    self.embed_dim * 4,
-                    kernel_size=3,
-                    strides=1,
-                    padding='same',
-                    name="upsample_conv1"
-                )
-            )
-            layers.append(
-                PixelShuffle2D(block_size=2, name="pixel_shuffle1")
-            )
-            layers.append(
-                keras.layers.Conv2D(
-                    self.embed_dim * 4,
-                    kernel_size=3,
-                    strides=1,
-                    padding='same',
-                    name="upsample_conv2"
-                )
-            )
-            layers.append(
-                PixelShuffle2D(block_size=2, name="pixel_shuffle2")
-            )
-        else:
-            raise ValueError(f"Unsupported scale: {self.scale}")
-
-        return keras.Sequential(layers, name="upsampler")
-
-    def _build_pixelshuffledirect_upsampler(self) -> keras.Sequential:
+    def _build_tail(self) -> List[keras.layers.Layer]:
         """
-        Build direct pixel shuffle upsampler.
+        Build the official reconstruction tail for ``self.upsampler``, as a
+        flat list applied in order.
 
-        One convolution to ``embed_dim * scale ** 2`` channels and one shuffle,
-        for any ``scale``, with no validation of it.
+        A flat list, not a nested ``keras.Sequential``: a nested sub-model's
+        variable paths carry its own name in the donor and lose it after a
+        ``.keras`` reload.
 
-        :return: Sequential model for upsampling.
-        :rtype: keras.Sequential
+        :return: The tail's layers, in application order.
+        :rtype: List[keras.layers.Layer]
         """
-        layers = [
-            keras.layers.Conv2D(
-                self.embed_dim * (self.scale ** 2),
-                kernel_size=3,
-                strides=1,
-                padding='same',
-                name="upsample_conv"
-            ),
-            PixelShuffle2D(block_size=self.scale, name="pixel_shuffle")
-        ]
+        # DECISION plan-2026-10-14T062616-81938e81/D-024: pixel shuffle after
+        # forward convs, NOT a transposed conv. Besides not being the paper,
+        # the 2026-10-10 Conv2DTranspose tail ran cuDNN backward-data on GPU,
+        # whose autotuner picked a non-deterministic engine once warm (a 1-ulp
+        # call-to-call spread). See decisions.md.
+        tail: List[keras.layers.Layer] = []
+        if self.upsampler == 'pixelshuffledirect':
+            # UpsampleOneStep: one conv straight to the output channels.
+            tail.append(self._conv3x3(
+                (self.scale ** 2) * self.in_channels, "upsample_conv"))
+            tail.append(PixelShuffle2D(block_size=self.scale, name="pixel_shuffle"))
+            return tail
 
-        return keras.Sequential(layers, name="upsampler")
+        # DECISION plan-2026-10-14T062616-81938e81/D-022: negative_slope=0.01 is
+        # torch nn.LeakyReLU()'s default, which the official tail uses; do NOT
+        # fall back to Keras' LeakyReLU default of 0.3. See decisions.md.
+        tail.append(self._conv3x3(NUM_FEAT, "conv_before_upsample"))
+        tail.append(keras.layers.LeakyReLU(
+            negative_slope=0.01, name="conv_before_upsample_lrelu"))
 
-    def _build_nearest_upsampler(self) -> keras.Sequential:
-        """
-        Build nearest neighbor + conv upsampler.
+        if self.upsampler == 'pixelshuffle':
+            # The official `Upsample(scale, num_feat)`.
+            factors = [3] if self.scale == 3 else [2] * (self.scale.bit_length() - 1)
+            for i, factor in enumerate(factors):
+                tail.append(self._conv3x3(
+                    (factor ** 2) * NUM_FEAT, f"upsample_conv_{i}"))
+                # DECISION plan_2026-06-15_39a31d4a/D-003: PixelShuffle2D, not
+                # keras.ops.nn.depth_to_space, absent in Keras 3.8. See decisions.md.
+                tail.append(PixelShuffle2D(block_size=factor, name=f"pixel_shuffle_{i}"))
+        else:  # 'nearest+conv', x4 (validated in __init__)
+            for i in (1, 2):
+                tail.append(keras.layers.UpSampling2D(
+                    size=(2, 2), interpolation='nearest', name=f"nearest_up{i}"))
+                tail.append(self._conv3x3(NUM_FEAT, f"conv_up{i}"))
+                tail.append(keras.layers.LeakyReLU(
+                    negative_slope=0.2, name=f"conv_up{i}_lrelu"))
+            tail.append(self._conv3x3(NUM_FEAT, "conv_hr"))
+            tail.append(keras.layers.LeakyReLU(negative_slope=0.2, name="conv_hr_lrelu"))
 
-        Only power-of-two scales work here: the stage count is
-        ``int(log2(scale))`` doubling stages, so any other scale emits the
-        wrong resolution (``scale=3`` gives one stage, a 2x output for a 3x
-        request).
-
-        :return: Sequential model for upsampling.
-        :rtype: keras.Sequential
-        :raises ValueError: If ``scale`` is not a power of two.
-        """
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-078: reject non-power-of-two
-        # scales here instead of silently under-upsampling. See decisions.md.
-        if self.scale < 1 or (self.scale & (self.scale - 1)) != 0:
-            raise ValueError(
-                f"Unsupported scale for upsampler='nearest+conv': {self.scale}. "
-                f"This upsampler stacks int(log2(scale)) doubling stages, so it can "
-                f"only realize powers of two (1, 2, 4, 8, ...); scale={self.scale} "
-                f"would silently emit a "
-                f"{2 ** max(self.scale.bit_length() - 1, 0) if self.scale > 0 else 0}x "
-                f"image. "
-                f"Use upsampler='pixelshuffle' (supports 2, 3 and 4) instead."
-            )
-
-        layers = []
-
-        for i in range(int(keras.ops.log2(self.scale))):
-            layers.extend([
-                keras.layers.UpSampling2D(size=(2, 2), interpolation='nearest'),
-                keras.layers.Conv2D(
-                    self.embed_dim,
-                    kernel_size=3,
-                    strides=1,
-                    padding='same',
-                    name=f"upsample_conv{i}"
-                )
-            ])
-
-        return keras.Sequential(layers, name="upsampler")
+        tail.append(self._conv3x3(self.in_channels, "conv_last"))
+        return tail
 
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+    ) -> keras.KerasTensor:
         """
         Forward pass of PFT-SR.
 
@@ -527,9 +511,9 @@ class PFTSR(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Whether the call runs in training mode.
         :type training: bool or None
-        :return: Super-resolved high-resolution images (include_top=True) or
-            features before upsampling (include_top=False).
-        :rtype: keras.KerasTensor or Dict[str, keras.KerasTensor]
+        :return: The super-resolved image (include_top=True) or the backbone
+            features at the input resolution (include_top=False).
+        :rtype: keras.KerasTensor
         """
         x = self.conv_first(inputs)
         residual = x
@@ -550,13 +534,9 @@ class PFTSR(keras.Model):
         x = self.conv_after_body(x)
         x = x + residual
 
-        if self.include_top:
-            # Use EnhancementHead for super-resolution
-            head_output = self.enhancement_head(x, training=training)
-            return head_output['enhanced']
-        else:
-            # Return features before upsampling for custom heads
-            return x
+        for layer in self.tail_layers:
+            x = layer(x)
+        return x
 
     def get_config(self):
         """Return model configuration.
@@ -580,7 +560,6 @@ class PFTSR(keras.Model):
             "use_lepe": self.use_lepe,
             "upsampler": self.upsampler,
             "include_top": self.include_top,
-            "head_config_overrides": self.head_config_overrides,
         })
         return config
 
@@ -589,39 +568,37 @@ def create_pft_sr(
         scale: int = 4,
         variant: Literal['base', 'light', 'repo_medium'] = 'base',
         include_top: bool = True,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
 ) -> PFTSR:
     """
     Build a PFT-SR model from a named variant.
 
-    :param scale: Upsampling scale factor (2, 3, or 4).
+    :param scale: Upsampling scale factor; see :class:`PFTSR` for what each
+        upsampler supports.
     :type scale: int
     :param variant: Model variant: ``'light'`` and ``'base'`` mirror the
-        paper's two released configs (from its official training YAMLs);
-        ``'repo_medium'`` is a repo-original mid-size tier with no
-        published counterpart.
+        paper's two released configs (from its official training YAMLs),
+        upsampler included; ``'repo_medium'`` is a repo-original mid-size tier
+        with no published counterpart.
     :type variant: str
-    :param include_top: Whether to include the EnhancementHead for super-resolution.
-        When True (default), the model outputs the super-resolved image.
-        When False, the model returns features before upsampling for custom heads.
+    :param include_top: When True (default), the model ends in the variant's
+        official upsampler tail and outputs the super-resolved image. When
+        False, it returns the backbone features at the input resolution.
     :type include_top: bool
-    :param head_config_overrides: Optional dict merged into the
-        ``EnhancementHead`` config; ``name`` and ``task_type`` are refused.
-    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Any :class:`PFTSR` constructor argument, overriding the
         variant table. This is the only route to ``window_size``,
-        ``drop_path_rate``, ``upsampler``, ``norm_type``, ``use_lepe`` and
-        the dropout rates.
+        ``drop_path_rate``, ``norm_type``, ``use_lepe`` and the dropout rates,
+        and to an ``upsampler`` other than the variant's.
     :return: Configured :class:`PFTSR` instance.
     :rtype: PFTSR
-    :raises ValueError: If ``variant`` is not a known variant name.
+    :raises ValueError: If ``variant`` is not a known variant name, or the
+        upsampler cannot realize ``scale``.
 
     Example:
         >>> model = create_pft_sr(scale=4, variant='base')
         >>> model_light = create_pft_sr(scale=2, variant='light')
         >>> model_medium = create_pft_sr(scale=4, variant='repo_medium')
-        >>> # Feature extractor for custom head
+        >>> # Backbone features for a custom tail
         >>> backbone = create_pft_sr(scale=4, variant='base', include_top=False)
     """
     if variant not in PFTSR.MODEL_VARIANTS:
@@ -639,7 +616,6 @@ def create_pft_sr(
     return PFTSR(
         scale=scale,
         include_top=include_top,
-        head_config_overrides=head_config_overrides,
         **config
     )
 

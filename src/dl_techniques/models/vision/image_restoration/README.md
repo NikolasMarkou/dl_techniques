@@ -5,7 +5,7 @@ Four leaf packages. A family directory is a filing decision, not a namespace: th
 
 | Package | What it is |
 |---|---|
-| [`darkir/`](darkir/) | DarkIR — low-light restoration. A functional builder, not a `keras.Model` subclass |
+| [`darkir/`](darkir/) | DarkIR — low-light restoration. The `keras.Model` subclass `DarkIR` (since 2026-10-10); `create_darkir_model` wraps it |
 | [`doc_res/`](doc_res/) | DocRes — one Restormer backbone for five document-restoration tasks (dewarping, deshadowing, appearance, deblurring, binarization). **6-channel input**: RGB plus a 3-channel classical-CV prompt that is the only thing selecting the task |
 | [`pw_fnet/`](pw_fnet/) | PW-FNet — 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | [`scunet/`](scunet/) | SCUNet — swin-conv U-Net denoiser |

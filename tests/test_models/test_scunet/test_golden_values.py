@@ -107,51 +107,42 @@ WEIGHT_SCALE = 0.05
 # spread-out probes plus the four whole-array statistics below cannot miss it,
 # and the file stays readable.
 GOLDEN_INDICES = (0, 1117, 2234, 3351, 4468, 5585, 6702, 7819, 8936, 10053, 11170, 12287)
-#: Re-derived 2026-10-13, and the cause is identified rather than assumed.
-#: The pinned values were correct at 3b281907a (verified by running this probe
-#: in a worktree at that commit: it reproduces them to ~1e-8). What changed
-#: since is 20225bf71, which gave ``EnhancementHead.build`` the same
-#: "skip the base's common layers" treatment the other heads got: it now calls
-#: ``keras.layers.Layer.build`` directly instead of ``super().build``, so the
-#: head's ``norm`` and ``ffn`` are constructed but never BUILT. Measured at
-#: window_size=8, the head goes from 20 weight tensors to 14, and the model from
-#: 307 tensors / 627,919 params to 301 / 625,759 -- the 6 lost tensors are
-#: exactly ``enhancement_head_ffn/fc{1,2}/{kernel,bias}`` plus
-#: ``enhancement_head_norm/{gamma,beta}``.
-#:
-#: Those layers were dead weight: ``EnhancementHead.call`` runs only
-#: ``enhance_blocks`` then ``upsample``/``output_conv``, and never applies
-#: ``norm``, ``ffn``, ``attention`` or ``dropout``. Stopping them being built
-#: removes six tensors that no gradient ever reached. The FORWARD pass is
-#: therefore unchanged in structure, but the values move because the probe
-#: assigns seeded values by walking ``model.weights`` -- with six fewer tensors
-#: in that list, every subsequent draw lands on a different variable.
-#:
-#: Reproducible: bit-identical across separate processes on CPU.
+#: The paper's network, tail included. Restored 2026-10-15
+#: (plan-2026-10-14T062616-81938e81 step 6.1, D-022) to the references this
+#: file pinned before 3b281907a (2026-10-10), which swapped the paper's tail
+#: conv for a 3-ConvBlock EnhancementHead without the long skip, re-pinned
+#: these values for that different network, and loosened ATOL from 1e-8 to
+#: 1e-6. The default head is now the paper's tail itself (``block_dims=()``,
+#: no bias, applied to ``up1 + x1``), and the probe reproduces the pre-3b281907a
+#: values below EXACTLY (max|diff| 0.0 on CPU, measured with this file's own
+#: ``_run_probe`` against both the restored model and ``include_top=False`` at
+#: HEAD 6815223bf, whose tail was the paper's). The weights are assigned by
+#: walking ``model.weights``; the tail kernel is the last weight either way,
+#: which is why the draws land on the same variables. ATOL is 1e-8 again.
 GOLDEN_VALUES = (
-    0.028037281706929207,
-    0.01876763068139553,
-    -0.04149823635816574,
-    0.021648656576871872,
-    0.019159644842147827,
-    -0.04193928837776184,
-    0.021442148834466934,
-    0.0187247134745121,
-    -0.0418277308344841,
-    0.02217383310198784,
-    0.01878255233168602,
-    -0.06177205219864845,
+    0.025833524763584137,
+    -0.21490876376628876,
+    0.14970672130584717,
+    0.15265358984470367,
+    0.18284118175506592,
+    0.049421459436416626,
+    0.0020036837086081505,
+    0.05485982447862625,
+    -0.4749571681022644,
+    -0.00747334212064743,
+    -0.3105686604976654,
+    -0.020963262766599655,
 )
 # mean, std, min, max over the FULL output -- these see every element, so a
 # change confined to the elements the sampler happens to skip is still caught.
 GOLDEN_STATS = (
-    -0.0002627142530400306,
-    0.029721857979893684,
-    -0.06177205219864845,
-    0.04569648951292038,
+    -0.06287622451782227,
+    0.16517893970012665,
+    -0.6904259920120239,
+    0.6506773233413696,
 )
 
-ATOL = 1e-6
+ATOL = 1e-8
 RTOL = 0.0
 
 

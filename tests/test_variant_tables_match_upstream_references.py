@@ -156,11 +156,13 @@ UPSTREAM_PINS = [
     ("pft_sr", "base", "num_heads", 6, _PFT_BASE_URL),
     ("pft_sr", "base", "mlp_ratio", 2.0, _PFT_BASE_URL),
     ("pft_sr", "base", "window_size", 32, _PFT_BASE_URL),
+    ("pft_sr", "base", "upsampler", "pixelshuffle", _PFT_BASE_URL),
     ("pft_sr", "light", "embed_dim", 52, _PFT_LIGHT_URL),
     ("pft_sr", "light", "num_blocks", [2, 4, 6, 6, 6], _PFT_LIGHT_URL),
     ("pft_sr", "light", "num_heads", 4, _PFT_LIGHT_URL),
     ("pft_sr", "light", "mlp_ratio", 1.0, _PFT_LIGHT_URL),
     ("pft_sr", "light", "window_size", 32, _PFT_LIGHT_URL),
+    ("pft_sr", "light", "upsampler", "pixelshuffledirect", _PFT_LIGHT_URL),
 
     # snap-stanford/relgt argparse defaults. Name mapping: channels ->
     # embedding_dim, num_centroids -> num_global_centroids, num_layers ->

@@ -77,13 +77,14 @@ MIN_EXTENT = 33
 BUILD_SEED = 0
 
 #: Measured 2026-08-21, one Adam step, ramp loss: 148, the paper's network.
-#: Re-measured 2026-10-14 (plan-2026-10-14T062616-81938e81 step 6): 161 =
-#: 147 U-Net weights + the 14 of the default ``include_top`` EnhancementHead,
-#: which replaces the 1-weight tail conv (3 ConvBlock x conv kernel/bias +
-#: LayerNorm gamma/beta, plus the output conv kernel/bias). The 167 pinned on
-#: 2026-10-10 also counted the head's six never-applied common norm and FFN
-#: weights.
-GF_WEIGHTS = 161
+#: From 2026-10-10 to 2026-10-14 the default ``include_top`` EnhancementHead
+#: replaced the paper's 1-weight tail conv with a 14-weight network (161; 167
+#: with the head's never-applied norm and FFN). Since
+#: plan-2026-10-14T062616-81938e81 step 6.1 the head IS that tail conv
+#: (``block_dims=()``, no bias), so the count is the paper's 148 again:
+#: 147 U-Net weights + the tail kernel (measured by
+#: ``len(SCUNet(**_scunet kwargs).trainable_weights)`` after one call).
+GF_WEIGHTS = 148
 
 
 def ramp_loss(outputs: Any) -> Any:
@@ -200,19 +201,19 @@ class TestSCUNetKnobSensitivity:
         It was written as a value knob first -- the Swin window decides WHICH
         pixels attend to which, which sounds like pure routing. The value
         instrument rejected it, and the numbers are the point: ``window_size=4``
-        and ``window_size=8`` both hold **161 weight tensors** and differ at
-        **355,977 vs 359,849 parameters**, because the relative-position-bias
+        and ``window_size=8`` both hold **148 weight tensors** and differ at
+        **348,918 vs 352,790 parameters**, because the relative-position-bias
         table is sized by the window. *"The counts may match while the shapes do
         not"* is the oracle's own error text, and a hand-written sweep asserting
         ``len(model.weights)`` would have seen nothing at all.
 
-        Both numbers re-derived 2026-10-13. They moved by exactly the six dead
-        weight tensors 20225bf71 stopped building inside ``EnhancementHead``
-        (its ``norm`` and ``ffn``, which ``call`` never applies): 167 -> 161
-        tensors, and 358,137 -> 355,977 / 362,009 -> 359,849 parameters. The
-        head's 14 live tensors are counted here, since ``include_top=True`` is
-        the default and the head is part of the parameterisation the knob is
-        measured against.
+        Re-derived 2026-10-15 (plan-2026-10-14T062616-81938e81 step 6.1) by
+        building both models and summing ``np.prod`` over ``model.weights``:
+        the default head is now the paper's bias-free tail conv (432 = 3*3*16*3
+        parameters on the 147-tensor, 348,486 / 352,358-parameter U-Net), and
+        both numbers equal the 2026-08-21 pins taken before 3b281907a swapped
+        that conv for a 7,491-parameter EnhancementHead (161 tensors, 355,977 /
+        359,849).
         """
         builders = {
             w: (lambda w=w: _built(lambda: _scunet(window_size=w)))
@@ -225,8 +226,8 @@ class TestSCUNetKnobSensitivity:
             k: sum(int(np.prod(shape)) for shape in v)
             for k, v in signatures.items()
         }
-        assert counts[4] == counts[8] == 161, counts
-        assert params[4] == 355977 and params[8] == 359849, params
+        assert counts[4] == counts[8] == 148, counts
+        assert params[4] == 348918 and params[8] == 352790, params
 
     def test_the_value_instrument_convicts_input_resolution_as_inert(self):
         """The VALUE instrument's adoption, and its RED proof in one.

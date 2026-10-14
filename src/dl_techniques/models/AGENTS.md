@@ -193,12 +193,14 @@ universal law — see "When it does not apply".
 
 - **No genuine named variants** — do not invent a `MODEL_VARIANTS` table to satisfy the
   template. Apply the skeleton, factory and hygiene rules only, and say why in the README.
-- **Functional builders** (`vision/bias_free_denoisers/`, `vision/convunext/`,
-  `vision/image_restoration/darkir/`) return `keras.Model(inputs, outputs)` and have no
-  subclass. Keep them functional — converting breaks existing checkpoints, and the
-  `bias_free_denoisers` ones are used by `src/train/bfunet/` and `src/applications/`.
-  Verify with `grep -n "^class .*(.*Model)" <pkg>/*.py` before calling a package functional:
-  `vision/detr/` looks functional and is not.
+- **Functional builders** (`vision/bias_free_denoisers/`, `vision/convunext/`) return
+  `keras.Model(inputs, outputs)` and have no subclass. Keep them functional — converting
+  breaks existing checkpoints, and the `bias_free_denoisers` ones are used by
+  `src/train/bfunet/` and `src/applications/`. Verify with
+  `grep -n "^class .*(.*Model)" <pkg>/*.py` before calling a package functional:
+  `vision/detr/` looks functional and is not, and `vision/image_restoration/darkir/`, once
+  listed here, has been the subclass `DarkIR` since 2026-10-10 (`create_darkir_model` only
+  wraps it).
 - **Multi-model families** (`vision_language/sam/`, `time_series/`, `vision/dino/`,
   `vision_language/ideogram4/`, `vision_language/sd3_mmdit/`) apply the shape per inner
   architecture, not per directory.

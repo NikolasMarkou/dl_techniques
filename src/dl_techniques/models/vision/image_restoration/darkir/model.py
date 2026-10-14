@@ -16,10 +16,12 @@ two residual branches by zero-initialized per-channel weights (``beta``,
 without warmup.
 
 The :class:`DarkIR` class is a ``keras.Model`` subclass with an ``include_top``
-parameter: when ``True`` an :class:`EnhancementHead` from the vision heads
-factory runs on the restored image (denoising mode); when ``False`` the model
-returns the restored image itself, the U-Net output after the global residual,
-with ``img_channels`` channels. ``create_darkir_model`` is a keyword-for-keyword
+parameter. When ``True`` (default) the model is the paper's network, tail
+included: the ``ending`` 3x3 conv to ``img_channels`` (cidautai/DarkIR
+``archs/DarkIR.py``), which is an :class:`EnhancementHead` with
+``block_dims=()``, then the global residual ``+ input``. When ``False`` the
+model returns the backbone features the tail reads: the last decoder stage's
+output, ``width`` channels. ``create_darkir_model`` is a keyword-for-keyword
 wrapper around the subclass.
 
 References:
@@ -40,7 +42,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 from typing import List, Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -159,7 +160,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
             block = DarkIREncoderBlock(
                 channels=64, dw_expand=2, dilations=[1, 4, 9]
             )
-            x = ops.random.normal((2, 32, 32, 64))
+            x = keras.random.normal((2, 32, 32, 64))
             y = block(x)  # (2, 32, 32, 64)
 
     Note:
@@ -505,7 +506,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
             block = DarkIRDecoderBlock(
                 channels=64, dw_expand=2, ffn_expand=2, dilations=[1, 4, 9]
             )
-            x = ops.random.normal((2, 32, 32, 64))
+            x = keras.random.normal((2, 32, 32, 64))
             y = block(x)  # (2, 32, 32, 64)
     """
 
@@ -782,26 +783,37 @@ class DarkIRDecoderBlock(keras.layers.Layer):
 # DarkIR Model (keras.Model subclass with include_top)
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-10-14T062616-81938e81/D-023: encoder blocks run ONE undilated
+# branch. Do NOT pass the model's `dilations` to them: cidautai/DarkIR builds
+# `EBlock(chan, extra_depth_wise=...)` (default `dilations=[1]`) and gives
+# `dilations` to the DBlocks only; passing it here added 42,240 parameters at
+# width 32 and broke the official hand sum. See decisions.md.
+ENCODER_DILATIONS: List[int] = [1]
+
 
 @register_dl_technique("dl_techniques.models.darkir.model")
 class DarkIR(keras.Model):
-    """DarkIR low-light image restoration model with configurable output head.
+    """DarkIR low-light image restoration model, tail included by default.
 
     A U-Net architecture with parallel dilated branches and frequency-domain
     modulation, wrapped as a keras.Model subclass supporting the ``include_top``
-    pattern. When ``include_top=True`` (default), an :class:`EnhancementHead`
-    from the vision heads factory runs on the restored image (denoising
-    mode). When ``include_top=False``, the model returns the restored image
-    itself: the U-Net output after the global residual, ``img_channels``
-    channels.
+    pattern. When ``include_top=True`` (default) the model is the official
+    network: its ``ending`` 3x3 conv is an :class:`EnhancementHead` named
+    ``enhancement_head`` with ``block_dims=()`` (one conv, bias kept), and the
+    model adds the input to its output (the global residual). When
+    ``include_top=False`` neither is built nor applied and the model returns
+    the last decoder stage's features, ``width`` channels.
 
     Architecture:
         - Intro 3x3 convolution
-        - Encoder stages with DarkIREncoderBlock + stride-2 downsampling
+        - Encoder stages with DarkIREncoderBlock + stride-2 downsampling. The
+          encoder blocks (stages and middle) run ONE undilated branch, as the
+          official ``EBlock(chan, extra_depth_wise=...)`` does; ``dilations``
+          configures the decoder blocks only.
         - Middle section with encoder/decoder blocks and residual
         - Decoder stages with PixelShuffle upsampling + DarkIRDecoderBlock
-        - Ending 3x3 convolution and the global residual (input added)
-        - With ``include_top``: an EnhancementHead on the restored image
+        - With ``include_top``: the ending 3x3 conv (the head) and the global
+          residual (input added)
 
     :param img_channels: Number of input and output image channels. Defaults to 3.
     :type img_channels: int
@@ -815,17 +827,21 @@ class DarkIR(keras.Model):
     :type enc_blk_nums: List[int]
     :param dec_blk_nums: Blocks per decoder stage. Defaults to [3, 1, 1].
     :type dec_blk_nums: List[int]
-    :param dilations: Dilation rates for all blocks. Defaults to [1, 4, 9].
+    :param dilations: Dilation rates of the decoder blocks (the middle and
+        decoder-stage ``DBlock``s). The encoder blocks always use ``[1]``.
+        Defaults to [1, 4, 9].
     :type dilations: List[int]
     :param extra_depth_wise: Whether blocks use extra depthwise convolution. Defaults to True.
     :type extra_depth_wise: bool
-    :param include_top: Whether to run the EnhancementHead on the restored
-        image. When False, the model returns the restored image (the U-Net
-        output after the global residual). Defaults to True.
+    :param include_top: Whether to build and apply the paper's tail, the
+        ending conv (the head) plus the global residual. When False, the
+        model returns the last decoder stage's ``width``-channel features.
+        Defaults to True.
     :type include_top: bool
     :param head_config_overrides: Optional dict merged into the
         ``EnhancementHead`` config. It may not set ``name`` or ``task_type``
-        (``ValueError``); the head is always named ``enhancement_head``.
+        (``ValueError``); the head is always named ``enhancement_head``. Any
+        other override departs from the paper's ending conv.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param use_side_loss: Whether to return an intermediate output for deep
         supervision. When True the model returns ``[main_output, side_output]``
@@ -833,8 +849,9 @@ class DarkIR(keras.Model):
         (``H / 2**len(enc_blk_nums)``), not full resolution. A caller that
         compiles a single full-resolution loss against both outputs will build
         fine and die at the first ``fit()`` step on a shape mismatch; the target
-        for the side output must be downsampled by the same factor.
-        Defaults to False.
+        for the side output must be downsampled by the same factor. The side
+        output is an image, a second task tail, so it requires
+        ``include_top=True`` (``ValueError`` otherwise). Defaults to False.
     :type use_side_loss: bool
     :param kwargs: Additional keyword arguments for the Model base class.
 
@@ -844,17 +861,18 @@ class DarkIR(keras.Model):
 
     Output shape:
         - ``include_top=True``: ``(batch, height, width, img_channels)``, the
-          head's output on the restored image.
-        - ``include_top=False``: ``(batch, height, width, img_channels)``, the
           restored image.
+        - ``include_top=False``: ``(batch, height, width, width)``, the last
+          decoder stage's features.
 
     Example:
-        >>> # Full restoration model
-        >>> model = DarkIR(img_channels=3, width=32, include_top=True)
+        >>> # The paper's restoration network
+        >>> model = DarkIR(img_channels=3, width=32)
+        >>> restored = model(inputs)  # (B, H, W, 3)
         >>>
-        >>> # The U-Net without the head
+        >>> # Backbone features for a custom tail
         >>> backbone = DarkIR(img_channels=3, width=32, include_top=False)
-        >>> restored = backbone(inputs)
+        >>> features = backbone(inputs)  # (B, H, W, 32)
     """
 
     def __init__(
@@ -905,6 +923,12 @@ class DarkIR(keras.Model):
             raise ValueError(f"All values in dec_blk_nums must be positive, got {dec_blk_nums}")
         if not dilations or any(d <= 0 for d in dilations):
             raise ValueError(f"All dilations must be positive, got {dilations}")
+        if use_side_loss and not include_top:
+            raise ValueError(
+                "use_side_loss=True needs include_top=True: the side output "
+                "is an image-space tail, and a headless DarkIR returns "
+                "features, not an image"
+            )
 
         # Store all configuration
         self.img_channels = img_channels
@@ -933,7 +957,7 @@ class DarkIR(keras.Model):
     def _build_network(self) -> None:
         """Build the encoder-decoder U-Net architecture."""
         # Intro convolution
-        self.intro_conv = layers.Conv2D(
+        self.intro_conv = keras.layers.Conv2D(
             self.width, kernel_size=3, padding="same", name="intro"
         )
 
@@ -948,7 +972,7 @@ class DarkIR(keras.Model):
                 stage_blocks.append(
                     DarkIREncoderBlock(
                         channels=chan,
-                        dilations=self.dilations,
+                        dilations=ENCODER_DILATIONS,
                         extra_depth_wise=self.extra_depth_wise,
                         name=f"enc_stage_{i}_block_{j}"
                     )
@@ -956,7 +980,7 @@ class DarkIR(keras.Model):
             self.encoder_stages.append(stage_blocks)
 
             # Downsample conv (except after last stage, handled in middle)
-            down_conv = layers.Conv2D(
+            down_conv = keras.layers.Conv2D(
                 chan * 2,
                 kernel_size=2,
                 strides=2,
@@ -972,7 +996,7 @@ class DarkIR(keras.Model):
             self.middle_encoder_blocks.append(
                 DarkIREncoderBlock(
                     channels=chan,
-                    dilations=self.dilations,
+                    dilations=ENCODER_DILATIONS,
                     extra_depth_wise=self.extra_depth_wise,
                     name=f"mid_enc_{i}"
                 )
@@ -989,12 +1013,12 @@ class DarkIR(keras.Model):
                 )
             )
 
-        self.middle_residual = layers.Add(name="middle_residual")
+        self.middle_residual = keras.layers.Add(name="middle_residual")
 
         # Side output head (for deep supervision / use_side_loss)
         self.side_out_head = None
         if self.use_side_loss:
-            self.side_out_head = layers.Conv2D(
+            self.side_out_head = keras.layers.Conv2D(
                 self.img_channels,
                 kernel_size=3,
                 padding="same",
@@ -1009,7 +1033,7 @@ class DarkIR(keras.Model):
 
         for i, num_blocks in enumerate(self.dec_blk_nums):
             # Upsample conv (chan * 2 for PixelShuffle)
-            up_conv = layers.Conv2D(
+            up_conv = keras.layers.Conv2D(
                 chan * 2,
                 kernel_size=1,
                 use_bias=False,
@@ -1022,7 +1046,7 @@ class DarkIR(keras.Model):
             self.upsample_pixelshuffles.append(up_ps)
 
             # Skip connection add
-            skip_add = layers.Add(name=f"skip_add_{i}")
+            skip_add = keras.layers.Add(name=f"skip_add_{i}")
             self.skip_adds.append(skip_add)
 
             # Halve channels after upsampling
@@ -1041,26 +1065,24 @@ class DarkIR(keras.Model):
                 )
             self.decoder_stages.append(stage_blocks)
 
-        # Ending convolution
-        self.ending_conv = layers.Conv2D(
-            self.img_channels,
-            kernel_size=3,
-            padding="same",
-            name="ending"
-        )
-
-        self.final_residual = layers.Add(name="final_residual")
-
-        # Enhancement head (when include_top=True)
+        # The paper's tail: the ending conv is the head, and the global
+        # residual adds the input to its output. Both exist only with
+        # include_top, so a headless model carries no layer it never runs.
         self.enhancement_head = None
+        self.final_residual = None
         if self.include_top:
+            self.final_residual = keras.layers.Add(name="final_residual")
             head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
             head_config.update({
                 'output_channels': self.img_channels,
                 'scale_factor': 1,  # Denoising: no upscaling
                 'hidden_dim': self.width,  # Match base feature width
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
+                # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
+                # official `ending` conv (one 3x3 conv, bias kept); do NOT drop
+                # block_dims=() for the default 3-ConvBlock head, which appended an
+                # extra network after the global residual. See decisions.md.
+                'block_dims': (),
+                'output_use_bias': True,
                 # Deterministic layer name: an unnamed head takes Keras' auto
                 # suffix in process-creation order, which breaks the by-name
                 # matching that weight transfer relies on.
@@ -1101,9 +1123,9 @@ class DarkIR(keras.Model):
 
         :param inputs: Input images of shape (batch, H, W, img_channels).
         :param training: Whether the call is in training mode.
-        :return: The head's output on the restored image (include_top=True)
-            or the restored image itself (include_top=False); with
-            ``use_side_loss``, ``[main_output, side_output]``.
+        :return: The restored image (include_top=True) or the last decoder
+            stage's features (include_top=False); with ``use_side_loss``,
+            ``[main_output, side_output]``.
         """
         # Intro convolution
         x = self.intro_conv(inputs)
@@ -1143,19 +1165,13 @@ class DarkIR(keras.Model):
             for block in stage_blocks:
                 x = block(x, training=training)
 
-        # Ending convolution
-        x = self.ending_conv(x)
-
-        # Global residual
-        outputs = self.final_residual([x, inputs])
-
         if self.include_top:
-            # Apply enhancement head for denoising
-            head_output = self.enhancement_head(outputs, training=training)
-            main_output = head_output['enhanced']
+            # The ending conv (the head), then the global residual.
+            x = self.enhancement_head(x, training=training)['enhanced']
+            main_output = self.final_residual([x, inputs])
         else:
-            # Return features for custom heads
-            main_output = outputs
+            # The last decoder stage's features, for a custom tail.
+            main_output = x
 
         if self.use_side_loss:
             # DECISION plan-2026-08-14T233721-d4f9beb2/D-044: the tap stays at
@@ -1167,20 +1183,24 @@ class DarkIR(keras.Model):
         return main_output
 
     def compute_output_shape(self, input_shape):
-        """Compute output shape."""
+        """Compute output shape.
+
+        The headed main output has the input's shape (the global residual adds
+        the input itself); the headless one has ``width`` channels.
+        """
+        if self.include_top:
+            main_shape = tuple(input_shape)
+        else:
+            main_shape = tuple(input_shape[:3]) + (self.width,)
         if self.use_side_loss:
             # Return list of shapes: [main_output_shape, side_output_shape]
-            main_shape = input_shape
             factor = 2 ** self.num_stages
             side_shape = (input_shape[0],
                           input_shape[1] // factor if input_shape[1] else None,
                           input_shape[2] // factor if input_shape[2] else None,
                           self.img_channels)
             return [main_shape, side_shape]
-        # Headed or not, the main output has the input's shape: the global
-        # residual adds the input itself, and the head maps img_channels back
-        # to img_channels at scale 1.
-        return input_shape
+        return main_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return model configuration for serialization."""
@@ -1281,8 +1301,13 @@ def create_darkir_model(
         │ Dec 2: m₂ × DBlock   │◄─────────────────────────┘
         └──────────┬───────────┘
                    ▼
+        ┌──────────────────────────────────────┐   include_top=False
+        │  features [B, H, W, width]           │──► returns these
+        └───────────────┬──────────────────────┘
+                        ▼
         ┌──────────────────────────────────────┐
-        │  Ending Conv 3×3 → img_channels      │
+        │  Ending Conv 3×3 → img_channels      │   the head
+        │  (EnhancementHead, block_dims=())    │   (include_top=True)
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
@@ -1337,35 +1362,39 @@ def create_darkir_model(
         ``enc_blk_nums``. ``None`` resolves to ``[3, 1, 1]``. All values must be
         positive.
     :type dec_blk_nums: List[int]
-    :param dilations: Dilation rates applied to every encoder and decoder
-        block. ``None`` resolves to ``[1, 4, 9]``. All values must be positive.
+    :param dilations: Dilation rates of every decoder block (middle and
+        decoder stages); the encoder blocks always run one undilated branch,
+        as in the official code. ``None`` resolves to ``[1, 4, 9]``. All
+        values must be positive.
     :type dilations: List[int]
     :param extra_depth_wise: Whether every block uses its extra convolution
         (before the 1x1 in the encoder, after it in the decoder). Defaults to
         True.
     :type extra_depth_wise: bool
-    :param include_top: Whether to run the EnhancementHead on the restored
-        image. When False, the model returns the restored image. Defaults to
-        True.
+    :param include_top: Whether to build and apply the paper's tail (the
+        ending conv as an ``EnhancementHead`` with ``block_dims=()``, then the
+        global residual). When False, the model returns the last decoder
+        stage's features. Defaults to True.
     :type include_top: bool
     :param head_config_overrides: Optional dict merged into the
         ``EnhancementHead`` config; ``name`` and ``task_type`` are refused.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param use_side_loss: Return ``[main_output, side_output]``, the side
-        output at bottleneck resolution, for deep supervision. See
-        :class:`DarkIR`.
+        output at bottleneck resolution, for deep supervision. Requires
+        ``include_top=True``. See :class:`DarkIR`.
     :type use_side_loss: bool
 
     :return: The constructed DarkIR model (keras.Model subclass). Its output
-        is one ``(batch, height, width, img_channels)`` tensor either way:
-        the head's output with ``include_top=True``, the restored image
-        with ``include_top=False``.
+        is the restored image ``(batch, height, width, img_channels)`` with
+        ``include_top=True`` and the features ``(batch, height, width,
+        width)`` with ``include_top=False``.
     :rtype: DarkIR
 
     :raises ValueError: If ``img_channels`` or ``width`` is not positive, if
         ``middle_blk_num_enc`` is negative, if ``middle_blk_num_dec`` is less
-        than 1, if ``enc_blk_nums`` and ``dec_blk_nums`` differ in length, or if
-        any block count or dilation is not positive.
+        than 1, if ``enc_blk_nums`` and ``dec_blk_nums`` differ in length, if
+        any block count or dilation is not positive, or if ``use_side_loss``
+        is set without ``include_top``.
 
     Input shape:
         4D tensor ``(batch, height, width, img_channels)``. Height and width
@@ -1373,9 +1402,10 @@ def create_darkir_model(
         ``[0, 1]``.
 
     Output shape:
-        - ``include_top=True``: ``(batch, height, width, img_channels)``.
-        - ``include_top=False``: ``(batch, height, width, img_channels)``, the
+        - ``include_top=True``: ``(batch, height, width, img_channels)``, the
           restored image.
+        - ``include_top=False``: ``(batch, height, width, width)``, the last
+          decoder stage's features.
 
     Example:
         .. code-block:: python
@@ -1399,7 +1429,7 @@ def create_darkir_model(
                 extra_depth_wise=True
             )
 
-            # The U-Net without the head
+            # Backbone features for a custom tail
             backbone = create_darkir_model(
                 img_channels=3,
                 width=32,
@@ -1409,8 +1439,9 @@ def create_darkir_model(
                 dilations=[1, 4, 9]
             )
 
-            x = ops.random.normal((1, 256, 256, 3))
+            x = keras.random.normal((1, 256, 256, 3))
             y = model(x)  # (1, 256, 256, 3)
+            f = backbone(x)  # (1, 256, 256, 32)
 
     Note:
         Channel progression is ``width -> 2*width -> 4*width -> ...``; the

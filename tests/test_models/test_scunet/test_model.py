@@ -119,7 +119,10 @@ class TestSCUNetInitialization:
         assert hasattr(model, 'm_up3')
         assert hasattr(model, 'm_up2')
         assert hasattr(model, 'm_up1')
-        assert hasattr(model, 'm_tail')
+        # The paper's tail conv is the head (plan-2026-10-14T062616-81938e81
+        # step 6.1, D-022); there is no separate `m_tail`.
+        assert hasattr(model, 'enhancement_head')
+        assert not hasattr(model, 'm_tail')
 
         # Check that components are Sequential models
         assert isinstance(model.m_down1, keras.Sequential)
@@ -187,24 +190,27 @@ class TestSCUNetInitialization:
                 assert layer.block_type == expected_type
 
     def test_head_and_tail_conv_layers(self) -> None:
-        """Test that head and tail convolution layers are properly configured."""
+        """The stem conv outputs ``dim`` channels; the tail is the paper's
+        ``nn.Conv2d(dim, in_nc, 3, 1, 1, bias=False)``, as an EnhancementHead
+        with no refinement block, built only with ``include_top``."""
         in_nc = 3
         dim = 64
-        model = SCUNet(in_nc=in_nc, dim=dim, include_top=False)
+        headed = SCUNet(in_nc=in_nc, dim=dim)
 
         # Head should output dim channels
-        assert isinstance(model.m_head, keras.layers.Conv2D)
-        assert model.m_head.filters == dim
+        assert isinstance(headed.m_head, keras.layers.Conv2D)
+        assert headed.m_head.filters == dim
 
-        # Tail should output in_nc channels
-        assert isinstance(model.m_tail, keras.layers.Conv2D)
-        assert model.m_tail.filters == in_nc
+        tail = headed.enhancement_head
+        assert tail.output_channels == in_nc
+        assert tail.scale_factor == 1
+        assert tail.block_dims == ()
+        assert tail.enhance_blocks == []
+        assert tail.output_conv.kernel_size == (3, 3)
+        assert tail.output_conv.use_bias is False
 
-        # With the default include_top the EnhancementHead takes the tail's
-        # place and the tail is not built (it would never run).
-        headed = SCUNet(in_nc=in_nc, dim=dim)
-        assert headed.m_tail is None
-        assert headed.enhancement_head.output_channels == in_nc
+        headless = SCUNet(in_nc=in_nc, dim=dim, include_top=False)
+        assert headless.enhancement_head is None
 
 
 class TestSCUNetForwardPass:
@@ -843,7 +849,6 @@ class TestSCUNetTrainingBehavior:
 
     def test_gradients_flow_through_model(self) -> None:
         """Test that gradients can flow through the model."""
-        import re
         import tensorflow as tf
 
         model = SCUNet(in_nc=3, dim=32, head_dim=16)
@@ -857,34 +862,15 @@ class TestSCUNetTrainingBehavior:
         # Compute gradients
         gradients = tape.gradient(loss, model.trainable_variables)
 
-        # Check that gradients exist
-        # Note: EnhancementHead weights (norm/ffn) don't receive gradients in this
-        # autoencoder-style test setup, so we skip them.
-        # EnhancementHead weights that don't receive gradients in this test setup
-        # (autoencoder-style MSE against input, similar to DarkIR)
-        # Note: layer names may have numeric suffixes (e.g., enhancement_head_49)
-        skipped_regexes = [
-            r"enhancement_head_\d*/enhancement_head_\d*_norm/gamma",
-            r"enhancement_head_\d*/enhancement_head_\d*_norm/beta",
-            r"enhancement_head_\d*/enhancement_head_\d*_ffn/fc1/kernel",
-            r"enhancement_head_\d*/enhancement_head_\d*_ffn/fc1/bias",
-            r"enhancement_head_\d*/enhancement_head_\d*_ffn/fc2/kernel",
-            r"enhancement_head_\d*/enhancement_head_\d*_ffn/fc2/bias",
-            # Also match non-suffixed versions
-            r"enhancement_head/enhancement_head_norm/gamma",
-            r"enhancement_head/enhancement_head_norm/beta",
-            r"enhancement_head/enhancement_head_ffn/fc1/kernel",
-            r"enhancement_head/enhancement_head_ffn/fc1/bias",
-            r"enhancement_head/enhancement_head_ffn/fc2/kernel",
-            r"enhancement_head/enhancement_head_ffn/fc2/bias",
-        ]
+        # Every trainable variable is on the backward graph. The skip list
+        # this test carried for the head's never-applied norm/FFN is gone with
+        # them (plan-2026-10-14T062616-81938e81 steps 6 and 6.1): the head is
+        # now the paper's single tail conv.
         checked = 0
         for var, grad in zip(model.trainable_variables, gradients):
-            if any(re.search(pattern, var.path) for pattern in skipped_regexes):
-                continue
             assert grad is not None, f"Variable {var.path} has no gradient"
             checked += 1
-        assert checked > 0, "No variables checked"
+        assert checked == len(model.trainable_variables) > 0
 
 
 class TestSCUNetOutputQuality:
@@ -945,10 +931,16 @@ class TestTheEnhancementHeadKnobs:
 
     @pytest.mark.parametrize("include_top", [True, False])
     def test_only_the_applied_output_layer_is_built(self, include_top):
-        """The headed model has no tail conv and the headless one no head."""
+        """The headed model's only output layer is the head's one bias-free
+        tail conv; the headless model has no output layer at all and returns
+        the ``dim``-channel features the tail reads."""
         model = SCUNet(include_top=include_top, **_HEAD_TINY)
-        model(np.zeros((1, 64, 64, 3), dtype="float32"))
-        owners = {w.path.split("/")[1] for w in model.weights}
-        assert ("enhancement_head" in owners) is include_top
-        assert ("tail" in owners) is (not include_top)
-        assert (model.m_tail is None) is include_top
+        out = model(np.zeros((1, 64, 64, 3), dtype="float32"))
+        head_paths = sorted(w.path.split("/", 1)[1] for w in model.weights
+                            if w.path.split("/")[1] == "enhancement_head")
+        if include_top:
+            assert head_paths == ["enhancement_head/output_conv/kernel"]
+            assert tuple(out.shape) == (1, 64, 64, 3)
+        else:
+            assert head_paths == []
+            assert tuple(out.shape) == (1, 64, 64, _HEAD_TINY["dim"])

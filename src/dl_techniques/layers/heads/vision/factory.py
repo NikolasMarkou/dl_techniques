@@ -138,6 +138,41 @@ def _refuse_common_layers_call_never_runs(
             )
 
 
+def _validated_block_dims(
+        block_dims: Optional[Sequence[int]]
+) -> Optional[Tuple[int, ...]]:
+    """
+    Check a head's ``block_dims`` argument and freeze it to a tuple.
+
+    Interface contract, shared by :class:`ClassificationHead` and
+    :class:`EnhancementHead`, whose ``block_dims`` means "the width of each
+    hidden block, in order":
+
+    * ``None`` is returned unchanged; each head resolves it to its own
+      default stack.
+    * Any other value is returned as a tuple. ``()`` is valid and means no
+      hidden block.
+    * An entry that is not a positive ``int`` (``bool`` included, since it is
+      an ``int`` subclass) raises ``ValueError`` naming the whole argument.
+
+    :param block_dims: The caller's ``block_dims``.
+    :type block_dims: Optional[Sequence[int]]
+    :return: ``None``, or the widths as a tuple.
+    :rtype: Optional[Tuple[int, ...]]
+    :raises ValueError: If an entry is not a positive integer.
+    """
+    if block_dims is None:
+        return None
+    block_dims = tuple(block_dims)
+    bad = [d for d in block_dims
+           if isinstance(d, bool) or not isinstance(d, int) or d <= 0]
+    if bad:
+        raise ValueError(
+            f"block_dims must hold positive integers, got {block_dims}"
+        )
+    return block_dims
+
+
 # ---------------------------------------------------------------------
 # Base Head Class
 # ---------------------------------------------------------------------
@@ -1937,14 +1972,7 @@ class ClassificationHead(BaseVisionHead):
             kwargs, type(self).__name__, ('use_ffn',))
         super().__init__(**kwargs)
 
-        if block_dims is not None:
-            block_dims = tuple(block_dims)
-            bad = [d for d in block_dims
-                   if isinstance(d, bool) or not isinstance(d, int) or d <= 0]
-            if bad:
-                raise ValueError(
-                    f"block_dims must hold positive integers, got {block_dims}"
-                )
+        block_dims = _validated_block_dims(block_dims)
         if not 0.0 <= classifier_dropout_rate < 1.0:
             raise ValueError(
                 f"classifier_dropout_rate must be in [0, 1), got "
@@ -2522,9 +2550,16 @@ class EnhancementHead(BaseVisionHead):
     A restored or upscaled image, built from a feature map.
 
     Use this for denoising, super-resolution and the other image-to-image
-    tasks. Three ``ConvBlock`` stages refine the features. Then one conv
-    produces the image: a transposed conv when ``scale_factor > 1``, and a
+    tasks. ``ConvBlock`` stages refine the features, one per ``block_dims``
+    entry (three at ``hidden_dim`` by default). Then one conv produces the
+    image: a transposed conv when ``scale_factor > 1``, and a 3x3
     same-resolution conv otherwise.
+
+    ``block_dims=()`` builds no refinement block, so the head is exactly one
+    3x3 conv to ``output_channels``: the tail conv of a restoration network
+    such as SCUNet's ``m_tail`` (``output_use_bias=False``) or DarkIR's
+    ``ending`` (bias kept). Any long skip or global residual around that
+    conv is the model's to apply; the head adds none.
 
     This head applies none of the common stages and no dropout, so it builds
     none: ``use_attention`` and ``use_ffn`` default to ``False``,
@@ -2543,7 +2578,8 @@ class EnhancementHead(BaseVisionHead):
                           │
                           ▼
         ┌─────────────────────────────────┐
-        │ enhance_blocks: 3 x ConvBlock   │ -> hidden_dim
+        │ enhance_blocks: one ConvBlock   │ default: 3 x hidden_dim
+        │ per block_dims entry (0 or more)│ () : none
         └────────────────┬────────────────┘
                           ▼
                  ┌────────┴────────┐
@@ -2582,12 +2618,21 @@ class EnhancementHead(BaseVisionHead):
     :param scale_factor: Spatial upscaling factor. Above 1 selects the
         transposed-conv path; 1 selects the same-resolution conv.
     :type scale_factor: int
+    :param block_dims: Width of each refinement ``ConvBlock``, in order.
+        ``None`` means ``(hidden_dim, hidden_dim, hidden_dim)``. ``()``
+        builds no block, so the output conv reads the input directly.
+    :type block_dims: Optional[Sequence[int]]
+    :param output_use_bias: Whether the output conv (``upsample`` or
+        ``output_conv``) has a bias. Defaults to ``True``.
+    :type output_use_bias: bool
     :param kwargs: Forwarded to :class:`BaseVisionHead`.
 
-    :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``, or
-        ``dropout_rate`` is above 0.
+    :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``,
+        ``dropout_rate`` is above 0, or ``block_dims`` holds a width that is
+        not a positive integer.
 
-    :ivar enhance_blocks: The three refinement ``ConvBlock`` layers.
+    :ivar enhance_blocks: One refinement ``ConvBlock`` per resolved
+        ``block_dims`` entry, named ``enhance_block_{i}``.
     :vartype enhance_blocks: List[ConvBlock]
     :ivar upsample: Transposed conv, built only when ``scale_factor > 1``.
     :vartype upsample: keras.layers.Conv2DTranspose
@@ -2595,7 +2640,14 @@ class EnhancementHead(BaseVisionHead):
     :vartype output_conv: keras.layers.Conv2D
     """
 
-    def __init__(self, output_channels: int = 3, scale_factor: int = 1, **kwargs):
+    def __init__(
+            self,
+            output_channels: int = 3,
+            scale_factor: int = 1,
+            block_dims: Optional[Sequence[int]] = None,
+            output_use_bias: bool = True,
+            **kwargs
+    ):
         """
         Store the configuration and build the enhancement layers.
 
@@ -2607,11 +2659,17 @@ class EnhancementHead(BaseVisionHead):
         :type output_channels: int
         :param scale_factor: Spatial upscaling factor.
         :type scale_factor: int
+        :param block_dims: Refinement block widths; ``None`` is three blocks
+            at ``hidden_dim``, ``()`` is none.
+        :type block_dims: Optional[Sequence[int]]
+        :param output_use_bias: Whether the output conv has a bias.
+        :type output_use_bias: bool
         :param kwargs: Forwarded to :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
         :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``,
-            or ``dropout_rate`` is above 0.
+            ``dropout_rate`` is above 0, or a ``block_dims`` entry is not a
+            positive integer.
         """
         _refuse_common_layers_call_never_runs(
             kwargs, type(self).__name__,
@@ -2619,6 +2677,12 @@ class EnhancementHead(BaseVisionHead):
         super().__init__(**kwargs)
         self.output_channels = output_channels
         self.scale_factor = scale_factor
+        self.block_dims = _validated_block_dims(block_dims)
+        self.output_use_bias = bool(output_use_bias)
+        resolved_dims = (
+            (self.hidden_dim,) * 3 if self.block_dims is None
+            else self.block_dims
+        )
 
         # Enhancement-specific layers. Named explicitly: unnamed, each took
         # Keras' process-global auto suffix (`conv_block_102`, `conv2d_20`),
@@ -2626,13 +2690,13 @@ class EnhancementHead(BaseVisionHead):
         # `.keras` reload drifted every path under the head.
         self.enhance_blocks = [
             ConvBlock(
-                filters=self.hidden_dim,
+                filters=filters,
                 kernel_size=3,
                 normalization_type=self.normalization_type,
                 activation_type=self.activation_type,
                 name=f'enhance_block_{i}'
             )
-            for i in range(3)
+            for i, filters in enumerate(resolved_dims)
         ]
 
         if self.scale_factor > 1:
@@ -2642,6 +2706,7 @@ class EnhancementHead(BaseVisionHead):
                 kernel_size=3,
                 strides=self.scale_factor,
                 padding='same',
+                use_bias=self.output_use_bias,
                 name='upsample'
             )
         else:
@@ -2650,6 +2715,7 @@ class EnhancementHead(BaseVisionHead):
                 filters=self.output_channels,
                 kernel_size=3,
                 padding='same',
+                use_bias=self.output_use_bias,
                 name='output_conv'
             )
 
@@ -2732,16 +2798,20 @@ class EnhancementHead(BaseVisionHead):
         """
         Return the constructor arguments for serialization.
 
-        Adds this head's two arguments to the base configuration.
+        Adds this head's four arguments to the base configuration.
 
-        :return: Config dict carrying ``output_channels`` and
-            ``scale_factor``.
+        :return: Config dict carrying ``output_channels``, ``scale_factor``,
+            ``block_dims`` and ``output_use_bias``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
             'output_channels': self.output_channels,
-            'scale_factor': self.scale_factor
+            'scale_factor': self.scale_factor,
+            'block_dims': (
+                None if self.block_dims is None else list(self.block_dims)
+            ),
+            'output_use_bias': self.output_use_bias,
         })
         return config
 
