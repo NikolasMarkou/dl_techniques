@@ -30,8 +30,8 @@ Each run writes one directory under repo-root ``results/`` (or ``--output-dir``)
 (``loss_curve.png``, ``transitions.png``, ``state_strip.png``). A reused
 ``--experiment-name`` is refused before anything is written; so is an argument the
 data or the model would refuse, and a flag the configuration would ignore
-(``--obs-dim``, ``--vocab-size``, ``--separation`` or ``--stay-prob`` where the data does
-not read it, ``--encoder`` on a preset that builds no encoder). A data flag that does
+(``--obs-dim``, ``--vocab-size`` or ``--separation`` where the data does not read it,
+``--encoder`` on a preset that builds no encoder). ``--n-states`` must be at least 2. A data flag that does
 not apply and was not given is recorded as ``null``.
 
 ``train.common.create_callbacks()`` is not used: its analyzer callback and default
@@ -106,7 +106,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--obs-type", choices=OBS_TYPES, default="gaussian",
                         help="Observation type of the data and the model.")
     parser.add_argument("--n-states", type=int, default=4,
-                        help="Hidden states of the true HMM and of the model.")
+                        help="Hidden states of the true HMM and of the model; at least 2.")
     parser.add_argument("--obs-dim", type=int, default=2,
                         help="Feature count of a gaussian observation. Refused with categorical "
                              "(recorded as null when not given).")
@@ -130,11 +130,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-test", type=int, default=500, help="Test sequences (final scores only).")
     parser.add_argument("--separation", type=float, default=4.0,
                         help="Distance between consecutive gaussian means, in standard "
-                             "deviations. Refused with categorical or --n-states 1 (recorded "
-                             "as null when not given).")
+                             "deviations. Refused with categorical (recorded as null when "
+                             "not given).")
     parser.add_argument("--stay-prob", type=float, default=0.9,
-                        help="Diagonal of the true transition matrix, in (0, 1). Refused with "
-                             "--n-states 1 (recorded as null when not given).")
+                        help="Diagonal of the true transition matrix, in (0, 1).")
 
     parser.add_argument("--epochs", type=int, default=60, help="Maximum epochs.")
     parser.add_argument("--batch-size", type=int, default=64, help="Sequences per batch.")
@@ -174,10 +173,11 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     Everything the data module would refuse is refused here, at parse time, so a bad
     value never leaves a half-written run directory behind. So is a data flag the
     configuration would ignore (``train.neural_hmm.data.unread_arguments``: ``--obs-dim``
-    for categorical, ``--vocab-size`` for gaussian, ``--separation`` for categorical or
-    one state, ``--stay-prob`` for one state) when it is given explicitly, even at its
-    default value; when it is not given it is set to ``None``, so ``config.json`` and the
-    summary record it as ``null``.
+    for categorical, ``--vocab-size`` for gaussian, ``--separation`` for categorical)
+    when it is given explicitly, even at its default value; when it is not given it is
+    set to ``None``, so ``config.json`` and the summary record it as ``null``.
+    ``--n-states`` below 2 is refused first, as the model refuses it (D-029), so the
+    data table's one-state rows are never reached from here.
 
     :param argv: Argument list to parse; ``None`` defers to ``sys.argv[1:]``.
     :return: Parsed arguments namespace.
@@ -186,8 +186,10 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.n_states < 1:
-        parser.error(f"--n-states must be >= 1, got {args.n_states}")
+    if args.n_states < 2:
+        parser.error(f"--n-states must be >= 2, got {args.n_states}: an HMM needs at least two "
+                     f"states; with one, the initial and transition distributions are constants "
+                     f"that never train")
     unread = unread_arguments(args.n_states, args.obs_type)
     explicit = _explicitly_set(parser, argv)
     for dest, reason in sorted(unread.items()):

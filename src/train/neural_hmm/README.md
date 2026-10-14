@@ -65,7 +65,7 @@ right-padded (mask 0, state `-1`, observation 0).
 | `true_viterbi_acc` | the accuracy of Viterbi decoding with the TRUE parameters, through the model package's own `inference.viterbi_decode`: the ceiling |
 | `majority_rate` | the share of valid test steps holding the most frequent state: the floor |
 
-**The matched-accuracy convention.** `viterbi_acc_matched` is one-to-one matched accuracy: the mapping from model states to true states is the one-to-one (Hungarian) assignment fitted on the same test labels it is then scored on. This is the standard convention for unsupervised state induction, where one-to-one (and many-to-one) accuracy is computed against the evaluated labels; fitting the assignment on those labels can only raise the score relative to a mapping fitted elsewhere, by an amount that shrinks with the number of scored steps against the `K!` candidate assignments (`K <= 4` here, and 18673 to 18979 scored test steps per run, `test_valid_steps`). The true model is held to the same rule: its states are named after the true ones, so `true_viterbi_acc` is its direct accuracy, and the same Hungarian assignment fitted on its own test path is the identity on all nine runs in §7 (re-derived read-only from each run's `config.json` through `load_splits` and `true_viterbi_path`), so its matched and direct accuracies are equal and the comparison is like for like.
+**The matched-accuracy convention.** `viterbi_acc_matched` is one-to-one matched accuracy: the mapping from model states to true states is the one-to-one (Hungarian) assignment fitted on the same test labels it is then scored on. It is therefore not a held-out measurement: fitting the assignment on those labels can only raise the score relative to a mapping fitted elsewhere, by an amount that shrinks with the number of scored steps against the `K!` candidate assignments (`K <= 4` here, and 18673 to 18979 scored test steps per run, `test_valid_steps`). The true model is held to the same rule: its states are named after the true ones, so `true_viterbi_acc` is its direct accuracy, and the same Hungarian assignment fitted on its own test path is the identity on all nine runs in §7 (re-derived read-only from each run's `config.json` through `load_splits` and `true_viterbi_path`), so its matched and direct accuracies are equal and the comparison is like for like.
 
 ## 4. Flags
 
@@ -73,7 +73,7 @@ right-padded (mask 0, state `-1`, observation 0).
 |---|---|---|
 | `--variant` | `neural-hmm` | `create_neural_hmm`; one of `NeuralHMM.MODEL_VARIANTS` |
 | `--obs-type` | `gaussian` | the data and the model (`gaussian` or `categorical`) |
-| `--n-states` | 4 | the data and the model |
+| `--n-states` | 4 | the data and the model; at least 2 (parse time, exit 2) |
 | `--obs-dim` | 2 (gaussian), `null` (categorical) | the data and the model, gaussian only; refused with categorical |
 | `--vocab-size` | 8 (categorical), `null` (gaussian) | the data and the model, categorical only; must be `>= --n-states`; refused with gaussian |
 | `--encoder` | the preset's | the model (`mlp`, `transformer`, `lstm`, `gru`, `conv`); refused for a preset that builds no encoder (`neural-hmm`) |
@@ -81,8 +81,8 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--seq-len` | 50 | the data (padded length) and, with a `transformer` encoder only, the model (its position table, `max_seq_len`) |
 | `--min-seq-len` | 25 | the data (shortest valid length) |
 | `--num-train`, `--num-val`, `--num-test` | 2000, 200, 500 | the data |
-| `--separation` | 4.0 (gaussian, `K > 1`), `null` otherwise | the data, gaussian with `K > 1` only; refused with categorical or `--n-states 1` |
-| `--stay-prob` | 0.9 (`K > 1`), `null` (`K = 1`) | the data; in `(0, 1)`; refused with `--n-states 1` |
+| `--separation` | 4.0 (gaussian), `null` (categorical) | the data, gaussian only; refused with categorical |
+| `--stay-prob` | 0.9 | the data; in `(0, 1)` |
 | `--epochs` | 60 | `fit` (maximum; early stopping may end sooner) |
 | `--batch-size` | 64 | `fit` and the evaluation passes |
 | `--learning-rate` | 0.003 | the Adam optimizer |
@@ -94,8 +94,9 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--experiment-name` | `neural_hmm_<variant>_<timestamp>` | the run directory's name |
 
 A bad value is refused before anything is written: range errors at parse time (exit 2),
-a combination the model refuses with a `ValueError` before the run directory exists
-(`--n-states 1` with `io-hmm` or `neural-crf-tagger`, which could train nothing there). A
+`--n-states 1` among them for every preset (the model refuses a one-state HMM too: its
+initial and transition distributions would be constants that never train), and a
+combination the model refuses with a `ValueError` before the run directory exists. A
 reused `--experiment-name` is refused the same way, and an existing run is never
 overwritten.
 
@@ -108,12 +109,13 @@ run is refused; `--vocab-size=8` and the abbreviation `--vocab 8` too).
 |---|---|---|
 | `--obs-dim` | `--obs-type categorical` | parse time, exit 2 |
 | `--vocab-size` | `--obs-type gaussian` (the default) | parse time, exit 2 |
-| `--separation` | `--obs-type categorical`, or `--n-states 1` | parse time, exit 2 |
-| `--stay-prob` | `--n-states 1` | parse time, exit 2 |
+| `--separation` | `--obs-type categorical` | parse time, exit 2 |
 | `--encoder` | a preset that builds no encoder (`neural-hmm`) | `ValueError` from the model build, before the run directory exists |
 
-The four data flags come from one table, `unread_arguments` in `data.py`, the same
-function that decides what `make_true_hmm` reads. When such a flag is not given it is
+The three data flags come from one table, `unread_arguments` in `data.py`, the same
+function that decides what `make_true_hmm` reads (its one-state rows, `separation` and
+`stay_prob` at `K = 1`, are never reached from the CLI, which refuses `--n-states 1`
+first). When such a flag is not given it is
 set to `null`, so `config.json` and `results_summary.json` record `null` rather than a
 default that played no part in the run. Every other flag is read by every
 configuration (`--hidden-dim` sizes the emission head even without an encoder). The

@@ -13,7 +13,8 @@ observation, of shape ``(B, T, K)``.
   - ``categorical``: a categorical over ``vocab_size`` symbols, ``log_softmax`` of the
     head's logits; a symbol outside ``[0, vocab_size)`` (``-1`` padding included) scores
     a neutral 0 in every state, an uninformative step. :class:`~.model.NeuralHMM` makes
-    one at a valid step loud by a per-sequence penalty outside the forward pass;
+    one at a valid step loud by a penalty per such step, added to the sequence
+    log-likelihood outside the forward pass;
   - ``poisson``: independent Poisson counts over ``obs_dim`` features, rate
     ``softplus(raw) + min_scale``, including the ``-log x!`` term, so the density is
     normalized.

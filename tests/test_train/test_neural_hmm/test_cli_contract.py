@@ -29,7 +29,6 @@ pointed at ``tmp_path``, never at repo-root ``results/``.
 from __future__ import annotations
 
 import json
-import re
 from typing import Dict, Tuple
 
 import keras
@@ -181,9 +180,6 @@ IGNORED_FLAGS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
     (("--vocab", "8"), "--vocab-size"),
     (("--obs-type", "categorical", "--obs-dim", "2"), "--obs-dim"),
     (("--obs-type", "categorical", "--separation", "4.0"), "--separation"),
-    (("--n-states", "1", "--separation", "4.0"), "--separation"),
-    (("--n-states", "1", "--stay-prob", "0.9"), "--stay-prob"),
-    (("--obs-type", "categorical", "--n-states", "1", "--stay-prob", "0.9"), "--stay-prob"),
 )
 
 
@@ -199,41 +195,29 @@ def test_an_ignored_data_flag_is_refused_before_anything_is_written(tmp_path, ca
     assert list(tmp_path.iterdir()) == []
 
 
-#: The presets the model refuses at one state (D-028): io-hmm's encoder would feed only a
-#: constant 1x1 transition, and a one-label CRF has a single path (loss identically 0).
-ONE_STATE_REFUSED = {"io-hmm": "transition='input_dependent'", "neural-crf-tagger": "mode='discriminative'"}
-
-
+@pytest.mark.parametrize("n_states", ["1", "0"])
 @pytest.mark.parametrize("obs_type", ["gaussian", "categorical"])
-@pytest.mark.parametrize("variant", sorted(set(train_nhmm.NeuralHMM.MODEL_VARIANTS) - set(ONE_STATE_REFUSED)))
-def test_every_other_variant_builds_at_one_state(variant, obs_type) -> None:
-    """``--n-states 1`` is accepted by the parser, so ``build_model`` must build every preset
-    the model accepts there: the model's ``n_states=1`` unread rows (``band_width``,
-    ``self_loop_init``) are never handed a non-default value by the trainer (D-027)."""
-    args = train_nhmm.parse_arguments(["--variant", variant, "--obs-type", obs_type, "--n-states", "1"])
-    model = train_nhmm.build_model(args)
-    assert model.n_states == 1 and model.band_width == 1 and model.self_loop_init == 2.0
-
-
-@pytest.mark.parametrize("obs_type", ["gaussian", "categorical"])
-@pytest.mark.parametrize("variant", sorted(ONE_STATE_REFUSED))
-def test_a_one_state_refusal_stops_the_run_before_anything_is_written(tmp_path, variant, obs_type) -> None:
-    """D-028: io-hmm and neural-crf-tagger at ``--n-states 1`` raise the model's
-    ``ValueError`` from ``build_model``, before the run directory exists."""
-    assert set(ONE_STATE_REFUSED) <= set(train_nhmm.NeuralHMM.MODEL_VARIANTS)
+@pytest.mark.parametrize("variant", sorted(train_nhmm.NeuralHMM.MODEL_VARIANTS))
+def test_fewer_than_two_states_is_refused_before_anything_is_written(tmp_path, capsys, variant, obs_type,
+                                                                     n_states) -> None:
+    """D-029: ``--n-states`` below 2 exits 2 at parse time for every preset, before any
+    GPU, data or model work and before the run directory exists, with the model's reason
+    (an HMM needs two states). The model refuses it too, but only after setup."""
     tiny = ("--num-train", "8", "--num-val", "4", "--num-test", "4", "--seq-len", "5",
             "--min-seq-len", "2", "--epochs", "1")
-    with pytest.raises(ValueError, match=re.escape(f"n_states=1 with {ONE_STATE_REFUSED[variant]}")):
-        train_nhmm.main(["--variant", variant, "--obs-type", obs_type, "--n-states", "1", *tiny,
+    with pytest.raises(SystemExit) as exit_info:
+        train_nhmm.main(["--variant", variant, "--obs-type", obs_type, "--n-states", n_states, *tiny,
                          "--output-dir", str(tmp_path), "--experiment-name", "one_state"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert f"--n-states must be >= 2, got {n_states}" in err and "at least two states" in err, err
     assert list(tmp_path.iterdir()) == []
+    assert train_nhmm.parse_arguments(["--variant", variant, "--obs-type", obs_type, "--n-states", "2"]).n_states == 2
 
 
 @pytest.mark.parametrize("argv,nulls", [
     ((), {"vocab_size"}),
     (("--obs-type", "categorical"), {"obs_dim", "separation"}),
-    (("--n-states", "1"), {"vocab_size", "separation", "stay_prob"}),
-    (("--obs-type", "categorical", "--n-states", "1"), {"obs_dim", "separation", "stay_prob"}),
 ])
 def test_an_unread_data_flag_that_is_not_given_is_none(argv, nulls) -> None:
     """Exactly the unread data flags are ``None``; every other flag keeps its default."""

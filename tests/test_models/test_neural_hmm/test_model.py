@@ -24,22 +24,24 @@ Guards (SC5), each through the shared oracle with its real signature:
   sequences, ``mixed_float16`` (float32 outputs, D-010) and float64 arms;
 * the generative right shift (D-022), per generative preset and encoder type with
   randomized weights: ``sum_x p(x) = 1`` by exact enumeration up to length 6, step
-  ``t``'s potentials read ``x_{<t}`` only (RED-proven against a no-shift mutant and a
-  leak that starts at step 4), and they DO read ``x_{t-1}`` (RED-proven against a
-  shift by two; D-027);
+  ``t``'s potentials read ``x_{<t}`` only, at length 6 at every step and at length 16 at
+  late steps (RED-proven against a no-shift mutant and leaks that start at step 4 and,
+  D-029, step 7), and they DO read ``x_{t-1}``, at the same two lengths (RED-proven
+  against a shift by two, from the start and, D-029, from step 7; D-027);
 * out-of-range inputs (D-022, D-027): a categorical symbol or a gold label outside its
   range at a VALID step drives the log-likelihood to the sentinel's scale and the loss
-  to a huge finite value with finite gradients; at a padded step it stays ignored; and a
-  bad symbol leaves ``posteriors`` and ``viterbi`` exact over the in-range evidence
-  (brute-force reference with that step uninformative);
+  to a huge finite value with finite gradients; at a padded step it stays ignored; ``k``
+  bad valid steps add exactly ``k`` sentinels and bad padded steps none (RED-proven
+  against a doubled and a once-per-sequence penalty, D-029); and a bad symbol leaves
+  ``posteriors`` and ``viterbi`` exact for the sequence with that step's emission
+  uninformative and token 0 in the encoder's input (brute-force reference);
 * factories: ``from_variant`` overrides, ``pretrained=True``, unknown variants,
   ``create_neural_hmm`` == ``from_variant``;
 * ignored arguments (D-025): a non-default value for an argument the configuration does
-  not read is refused, naming it, its value and the reason, one row per rule branch
-  (including ``n_states=1``, D-027); the same argument at its default is accepted; every
-  preset sets only what it reads; ``n_states < 2`` is refused for input-dependent
-  transitions and the discriminative mode (D-028), every other preset builds at one state,
-  where the transition knobs measurably change nothing; ``from_config`` resets a stale
+  not read is refused, naming it, its value and the reason, one row per rule branch; the
+  same argument at its default is accepted; every preset sets only what it reads;
+  ``n_states < 2`` is refused for every preset through every construction path, where the
+  one-state transition is measurably constant (D-029); ``from_config`` resets a stale
   unread value in an old config (D-026).
 
 Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDNN on a GPU.
@@ -686,8 +688,15 @@ def test_the_helpers_agree_with_the_inference_module():
 
 
 #: One preset per way a categorical symbol is read: the emission alone (neural-hmm), the
-#: emission and an encoder (io-hmm, autoregressive), the embedding alone (the CRF).
-CATEGORICAL_READERS = ["neural-hmm", "io-hmm", "autoregressive-neural-hmm", "neural-crf-tagger"]
+#: emission and an encoder (io-hmm, autoregressive), the emission and an encoder under the
+#: banded topology, whose transition holds forbidden entries (the segmenter, D-029), the
+#: embedding alone (the CRF). Every preset, so a new one fails the coverage check below.
+CATEGORICAL_READERS = ["neural-hmm", "io-hmm", "autoregressive-neural-hmm", "left-to-right-segmenter",
+                       "neural-crf-tagger"]
+
+
+def test_the_categorical_readers_are_every_preset():
+    assert sorted(CATEGORICAL_READERS) == VARIANTS
 
 
 def _loss_and_grads(model, inputs, y):
@@ -810,19 +819,81 @@ def test_an_out_of_range_symbol_leaves_viterbi_and_posteriors_exact(variant, bad
     np.testing.assert_allclose(score, best_score, rtol=0, atol=1e-4)
 
 
-def test_n_states_one_is_finite():
-    model = _model("neural-hmm", n_states=1)
-    out = model(_inputs())
-    assert np.isfinite(_loss(model, _inputs()))
-    assert (_np(out["log_A"]) == 0.0).all()
+#: Valid lengths of the penalty-count batch, the bad VALID steps of each row (the count the
+#: log-likelihood must carry) and the bad PADDED steps (which must add nothing).
+PENALTY_LENGTHS = (T, T, 5, 3)
+PENALTY_BAD_VALID = ((0, 3, 6), (2,), (1, 4), ())
+PENALTY_BAD_PADDED = ((), (), (5, 6), (3, 4, 5, 6))
+
+
+@pytest.mark.parametrize("variant", CATEGORICAL_READERS)
+def test_the_out_of_range_penalty_counts_the_bad_steps(variant):
+    """D-029: k bad symbols at valid steps add exactly k sentinels, bad padded steps none.
+
+    The reference is the same potentials' likelihood without any penalty, through the
+    inference module: ``forward_log_likelihood`` (generative) or ``path_log_score`` minus
+    it (the CRF). Rows hold 3, 1, 2 and 0 bad valid steps, so a doubled penalty (6, 2, 4)
+    and one sentinel per sequence (1, 1, 1) both miss; rows 2 and 3 also hold bad padded
+    steps. The bad valid steps' generative emission is 0 in every state (the neutral
+    potentials the reference reads).
+    """
+    model = _model(variant, obs_type="categorical")
+    x = _inputs("categorical", lengths=PENALTY_LENGTHS)
+    y = _y(model, lengths=PENALTY_LENGTHS)
+    bad = {"obs": x["obs"].copy(), "mask": x["mask"]}
+    symbols = itertools.cycle([-1, V, V + 7])
+    for steps_per_row in (PENALTY_BAD_VALID, PENALTY_BAD_PADDED):
+        for row, steps in enumerate(steps_per_row):
+            for step in steps:
+                bad["obs"][row, step] = next(symbols)
+    assert all(bad["mask"][row, step] > 0 for row, steps in enumerate(PENALTY_BAD_VALID) for step in steps)
+    assert all(bad["mask"][row, step] == 0 for row, steps in enumerate(PENALTY_BAD_PADDED) for step in steps)
+
+    out = model(bad, training=False)
+    args = (out["log_pi"], out["log_A"], out["log_emit"], bad["mask"])
+    neutral = _np(inference.forward_log_likelihood(*args)).astype("float64")
+    if y is not None:
+        neutral = _np(inference.path_log_score(*args[:3], y, bad["mask"])).astype("float64") - neutral
+    else:
+        log_emit = _np(out["log_emit"])
+        assert all((log_emit[row, step] == 0.0).all()
+                   for row, steps in enumerate(PENALTY_BAD_VALID) for step in steps)
+    got = _np(model.log_likelihood(bad, y)).astype("float64")
+    sentinel = float(mask_sentinel("float32"))
+    expected = np.array([len(steps) for steps in PENALTY_BAD_VALID], dtype="float64")
+    counts = np.rint((got - neutral) / sentinel)
+    assert counts.tolist() == expected.tolist(), f"sentinels per row: {counts} (expected {expected})"
+    # float32 resolution at 3e9 is 256; the in-range part must be untouched to that grain.
+    np.testing.assert_allclose(got - neutral, expected * sentinel, rtol=0, atol=1024.0)
+    np.testing.assert_allclose(got[expected == 0], neutral[expected == 0], rtol=0, atol=1e-4)
+
+
+@pytest.mark.parametrize("n_states", [1, 0])
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_fewer_than_two_states_is_refused_for_every_preset(variant, n_states):
+    """D-029: an HMM needs two states. The message names n_states and why; every
+    construction path refuses (the constructor, ``from_variant``, ``create_neural_hmm``),
+    and K = 2 builds and round-trips."""
+    kwargs = _shape_kwargs({"n_states": n_states})
+    for build in (lambda: NeuralHMM(**{**NeuralHMM.MODEL_VARIANTS[variant], **kwargs}),
+                  lambda: NeuralHMM.from_variant(variant, **kwargs),
+                  lambda: create_neural_hmm(variant, **kwargs)):
+        with pytest.raises(ValueError, match=re.escape(f"n_states={n_states} is refused")) as info:
+            build()
+        message = str(info.value)
+        assert "at least two states" in message and "never train" in message and "n_states >= 2" in message
+    model = create_neural_hmm(variant, **_shape_kwargs({"n_states": 2}))
+    assert model.n_states == 2
+    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
 
 
 @pytest.mark.parametrize("transition_class", [StaticTransition, InputDependentTransition])
-def test_at_one_state_the_transition_knobs_change_nothing(transition_class):
-    """D-027: why band_width and self_loop_init are unread at n_states=1 (and why the rule
-    is K = 1 only). At one state every topology mask is all-true and the 1x1 transition
-    normalizes to log 1 = 0, so neither knob (nor the topology) changes an output or
-    receives a gradient; at two states each one changes the output."""
+def test_at_one_state_the_transition_is_constant(transition_class):
+    """D-029: why ``n_states < 2`` is refused in every configuration. At one state every
+    topology mask is all-true and the 1x1 transition normalizes to log 1 = 0: neither the
+    logits nor any knob (topology, band_width, self_loop_init) changes an output, and
+    ``pi_logits`` and ``transition_logits`` get exactly-zero gradients; at two states each
+    knob changes the output. The layer itself still accepts one state; the model refuses."""
     context = np.random.default_rng(0).normal(size=(2, 5, 3)).astype("float32")
 
     def outputs(n_states, **kwargs):
@@ -834,13 +905,13 @@ def test_at_one_state_the_transition_knobs_change_nothing(transition_class):
         with tf.GradientTape() as tape:
             log_pi, log_A = layer(context)
             total = keras.ops.sum(log_pi) + keras.ops.sum(log_A * np.arange(1.0, 6.0)[None, :, None, None])
-        grad = tape.gradient(total, layer.transition_logits)
-        return _np(log_pi), _np(log_A), _np(grad)
+        grad_a, grad_pi = tape.gradient(total, [layer.transition_logits, layer.pi_logits])
+        return _np(log_pi), _np(log_A), _np(grad_a), _np(grad_pi)
 
     variants = [{"topology": "banded", "band_width": 0}, {"topology": "banded", "band_width": 3},
                 {"topology": "left_to_right"}, {"self_loop_init": 7.0}]
     single = outputs(1)
-    assert (single[0] == 0.0).all() and (single[1] == 0.0).all() and (single[2] == 0.0).all()
+    assert all((part == 0.0).all() for part in single), single
     for kwargs in variants:
         for got, want in zip(outputs(1, **kwargs), single):
             np.testing.assert_array_equal(got, want, err_msg=str(kwargs))
@@ -872,6 +943,13 @@ ENUM_V, ENUM_T = 3, 6
 #: 4.0e-7 (GPU 1); the no-shift mutant misses by 7.5e-3 (io-hmm/conv) to 0.17
 #: (autoregressive/lstm) at lengths up to 4, the step-4 leak by 5e-4 to 0.99 at 5 and 6.
 NORMALIZATION_ATOL = 1e-5
+#: The long arm of the perturbation guards (D-029): a sequence of LONG_T steps, perturbed
+#: at late split points only. The enumeration stops at 6 steps and the lstm/gru encoders
+#: have an unbounded receptive field, so a leak that starts at step 6 or 7 passed every
+#: guard (review pass 3, concern 3). LONG_T is SMALL's max_seq_len (the transformer's
+#: position table).
+LONG_T = 16
+LONG_SPLITS = (6, 9, 11, 15)
 
 
 def _every_sequence(length, steps=ENUM_T, seed=0):
@@ -930,31 +1008,38 @@ def test_the_generative_potentials_read_only_the_past(variant, encoder_type):
     emission's parameters must not read the symbol they score. Arm 1 cannot see that leak:
     log_emit[:, s] depends on x_s legitimately. So for sequences that share x_{<s} and
     differ only at x_s, every state's emission must sum to 1 over the symbols at step s.
+    Each arm runs at 6 steps, every split point, and at LONG_T steps, the late split
+    points LONG_SPLITS (D-029).
     """
-    steps = 6
     model = _randomized(variant, encoder_type, "gaussian")
     rng = np.random.default_rng(5)
-    obs = rng.normal(size=(2, steps, D)).astype("float32")
-    mask = np.ones((2, steps), dtype="float32")
-    clean = model({"obs": obs, "mask": mask}, training=False)
-    for s in range(steps):
-        moved = obs.copy()
-        moved[:, s:] += 5.0 * rng.normal(size=moved[:, s:].shape).astype("float32")
-        out = model({"obs": moved, "mask": mask}, training=False)
-        assert np.array_equal(_np(out["log_emit"])[:, :s], _np(clean["log_emit"])[:, :s]), f"log_emit, s={s}"
-        assert np.array_equal(_np(out["log_A"])[:, :s + 1], _np(clean["log_A"])[:, :s + 1]), f"log_A, s={s}"
-        assert not np.array_equal(_np(out["log_emit"])[:, s], _np(clean["log_emit"])[:, s])
+    for steps, splits in ((6, range(6)), (LONG_T, LONG_SPLITS)):
+        obs = rng.normal(size=(2, steps, D)).astype("float32")
+        mask = np.ones((2, steps), dtype="float32")
+        clean = model({"obs": obs, "mask": mask}, training=False)
+        for s in splits:
+            moved = obs.copy()
+            moved[:, s:] += 5.0 * rng.normal(size=moved[:, s:].shape).astype("float32")
+            out = model({"obs": moved, "mask": mask}, training=False)
+            where = f"T={steps}, s={s}"
+            assert np.array_equal(_np(out["log_emit"])[:, :s], _np(clean["log_emit"])[:, :s]), f"log_emit, {where}"
+            assert np.array_equal(_np(out["log_A"])[:, :s + 1], _np(clean["log_A"])[:, :s + 1]), f"log_A, {where}"
+            assert not np.array_equal(_np(out["log_emit"])[:, s], _np(clean["log_emit"])[:, s]), where
 
     model = _randomized(variant, encoder_type, "categorical")
-    # Arm 2 runs over all ENUM_T = 6 steps, so a leak that starts late is seen (D-027).
-    base = np.random.default_rng(6).integers(0, ENUM_V, ENUM_T).astype("int32")
-    symbols = np.repeat(base[None], ENUM_T * ENUM_V, axis=0)
-    for s in range(ENUM_T):
-        symbols[s * ENUM_V:(s + 1) * ENUM_V, s] = np.arange(ENUM_V)
-    out = model({"obs": symbols, "mask": np.ones(symbols.shape, "float32")}, training=False)
-    log_emit = _np(out["log_emit"]).astype("float64").reshape(ENUM_T, ENUM_V, ENUM_T, K)
-    per_step = np.stack([_logsumexp(log_emit[s, :, s, :], axis=0) for s in range(ENUM_T)])  # (T, K)
-    assert np.abs(per_step).max() <= NORMALIZATION_ATOL, f"log sum_v p(x_s = v | z_s = k): {per_step}"
+    # Arm 2 runs over all ENUM_T = 6 steps, so a leak that starts late is seen (D-027),
+    # and at the late steps of a LONG_T sequence (D-029).
+    for steps, splits in ((ENUM_T, tuple(range(ENUM_T))), (LONG_T, LONG_SPLITS)):
+        base = np.random.default_rng(6).integers(0, ENUM_V, steps).astype("int32")
+        symbols = np.repeat(base[None], len(splits) * ENUM_V, axis=0)
+        for i, s in enumerate(splits):
+            symbols[i * ENUM_V:(i + 1) * ENUM_V, s] = np.arange(ENUM_V)
+        out = model({"obs": symbols, "mask": np.ones(symbols.shape, "float32")}, training=False)
+        log_emit = _np(out["log_emit"]).astype("float64").reshape(len(splits), ENUM_V, steps, K)
+        per_step = np.stack([_logsumexp(log_emit[i, :, s, :], axis=0) for i, s in enumerate(splits)])
+        assert np.abs(per_step).max() <= NORMALIZATION_ATOL, (
+            f"T={steps}, splits {splits}: log sum_v p(x_s = v | z_s = k): {per_step}"
+        )
 
 
 #: The generative cases with an input-dependent potential, and which potential reads
@@ -972,19 +1057,22 @@ def test_the_generative_potentials_read_the_previous_step(variant, encoder_type)
     from x_{<t-1} is still a valid likelihood, but the model no longer conditions on the
     previous observation (an all-green suite measured it, review pass 2, concern 3).
     """
-    steps = 6
     model = _randomized(variant, encoder_type, "gaussian")
     key = "log_A" if variant == "io-hmm" else "log_emit"
     rng = np.random.default_rng(7)
-    obs = rng.normal(size=(2, steps, D)).astype("float32")
-    mask = np.ones((2, steps), dtype="float32")
-    clean = _np(model({"obs": obs, "mask": mask}, training=False)[key])
-    for s in range(1, steps):
-        moved = obs.copy()
-        moved[:, s - 1] += 3.0 * rng.normal(size=moved[:, s - 1].shape).astype("float32")
-        out = _np(model({"obs": moved, "mask": mask}, training=False)[key])
-        change = np.abs(out[:, s] - clean[:, s]).reshape(2, -1).max(axis=1)
-        assert (change > 1e-4).all(), f"{key}[:, {s}] did not read x_{s - 1}: max change per row {change}"
+    # Every step of a 6-step sequence, and the late steps of a LONG_T one (D-029).
+    for steps, splits in ((6, range(1, 6)), (LONG_T, LONG_SPLITS)):
+        obs = rng.normal(size=(2, steps, D)).astype("float32")
+        mask = np.ones((2, steps), dtype="float32")
+        clean = _np(model({"obs": obs, "mask": mask}, training=False)[key])
+        for s in splits:
+            moved = obs.copy()
+            moved[:, s - 1] += 3.0 * rng.normal(size=moved[:, s - 1].shape).astype("float32")
+            out = _np(model({"obs": moved, "mask": mask}, training=False)[key])
+            change = np.abs(out[:, s] - clean[:, s]).reshape(2, -1).max(axis=1)
+            assert (change > 1e-4).all(), (
+                f"T={steps}: {key}[:, {s}] did not read x_{s - 1}: max change per row {change}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -1128,10 +1216,6 @@ INAPPLICABLE = [
     # band_width off the banded topology
     ("neural-hmm", {}, "band_width", 2, "topology='ergodic'"),
     ("neural-hmm", {"topology": "left_to_right"}, "band_width", 2, "topology='left_to_right'"),
-    # one state (D-027): every topology mask is all-true and the 1x1 transition is log 1
-    ("left-to-right-segmenter", {"n_states": 1}, "band_width", 2, "n_states=1"),
-    ("neural-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
-    ("autoregressive-neural-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
     # the emission: no density floor for symbols or CRF potentials, no state embeddings in a CRF
     ("neural-hmm", {"obs_type": "categorical"}, "min_scale", 0.5, "categorical emission"),
     ("neural-crf-tagger", {}, "min_scale", 0.5, "mode='discriminative'"),
@@ -1176,68 +1260,6 @@ def test_every_preset_constructs_and_sets_only_what_it_reads(variant, obs_type):
     unread = NeuralHMM.unread_arguments({**preset, **_shape_kwargs({"obs_type": obs_type})})
     assert not set(preset) & set(unread), sorted(set(preset) & set(unread))
     model = create_neural_hmm(variant, **_shape_kwargs({"obs_type": obs_type}))
-    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
-
-
-#: The presets refused at n_states=1 (D-028), written out rather than derived from the
-#: rule under test: io-hmm's encoder feeds only a 1x1 transition, and a one-label CRF has
-#: one path.
-ONE_STATE_REFUSED = ("io-hmm", "neural-crf-tagger")
-ONE_STATE_VARIANTS = [variant for variant in VARIANTS if variant not in ONE_STATE_REFUSED]
-
-#: One row per refused setting (D-028): through a preset, and the bare setting on a
-#: configuration that sets nothing else (so the refusal is keyed on the setting, not the
-#: preset name), with the reason the message must give.
-ONE_STATE_REFUSALS = [
-    ("io-hmm", {}, "transition='input_dependent'", "never receive a gradient"),
-    ("neural-hmm", {"transition": "input_dependent"}, "transition='input_dependent'", "never receive a gradient"),
-    ("neural-crf-tagger", {}, "mode='discriminative'", "identically 0"),
-    ("neural-hmm", {"mode": "discriminative"}, "mode='discriminative'", "identically 0"),
-]
-
-
-def test_the_one_state_refusals_cover_exactly_the_degenerate_presets():
-    """A new preset with either setting must join the hand-written list."""
-    degenerate = {variant for variant, preset in NeuralHMM.MODEL_VARIANTS.items()
-                  if preset["transition"] == "input_dependent" or preset["mode"] == "discriminative"}
-    assert degenerate == set(ONE_STATE_REFUSED)
-    assert {variant for variant, *_ in ONE_STATE_REFUSALS} - {"neural-hmm"} == set(ONE_STATE_REFUSED)
-
-
-@pytest.mark.parametrize("n_states", [1, 0])
-@pytest.mark.parametrize("variant,extra,setting,why", ONE_STATE_REFUSALS,
-                         ids=[f"{v}-{s}" for v, _, s, _ in ONE_STATE_REFUSALS])
-def test_one_state_is_refused_where_nothing_would_train(variant, extra, setting, why, n_states):
-    """D-028: the message names n_states, the setting and why; every construction path
-    refuses (the constructor, ``from_variant``, ``create_neural_hmm``), and K = 2 builds."""
-    kwargs = _shape_kwargs({**extra, "n_states": n_states})
-    for build in (lambda: NeuralHMM(**{**NeuralHMM.MODEL_VARIANTS[variant], **kwargs}),
-                  lambda: NeuralHMM.from_variant(variant, **kwargs),
-                  lambda: create_neural_hmm(variant, **kwargs)):
-        with pytest.raises(ValueError, match=re.escape(f"n_states={n_states} with {setting}")) as info:
-            build()
-        assert why in str(info.value) and "n_states >= 2" in str(info.value), str(info.value)
-    model = create_neural_hmm(variant, **_shape_kwargs({**extra, "n_states": 2}))
-    assert model.n_states == 2
-    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
-
-
-@pytest.mark.parametrize("obs_type", ["gaussian", "poisson", "categorical"])
-@pytest.mark.parametrize("variant", ONE_STATE_VARIANTS)
-def test_every_other_preset_builds_at_one_state(variant, obs_type):
-    """The n_states=1 rows (D-027) must not stop a preset D-028 accepts from building at
-    K = 1: a preset key the rule lists there (the segmenter's band_width) holds its default."""
-    shape = _shape_kwargs({"obs_type": obs_type, "n_states": 1})
-    preset = NeuralHMM.MODEL_VARIANTS[variant]
-    unread = NeuralHMM.unread_arguments({**preset, **shape})
-    assert {"band_width", "self_loop_init"} <= set(unread)
-    assert all(preset[name] == _defaults()[name] for name in set(preset) & set(unread))
-    model = create_neural_hmm(variant, **shape)
-    x = _inputs(obs_type)
-    out = model(x, training=False)
-    assert (_np(out["log_A"]) == 0.0).all() and (_np(out["log_pi"]) == 0.0).all()
-    assert model.mode == "generative" and model.transition_type == "static"
-    assert np.isfinite(_loss(model, x))
     assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
 
 

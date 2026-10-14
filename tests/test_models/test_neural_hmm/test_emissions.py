@@ -188,7 +188,7 @@ def test_a_categorical_symbol_outside_the_vocabulary_is_uninformative():
     """D-027: every out-of-range symbol, ``-1`` included, scores exactly 0 in EVERY state.
 
     The same value in every state is an uninformative step, so the forward recursion,
-    Viterbi and the posteriors stay exact over the in-range evidence. The emission must
+    Viterbi and the posteriors treat that step as a missing observation. The emission must
     NOT carry ``mask_sentinel``: -1e9 in every state of one step absorbed every float32
     forward/backward value of the row (D-022's first fix). The model makes such a symbol
     loud by a penalty outside the forward pass; test_model.py pins that.

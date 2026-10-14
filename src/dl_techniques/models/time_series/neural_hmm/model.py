@@ -104,14 +104,13 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
 
     An argument the configuration does not read must keep its default:
     :meth:`unread_arguments` names those arguments (the encoder's without an encoder, the
-    other encoder types' with one, ``band_width`` off ``banded``, ``band_width`` and
-    ``self_loop_init`` at ``n_states=1``, ``min_scale`` for a categorical or
-    discriminative emission, ``state_emb_dim`` in discriminative mode), and a non-default
-    value for one raises ``ValueError`` rather than being ignored.
+    other encoder types' with one, ``band_width`` off ``banded``, ``min_scale`` for a
+    categorical or discriminative emission, ``state_emb_dim`` in discriminative mode), and
+    a non-default value for one raises ``ValueError`` rather than being ignored.
 
-    :param n_states: Number of hidden states ``K``; positive, and at least 2 with
-        ``transition='input_dependent'`` or ``mode='discriminative'`` (at one state their
-        trainable part receives no gradient, so ``ValueError``).
+    :param n_states: Number of hidden states ``K``; at least 2 in every configuration
+        (with one, the initial and transition distributions are constants that never
+        train, so ``ValueError``).
     :param mode: ``generative`` (unsupervised, maximizes ``log p(x)``) or
         ``discriminative`` (a linear-chain CRF trained on state labels).
     :param obs_type: ``gaussian`` (real ``(B, T, obs_dim)``), ``poisson`` (counts
@@ -258,22 +257,16 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
                 f"mode='discriminative' scores states from the encoder context already; "
                 f"emission_context must be 'none', got '{emission_context}'."
             )
-        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-028: refuse n_states < 2 for these two
-        # settings. Do NOT accept it and document the degeneracy (the L-4 note once did): a
-        # 1x1 log_softmax is constant, so the context projection and encoder never get a
-        # gradient, and the one-label CRF loss is identically 0. Only these two: every other
-        # configuration still trains its emission at one state.
-        if n_states < 2 and transition == "input_dependent":
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-029: refuse n_states < 2 for EVERY
+        # configuration. Do NOT go back to a per-setting list of exceptions (D-028 refused only
+        # input_dependent and discriminative): at one state pi_logits and transition_logits
+        # feed a softmax over one entry, so they are constants in every configuration, and a
+        # one-state model is a constant-transition density model, not an HMM.
+        if n_states < 2:
             raise ValueError(
-                f"n_states={n_states} with transition='input_dependent' is refused: the 1x1 "
-                f"transition normalizes to log 1 = 0 whatever the context, so the encoder and the "
-                f"context projection never receive a gradient. Use n_states >= 2."
-            )
-        if n_states < 2 and mode == "discriminative":
-            raise ValueError(
-                f"n_states={n_states} with mode='discriminative' is refused: a linear-chain CRF "
-                f"over one label has a single path, so its loss is identically 0 and nothing "
-                f"trains. Use n_states >= 2."
+                f"n_states={n_states} is refused: an HMM needs at least two states; with one, the "
+                f"initial and transition distributions are constants that never train. Use "
+                f"n_states >= 2."
             )
 
         self.n_states = n_states
@@ -506,8 +499,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         A bad symbol is a ``categorical`` one outside ``[0, vocab_size)``. Both modes read
         it silently: the generative emission scores it a neutral 0 (an uninformative step)
         and the embedding maps it to token 0. This term, added to the sequence
-        log-likelihood OUTSIDE the forward pass, is what makes it loud (D-027), so the
-        potentials, ``viterbi`` and ``posteriors`` stay exact over the in-range evidence.
+        log-likelihood OUTSIDE the forward pass, is what makes it loud (D-027); the
+        potentials do not carry it, so ``viterbi`` and ``posteriors`` are exact for the
+        sequence with that step's emission uninformative and token 0 in its place in the
+        encoder's input (a generative encoder reads it only at later steps).
 
         :param inputs: ``{"obs", "mask"}``.
         :param mask: ``(B, T)`` float mask in the accumulation dtype.
@@ -620,9 +615,11 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     def viterbi(self, inputs: Dict[str, Any]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Return the most likely state path of every sequence.
 
-        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is decoded as
-        an uninformative step (its emission scores 0 in every state); it is not flagged
-        here: :meth:`log_likelihood` exposes it.
+        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is decoded
+        with that step's generative emission uninformative (0 in every state); an encoder
+        reads token 0 in its place, so in a preset with an encoder the context of the
+        later steps (every step, in the CRF) sees token 0 there. It is not flagged here:
+        :meth:`log_likelihood` carries the sentinel for it.
 
         :param inputs: ``{"obs", "mask"}``.
         :return: ``(path, score)``: ``path`` is ``(B, T)`` int32 with ``-1`` at padded
@@ -635,9 +632,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     def posteriors(self, inputs: Dict[str, Any]) -> keras.KerasTensor:
         """Return the posterior state marginals ``p(z_t = k | x)``.
 
-        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is treated as
-        an uninformative step (as in :meth:`viterbi`), so the rows still sum to 1; only
-        :meth:`log_likelihood` and the loss flag it.
+        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is read as in
+        :meth:`viterbi` (its emission uninformative, token 0 in the encoder's input), so
+        the rows still sum to 1; only :meth:`log_likelihood` and the loss carry the
+        sentinel for it.
 
         :param inputs: ``{"obs", "mask"}``.
         :return: ``(B, T, K)`` probabilities, summing to 1 at valid steps and 0 at padded ones.
@@ -752,14 +750,6 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
                     unread[name] = f"encoder_type='{encoder_type}' does not read it (only {', '.join(readers)})"
         if resolved["topology"] != "banded":
             unread["band_width"] = f"topology='{resolved['topology']}' has no band (only 'banded' reads it)"
-        if resolved.get("n_states") == 1:
-            # One state: every topology mask is all-true and the 1x1 transition normalizes
-            # to log 1 = 0 whatever its logit. topology itself is not listed: it is a
-            # preset's structural choice (the segmenter's "banded"), and refusing it would
-            # stop that preset from building at K = 1.
-            single = "n_states=1: the single 1x1 transition normalizes to log 1 = 0 whatever it is"
-            unread.setdefault("band_width", single)
-            unread["self_loop_init"] = single
         if resolved["mode"] == "discriminative":
             unread["state_emb_dim"] = "mode='discriminative' scores states with Dense(K) on the encoder context"
             unread["min_scale"] = "mode='discriminative' has no emission density to floor"
