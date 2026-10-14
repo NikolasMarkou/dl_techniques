@@ -1,6 +1,6 @@
 """Vision task heads, and the factory that picks one.
 
-This module holds eight layer classes and six module-level helpers. The
+This module holds eight layer classes and five module-level helpers. The
 classes turn a backbone feature map into task predictions. The helpers pick a
 class and configure it.
 
@@ -16,7 +16,8 @@ Classes
   The only head here that returns a bare tensor.
 * :class:`DepthEstimationHead` -- one depth map, plus the tensor it was
   scaled from.
-* :class:`ClassificationHead` -- one label for the whole image.
+* :class:`ClassificationHead` -- one label for the whole image. Returns
+  pre-softmax ``'logits'`` and their softmax under ``'probabilities'``.
 * :class:`InstanceSegmentationHead` -- detection outputs plus instance masks.
 * :class:`EnhancementHead` -- a restored or upscaled image.
 * :class:`MultiTaskHead` -- several heads behind one layer. It does not
@@ -32,6 +33,9 @@ Helpers
   of three configuration formats.
 * :class:`HeadConfiguration` -- three keyword-argument presets per task type:
   default, efficient and high-performance.
+* :func:`merge_head_config_overrides` -- merge a model's
+  ``head_config_overrides`` into its head config, refusing the keys the model
+  owns (``name``, ``num_classes``, ``task_type``).
 
 The task types and the configuration objects live in
 ``vision/task_types.py``. The ``VisionTaskType`` docstring there lists the 10
@@ -45,6 +49,10 @@ Example
 >>> out = head(features)
 >>> sorted(out)
 ['logits', 'probabilities']
+
+``out['logits']`` is the linear classifier output. ``out['probabilities']``
+is ``softmax(out['logits'])``. Compile a model that returns the logits with
+``from_logits=True``.
 """
 
 import keras
@@ -123,8 +131,9 @@ class BaseVisionHead(keras.layers.Layer):
     common layers are weight the forward pass never reaches, not a stage.
 
     The other two stages are not uniform either. :class:`ClassificationHead`
-    applies ``attention`` and never ``ffn``, even though ``use_ffn`` defaults
-    to ``True``. :class:`EnhancementHead` applies none of the four.
+    overrides ``_create_common_layers`` and builds ``attention`` only: no
+    ``norm``, no ``ffn`` and no ``dropout``, whatever ``use_ffn`` and
+    ``dropout_rate`` say. :class:`EnhancementHead` applies none of the four.
     :class:`MultiTaskHead` does not inherit from this class at all. Read the
     subclass diagram, not this one, for what a given head runs.
 
@@ -143,8 +152,8 @@ class BaseVisionHead(keras.layers.Layer):
     :type use_attention: bool
     :param attention_type: Which registered attention type to build.
     :type attention_type: AttentionType
-    :param use_ffn: Whether to build an FFN block. It defaults to ``True``,
-        and :class:`ClassificationHead` never applies the result.
+    :param use_ffn: Whether to build an FFN block. It defaults to ``True``.
+        :class:`ClassificationHead` builds no FFN whatever it says.
     :type use_ffn: bool
     :param ffn_type: Which registered FFN type to build.
     :type ffn_type: FFNType
@@ -226,14 +235,8 @@ class BaseVisionHead(keras.layers.Layer):
         Build the four layers every vision head shares.
 
         ``norm`` is always built. ``attention``, ``ffn`` and ``dropout`` are
-        built only when their flag or rate asks for them.
-
-        The attention branch has three cases. ``'multi_head'`` and ``'cbam'``
-        get their own argument sets. Every other type goes through
-        ``assemble_attention_config``, which drops any keyword the type does
-        not declare. ``create_attention_layer`` itself raises ``ValueError``
-        on such a keyword. So passing ``dim`` to a type that has no such
-        parameter would fail construction outright.
+        built only when their flag or rate asks for them. The attention
+        branch lives in ``_create_attention_layer``.
 
         Called from ``__init__``, following the package rule that layers are
         created in ``__init__``.
@@ -249,6 +252,49 @@ class BaseVisionHead(keras.layers.Layer):
         )
 
         # Optional attention mechanism
+        self._create_attention_layer()
+
+        # Optional FFN block
+        if self.use_ffn:
+            if self.ffn_type == 'swiglu':
+                self.ffn = create_ffn_layer(
+                    'swiglu',
+                    output_dim=self.hidden_dim,
+                    ffn_expansion_factor=self.ffn_expansion_factor,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+            else:
+                self.ffn = create_ffn_layer(
+                    self.ffn_type,
+                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
+                    output_dim=self.hidden_dim,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+
+        # Dropout layer
+        if self.dropout_rate > 0:
+            self.dropout = layers.Dropout(self.dropout_rate)
+
+    def _create_attention_layer(self) -> None:
+        """
+        Build ``attention`` when ``use_attention`` is set, else nothing.
+
+        The one place the attention branch is written. Both
+        ``_create_common_layers`` and :class:`ClassificationHead`'s override
+        of it call this.
+
+        The attention branch has three cases. ``'multi_head'`` and ``'cbam'``
+        get their own argument sets. Every other type goes through
+        ``assemble_attention_config``, which drops any keyword the type does
+        not declare. ``create_attention_layer`` itself raises ``ValueError``
+        on such a keyword. So passing ``dim`` to a type that has no such
+        parameter would fail construction outright.
+
+        :return: None.
+        :rtype: None
+        """
         if self.use_attention:
             if self.attention_type == 'multi_head':
                 self.attention = create_attention_layer(
@@ -278,29 +324,6 @@ class BaseVisionHead(keras.layers.Layer):
                         self.attention_type, {'dim': self.hidden_dim}
                     )
                 )
-
-        # Optional FFN block
-        if self.use_ffn:
-            if self.ffn_type == 'swiglu':
-                self.ffn = create_ffn_layer(
-                    'swiglu',
-                    output_dim=self.hidden_dim,
-                    ffn_expansion_factor=self.ffn_expansion_factor,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-            else:
-                self.ffn = create_ffn_layer(
-                    self.ffn_type,
-                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
-                    output_dim=self.hidden_dim,
-                    dropout_rate=self.dropout_rate,
-                    name=f'{self.name}_ffn'
-                )
-
-        # Dropout layer
-        if self.dropout_rate > 0:
-            self.dropout = layers.Dropout(self.dropout_rate)
 
     def _common_processed_shape(
             self,
@@ -1762,13 +1785,15 @@ class ClassificationHead(BaseVisionHead):
     One label for a whole image.
 
     Spatial features are collapsed to one vector per image, pushed through
-    two dense blocks, and scored by a softmax ``Dense``. Use this for image
+    two dense blocks, and scored by a linear ``Dense``. Use this for image
     classification.
 
-    This head applies ``attention`` and never applies ``ffn``, even though
-    ``BaseVisionHead.use_ffn`` defaults to ``True``. Setting ``use_ffn``
-    builds an FFN block that carries weights and never runs. ``build``
-    matches ``call`` here: it propagates the attention shape only.
+    This head builds and applies ``attention`` (when ``use_attention`` is
+    set) and nothing else from :class:`BaseVisionHead`. Its
+    ``_create_common_layers`` override builds no ``norm``, no ``ffn`` and no
+    ``dropout``, so the head carries exactly the weights its ``call`` runs.
+    ``use_ffn`` is stored and serialized but builds nothing here. ``build``
+    matches ``call``: it propagates the attention shape only.
 
     **Architecture Overview:**
 
@@ -1796,17 +1821,20 @@ class ClassificationHead(BaseVisionHead):
                          ▼
         ┌─────────────────────────────────┐
         │ classifier: Dense(num_classes)  │
+        │ linear, no activation           │
         └────────────────┬────────────────┘
-                         ▼ softmax applied here
+                         ▼
                  ┌───────┴────────────┐
                  ▼                    ▼
-              'logits'         'probabilities'
+              'logits'      softmax(logits, axis=-1)
+                                      ▼
+                               'probabilities'
 
-        One tensor reaches both keys. Nothing is computed twice.
-
-    The two returned keys hold the identical tensor. ``classifier`` already
-    applies softmax, so ``'logits'`` are probabilities too, despite the name.
-    A loss expecting raw logits will be wrong here.
+    The two keys hold different tensors. ``'logits'`` is the linear
+    classifier output, the input a ``from_logits=True`` loss expects.
+    ``'probabilities'`` is ``keras.ops.softmax(logits, axis=-1)``, computed in
+    the layer's compute dtype exactly as the NLP ``TextClassificationHead``
+    does. Under ``mixed_float16`` it is therefore a float16 softmax.
 
     With ``use_global_pooling=False`` the flatten is a ``layers.Flatten()``
     created inside ``call`` on every invocation. It is not a stored
@@ -1814,7 +1842,8 @@ class ClassificationHead(BaseVisionHead):
     so this costs correctness nothing.
 
     Input shape:
-        ``(batch, height, width, channels)``.
+        ``(batch, height, width, channels)``, or ``(batch, seq_len, dim)``
+        with ``pooling_type='cls_token'``.
 
     Output shape:
         ``{'logits': (batch, num_classes),
@@ -1824,9 +1853,10 @@ class ClassificationHead(BaseVisionHead):
     :type num_classes: int
     :param use_global_pooling: Collapse the spatial dimensions by pooling.
         When ``False``, ``call`` flattens them instead.
-    :param pooling_type: Which pooling to build. ``avg`` or ``max`` for 4D feature maps; ``cls_token`` for 3D sequence inputs (extracts position 0).
-    :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
-        Read only when ``use_global_pooling`` is set.
+    :type use_global_pooling: bool
+    :param pooling_type: How to collapse the input when
+        ``use_global_pooling`` is set: ``'avg'`` or ``'max'`` pooling for 4D
+        feature maps, ``'cls_token'`` (position 0) for 3D sequence inputs.
     :type pooling_type: Literal['avg', 'max', 'cls_token']
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
@@ -1836,7 +1866,7 @@ class ClassificationHead(BaseVisionHead):
     :ivar dense_blocks: Two ``DenseBlock`` layers, ``hidden_dim`` wide then
         ``hidden_dim // 2`` wide.
     :vartype dense_blocks: List[DenseBlock]
-    :ivar classifier: Output ``Dense(num_classes)`` with softmax.
+    :ivar classifier: Output ``Dense(num_classes)``, linear (no activation).
     :vartype classifier: keras.layers.Dense
     """
 
@@ -1854,11 +1884,11 @@ class ClassificationHead(BaseVisionHead):
         :type num_classes: int
         :param use_global_pooling: Collapse spatial dimensions by pooling.
         :type use_global_pooling: bool
-        :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
-    :type pooling_type: Literal['avg', 'max', 'cls_token']
+        :param pooling_type: ``'avg'``, ``'max'`` or ``'cls_token'``.
+        :type pooling_type: Literal['avg', 'max', 'cls_token']
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
-        :param pooling_type: Which pooling to build. ``avg`` or ``max`` for 4D feature maps; ``cls_token`` for 3D sequence inputs (extracts position 0).
+        :rtype: None
         """
         super().__init__(**kwargs)
 
@@ -1867,6 +1897,26 @@ class ClassificationHead(BaseVisionHead):
         self.pooling_type = pooling_type
 
         self._create_classification_layers()
+
+    def _create_common_layers(self) -> None:
+        """
+        Build ``attention`` only, the one common layer this head's ``call``
+        applies.
+
+        Overrides :meth:`BaseVisionHead._create_common_layers`, which would
+        also build ``norm``, ``ffn`` and ``dropout``. None of those runs in
+        :meth:`call`, so building them would add weights the forward pass
+        never reaches.
+
+        :return: None.
+        :rtype: None
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-004
+        # Do NOT call super()._create_common_layers() here: its norm, ffn and
+        # dropout never run in this head's call(), and the Dropout seed
+        # generators they create shift every later weight's default seed.
+        # See decisions.md D-004.
+        self._create_attention_layer()
 
     def _create_classification_layers(self) -> None:
         """
@@ -1918,10 +1968,10 @@ class ClassificationHead(BaseVisionHead):
             )
         ]
 
-        # Final classifier
+        # Final classifier: linear. The softmax for 'probabilities' is
+        # applied in call(), so 'logits' stays the pre-softmax score.
         self.classifier = layers.Dense(
             units=self.num_classes,
-            activation='softmax',
             name='classifier'
         )
 
@@ -1974,7 +2024,7 @@ class ClassificationHead(BaseVisionHead):
         """
         Pool or flatten, run the dense blocks, then classify.
 
-        The FFN never runs here, whatever ``use_ffn`` says.
+        No FFN runs here, whatever ``use_ffn`` says; none is built.
 
         :param inputs: Feature map of shape ``(batch, height, width,
             channels)`` for 4D, or ``(batch, seq_len, dim)`` for 3D sequences.
@@ -1982,8 +2032,8 @@ class ClassificationHead(BaseVisionHead):
         :param training: Keras training flag, forwarded to the dense blocks
             and to attention.
         :type training: Optional[bool]
-        :return: Dict whose ``'logits'`` and ``'probabilities'`` keys hold the
-            same softmax output.
+        :return: ``{'logits': z, 'probabilities': softmax(z, axis=-1)}``,
+            where ``z`` is the linear classifier output.
         :rtype: Dict[str, keras.KerasTensor]
         """
 
@@ -2007,14 +2057,19 @@ class ClassificationHead(BaseVisionHead):
         for dense_block in self.dense_blocks:
             x = dense_block(x, training=training)
 
-        # Final classification
+        # DECISION plan-2026-10-14T062616-81938e81/D-001
+        # Linear logits, then their softmax in the COMPUTE dtype, exactly as the
+        # NLP TextClassificationHead does. Do NOT put activation='softmax' back on
+        # the classifier: 'logits' would again be probabilities. Do NOT cast to
+        # float32 before the softmax: that would split the vision and NLP heads'
+        # convention; measured under mixed_float16 the float16 softmax is finite
+        # and within one float16 ulp of 1. See decisions.md D-001.
         logits = self.classifier(x)
+        probabilities = keras.ops.softmax(logits, axis=-1)
 
         return {
             'logits': logits,
-            # The classifier already applied softmax, so this is the same
-            # tensor under a second name, not a second computation.
-            'probabilities': logits
+            'probabilities': probabilities
         }
 
     def compute_output_shape(
@@ -2024,7 +2079,8 @@ class ClassificationHead(BaseVisionHead):
         """
         Report the two output shapes.
 
-        Both keys carry ``(batch, num_classes)``.
+        Both keys carry ``(batch, num_classes)``: the logits and their
+        softmax have the same shape.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -3139,3 +3195,57 @@ class HeadConfiguration:
 
 
 # ---------------------------------------------------------------------
+# Model-side head_config_overrides merge
+# ---------------------------------------------------------------------
+
+#: Head-config keys a model owns and a ``head_config_overrides`` dict may not
+#: replace. ``name`` fixes the head's weight paths (by-name weight transfer
+#: reads them), ``num_classes`` must agree with the model's own
+#: ``num_classes`` and its ``get_config``, and ``task_type`` picks the head
+#: class.
+RESERVED_HEAD_OVERRIDE_KEYS: Tuple[str, ...] = ('name', 'num_classes', 'task_type')
+
+
+def merge_head_config_overrides(
+        head_config: Dict[str, Any],
+        overrides: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Merge a model's ``head_config_overrides`` into its head config.
+
+    Interface contract, shared by every model that builds a vision head from
+    a config dict plus caller overrides:
+
+    * ``head_config`` is not mutated. The return value is a new dict.
+    * ``overrides`` of ``None`` or ``{}`` returns a plain copy.
+    * An override naming any of :data:`RESERVED_HEAD_OVERRIDE_KEYS` raises
+      ``ValueError`` naming every offending key. Nothing is merged then.
+    * Every other override key replaces or adds the matching entry. Unknown
+      keys are not checked here: the head constructor rejects them.
+
+    A plain ``dict.update`` let ``num_classes`` silently desynchronise the
+    head from the model's config, and let ``name`` collide with the model's
+    own ``name=`` argument as a ``TypeError``.
+
+    :param head_config: The model's head configuration.
+    :type head_config: Dict[str, Any]
+    :param overrides: Caller overrides, or ``None``.
+    :type overrides: Optional[Dict[str, Any]]
+    :return: The merged configuration.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If ``overrides`` names a reserved key.
+    """
+    merged = dict(head_config)
+    if not overrides:
+        return merged
+
+    reserved = sorted(set(overrides) & set(RESERVED_HEAD_OVERRIDE_KEYS))
+    if reserved:
+        raise ValueError(
+            f"head_config_overrides may not set {reserved}: the model owns "
+            f"{list(RESERVED_HEAD_OVERRIDE_KEYS)}. Pass num_classes to the "
+            f"model itself; the head name and task type are fixed."
+        )
+
+    merged.update(overrides)
+    return merged

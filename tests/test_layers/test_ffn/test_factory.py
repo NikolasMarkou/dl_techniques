@@ -1753,8 +1753,12 @@ def _b_heads_nlp_factory():
 
 
 def _b_heads_vision_factory():
-    from dl_techniques.layers.heads.vision.factory import ClassificationHead
-    h = ClassificationHead(num_classes=3, hidden_dim=16, use_ffn=True)
+    # `BaseVisionHead._create_common_layers` holds this file's base FFN site.
+    # `SegmentationHead` inherits it and APPLIES the FFN in call(), at its own
+    # default `use_ffn=True`. `ClassificationHead` no longer reaches the site:
+    # it overrides `_create_common_layers` and builds no FFN at all.
+    from dl_techniques.layers.heads.vision.factory import SegmentationHead
+    h = SegmentationHead(num_classes=3, hidden_dim=16)
     h.build((None, 8, 8, 16))
     return h.ffn
 
@@ -2001,6 +2005,28 @@ def _b_models_qwen_components():
     return b.attention_ffn
 
 
+def _b_models_neural_hmm_emissions():
+    from dl_techniques.models.probabilistic.neural_hmm.emissions import (
+        GenerativeEmission,
+    )
+    # The one site is the literal `create_ffn_layer("mlp", ...)` head, built in
+    # `__init__` for every obs_type.
+    e = GenerativeEmission(n_states=3, obs_type="gaussian", obs_dim=2)
+    return e.head
+
+
+def _b_models_neural_hmm_encoders():
+    from dl_techniques.models.probabilistic.neural_hmm.encoders import (
+        NeuralHMMEncoder,
+    )
+    # The one site is the literal `create_ffn_layer("residual", ...)` of the
+    # `mlp` encoder, built in `__init__`. The `transformer` encoder builds its
+    # FFN inside `TransformerLayer`, which has its own builder.
+    enc = NeuralHMMEncoder(encoder_type="mlp", hidden_dim=16,
+                           intermediate_size=32)
+    return enc.blocks[0]
+
+
 def _b_models_topolm_components():
     from dl_techniques.models.language.topolm.components import TopoLMBlock
     # BOTH call sites (`ffn_dense_1` widens, `ffn_dense_2` projects back) are
@@ -2050,6 +2076,10 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/language/hnet/components.py": _b_models_hnet_components,
     "models/language/qwen/components.py": _b_models_qwen_components,
     "models/language/topolm/components.py": _b_models_topolm_components,
+    "models/probabilistic/neural_hmm/emissions.py":
+        _b_models_neural_hmm_emissions,
+    "models/probabilistic/neural_hmm/encoders.py":
+        _b_models_neural_hmm_encoders,
 }
 
 
