@@ -9,7 +9,7 @@ archive loads without ``custom_objects``.
 
 Example::
 
-    from dl_techniques.models.time_series.neural_hmm import create_neural_hmm
+    from dl_techniques.models.probabilistic.neural_hmm import create_neural_hmm
 
     model = create_neural_hmm("neural-hmm", n_states=4, obs_type="gaussian", obs_dim=2)
     model.compile(optimizer="adam")

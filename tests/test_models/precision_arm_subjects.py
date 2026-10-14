@@ -877,7 +877,7 @@ def _b_neural_hmm():
     XLA and round-trip arms all run through the encoder as well as the log-space
     inference. The default ``neural-hmm`` preset has no encoder at all.
     """
-    from dl_techniques.models.time_series.neural_hmm import create_neural_hmm
+    from dl_techniques.models.probabilistic.neural_hmm import create_neural_hmm
     return create_neural_hmm(
         "left-to-right-segmenter", n_states=3, obs_type="gaussian", obs_dim=2,
         hidden_dim=8, state_emb_dim=4, num_layers=1, num_heads=2,

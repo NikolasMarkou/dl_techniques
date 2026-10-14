@@ -57,14 +57,14 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.time_series.neural_hmm import NeuralHMM, create_neural_hmm
-from dl_techniques.models.time_series.neural_hmm import inference
-from dl_techniques.models.time_series.neural_hmm.emissions import (
+from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM, create_neural_hmm
+from dl_techniques.models.probabilistic.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm.emissions import (
     DiscriminativeEmission,
     GenerativeEmission,
 )
-from dl_techniques.models.time_series.neural_hmm.encoders import ENCODER_TYPES, NeuralHMMEncoder
-from dl_techniques.models.time_series.neural_hmm.transitions import (
+from dl_techniques.models.probabilistic.neural_hmm.encoders import ENCODER_TYPES, NeuralHMMEncoder
+from dl_techniques.models.probabilistic.neural_hmm.transitions import (
     InputDependentTransition,
     StaticTransition,
 )

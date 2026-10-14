@@ -1,6 +1,6 @@
 # Models Package
 
-Model architectures, grouped into 12 families under `src/dl_techniques/models/`.
+Model architectures, grouped into 13 families under `src/dl_techniques/models/`.
 `src/dl_techniques/models/README.md` is the catalogue: every family, every leaf package,
 one line each. This file is the authoring contract.
 
@@ -17,7 +17,7 @@ one line each. This file is the authoring contract.
 ## Layout
 
 Families: `common` `embeddings_experimental` `general_purpose` `graph` `language` `memory`
-`neural_computer` `point_cloud` `tabular` `time_series` `vision` `vision_language`.
+`neural_computer` `point_cloud` `probabilistic` `tabular` `time_series` `vision` `vision_language`.
 
 A **leaf package** is a directory with an `__init__.py` and no `__init__.py`-bearing child.
 Four families nest one level further (`vision/image_restoration`, `vision/keypoints`,
@@ -55,7 +55,7 @@ transcribe them.
 - **Family and subfamily `__init__.py` carry a docstring and nothing else** — no imports, no
   `__all__`. Re-exporting `vision/` would pull 50 packages behind one statement: a real import
   cost and a real circular-import surface. Do not "finish the job" by adding re-exports.
-- **`time_series/__init__.py` is the one exception** — 9 children, curated re-exports, and
+- **`time_series/__init__.py` is the one exception** — 8 children, curated re-exports, and
   consumers that rely on them. Leave it. It is also why `time_series/{deepar,prism,tirex}`
   can carry an empty `__init__.py` without being broken.
 - This diverges from `layers/`, where most subpackages are curated. The discriminator is child
@@ -81,9 +81,9 @@ class ResNet(keras.Model):
 even though the class lives at
 `src/dl_techniques/models/vision/resnet/model.py`.
 
-The `package` string is the defining module's dotted path with the **12 family directories**
+The `package` string is the defining module's dotted path with the **13 family directories**
 (`common`, `embeddings_experimental`, `general_purpose`, `graph`, `language`, `memory`,
-`neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`, `vision_language`) and the
+`neural_computer`, `point_cloud`, `probabilistic`, `tabular`, `time_series`, `vision`, `vision_language`) and the
 **4 subfamily containers** (`image_restoration`, `keypoints`, `super_resolution`, `sam`) removed.
 A family is a filing decision, not a namespace: it has been reshuffled before, and a key derived
 from it would break every archive the moment it moves again.

@@ -374,14 +374,14 @@ class TestPackageDiscovery:
 
         A count alone cannot tell 79 right names from 79 wrong ones. The
         restructure's failure mode was a one-level listing collapsing the set
-        to the eleven family directories, so those are excluded by name here,
+        to the family directories, so those are excluded by name here,
         and the packages that only a recursive walk reaches are required by
         name in the sibling test below.
         """
         containers = {
             "common", "general_purpose", "graph", "language", "memory",
-            "neural_computer", "point_cloud", "tabular", "time_series",
-            "vision", "vision_language",
+            "neural_computer", "point_cloud", "probabilistic", "tabular",
+            "time_series", "vision", "vision_language",
             "image_restoration", "keypoints", "super_resolution", "sam",
         }
         found = containers & set(PACKAGES)

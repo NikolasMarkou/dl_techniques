@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.time_series.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm import inference
 from dl_techniques.utils.dtype_policy import mask_sentinel
 from tests.numerics import reassociation_atol
 

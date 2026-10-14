@@ -1,6 +1,6 @@
 # `dl_techniques.models`
 
-Complete model architectures — **102 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **107 leaf packages** grouped into **13 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
 holds one architecture, its blocks, usually a factory, and a `README.md` (102 of 102 have one).
 The family directory above it is a filing decision, not a namespace.
@@ -24,10 +24,10 @@ Family-level re-exports were considered and rejected: `import dl_techniques.mode
 would then eagerly construct all 50 vision packages — the whole Keras/TensorFlow import cost
 of the family to reach one model — and it opens a circular-import surface between packages
 that share layers. The family `__init__.py` files carry a docstring listing their members and
-nothing else. `time_series/` is the single exception; it predates this layout, has 9 children
+nothing else. `time_series/` is the single exception; it predates this layout, has 8 children
 rather than 50, and its consumers rely on the re-exports.
 
-## The 12 families
+## The 13 families
 
 Counts are **leaf counts**, which for `vision` and `vision_language` are larger than the
 direct-child count, because those two nest one level further. Re-derive with the `find` in
@@ -38,13 +38,14 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`vision/`](vision/) | **50** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 19 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
-| [`time_series/`](time_series/) | 9 | forecasting, probabilistic and point |
+| [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 4 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
 | [`common/`](common/) | 2 | model-agnostic machinery (training heads, inference sampling) |
 | [`memory/`](memory/) | 1 | learned codebook topologies |
+| [`probabilistic/`](probabilistic/) | 1 | latent-variable models with exact, tractable inference |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
 | **Sum** | **107** | |
@@ -149,7 +150,7 @@ image-patch input modality now matches its filing.)
 | `sam/sam3/` | Segment Anything v3, text-promptable |
 | `sd3_mmdit/` | SD3 MMDiT dual-stream text-to-image diffusion transformer |
 
-### `time_series/` (9)
+### `time_series/` (8)
 
 | Package | |
 |---|---|
@@ -157,7 +158,6 @@ image-patch input modality now matches its filing.)
 | `deepar/` | DeepAR probabilistic forecasting |
 | `ets/` | Pure additive exponential smoothing (the one recursive forecaster) |
 | `mdn/` | Mixture Density Networks |
-| `neural_hmm/` | Neural Hidden Markov Model: exact forward-algorithm likelihood, Viterbi and posteriors over neural transitions and emissions; generative or CRF |
 | `nbeats/` | N-BEATS, plus the exogenous `nbeatsx` variant |
 | `prism/` | PRISM forecasting |
 | `tirex/` | TiReX |
@@ -180,6 +180,7 @@ image-patch input modality now matches its filing.)
 | `common/masked_language_model/` | MLM/CLM training heads — consumed by every language trainer, filed here (not under `language/`) because they wrap any backbone rather than implementing one |
 | `memory/som/` | Self-Organizing Maps |
 | `point_cloud/latent_gmm_registration/` | latent GMM registration |
+| `probabilistic/neural_hmm/` | Neural Hidden Markov Model: exact forward-algorithm likelihood, Viterbi and posteriors over neural transitions and emissions; generative or CRF. A sequence model, not a forecaster, so not under `time_series/` |
 | `tabular/tabm/` | TabM |
 | `embeddings_experimental/shared/` | the study skeleton and block registry — not an architecture |
 | `embeddings_experimental/ascii_bert/` | ASCII-vocabulary BERT, the study's transformer baseline |

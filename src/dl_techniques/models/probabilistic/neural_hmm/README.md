@@ -4,7 +4,7 @@
 
 A Keras 3 **Neural Hidden Markov Model**: a `K`-state HMM whose initial distribution, transition matrices and emission densities are produced by neural layers, trained by exact maximum likelihood through the forward algorithm, and decoded exactly by Viterbi and forward-backward.
 
-> **Identity, up front.** `NeuralHMM` scores and decodes sequences; it is not a forecaster and does not implement the `time_series` family's `ForecastMixin`. Its forward pass returns the HMM's three log-potentials as a dict, `{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}`; the loss, the likelihood, the most likely state path and the state posteriors are all computed from that dict by one exact inference module. No pretrained weights are distributed: asking `from_variant` / `create_neural_hmm` for pretrained weights raises `NotImplementedError`.
+> **Identity, up front.** `NeuralHMM` scores and decodes sequences; it is not a forecaster and does not implement the `time_series` family's `ForecastMixin`, which is why it lives in the `probabilistic` family. Its forward pass returns the HMM's three log-potentials as a dict, `{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}`; the loss, the likelihood, the most likely state path and the state posteriors are all computed from that dict by one exact inference module. No pretrained weights are distributed: asking `from_variant` / `create_neural_hmm` for pretrained weights raises `NotImplementedError`.
 
 ---
 
@@ -118,7 +118,7 @@ Both are trained by stock `fit()`: the loss is `NeuralHMM.compute_loss`, so `com
 
 ```python
 import numpy as np
-from dl_techniques.models.time_series.neural_hmm import create_neural_hmm
+from dl_techniques.models.probabilistic.neural_hmm import create_neural_hmm
 
 rng = np.random.default_rng(0)
 obs = rng.normal(size=(8, 20, 2)).astype("float32")
@@ -207,7 +207,7 @@ All take `log_pi (B, K)`, `log_A (B, T, K, K)`, `log_emit (B, T, K)` and `mask (
 | `viterbi_decode(log_pi, log_A, log_emit, mask)` | `(path (B, T) int32, score (B,))`, `-1` at padding |
 | `state_posteriors(log_pi, log_A, log_emit, mask)` | `(B, T, K)`, 0 at padding |
 
-The package `__init__.py` exports `NeuralHMM` and `create_neural_hmm`; the family re-exports both, so `from dl_techniques.models.time_series import NeuralHMM, create_neural_hmm` also works.
+The package `__init__.py` exports `NeuralHMM` and `create_neural_hmm`. The `probabilistic` family package re-exports nothing, so import from the leaf: `from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM, create_neural_hmm`.
 
 ---
 
@@ -274,7 +274,7 @@ segments, _ = segmenter.viterbi({"obs": counts, "mask": mask})  # never decrease
 ### Example 4 — Per-sequence weights, and the inference module directly
 
 ```python
-from dl_techniques.models.time_series.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm import inference
 
 weights = np.array([1, 1, 1, 1, 2, 2, 2, 2], dtype="float32")
 model.fit(inputs, None, sample_weight=weights, batch_size=4, epochs=1, verbose=0)
@@ -380,7 +380,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 
 **Related code**
 
-- Model: `dl_techniques/models/time_series/neural_hmm/model.py`
+- Model: `dl_techniques/models/probabilistic/neural_hmm/model.py`
 - Layers: `encoders.py`, `transitions.py`, `emissions.py`; inference: `inference.py`
 - Trainer: `train/neural_hmm/`
 - Tests: `tests/test_models/test_neural_hmm/`; this README's code blocks run in `tests/test_models/test_readme_examples.py`

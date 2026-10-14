@@ -2,7 +2,7 @@
 Neural HMM Training Script
 ====================================================================
 
-Trains a `NeuralHMM` (`dl_techniques.models.time_series.neural_hmm`) on sequences
+Trains a `NeuralHMM` (`dl_techniques.models.probabilistic.neural_hmm`) on sequences
 sampled from a known hidden Markov model (`train.neural_hmm.data`), then scores it
 against that ground truth:
 
@@ -61,9 +61,9 @@ import matplotlib.patches
 import matplotlib.ticker
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.time_series.neural_hmm import NeuralHMM, create_neural_hmm
-from dl_techniques.models.time_series.neural_hmm import inference
-from dl_techniques.models.time_series.neural_hmm.encoders import ENCODER_TYPES
+from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM, create_neural_hmm
+from dl_techniques.models.probabilistic.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm.encoders import ENCODER_TYPES
 from dl_techniques.optimization import optimizer_builder
 from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,

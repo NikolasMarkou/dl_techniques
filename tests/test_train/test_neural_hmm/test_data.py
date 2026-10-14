@@ -35,7 +35,7 @@ import pytest
 from scipy.special import logsumexp
 from scipy.stats import norm
 
-from dl_techniques.models.time_series.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm import inference
 from train.neural_hmm.data import (
     OBS_TYPES, OWN_SYMBOL_MASS, SPLIT_TAGS, TrueHMM, accuracy, hungarian_mapping, make_true_hmm,
     majority_rate, matched_accuracy, sample_hmm_dataset, sample_splits, split_seed,

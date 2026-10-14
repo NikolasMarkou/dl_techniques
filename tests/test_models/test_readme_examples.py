@@ -349,7 +349,7 @@ def test_fastvit_exposes_the_canonical_model_variants_alias():
 
 _NEURAL_HMM_README = os.path.join(
     os.path.dirname(__file__), os.pardir, os.pardir, "src", "dl_techniques", "models",
-    "time_series", "neural_hmm", "README.md",
+    "probabilistic", "neural_hmm", "README.md",
 )
 
 
@@ -405,7 +405,7 @@ class TestNeuralHMMReadme:
     def test_the_neural_hmm_variant_table_names_the_class_table(self):
         import re
 
-        from dl_techniques.models.time_series.neural_hmm import NeuralHMM
+        from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM
 
         section = _neural_hmm_readme().split("## 8. Configuration & Presets", 1)[1].split("\n## ", 1)[0]
         documented = set(re.findall(r"^\| `([a-z0-9-]+)` \|", section, flags=re.MULTILINE))
@@ -421,7 +421,7 @@ class TestNeuralHMMReadme:
         """
         import re
 
-        from dl_techniques.models.time_series.neural_hmm import NeuralHMM
+        from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM
 
         base = {"mode": "generative", "obs_type": "gaussian", "emission_context": "autoregressive",
                 "transition": "static", "topology": "banded", "encoder_type": "transformer"}

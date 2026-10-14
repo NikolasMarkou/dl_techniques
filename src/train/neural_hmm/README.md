@@ -1,6 +1,6 @@
 # Neural HMM trainer
 
-Trains a `NeuralHMM` (`src/dl_techniques/models/time_series/neural_hmm/`) on sequences
+Trains a `NeuralHMM` (`src/dl_techniques/models/probabilistic/neural_hmm/`) on sequences
 sampled from a known hidden Markov model, then scores it against that ground truth.
 The model package README explains the model, its variants and its inference; this file
 covers the trainer.
@@ -9,8 +9,8 @@ covers the trainer.
 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm --help
 ```
 
-The model package lives at `src/dl_techniques/models/time_series/neural_hmm/`; the
-trainer is at `src/train/neural_hmm/`, not under `src/train/time_series/`.
+The model package lives at `src/dl_techniques/models/probabilistic/neural_hmm/`; the
+trainer is at `src/train/neural_hmm/`.
 
 ## 1. What a run does
 
@@ -133,7 +133,7 @@ The model refuses a non-default value for an argument its configuration does not
 | `run.log` | the run's log, one line per epoch |
 | `training_log.csv` | `epoch`, `loss`, `val_loss` per epoch (`CSVLogger`) |
 | `training_history.json` | the `fit` history |
-| `best_model.keras` | the epoch with the lowest `val_loss`; loads with `keras.models.load_model` and no `custom_objects` once `dl_techniques.models.time_series.neural_hmm` is imported (the import registers the classes) |
+| `best_model.keras` | the epoch with the lowest `val_loss`; loads with `keras.models.load_model` and no `custom_objects` once `dl_techniques.models.probabilistic.neural_hmm` is imported (the import registers the classes) |
 | `results_summary.json` | strict JSON (a non-finite number is written as `null`): the keys of §3, the resolved arguments, `params`, `jit_compile` (the resolved value after `compile`), `epochs_run`, `best_checkpoint` (`file`, `epoch`, `val_loss`, `reload_max_abs_diff`, `reload_exact`; a NaN in one output facing a number in the other counts as an infinite difference, written `null`, with `reload_exact` false), `fit_seconds`, `total_seconds` and `visualizations` (`files`, `failed`) |
 | `visualizations/loss_curve.png` | train and validation loss per epoch, with the true HMM's NLL per step on the test split as a dashed line |
 | `visualizations/transitions.png` | the learned transition matrix (mean of `exp(log_A)` over the valid test steps; for a static transition, the matrix itself) beside the true one, both in true-label order |
@@ -368,7 +368,7 @@ run B and 0.839 to 0.872 for run C over the three seeds, and diagonal
 ```bash
 CUDA_VISIBLE_DEVICES="" .venv/bin/python - <<'PY'
 import argparse, json, keras, numpy as np
-import dl_techniques.models.time_series.neural_hmm  # registers the classes
+import dl_techniques.models.probabilistic.neural_hmm  # registers the classes
 from train.neural_hmm.train_neural_hmm import load_splits, evaluate, _relabel_matrix
 for run in ("runA_gaussian_k4_sep4_seed0", "runD_autoregressive_gaussian_k4_sep4_seed0",
             "runE_segmenter_gaussian_k4_sep4_seed0", *(f"runB_categorical_k3_v8_seed{s}" for s in range(3)),
@@ -393,7 +393,7 @@ returned the expected shapes and finite outputs:
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python - <<'PY'
 import keras, numpy as np
-import dl_techniques.models.time_series.neural_hmm  # registers the classes
+import dl_techniques.models.probabilistic.neural_hmm  # registers the classes
 rng = np.random.default_rng(0)
 for run, lengths in (("runA_gaussian_k4_sep4", (50, 30, 70)), ("runB_categorical_k3_v8", (50, 30, 70)),
                      ("runC_crf_gaussian_k4_sep2", (50, 30, 40))):
@@ -415,7 +415,7 @@ runs above used the default (TF32 on). The argument after `-` is `on` or `off`:
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python - off <<'PY'
 import sys, keras, numpy as np, tensorflow as tf
-import dl_techniques.models.time_series.neural_hmm  # registers the classes
+import dl_techniques.models.probabilistic.neural_hmm  # registers the classes
 tf.config.experimental.enable_tensor_float_32_execution(sys.argv[1] == "on")
 model = keras.models.load_model("results/neural_hmm_runA_gaussian_k4_sep4_seed0_20261014/best_model.keras")
 x = {"obs": np.random.default_rng(0).normal(size=(5, 50, 2)).astype("float32"), "mask": np.ones((5, 50), "float32")}

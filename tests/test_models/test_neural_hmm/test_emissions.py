@@ -27,7 +27,7 @@ import pytest
 import tensorflow as tf
 from scipy import stats
 
-from dl_techniques.models.time_series.neural_hmm.emissions import (
+from dl_techniques.models.probabilistic.neural_hmm.emissions import (
     DiscriminativeEmission,
     GenerativeEmission,
 )
