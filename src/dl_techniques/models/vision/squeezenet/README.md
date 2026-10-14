@@ -74,10 +74,14 @@ Input (B, H, W, 3)
     |
     +-- include_top=False -> the feature map after dropout
     +-- include_top=True  -> conv10 (1x1, num_classes filters, ReLU)
-                             -> GlobalAveragePooling -> softmax -> (B, num_classes)
+                             -> GlobalAveragePooling -> logits (B, num_classes)
 ```
 
-The head ends in **softmax**, so the model outputs probabilities. Compile with `from_logits=False` (the default).
+The model outputs **logits**: the paper's ReLU'd `conv10` averaged over space, with no softmax. Compile with `SparseCategoricalCrossentropy(from_logits=True)`. Because of the ReLU every logit is non-negative.
+
+The head is the official prototxts' `conv10`, `relu_conv10` and global `pool10` (the `SoftmaxWithLoss` after them is the loss), the same as torchvision's `final_conv`, ReLU and `AdaptiveAvgPool2d(1)`. It is built by the model itself, not by the shared `ClassificationHead` from `layers/heads`: that head pools first and classifies with a `Dense` after the pool, while here the classifier runs per position and a ReLU sits between it and the pool, which a `layers/heads` class-score head may not apply. Both models, and both ranks of `SqueezeNoduleNetV2`, build this one head.
+
+**Archive break (2026-10-14).** From 2026-10-09 the 2D heads were the shared `ClassificationHead` (two hidden blocks with BatchNorm, then a softmax) and `conv10` was gone, while the V2 3D head kept `conv10` plus its own softmax. A `.keras` file saved before this change does not load and is not supported. `SqueezeNetV1`'s `head_config_preset` and `head_config_overrides` are gone (there is no shared head to configure); passing either raises `ValueError`.
 
 ---
 
@@ -126,10 +130,10 @@ model = create_squeezenet_v1(
     input_shape=(32, 32, 3),
 )
 
-# 2. Compile. The head ends in softmax, so the loss reads probabilities.
+# 2. Compile. The model returns logits, so the loss applies the softmax.
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-    loss=keras.losses.SparseCategoricalCrossentropy(),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
 model.summary()
@@ -194,7 +198,7 @@ None are distributed. Passing `weights=<anything>` to either factory (or to `fro
 
 ### SqueezeNetV1
 
-Parameter counts measured at `input_shape=(224, 224, 3)`, `num_classes=1000`.
+Parameter counts measured at `input_shape=(224, 224, 3)`, `num_classes=1000` (`SqueezeNetV1.from_variant(v, num_classes=1000).count_params()`, re-derived 2026-10-14). `1.0` and `1.1` equal torchvision's published `squeezenet1_0` and `squeezenet1_1` counts; `tests/test_models/test_a_vision_classifier_emits_logits.py` pins both.
 
 | Variant | Stem | Pools after | Bypass | Params |
 | :--- | :--- | :--- | :--- | ---: |
@@ -323,14 +327,14 @@ The models and both Fire-module layers are registered, so no `custom_objects` ar
 - `ValueError: ... collapses to length 0 at stage ...` -- the input is smaller than the variant's minimum extent (4.3). Use `"1.1"` for 32-pixel inputs, or enlarge the input.
 - `NotImplementedError` from `weights=` -- expected; no checkpoints ship with this package.
 - `ValueError: num_classes must be a positive integer` / `dropout_rate must be in range [0, 1)` -- constructor validation.
-- Loss much higher than expected -- the head already applies softmax; do not pass `from_logits=True`.
+- Accuracy stuck near chance -- the model returns logits; compile with `from_logits=True`, not the string `"sparse_categorical_crossentropy"` (which means `from_logits=False`).
 - A backbone output with an unexpected spatial size -- valid padding, not `same`. See Example 1.
 
 ---
 
 ## 13. Technical Details
 
-**Head.** `conv10` is a `1x1` convolution with `num_classes` filters and a ReLU activation, followed by global average pooling and softmax. The softmax is applied at every `num_classes`, including 2; there is no binary special case, so the output shape is always `(B, num_classes)`.
+**Head.** `conv10` is a `1x1` convolution with `num_classes` filters and a ReLU activation, followed by global average pooling, and nothing after it: the output is the logits at every `num_classes`, including 2 (there is no binary sigmoid), in 2D and 3D alike, so the output shape is always `(B, num_classes)`. `kernel_regularizer` reaches `conv10`; `kernel_initializer` does not, because `conv10` keeps the prototxt's `Normal(0, 0.01)` filler.
 
 **Initializers.** `STEM_INITIALIZER` and `HEAD_INITIALIZER` are different fillers on purpose. `HEAD_INITIALIZER` is stored as a serialized config dict and copied at each call site, because one shared seedless `Initializer` instance replays its draw.
 

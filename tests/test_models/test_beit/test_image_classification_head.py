@@ -42,7 +42,7 @@ def _head(model):
 
 
 def _logits(model, x):
-    """The model's own output (probabilities tensor, not logits since head applies softmax)."""
+    """The model's own output: the head's logits, one tensor, no softmax."""
     out = model(x, training=False)
     return ops.convert_to_numpy(out)
 
@@ -53,7 +53,8 @@ class TestBeitForImageClassification:
     def test_output_shape(self, variant):
         model = _classifier(variant)
         out = model(_images(), training=False)
-        # Model unwraps ClassificationHead dict to return probabilities tensor
+        # The model unwraps the head's 'logits' and returns that one tensor.
+        assert not isinstance(out, dict)
         assert out.shape == (2, 7)
         assert np.all(np.isfinite(out))
         assert model.compute_output_shape((2,) + IMG) == (2, 7)
@@ -113,16 +114,25 @@ class TestBeitForImageClassification:
         )
 
     def test_cls_pooling_mode_has_no_head_norm(self):
-        """D-007's other branch: use_mean_pooling=False -> the trunk norms, not us."""
+        """D-007's other branch: use_mean_pooling=False -> the trunk norms, not us.
+
+        The CLS branch is BEiT's reference head (unilm ``x[:, 0]`` after the
+        trunk's ``self.norm``, then ``self.head``): the shared
+        ``ClassificationHead`` at ``pooling_type='cls_token'`` with no hidden
+        block and no norm of any kind -- it builds no ``norm`` attribute since
+        plan-2026-10-14T062616-81938e81 step 1, and no ``pooled_norm`` -- so the
+        head owns exactly the classifier's kernel and bias.
+        """
         model = _classifier(use_mean_pooling=False)
         model.build((None,) + IMG)
         head = _head(model)
         # The CLS branch builds the shared ClassificationHead, which pools
         # position 0 directly and has no SequencePooling of its own.
         assert not hasattr(head, "pool")
-        assert head.norm is None or not head.norm.built, (
-            "the CLS branch must not apply a head norm of its own"
-        )
+        assert not hasattr(head, "norm"), "the head builds a norm of its own"
+        assert not hasattr(head, "pooled_norm"), "the head norms the cls state"
+        assert head.dense_blocks == []
+        assert {w.path.split("/")[-2] for w in head.weights} == {"classifier"}
         assert model.backbone.final_norm is not None
         out = model(_images(), training=False)
         assert out.shape == (2, 7)
@@ -178,7 +188,8 @@ class TestBeitForImageClassification:
         "kwargs,match",
         [
             (dict(num_classes=0), "num_classes must be a positive integer"),
-            (dict(num_classes=3, dropout_rate=1.5), r"dropout_rate must be in \[0, 1\]"),
+            (dict(num_classes=3, dropout_rate=1.5), r"dropout_rate must be in \[0, 1\)"),
+            (dict(num_classes=3, dropout_rate=1.0), r"dropout_rate must be in \[0, 1\)"),
         ],
     )
     def test_invalid_config_raises(self, kwargs, match):

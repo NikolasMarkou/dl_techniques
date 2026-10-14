@@ -68,6 +68,20 @@ only when the trace provably cannot run, and pin the result.
 Two more (``qwen``, ``scunet``) DO use this helper, after coercing a ``None``
 axis to a concrete probe extent with :func:`concretize_axes` -- their blocker is
 the trace mechanism, not their design.
+
+Functional subclasses and unknown keywords
+------------------------------------------
+A ``keras.Model`` subclass that builds its graph in ``__init__`` and hands it to
+``super().__init__(inputs, outputs, **kwargs)`` reaches Keras 3.8's
+``Functional.__init__(self, inputs, outputs, name=None, **kwargs)``, which pops
+``trainable`` and DISCARDS every other keyword without a word (read in the
+installed source; measured at plan-2026-10-14T062616-81938e81 step 4:
+``SwinTransformer(..., head_config_preset='default')`` built without raising,
+while a subclassed ``keras.Model`` refuses the same keyword with
+``ValueError: Unrecognized keyword arguments``). A misspelled or deleted
+argument is then silently ignored. :func:`refuse_unknown_model_kwargs` restores
+the subclassed models' refusal for such a class, called on its ``**kwargs``
+before ``super().__init__``.
 """
 
 from typing import Any, Mapping
@@ -76,7 +90,13 @@ import keras
 
 # ---------------------------------------------------------------------
 
-__all__ = ["concretize_axes", "materialize_sublayers"]
+__all__ = ["concretize_axes", "materialize_sublayers", "refuse_unknown_model_kwargs"]
+
+#: The keywords a functional ``keras.Model`` subclass may forward to
+#: ``super().__init__``: ``name`` and ``trainable``, which Keras applies, and
+#: ``dtype``, which every ``get_config`` emits (Keras' ``Functional`` does not
+#: apply it), so ``from_config`` must be able to pass it back.
+FUNCTIONAL_MODEL_KWARGS = frozenset({"name", "trainable", "dtype"})
 
 # ---------------------------------------------------------------------
 
@@ -193,5 +213,30 @@ def materialize_sublayers(
                 first_error = exc
 
     raise first_error
+
+# ---------------------------------------------------------------------
+
+
+def refuse_unknown_model_kwargs(kwargs: Mapping[str, Any], class_name: str) -> None:
+    """Raise for any keyword a functional ``keras.Model`` subclass would drop.
+
+    Interface contract (call sites: the ``__init__`` of each functional
+    ``keras.Model`` subclass, on its own ``**kwargs``, before
+    ``super().__init__(inputs=..., outputs=..., **kwargs)``): ``kwargs`` is
+    inspected, never mutated. Keys in :data:`FUNCTIONAL_MODEL_KWARGS` pass.
+    Any other key raises ``ValueError`` with the message a subclassed
+    ``keras.Model`` gives, ``"Unrecognized keyword arguments passed to
+    <class_name>: {...}"``, so the two kinds of model refuse alike.
+
+    :param kwargs: The constructor's leftover keyword arguments.
+    :param class_name: The model class name, quoted in the message.
+    :raises ValueError: If ``kwargs`` holds a key outside
+        :data:`FUNCTIONAL_MODEL_KWARGS`.
+    """
+    unknown = {k: kwargs[k] for k in kwargs if k not in FUNCTIONAL_MODEL_KWARGS}
+    if unknown:
+        raise ValueError(
+            f"Unrecognized keyword arguments passed to {class_name}: {unknown}"
+        )
 
 # ---------------------------------------------------------------------

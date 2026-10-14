@@ -48,8 +48,8 @@ class TestSwinRoundTrip:
     def test_forward_shape(self):
         model = create_swin_transformer("tiny", 10, input_shape=(224, 224, 3))
         out = model(_images(), training=False)
-        # The model unwraps the ClassificationHead dict to return just the
-        # probabilities tensor (shape (2, 10)), matching ResNet/ConvNeXt/MobileNet behavior.
+        # The model unwraps the head's 'logits' and returns that one tensor.
+        assert not isinstance(out, dict)
         assert out.shape == (2, 10)
         assert np.all(np.isfinite(out))
 
@@ -84,12 +84,24 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 class TestSwinGradientFlow:
     """Every trainable weight must be on the backward graph.
 
-    Run at 32x32 rather than this file's 224 default: the geometry note above
-    establishes that 32 is legal, and the smaller grid keeps the tape step cheap
-    (176 trainable weights either way). The interesting tensors here are the
-    per-block ``relative_position_bias_table`` entries and the shifted-window
-    attention projections -- a shift/roll implementation that dropped one of them
-    would keep every shape and every round-trip test green.
+    Run at 64x64 rather than this file's 224 default, to keep the tape step
+    cheap (173 trainable weights at any input size). The interesting tensors here
+    are the per-block ``relative_position_bias_table`` entries and the
+    shifted-window attention projections -- a shift/roll implementation that
+    dropped one of them would keep every shape and every round-trip test green.
+
+    64 is the smallest square input at which the claim is decidable. At 32x32
+    (the size this test used until 2026-10-14, baseline red B-5) the stage grids
+    are 8, 4, 2, **1**: stage 3 holds ONE token, so each of its windows attends
+    to one real key, the padded keys are masked, and the softmax is identically
+    1. The bias table's only live entry, relative position (0, 0), then has a
+    gradient of exactly zero (``d softmax / d logit = p (1 - p) = 0``). MEASURED
+    with ``keras.utils.set_random_seed(0)`` and this test's model: on CPU the two
+    stage-3 tables read ``max|grad| = 1.397e-09`` in 1 of 169 rows (rounding
+    residue of ``1 - p``), on GPU 1 exactly 0.0 -- so the old test passed on CPU
+    and failed on GPU, a degenerate fixture rather than a dead path. At 64x64 the
+    grids are 16, 8, 4, 2; both stage-3 tables then receive 6.525e-04 and
+    3.473e-04 over 9 of 169 rows (CPU), and every one of the 173 weights is live.
     """
 
     # DECISION plan-2026-08-22T035419-a11304c8/D-030
@@ -128,9 +140,9 @@ class TestSwinGradientFlow:
     def test_gradients_reach_every_trainable_weight(self):
         keras.utils.set_random_seed(0)
         model = create_swin_transformer(
-            "tiny", 10, input_shape=(32, 32, 3), drop_path_rate=0.0
+            "tiny", 10, input_shape=(64, 64, 3), drop_path_rate=0.0
         )
-        x = _images(s=32)
+        x = _images(s=64)
         model(x, training=False)  # a subclassed model is unbuilt until first call
 
         report = assert_gradients_reach_every_trainable_weight(model, x)

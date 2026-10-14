@@ -58,18 +58,51 @@ Input (B, H, W, C)
   --> Patch stem Conv2D + BN
   --> L x CliffordNetBlock     isotropic; channels constant throughout
   --> GlobalAveragePool
-  --> LayerNorm --> Dense(num_classes)
+  --> LayerNorm --> [Dropout] --> Dense(num_classes)
+  --> logits (B, num_classes)
 ```
 
 Each `CliffordNetBlock` contains no FFN. The dual-stream detail/context pipeline followed by a sparse Clifford geometric product is the entire non-linear interaction.
 
+The head is the reference implementation's (`ParaMind2025/CAN` `model.py`:
+`x.mean(dim=[-2, -1])`, `nn.LayerNorm(embed_dim)`, `nn.Linear(embed_dim,
+num_classes)`), built as the shared `ClassificationHead` with no hidden block: a
+`pooled_norm` LayerNorm at torch's default epsilon `1e-5`
+(`CliffordNet.LAYERNORM_EPSILON`), the dropout when `dropout_rate > 0`, and the
+linear `classifier`. The model's `kernel_initializer`, `bias_initializer`,
+`kernel_regularizer` and `bias_regularizer` reach the classifier, and
+`head_config_overrides` is merged into the head config (`name`, `num_classes` and
+`task_type` raise `ValueError`).
+
+**The model returns logits, one `(B, num_classes)` tensor, with no softmax.**
+Compile with `keras.losses.SparseCategoricalCrossentropy(from_logits=True)`.
+Until 2026-10-14 `call` returned the head's `{'logits', 'probabilities'}` dict,
+whose `'logits'` held a softmax, and the head carried two hidden blocks. That
+change breaks archives: a `.keras` file saved before it does not load, and is
+not supported. `head_config_preset`, which nothing read, is gone; passing it
+raises `ValueError`.
+
 ### Variants
 
-| Variant | Channels | Depth | Shifts | Params |
-|:--------|:--------:|:-----:|:-------|:-------|
-| `nano` | 128 | 12 | [1, 2] | ~1.4M |
-| `lite` | 128 | 12 | [1, 2, 4, 8, 16] | ~2.6M |
-| `lite_g` | 128 | 12 | [1, 2, 4, 8, 16] + global | ~3.4M |
+| Variant | Channels | Depth | Shifts | Params (paper) | Params (100 classes) |
+|:--------|:--------:|:-----:|:-------|:------:|-------:|
+| `nano` | 128 | 12 | [1, 2] | 1.4M | 1,436,516 |
+| `lite` | 128 | 12 | [1, 2, 4, 8, 16] | 2.6M | 2,616,164 |
+| `lite_g` | 128 | 12 | [1, 2, 4, 8, 16] + global | not reported | 3,404,132 |
+
+The paper column is Ji 2026, Table 1. The last column is `count_params()`,
+re-derived with:
+
+```python
+from dl_techniques.models.vision.cliffordnet import CliffordNet
+for v in ("nano", "lite", "lite_g"):
+    m = CliffordNet.from_variant(v, num_classes=100)
+    m.build((None, 32, 32, 3))
+    print(v, m.count_params())
+```
+
+The two-hidden-block head this replaced read 1,502,948 / 2,682,596 / 3,470,564,
+which round to 1.5M and 2.7M, not the paper's figures.
 
 ---
 
@@ -259,6 +292,7 @@ Every model in the family exploits the core properties of the Clifford geometric
 ### CliffordNet (Vision)
 
 ```python
+import keras
 from dl_techniques.models.vision.cliffordnet import CliffordNet, create_cliffordnet
 
 model = CliffordNet.nano(num_classes=100)
@@ -266,6 +300,13 @@ model = CliffordNet.nano(num_classes=100)
 # or: CliffordNet.lite_g(num_classes=100)  # with global context
 # or the module-level factory, which delegates to CliffordNet.from_variant:
 model = create_cliffordnet("lite", num_classes=100)
+
+# The model returns logits: the loss applies the softmax.
+model.compile(
+    optimizer="adamw",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
+)
 ```
 
 ### CliffordNetLM (Language)

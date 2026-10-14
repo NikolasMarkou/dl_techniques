@@ -86,9 +86,8 @@ class TestFractalNet:
         model = FractalNet(**model_config)
         output = model(sample_data, training=False)
         assert model.built
-        # ClassificationHead returns dict {'logits': ..., 'probabilities': ...}
-        if isinstance(output, dict):
-            output = output['logits']
+        # The model returns the head's logits as one tensor.
+        assert not isinstance(output, (dict, list, tuple)), type(output)
         assert output.shape == (sample_data.shape[0], model_config["num_classes"])
 
     def test_forward_pass_without_top(self, model_config: Dict[str, Any], sample_data: tf.Tensor):
@@ -158,11 +157,6 @@ class TestFractalNet:
             loaded_prediction = loaded_model(sample_data, training=False)
 
             # 4. Verify identical outputs
-            # Handle both dict (with ClassificationHead) and tensor outputs
-            if isinstance(original_prediction, dict):
-                original_prediction = original_prediction['logits']
-            if isinstance(loaded_prediction, dict):
-                loaded_prediction = loaded_prediction['logits']
             np.testing.assert_allclose(
                 original_prediction.numpy(),
                 loaded_prediction.numpy(),
@@ -198,9 +192,11 @@ class TestFractalNet:
     def test_training_integration(self, model_config: Dict[str, Any], sample_data: tf.Tensor, num_classes: int):
         """Test model integration with model.fit()."""
         model = FractalNet(**model_config)
+        # The model returns logits; the string loss would mean
+        # from_logits=False.
         model.compile(
             optimizer="adam",
-            loss="sparse_categorical_crossentropy",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"]
         )
 

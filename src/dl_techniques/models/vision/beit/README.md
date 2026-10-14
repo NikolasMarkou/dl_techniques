@@ -12,7 +12,7 @@ prefixes**, so a classifier warm-starts from an MIM checkpoint layer-for-layer:
 |:---|:---:|:---|
 | `BeitModel` | — | `(B, N+1, D)` token sequence, cls first |
 | `BeitForMaskedImageModeling` | `decoder_` | `(B, N, vocab_size)` logits, cls excluded |
-| `BeitForImageClassification` | `head_` | `(B, num_classes)` logits |
+| `BeitForImageClassification` | `head_` (mean pooling) / `classification_head` (cls pooling) | `(B, num_classes)` logits |
 
 > **No pretrained weights are distributed, and there is no `pretrained=` argument anywhere in this
 > package.** Every constructor and factory returns a randomly-initialized model. To get a
@@ -185,8 +185,27 @@ argument below is serialized by `get_config()`.
 `decoder_head` → `(B, N, vocab_size)` logits. The cls position is sliced off **before** the head, so
 output index `i` is patch `i`; emitting `N+1` logits would put every target off by one with no error
 anywhere. **`BeitForImageClassification(backbone, num_classes, dropout_rate=0.0)`** — trunk →
-pooling → `head_norm` → `head_dropout` → `head_classifier` → logits, with pooling following the
-backbone's `use_mean_pooling` (§ 15.4).
+pooling → (`head_norm` on the mean path) → dropout → one linear classifier → logits, with pooling
+following the backbone's `use_mean_pooling` (§ 15.4). That is BEiT's reference head
+(`microsoft/unilm` `beit/modeling_finetune.py`: `self.fc_norm(t.mean(1))` over the patch tokens
+when `use_mean_pooling`, else `x[:, 0]` after the trunk's own norm, then
+`self.head = nn.Linear(embed_dim, num_classes)`; HF `BeitForImageClassification` is the same).
+On the mean path it is a local head (`head_pool`, `head_norm`, `head_dropout`,
+`head_classifier`), because the shared vision head cannot pool patch tokens with the cls position
+excluded; on the cls path it is the shared `ClassificationHead` at `pooling_type='cls_token'`
+with no hidden block and no norm (`classification_head/classifier`, plus `classifier_dropout` when
+`dropout_rate > 0`). Both draw the classifier kernel from
+`TruncatedNormal(backbone.initializer_range)` with a zero bias. unilm's fine-tuning recipe also
+multiplies the head weights by `init_scale=0.001`; HF, whose config this port follows, does not,
+and neither does this class. `call` returns the classifier output as one tensor; `dropout_rate`
+must lie in `[0, 1)`.
+
+**Archive break (2026-10-14).** Until then the cls path ran the shared head with two hidden
+blocks and returned its softmax, the mean path's head also returned the logits under a
+`'probabilities'` key. A cls-path `.keras` classifier saved before this change carries the old
+head's weights and does not load; it is not supported. The mean path's weight tree is unchanged
+(`test_the_weight_tree_is_pinned.py` still matches its 2026-10-13 row), so only its output key
+changed.
 
 **Factories** — `create_beit_backbone(variant, input_shape, patch_size, **overrides)`,
 `create_beit_mim(..., vocab_size=8192, **overrides)` and
@@ -339,8 +358,8 @@ print(len(clf.trainable_weights), len(clf.weights))
 For raw features call the trunk directly: it emits the full token sequence with cls at index 0, so
 `tokens[:, 0, :]` is the cls feature and `tokens[:, 1:, :].mean(1)` is BEiT's own pooling. Passing
 `use_mean_pooling=False` switches to cls pooling and moves the norm INTO the trunk
-(`clf.backbone.final_norm` becomes non-`None` while `head_pool` and `head_norm` become `None`; see
-§ 15.4). That changes the **layer set**, so an MIM checkpoint trained at `True` will not transfer
+(`clf.backbone.final_norm` becomes non-`None`, and the head becomes the shared
+`ClassificationHead` on the cls state, with no `head_pool` and no `head_norm`; see § 15.4). That changes the **layer set**, so an MIM checkpoint trained at `True` will not transfer
 cleanly into a `False` classifier — keep the flag identical across stages.
 
 ## 10. Performance Optimization

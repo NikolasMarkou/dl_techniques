@@ -38,12 +38,13 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-08-21 at channels=16, depth=2; re-derived 2026-10-13 at 40
-#: after the factory ClassificationHead replaced the bespoke top. The head
-#: contributes 10 trainable weights (two DenseBlocks at 4 each -- kernel, bias,
-#: norm gamma, norm beta -- plus the classifier's kernel and bias); the trunk's
-#: own 30 are unchanged.
-GF_N_WEIGHTS = 40
+#: Measured 2026-08-21 at channels=16, depth=2 as 34; 40 from 2026-10-13 while
+#: the shared ClassificationHead added two DenseBlocks (4 weights each) in
+#: front of the classifier. 34 again since plan-2026-10-14T062616-81938e81
+#: step 4, which gave the head the reference's shape (GAP, LayerNorm, Dense):
+#: the trunk's 30 plus pooled_norm gamma and beta plus the classifier's kernel
+#: and bias.
+GF_N_WEIGHTS = 34
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -64,10 +65,7 @@ def _one_adam_step(model, inputs) -> None:
     variables = list(model.trainable_variables)
     optimizer.build(variables)
     with tf.GradientTape() as tape:
-        out = model(inputs, training=True)
-        # `call` returns the ClassificationHead's dict, so `default_loss`
-        # (which reduces over a tensor) needs the logits.
-        loss = default_loss(out["logits"] if isinstance(out, dict) else out)
+        loss = default_loss(model(inputs, training=True))
     optimizer.apply_gradients(zip(tape.gradient(loss, variables), variables))
 
 
@@ -122,10 +120,8 @@ class TestCliffordNetSmokeContract:
         model = _model()
         x = _images()
 
-        def contract(out):
-            # The factory ClassificationHead's documented output is a dict;
-            # `call` returns it unchanged.
-            logits = out["logits"] if isinstance(out, dict) else out
+        def contract(logits):
+            # `call` returns the head's logits as one tensor.
             assert not isinstance(logits, (dict, list, tuple)), (
                 f"CliffordNet returns one tensor, got {type(logits)}"
             )

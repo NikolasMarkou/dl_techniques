@@ -6,8 +6,10 @@ squeezes its input to a narrow 1x1 bottleneck, then expands through parallel
 1x1 and 3x3 convolutions concatenated on the channel axis, so the 3x3
 convolution runs on far fewer input channels than the block's own width.
 Downsampling is delayed to later layers, and ResNet-style bypass connections
-can be added around Fire modules. Callers should know that the head applies
-softmax itself, that every downsampling stage uses `padding='valid'` and so
+can be added around Fire modules. Callers should know that the model returns
+logits, the paper's ReLU'd `conv10` averaged over space with no softmax
+(compile with `SparseCategoricalCrossentropy(from_logits=True)`), that every
+downsampling stage uses `padding='valid'` and so
 each variant has a minimum input extent (35 for the 1.0 stem family, 31 for
 1.1) checked in the constructor, that no pretrained weights ship with this
 port, and that the kernel initializers are transcribed from the official
@@ -31,7 +33,7 @@ References:
 
 import keras
 from keras import layers, initializers, regularizers
-from typing import Optional, Tuple, Dict, Any, Union, Literal
+from typing import Optional, Tuple, Dict, Any, Union
 
 
 # ---------------------------------------------------------------------
@@ -44,12 +46,8 @@ from .caffe_reference_init import (
     CAFFE_HEAD_INITIALIZER,
     CAFFE_XAVIER_INITIALIZER,
 )
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 
@@ -239,8 +237,9 @@ class SqueezeNetV1(keras.Model):
     """Assemble a stem, eight Fire modules, and a classification head.
 
     The graph is built in ``__init__`` and handed to ``keras.Model``, so the
-    instance is a functional model. The head applies softmax, so its output is a
-    probability vector rather than logits.
+    instance is a functional model. The output is logits: the head is the
+    paper's ``conv10`` (1x1, ``num_classes`` filters, ReLU) averaged over space,
+    with no softmax.
 
     Architecture:
 
@@ -281,14 +280,19 @@ class SqueezeNetV1(keras.Model):
         └──────────────────────────────┘
               │
               ▼
-        ┌──────────────────────────────┐
-        │ softmax                      │
-        └──────────────────────────────┘
-              │
-              ▼
-        output [B, num_classes]
+        logits [B, num_classes]
 
     Dropout sits before the fork, so it is applied on both leaves.
+
+    The head is the official prototxts' ``conv10``, ``relu_conv10`` and global
+    ``pool10`` (the ``SoftmaxWithLoss`` after them is the loss, not the model);
+    torchvision ``squeezenet1_0``/``1_1`` build the same ``final_conv``, ReLU
+    and ``AdaptiveAvgPool2d(1)``. It is not the shared ``ClassificationHead``,
+    which cannot express it: that head pools first and classifies with a
+    ``Dense`` after the pool, while here the classifier runs per position and
+    a ReLU sits between it and the pool, and a ``layers/heads`` class-score
+    head applies no activation. Because of the ReLU every logit is
+    non-negative.
 
     Bypass wiring:
 
@@ -331,27 +335,21 @@ class SqueezeNetV1(keras.Model):
     :param dropout_rate: Dropout rate after the final Fire module. Must be in
         `[0, 1)`.
     :type dropout_rate: float
-    :param kernel_regularizer: Regularizer for all convolution kernels.
+    :param kernel_regularizer: Regularizer for all convolution kernels,
+        ``conv10``'s included.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param kernel_initializer: Initializer for the Fire module and bypass
         convolutions. The stem and head use `STEM_INITIALIZER` and
         `HEAD_INITIALIZER` instead.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param include_top: Whether to include the classification head.
+    :param include_top: Whether to include the classification head
+        (``conv10`` and the global pool).
     :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`.
     :type input_shape: tuple of 3 ints
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-        Note: SqueezeNet uses a custom head (Conv2D 1x1 -> GAP -> Softmax) which
-        differs from the standard ClassificationHead. This parameter is accepted
-        for API consistency but does not change the head architecture.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
-        Note: SqueezeNet uses a custom head. This parameter is accepted
-        for API consistency but does not change the head architecture.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :param kwargs: Passthrough to `keras.Model`.
+    :param kwargs: `name`, `trainable` or `dtype`, passed to `keras.Model`.
+        Anything else raises `ValueError`, because Keras' functional
+        constructor would drop it silently.
     :raises ValueError: If `num_classes` is not positive, `dropout_rate` is
         outside `[0, 1)`, or the input's spatial extent is below the variant's
         minimum (35 for the "1.0" stem family, 31 for "1.1", computed from the
@@ -435,10 +433,9 @@ class SqueezeNetV1(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
-            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
-            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         if variant_config is None:
             variant_config = self.MODEL_VARIANTS["1.0"]
 
@@ -469,10 +466,6 @@ class SqueezeNetV1(keras.Model):
         self.conv1_kernel = variant_config["conv1_kernel"]
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
-
-        # Head configuration (for API consistency; SqueezeNet uses custom head)
-        self._head_config_preset = str(head_config_preset)
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.stem_layers = []
         self.fire_modules = []
@@ -616,43 +609,36 @@ class SqueezeNetV1(keras.Model):
         return x
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head using the vision heads factory.
+        """Build the paper's head: ``conv10`` with its ReLU, then a global average pool.
 
-        Uses :class:`ClassificationHead` from the vision heads factory with
-        global average pooling. The head returns a dict with 'logits' and
-        'probabilities' (softmax applied). This method extracts probabilities
-        to maintain backward compatibility with the original SqueezeNet output.
+        The 1x1 convolution carries a ReLU before the pooling, as the reference
+        prototxts do. Nothing follows the pool: the output is the logits.
 
         :param x: Tensor coming out of the Fire stack.
         :type x: keras.KerasTensor
-        :return: Class probabilities ``(batch, num_classes)``.
+        :return: Logits ``(batch, num_classes)``.
         :rtype: keras.KerasTensor
         """
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            'normalization_type': 'batch_norm',
-            'activation_type': 'relu',
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            'use_ffn': False,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        # DECISION plan-2026-10-14T062616-81938e81/D-017
+        # conv10 + ReLU + global average pool is the paper's head, built here,
+        # not by the shared ClassificationHead: that head classifies AFTER its
+        # pool with no activation, and cannot put the ReLU between a per-position
+        # classifier and the pool. Do NOT add a softmax after the pool: the
+        # output is the logits. See decisions.md.
+        conv10 = layers.Conv2D(
+            filters=self.num_classes,
+            kernel_size=1,
+            activation='relu',
+            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=dict(self.HEAD_INITIALIZER),
+            name='conv10'
         )
-        head_output = self.classification_head(x)
-        # Extract probabilities for backward compatibility (original SqueezeNet returns probabilities)
-        x = head_output['probabilities']
-        self.head_layers = [self.classification_head]
+        x = conv10(x)
+        self.head_layers.append(conv10)
+
+        avgpool = layers.GlobalAveragePooling2D(name='avgpool')
+        x = avgpool(x)
+        self.head_layers.append(avgpool)
 
         return x
 
@@ -730,8 +716,6 @@ class SqueezeNetV1(keras.Model):
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
-            'head_config_preset': self._head_config_preset,
-            'head_config_overrides': self._head_config_overrides,
         })
         return config
 
@@ -759,13 +743,7 @@ class SqueezeNetV1(keras.Model):
         for key in ('layers', 'input_layers', 'output_layers'):
             config.pop(key, None)
 
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
+        return cls(**config)
 
     def summary_with_details(self) -> None:
         """Print the Keras summary, then log the resolved configuration.
@@ -805,8 +783,6 @@ def create_squeezenet_v1(
         num_classes: int = 1000,
         input_shape: Tuple[int, int, int] = (224, 224, 3),
         weights: Optional[str] = None,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
-        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> SqueezeNetV1:
     """Create a SqueezeNet V1 model from a variant name.
@@ -819,11 +795,6 @@ def create_squeezenet_v1(
     :type input_shape: tuple of 3 ints
     :param weights: Unsupported; any non-`None` value raises `NotImplementedError`.
     :type weights: str or None
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
-    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to the model constructor.
     :return: A configured `SqueezeNetV1` instance.
     :rtype: SqueezeNetV1
@@ -843,8 +814,6 @@ def create_squeezenet_v1(
         num_classes=num_classes,
         input_shape=input_shape,
         weights=weights,
-        head_config_preset=head_config_preset,
-        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

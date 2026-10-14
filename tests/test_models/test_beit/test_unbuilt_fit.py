@@ -39,12 +39,13 @@ class TestBeitUnbuiltFit:
     while that was true, so nothing below may call ``build()`` first.
     """
 
-    #: The classifier's output is the factory ClassificationHead's dict, so the
-    #: loss must name the key it applies to. ``mean_pooling_classification_head``
-    #: emits LINEAR logits (its ``Dense`` has no activation), which is why
-    #: ``from_logits=True`` is the right loss here -- and why the mean-pooling
-    #: branch of ``test_output_is_logits_not_probabilities`` still holds.
-    _CLF_LOSS = {'logits': keras.losses.SparseCategoricalCrossentropy(from_logits=True)}
+    #: The classifier returns its logits as one tensor, so the loss is one
+    #: stock loss. Until plan-2026-10-14T062616-81938e81 step 4 this was a dict
+    #: keyed ``'logits'`` (the head's dict was never the model output, so Keras
+    #: raised ``TypeError: 'NoneType' object is not iterable`` -- baseline red
+    #: B-4). ``mean_pooling_classification_head`` emits LINEAR logits (its
+    #: ``Dense`` has no activation), so ``from_logits=True`` is the right loss.
+    _CLF_LOSS = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     def test_classifier_fit_without_an_explicit_build(self):
         model = _classifier('tiny', num_classes=4)

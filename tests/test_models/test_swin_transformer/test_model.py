@@ -44,9 +44,7 @@ def _smoke_inputs():
 
 def _assert_smoke_contract(out):
     """The smoke assertion. Shared with the meta-test so it is proven falsifiable."""
-    # ClassificationHead returns dict {'logits': ..., 'probabilities': ...}
-    if isinstance(out, dict):
-        out = out['logits']
+    # The model unwraps the head's 'logits' itself; a dict here is a defect.
     assert not isinstance(out, (dict, list, tuple)), (
         f"swin should return a single logits tensor, got {type(out)}"
     )

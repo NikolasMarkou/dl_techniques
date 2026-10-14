@@ -1,4 +1,4 @@
-"""A vision classifier built on the shared ``ClassificationHead`` returns bare logits.
+"""Every ``models/vision`` classifier returns bare logits.
 
 Census guard for plan-2026-10-14T062616-81938e81 (decisions D-002, D-010). Until
 that plan the vision ``ClassificationHead`` ended in a softmax and returned the
@@ -32,6 +32,13 @@ One row per consumer class, four arms per row:
     fails this arm too.
 
 Adding a consumer is one entry in :data:`SUBJECTS`.
+
+Step 4 (Batch C) added CliffordNet, BEiT on both pooling paths, Swin, FractalNet
+and SqueezeNet V1/V2, so the census covers all 17 ``models/vision`` classifier
+classes (BEiT twice). SqueezeNet is the one family that is NOT a
+``ClassificationHead`` consumer any more: its paper head is ``conv10`` (ReLU)
+then a global average pool, which the shared head cannot express (decision
+D-017), so its rows locate the classifier as the ``conv10`` layer.
 
 Step 3 of the same plan (decisions D-013 to D-015) added two more arms. Each consumer's
 head is configured as its paper's or reference implementation's
@@ -125,6 +132,57 @@ def _vit_hmlp(**knobs) -> keras.Model:
                    scale="tiny", patch_size=16, **knobs)
 
 
+def _cliffordnet(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.cliffordnet import CliffordNet
+    return CliffordNet(num_classes=NUM_CLASSES, channels=16, depth=2,
+                       patch_size=2, shifts=[1, 2], **knobs)
+
+
+def _beit(**knobs) -> keras.Model:
+    # use_mean_pooling=True (the default): the local mean-pooling head.
+    from dl_techniques.models.vision.beit import create_beit_classifier
+    return create_beit_classifier("tiny", (32, 48, 3), 16,
+                                  num_classes=NUM_CLASSES, **knobs)
+
+
+def _beit_cls(**knobs) -> keras.Model:
+    # use_mean_pooling=False: the shared ClassificationHead on the cls state.
+    from dl_techniques.models.vision.beit import create_beit_classifier
+    return create_beit_classifier("tiny", (32, 48, 3), 16,
+                                  num_classes=NUM_CLASSES,
+                                  use_mean_pooling=False, **knobs)
+
+
+def _swin(**knobs) -> keras.Model:
+    # 64 x 96 at patch 4, window 2: stage grids 16x24, 8x12, 4x6, 2x3.
+    from dl_techniques.models.vision.swin_transformer import SwinTransformer
+    return SwinTransformer(num_classes=NUM_CLASSES, embed_dim=16,
+                           depths=[2, 2, 2, 2], num_heads=[1, 2, 4, 8],
+                           window_size=2, patch_size=4, drop_path_rate=0.0,
+                           input_shape=(64, 96, 3), **knobs)
+
+
+def _fractalnet(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.fractalnet import FractalNet
+    return FractalNet(num_classes=NUM_CLASSES, depths=[1, 2], filters=[8, 16],
+                      strides=[2, 2], drop_path_rate=0.0,
+                      input_shape=(32, 48, 3), **knobs)
+
+
+def _squeezenet_v1(**knobs) -> keras.Model:
+    # "1.1": its spatial floor is 31, so 48 x 64 clears it on both axes.
+    from dl_techniques.models.vision.squeezenet import SqueezeNetV1
+    return SqueezeNetV1.from_variant("1.1", num_classes=NUM_CLASSES,
+                                     input_shape=(48, 64, 3), **knobs)
+
+
+def _squeezenet_v2(**knobs) -> keras.Model:
+    # Floor 35 on every axis for all four V2 variants.
+    from dl_techniques.models.vision.squeezenet import SqueezeNoduleNetV2
+    return SqueezeNoduleNetV2.from_variant("v2", num_classes=NUM_CLASSES,
+                                           input_shape=(48, 64, 3), **knobs)
+
+
 #: Each builder takes extra constructor keywords (``**knobs``).
 SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
@@ -138,7 +196,33 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "MobileNetV4": (_mobilenet_v4, (32, 48, 3)),
     "ViT": (_vit, (32, 48, 3)),
     "ViTHMLP": (_vit_hmlp, (32, 48, 3)),
+    "CliffordNet": (_cliffordnet, (32, 48, 3)),
+    "BeitForImageClassification": (_beit, (32, 48, 3)),
+    "BeitForImageClassification_cls": (_beit_cls, (32, 48, 3)),
+    "SwinTransformer": (_swin, (64, 96, 3)),
+    "FractalNet": (_fractalnet, (32, 48, 3)),
+    "SqueezeNetV1": (_squeezenet_v1, (48, 64, 3)),
+    "SqueezeNoduleNetV2": (_squeezenet_v2, (48, 64, 3)),
 }
+
+#: The classes whose classifier is the paper's ``conv10`` layer, not a
+#: ``ClassificationHead`` (decision D-017).
+CONV10_HEADS = {"SqueezeNetV1", "SqueezeNoduleNetV2"}
+
+
+def _classifier(model: keras.Model) -> keras.layers.Layer:
+    """The layer that produces the class scores.
+
+    :param model: A census subject, built.
+    :type model: keras.Model
+    :return: The head's ``classifier`` Dense (``head_classifier`` on BEiT's
+        mean-pooling head), or SqueezeNet's ``conv10``.
+    :rtype: keras.layers.Layer
+    """
+    head = getattr(model, "classification_head", None)
+    if head is None:
+        return model.get_layer("conv10")
+    return head.classifier
 
 
 def _images(shape: Tuple[int, int, int], seed: int = 0) -> np.ndarray:
@@ -219,7 +303,7 @@ def test_a_stock_from_logits_fit_step_moves_the_classifier(subject: str) -> None
     x = _images(shape, seed=1)
     y = np.arange(BATCH) % NUM_CLASSES
     model(x[:1], training=False)
-    kernel = model.classification_head.classifier.kernel
+    kernel = _classifier(model).kernel
     before = keras.ops.convert_to_numpy(kernel).copy()
 
     model.compile(
@@ -269,22 +353,74 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     # layer at fine-tuning time", on the final norm's CLS token.
     "ViT": {"classifier"},
     "ViTHMLP": {"classifier"},
+    # CliffordNet: ParaMind2025/CAN model.py, x.mean(dim=[-2, -1]) ->
+    # nn.LayerNorm(embed_dim) -> nn.Linear(embed_dim, num_classes).
+    "CliffordNet": {"pooled_norm", "classifier"},
+    # BEiT: microsoft/unilm beit/modeling_finetune.py. Mean path:
+    # fc_norm(t[:, 1:].mean(1)) -> head; here head_norm and head_classifier.
+    "BeitForImageClassification": {"head_norm", "head_classifier"},
+    # Cls path: x[:, 0] after the trunk's own norm -> head. No head norm.
+    "BeitForImageClassification_cls": {"classifier"},
+    # Swin: microsoft/Swin-Transformer models/swin_transformer.py, norm (per
+    # token, the model's own head_norm) -> avgpool -> head. The head itself
+    # is pool + one Linear.
+    "SwinTransformer": {"classifier"},
+    # FractalNet: Larsson et al. 2017 Sec. 4, "A softmax prediction layer
+    # attaches at the end of the network": pool, one linear layer.
+    "FractalNet": {"classifier"},
 }
+
+
+def _head_owners(head: keras.layers.Layer) -> set:
+    """Names of the sublayers that own the head's weights.
+
+    Paths read ``.../<head name>/<owner>/<variable>``.
+
+    :param head: The model's head layer.
+    :type head: keras.layers.Layer
+    :return: The owner names.
+    :rtype: set
+    """
+    return {
+        parts[parts.index(head.name) + 1]
+        for parts in (w.path.split("/") for w in head.weights)
+    }
+
+
+def _assert_the_conv10_head(subject: str, model: keras.Model) -> None:
+    """SqueezeNet's paper head: conv10 (1x1, num_classes, ReLU), then GAP.
+
+    Iandola et al. 2016 / the official prototxts (conv10, relu_conv10, global
+    pool10) and torchvision ``squeezenet1_0``/``1_1`` (``final_conv``, ReLU,
+    ``AdaptiveAvgPool2d(1)``). Nothing follows the pool.
+    """
+    assert getattr(model, "classification_head", None) is None, subject
+    conv10 = model.get_layer("conv10")
+    assert isinstance(conv10, keras.layers.Conv2D), subject
+    assert conv10.kernel_size == (1, 1) and conv10.filters == NUM_CLASSES
+    assert conv10.activation is keras.activations.relu, subject
+    assert isinstance(model.layers[-1], keras.layers.GlobalAveragePooling2D), (
+        f"{subject}: last layer {model.layers[-1].name}"
+    )
+    assert model.layers[-2] is conv10, subject
 
 
 def test_the_head_has_the_reference_shape(subject: str) -> None:
     model, shape = _build(subject)
     model(_images(shape), training=False)
+    if subject in CONV10_HEADS:
+        _assert_the_conv10_head(subject, model)
+        return
     head = model.classification_head
-    # Paths read ``<model>/classification_head/<owner>/...``.
-    owners = {
-        parts[parts.index("classification_head") + 1]
-        for parts in (w.path.split("/") for w in head.weights)
-    }
+    owners = _head_owners(head)
     assert owners == REFERENCE_HEAD_OWNERS[subject], (
         f"{subject} head weight owners {sorted(owners)}, the reference head "
         f"has {sorted(REFERENCE_HEAD_OWNERS[subject])}"
     )
+    if subject == "BeitForImageClassification":
+        # The local mean-pooling head: no hidden block by construction.
+        assert head.norm.epsilon == model.backbone.layer_norm_eps
+        return
     # No normalization inside any hidden block of these reference heads,
     # except MobileNetV4's BatchNorm at the family epsilon.
     if subject == "MobileNetV4":
@@ -305,6 +441,21 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
     if subject == "AlexNet":
         assert [b.units for b in head.dense_blocks] == [4096, 4096]
         assert [b.dropout_rate for b in head.dense_blocks] == [0.5, 0.5]
+    if subject == "CliffordNet":
+        assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
+        # torch nn.LayerNorm's default eps, not the 1e-6 of the blocks.
+        assert head.pooled_norm.epsilon == pytest.approx(1e-5)
+    if subject == "SwinTransformer":
+        # The official norm is per token, BEFORE the pool, so the model owns
+        # it; the shared head's pooled_norm would norm the pooled vector.
+        assert not hasattr(head, "pooled_norm")
+        assert isinstance(model.head_norm, keras.layers.LayerNormalization)
+        assert model.head_norm.epsilon == pytest.approx(1e-5)
+        # Official PatchMerging: nn.Linear(4 * dim, 2 * dim, bias=False).
+        assert [m.reduction.use_bias for m in model.patch_merge_layers] == [
+            False, False, False]
+    if subject == "FractalNet":
+        assert isinstance(head.pooling, keras.layers.GlobalAveragePooling2D)
 
 
 _L2 = 3e-4
@@ -339,10 +490,36 @@ KNOBS: Dict[str, Dict[str, object]] = {
                 "bias_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
                 "bias_initializer": keras.initializers.Constant(0.5)},
+    "CliffordNet": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                    "bias_regularizer": keras.regularizers.L2(_L2),
+                    "dropout_rate": 0.3,
+                    "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+                    "bias_initializer": keras.initializers.Constant(0.5)},
+    # BEiT takes no initializer or regularizer knob of its own: the head draws
+    # from TruncatedNormal(backbone.initializer_range), so that is the knob.
+    "BeitForImageClassification": {"dropout_rate": 0.3, "initializer_range": 0.05},
+    "BeitForImageClassification_cls": {"dropout_rate": 0.3,
+                                       "initializer_range": 0.05},
+    "SwinTransformer": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                        "bias_regularizer": keras.regularizers.L2(_L2),
+                        "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+                        "bias_initializer": keras.initializers.Constant(0.5)},
+    # FractalNet: classifier_dropout_rate is its pre-classifier dropout and
+    # global_pool picks the head's pooling (dead before step 4).
+    "FractalNet": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                   "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+                   "classifier_dropout_rate": 0.3, "global_pool": "max"},
+    # SqueezeNet: the regularizer reaches conv10; the kernel_initializer does
+    # NOT, by design -- conv10 keeps the prototxt's gaussian(0.01) filler.
+    "SqueezeNetV1": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "SqueezeNoduleNetV2": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                           "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
 }
 
 #: Where each class's ``dropout_rate`` must land in its reference head.
-CLASSIFIER_DROPOUT = {"MobileNetV1", "MobileNetV2", "ViT", "ViTHMLP"}
+CLASSIFIER_DROPOUT = {"MobileNetV1", "MobileNetV2", "ViT", "ViTHMLP",
+                      "CliffordNet", "BeitForImageClassification_cls"}
 BLOCK_DROPOUT = {"MobileNetV3", "MobileNetV4"}
 
 
@@ -351,8 +528,8 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
     keras.utils.set_random_seed(0)
     model = builder(**KNOBS[subject])
     model(_images(shape), training=False)
-    head = model.classification_head
-    classifier = head.classifier
+    head = getattr(model, "classification_head", None)
+    classifier = _classifier(model)
     knobs = KNOBS[subject]
     if "kernel_regularizer" in knobs or "weight_decay" in knobs:
         assert isinstance(classifier.kernel_regularizer, keras.regularizers.L2), (
@@ -368,7 +545,26 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
         assert head.classifier_dropout.rate == pytest.approx(0.3), subject
     if subject in BLOCK_DROPOUT:
         assert [b.dropout_rate for b in head.dense_blocks] == [0.3], subject
-    if "kernel_initializer" in knobs:
+    if subject == "BeitForImageClassification":
+        assert head.dropout.rate == pytest.approx(0.3), subject
+    if subject.startswith("BeitForImageClassification"):
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "TruncatedNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.05), (
+            f"{subject}: initializer_range did not reach the classifier"
+        )
+    if subject == "FractalNet":
+        assert head.classifier_dropout.rate == pytest.approx(0.3)
+        assert isinstance(head.pooling, keras.layers.GlobalMaxPooling2D), (
+            "FractalNet: global_pool='max' did not reach the head"
+        )
+    if subject in CONV10_HEADS:
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "RandomNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.01), (
+            f"{subject}: conv10 must keep the prototxt's gaussian(0.01) filler"
+        )
+    elif "kernel_initializer" in knobs:
         config = keras.initializers.serialize(classifier.kernel_initializer)
         assert config["class_name"] == "RandomNormal", (subject, config)
         assert config["config"]["stddev"] == pytest.approx(0.123)
@@ -436,6 +632,70 @@ def test_vit_base_has_the_timm_parameter_count() -> None:
     assert model.count_params() == TIMM_VIT_BASE_PATCH16_224_PARAMETERS
 
 
+#: torchvision ``squeezenet1_0()`` / ``squeezenet1_1()`` at 1000 classes:
+#: ``sum(p.numel() for p in m.parameters())``, the figures torchvision's model
+#: table publishes (1.2M; 1,248,424 and 1,235,496 exactly). The two share the
+#: Fire widths and the conv10 head; they differ in the stem and pool schedule.
+TORCHVISION_SQUEEZENET_PARAMETERS = {"1.0": 1_248_424, "1.1": 1_235_496}
+
+
+@pytest.mark.parametrize("variant", sorted(TORCHVISION_SQUEEZENET_PARAMETERS))
+def test_squeezenet_v1_has_the_torchvision_parameter_count(variant: str) -> None:
+    from dl_techniques.models.vision.squeezenet import SqueezeNetV1
+    model = SqueezeNetV1.from_variant(variant, num_classes=1000,
+                                      input_shape=(224, 224, 3))
+    assert _trainable_count(model) == TORCHVISION_SQUEEZENET_PARAMETERS[variant]
+
+
+def _swin_official_parameter_count(embed_dim: int, depths, num_heads,
+                                   num_classes: int = 1000, window: int = 7,
+                                   patch: int = 4, in_chans: int = 3) -> int:
+    """Swin's parameters, summed by hand from the official module list.
+
+    ``microsoft/Swin-Transformer`` ``models/swin_transformer.py``: a patch-embed
+    conv with bias and its LayerNorm; per block ``norm1``, the
+    ``(2 * window - 1) ** 2 x heads`` relative-position table, ``qkv`` and
+    ``proj`` with bias, ``norm2``, ``fc1``/``fc2`` with bias at ratio 4; per
+    merge a LayerNorm over ``4C`` and ``nn.Linear(4C, 2C, bias=False)``; the
+    final LayerNorm and ``nn.Linear(num_features, num_classes)``. Written out
+    here, not imported, so the oracle does not come from the code under test.
+    """
+    total = in_chans * patch * patch * embed_dim + embed_dim + 2 * embed_dim
+    for stage, (depth, heads) in enumerate(zip(depths, num_heads)):
+        c = embed_dim * 2 ** stage
+        block = (2 * c + (2 * window - 1) ** 2 * heads + 3 * c * c + 3 * c
+                 + c * c + c + 2 * c + c * 4 * c + 4 * c + 4 * c * c + c)
+        total += depth * block
+        if stage < len(depths) - 1:
+            total += 2 * 4 * c + 4 * c * 2 * c
+    features = embed_dim * 2 ** (len(depths) - 1)
+    return total + 2 * features + features * num_classes + num_classes
+
+
+def test_swin_tiny_has_the_official_parameter_count() -> None:
+    from dl_techniques.models.vision.swin_transformer import SwinTransformer
+    expected = _swin_official_parameter_count(96, [2, 2, 6, 2], [3, 6, 12, 24])
+    # timm's swin_tiny_patch4_window7_224 publishes 28.29M.
+    assert expected == 28_288_354, "the hand sum itself changed"
+    model = SwinTransformer.from_variant("tiny", num_classes=1000,
+                                         input_shape=(224, 224, 3))
+    assert _trainable_count(model) == expected
+
+
+#: Ji 2026 (arXiv:2601.06793) Table 1, CIFAR-100: CliffordNet-Nano 1.4M,
+#: CliffordNet-Lite 2.6M. The paper prints one decimal, so that is the pin.
+CLIFFORDNET_PAPER_PARAMETERS_M = {"nano": 1.4, "lite": 2.6}
+
+
+@pytest.mark.parametrize("variant", sorted(CLIFFORDNET_PAPER_PARAMETERS_M))
+def test_cliffordnet_has_the_paper_parameter_count(variant: str) -> None:
+    from dl_techniques.models.vision.cliffordnet import CliffordNet
+    model = CliffordNet.from_variant(variant, num_classes=100)
+    model.build((None, 32, 32, 3))
+    assert round(model.count_params() / 1e6, 1) == (
+        CLIFFORDNET_PAPER_PARAMETERS_M[variant])
+
+
 def test_alexnet_has_the_paper_parameter_count() -> None:
     from dl_techniques.models.vision.alexnet import create_alexnet
     expected = _alexnet_paper_parameter_count()
@@ -476,6 +736,12 @@ def test_return_dict_is_refused(name: str) -> None:
     "dl_techniques.models.vision.mobilenet:create_mobilenetv4",
     "dl_techniques.models.vision.vit:create_vit",
     "dl_techniques.models.vision.vit_hmlp:create_vit_hmlp",
+    "dl_techniques.models.vision.cliffordnet:create_cliffordnet",
+    "dl_techniques.models.vision.swin_transformer:create_swin_transformer",
+    "dl_techniques.models.vision.fractalnet:create_fractal_net",
+    "dl_techniques.models.vision.squeezenet:create_squeezenet_v1",
+    "dl_techniques.models.vision.squeezenet:create_squeezenodule_net_v2",
+    "dl_techniques.models.vision.beit:create_beit_classifier",
 ])
 def test_no_factory_takes_return_dict(factory: str) -> None:
     import importlib
@@ -488,3 +754,38 @@ def test_no_factory_takes_return_dict(factory: str) -> None:
     assert "head_config_preset" not in inspect.signature(fn).parameters, (
         f"{attr} still declares the dead head_config_preset"
     )
+
+
+# ---------------------------------------------------------------------
+# The dead head knobs are gone, and refused (plan-2026-10-14T062616-81938e81
+# step 4, D-004 and D-017)
+# ---------------------------------------------------------------------
+
+#: (subject, dead keyword). ``head_config_preset`` was stored and never read
+#: by any Batch C class; SqueezeNetV1's ``head_config_overrides`` configured a
+#: shared head the class no longer has.
+DEAD_HEAD_KNOBS = [
+    ("CliffordNet", "head_config_preset"),
+    ("SwinTransformer", "head_config_preset"),
+    ("FractalNet", "head_config_preset"),
+    ("SqueezeNetV1", "head_config_preset"),
+    ("SqueezeNetV1", "head_config_overrides"),
+    ("SqueezeNoduleNetV2", "head_config_overrides"),
+]
+
+
+@pytest.mark.parametrize("name,knob", DEAD_HEAD_KNOBS,
+                         ids=[f"{n}-{k}" for n, k in DEAD_HEAD_KNOBS])
+def test_a_dead_head_knob_is_refused(name: str, knob: str) -> None:
+    """Deleted, not ignored.
+
+    CliffordNet is a subclassed ``keras.Model``, which refuses an unknown
+    keyword itself. Swin, FractalNet and SqueezeNet are functional subclasses:
+    Keras' ``Functional.__init__`` drops unknown keywords silently (measured),
+    so they refuse through ``utils.model_build.refuse_unknown_model_kwargs``.
+    Either way the refusal is ``ValueError`` naming the keyword.
+    """
+    builder, _ = SUBJECTS[name]
+    value = "default" if knob == "head_config_preset" else {}
+    with pytest.raises(ValueError, match=knob):
+        builder(**{knob: value})

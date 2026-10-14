@@ -136,10 +136,12 @@ class TestSqueezeNetV1:
         expected_shape = (sample_data.shape[0], num_classes)
         assert outputs.shape == expected_shape
 
-        # Check for valid values (probabilities should sum to 1)
-        assert not np.any(np.isnan(outputs.numpy()))
-        assert not np.any(np.isinf(outputs.numpy()))
-        assert np.allclose(np.sum(outputs.numpy(), axis=-1), 1.0)
+        # Logits: finite, non-negative (conv10 carries a ReLU before the pool),
+        # and not a probability vector.
+        values = outputs.numpy()
+        assert np.all(np.isfinite(values))
+        assert np.all(values >= 0.0)
+        assert not np.allclose(values.sum(axis=-1), 1.0, atol=1e-3)
 
     def test_forward_pass_without_top(self, small_input_shape, small_sample_data):
         """Test forward pass without classification head (feature extraction)."""
@@ -209,7 +211,7 @@ class TestSqueezeNetV1:
         for optimizer in optimizers:
             model.compile(
                 optimizer=optimizer,
-                loss=keras.losses.SparseCategoricalCrossentropy(),
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=["accuracy"]
             )
             assert model.optimizer == optimizer
@@ -241,7 +243,10 @@ class TestSqueezeNetV1:
             name="test_squeezenet",
             variant_config=SqueezeNetV1.MODEL_VARIANTS["1.1"]
         )
-        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
 
         original_outputs = model(cifar_sample_data, training=False)
 
@@ -269,7 +274,7 @@ class TestSqueezeNetV1:
         model = SqueezeNetV1(num_classes=num_classes, input_shape=small_input_shape)
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=0.001),
-            loss=keras.losses.SparseCategoricalCrossentropy(),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"]
         )
 
@@ -294,7 +299,8 @@ class TestSqueezeNetV1:
 
         with tf.GradientTape() as tape:
             outputs = model(small_sample_data, training=True)
-            loss = keras.losses.sparse_categorical_crossentropy(labels, outputs)
+            loss = keras.losses.sparse_categorical_crossentropy(
+                labels, outputs, from_logits=True)
             loss = tf.reduce_mean(loss)
 
         grads = tape.gradient(loss, model.trainable_variables)

@@ -29,11 +29,13 @@ Tolerance
 Neutering the SW-MSA mask (``ops.ones_like(...)`` at the block's call site)
 moves these logits far outside any plausible tolerance, but neutering the D-006
 single-window rule (``_resolve_shift_size`` -> ``return self.shift_size``) moves
-them by only **1.04e-07** -- the affected block is one 2x2 stage whose four
-tokens are then global-pooled. A ``1e-6`` tolerance would have let that probe
-pass, i.e. the guard would have been blind to half of what it is here to watch.
-``1e-8`` is still two orders of magnitude above the measured floor: the probe is
-bit-identical across separate interpreter processes on CPU.
+them by only **1.825392e-07** (re-measured 2026-10-14 against the current head;
+**1.04e-07** against the softmax head before it) -- the affected block is one
+2x2 stage whose four tokens are then normed, global-pooled and projected. A
+``1e-6`` tolerance would have let that probe pass, i.e. the guard would have
+been blind to half of what it is here to watch. ``1e-8`` is still well above
+the measured floor: the probe is bit-identical across two builds in one process
+and across separate interpreter processes on CPU.
 
 Device
 ------
@@ -76,28 +78,37 @@ INPUT_SEED = 11
 WEIGHT_SEED = 20260731
 WEIGHT_SCALE = 0.05
 
-#: Re-derived 2026-10-13. The previous values were taken against the bespoke
-#: top (GlobalAveragePooling2D + a LINEAR Dense), and are kept nowhere: the
-#: factory ``ClassificationHead`` replaced it, and that head's ``classifier``
-#: applies ``activation='softmax'`` -- so this is a change of FUNCTION, not of
-#: the last few bits, and the two sets share no digits. The tell is the row
-#: sums: the pinned set summed to nothing in particular (a logit vector need
-#: not), this one sums to 1.0 to 1e-8 because every entry is a probability.
-#: The head's own docstring says both keys hold the same softmax output, so
-#: ``'logits'`` is a misnomer there; what is pinned is the tensor ``call``
-#: returns under that key, which is what the rest of this file compares.
+#: Re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 4), seed
+#: ``WEIGHT_SEED`` for the weights and ``INPUT_SEED`` for the input, by running
+#: this module's own ``_run_probe`` inside ``keras.device("cpu")``:
+#:
+#:     CUDA_VISIBLE_DEVICES="" .venv/bin/python - <<'EOF'
+#:     import keras
+#:     from tests.test_models.test_swin_transformer import test_golden_values as g
+#:     with keras.device("cpu"):
+#:         print(repr(g._run_probe().tolist()))
+#:     EOF
+#:
+#: These ARE logits: the model returns the official head's output, a per-token
+#: LayerNorm (``head_norm``), a global average pool and one linear Dense, with no
+#: softmax. The rows sum to 0.0397 and 0.0398, not 1, and hold negative entries.
+#: The previous pin (2026-10-13) was the shared head's SOFTMAX output, taken
+#: while that head ran two hidden DenseBlocks and the patch merges carried a
+#: bias; a change of function, so the two sets share no digits. The weight
+#: order the seeded ``assign`` loop walks also changed (``head_norm`` added, the
+#: three merge biases gone), which alone moves every value.
 GOLDEN_LOGITS = (
     (
-        0.23747052252292633,
-        0.25725874304771423,
-        0.26556873321533203,
-        0.2397020012140274,
+        -0.025703303515911102,
+        0.10288366675376892,
+        0.006418711971491575,
+        -0.04394727200269699,
     ),
     (
-        0.23747017979621887,
-        0.25725799798965454,
-        0.26556596159935,
-        0.2397058755159378,
+        -0.02567208558320999,
+        0.10287508368492126,
+        0.006520244758576155,
+        -0.04394083842635155,
     ),
 )
 
@@ -110,7 +121,7 @@ def _run_probe() -> np.ndarray:
 
     The caller is responsible for the device scope; see ``golden_output``.
 
-    :return: the ``(2, 4)`` array under the head's ``'logits'`` key, float32.
+    :return: the ``(2, 4)`` logits the model returns, float32.
     """
     model = SwinTransformer(**CONFIG)
     x = np.asarray(
@@ -121,12 +132,8 @@ def _run_probe() -> np.ndarray:
     for w in model.weights:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
     out = model(x, training=False)
-    # The factory ClassificationHead returns a dict. Its classifier applies
-    # softmax, so both keys are the same probability tensor; 'logits' is the
-    # one everything else in this file compares.
-    return np.asarray(
-        ops.convert_to_numpy(out["logits"] if isinstance(out, dict) else out)
-    )
+    assert not isinstance(out, dict), "SwinTransformer returns one logits tensor"
+    return np.asarray(ops.convert_to_numpy(out))
 
 
 @pytest.fixture(scope="module")
@@ -153,6 +160,8 @@ class TestSwinTransformerGoldenValues:
         want = np.asarray(GOLDEN_LOGITS, dtype="float64")
         # Non-vacuity: an all-zero head would otherwise pass by tolerance.
         assert float(np.abs(want).max()) > 1e-3
+        # These are logits: a re-added softmax would make every row sum to 1.
+        assert np.all(np.abs(want.sum(axis=-1) - 1.0) > 0.5)
         np.testing.assert_allclose(
             golden_output,
             want,
@@ -171,19 +180,18 @@ class TestSwinTransformerGoldenValues:
         """Guards the guard: if the head collapsed, the values above would be
         stable for a reason that has nothing to do with the attention path.
 
-        The threshold was 1e-5 and is now 1e-6, re-derived 2026-10-13. The
-        factory head's ``classifier`` applies softmax, so this compares two
-        probability vectors rather than two logit vectors, and a softmax
-        compresses the spread: measured row spread fell from above 1e-5 to
-        3.874e-06, and re-running the probe with BOTH rows fed the SAME image
-        gives exactly 0.0. So 3.874e-06 is entirely input-driven, with nothing
-        of it arithmetic -- the floor is zero, not merely small, and a
-        threshold anywhere below the measured spread catches a collapse. The
-        probes are also bit-identical across separate constructions, so there
-        is no run-to-run drift for a tighter bound to hide in.
+        The threshold is 1e-5 again, re-derived 2026-10-14: the rows are logits
+        once more, and their measured spread is 1.015328e-04. Re-running the
+        probe with BOTH rows fed the SAME image gives exactly 0.0, so the whole
+        spread is input-driven, with nothing of it arithmetic -- the floor is
+        zero, not merely small, and a threshold a decade below the measured
+        spread catches a collapse. (From 2026-10-13 it was 1e-6, because the
+        softmax output then pinned compressed the spread to 3.874e-06.) The
+        probes are bit-identical across separate constructions, so there is no
+        run-to-run drift for a tighter bound to hide in.
         """
         spread = float(np.abs(golden_output[0] - golden_output[1]).max())
-        assert spread > 1e-6, (
+        assert spread > 1e-5, (
             f"the two rows differ by only {spread:.3e}; the probe is not "
             "discriminating between inputs"
         )

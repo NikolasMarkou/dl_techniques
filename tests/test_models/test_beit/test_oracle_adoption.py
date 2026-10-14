@@ -222,9 +222,8 @@ class TestBeitSmokeContract:
         model = _classifier()
         x = _images()
 
-        def contract(out):
-            # The factory ClassificationHead's documented output is a dict.
-            logits = out["logits"] if isinstance(out, dict) else out
+        def contract(logits):
+            # The model returns the head's logits as one tensor.
             assert not isinstance(logits, (dict, list, tuple)), (
                 f"the classifier returns one tensor, got {type(logits)}"
             )

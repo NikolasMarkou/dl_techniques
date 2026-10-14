@@ -27,7 +27,7 @@ References:
 """
 
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any, Sequence, Literal
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -41,7 +41,9 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 
@@ -83,6 +85,17 @@ class FractalNet(keras.Model):
                   [B, num_classes]       [B, h, w, filters[-1]]
 
     The right branch is the ``include_top=False`` output, still 4D.
+
+    The head is the paper's: "A softmax prediction layer attaches at the end of
+    the network" (Larsson et al. 2017, Sec. 4), on a 1 x 1 map after five
+    pools for CIFAR and after ResNet-34's own global pool and FC for ImageNet.
+    That is one linear layer on the pooled features, here the shared
+    ``ClassificationHead`` with no hidden block: ``global_pool`` pooling, the
+    optional ``classifier_dropout_rate`` dropout (this port's knob; the paper
+    drops out inside the blocks), then the linear ``classifier``, which takes
+    the model's ``kernel_initializer`` and ``kernel_regularizer``. The model
+    returns that classifier's output, the logits; the softmax lives in the
+    loss.
 
     One stage:
 
@@ -153,10 +166,10 @@ class FractalNet(keras.Model):
         Default is "batch_norm".
     :param activation_type: String, type of activation to use in conv blocks.
         Default is "relu".
-    :param kernel_initializer: String or initializer for conv layers.
-        Default is "he_normal".
-    :param kernel_regularizer: String or regularizer for conv layers.
-        Default is None.
+    :param kernel_initializer: String or initializer for the conv layers and
+        the classifier. Default is "he_normal".
+    :param kernel_regularizer: String or regularizer for the conv layers and
+        the classifier. Default is None.
     :param global_pool: String, global pooling type ("avg" or "max").
         Default is "avg".
     :param classifier_dropout_rate: Float, dropout rate before final dense
@@ -165,17 +178,19 @@ class FractalNet(keras.Model):
         Default is True.
     :param input_shape: Tuple, input shape of `(height, width, channels)`.
         Default and `None` both give (32, 32, 3) for CIFAR.
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (for example ``{'block_dims': (256,)}``). ``name``,
+        ``num_classes`` and ``task_type`` are refused with ``ValueError``.
+        Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
-    :param kwargs: Additional keyword arguments for the Model base class.
+    :param kwargs: ``name``, ``trainable`` or ``dtype`` for the Model base
+        class. Anything else raises ``ValueError``, because Keras' functional
+        constructor would drop it silently.
 
     :raises ValueError: If `depths`, `filters` and `strides` do not all have
         the same length, if there is not at least one stage, if `input_shape`
-        is not 3D, or if `global_pool` is neither "avg" nor "max".
+        is not 3D, if `global_pool` is neither "avg" nor "max", or if
+        `head_config_overrides` names a reserved key.
 
     Input shape:
         4D tensor with shape `(batch_size, height, width, channels)`, matching
@@ -223,11 +238,11 @@ class FractalNet(keras.Model):
         classifier_dropout_rate: float = 0.2,
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (32, 32, 3),
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         """Validate the configuration and build the functional graph."""
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         if len(depths) != len(filters):
             raise ValueError(
                 f"Length of depths ({len(depths)}) must equal length of filters ({len(filters)})"
@@ -240,6 +255,11 @@ class FractalNet(keras.Model):
 
         if len(depths) < 1:
             raise ValueError("At least one stage is required")
+
+        if global_pool not in ("avg", "max"):
+            raise ValueError(
+                f"global_pool must be 'avg' or 'max', got {global_pool!r}"
+            )
 
         if input_shape is None:
             input_shape = (32, 32, 3)
@@ -261,8 +281,6 @@ class FractalNet(keras.Model):
         self.include_top = include_top
         self._input_shape = input_shape
 
-        # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         if len(input_shape) != 3:
@@ -357,43 +375,41 @@ class FractalNet(keras.Model):
         return x
 
     def _build_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head using the vision heads factory.
+        """Build the paper's head: global pool, optional dropout, one linear layer.
 
-        Uses :class:`ClassificationHead` from the vision heads factory with
-        global average pooling and optional dropout.
+        A shared ``ClassificationHead`` with no hidden block. Its pooling is
+        ``global_pool``, its dropout ``classifier_dropout_rate``, and its
+        classifier takes the model's kernel initializer and regularizer.
 
         :param x: Input feature tensor
-        :return: Classification logits or dict with logits/probabilities
+        :return: Classification logits ``(batch, num_classes)``
+        :raises ValueError: If ``head_config_overrides`` names a reserved key.
         """
-        if self.include_top:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'dropout_rate': self.classifier_dropout_rate,
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
-                'use_global_pooling': True,
-                'pooling_type': 'avg',
-                'use_attention': False,
-                'use_ffn': True,
-                'ffn_type': 'mlp',
-                'ffn_expansion_factor': 4,
-                # Deterministic layer name: an unnamed head takes Keras'
-                # auto suffix in process-creation order, which breaks the
-                # by-name matching that weight transfer relies on.
-                'name': 'classification_head',
-            })
-            if self._head_config_overrides:
-                head_config.update(self._head_config_overrides)
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'use_global_pooling': True,
+            'pooling_type': self.global_pool,
+            'use_attention': False,
+            'block_dims': (),
+            'classifier_dropout_rate': self.classifier_dropout_rate,
+            # No hidden block, so no block dropout either.
+            'dropout_rate': 0.0,
+            'kernel_initializer': self.kernel_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
+            # Deterministic layer name: an unnamed head takes Keras'
+            # auto suffix in process-creation order, which breaks the
+            # by-name matching that weight transfer relies on.
+            'name': 'classification_head',
+        })
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
-            self.head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
-            )
-            # The factory ClassificationHead returns {'logits', 'probabilities'};
-            # the model's own output is the probability tensor, as it was when
-            # the top was the bespoke GAP + Dense.
-            x = self.head(x)['probabilities']
-        return x
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
+        return self.classification_head(x)['logits']
 
     @classmethod
     def from_variant(
@@ -470,7 +486,6 @@ class FractalNet(keras.Model):
             "classifier_dropout_rate": self.classifier_dropout_rate,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
-            "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
         })
         return config
@@ -491,13 +506,7 @@ class FractalNet(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
+        return cls(**config)
 
     def summary(self, **kwargs):
         """Print the Keras summary, then log the fractal configuration.

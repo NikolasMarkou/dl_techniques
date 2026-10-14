@@ -93,10 +93,24 @@ Input (B, H, W, 3)
   │
   ├─► Stage 2: FractalBlock(depth=D2, filters=F2)  ──► MaxPool(2)  ──► (B, H/8, W/8, F2)
   │
-  ├─► GlobalAveragePooling2D
+  ├─► GlobalAveragePooling2D (or GlobalMaxPooling2D, per global_pool)
   ├─► Dropout(classifier_dropout_rate)
   └─► Dense(num_classes)   ──►  RAW LOGITS (no softmax)
 ```
+
+The head is the paper's single prediction layer ("A softmax prediction layer attaches at the
+end of the network", Larsson et al. 2017, Sec. 4; the softmax is the loss's), built as the shared
+`ClassificationHead` with no hidden block. `global_pool` picks its pooling,
+`classifier_dropout_rate` its dropout, and the classifier takes the model's
+`kernel_initializer` and `kernel_regularizer`. `head_config_overrides` is merged into its config;
+`name`, `num_classes` and `task_type` raise `ValueError`. The model returns the classifier output,
+one `(B, num_classes)` tensor.
+
+**Archive break (2026-10-14).** From 2026-10-09 to 2026-10-14 the head ran two hidden blocks and
+the model returned their softmax, so `create_fractal_net`'s `from_logits=True` default
+double-softmaxed; `global_pool` reached nothing and an invalid value did not raise. A `.keras`
+file saved before this change is not supported; one saved in that window does not load.
+`head_config_preset`, which nothing read, is gone; passing it raises `ValueError`.
 
 Downsampling happens **between** blocks, never inside one. The deep branch applies its
 base block `2^(k-1)` times, so a stride inside the block would shrink the deep branch
@@ -235,7 +249,9 @@ There are no pretrained weights in this package.
 
 `FractalNet.MODEL_VARIANTS` holds four repo-defined presets. They are **not** the paper's
 configurations. Parameter counts below were measured at `input_shape=(32, 32, 3)` with
-`num_classes=10`.
+`num_classes=10` (`FractalNet.from_variant(v, num_classes=10, input_shape=(32, 32, 3)).count_params()`;
+re-derived 2026-10-14, and equal to the figures this table carried for the original GAP + Dense
+head).
 
 | Variant | `depths` | `filters` | Leaf convolutions | Parameters |
 | :--- | :--- | :--- | :--- | ---: |

@@ -410,9 +410,12 @@ def build_variant(
                 name_prefix=f"down{stage_idx}",
             )
 
-    # Head: GAP -> LayerNorm -> (Dropout) -> Dense
+    # Head: GAP -> LayerNorm -> (Dropout) -> Dense, CliffordNet's reference head
+    # at the same epsilon as V0's, so the variants differ only in downsampling.
     x = keras.layers.GlobalAveragePooling2D(name="global_pool")(x)
-    x = keras.layers.LayerNormalization(epsilon=1e-6, name="head_norm")(x)
+    x = keras.layers.LayerNormalization(
+        epsilon=CliffordNet.LAYERNORM_EPSILON, name="head_norm"
+    )(x)
     if dropout_rate > 0.0:
         x = keras.layers.Dropout(dropout_rate, name="head_dropout")(x)
     outputs = keras.layers.Dense(num_classes, name="classifier")(x)

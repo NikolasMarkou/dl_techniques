@@ -1,5 +1,5 @@
 """SqueezeNet's bypass variant must really wire bypasses, and its head must
-emit a class distribution.
+emit logits at every class count and in both ranks.
 
 Guard for C-9 (plan-2026-08-14T233721-d4f9beb2, step 32).
 
@@ -21,7 +21,15 @@ Two defects, both invisible to the pre-existing suite:
    ``Conv2D(2) -> GAP -> sigmoid`` the two outputs are independent and do not sum
    to 1, so the package's own documented ``num_classes=2`` nodule examples,
    compiled with ``categorical_crossentropy``, optimize something else.
-   ``SqueezeNetV1`` softmaxes on the same argument.
+   ``SqueezeNetV1`` softmaxed on the same argument.
+
+Since plan-2026-10-14T062616-81938e81 step 4 neither model applies ANY output
+activation: both return the paper head, ``conv10`` (ReLU) averaged over space,
+as logits, and the loss applies the softmax. The 2D V2 head had been the shared
+``ClassificationHead`` (two hidden blocks, softmax) since 2026-10-09 while the
+3D one kept ``conv10`` plus its own ``Activation('softmax')``; both ranks now
+build the same ``conv10`` head. ``TestTheHeadEmitsLogits`` pins that, rank by
+rank, by recomputing the output from ``conv10``'s own activations.
 """
 
 import keras
@@ -82,29 +90,82 @@ class TestSimpleBypassIsRealWiring:
         assert np.all(np.isfinite(arr))
 
 
-class TestV2HeadEmitsAClassDistribution:
-    @pytest.mark.parametrize("num_classes", [2, 3])
-    def test_outputs_sum_to_one(self, num_classes):
-        model = SqueezeNoduleNetV2.from_variant(
-            "v2", num_classes=num_classes, input_shape=(64, 64, 1)
-        )
-        out = keras.ops.convert_to_numpy(
-            model(np.random.rand(4, 64, 64, 1).astype("float32"))
-        )
-        assert out.shape == (4, num_classes)
-        np.testing.assert_allclose(out.sum(axis=-1), np.ones(4), rtol=1e-5, atol=1e-5)
+#: (case id, builder, per-sample input shape). The 3D row is the one whose
+#: ``Activation('softmax', name='predictions')`` (anchor
+#: plan-2026-08-14T233721-d4f9beb2/D-063) was deleted at step 4.
+_LOGIT_CASES = [
+    ("v1_2d_binary", lambda: SqueezeNetV1.from_variant(
+        "1.1", num_classes=2, input_shape=(64, 64, 3), dropout_rate=0.0),
+     (64, 64, 3)),
+    ("v2_2d_binary", lambda: SqueezeNoduleNetV2.from_variant(
+        "v2", num_classes=2, input_shape=(64, 64, 1), dropout_rate=0.0),
+     (64, 64, 1)),
+    ("v2_2d_three", lambda: SqueezeNoduleNetV2.from_variant(
+        "v2", num_classes=3, input_shape=(64, 64, 1), dropout_rate=0.0),
+     (64, 64, 1)),
+    # 64, not 40 or 48: at both of those the final map is 1 x 1 x 1, and at
+    # seed 0 both binary conv10 units start below zero, so the ReLU'd logits
+    # are exactly 0.0 for both samples (MEASURED, CPU) and nothing here could
+    # discriminate. At 64 the map is 2 x 2 x 2.
+    ("v2_3d_binary", lambda: SqueezeNoduleNetV2.from_variant(
+        "v2_3d", num_classes=2, input_shape=(64, 64, 64, 1), dropout_rate=0.0),
+     (64, 64, 64, 1)),
+]
 
-    def test_v1_and_v2_agree_on_the_binary_head(self):
-        v1 = SqueezeNetV1.from_variant("1.1", num_classes=2, input_shape=(64, 64, 3))
-        v2 = SqueezeNoduleNetV2.from_variant("v2", num_classes=2, input_shape=(64, 64, 1))
-        v1_out = keras.ops.convert_to_numpy(
-            v1(np.random.rand(2, 64, 64, 3).astype("float32"))
+
+class TestTheHeadEmitsLogits:
+    """No output activation in either model, in 2D or 3D, at 2 or 3 classes."""
+
+    @pytest.mark.parametrize(
+        "case,build,shape", _LOGIT_CASES, ids=[c[0] for c in _LOGIT_CASES])
+    def test_no_softmax_or_sigmoid_layer_exists(self, case, build, shape):
+        keras.utils.set_random_seed(0)
+        model = build()
+        for layer in model._flatten_layers(include_self=False):
+            assert not isinstance(layer, keras.layers.Softmax), (case, layer.name)
+            activation = getattr(layer, "activation", None)
+            assert activation not in (
+                keras.activations.softmax, keras.activations.sigmoid
+            ), (case, layer.name)
+        assert model.layers[-1].name in ("avgpool", "globalpool"), (
+            f"{case}: the model's last layer is {model.layers[-1].name}, "
+            f"not the global pool"
         )
-        v2_out = keras.ops.convert_to_numpy(
-            v2(np.random.rand(2, 64, 64, 1).astype("float32"))
+
+    @pytest.mark.parametrize(
+        "case,build,shape", _LOGIT_CASES, ids=[c[0] for c in _LOGIT_CASES])
+    def test_the_output_is_the_spatial_mean_of_relu_conv10(self, case, build, shape):
+        """Recompute the output from ``conv10``'s activations; nothing may follow.
+
+        A re-added softmax (or the old binary sigmoid) after the pool fails the
+        value comparison, and also the "not normalized" assertion below. The
+        tolerance is the float32 reassociation bound for a mean over the
+        ``conv10`` map, derived, not pasted.
+        """
+        from tests.numerics import reassociation_atol
+
+        keras.utils.set_random_seed(0)
+        model = build()
+        x = (3.0 * np.random.default_rng(0).standard_normal((2, *shape))).astype("float32")
+        conv10 = model.get_layer("conv10")
+        assert conv10.activation is keras.activations.relu, case
+        tap = keras.Model(model.input, conv10.output)
+
+        out = keras.ops.convert_to_numpy(model(x, training=False)).astype(np.float64)
+        maps = keras.ops.convert_to_numpy(tap(x, training=False)).astype(np.float64)
+        spatial_axes = tuple(range(1, maps.ndim - 1))
+        expected = maps.mean(axis=spatial_axes)
+        positions = int(np.prod(maps.shape[1:-1]))
+        atol = reassociation_atol([positions], 1, float(np.abs(expected).max()))
+        np.testing.assert_allclose(out, expected, rtol=0, atol=atol, err_msg=case)
+
+        assert np.all(out >= 0.0), f"{case}: a ReLU'd conv10 averages to >= 0"
+        assert float(np.abs(out).max()) > 0.0, f"{case}: every logit is zero"
+        rows = out.sum(axis=-1)
+        assert np.any(np.abs(rows - 1.0) > reassociation_atol([out.shape[-1]], 1, 1.0)), (
+            f"{case}: every output row sums to 1 ({rows}); the model returns "
+            f"probabilities, not logits"
         )
-        np.testing.assert_allclose(v1_out.sum(axis=-1), np.ones(2), rtol=1e-5, atol=1e-5)
-        np.testing.assert_allclose(v2_out.sum(axis=-1), np.ones(2), rtol=1e-5, atol=1e-5)
 
 
 class TestDocstringExampleIsConstructible:

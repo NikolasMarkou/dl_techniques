@@ -72,20 +72,16 @@ def _x(seed: int = 0) -> np.ndarray:
 
 
 def _logits(model, x, training=False):
-    """The forward pass's ``'logits'``.
+    """The forward pass: ``CliffordNet.call`` returns the logits as one tensor.
 
-    ``CliffordNet.call`` returns the factory ``ClassificationHead``'s dict
-    unchanged -- ``{'logits', 'probabilities'}`` -- so every claim in this file
-    that is about the classifier's OUTPUT goes through here rather than
-    treating the model as returning a bare tensor.
+    Since plan-2026-10-14T062616-81938e81 step 4 the model unwraps the shared
+    ``ClassificationHead``'s ``'logits'`` key itself; the head's softmax is not
+    part of the model output.
     """
-    out = model(x, training=training)
-    return out["logits"] if isinstance(out, dict) else out
+    return model(x, training=training)
 
 
 def _np(t) -> np.ndarray:
-    if isinstance(t, dict):
-        t = t["logits"] if "logits" in t else next(iter(t.values()))
     return keras.ops.convert_to_numpy(t)
 
 
@@ -104,7 +100,9 @@ class TestCliffordNetForward:
     def test_output_shape(self):
         model = _tiny()
         out = model(_x(2), training=False)
-        assert set(out) == {"logits", "probabilities"}
+        assert not isinstance(out, (dict, list, tuple)), (
+            f"CliffordNet returns its logits as one tensor, got {type(out)}"
+        )
         assert _np(out).shape == (BATCH, NUM_CLASSES)
         assert model.compute_output_shape((BATCH,) + IMG) == (BATCH, NUM_CLASSES)
 
@@ -123,13 +121,15 @@ class TestCliffordNetGradientFlow:
         labels = tf.one_hot([0, 1], NUM_CLASSES)
 
         with tf.GradientTape() as tape:
-            # `from_logits=False`: the factory ClassificationHead's classifier
-            # applies softmax, so its 'logits' entry is already a probability
-            # vector. Passing True made Keras raise a UserWarning about exactly
-            # that, which this suite turns into an error.
-            probs = _logits(model, x, training=True)
+            # The model returns logits, so the loss applies the softmax. A
+            # softmax-produced output would trip Keras' "from_logits=True but
+            # the output came from a Softmax" UserWarning, which this suite
+            # turns into an error.
+            logits = _logits(model, x, training=True)
             loss = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(labels, probs)
+                keras.losses.categorical_crossentropy(
+                    labels, logits, from_logits=True
+                )
             )
         grads = tape.gradient(loss, model.trainable_weights)
 

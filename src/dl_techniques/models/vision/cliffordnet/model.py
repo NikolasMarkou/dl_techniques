@@ -14,7 +14,8 @@ identical blocks at constant width, with no stage structure. `CliffordNetBlock`
 returns the gamma-scaled update alone, so the residual add and the
 stochastic-depth gate sit in this model's `call`. The head pools before it
 normalizes. No pretrained weights are distributed, so `pretrained=True` raises
-`NotImplementedError`; pass a local `.keras` path instead.
+`NotImplementedError`; pass a local `.keras` path instead. The model returns
+logits: compile with ``SparseCategoricalCrossentropy(from_logits=True)``.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -36,7 +37,7 @@ from __future__ import annotations
 import os
 import keras
 from keras import initializers, regularizers
-from typing import Any, Dict, List, Optional, Tuple, Union, Literal
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -57,6 +58,7 @@ from dl_techniques.layers.heads.vision import (
     VisionTaskType,
     HeadConfiguration,
 )
+from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
 
 # Matches the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -115,6 +117,14 @@ class CliffordNet(keras.Model):
         logits [B, num_classes]
 
     Pooling comes before the normalization, the reverse of the usual order.
+    That is the reference head (``ParaMind2025/CAN`` ``model.py``:
+    ``x.mean(dim=[-2, -1])``, ``nn.LayerNorm(embed_dim)``,
+    ``nn.Linear(embed_dim, num_classes)``), built as the shared
+    ``ClassificationHead`` with no hidden block: global average pooling, a
+    ``pooled_norm`` LayerNorm at the torch default epsilon ``1e-5``
+    (:attr:`LAYERNORM_EPSILON`), the optional dropout, then the linear
+    ``classifier``. ``call`` returns that classifier's output, the logits, as
+    one tensor. The model's initializers and regularizers reach the head.
 
     Block wiring:
 
@@ -180,27 +190,31 @@ class CliffordNet(keras.Model):
         across blocks). Defaults to ``0.0``.
     :param dropout_rate: Pre-classifier head dropout. At ``0.0``, the default,
         no Dropout layer is created.
-    :param use_bias: Whether the Dense layers, the classifier and the
-        single-conv stems use a bias.
-    :param kernel_initializer: Kernel initializer. Defaults to Keras'
-        ``glorot_uniform``, while every ``MODEL_VARIANTS`` entry overrides it
-        with ``TruncatedNormal(0.02)`` to match the reference.
-    :param bias_initializer: Bias initializer.
-    :param kernel_regularizer: Kernel regularizer.
-    :param bias_regularizer: Bias regularizer.
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration
-        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :param use_bias: Whether the blocks' Dense layers and the single-conv
+        stems use a bias. The classifier always has one, as the reference's
+        ``nn.Linear`` does.
+    :param kernel_initializer: Kernel initializer, for the stem, the blocks
+        and the head's classifier. Defaults to Keras' ``glorot_uniform``,
+        while every ``MODEL_VARIANTS`` entry overrides it with
+        ``TruncatedNormal(0.02)`` to match the reference.
+    :param bias_initializer: Bias initializer, the classifier's included.
+    :param kernel_regularizer: Kernel regularizer, the classifier's included.
+    :param bias_regularizer: Bias regularizer, the classifier's included.
+    :param head_config_overrides: Optional dict merged into the head
+        configuration (for example ``{'block_dims': (256,)}``). ``name``,
+        ``num_classes`` and ``task_type`` are refused with ``ValueError``.
+        Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passed to :class:`keras.Model`.
 
     :raises ValueError: If ``num_classes``, ``channels``, ``depth`` or
-        ``patch_size`` is not positive.
+        ``patch_size`` is not positive, or ``head_config_overrides`` names a
+        reserved key.
     """
 
-    LAYERNORM_EPSILON: float = 1e-6
+    # The head's pooled LayerNorm. The reference's ``nn.LayerNorm(embed_dim)``
+    # takes torch's default eps, 1e-5, not the 1e-6 of its LayerNorm2d blocks.
+    LAYERNORM_EPSILON: float = 1e-5
 
     def __init__(
         self,
@@ -220,7 +234,6 @@ class CliffordNet(keras.Model):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -252,8 +265,6 @@ class CliffordNet(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Head configuration
-        self._head_config_preset = str(head_config_preset)
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_stem()
@@ -395,26 +406,32 @@ class CliffordNet(keras.Model):
             self.blocks_list.append({"block": block, "drop_path": drop_path})
 
     def _build_head(self) -> None:
-        """Build the classifier head using the vision heads factory.
+        """Build the reference classifier head as a shared ``ClassificationHead``.
 
-        Uses :class:`ClassificationHead` from the vision heads factory with
-        global average pooling and optional dropout.
+        Global average pooling, a LayerNorm on the pooled vector, the optional
+        dropout and one linear ``Dense``: the reference's
+        ``self.head(self.norm(x.mean(dim=[-2, -1])))``. No hidden block.
 
         :return: Nothing.
         :rtype: None
+        :raises ValueError: If ``head_config_overrides`` names a reserved key.
         """
         head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
         head_config.update({
             'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            'normalization_type': 'layer_norm',
-            'activation_type': 'gelu',
             'use_global_pooling': True,
             'pooling_type': 'avg',
             'use_attention': False,
-            'use_ffn': True,
-            'ffn_type': 'mlp',
-            'ffn_expansion_factor': 4,
+            'block_dims': (),
+            'pooled_normalization_type': 'layer_norm',
+            'normalization_kwargs': {'epsilon': self.LAYERNORM_EPSILON},
+            'classifier_dropout_rate': self.dropout_rate,
+            # No hidden block, so no block dropout either.
+            'dropout_rate': 0.0,
+            'kernel_initializer': self.kernel_initializer,
+            'bias_initializer': self.bias_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
+            'bias_regularizer': self.bias_regularizer,
             # An unnamed head is `classification_head` in whichever process
             # builds it first and `classification_head_1`, `_2`, ... after.
             # A `.keras` round trip re-enters the naming counter, so the loaded
@@ -423,10 +440,11 @@ class CliffordNet(keras.Model):
             # head differed, and by-name weight transfer could not match it.
             'name': 'classification_head',
         })
-        if self._head_config_overrides:
-            head_config.update(self._head_config_overrides)
+        head_config = merge_head_config_overrides(
+            head_config, self._head_config_overrides
+        )
 
-        self.head = create_vision_head(
+        self.classification_head = create_vision_head(
             VisionTaskType.CLASSIFICATION, **head_config
         )
 
@@ -481,7 +499,7 @@ class CliffordNet(keras.Model):
 
         :param inputs: Image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode.
-        :return: Dict with ``logits`` and ``probabilities`` ``(B, num_classes)``.
+        :return: Logits ``(B, num_classes)``, no softmax.
         """
         x = self._apply_stem(inputs, training=training)
 
@@ -490,7 +508,7 @@ class CliffordNet(keras.Model):
                 block_info["block"](x, training=training), training=training
             )
 
-        return self.head(x, training=training)
+        return self.classification_head(x, training=training)["logits"]
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -605,32 +623,10 @@ class CliffordNet(keras.Model):
                 "bias_regularizer": regularizers.serialize(
                     self.bias_regularizer
                 ),
-                "head_config_preset": self._head_config_preset,
                 "head_config_overrides": self._head_config_overrides,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CliffordNet":
-        """Reconstruct model from configuration dict.
-
-        The serialized initializers are left as dicts, since
-        ``initializers.get`` accepts a config dict in ``__init__``.
-
-        :param config: Dictionary produced by :meth:`get_config`.
-        :return: New :class:`CliffordNet` instance.
-        """
-        for key in ("kernel_regularizer", "bias_regularizer"):
-            if config.get(key) and isinstance(config[key], dict):
-                config[key] = regularizers.deserialize(config[key])
-        head_config_preset = config.pop("head_config_preset", "default")
-        head_config_overrides = config.pop("head_config_overrides", None)
-        return cls(
-            head_config_preset=head_config_preset,
-            head_config_overrides=head_config_overrides,
-            **config
-        )
 
     def summary(self, **kwargs: Any) -> None:
         """Print the Keras summary, then log the resolved configuration.
@@ -848,8 +844,6 @@ def create_cliffordnet(
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "cifar100",
         cache_dir: Optional[str] = None,
-        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
-        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
 ) -> "CliffordNet":
     """Create a CliffordNet model from a variant name.
@@ -869,12 +863,7 @@ def create_cliffordnet(
     :type weights_dataset: str
     :param cache_dir: Directory to cache downloaded weights.
     :type cache_dir: Optional[str]
-    :param head_config_preset: Classification head preset: ``'default'``,
-        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
-    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
-    :param head_config_overrides: Optional dict to override head configuration.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :param kwargs: Additional arguments forwarded to `CliffordNet.from_variant` (e.g. `stochastic_depth_rate`, `dropout_rate`).
+    :param kwargs: Additional arguments forwarded to `CliffordNet.from_variant` (e.g. `stochastic_depth_rate`, `dropout_rate`, `head_config_overrides`).
     :return: A `CliffordNet` instance.
     :rtype: CliffordNet
     :raises ValueError: If `variant` is not recognised.
@@ -900,8 +889,6 @@ def create_cliffordnet(
         pretrained=pretrained,
         weights_dataset=weights_dataset,
         cache_dir=cache_dir,
-        head_config_preset=head_config_preset,
-        head_config_overrides=head_config_overrides,
         **kwargs,
     )
 

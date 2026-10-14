@@ -63,10 +63,26 @@ Input image (B, H, W, 3)
     +-> PatchMerging  -> Stage 4: depths[3] blocks                   8C, eighth resolution
     |
     +-- include_top=False -> (B, H/(8p), W/(8p), 8C)   e.g. (B, 7, 7, 8C) at H=W=224, p=4
-    +-- include_top=True  -> LayerNorm -> GlobalAveragePooling2D -> Dense -> logits (B, num_classes)
+    +-- include_top=True  -> head_norm (LayerNorm per token) -> GlobalAveragePooling2D -> Dense -> logits (B, num_classes)
 ```
 
-The classifier `Dense` has no activation, so it emits **logits**; compile with `from_logits=True`.
+The classifier `Dense` has no activation, so the model emits **logits**, one `(B, num_classes)`
+tensor; compile with `from_logits=True`.
+
+The head is the official one (`microsoft/Swin-Transformer` `models/swin_transformer.py`:
+`x = self.norm(x)` over every token, then `self.avgpool`, `torch.flatten` and
+`self.head = nn.Linear(num_features, num_classes)`). The LayerNorm runs per token BEFORE the
+pool, so it is the model's own `head_norm` (epsilon `1e-5`), built only with `include_top`; the
+pool and the one linear `classifier` are the shared `ClassificationHead` with no hidden block,
+drawing from the model's `kernel_initializer`, `bias_initializer`, `kernel_regularizer` and
+`bias_regularizer`. `head_config_overrides` is merged into that head's config; `name`,
+`num_classes` and `task_type` raise `ValueError`. The patch-merging reduction is bias-free
+whatever `use_bias` says, as the official `nn.Linear(4 * dim, 2 * dim, bias=False)` is.
+
+**Archive break (2026-10-14).** Until then the model returned the shared head's softmax under a
+`'logits'` key, the head ran two hidden blocks, and every patch merge carried a bias. A `.keras`
+file saved before this change does not load and is not supported. `head_config_preset`, which
+nothing read, is gone; passing it raises `ValueError`.
 
 ---
 
@@ -147,11 +163,11 @@ print(f"Test accuracy: {acc * 100:.2f}%")
 | `attn_dropout_rate` | `0.0` | Dropout on attention weights. |
 | `drop_path_rate` | `0.1` | Stochastic depth rate. |
 | `patch_size` | `4` | Patch side; `H` and `W` must divide by it. |
-| `use_bias` | `True` | Bias (and LayerNorm centering) throughout. |
+| `use_bias` | `True` | Bias on the patch embedding and the blocks' linear layers, and centering on `patch_embed_norm` and `head_norm`. The classifier always has a bias; the patch-merging reduction never does. |
 | `include_top` | `True` | `False` returns the stage-4 feature grid. |
 | `input_shape` | `None` (resolves to `(224, 224, 3)`) | Input shape `(H, W, C)`. |
 
-Also available: `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`.
+Also available: `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer` (all four reach the classifier), and `head_config_overrides`.
 
 `SwinTransformer.from_variant(variant, num_classes=..., input_shape=..., **overrides)` builds from `MODEL_VARIANTS`; any keyword overrides the preset value.
 
@@ -176,14 +192,26 @@ To warm-start from a local checkpoint, build with `pretrained=False` and load ex
 
 ## 7. Configuration & Model Variants
 
-The four presets from the paper. Parameter counts were measured by building each model at `input_shape=(224, 224, 3)`, `num_classes=1000`, `patch_size=4`, `window_size=7`.
+The four presets from the paper. Parameter counts were measured by building each model at `input_shape=(224, 224, 3)`, `num_classes=1000`, `patch_size=4`, `window_size=7`:
+
+```python
+from dl_techniques.models.vision.swin_transformer import SwinTransformer
+for v in ("tiny", "small", "base", "large"):
+    m = SwinTransformer.from_variant(v, num_classes=1000, input_shape=(224, 224, 3))
+    print(v, m.count_params())
+```
 
 | Variant | Embed dim | Depths | Heads | Params |
 | :--- | ---: | :--- | :--- | ---: |
-| `tiny` | 96 | `[2, 2, 6, 2]` | `[3, 6, 12, 24]` | 28,289,698 |
-| `small` | 96 | `[2, 2, 18, 2]` | `[3, 6, 12, 24]` | 49,607,602 |
-| `base` | 128 | `[2, 2, 18, 2]` | `[4, 8, 16, 32]` | 87,770,016 |
-| `large` | 192 | `[2, 2, 18, 2]` | `[6, 12, 24, 48]` | 196,535,164 |
+| `tiny` | 96 | `[2, 2, 6, 2]` | `[3, 6, 12, 24]` | 28,288,354 |
+| `small` | 96 | `[2, 2, 18, 2]` | `[3, 6, 12, 24]` | 49,606,258 |
+| `base` | 128 | `[2, 2, 18, 2]` | `[4, 8, 16, 32]` | 87,768,224 |
+| `large` | 192 | `[2, 2, 18, 2]` | `[6, 12, 24, 48]` | 196,532,476 |
+
+Each equals the official module list summed by hand (`tiny` is timm's published 28.29M);
+`tests/test_models/test_a_vision_classifier_emits_logits.py::test_swin_tiny_has_the_official_parameter_count`
+holds that sum. The table read 1,344 / 1,344 / 1,792 / 2,688 more until 2026-10-14: the patch
+merges carried a bias the official code does not have.
 
 Only `embed_dim`, `depths` and `num_heads` vary between variants; everything else comes from the constructor defaults or your overrides.
 

@@ -143,36 +143,31 @@ class TestSqueezeNoduleNetV2:
         assert features.shape[-1] == expected_channels
 
     def test_binary_classification_head(self, num_classes_binary, sample_data_2d):
-        """Binary classification uses softmax, like every other class count.
+        """Binary classification emits logits, like every other class count.
 
-        Updated for D-063 (C-9): the head is Conv2D(num_classes) -> GAP, so the
-        previous num_classes == 2 -> sigmoid special case emitted two INDEPENDENT
-        scores that did not sum to 1, disagreeing with SqueezeNetV1 and with this
-        package's own categorical_crossentropy examples.
-
-        With the new ClassificationHead architecture, the head is a ClassificationHead
-        object that internally applies softmax.
+        The head is SqueezeNet's ``conv10`` (ReLU) then a global average pool,
+        and nothing after it at any ``num_classes``: no binary sigmoid (the
+        C-9 defect) and, since plan-2026-10-14T062616-81938e81 step 4, no
+        softmax either. The loss applies the softmax.
         """
         model = SqueezeNoduleNetV2(num_classes=num_classes_binary, input_shape=sample_data_2d.shape[1:])
 
-        # The model now uses ClassificationHead which applies softmax internally
-        assert hasattr(model, 'classification_head')
-        assert hasattr(model.classification_head, 'classifier')
+        assert not hasattr(model, 'classification_head')
+        assert model.get_layer('conv10').filters == num_classes_binary
+        assert isinstance(model.layers[-1], keras.layers.GlobalAveragePooling2D)
 
-        outputs = model(sample_data_2d)
+        outputs = model(sample_data_2d).numpy()
         assert outputs.shape == (sample_data_2d.shape[0], num_classes_binary)
-        assert np.all(outputs.numpy() >= 0) and np.all(outputs.numpy() <= 1)
-        np.testing.assert_allclose(
-            outputs.numpy().sum(axis=-1),
-            np.ones(sample_data_2d.shape[0]),
-            rtol=1e-5,
-            atol=1e-5,
-        )
+        assert np.all(outputs >= 0.0)
+        assert not np.allclose(outputs.sum(axis=-1), 1.0, atol=1e-3)
 
     def test_model_compilation(self, num_classes, input_shape_2d):
         """Test model compilation with different optimizers and losses."""
         model = SqueezeNoduleNetV2(num_classes=num_classes, input_shape=input_shape_2d)
-        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
         assert model.optimizer is not None
 
     def test_serialization_2d(self, num_classes, input_shape_2d):
@@ -218,7 +213,10 @@ class TestSqueezeNoduleNetV2:
     def test_training_integration(self, num_classes, input_shape_2d, sample_data_2d):
         """Test training integration with a small dataset."""
         model = SqueezeNoduleNetV2(num_classes=num_classes, input_shape=input_shape_2d)
-        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
         labels = tf.random.uniform([sample_data_2d.shape[0]], 0, num_classes, dtype=tf.int32)
         history = model.fit(sample_data_2d, labels, epochs=2, verbose=0)
 
@@ -232,7 +230,8 @@ class TestSqueezeNoduleNetV2:
 
         with tf.GradientTape() as tape:
             outputs = model(sample_data_2d, training=True)
-            loss = keras.losses.sparse_categorical_crossentropy(labels, outputs)
+            loss = keras.losses.sparse_categorical_crossentropy(
+                labels, outputs, from_logits=True)
 
         grads = tape.gradient(loss, model.trainable_variables)
         assert all(g is not None for g in grads)

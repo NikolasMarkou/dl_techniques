@@ -1169,6 +1169,20 @@ class BeitForImageClassification(keras.Model):
 
     **The head emits LOGITS** (no softmax). Compile with
     ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
+    Both pooling paths return the linear classifier's output as one tensor.
+
+    **Both paths are BEiT's reference head** (``microsoft/unilm``
+    ``beit/modeling_finetune.py``: ``self.fc_norm(t.mean(1))`` on the patch
+    tokens when ``use_mean_pooling``, else ``x[:, 0]`` after the trunk's
+    ``self.norm``; then ``self.head = nn.Linear(embed_dim, num_classes)``; the
+    same in HF ``BeitForImageClassification``). No hidden layer. The cls path
+    is the shared ``ClassificationHead`` with ``pooling_type='cls_token'``, no
+    hidden block and no norm of its own; the mean path is a local head, because
+    the shared head pools only 4D maps or the cls position. The classifier
+    kernel draws from ``TruncatedNormal(backbone.initializer_range)`` with a
+    zero bias, on both paths. The unilm fine-tuning recipe then multiplies the
+    head weights by ``init_scale=0.001``; HF, whose config this port follows,
+    does not, and neither does this class.
 
     **Architecture Overview:**
 
@@ -1209,7 +1223,8 @@ class BeitForImageClassification(keras.Model):
     :type backbone: Union[BeitModel, Dict[str, Any]]
     :param num_classes: Number of output classes. Must be positive.
     :type num_classes: int
-    :param dropout_rate: Dropout before the final Dense. Defaults to ``0.0``.
+    :param dropout_rate: Dropout before the final Dense, in ``[0, 1)``.
+        Defaults to ``0.0``.
     :type dropout_rate: float
     :param include_top: Whether to include the classification head. When False
         the model returns pooled features from the backbone (per ``use_mean_pooling``).
@@ -1220,7 +1235,7 @@ class BeitForImageClassification(keras.Model):
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
     :type kwargs: Any
     :raises ValueError: If ``num_classes <= 0`` or ``dropout_rate`` is outside
-        ``[0, 1]``.
+        ``[0, 1)``.
     :raises TypeError: If ``backbone`` is neither a :class:`BeitModel` nor a config
         dict that deserializes to one.
 
@@ -1245,8 +1260,10 @@ class BeitForImageClassification(keras.Model):
 
     Attributes:
         backbone: The shared :class:`BeitModel` trunk.
-        classification_head: Factory ``ClassificationHead`` when ``include_top=True``,
-            otherwise ``None``.
+        classification_head: The cls path's shared ``ClassificationHead``, or the
+            mean path's local head, when ``include_top=True``; otherwise ``None``.
+            Either returns ``{'logits': ...}`` among its keys; ``call`` returns
+            that tensor.
     """
 
     def __init__(
@@ -1269,8 +1286,8 @@ class BeitForImageClassification(keras.Model):
         backbone = _coerce_backbone(backbone)
         if not isinstance(num_classes, int) or num_classes <= 0:
             raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
-        if not 0.0 <= float(dropout_rate) <= 1.0:
-            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
+        if not 0.0 <= float(dropout_rate) < 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
 
         self.backbone = backbone
         self.num_classes = int(num_classes)
@@ -1286,31 +1303,33 @@ class BeitForImageClassification(keras.Model):
             self._build_classification_head()
 
     def _build_classification_head(self) -> None:
-        """Build classification head using the vision heads factory.
+        """Build the reference head for the backbone's pooling mode.
 
-        For ``use_mean_pooling=False`` (CLS token), the factory
-        ``ClassificationHead`` with ``pooling_type='cls_token'`` handles 3D
-        sequences natively.
+        For ``use_mean_pooling=False`` (CLS token) the shared
+        ``ClassificationHead`` takes position 0 of the trunk output, already
+        normed by the trunk's ``final_norm``, and applies one linear ``Dense``
+        after the optional dropout. No hidden block, no norm of its own.
 
-        For ``use_mean_pooling=True`` (mean over patches), we build a custom
-        head using ``SequencePooling`` + factory dense blocks, since the
-        factory head's ``avg``/``max`` pooling only works on 4D feature maps.
+        For ``use_mean_pooling=True`` (mean over the patch tokens) a local head
+        runs ``SequencePooling`` with the cls position excluded, ``head_norm``
+        (BEiT's ``fc_norm``), the dropout and the linear classifier, because the
+        shared head's ``avg``/``max`` pooling only works on 4D feature maps.
         """
         if not self.use_mean_pooling:
-            # CLS token path: factory head handles 3D sequences natively
             head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
             head_config.update({
                 'num_classes': self.num_classes,
-                'dropout_rate': self.dropout_rate,
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
                 'use_global_pooling': True,
                 'pooling_type': 'cls_token',
                 'use_attention': False,
-                'use_ffn': True,
-                'ffn_type': 'mlp',
-                'ffn_expansion_factor': 4,
-                'hidden_dim': self.hidden_size,
+                'block_dims': (),
+                'classifier_dropout_rate': self.dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': {
+                    'class_name': 'TruncatedNormal',
+                    'config': {'stddev': self.backbone.initializer_range},
+                },
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
                 # by-name matching that weight transfer relies on.
@@ -1321,12 +1340,7 @@ class BeitForImageClassification(keras.Model):
                 VisionTaskType.CLASSIFICATION, **head_config
             )
         else:
-            # Mean pooling path: custom head with SequencePooling
-            # Use factory components for dense blocks but custom pooling
-            from dl_techniques.layers.heads.vision.factory import BaseVisionHead
-            from dl_techniques.layers.sequence_pooling import SequencePooling
-
-            # Create a minimal head that does: SequencePooling -> Norm -> Dropout -> Dense
+            # Mean pooling path: SequencePooling -> Norm -> Dropout -> Dense.
             class _MeanPoolingHead(keras.layers.Layer):
                 def __init__(self, hidden_size, num_classes, dropout_rate, layer_norm_eps, initializer_range, **kwargs):
                     super().__init__(**kwargs)
@@ -1367,11 +1381,14 @@ class BeitForImageClassification(keras.Model):
                     pooled = self.pool(inputs, training=training)  # (B, D), excludes CLS
                     pooled = self.norm(pooled, training=training)
                     pooled = self.dropout(pooled, training=training)
-                    logits = self.classifier(pooled)
-                    return {'logits': logits, 'probabilities': logits}
+                    # The linear classifier output, under the one key the
+                    # model reads. No 'probabilities': that label would hold
+                    # the logits.
+                    return {'logits': self.classifier(pooled)}
 
                 def compute_output_shape(self, input_shape):
-                    return (input_shape[0], self.num_classes)
+                    # Mirrors call(): one key.
+                    return {'logits': (input_shape[0], self.num_classes)}
 
                 def get_config(self):
                     config = super().get_config()
@@ -1426,11 +1443,10 @@ class BeitForImageClassification(keras.Model):
         tokens = self.backbone(inputs, training=training)
 
         if self.include_top:
-            # Factory head handles pooling, norm, dropout, classifier internally
-            # ClassificationHead returns {'logits': ..., 'probabilities': ...}
-            # Unwrap to return just the probabilities tensor
+            # Either head pools, norms where its path needs it, drops out and
+            # classifies; both return the linear classifier output as 'logits'.
             head_output = self.classification_head(tokens, training=training)
-            return head_output["probabilities"]
+            return head_output["logits"]
 
         # include_top=False: return backbone features per use_mean_pooling
         if self.use_mean_pooling:
@@ -1486,8 +1502,7 @@ class BeitForImageClassification(keras.Model):
         """
         config = dict(config)
         config["backbone"] = deserialize_keras_object(config["backbone"])
-        include_top = config.pop("include_top", True)  # Default True for backward compatibility
-        return cls(include_top=include_top, **config)
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------

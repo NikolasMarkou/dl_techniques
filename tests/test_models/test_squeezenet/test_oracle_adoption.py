@@ -7,12 +7,32 @@ adopted; no new oracle is authored and no ``src/`` file is added.
 THE D-059 SYMMETRY TRAP LIVES HERE TOO, AND IT IS PINNED
 ---------------------------------------------------------
 ``gradient_flow_oracle.default_loss`` is ``mean(square(t))``, which is SYMMETRIC
-under any permutation of the output. Both SqueezeNet generations end in
-``Activation('softmax')`` (V1 ``predictions``; V2 ``activation='softmax'``, see
-that file's D-063), and the gradient of a symmetric function of an EXACTLY
-uniform softmax is EXACTLY zero -- so the whole backward pass reads ``0.0`` and
-the instrument convicts a perfectly healthy model. D-059 measured that on
-``mobilenet``, and this package was named alongside it.
+under any permutation of the output. Until plan-2026-10-14T062616-81938e81 step 4
+both SqueezeNet generations ended in a softmax (V1 ``predictions``; V2's 3D
+``Activation('softmax')`` under the retired anchor D-063, and from 2026-10-09 the
+shared head's softmax in 2D), and the gradient of a symmetric function of an
+EXACTLY uniform softmax is EXACTLY zero -- so the whole backward pass reads
+``0.0`` and the instrument convicts a perfectly healthy model. D-059 measured
+that on ``mobilenet``, and this package was named alongside it.
+
+**Since step 4 the trap's premise is gone here:** both models return logits, the
+paper's ReLU'd ``conv10`` averaged over space, with no softmax.
+``test_the_shipped_heads_emit_logits`` pins that. The uniform-softmax tests below
+stay as the oracle's own documentation of the trap, on a synthetic head.
+
+**A ReLU'd logit head brings its own trap, so the step and the gradient reading
+use the model's real loss.** The ramp loss is ``mean(t ** 2 * ramp)``: its
+minimum is every output at exactly 0, which for a non-negative ReLU output is
+the all-dead state. MEASURED at step 4 on the V2 arm below (seed 0, 40 x 40 x 1,
+so ``conv10`` sees a 1 x 1 map): before the step the largest ``conv10``
+pre-activation is ``3.16e-04``; one Adam step at ``1e-3`` under the ramp loss
+pushes every one of them below zero (largest after the step ``-2.07e-05``, CPU),
+and the gradient report then reads **0 of 36** live (CPU and GPU 1) -- the
+instrument convicting a model it drove to its loss's minimum. ``ce_loss``
+(``SparseCategoricalCrossentropy(from_logits=True)`` on fixed labels, the loss
+the model is compiled with) pushes the labelled class up and the rest down: the
+same step leaves the largest pre-activation at ``3.91e-03`` and **36 of 36**
+weights live. Labels break the D-059 symmetry as the ramp did.
 
 **Measured here 2026-08-21: the trap does NOT fire on a randomly-initialised
 SqueezeNet.** With the shipped initializers the head's softmax is only NEARLY
@@ -84,15 +104,30 @@ from ..smoke_contract_oracle import (
     assert_finite,
     broken_forward,
 )
+from tests.numerics import reassociation_atol
 
 NUM_CLASSES = 10
 V1_SHAPE = (32, 32, 3)
 V2_SHAPE = (40, 40, 1)
 BUILD_SEED = 0
 
-#: Measured 2026-08-21, one Adam step, ramp loss.
-# UPDATED 2026-10-12: ClassificationHead with DenseBlocks adds more weights
-GF_WEIGHTS = {"v1": 60, "v2": 44}
+#: Measured 2026-08-21, one Adam step, ramp loss (softmax heads then): 52 / 36,
+#: each ending in ``conv10``'s kernel and bias. 60 / 44 from 2026-10-12 while the 2D head was
+#: the shared ClassificationHead (two DenseBlocks with BatchNorm, then a Dense).
+#: 52 / 36 again since plan-2026-10-14T062616-81938e81 step 4 restored the
+#: paper's ``conv10`` head.
+GF_WEIGHTS = {"v1": 52, "v2": 36}
+
+
+#: Fixed labels for ``ce_loss``; batches here are at most this long.
+_LABELS = np.array([0, 1, 2, 3], dtype="int32")
+
+
+def ce_loss(outputs: Any) -> Any:
+    """The model's own loss on fixed labels -- see the module docstring."""
+    labels = _LABELS[: int(outputs.shape[0])]
+    return keras.ops.mean(keras.losses.sparse_categorical_crossentropy(
+        labels, outputs, from_logits=True))
 
 
 def ramp_loss(outputs: Any) -> Any:
@@ -136,7 +171,7 @@ def _one_adam_step(model: keras.Model, inputs) -> None:
     variables = list(model.trainable_variables)
     optimizer.build(variables)
     with tf.GradientTape() as tape:
-        loss = ramp_loss(model(inputs, training=True))
+        loss = ce_loss(model(inputs, training=True))
     grads = tape.gradient(loss, variables)
     optimizer.apply_gradients(
         [(g, v) for g, v in zip(grads, variables) if g is not None]
@@ -194,14 +229,21 @@ class TestTheUniformSoftmaxSaddleIsNotADeadModel:
             f"the ramp loss must break the symmetry; got {report}"
         )
 
-    def test_the_shipped_heads_are_softmax(self):
-        """The premise. If either head stops being a softmax this file's whole
-        explanation stops applying, and this test says so."""
+    def test_the_shipped_heads_emit_logits(self):
+        """The premise, inverted at step 4: neither head is a softmax.
+
+        Non-negative (``conv10`` carries a ReLU before the pool) and not
+        normalized. If a softmax came back, every row would sum to 1 within the
+        float32 reassociation bound and this test would say so.
+        """
+        atol = reassociation_atol([NUM_CLASSES], 1, 1.0)
         for build, shape in ((_v1, V1_SHAPE), (_v2, V2_SHAPE)):
             model = _built(build, shape)
             out = keras.ops.convert_to_numpy(model(_images(shape), training=False))
-            rows = out.sum(axis=-1)
-            np.testing.assert_allclose(rows, np.ones_like(rows), atol=1e-5)
+            assert np.all(out >= 0.0)
+            rows = out.astype(np.float64).sum(axis=-1)
+            assert np.any(np.abs(rows - 1.0) > atol), (
+                f"{type(model).__name__}: every row sums to 1 ({rows})")
 
     def test_a_random_squeezenet_is_not_on_the_saddle(self):
         """MEASURED, and the reason the trap did not fire unseeded.
@@ -243,7 +285,7 @@ class TestSqueezeNetGradientFlow:
         _one_adam_step(model, x)
 
         report = assert_gradients_reach_every_trainable_weight(
-            model, x, loss_fn=ramp_loss)
+            model, x, loss_fn=ce_loss)
 
         assert len(report) == GF_WEIGHTS[name] == len(model.trainable_weights)
 
@@ -252,7 +294,7 @@ class TestSqueezeNetGradientFlow:
         with broken_forward(model, stop_all_gradients):
             with pytest.raises(AssertionError, match="received NO gradient"):
                 assert_gradients_reach_every_trainable_weight(
-                    model, _images(V1_SHAPE), loss_fn=ramp_loss)
+                    model, _images(V1_SHAPE), loss_fn=ce_loss)
 
 
 class TestSqueezeNetKnobSensitivity:
@@ -303,8 +345,8 @@ class TestSqueezeNetSmokeContract:
             assert tuple(out.shape) == (x.shape[0], NUM_CLASSES), (
                 f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}")
             assert_finite(out)
-            rows = keras.ops.convert_to_numpy(keras.ops.sum(out, axis=-1))
-            np.testing.assert_allclose(rows, np.ones_like(rows), atol=1e-5)
+            # Logits: a ReLU'd conv10 averaged over space is non-negative.
+            assert bool(keras.ops.all(out >= 0.0)), "negative logit from a ReLU head"
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)
         assert set(rejections) == {
@@ -324,14 +366,15 @@ class TestSqueezeNetSmokeContract:
         _v1(variant="1.1", input_shape=(32, 32, 3))  # must NOT raise
 
     def test_pretrained_weights_are_refused_rather_than_silently_ignored(self):
-        """The refusal lives in the module FACTORIES, not in ``from_variant``.
+        """Both factories refuse ``weights``; the check lives in ``from_variant``.
 
-        Measured: ``SqueezeNetV1.from_variant(..., weights="imagenet")`` does
-        NOT raise -- ``weights`` is swallowed by ``**kwargs`` and handed to
-        ``keras.Model``. Only ``create_squeezenet_v1`` /
-        ``create_squeezenodule_net_v2`` guard it. This test therefore calls the
-        factories, and names the asymmetry so a reader does not conclude the
-        guard is universal.
+        ``from_variant`` pops ``weights`` and raises ``NotImplementedError`` for
+        any non-``None`` value, and the factories delegate to it. (This
+        docstring used to say ``from_variant`` let ``weights`` through to
+        ``keras.Model``; that predates the guard's move into ``from_variant``.
+        A ``weights=`` passed to the CONSTRUCTOR itself now raises ``ValueError``
+        too, because the functional constructor refuses unknown keywords since
+        plan-2026-10-14T062616-81938e81 step 4.)
         """
         with pytest.raises(NotImplementedError):
             create_squeezenet_v1("1.1", num_classes=NUM_CLASSES,
