@@ -72,15 +72,15 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--variant` | `neural-hmm` | `create_neural_hmm`; one of `NeuralHMM.MODEL_VARIANTS` |
 | `--obs-type` | `gaussian` | the data and the model (`gaussian` or `categorical`) |
 | `--n-states` | 4 | the data and the model |
-| `--obs-dim` | 2 | the data and the model, gaussian only |
-| `--vocab-size` | 8 | the data and the model, categorical only; must be `>= --n-states` |
+| `--obs-dim` | 2 (gaussian), `null` (categorical) | the data and the model, gaussian only; refused with categorical |
+| `--vocab-size` | 8 (categorical), `null` (gaussian) | the data and the model, categorical only; must be `>= --n-states`; refused with gaussian |
 | `--encoder` | the preset's | the model (`mlp`, `transformer`, `lstm`, `gru`, `conv`); refused for a preset that builds no encoder (`neural-hmm`) |
 | `--hidden-dim` | 32 | the model (encoder, observation embedding, emission head); divisible by 4 for a transformer encoder |
 | `--seq-len` | 50 | the data (padded length) and the model (transformer position table) |
 | `--min-seq-len` | 25 | the data (shortest valid length) |
 | `--num-train`, `--num-val`, `--num-test` | 2000, 200, 500 | the data |
-| `--separation` | 4.0 | the data, gaussian only |
-| `--stay-prob` | 0.9 | the data; in `(0, 1)` |
+| `--separation` | 4.0 (gaussian, `K > 1`), `null` otherwise | the data, gaussian with `K > 1` only; refused with categorical or `--n-states 1` |
+| `--stay-prob` | 0.9 (`K > 1`), `null` (`K = 1`) | the data; in `(0, 1)`; refused with `--n-states 1` |
 | `--epochs` | 60 | `fit` (maximum; early stopping may end sooner) |
 | `--batch-size` | 64 | `fit` and the evaluation passes |
 | `--learning-rate` | 0.003 | the Adam optimizer |
@@ -92,9 +92,30 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--experiment-name` | `neural_hmm_<variant>_<timestamp>` | the run directory's name |
 
 A bad value is refused before anything is written: range errors at parse time (exit 2),
-a combination the model refuses (or an ignored `--encoder`) with a `ValueError` before
-the run directory exists. A reused `--experiment-name` is refused the same way, and an
-existing run is never overwritten.
+a combination the model refuses with a `ValueError` before the run directory exists. A
+reused `--experiment-name` is refused the same way, and an existing run is never
+overwritten.
+
+**A flag the configuration would ignore is refused, not dropped.** The rule is the same
+for every flag: given explicitly where nothing reads it, the run stops before anything is
+written, even when the value given equals the default (`--vocab-size 8` on a gaussian
+run is refused; `--vocab-size=8` and the abbreviation `--vocab 8` too).
+
+| Flag | Refused when | How |
+|---|---|---|
+| `--obs-dim` | `--obs-type categorical` | parse time, exit 2 |
+| `--vocab-size` | `--obs-type gaussian` (the default) | parse time, exit 2 |
+| `--separation` | `--obs-type categorical`, or `--n-states 1` | parse time, exit 2 |
+| `--stay-prob` | `--n-states 1` | parse time, exit 2 |
+| `--encoder` | a preset that builds no encoder (`neural-hmm`) | `ValueError` from the model build, before the run directory exists |
+
+The four data flags come from one table, `unread_arguments` in `data.py`, the same
+function that decides what `make_true_hmm` reads. When such a flag is not given it is
+set to `null`, so `config.json` and `results_summary.json` record `null` rather than a
+default that played no part in the run. Every other flag is read by every
+configuration (`--hidden-dim` sizes the emission head even without an encoder). The
+model's own transformer knobs (`num_heads`, `ffn_type` and the like) are not trainer
+flags.
 
 ## 5. Run directory
 
@@ -105,7 +126,7 @@ existing run is never overwritten.
 | `training_log.csv` | `epoch`, `loss`, `val_loss` per epoch (`CSVLogger`) |
 | `training_history.json` | the `fit` history |
 | `best_model.keras` | the epoch with the lowest `val_loss`; loads with `keras.models.load_model` and no `custom_objects` once `dl_techniques.models.time_series.neural_hmm` is imported (the import registers the classes) |
-| `results_summary.json` | strict JSON (a non-finite number is written as `null`): the keys of §3, the resolved arguments, `params`, `jit_compile` (the resolved value after `compile`), `epochs_run`, `best_checkpoint` (`file`, `epoch`, `val_loss`, `reload_max_abs_diff`, `reload_exact`), `fit_seconds`, `total_seconds` and `visualizations` (`files`, `failed`) |
+| `results_summary.json` | strict JSON (a non-finite number is written as `null`): the keys of §3, the resolved arguments, `params`, `jit_compile` (the resolved value after `compile`), `epochs_run`, `best_checkpoint` (`file`, `epoch`, `val_loss`, `reload_max_abs_diff`, `reload_exact`; a NaN in one output facing a number in the other counts as an infinite difference, written `null`, with `reload_exact` false), `fit_seconds`, `total_seconds` and `visualizations` (`files`, `failed`) |
 | `visualizations/loss_curve.png` | train and validation loss per epoch, with the true HMM's NLL per step on the test split as a dashed line |
 | `visualizations/transitions.png` | the learned transition matrix (mean of `exp(log_A)` over the valid test steps; for a static transition, the matrix itself) beside the true one, both in true-label order |
 | `visualizations/state_strip.png` | true and decoded states of the first 4 test sequences, in true-label order; padding blank |
@@ -277,9 +298,12 @@ PY
 
 - `test_data.py`: the sampler's layout and statistics, and the references against a
   brute-force enumeration of every state path and against the model package's
-  `inference.forward_log_likelihood`;
-- `test_cli_contract.py`: one contract row per flag, the `--gpu` sentinel, and two real
-  runs recording what the sampler, the model factory, the optimizer and `fit` received;
+  `inference.forward_log_likelihood` and `inference.viterbi_decode`, on an HMM with an
+  asymmetric transition matrix and a non-uniform initial distribution (so a transposed
+  matrix fails); `unread_arguments` against what `make_true_hmm` actually reads;
+- `test_cli_contract.py`: one contract row per flag, the `--gpu` sentinel, two real
+  runs recording what the sampler, the model factory, the optimizer and `fit` received,
+  every ignored-flag refusal of §4 and the `null` they leave in `config.json`;
 - `test_train_neural_hmm.py`: real tiny runs of `main()` for gaussian `neural-hmm`,
   categorical `io-hmm` and gaussian `neural-crf-tagger`, every artifact, the archive
   reload (including a run whose best epoch is not its last, so that the exact reload

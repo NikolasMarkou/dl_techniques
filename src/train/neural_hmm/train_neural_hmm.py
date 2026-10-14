@@ -29,7 +29,10 @@ Each run writes one directory under repo-root ``results/`` (or ``--output-dir``)
 (strict JSON; a non-finite number is written as ``null``) and ``visualizations/``
 (``loss_curve.png``, ``transitions.png``, ``state_strip.png``). A reused
 ``--experiment-name`` is refused before anything is written; so is an argument the
-data or the model would refuse.
+data or the model would refuse, and a flag the configuration would ignore
+(``--obs-dim``, ``--vocab-size``, ``--separation`` or ``--stay-prob`` where the data does
+not read it, ``--encoder`` on a preset that builds no encoder). A data flag that does
+not apply and was not given is recorded as ``null``.
 
 ``train.common.create_callbacks()`` is not used: its analyzer callback and default
 monitor are built for classification, and this run needs ``restore_best_weights``.
@@ -47,7 +50,7 @@ import argparse
 import csv
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import keras
 import numpy as np
@@ -71,6 +74,7 @@ from train.common.run_artifacts import attach_run_log, refuse_existing_run, writ
 from train.neural_hmm.data import (
     OBS_TYPES, HMMDataset, accuracy, hungarian_mapping, majority_rate, matched_accuracy,
     sample_splits, true_conditional_nll_per_step, true_log_potentials, true_nll_per_step,
+    unread_arguments,
 )
 
 # ---------------------------------------------------------------------
@@ -104,9 +108,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-states", type=int, default=4,
                         help="Hidden states of the true HMM and of the model.")
     parser.add_argument("--obs-dim", type=int, default=2,
-                        help="Feature count of a gaussian observation. Not read for categorical.")
+                        help="Feature count of a gaussian observation. Refused with categorical "
+                             "(recorded as null when not given).")
     parser.add_argument("--vocab-size", type=int, default=8,
-                        help="Symbol count of a categorical observation. Not read for gaussian.")
+                        help="Symbol count of a categorical observation. Refused with gaussian "
+                             "(recorded as null when not given).")
     parser.add_argument("--encoder", choices=ENCODER_TYPES, default=None,
                         help="Override the preset's encoder type (default: the preset's). "
                              "Refused for a preset that builds no encoder.")
@@ -124,9 +130,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-test", type=int, default=500, help="Test sequences (final scores only).")
     parser.add_argument("--separation", type=float, default=4.0,
                         help="Distance between consecutive gaussian means, in standard "
-                             "deviations. Not read for categorical.")
+                             "deviations. Refused with categorical or --n-states 1 (recorded "
+                             "as null when not given).")
     parser.add_argument("--stay-prob", type=float, default=0.9,
-                        help="Diagonal of the true transition matrix, in (0, 1).")
+                        help="Diagonal of the true transition matrix, in (0, 1). Refused with "
+                             "--n-states 1 (recorded as null when not given).")
 
     parser.add_argument("--epochs", type=int, default=60, help="Maximum epochs.")
     parser.add_argument("--batch-size", type=int, default=64, help="Sequences per batch.")
@@ -147,11 +155,29 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _explicitly_set(parser: argparse.ArgumentParser, argv: Optional[Sequence[str]]) -> Set[str]:
+    """Return the destinations ``argv`` sets, whatever the value (the default included).
+
+    Parses again into a namespace pre-filled with a sentinel: argparse writes a default
+    only into a missing attribute, so every attribute still holding the sentinel was not
+    on the command line. Abbreviations and ``--flag=value`` resolve as in the real parse.
+    """
+    unset = object()
+    dests = vars(parser.parse_args([]))
+    seen = parser.parse_args(argv, namespace=argparse.Namespace(**dict.fromkeys(dests, unset)))
+    return {dest for dest, value in vars(seen).items() if value is not unset}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     """Parse and validate CLI arguments for the Neural HMM trainer.
 
     Everything the data module would refuse is refused here, at parse time, so a bad
-    value never leaves a half-written run directory behind.
+    value never leaves a half-written run directory behind. So is a data flag the
+    configuration would ignore (``train.neural_hmm.data.unread_arguments``: ``--obs-dim``
+    for categorical, ``--vocab-size`` for gaussian, ``--separation`` for categorical or
+    one state, ``--stay-prob`` for one state) when it is given explicitly, even at its
+    default value; when it is not given it is set to ``None``, so ``config.json`` and the
+    summary record it as ``null``.
 
     :param argv: Argument list to parse; ``None`` defers to ``sys.argv[1:]``.
     :return: Parsed arguments namespace.
@@ -160,18 +186,28 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    for flag in ("n_states", "obs_dim", "vocab_size", "hidden_dim", "seq_len", "min_seq_len",
+    if args.n_states < 1:
+        parser.error(f"--n-states must be >= 1, got {args.n_states}")
+    unread = unread_arguments(args.n_states, args.obs_type)
+    explicit = _explicitly_set(parser, argv)
+    for dest, reason in sorted(unread.items()):
+        if dest in explicit:
+            parser.error(f"--{dest.replace('_', '-')} would be ignored with --obs-type "
+                         f"{args.obs_type} and --n-states {args.n_states}: {reason}. Drop it.")
+        setattr(args, dest, None)
+
+    for flag in ("obs_dim", "vocab_size", "hidden_dim", "seq_len", "min_seq_len",
                  "num_train", "num_val", "num_test", "epochs", "batch_size"):
-        if getattr(args, flag) < 1:
+        if getattr(args, flag) is not None and getattr(args, flag) < 1:
             parser.error(f"--{flag.replace('_', '-')} must be >= 1, got {getattr(args, flag)}")
     if args.min_seq_len > args.seq_len:
         parser.error(f"--min-seq-len ({args.min_seq_len}) must be <= --seq-len ({args.seq_len})")
-    if args.obs_type == "categorical" and args.vocab_size < args.n_states:
+    if args.vocab_size is not None and args.vocab_size < args.n_states:
         parser.error(f"--vocab-size ({args.vocab_size}) must be >= --n-states ({args.n_states}) "
                      "so that every state owns a symbol")
-    if not (np.isfinite(args.separation) and args.separation >= 0):
+    if args.separation is not None and not (np.isfinite(args.separation) and args.separation >= 0):
         parser.error(f"--separation must be finite and >= 0, got {args.separation}")
-    if args.n_states > 1 and not 0.0 < args.stay_prob < 1.0:
+    if args.stay_prob is not None and not 0.0 < args.stay_prob < 1.0:
         parser.error(f"--stay-prob must lie in (0, 1), got {args.stay_prob}")
     for flag in ("learning_rate", "gradient_clip_norm"):
         if not (np.isfinite(getattr(args, flag)) and getattr(args, flag) > 0):
@@ -304,14 +340,23 @@ def true_viterbi_path(split: HMMDataset, batch_size: int) -> np.ndarray:
 
 
 def _max_abs_output_diff(a: keras.Model, b: keras.Model, split: HMMDataset, batch_size: int) -> float:
-    """Largest absolute difference between two models' outputs over a split."""
+    """Largest absolute difference between two models' outputs over a split.
+
+    Equal entries count 0, NaN in both included. A NaN facing a number, or two
+    infinities of opposite sign, counts ``inf``: a NaN never hides a disagreement.
+    """
     worst = 0.0
     for start in range(0, len(split.obs), batch_size):
         inputs = _inputs(split, start, start + batch_size)
         out_a, out_b = a(inputs, training=False), b(inputs, training=False)
         for key in out_a:
-            diff = np.abs(keras.ops.convert_to_numpy(out_a[key]) - keras.ops.convert_to_numpy(out_b[key]))
-            worst = max(worst, float(np.nanmax(diff)) if diff.size else 0.0)
+            x = keras.ops.convert_to_numpy(out_a[key]).astype(np.float64)
+            y = keras.ops.convert_to_numpy(out_b[key]).astype(np.float64)
+            same = (x == y) | (np.isnan(x) & np.isnan(y))
+            with np.errstate(invalid="ignore"):
+                diff = np.where(same, 0.0, np.abs(x - y))
+            diff = np.where(np.isnan(diff), np.inf, diff)
+            worst = max(worst, float(diff.max()) if diff.size else 0.0)
     return worst
 
 # ---------------------------------------------------------------------
@@ -516,8 +561,8 @@ def main(argv=None) -> int:
             "mode": model.mode,
             "obs_type": args.obs_type,
             "n_states": args.n_states,
-            "obs_dim": None if args.obs_type == "categorical" else args.obs_dim,
-            "vocab_size": args.vocab_size if args.obs_type == "categorical" else None,
+            "obs_dim": args.obs_dim,
+            "vocab_size": args.vocab_size,
             "encoder_type": model.encoder_type if model.encoder is not None else None,
             "hidden_dim": args.hidden_dim,
             "params": int(scored.count_params()),
@@ -527,7 +572,7 @@ def main(argv=None) -> int:
             "num_val": args.num_val,
             "num_test": args.num_test,
             "test_valid_steps": int(steps),
-            "separation": args.separation if args.obs_type == "gaussian" else None,
+            "separation": args.separation,
             "stay_prob": args.stay_prob,
             "seed": args.seed,
             "jit_compile": jit_compile,

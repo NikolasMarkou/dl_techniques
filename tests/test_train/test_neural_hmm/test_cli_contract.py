@@ -9,12 +9,17 @@ the second hop:
    incomplete row table, two rows sharing a value). The trainer has no config
    dataclass: ``parse_arguments()`` returns the ``argparse.Namespace`` and every
    downstream function reads ``args.<field>``, the hkan shape. So ``build_config`` is
-   ``parse_arguments`` and every row but ``--gpu`` is a ``field`` row.
+   ``parse_arguments`` and every row but ``--gpu`` is a ``field`` row. ``--vocab-size``
+   is driven in a categorical mode, because the default gaussian run refuses it.
 2. **Namespace -> callee** (``wired``): two real tiny runs of ``main()`` with every flag
    off its default, recording what the data sampler, the model factory, the optimizer
    builder, ``fit`` and the early-stopping callback actually received. A flag that is
    parsed and then dropped (``--stay-prob`` never handed to the sampler, say) passes
    half 1 and fails here.
+3. **An ignored flag is refused, not dropped**: a data flag the configuration does not
+   read (``train.neural_hmm.data.unread_arguments``) exits 2 before anything is
+   written when it is given, even at its default value, and is recorded as ``null``
+   in the Namespace and in ``config.json`` when it is not.
 
 ``--gpu`` is consumed once in ``main()`` by ``setup_gpu(gpu_id=args.gpu)``;
 ``test_gpu_flag_reaches_setup_gpu`` drives ``main()`` against a sentinel. Every run is
@@ -23,6 +28,7 @@ pointed at ``tmp_path``, never at repo-root ``results/``.
 
 from __future__ import annotations
 
+import json
 from typing import Dict, Tuple
 
 import keras
@@ -41,14 +47,15 @@ from .._cli_contract import (  # noqa: TID252 -- shared driver, one level up
 )
 
 #: One row per declared flag; every probe value is unique across the table and
-#: differs from the flag's default (each row is driven alone against the defaults,
-#: so each probe also passes the trainer's own range checks on its own).
-NHMM_ROWS: Tuple[Row, ...] = (
+#: differs from the flag's default (each row is driven alone against its mode's
+#: required argv, so each probe also passes the trainer's own range checks on its own).
+#: The default observation type is gaussian, where ``--vocab-size`` is refused as
+#: ignored, so that one row runs in a categorical mode.
+GAUSSIAN_ROWS: Tuple[Row, ...] = (
     Row(("--variant",), ("--variant", "io-hmm"), "variant", "io-hmm"),
     Row(("--obs-type",), ("--obs-type", "categorical"), "obs_type", "categorical"),
     Row(("--n-states",), ("--n-states", "5"), "n_states", 5),
     Row(("--obs-dim",), ("--obs-dim", "7"), "obs_dim", 7),
-    Row(("--vocab-size",), ("--vocab-size", "13"), "vocab_size", 13),
     Row(("--encoder",), ("--encoder", "gru"), "encoder", "gru"),
     Row(("--hidden-dim",), ("--hidden-dim", "24"), "hidden_dim", 24),
     Row(("--seq-len",), ("--seq-len", "41"), "seq_len", 41),
@@ -72,12 +79,19 @@ NHMM_ROWS: Tuple[Row, ...] = (
     # This row proves parsing only; test_gpu_flag_reaches_setup_gpu proves the call.
     Row(("--gpu",), ("--gpu", "3"), namespace_dest="gpu", expected=3),
 )
+CATEGORICAL_ROWS: Tuple[Row, ...] = (
+    Row(("--vocab-size",), ("--vocab-size", "13"), "vocab_size", 13),
+)
+NHMM_ROWS: Tuple[Row, ...] = GAUSSIAN_ROWS + CATEGORICAL_ROWS
 
 NHMM_TRAINER = Contract(
     name="train.neural_hmm.train_neural_hmm",
     build_parser=lambda monkeypatch: train_nhmm._build_parser(),
     build_config=lambda monkeypatch: train_nhmm.parse_arguments(),
-    modes=(Mode(id="plain", required_argv=(), rows=NHMM_ROWS),),
+    modes=(
+        Mode(id="gaussian", required_argv=(), rows=GAUSSIAN_ROWS),
+        Mode(id="categorical", required_argv=("--obs-type", "categorical"), rows=CATEGORICAL_ROWS),
+    ),
 )
 
 CONTRACTS: Tuple[Contract, ...] = (NHMM_TRAINER,)
@@ -151,6 +165,50 @@ def test_gpu_flag_reaches_setup_gpu(monkeypatch, tmp_path) -> None:
         f"--gpu 3 did not reach setup_gpu(gpu_id=3): recorded calls={calls!r}"
     )
     assert not (tmp_path / "gpu_probe").exists(), "setup_gpu ran after the run directory was made"
+
+
+# ---------------------------------------------------------------------
+# an ignored data flag is refused when given, and recorded as null when not
+# ---------------------------------------------------------------------
+
+#: (argv, the refused flag). Each refused value is the flag's DEFAULT, so only "was
+#: it given" can tell these apart from a run that does not mention the flag; the
+#: ``=value`` and abbreviated spellings resolve to the same destination.
+IGNORED_FLAGS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("--vocab-size", "8"), "--vocab-size"),
+    (("--vocab-size=8",), "--vocab-size"),
+    (("--vocab", "8"), "--vocab-size"),
+    (("--obs-type", "categorical", "--obs-dim", "2"), "--obs-dim"),
+    (("--obs-type", "categorical", "--separation", "4.0"), "--separation"),
+    (("--n-states", "1", "--separation", "4.0"), "--separation"),
+    (("--n-states", "1", "--stay-prob", "0.9"), "--stay-prob"),
+    (("--obs-type", "categorical", "--n-states", "1", "--stay-prob", "0.9"), "--stay-prob"),
+)
+
+
+@pytest.mark.parametrize("argv,flag", IGNORED_FLAGS, ids=[" ".join(a) for a, _ in IGNORED_FLAGS])
+def test_an_ignored_data_flag_is_refused_before_anything_is_written(tmp_path, capsys, argv, flag) -> None:
+    # tiny sizes, so that a missing refusal fails in seconds instead of training a default run
+    tiny = ("--num-train", "8", "--num-val", "4", "--num-test", "4", "--seq-len", "5",
+            "--min-seq-len", "2", "--epochs", "1")
+    with pytest.raises(SystemExit) as exit_info:
+        train_nhmm.main([*argv, *tiny, "--output-dir", str(tmp_path), "--experiment-name", "ignored"])
+    assert exit_info.value.code == 2
+    assert f"{flag} would be ignored" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("argv,nulls", [
+    ((), {"vocab_size"}),
+    (("--obs-type", "categorical"), {"obs_dim", "separation"}),
+    (("--n-states", "1"), {"vocab_size", "separation", "stay_prob"}),
+    (("--obs-type", "categorical", "--n-states", "1"), {"obs_dim", "separation", "stay_prob"}),
+])
+def test_an_unread_data_flag_that_is_not_given_is_none(argv, nulls) -> None:
+    """Exactly the unread data flags are ``None``; every other flag keeps its default."""
+    args = vars(train_nhmm.parse_arguments(list(argv)))
+    defaults = {action.dest: action.default for action in train_nhmm._build_parser()._actions}
+    assert {dest for dest, value in args.items() if value is None and defaults[dest] is not None} == nulls
 
 
 # ---------------------------------------------------------------------
@@ -273,6 +331,16 @@ WIRED_CHECKS = {
     "--output-dir/--experiment-name": lambda s: (
         all((s[name]["run_dir"] / "results_summary.json").is_file() for name in WIRED_RUNS), True),
 }
+
+
+def test_config_json_records_the_unread_data_flags_as_null(wired) -> None:
+    """The real runs' ``config.json``: ``null`` where the data does not read the flag."""
+    gaussian = json.loads((wired["gaussian"]["run_dir"] / "config.json").read_text())
+    categorical = json.loads((wired["categorical"]["run_dir"] / "config.json").read_text())
+    assert gaussian["vocab_size"] is None
+    assert (gaussian["obs_dim"], gaussian["separation"], gaussian["stay_prob"]) == (3, 2.5, 0.75)
+    assert categorical["obs_dim"] is None and categorical["separation"] is None
+    assert (categorical["vocab_size"], categorical["stay_prob"]) == (11, 0.9)
 
 
 @pytest.mark.parametrize("check", sorted(WIRED_CHECKS))

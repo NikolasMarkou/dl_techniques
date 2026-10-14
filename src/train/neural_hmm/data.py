@@ -20,6 +20,11 @@ parameter; the seed only drives the sampling:
   puts :data:`OWN_SYMBOL_MASS` of its probability uniformly on its own symbols and the
   rest uniformly on the others. ``separation`` is not read.
 
+:func:`unread_arguments` names the arguments of :func:`make_true_hmm` that a given
+``n_states`` and ``obs_type`` do not read (``obs_dim`` for categorical, ``vocab_size``
+for gaussian, ``separation`` for categorical or ``K = 1``, ``stay_prob`` for ``K = 1``);
+the trainer refuses those flags when they are set and records them as ``null``.
+
 :func:`sample_hmm_dataset` draws ``N`` right-padded sequences whose valid lengths are
 uniform on ``[min_seq_len, seq_len]``. :func:`sample_splits` draws the train,
 validation and test splits from three disjoint random streams of one seed.
@@ -61,6 +66,9 @@ OWN_SYMBOL_MASS = 0.8
 
 #: Last entry of each split's seed list (the ASCII bytes of TRN, VAL, TST): one
 #: independent random stream per split from one user seed.
+# DECISION plan-2026-10-13T192257-1bb3bf1f/D-006: split streams are [seed, tag]. Do NOT
+# derive them as seed + k: run seed 1's train stream would be run seed 0's validation
+# stream, so runs at adjacent seeds would share sequences across splits.
 SPLIT_TAGS: Dict[str, int] = {"train": 0x54524E, "val": 0x56414C, "test": 0x545354}
 
 # ---------------------------------------------------------------------
@@ -107,22 +115,49 @@ class HMMDataset(NamedTuple):
 # ---------------------------------------------------------------------
 
 
+def unread_arguments(n_states: int, obs_type: str) -> Dict[str, str]:
+    """Return the arguments of :func:`make_true_hmm` that a configuration does not read.
+
+    Interface contract (one source for "not read", shared by :func:`make_true_hmm`'s
+    behaviour and the trainer's refusal of a flag that would be ignored):
+
+    :param n_states: ``K``.
+    :param obs_type: ``gaussian`` or ``categorical``.
+    :return: Argument name to a short reason it is not read; the remaining arguments
+        are all read. Never raises; an unknown ``obs_type`` is treated as gaussian
+        (:func:`make_true_hmm` refuses it).
+    """
+    unread: Dict[str, str] = {}
+    if obs_type == "categorical":
+        unread["obs_dim"] = "a categorical observation is one symbol, with no feature dimension"
+        unread["separation"] = "categorical emissions are not placed by distance"
+    else:
+        unread["vocab_size"] = "a gaussian observation has no vocabulary"
+        if n_states == 1:
+            unread["separation"] = "a single gaussian mean has no neighbour to be separated from"
+    if n_states == 1:
+        unread["stay_prob"] = "a single state has no transition to set"
+    return unread
+
+
 def make_true_hmm(
         n_states: int,
         obs_type: str,
         obs_dim: Optional[int] = None,
         vocab_size: Optional[int] = None,
-        separation: float = 4.0,
-        stay_prob: float = 0.9,
+        separation: Optional[float] = 4.0,
+        stay_prob: Optional[float] = 0.9,
 ) -> TrueHMM:
     """Build the ground-truth HMM described in the module docstring.
+
+    An argument :func:`unread_arguments` names is never read, so it may be ``None``.
 
     :param n_states: ``K >= 1``.
     :param obs_type: ``gaussian`` or ``categorical``.
     :param obs_dim: ``D >= 1``; required for ``gaussian``.
     :param vocab_size: ``V >= K``; required for ``categorical``.
     :param separation: Distance between consecutive Gaussian means, in standard
-        deviations; finite and ``>= 0``. Not read for ``categorical``.
+        deviations; finite and ``>= 0``. Not read for ``categorical`` or ``K = 1``.
     :param stay_prob: Diagonal of the transition matrix, in ``(0, 1)``. Not read when
         ``K = 1``.
     :return: The parameters.
@@ -132,7 +167,8 @@ def make_true_hmm(
         raise ValueError(f"Unknown obs_type '{obs_type}'. Available: {list(OBS_TYPES)}.")
     if n_states < 1:
         raise ValueError(f"n_states must be >= 1, got {n_states}.")
-    if n_states > 1 and not 0.0 < stay_prob < 1.0:
+    unread = unread_arguments(n_states, obs_type)
+    if "stay_prob" not in unread and not (stay_prob is not None and 0.0 < stay_prob < 1.0):
         raise ValueError(f"stay_prob must lie in (0, 1), got {stay_prob}.")
     k = n_states
     pi = np.full(k, 1.0 / k)
@@ -145,10 +181,13 @@ def make_true_hmm(
     if obs_type == "gaussian":
         if obs_dim is None or obs_dim < 1:
             raise ValueError(f"obs_type='gaussian' needs obs_dim >= 1, got {obs_dim}.")
-        if not (np.isfinite(separation) and separation >= 0):
+        if "separation" in unread:
+            offsets = np.zeros(k)
+        elif separation is not None and np.isfinite(separation) and separation >= 0:
+            offsets = (np.arange(k) - (k - 1) / 2.0) * separation
+        else:
             raise ValueError(f"separation must be finite and >= 0, got {separation}.")
         direction = np.ones(obs_dim) / np.sqrt(obs_dim)
-        offsets = (np.arange(k) - (k - 1) / 2.0) * separation
         return TrueHMM(pi, transition, obs_type, means=offsets[:, None] * direction[None, :])
 
     if vocab_size is None or vocab_size < k:
@@ -184,8 +223,8 @@ def sample_hmm_dataset(
         obs_type: str,
         obs_dim: Optional[int] = None,
         vocab_size: Optional[int] = None,
-        separation: float = 4.0,
-        stay_prob: float = 0.9,
+        separation: Optional[float] = 4.0,
+        stay_prob: Optional[float] = 0.9,
         seed: Union[int, Sequence[int]] = 0,
 ) -> HMMDataset:
     """Sample ``n_sequences`` right-padded sequences from :func:`make_true_hmm`'s HMM.

@@ -24,7 +24,8 @@ Mechanisms guarded:
   parsed arguments;
 - ``--help`` builds nothing; a reused experiment name, a bad argument and an
   ``--encoder`` the preset would ignore are all refused BEFORE anything is written;
-- a failing figure does not cost the run its results.
+- a failing figure does not cost the run its results;
+- the archive check counts a NaN facing a number as a difference (``inf``), never as 0.
 
 Nothing may be written under repo-root ``results/``: the autouse fixture in
 ``tests/conftest.py`` fails any test that adds an entry there.
@@ -387,6 +388,37 @@ def test_a_model_refusal_comes_before_anything_is_written(tmp_path, bad, match) 
     with pytest.raises(ValueError, match=match):
         train_nhmm.main(_argv(tmp_path, "refused", *bad))
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------
+# the archive check cannot be fooled by a NaN
+# ---------------------------------------------------------------------
+
+
+class _Split(NamedTuple):
+    obs: np.ndarray
+    mask: np.ndarray
+
+
+def _fixed_output(**outputs):
+    """A stand-in model returning the same output dict for every batch."""
+    return lambda inputs, training=False: {k: np.asarray(v, dtype=np.float32) for k, v in outputs.items()}
+
+
+@pytest.mark.parametrize("a,b,expected", [
+    ([0.5, np.nan], [0.5, 0.25], np.inf),        # NaN facing a number
+    ([np.nan, 1.0], [np.nan, 1.0], 0.0),         # NaN in both at one place: equal
+    ([np.inf, 1.0], [np.inf, 1.0], 0.0),         # equal infinities
+    ([np.inf, 1.0], [-np.inf, 1.0], np.inf),     # opposite infinities
+    ([1.0, 2.0], [1.0, 2.5], 0.5),
+])
+def test_the_reload_difference_counts_a_nan_disagreement_as_inexact(a, b, expected) -> None:
+    split = _Split(obs=np.zeros((3, 2, 1), np.float32), mask=np.ones((3, 2), np.float32))
+    for left, right in ((a, b), (b, a)):
+        diff = train_nhmm._max_abs_output_diff(
+            _fixed_output(log_emit=left, log_pi=[0.0]), _fixed_output(log_emit=right, log_pi=[0.0]),
+            split, batch_size=2)
+        assert diff == expected, (left, right, diff)
 
 
 # ---------------------------------------------------------------------

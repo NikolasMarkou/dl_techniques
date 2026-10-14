@@ -11,12 +11,19 @@ What is pinned here, and the mutation each group is meant to catch:
   standard deviation, the categorical own-symbol mass;
 - ``log p(x)`` (scaled forward), ``log p(x, z)`` and ``log p(z | x)`` equal a brute-force
   enumeration of every state path, computed here with scipy densities rather than the
-  module's own emission code (a dropped first emission, a transposed transition matrix
-  or a wrong normalizer all fail);
+  module's own emission code (a dropped first emission or a wrong normalizer fails);
 - the per-step NLL equals the model package's ``inference.forward_log_likelihood`` run
-  on :func:`true_log_potentials`;
+  on :func:`true_log_potentials`, and Viterbi through the model package's
+  ``inference.viterbi_decode`` on those potentials is the brute-force best path;
+- those three reference tests score a :class:`TrueHMM` built here with an ASYMMETRIC
+  transition matrix and a NON-UNIFORM initial distribution. :func:`make_true_hmm`'s
+  matrix is symmetric and its ``pi`` uniform, so on its HMM a transposed transition
+  matrix (source and destination swapped) or an ignored ``pi`` scores identically and
+  no test could see it; on this HMM both fail;
 - :func:`matched_accuracy` matches labels by the optimal assignment, not greedily and
-  not at all; a constant predictor scores :func:`majority_rate`.
+  not at all; a constant predictor scores :func:`majority_rate`;
+- :func:`unread_arguments` lists exactly the :func:`make_true_hmm` arguments whose value
+  changes nothing (the table behind the trainer's ignored-flag refusal).
 
 Nothing here touches a model, a GPU or the file system.
 """
@@ -30,10 +37,10 @@ from scipy.stats import norm
 
 from dl_techniques.models.time_series.neural_hmm import inference
 from train.neural_hmm.data import (
-    OWN_SYMBOL_MASS, SPLIT_TAGS, accuracy, hungarian_mapping, make_true_hmm, majority_rate,
-    matched_accuracy, sample_hmm_dataset, sample_splits, split_seed,
+    OBS_TYPES, OWN_SYMBOL_MASS, SPLIT_TAGS, TrueHMM, accuracy, hungarian_mapping, make_true_hmm,
+    majority_rate, matched_accuracy, sample_hmm_dataset, sample_splits, split_seed,
     true_conditional_nll_per_step, true_log_likelihood, true_log_potentials,
-    true_nll_per_step, true_path_log_prob,
+    true_nll_per_step, true_path_log_prob, unread_arguments,
 )
 
 GAUSSIAN = {"obs_type": "gaussian", "obs_dim": 2, "separation": 3.0}
@@ -169,6 +176,44 @@ def test_make_true_hmm_refuses_bad_arguments(bad) -> None:
         make_true_hmm(**kwargs)
 
 
+#: make_true_hmm's optional arguments: (base value, a different valid value).
+_HMM_ARGUMENTS = {"obs_dim": (2, 3), "vocab_size": (6, 7), "separation": (1.5, 2.5),
+                  "stay_prob": (0.8, 0.6)}
+
+
+def _hmm_arrays(hmm: TrueHMM) -> list:
+    return [hmm.pi, hmm.transition, hmm.means, hmm.emission_probs]
+
+
+def _same_hmm(a: TrueHMM, b: TrueHMM) -> bool:
+    return all((x is None and y is None) or (x is not None and y is not None and x.shape == y.shape
+                                             and np.array_equal(x, y))
+               for x, y in zip(_hmm_arrays(a), _hmm_arrays(b)))
+
+
+@pytest.mark.parametrize("obs_type", OBS_TYPES)
+@pytest.mark.parametrize("n_states", [1, 3])
+def test_unread_arguments_names_exactly_what_make_true_hmm_ignores(obs_type, n_states) -> None:
+    """Both directions: an unread argument changes nothing (``None`` included), and every
+    other argument changes the HMM. The trainer's ignored-flag refusal rests on this table.
+    """
+    unread = unread_arguments(n_states, obs_type)
+    base = {name: value for name, (value, _) in _HMM_ARGUMENTS.items()}
+    reference = make_true_hmm(n_states, obs_type, **base)
+    for name, (_, other) in _HMM_ARGUMENTS.items():
+        changed = make_true_hmm(n_states, obs_type, **{**base, name: other})
+        if name in unread:
+            assert _same_hmm(changed, reference), f"{name} is listed as unread but changes the HMM"
+            assert _same_hmm(make_true_hmm(n_states, obs_type, **{**base, name: None}), reference)
+        else:
+            assert not _same_hmm(changed, reference), f"{name} changes nothing but is not listed"
+    expected = {("gaussian", 1): {"vocab_size", "separation", "stay_prob"},
+                ("gaussian", 3): {"vocab_size"},
+                ("categorical", 1): {"obs_dim", "separation", "stay_prob"},
+                ("categorical", 3): {"obs_dim", "separation"}}
+    assert set(unread) == expected[(obs_type, n_states)]
+
+
 @pytest.mark.parametrize("sizes", [(0, 5, 3), (4, 5, 6), (4, 5, 0)])
 def test_sample_hmm_dataset_refuses_bad_sizes(sizes) -> None:
     n, seq_len, min_seq_len = sizes
@@ -181,10 +226,30 @@ def test_sample_hmm_dataset_refuses_bad_sizes(sizes) -> None:
 # ---------------------------------------------------------------------
 
 
-def _brute_force(hmm, obs, states, mask):
-    """``log p(x)`` and ``log p(x, z)`` by enumerating every path, with scipy densities."""
+def _asymmetric(hmm: TrueHMM, seed: int = 0) -> TrueHMM:
+    """``hmm``'s emissions with a random asymmetric transition matrix and non-uniform ``pi``.
+
+    Only the references are scored on it; nothing is sampled from it, and none of the
+    references needs the observations to come from the HMM that scores them.
+    """
     k = hmm.n_states
-    marginal, joint = [], []
+    rng = np.random.default_rng(100 + seed)
+    pi = rng.dirichlet(np.ones(k))
+    transition = rng.dirichlet(np.ones(k), size=k)
+    if k > 1:
+        # how far the swap moves each quantity: far above the tests' 1e-9 tolerances
+        assert np.abs(transition - transition.T).max() > 0.05
+        assert np.abs(pi - 1.0 / k).max() > 0.05
+    return TrueHMM(pi, transition, hmm.obs_type, hmm.means, hmm.emission_probs)
+
+
+def _brute_force(hmm, obs, states, mask):
+    """``log p(x)``, ``log p(x, z)`` and the best path by enumerating every path.
+
+    Emissions come from scipy densities, not the module's own emission code.
+    """
+    k = hmm.n_states
+    marginal, joint, best = [], [], []
     for row in range(len(mask)):
         length = int((mask[row] > 0).sum())
         if hmm.obs_type == "gaussian":
@@ -202,10 +267,14 @@ def _brute_force(hmm, obs, states, mask):
         if length == 0:
             marginal.append(0.0)
             joint.append(0.0)
+            best.append(())
             continue
-        marginal.append(logsumexp([score(p) for p in itertools.product(range(k), repeat=length)]))
+        paths = list(itertools.product(range(k), repeat=length))
+        scores = [score(p) for p in paths]
+        marginal.append(logsumexp(scores))
         joint.append(score(states[row, :length]))
-    return np.array(marginal), np.array(joint)
+        best.append(paths[int(np.argmax(scores))])
+    return np.array(marginal), np.array(joint), best
 
 
 @pytest.mark.parametrize("kind", sorted(OBS_KINDS))
@@ -217,33 +286,55 @@ def test_the_references_equal_brute_force_enumeration(kind, n_states, seq_len) -
     else:
         kwargs = dict(obs_type="gaussian", obs_dim=2, separation=1.5)
     data = sample_hmm_dataset(6, seq_len, 1, n_states, stay_prob=0.7, seed=seq_len, **kwargs)
+    hmm = _asymmetric(data.true_hmm, seed=seq_len)
     mask = data.mask.copy()
     mask[0] = 0.0  # a length-0 sequence
     states = np.where(mask > 0, data.states, -1)
-    marginal, joint = _brute_force(data.true_hmm, data.obs, states, mask)
+    marginal, joint, _ = _brute_force(hmm, data.obs, states, mask)
 
-    np.testing.assert_allclose(true_log_likelihood(data.true_hmm, data.obs, mask), marginal,
+    np.testing.assert_allclose(true_log_likelihood(hmm, data.obs, mask), marginal,
                                rtol=0, atol=1e-10)
-    np.testing.assert_allclose(true_path_log_prob(data.true_hmm, data.obs, states, mask), joint,
+    np.testing.assert_allclose(true_path_log_prob(hmm, data.obs, states, mask), joint,
                                rtol=0, atol=1e-10)
     steps = mask.sum()
-    assert true_nll_per_step(data.true_hmm, data.obs, mask) == pytest.approx(
+    assert true_nll_per_step(hmm, data.obs, mask) == pytest.approx(
         -marginal.sum() / steps, abs=1e-10)
-    assert true_conditional_nll_per_step(data.true_hmm, data.obs, states, mask) == pytest.approx(
+    assert true_conditional_nll_per_step(hmm, data.obs, states, mask) == pytest.approx(
         -(joint - marginal).sum() / steps, abs=1e-10)
 
 
 @pytest.mark.parametrize("kind", sorted(OBS_KINDS))
 def test_the_true_nll_equals_the_model_inference_on_the_true_parameters(kind) -> None:
     data = _sample(kind, n=25, seq_len=30, min_seq_len=1, n_states=4, seed=9)
-    potentials = true_log_potentials(data.true_hmm, data.obs)
+    hmm = _asymmetric(data.true_hmm)
+    potentials = true_log_potentials(hmm, data.obs)
     assert potentials["log_A"].shape == (25, 30, 4, 4)
     log_z = np.asarray(inference.forward_log_likelihood(
         potentials["log_pi"], potentials["log_A"], potentials["log_emit"], data.mask))
-    np.testing.assert_allclose(true_log_likelihood(data.true_hmm, data.obs, data.mask), log_z,
+    np.testing.assert_allclose(true_log_likelihood(hmm, data.obs, data.mask), log_z,
                                rtol=0, atol=1e-9)
-    assert true_nll_per_step(data.true_hmm, data.obs, data.mask) == pytest.approx(
+    assert true_nll_per_step(hmm, data.obs, data.mask) == pytest.approx(
         -log_z.sum() / data.mask.sum(), abs=1e-10)
+
+
+@pytest.mark.parametrize("kind", sorted(OBS_KINDS))
+def test_the_model_viterbi_on_the_true_parameters_is_the_brute_force_best_path(kind) -> None:
+    """The decoding behind the trainer's ``true_viterbi_acc``, on an asymmetric HMM.
+
+    Compared by score, not by path: two paths can tie exactly (categorical emissions
+    share their values), and either is a correct decoding.
+    """
+    data = _sample(kind, n=12, seq_len=5, min_seq_len=1, n_states=3, seed=13)
+    hmm = _asymmetric(data.true_hmm, seed=1)
+    potentials = true_log_potentials(hmm, data.obs)
+    path, _ = inference.viterbi_decode(
+        potentials["log_pi"], potentials["log_A"], potentials["log_emit"], data.mask)
+    path = np.asarray(path)
+    np.testing.assert_array_equal(path < 0, data.mask == 0)
+    _, decoded, best = _brute_force(hmm, data.obs, path, data.mask)
+    _, optimum, _ = _brute_force(hmm, data.obs, np.array([p + (0,) * (5 - len(p)) for p in best]),
+                                 data.mask)
+    np.testing.assert_allclose(decoded, optimum, rtol=0, atol=1e-9)
 
 
 def test_a_split_without_a_valid_step_is_refused() -> None:
