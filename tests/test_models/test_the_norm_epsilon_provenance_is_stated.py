@@ -37,8 +37,12 @@ package               MEASURED census                      ruling
                                                            pre-D-203 bug)
 ``vit_hmlp``          25x ``1e-06`` + 3x ``1e-03``         STATED -- the split
                                                            is factory-vs-bare
-``fastvlm``           34x ``1e-03`` + 12x ``1e-06``        construction, not a
+``fastvlm``           36x ``1e-03`` + 12x ``1e-06``        construction, not a
                                                            per-site choice
+                                                           (34 -> 36 on
+                                                           2026-10-14: the
+                                                           reference head's
+                                                           ``conv_exp``)
 ``qwen``              6x ``1e-05`` + 11x ``1e-06``         STATED
 ``accunet``           119 sites, all ``1e-03``             STATED (port;
                                                            reference is
@@ -190,7 +194,19 @@ CENSUS = {
     # read 1e-3; this pin was simply never re-derived after D-203 landed.
     "mobilenet": (_mobilenet, {"1e-03": 53}),
     "vit_hmlp": (_vit_hmlp, {"1e-06": 25, "1e-03": 3}),
-    "fastvlm": (_fastvlm, {"1e-03": 34, "1e-06": 12}),
+    # RE-MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81 step 5, D-019):
+    # {"1e-03": 36, "1e-06": 12}. Between 2026-10-09 (728c33e3b) and step 5 the
+    # census read {"1e-03": 34, "1e-06": 14}: the shared ClassificationHead's
+    # two DenseBlock LayerNorms (`classification_head/dense_block{,_1}_norm`)
+    # at the norms factory's 1e-6, which the pin never ruled on -- a MODEL
+    # defect, not a stale pin. Step 5 made the head FastViT's reference
+    # classifier, which holds no norm, so the 1e-6 count is the 12 stage-3
+    # transformer norms again (2 per block, 6 blocks). The 1e-3 count grows by
+    # the two BatchNorms of the reference head's `conv_exp`
+    # (`conv_branch_0_bn`, `scale_branch_bn`): a `MobileOneBlock` at Keras'
+    # 1e-3, the same block and default as the stem's six. Measured by naming
+    # every norm layer of `_fastvlm()`.
+    "fastvlm": (_fastvlm, {"1e-03": 36, "1e-06": 12}),
     # RE-MEASURED 2026-10-13: {"1e-05": 6, "1e-06": 11}, not {"1e-05": 9,
     # "1e-06": 8}. The three moved sites are the `v_norm` layers of the
     # Qwen3Next delta blocks. Provenance: user commit 2c2694d91 set

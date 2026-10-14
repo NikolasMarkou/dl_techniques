@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A hybrid convolution/transformer **image model**: a `ConvolutionalStem` of MobileOne blocks, two `RepMixer` stages for cheap token mixing, and one attention stage for global context, ending in a classification head.
+A hybrid convolution/transformer **image model**: a `ConvolutionalStem` of MobileOne blocks, two `RepMixer` stages for cheap token mixing, and one attention stage for global context, ending in FastViT's reference classification head. The model returns **logits**.
 
 > **Two things the name invites you to assume, and shouldn't.**
 >
@@ -55,10 +55,11 @@ Input (B, H, W, 3)
     │
     ├─► Stage 3: depths[2] x AttentionBlockVLM   -> (B, H/16, W/16, D2)
     │
-    └─► [include_top] GAP -> [Dropout] -> Dense  -> (B, num_classes)
+    └─► [include_top] conv_exp                   -> (B, H/16, W/16, 2*D2)
+                      GAP -> [Dropout] -> Dense  -> (B, num_classes) logits
 ```
 
-`embed_dims` is `[D0, D1, D2]` and `depths` is per stage; both must have exactly 3 entries. With `include_top=False` the model stops at the stage-3 feature map, downsampled `16x` from the input.
+`embed_dims` is `[D0, D1, D2]` and `depths` is per stage; both must have exactly 3 entries. With `include_top=False` the model stops at the stage-3 feature map, downsampled `16x` from the input; `conv_exp` belongs to the head and is not built.
 
 ---
 
@@ -95,6 +96,35 @@ Because attention is positional here, `attention_max_seq_len` (default `2048`) i
 
 `num_heads` defaults to `[max(1, dim // 32) for dim in embed_dims]` and each entry must divide its `embed_dims` entry.
 
+### 4.4 The classification head
+
+The head is FastViT's reference classifier. apple/ml-fastvit (`models/fastvit.py`) and apple/ml-fastvlm (`llava/model/multimodal_encoder/mobileclip/mci.py`) build it only in classification mode, under the comment `# Classifier head`; timm (`models/fastvit.py`) builds the same `final_conv` and a `ClassifierHead`:
+
+```
+stage-3 map (B, H/16, W/16, D2)
+    │
+    ├─► conv_exp: MobileOneBlock, 3x3, stride 1, depthwise,     -> (B, H/16, W/16, 2*D2)
+    │             squeeze-and-excitation, one conv branch
+    │             (plus its 1x1 scale branch), D2 -> 2*D2
+    │
+    └─► classification_head (a shared ClassificationHead):
+          GlobalAveragePooling2D -> Dropout(dropout_rate) -> Dense(num_classes)
+          no hidden block, no normalization, no activation   -> (B, num_classes) logits
+```
+
+`conv_exp` is a layer of the model, built only with `include_top`, so the headless output is the raw stage-3 map. The `ClassificationHead` is `layers/heads/vision`'s, configured with `block_dims=()`; its `'logits'` key is the model output. Compile with `from_logits=True`; apply `keras.ops.softmax` yourself for probabilities.
+
+Where this head deliberately differs from the reference:
+
+| | Reference | Here | Why |
+|---|---|---|---|
+| `conv_exp` squeeze-and-excitation | ratio 1/16, biased 1x1 convs, before the activation | this repo's `MobileOneBlock` defaults: ratio 0.25, no bias, after the activation | the same block convention as this model's own stem; the backbone is not a FastViT port (header note). The faithful values live in `models/vision/fastvit/` |
+| `conv_exp` BatchNorm epsilon | 1e-5 (PyTorch) | 1e-3 (Keras) | every BatchNorm in this model's MobileOne and RepMixer blocks is 1e-3 |
+| Classifier initializer | `trunc_normal_(std=0.02)` (ml-fastvit, timm), `normal_(std=0.02)` (mci) | the model's `kernel_initializer` (default `he_normal`) | one knob governs every kernel; pass `head_config_overrides={'kernel_initializer': {...}}` for the reference draw |
+| Regularization | none | none by default; FastVLM has no `kernel_regularizer` knob | pass `head_config_overrides={'kernel_regularizer': ...}` |
+
+`head_config_overrides` is merged into the `ClassificationHead` configuration. `name`, `num_classes` and `task_type` belong to the model and raise `ValueError`. The head's `activation_type` is the model's `activation` by name; the reference head applies none, but a hidden block added with `head_config_overrides={'block_dims': (256,)}` uses it, and an activation the head's activation factory cannot build (`'tanh'`, a custom callable) then raises unless the override also sets `activation_type`.
+
 ---
 
 ## 5. Quick Start Guide
@@ -116,11 +146,13 @@ labels = np.random.randint(0, 10, 16)
 
 loss, acc = model.train_on_batch(images, labels)
 print(model.predict(images).shape)   # (16, 10)
-print(f"{model.count_params():,}")   # 505,978
+print(f"{model.count_params():,}")   # 528,826
 model.summary()
 ```
 
-The head emits **logits**: keep `from_logits=True`, or pass your own activation through the classification `Dense`.
+The model returns **logits**: compile with `from_logits=True`, and apply `keras.ops.softmax` yourself when you need probabilities.
+
+The count above is measured, not transcribed (CPU, 2026-10-14): `FastVLM.from_variant("nano", num_classes=10, input_shape=(32, 32, 3)).count_params()` prints `528826`, of which `conv_exp` holds 21,888 and `classification_head` 1,930 (`model.get_layer(name).count_params()`). The headless backbone is 505,008.
 
 ---
 
@@ -132,6 +164,8 @@ The head emits **logits**: keep `from_logits=True`, or pass your own activation 
 | **`FastVLM.from_variant`** | — | Build a preset; kwargs override the row. |
 | **`create_fastvlm`** | `...fastvlm.model.create_fastvlm` | Module-level factory; forwards to `from_variant`. |
 | **`FastVLM.extract_features`** | — | All four intermediate feature maps (§8). |
+| **`FastVLM.conv_exp`** | — | The head's widening `MobileOneBlock` (§4.4); `None` without a head. |
+| **`FastVLM.head`** | `...layers.heads.vision.ClassificationHead` | Pool, dropout, linear classifier (§4.4); `None` without a head. |
 | **`AttentionBlockVLM`** | `...fastvlm.components.AttentionBlockVLM` | This package's own attention block. |
 | **`RepMixerBlock`** | `...layers.repmixer_block.RepMixerBlock` | Convolutional token + channel mixing. |
 | **`ConvolutionalStem`** | `...layers.repmixer_block.ConvolutionalStem` | Stem; `/4` downsample. |
@@ -145,9 +179,11 @@ from dl_techniques.models.vision_language.fastvlm import FastVLM, create_fastvlm
 
 ### Constructor
 
-`num_classes=1000`, `embed_dims=[64, 128, 256]`, `depths=[3, 4, 6]`, `num_heads=None`, `mlp_ratio=4.0`, `dropout_rate=0.0`, `drop_path_rate=0.1`, `use_se=False`, `attention_type='group_query'`, `use_layer_scale=True`, `attention_max_seq_len=2048`, `activation='gelu'`, `kernel_initializer='he_normal'`, `include_top=True`, `input_shape=None` (defaults to `(224, 224, 3)`).
+`num_classes=1000`, `embed_dims=[64, 128, 256]`, `depths=[3, 4, 6]`, `num_heads=None`, `mlp_ratio=4.0`, `dropout_rate=0.0` (in `[0, 1)`), `drop_path_rate=0.1`, `use_se=False`, `attention_type='group_query'`, `use_layer_scale=True`, `attention_max_seq_len=2048`, `activation='gelu'`, `kernel_initializer='he_normal'`, `include_top=True`, `input_shape=None` (defaults to `(224, 224, 3)`), `head_config_overrides=None`.
 
 `num_classes=0` builds a feature extractor, as does `include_top=False`.
+
+Any other keyword except `name`, `trainable` and `dtype` raises `ValueError`. FastVLM is a functional `keras.Model` subclass, and Keras' functional constructor would otherwise drop a misspelled or deleted argument silently. `head_config_preset` was deleted on 2026-10-14: it was stored and never read.
 
 ---
 
@@ -171,7 +207,35 @@ model = FastVLM.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3),
                              drop_path_rate=0.2, attention_type="multi_head")
 ```
 
-**No pretrained weights ship with this package.** There is no `pretrained` argument; build the architecture and warm-start from a local checkpoint with `model.load_weights(path)` — or better, `dl_techniques.utils.weight_transfer.load_weights_or_raise(model, path)`, which raises when a load changes zero variables.
+### Variant sizes
+
+Measured on CPU, 2026-10-14, at 224 x 224 x 3 and 1000 classes: `FastVLM.from_variant(v, num_classes=1000, input_shape=(224, 224, 3))`, then `count_params()` and the sum over `trainable_weights`. The total includes the non-trainable BatchNorm statistics and the stage-3 RoPE tables.
+
+| Variant | `count_params()` | trainable |
+|:---|---:|---:|
+| `nano` | 719,896 | 521,752 |
+| `tiny` | 1,417,320 | 1,152,744 |
+| `small` | 4,130,920 | 3,733,480 |
+| `base` | 6,847,976 | 6,449,128 |
+| `large` | 18,861,672 | 18,327,016 |
+| `huge` | 46,941,672 | 46,138,344 |
+
+### `pretrained`
+
+`FastVLM.from_variant(variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs)` owns `pretrained`, as the `models/language` packages do; `create_fastvlm(variant="base", pretrained=False, **kwargs)` only delegates to it.
+
+- `pretrained=False` (default): random initialization.
+- `pretrained=True` raises `NotImplementedError`. **No pretrained weights ship with this package.**
+- `pretrained="<path>.keras"`: the path is checked first (`FileNotFoundError` before anything is built), then the **backbone only** is copied from that FastVLM checkpoint by layer name. The checkpoint may be headed or headless, and so may the model. The checkpoint's head (`conv_exp` and `classification_head`) is never copied, so the class count may differ and the model's own head keeps its fresh initialization. Every backbone layer loads or the call raises: a deeper or wider checkpoint is refused, and the load asserts that every backbone layer is in the transfer report.
+
+```python
+from dl_techniques.models.vision_language.fastvlm import create_fastvlm
+
+model = create_fastvlm("tiny", num_classes=10, input_shape=(32, 32, 3),
+                       pretrained="fastvlm_tiny_imagenet.keras")
+```
+
+To restore a whole model, head included, use `keras.models.load_model(path)`.
 
 ---
 
@@ -246,6 +310,8 @@ Raise `attention_max_seq_len` past `(H/16) * (W/16)` before going beyond ~720 px
 model.save('my_fastvlm.keras')
 loaded = keras.models.load_model('my_fastvlm.keras')
 ```
+
+**Archives saved before 2026-10-14 do not load and are not supported.** That date changed the head to the FastViT reference classifier (a new `conv_exp`, a single-`Dense` head) and the output from probabilities to logits, and deleted the `head_config_preset` argument. Archives saved before commit `728c33e3b` (a `Sequential` GAP + Dense head) did not load into the previous version either. Rebuild the model and, if the backbone is what you need, warm-start it with `pretrained=<path>` from a checkpoint saved by this version.
 
 ---
 

@@ -312,13 +312,10 @@ class TestFastVLM:
 
             loaded_model = keras.models.load_model(filepath)
 
-            head_layer = loaded_model.head
-            # ClassificationHead has multiple sub-layers; the final classifier
-            # is the last Dense layer. Its weights are the last two arrays.
-            weights = head_layer.get_weights()
-            classifier_kernel = weights[-2]
-            classifier_bias = weights[-1]
-            head_layer.set_weights(weights[:-2] + [classifier_kernel + 1.0, classifier_bias])
+            # The reference head has no hidden block: its only weights are
+            # the linear classifier's kernel and bias.
+            classifier = loaded_model.head.classifier
+            classifier.kernel.assign(classifier.kernel + 1.0)
 
             perturbed_prediction = keras.ops.convert_to_numpy(
                 loaded_model(sample_input, training=False)
@@ -571,10 +568,10 @@ class TestFastVLM:
         """Test model compilation and basic training step."""
         model = FastVLM(**base_config)
 
-        # Compile model
+        # The model returns logits.
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -638,9 +635,10 @@ class TestFastVLM:
         sweep nowhere to compare, so it asserted the logits shape (identical at
         every attention type) plus ``model.attention_type == attention_type``,
         a knob ECHO of the stored kwarg. The two attentions have different
-        parameterisations -- measured 139 tensors / 418,058 params for
-        `multi_head` and 151 / 549,130 for `group_query` -- so the weight-shape
-        signature says which one was actually built.
+        parameterisations -- re-measured 2026-10-14 with the reference head
+        (CPU, this fixture): 151 tensors / 456,714 params for `multi_head` and
+        163 / 587,786 for `group_query` -- so the weight-shape signature says
+        which one was actually built.
         """
         # Note: window_attention requires specific spatial dimensions that are
         # complex to set up.
@@ -711,19 +709,19 @@ class TestFastVLMIntegration:
         # Freeze base model
         base_model.trainable = False
 
-        # Add custom head
+        # Add a custom 5-class head that emits logits, like the model's own.
         inputs = keras.layers.Input(shape=(224, 224, 3))
         x = base_model(inputs)
         x = keras.layers.GlobalAveragePooling2D()(x)
         x = keras.layers.Dense(128, activation='relu')(x)
-        outputs = keras.layers.Dense(5, activation='softmax')(x)  # Custom 5 classes
+        outputs = keras.layers.Dense(5)(x)
 
         transfer_model = keras.Model(inputs, outputs)
 
         # Test compilation and forward pass
         transfer_model.compile(
             optimizer='adam',
-            loss='categorical_crossentropy',
+            loss=keras.losses.CategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -732,6 +730,57 @@ class TestFastVLMIntegration:
 
         assert output.shape == (1, 5)
         assert keras.ops.all(keras.ops.isfinite(output))
+
+
+class TestFastVLMTrains:
+    """FastVLM's training proof: it has no trainer in ``src/train``.
+
+    A stock ``compile`` with ``SparseCategoricalCrossentropy(from_logits=True)``
+    and two ``fit`` steps on the ``tiny`` variant at 32 px. MEASURED on GPU 1
+    (seed 0, Adam 1e-3): loss 2.2954 at batch 4 in steps of 2, and every one of
+    the 178 trainable variables moved; at batch 2 in steps of 1 the loss is
+    2.4282 and again 178 of 178 moved. The head's only BatchNorms sit in
+    ``conv_exp`` on the 2 x 2 stage-3 map, so even a batch-1 step normalizes
+    over 4 values per channel and does not zero the gradient.
+    """
+
+    def test_two_fit_steps_move_the_backbone_and_the_head(self) -> None:
+        keras.utils.set_random_seed(0)
+        model = FastVLM.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal((4, 32, 32, 3)).astype("float32")
+        y = np.arange(4) % 10
+
+        def first_kernel(layer):
+            return next(v for v in layer.weights if v.path.endswith("kernel"))
+
+        named = {
+            "stem": first_kernel(model.stem),
+            "stage3": first_kernel(model.stages[2]),
+            "conv_exp": first_kernel(model.conv_exp),
+            "classifier": model.head.classifier.kernel,
+        }
+        before = {v.path: keras.ops.convert_to_numpy(v).copy()
+                  for v in model.trainable_variables}
+
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
+        history = model.fit(x, y, batch_size=2, epochs=1, verbose=0)
+
+        assert int(model.optimizer.iterations.numpy()) == 2
+        loss = history.history["loss"][0]
+        assert np.isfinite(loss), f"loss {loss}"
+        for label, variable in named.items():
+            assert not np.array_equal(
+                before[variable.path], keras.ops.convert_to_numpy(variable)
+            ), f"two fit steps left the {label} kernel {variable.path} unchanged"
+        stalled = [
+            v.path for v in model.trainable_variables
+            if np.array_equal(before[v.path], keras.ops.convert_to_numpy(v))
+        ]
+        assert not stalled, f"{len(stalled)} trainable variables did not move: {stalled}"
 
 
 # Performance and memory tests

@@ -25,9 +25,14 @@ MEASURED on CPU, 14x14 grid, dim=64, 4 heads, random permutation,
 TWO instrument traps are pinned as tests below, because either one makes the
 fix look like a no-op:
 
-1. The shipped classification head is `GlobalAveragePooling2D`, which is itself
-   permutation-INVARIANT. A probe on the model's LOGITS cannot see this defect
-   at all; it must read `include_top=False` features (or the block directly).
+1. The classification head pools with global average pooling, which is itself
+   permutation-INVARIANT. Since 2026-10-14 (plan-2026-10-14T062616-81938e81,
+   step 5) the head is FastViT's reference classifier, so a 3x3 depthwise
+   `conv_exp` runs before that pool and the logits do move under a spatial
+   permutation of the stage-3 map -- but by the conv's own local response,
+   not by anything stage 3 knows about position. A probe on the model's
+   LOGITS still cannot isolate this defect; it must read `include_top=False`
+   features (or the block directly).
 2. At the shipped ``layer_scale_init=1e-4`` the block is ~identity at init, so
    the SAME positional signal is attenuated by 1e-4 to 4.88e-05 -- present, but
    easy to mistake for float noise. Probe with ``use_layer_scale=False``.
@@ -118,7 +123,7 @@ class TestTheTwoInstrumentTraps:
         )
 
     def test_global_average_pooling_head_cannot_see_position(self):
-        """Trap 1: the shipped head is permutation-INVARIANT by construction."""
+        """Trap 1: the head's global average pool is permutation-INVARIANT."""
         rng = np.random.RandomState(0)
         feats = rng.randn(BATCH, GRID, GRID, DIM).astype("float32")
         pool = keras.layers.GlobalAveragePooling2D()

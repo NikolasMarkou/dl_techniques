@@ -11,25 +11,28 @@ most-derived ``call()``, so ``_build_model``'s ``training=None`` calls run
 exactly once, at construction, to trace shapes.
 
 This file pins the refutation so nobody re-derives the false alarm and "fixes"
-it. MEASURED at the geometry below (CPU, seed 3, ``dropout_rate=0.9``): two
-``training=True`` calls diverge by 400.48, ``training=True`` vs ``False`` by
-224.41, two ``training=False`` calls are bit-identical at 0.0, and one
-``training=True`` forward moves all 10 ``moving_mean`` tensors.
+it. MEASURED at the geometry below (CPU, seed 3, ``dropout_rate=0.9``;
+re-measured 2026-10-14 after the head became FastViT's reference classifier,
+plan-2026-10-14T062616-81938e81 step 5): two ``training=True`` calls diverge
+by 6.32, ``training=True`` vs ``False`` by 5.04, two ``training=False`` calls
+are bit-identical at 0.0, and one ``training=True`` forward moves all 12
+``moving_mean`` tensors (10 in the backbone, 2 in the head's ``conv_exp``).
+Before step 5 the figures were 400.48 and 224.41 over 10 tensors.
 
-Deleting the ``call()`` override does NOT make these assertions fail (measured:
-``max|train1-train2|`` stays at exactly 400.475). Keras 3's ``Functional.call``
-injects the caller's ``training`` into every operation in the traced graph, so
-the value recorded at trace time is overridden at runtime -- a second,
-independent reason the routed claim is false, and the reason the structural
-assertion below reads ``"call" in FastVLM.__dict__`` rather than
+Deleting the ``call()`` override does NOT make these assertions fail (measured
+before step 5: ``max|train1-train2|`` stayed at exactly 400.475). Keras 3's
+``Functional.call`` injects the caller's ``training`` into every operation in
+the traced graph, so the value recorded at trace time is overridden at
+runtime -- a second, independent reason the routed claim is false, and the
+reason the structural assertion below reads ``"call" in FastVLM.__dict__`` rather than
 ``type(model).call is FastVLM.call`` (with the override gone, the latter is
 still True, resolving to ``Functional.call`` -- it cannot fail and proves
 nothing).
 
 RED proof: hard-code ``training=False`` inside ``call()``. Then
 ``test_two_training_true_forwards_differ`` fails at ``max|delta| = 0.0`` and
-``test_every_batchnorm_moving_mean_updates_under_training_true`` names all 10
-stalled indices.
+``test_every_batchnorm_moving_mean_updates_under_training_true`` names every
+stalled index (10 before step 5, 12 since).
 """
 
 import numpy as np
@@ -69,8 +72,9 @@ class TestTrainingModeReachesTheForwardPath:
         delta = float(
             np.max(np.abs(_forward(model, x, True) - _forward(model, x, True)))
         )
-        # Measured 400.48. The defect signal is exactly 0.0 (dropout never
-        # firing), so the bar only has to separate "some" from "none".
+        # Measured 6.32 (400.48 before step 5). The defect signal is exactly
+        # 0.0 (dropout never firing), so the bar only has to separate "some"
+        # from "none".
         assert delta > 1e-3, (
             "two training=True forwards are identical "
             f"(max|delta| = {delta:.6e}); dropout is not reaching training mode"
@@ -102,7 +106,10 @@ class TestTrainingModeReachesTheForwardPath:
             for layer in model._flatten_layers()
             if isinstance(layer, keras.layers.BatchNormalization)
         ]
-        assert len(bns) == 10, f"expected 10 BatchNormalization layers, found {len(bns)}"
+        # 10 in the backbone (6 in the stem's three MobileOne blocks, 2 per
+        # RepMixer block) plus 2 in the head's conv_exp (its 3x3 conv branch
+        # and 1x1 scale branch), which runs because include_top defaults True.
+        assert len(bns) == 12, f"expected 12 BatchNormalization layers, found {len(bns)}"
         before = [np.array(keras.ops.convert_to_numpy(b.moving_mean)) for b in bns]
         model(_inputs(), training=True)
         after = [np.array(keras.ops.convert_to_numpy(b.moving_mean)) for b in bns]

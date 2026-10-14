@@ -33,6 +33,12 @@ One row per consumer class, four arms per row:
 
 Adding a consumer is one entry in :data:`SUBJECTS`.
 
+Step 5 added FastVLM (``models/vision_language``, decision D-005), the one
+``ClassificationHead`` consumer outside ``models/vision``. Its head is FastViT's
+reference classifier: a model-owned ``conv_exp`` (a depthwise 3x3
+``MobileOneBlock`` with squeeze-and-excitation, twice as wide as stage 3), then
+the shared head as pool, dropout and one linear layer (decision D-019).
+
 Step 4 (Batch C) added CliffordNet, BEiT on both pooling paths, Swin, FractalNet
 and SqueezeNet V1/V2, so the census covers all 17 ``models/vision`` classifier
 classes (BEiT twice). SqueezeNet is the one family that is NOT a
@@ -183,6 +189,15 @@ def _squeezenet_v2(**knobs) -> keras.Model:
                                            input_shape=(48, 64, 3), **knobs)
 
 
+def _fastvlm(**knobs) -> keras.Model:
+    # 32 x 48 gives a 2 x 3 stage-3 map, so conv_exp's BatchNorms see 6
+    # values per channel even at batch 1.
+    from dl_techniques.models.vision_language.fastvlm import FastVLM
+    return FastVLM(num_classes=NUM_CLASSES, embed_dims=[16, 32, 64],
+                   depths=[1, 1, 1], num_heads=[1, 2, 4], mlp_ratio=2.0,
+                   drop_path_rate=0.0, input_shape=(32, 48, 3), **knobs)
+
+
 #: Each builder takes extra constructor keywords (``**knobs``).
 SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
@@ -203,11 +218,29 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "FractalNet": (_fractalnet, (32, 48, 3)),
     "SqueezeNetV1": (_squeezenet_v1, (48, 64, 3)),
     "SqueezeNoduleNetV2": (_squeezenet_v2, (48, 64, 3)),
+    "FastVLM": (_fastvlm, (32, 48, 3)),
 }
 
 #: The classes whose classifier is the paper's ``conv10`` layer, not a
 #: ``ClassificationHead`` (decision D-017).
 CONV10_HEADS = {"SqueezeNetV1", "SqueezeNoduleNetV2"}
+
+
+def _head_layer(model: keras.Model):
+    """The model's classification head, or ``None`` (SqueezeNet's ``conv10``).
+
+    FastVLM holds its head as ``head``; every ``models/vision`` class as
+    ``classification_head``.
+
+    :param model: A census subject.
+    :type model: keras.Model
+    :return: The head layer, or ``None``.
+    """
+    for attribute in ("classification_head", "head"):
+        head = getattr(model, attribute, None)
+        if head is not None and hasattr(head, "classifier"):
+            return head
+    return None
 
 
 def _classifier(model: keras.Model) -> keras.layers.Layer:
@@ -219,7 +252,7 @@ def _classifier(model: keras.Model) -> keras.layers.Layer:
         mean-pooling head), or SqueezeNet's ``conv10``.
     :rtype: keras.layers.Layer
     """
-    head = getattr(model, "classification_head", None)
+    head = _head_layer(model)
     if head is None:
         return model.get_layer("conv10")
     return head.classifier
@@ -368,6 +401,10 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     # FractalNet: Larsson et al. 2017 Sec. 4, "A softmax prediction layer
     # attaches at the end of the network": pool, one linear layer.
     "FractalNet": {"classifier"},
+    # FastVLM: apple/ml-fastvit and apple/ml-fastvlm (mci.py) FastViT
+    # classifier, conv_exp -> gap -> head (nn.Linear); timm final_conv ->
+    # ClassifierHead (pool, drop_rate, fc). conv_exp is the model's own layer.
+    "FastVLM": {"classifier"},
 }
 
 
@@ -411,7 +448,7 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
     if subject in CONV10_HEADS:
         _assert_the_conv10_head(subject, model)
         return
-    head = model.classification_head
+    head = _head_layer(model)
     owners = _head_owners(head)
     assert owners == REFERENCE_HEAD_OWNERS[subject], (
         f"{subject} head weight owners {sorted(owners)}, the reference head "
@@ -456,6 +493,17 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
             False, False, False]
     if subject == "FractalNet":
         assert isinstance(head.pooling, keras.layers.GlobalAveragePooling2D)
+    if subject == "FastVLM":
+        assert head.normalization_type is None
+        assert isinstance(head.pooling, keras.layers.GlobalAveragePooling2D)
+        # conv_exp: in_channels=64, out_channels=int(64 * cls_ratio 2.0),
+        # kernel_size=3, stride=1, groups=in_channels, use_se=True,
+        # num_conv_branches=1 (the reference constructor call).
+        conv_exp = model.conv_exp
+        assert (conv_exp.out_channels, conv_exp.kernel_size, conv_exp.stride,
+                conv_exp.groups, conv_exp.use_se,
+                conv_exp.num_conv_branches) == (128, 3, 1, 64, True, 1)
+        assert model.layers[-2] is conv_exp and model.layers[-1] is head
 
 
 _L2 = 3e-4
@@ -515,11 +563,15 @@ KNOBS: Dict[str, Dict[str, object]] = {
                      "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "SqueezeNoduleNetV2": {"kernel_regularizer": keras.regularizers.L2(_L2),
                            "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    # FastVLM has no regularizer knob; its kernel_initializer governs every
+    # conv and Dense kernel, conv_exp and the classifier included.
+    "FastVLM": {"dropout_rate": 0.3,
+                "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
 }
 
 #: Where each class's ``dropout_rate`` must land in its reference head.
 CLASSIFIER_DROPOUT = {"MobileNetV1", "MobileNetV2", "ViT", "ViTHMLP",
-                      "CliffordNet", "BeitForImageClassification_cls"}
+                      "CliffordNet", "BeitForImageClassification_cls", "FastVLM"}
 BLOCK_DROPOUT = {"MobileNetV3", "MobileNetV4"}
 
 
@@ -528,7 +580,7 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
     keras.utils.set_random_seed(0)
     model = builder(**KNOBS[subject])
     model(_images(shape), training=False)
-    head = getattr(model, "classification_head", None)
+    head = _head_layer(model)
     classifier = _classifier(model)
     knobs = KNOBS[subject]
     if "kernel_regularizer" in knobs or "weight_decay" in knobs:
@@ -578,6 +630,10 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
         assert config["config"]["stddev"] == pytest.approx(0.02), (
             f"{subject}: the reference head draws at trunc_normal_(std=.02)"
         )
+    if subject == "FastVLM":
+        config = keras.initializers.serialize(model.conv_exp.kernel_initializer)
+        assert config["class_name"] == "RandomNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.123)
 
 
 def _trainable_count(model: keras.Model) -> int:
@@ -742,6 +798,7 @@ def test_return_dict_is_refused(name: str) -> None:
     "dl_techniques.models.vision.squeezenet:create_squeezenet_v1",
     "dl_techniques.models.vision.squeezenet:create_squeezenodule_net_v2",
     "dl_techniques.models.vision.beit:create_beit_classifier",
+    "dl_techniques.models.vision_language.fastvlm:create_fastvlm",
 ])
 def test_no_factory_takes_return_dict(factory: str) -> None:
     import importlib
@@ -771,6 +828,7 @@ DEAD_HEAD_KNOBS = [
     ("SqueezeNetV1", "head_config_preset"),
     ("SqueezeNetV1", "head_config_overrides"),
     ("SqueezeNoduleNetV2", "head_config_overrides"),
+    ("FastVLM", "head_config_preset"),
 ]
 
 
@@ -782,7 +840,8 @@ def test_a_dead_head_knob_is_refused(name: str, knob: str) -> None:
     CliffordNet is a subclassed ``keras.Model``, which refuses an unknown
     keyword itself. Swin, FractalNet and SqueezeNet are functional subclasses:
     Keras' ``Functional.__init__`` drops unknown keywords silently (measured),
-    so they refuse through ``utils.model_build.refuse_unknown_model_kwargs``.
+    so they refuse through ``utils.model_build.refuse_unknown_model_kwargs``,
+    as FastVLM (also functional) does since step 5.
     Either way the refusal is ``ValueError`` naming the keyword.
     """
     builder, _ = SUBJECTS[name]
