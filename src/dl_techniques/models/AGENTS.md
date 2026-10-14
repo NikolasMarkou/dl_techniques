@@ -53,9 +53,9 @@ transcribe them.
 - `models/__init__.py` (the root) is **0 bytes** and stays that way. Never import from
   `dl_techniques.models` itself — import from the leaf package.
 - **Family and subfamily `__init__.py` carry a docstring and nothing else** — no imports, no
-  `__all__`. Re-exporting `vision/` would pull 35 packages behind one statement: a real import
+  `__all__`. Re-exporting `vision/` would pull 50 packages behind one statement: a real import
   cost and a real circular-import surface. Do not "finish the job" by adding re-exports.
-- **`time_series/__init__.py` is the one exception** — 7 children, curated re-exports, and
+- **`time_series/__init__.py` is the one exception** — 9 children, curated re-exports, and
   consumers that rely on them. Leave it. It is also why `time_series/{deepar,prism,tirex}`
   can carry an empty `__init__.py` without being broken.
 - This diverges from `layers/`, where most subpackages are curated. The discriminator is child

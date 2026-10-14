@@ -14,7 +14,9 @@ Mechanisms guarded:
 - the run directory holds exactly the documented files, and the summary is strict
   JSON whose numbers are finite;
 - ``best_model.keras`` reloads, reproduces the in-memory best weights exactly, and is
-  the model the summary's scores come from (re-scored here from the archive);
+  the model the summary's scores come from (re-scored here from the archive); a
+  separate run whose best epoch is not its last shows that the exact match comes from
+  restoring the best weights;
 - the summary's reference numbers are the data module's, on the test split of the
   run's own seed; the unsupervised runs report a matched accuracy only, the supervised
   run a direct one and a conditional NLL;
@@ -220,6 +222,32 @@ def test_the_best_model_reloads_exactly_and_is_the_scored_model(runs, name) -> N
     assert -scores["log_likelihood"].sum() / test.mask.sum() == pytest.approx(
         run.summary["test_nll_per_step"], rel=1e-6)
     assert int(model.count_params()) == run.summary["params"]
+
+
+def test_the_archive_matches_the_model_when_a_later_epoch_is_worse(tmp_path) -> None:
+    """``EarlyStopping(restore_best_weights=True)`` is what makes the reload check exact.
+
+    The module-scoped runs cannot show this: in a 2-epoch run the best epoch is usually
+    the last one, and the in-memory model then equals the archive with or without the
+    restore. This run is built so that a later epoch is worse. The supervised tagger is
+    fit to 8 sequences whose observations carry no state information
+    (``--separation 0``), so after a few epochs it fits noise and ``val_loss`` rises.
+    ``--patience 0`` then stops it one epoch after the best. Measured: ``val_loss``
+    falls to its minimum at epoch 4 and rises about 50% at epoch 5 on both the CPU and
+    GPU 1. With ``restore_best_weights=False`` the in-memory model would hold epoch 5
+    while ``best_model.keras`` holds epoch 4, and the reload check would fail.
+    """
+    argv = _argv(tmp_path, "overfit", "--variant", "neural-crf-tagger", "--obs-type", "gaussian",
+                 "--n-states", "3", "--obs-dim", "2", "--separation", "0.0", "--num-train", "8",
+                 "--learning-rate", "0.03", "--epochs", "8", "--patience", "0")
+    assert train_nhmm.main(argv) == 0
+    summary = _strict_summary(tmp_path / "overfit")
+    best = summary["best_checkpoint"]
+    # The precondition: without it the check below passes whatever the restore does.
+    assert best["epoch"] < summary["epochs_run"], (
+        f"the best epoch ({best['epoch']}) is the last ({summary['epochs_run']}): this run "
+        "no longer separates the restored weights from the last epoch's")
+    assert best["reload_exact"] is True and best["reload_max_abs_diff"] == 0.0
 
 
 @pytest.mark.parametrize("name", RUNS)

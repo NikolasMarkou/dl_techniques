@@ -192,30 +192,84 @@ D-012). They were not adjusted afterwards:
 
 All three runs ended by early stopping (patience 10) before reaching `--epochs`.
 
-The figures show the following:
+The figures show the following (epochs counted from 1, as `best_checkpoint.epoch`;
+`training_log.csv` counts from 0):
 
 - **Run A.** The learned transition matrix matches the true one to within 0.005 on every
   entry, after relabelling with `state_mapping`, so all four states are separate and none
-  are merged. The
-  decoded strips follow the true states except for a one-step boundary shift.
+  are merged. The decoded strips follow the true states except for a one-step boundary
+  shift.
 - **Run B.** `val_loss` is flat from epoch 2 and rises slightly after its minimum at
   epoch 9, while the training loss keeps falling. The learned transition diagonal is
   0.74 to 0.81 against the true 0.90. The `io-hmm` transitions depend on the input, so
   this heatmap is an average of per-step matrices, not one static matrix. The decoded
   strips lag the true state changes by 1 to 3 steps.
 - **Run C.** `val_loss` reaches its minimum at epoch 12 and then rises while the
-  training loss keeps falling. The learned transition potentials have a 0.86 to 0.87
+  training loss keeps falling. The learned transition matrix has a 0.86 to 0.87
   diagonal.
+
+The transition numbers re-derive from the archives with the trainer's own `evaluate`.
+The heatmaps were drawn on GPU 1; this command runs on the CPU and printed a largest
+entry error of 0.0043 for run A, and diagonals of 0.744 to 0.808 for run B and 0.863 to
+0.872 for run C. From the repository root:
+
+```bash
+CUDA_VISIBLE_DEVICES="" .venv/bin/python - <<'PY'
+import argparse, json, keras, numpy as np
+import dl_techniques.models.time_series.neural_hmm  # registers the classes
+from train.neural_hmm.train_neural_hmm import load_splits, evaluate, _relabel_matrix
+for run in ("runA_gaussian_k4_sep4", "runB_categorical_k3_v8", "runC_crf_gaussian_k4_sep2"):
+    d = f"results/neural_hmm_{run}_seed0_20261014"
+    args = argparse.Namespace(**json.load(open(f"{d}/config.json")))
+    s = json.load(open(f"{d}/results_summary.json"))
+    test = load_splits(args)["test"]
+    model = keras.models.load_model(f"{d}/best_model.keras")
+    order = np.arange(args.n_states) if s["mode"] == "discriminative" else np.array(s["state_mapping"])
+    learned = _relabel_matrix(evaluate(model, test, args.batch_size)["transition"], order)
+    print(run, "max|learned-true| = %.4f" % np.abs(learned - test.true_hmm.transition).max(),
+          "diagonal =", np.diag(learned).round(3).tolist())
+PY
+```
 
 **Sequence length on the GPU.** Each run's `best_model.keras` was reloaded on GPU 1 and
 called with `predict` at three lengths in one process: T=50, 30 and 70 for runs A and B,
 and T=50, 30 and 40 for run C, whose `transformer` position table has 50 rows. Every call
-returned the expected shapes and finite outputs.
+returned the expected shapes and finite outputs:
 
-**TF32.** In that same probe, `predict` (XLA) and an eager call on the same batch differed
-by up to 0.035 in run A's `log_emit`. That difference comes from TensorFlow's default
-TF32 matmuls: with `tf.config.experimental.enable_tensor_float_32_execution(False)` it fell
-to 1.6e-5. The runs above used the default (TF32 on).
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python - <<'PY'
+import keras, numpy as np
+import dl_techniques.models.time_series.neural_hmm  # registers the classes
+rng = np.random.default_rng(0)
+for run, lengths in (("runA_gaussian_k4_sep4", (50, 30, 70)), ("runB_categorical_k3_v8", (50, 30, 70)),
+                     ("runC_crf_gaussian_k4_sep2", (50, 30, 40))):
+    model = keras.models.load_model(f"results/neural_hmm_{run}_seed0_20261014/best_model.keras")
+    for t in lengths:
+        obs = (rng.integers(0, model.vocab_size, (5, t)).astype("int32") if model.obs_type == "categorical"
+               else rng.normal(size=(5, t, model.obs_dim)).astype("float32"))
+        out = model.predict({"obs": obs, "mask": np.ones((5, t), "float32")}, batch_size=5, verbose=0)
+        print(run, t, {k: v.shape for k, v in out.items()}, all(np.isfinite(v).all() for v in out.values()))
+PY
+```
+
+**TF32.** On GPU 1, `predict` (XLA) and an eager call on the same run-A batch (5
+sequences of T=50) differ by up to 3.5e-2 in `log_emit`. That difference comes from
+TensorFlow's default TF32 matmuls: with
+`tf.config.experimental.enable_tensor_float_32_execution(False)` it falls to 1.5e-5. The
+runs above used the default (TF32 on). The argument after `-` is `on` or `off`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python - off <<'PY'
+import sys, keras, numpy as np, tensorflow as tf
+import dl_techniques.models.time_series.neural_hmm  # registers the classes
+tf.config.experimental.enable_tensor_float_32_execution(sys.argv[1] == "on")
+model = keras.models.load_model("results/neural_hmm_runA_gaussian_k4_sep4_seed0_20261014/best_model.keras")
+x = {"obs": np.random.default_rng(0).normal(size=(5, 50, 2)).astype("float32"), "mask": np.ones((5, 50), "float32")}
+pred, eager = model.predict(x, batch_size=5, verbose=0), model(x, training=False)
+print("TF32", sys.argv[1], "max|predict - eager| log_emit = %.2e"
+      % np.abs(pred["log_emit"] - keras.ops.convert_to_numpy(eager["log_emit"])).max())
+PY
+```
 
 ## 8. Tests
 
@@ -228,7 +282,8 @@ to 1.6e-5. The runs above used the default (TF32 on).
   runs recording what the sampler, the model factory, the optimizer and `fit` received;
 - `test_train_neural_hmm.py`: real tiny runs of `main()` for gaussian `neural-hmm`,
   categorical `io-hmm` and gaussian `neural-crf-tagger`, every artifact, the archive
-  reload, the refusals and a failing figure.
+  reload (including a run whose best epoch is not its last, so that the exact reload
+  depends on `restore_best_weights=True`), the refusals and a failing figure.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_train/test_neural_hmm/ -q

@@ -346,7 +346,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 
 **Q. My decoded states do not match the true labels.** In generative mode the state indices are arbitrary; match them first (§10).
 
-**Q. Training on a GPU is slower with `lstm`/`gru`.** Keras disables XLA for cuDNN recurrent layers (§10); the `conv`, `mlp` and `transformer` encoders compile.
+**Q. `model.jit_compile` is `False` on a GPU with `lstm`/`gru`.** Keras disables XLA for cuDNN recurrent layers (§10); the `conv`, `mlp` and `transformer` encoders compile (`tests/test_models/test_neural_hmm/test_model.py::test_jit_compile_true_trains_per_encoder_type`). No speed comparison between the two regimes has been measured.
 
 ---
 
