@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="imgs/logo_v3.png" alt="Deep Learning Techniques Logo" width="350">
+  <img src="imgs/logo_v3.png" alt="Deep Learning Techniques Logo" width="550">
 </p>
 
 In the rapidly evolving landscape of AI research, groundbreaking techniques are often scattered across countless repositories, disparate implementations, and dense academic papers. **dl_techniques** emerges as a unified, curated, and production-ready arsenal for advanced deep learning. Pioneered and sponsored by [Electi Consulting](https://electiconsulting.com), this library is more than a collection of components—it is the definitive toolkit for researchers and engineers to design, train, and dissect state-of-the-art neural networks.
