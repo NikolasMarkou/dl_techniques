@@ -109,7 +109,9 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     discriminative emission, ``state_emb_dim`` in discriminative mode), and a non-default
     value for one raises ``ValueError`` rather than being ignored.
 
-    :param n_states: Number of hidden states ``K``; positive.
+    :param n_states: Number of hidden states ``K``; positive, and at least 2 with
+        ``transition='input_dependent'`` or ``mode='discriminative'`` (at one state their
+        trainable part receives no gradient, so ``ValueError``).
     :param mode: ``generative`` (unsupervised, maximizes ``log p(x)``) or
         ``discriminative`` (a linear-chain CRF trained on state labels).
     :param obs_type: ``gaussian`` (real ``(B, T, obs_dim)``), ``poisson`` (counts
@@ -255,6 +257,23 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             raise ValueError(
                 f"mode='discriminative' scores states from the encoder context already; "
                 f"emission_context must be 'none', got '{emission_context}'."
+            )
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-028: refuse n_states < 2 for these two
+        # settings. Do NOT accept it and document the degeneracy (the L-4 note once did): a
+        # 1x1 log_softmax is constant, so the context projection and encoder never get a
+        # gradient, and the one-label CRF loss is identically 0. Only these two: every other
+        # configuration still trains its emission at one state.
+        if n_states < 2 and transition == "input_dependent":
+            raise ValueError(
+                f"n_states={n_states} with transition='input_dependent' is refused: the 1x1 "
+                f"transition normalizes to log 1 = 0 whatever the context, so the encoder and the "
+                f"context projection never receive a gradient. Use n_states >= 2."
+            )
+        if n_states < 2 and mode == "discriminative":
+            raise ValueError(
+                f"n_states={n_states} with mode='discriminative' is refused: a linear-chain CRF "
+                f"over one label has a single path, so its loss is identically 0 and nothing "
+                f"trains. Use n_states >= 2."
             )
 
         self.n_states = n_states

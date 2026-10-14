@@ -37,9 +37,10 @@ Guards (SC5), each through the shared oracle with its real signature:
 * ignored arguments (D-025): a non-default value for an argument the configuration does
   not read is refused, naming it, its value and the reason, one row per rule branch
   (including ``n_states=1``, D-027); the same argument at its default is accepted; every
-  preset sets only what it reads and builds at ``n_states=1``; at one state the
-  transition knobs measurably change nothing; a stale unread value in an old config is
-  reset by ``from_config`` (D-026).
+  preset sets only what it reads; ``n_states < 2`` is refused for input-dependent
+  transitions and the discriminative mode (D-028), every other preset builds at one state,
+  where the transition knobs measurably change nothing; ``from_config`` resets a stale
+  unread value in an old config (D-026).
 
 Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDNN on a GPU.
 """
@@ -1130,7 +1131,7 @@ INAPPLICABLE = [
     # one state (D-027): every topology mask is all-true and the 1x1 transition is log 1
     ("left-to-right-segmenter", {"n_states": 1}, "band_width", 2, "n_states=1"),
     ("neural-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
-    ("io-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
+    ("autoregressive-neural-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
     # the emission: no density floor for symbols or CRF potentials, no state embeddings in a CRF
     ("neural-hmm", {"obs_type": "categorical"}, "min_scale", 0.5, "categorical emission"),
     ("neural-crf-tagger", {}, "min_scale", 0.5, "mode='discriminative'"),
@@ -1178,11 +1179,54 @@ def test_every_preset_constructs_and_sets_only_what_it_reads(variant, obs_type):
     assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
 
 
+#: The presets refused at n_states=1 (D-028), written out rather than derived from the
+#: rule under test: io-hmm's encoder feeds only a 1x1 transition, and a one-label CRF has
+#: one path.
+ONE_STATE_REFUSED = ("io-hmm", "neural-crf-tagger")
+ONE_STATE_VARIANTS = [variant for variant in VARIANTS if variant not in ONE_STATE_REFUSED]
+
+#: One row per refused setting (D-028): through a preset, and the bare setting on a
+#: configuration that sets nothing else (so the refusal is keyed on the setting, not the
+#: preset name), with the reason the message must give.
+ONE_STATE_REFUSALS = [
+    ("io-hmm", {}, "transition='input_dependent'", "never receive a gradient"),
+    ("neural-hmm", {"transition": "input_dependent"}, "transition='input_dependent'", "never receive a gradient"),
+    ("neural-crf-tagger", {}, "mode='discriminative'", "identically 0"),
+    ("neural-hmm", {"mode": "discriminative"}, "mode='discriminative'", "identically 0"),
+]
+
+
+def test_the_one_state_refusals_cover_exactly_the_degenerate_presets():
+    """A new preset with either setting must join the hand-written list."""
+    degenerate = {variant for variant, preset in NeuralHMM.MODEL_VARIANTS.items()
+                  if preset["transition"] == "input_dependent" or preset["mode"] == "discriminative"}
+    assert degenerate == set(ONE_STATE_REFUSED)
+    assert {variant for variant, *_ in ONE_STATE_REFUSALS} - {"neural-hmm"} == set(ONE_STATE_REFUSED)
+
+
+@pytest.mark.parametrize("n_states", [1, 0])
+@pytest.mark.parametrize("variant,extra,setting,why", ONE_STATE_REFUSALS,
+                         ids=[f"{v}-{s}" for v, _, s, _ in ONE_STATE_REFUSALS])
+def test_one_state_is_refused_where_nothing_would_train(variant, extra, setting, why, n_states):
+    """D-028: the message names n_states, the setting and why; every construction path
+    refuses (the constructor, ``from_variant``, ``create_neural_hmm``), and K = 2 builds."""
+    kwargs = _shape_kwargs({**extra, "n_states": n_states})
+    for build in (lambda: NeuralHMM(**{**NeuralHMM.MODEL_VARIANTS[variant], **kwargs}),
+                  lambda: NeuralHMM.from_variant(variant, **kwargs),
+                  lambda: create_neural_hmm(variant, **kwargs)):
+        with pytest.raises(ValueError, match=re.escape(f"n_states={n_states} with {setting}")) as info:
+            build()
+        assert why in str(info.value) and "n_states >= 2" in str(info.value), str(info.value)
+    model = create_neural_hmm(variant, **_shape_kwargs({**extra, "n_states": 2}))
+    assert model.n_states == 2
+    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
+
+
 @pytest.mark.parametrize("obs_type", ["gaussian", "poisson", "categorical"])
-@pytest.mark.parametrize("variant", VARIANTS)
-def test_every_preset_builds_at_one_state(variant, obs_type):
-    """The n_states=1 rows (D-027) must not stop a preset from building at K = 1: a preset
-    key the rule lists there (the segmenter's band_width) holds its default."""
+@pytest.mark.parametrize("variant", ONE_STATE_VARIANTS)
+def test_every_other_preset_builds_at_one_state(variant, obs_type):
+    """The n_states=1 rows (D-027) must not stop a preset D-028 accepts from building at
+    K = 1: a preset key the rule lists there (the segmenter's band_width) holds its default."""
     shape = _shape_kwargs({"obs_type": obs_type, "n_states": 1})
     preset = NeuralHMM.MODEL_VARIANTS[variant]
     unread = NeuralHMM.unread_arguments({**preset, **shape})
@@ -1192,8 +1236,8 @@ def test_every_preset_builds_at_one_state(variant, obs_type):
     x = _inputs(obs_type)
     out = model(x, training=False)
     assert (_np(out["log_A"]) == 0.0).all() and (_np(out["log_pi"]) == 0.0).all()
-    y = None if model.mode == "generative" else np.where(x["mask"] > 0, 0, -1).astype("int32")
-    assert np.isfinite(_loss(model, x, y))
+    assert model.mode == "generative" and model.transition_type == "static"
+    assert np.isfinite(_loss(model, x))
     assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
 
 

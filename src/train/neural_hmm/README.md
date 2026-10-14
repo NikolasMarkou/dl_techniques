@@ -94,7 +94,8 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--experiment-name` | `neural_hmm_<variant>_<timestamp>` | the run directory's name |
 
 A bad value is refused before anything is written: range errors at parse time (exit 2),
-a combination the model refuses with a `ValueError` before the run directory exists. A
+a combination the model refuses with a `ValueError` before the run directory exists
+(`--n-states 1` with `io-hmm` or `neural-crf-tagger`, which could train nothing there). A
 reused `--experiment-name` is refused the same way, and an existing run is never
 overwritten.
 
