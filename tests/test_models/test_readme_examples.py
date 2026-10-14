@@ -432,6 +432,7 @@ class TestNeuralHMMReadme:
             "encoder `conv`": ([{"encoder_type": "conv"}], True),
             "encoder `transformer`": ([{}], True),
             "`topology` other than `banded`": ([{"topology": "ergodic"}, {"topology": "left_to_right"}], False),
+            "`n_states=1`": ([{"n_states": 1}], False),
             "`obs_type=\"categorical\"`": ([{"obs_type": "categorical"}], False),
             "`mode=\"discriminative\"`": ([{"mode": "discriminative", "emission_context": "none"}], False),
         }

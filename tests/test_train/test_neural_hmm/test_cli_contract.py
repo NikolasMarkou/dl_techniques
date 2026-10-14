@@ -198,6 +198,17 @@ def test_an_ignored_data_flag_is_refused_before_anything_is_written(tmp_path, ca
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("obs_type", ["gaussian", "categorical"])
+@pytest.mark.parametrize("variant", sorted(train_nhmm.NeuralHMM.MODEL_VARIANTS))
+def test_every_variant_builds_at_one_state(variant, obs_type) -> None:
+    """``--n-states 1`` is accepted by the parser, so ``build_model`` must build every preset
+    there: the model's ``n_states=1`` unread rows (``band_width``, ``self_loop_init``) are
+    never handed a non-default value by the trainer (D-027)."""
+    args = train_nhmm.parse_arguments(["--variant", variant, "--obs-type", obs_type, "--n-states", "1"])
+    model = train_nhmm.build_model(args)
+    assert model.n_states == 1 and model.band_width == 1 and model.self_loop_init == 2.0
+
+
 @pytest.mark.parametrize("argv,nulls", [
     ((), {"vocab_size"}),
     (("--obs-type", "categorical"), {"obs_dim", "separation"}),

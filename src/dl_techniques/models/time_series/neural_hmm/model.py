@@ -104,9 +104,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
 
     An argument the configuration does not read must keep its default:
     :meth:`unread_arguments` names those arguments (the encoder's without an encoder, the
-    other encoder types' with one, ``band_width`` off ``banded``, ``min_scale`` for a
-    categorical or discriminative emission, ``state_emb_dim`` in discriminative mode),
-    and a non-default value for one raises ``ValueError`` rather than being ignored.
+    other encoder types' with one, ``band_width`` off ``banded``, ``band_width`` and
+    ``self_loop_init`` at ``n_states=1``, ``min_scale`` for a categorical or
+    discriminative emission, ``state_emb_dim`` in discriminative mode), and a non-default
+    value for one raises ``ValueError`` rather than being ignored.
 
     :param n_states: Number of hidden states ``K``; positive.
     :param mode: ``generative`` (unsupervised, maximizes ``log p(x)``) or
@@ -433,7 +434,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """Return the observations with padded steps neutralized, and the boolean mask.
 
         Padded float steps become 0 and padded symbols ``-1`` (which the categorical
-        emission scores ``mask_sentinel``, inertly: inference never reads a padded step).
+        emission scores a neutral 0; inference never reads a padded step either way).
         The inference functions ignore padded steps, but a NaN there would still reach
         the weights' gradients, since ``where`` passes ``0 * NaN`` back through the branch
         it did not select.
@@ -483,16 +484,17 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     def _out_of_range_symbol_penalty(self, inputs: Dict[str, Any], mask: keras.KerasTensor) -> keras.KerasTensor:
         """Return ``mask_sentinel`` times the count of valid steps holding a bad symbol.
 
-        A bad symbol is a ``categorical`` one outside ``[0, vocab_size)``. Only the
-        discriminative mode needs this term: it reads symbols through the embedding alone,
-        which maps a bad symbol to token 0, while the generative emission already scores
-        one with the sentinel (D-022).
+        A bad symbol is a ``categorical`` one outside ``[0, vocab_size)``. Both modes read
+        it silently: the generative emission scores it a neutral 0 (an uninformative step)
+        and the embedding maps it to token 0. This term, added to the sequence
+        log-likelihood OUTSIDE the forward pass, is what makes it loud (D-027), so the
+        potentials, ``viterbi`` and ``posteriors`` stay exact over the in-range evidence.
 
         :param inputs: ``{"obs", "mask"}``.
         :param mask: ``(B, T)`` float mask in the accumulation dtype.
         :return: ``(B,)`` penalty, 0 where every valid symbol is in range.
         """
-        if self.obs_type != "categorical" or self.mode == "generative":
+        if self.obs_type != "categorical":
             return keras.ops.zeros_like(mask[:, 0])
         obs = keras.ops.cast(inputs["obs"], "int32")
         in_range = keras.ops.logical_and(obs >= 0, obs < self.vocab_size)
@@ -511,6 +513,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
 
         A ``categorical`` symbol or a gold state out of range at a valid step adds
         ``mask_sentinel`` (``-1e9`` in float32) per such step instead of passing silently.
+        The symbol's penalty is added here, after the forward pass (D-027).
 
         :param inputs: ``{"obs", "mask"}``, read for out-of-range symbols.
         :param outputs: The :meth:`call` dict.
@@ -522,16 +525,21 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """
         log_pi, log_A, log_emit = outputs["log_pi"], outputs["log_A"], outputs["log_emit"]
         log_z = inference.forward_log_likelihood(log_pi, log_A, log_emit, mask)
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-027: the out-of-range symbol penalty is
+        # added to the finished sequence log-likelihood, never to log_emit. Do NOT move it
+        # into the potentials: one -1e9 step absorbs every float32 forward/backward value
+        # of its row, and posteriors/viterbi (which share those potentials) return garbage.
+        penalty = self._out_of_range_symbol_penalty(inputs, mask)
         if self.mode == "generative":
             if states is not None:
                 raise ValueError(
                     "mode='generative' is trained without labels: pass y=None (got state labels)."
                 )
-            return log_z
+            return log_z + penalty
         if states is None:
             raise ValueError("mode='discriminative' needs the state labels: pass y=states of shape (B, T).")
         score = inference.path_log_score(log_pi, log_A, log_emit, states, mask)
-        return score - log_z + self._out_of_range_symbol_penalty(inputs, mask)
+        return score - log_z + penalty
 
     def compute_loss(
         self,
@@ -593,6 +601,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     def viterbi(self, inputs: Dict[str, Any]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Return the most likely state path of every sequence.
 
+        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is decoded as
+        an uninformative step (its emission scores 0 in every state); it is not flagged
+        here: :meth:`log_likelihood` exposes it.
+
         :param inputs: ``{"obs", "mask"}``.
         :return: ``(path, score)``: ``path`` is ``(B, T)`` int32 with ``-1`` at padded
             steps, ``score`` the ``(B,)`` unnormalized log score of that path.
@@ -603,6 +615,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
 
     def posteriors(self, inputs: Dict[str, Any]) -> keras.KerasTensor:
         """Return the posterior state marginals ``p(z_t = k | x)``.
+
+        A ``categorical`` symbol outside ``[0, vocab_size)`` at a valid step is treated as
+        an uninformative step (as in :meth:`viterbi`), so the rows still sum to 1; only
+        :meth:`log_likelihood` and the loss flag it.
 
         :param inputs: ``{"obs", "mask"}``.
         :return: ``(B, T, K)`` probabilities, summing to 1 at valid steps and 0 at padded ones.
@@ -647,7 +663,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         :param custom_objects: Forwarded to ``keras.Model.from_config``.
         :return: The model.
         """
-        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-025: reset, do NOT refuse, here. The
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-026: reset, do NOT refuse, here. The
         # step-6 archives (neural-hmm, io-hmm) hold max_seq_len=50, which no layer read;
         # refusing it would make a saved model unloadable for a value that changed nothing.
         config = dict(config)
@@ -717,6 +733,14 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
                     unread[name] = f"encoder_type='{encoder_type}' does not read it (only {', '.join(readers)})"
         if resolved["topology"] != "banded":
             unread["band_width"] = f"topology='{resolved['topology']}' has no band (only 'banded' reads it)"
+        if resolved.get("n_states") == 1:
+            # One state: every topology mask is all-true and the 1x1 transition normalizes
+            # to log 1 = 0 whatever its logit. topology itself is not listed: it is a
+            # preset's structural choice (the segmenter's "banded"), and refusing it would
+            # stop that preset from building at K = 1.
+            single = "n_states=1: the single 1x1 transition normalizes to log 1 = 0 whatever it is"
+            unread.setdefault("band_width", single)
+            unread["self_loop_init"] = single
         if resolved["mode"] == "discriminative":
             unread["state_emb_dim"] = "mode='discriminative' scores states with Dense(K) on the encoder context"
             unread["min_scale"] = "mode='discriminative' has no emission density to floor"

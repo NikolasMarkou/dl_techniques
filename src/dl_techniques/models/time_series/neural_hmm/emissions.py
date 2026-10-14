@@ -11,9 +11,9 @@ observation, of shape ``(B, T, K)``.
   - ``gaussian``: a diagonal Gaussian over ``obs_dim`` features, mean ``mu`` and scale
     ``softplus(raw) + min_scale``;
   - ``categorical``: a categorical over ``vocab_size`` symbols, ``log_softmax`` of the
-    head's logits; a symbol outside ``[0, vocab_size)`` scores the finite
-    :func:`~dl_techniques.utils.dtype_policy.mask_sentinel` (``-1e9`` in float32), so
-    it can never pass as a probable observation;
+    head's logits; a symbol outside ``[0, vocab_size)`` (``-1`` padding included) scores
+    a neutral 0 in every state, an uninformative step. :class:`~.model.NeuralHMM` makes
+    one at a valid step loud by a per-sequence penalty outside the forward pass;
   - ``poisson``: independent Poisson counts over ``obs_dim`` features, rate
     ``softplus(raw) + min_scale``, including the ``-log x!`` term, so the density is
     normalized.
@@ -45,7 +45,7 @@ import numpy as np
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn.factory import create_ffn_layer
-from dl_techniques.utils.dtype_policy import accumulation_dtype, mask_sentinel
+from dl_techniques.utils.dtype_policy import accumulation_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tensors import log_gamma
 
@@ -197,7 +197,7 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
         """Return ``log p(x_t | z_t = k)`` for every step and state.
 
         :param obs: ``(B, T)`` integer symbols in ``[0, V)`` for ``categorical`` (any other
-            value, ``-1`` padding included, scores ``mask_sentinel`` in every state);
+            value, ``-1`` padding included, scores 0 in every state: uninformative);
             ``(B, T, D)`` reals for ``gaussian``; ``(B, T, D)`` non-negative counts for
             ``poisson``.
         :param context: ``(B, T, H)`` per-step context when ``context_dim > 0``.
@@ -220,16 +220,15 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
             symbols = keras.ops.cast(obs, "int32")
             chosen = keras.ops.one_hot(symbols, self.vocab_size)[:, :, None, :] > 0
             # Select, never multiply by the one-hot: 0 * -inf is NaN.
-            picked = keras.ops.sum(keras.ops.where(chosen, log_probs, keras.ops.zeros_like(log_probs)), axis=-1)
-            # DECISION plan-2026-10-13T192257-1bb3bf1f/D-022: a symbol outside [0, V) has
-            # an all-zero one-hot, so the sum above scores it 0 = log 1 (certain). Score
-            # it mask_sentinel instead, so a bad symbol at a valid step makes log p(x) and
-            # the loss huge. Do NOT assert in-graph (XLA drops tf.debugging asserts) and do
-            # NOT use -inf (a step with every state at -inf makes the forward recursion and
-            # its gradients NaN). The model's -1 padding also lands here; inference never
-            # reads a padded step, so the sentinel there is inert.
-            in_range = keras.ops.logical_and(symbols >= 0, symbols < self.vocab_size)[:, :, None]
-            return keras.ops.where(in_range, picked, keras.ops.full_like(picked, mask_sentinel(accum)))
+            # DECISION plan-2026-10-13T192257-1bb3bf1f/D-027 (supersedes the D-022 sentinel
+            # that stood here): a symbol outside [0, V) has an all-zero one-hot and scores
+            # a NEUTRAL 0 in every state, an uninformative step, as -1 padding does. Do NOT
+            # score it mask_sentinel here: -1e9 in every state of one step absorbs every
+            # float32 forward/backward value of the row (ulp(1e9) = 64), so posteriors
+            # returned 1.0 for every state (rows summed to K) and viterbi decoded garbage.
+            # NeuralHMM._out_of_range_symbol_penalty adds the sentinel to log p(x) OUTSIDE
+            # the forward pass instead, so the loss stays loud and inference stays exact.
+            return keras.ops.sum(keras.ops.where(chosen, log_probs, keras.ops.zeros_like(log_probs)), axis=-1)
 
         x = keras.ops.cast(obs, accum)[:, :, None, :]  # (B, T, 1, D)
         if self.obs_type == "gaussian":

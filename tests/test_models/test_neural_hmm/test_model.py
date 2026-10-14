@@ -23,17 +23,23 @@ Guards (SC5), each through the shared oracle with its real signature:
   NaN in padded content changes neither the loss nor the gradients, length-0/length-1
   sequences, ``mixed_float16`` (float32 outputs, D-010) and float64 arms;
 * the generative right shift (D-022), per generative preset and encoder type with
-  randomized weights: ``sum_x p(x) = 1`` by exact enumeration, and step ``t``'s
-  potentials read ``x_{<t}`` only; both RED-proven against a no-shift mutant;
-* out-of-range inputs (D-022): a categorical symbol or a gold label outside its range at
-  a VALID step drives the log-likelihood to the sentinel's scale and the loss to a huge
-  finite value with finite gradients; at a padded step it stays ignored;
+  randomized weights: ``sum_x p(x) = 1`` by exact enumeration up to length 6, step
+  ``t``'s potentials read ``x_{<t}`` only (RED-proven against a no-shift mutant and a
+  leak that starts at step 4), and they DO read ``x_{t-1}`` (RED-proven against a
+  shift by two; D-027);
+* out-of-range inputs (D-022, D-027): a categorical symbol or a gold label outside its
+  range at a VALID step drives the log-likelihood to the sentinel's scale and the loss
+  to a huge finite value with finite gradients; at a padded step it stays ignored; and a
+  bad symbol leaves ``posteriors`` and ``viterbi`` exact over the in-range evidence
+  (brute-force reference with that step uninformative);
 * factories: ``from_variant`` overrides, ``pretrained=True``, unknown variants,
   ``create_neural_hmm`` == ``from_variant``;
 * ignored arguments (D-025): a non-default value for an argument the configuration does
-  not read is refused, naming it, its value and the reason, one row per rule branch; the
-  same argument at its default is accepted; every preset sets only what it reads; a
-  stale unread value in an old config is reset by ``from_config``.
+  not read is refused, naming it, its value and the reason, one row per rule branch
+  (including ``n_states=1``, D-027); the same argument at its default is accepted; every
+  preset sets only what it reads and builds at ``n_states=1``; at one state the
+  transition knobs measurably change nothing; a stale unread value in an old config is
+  reset by ``from_config`` (D-026).
 
 Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDNN on a GPU.
 """
@@ -82,6 +88,7 @@ from ..roundtrip_instrument_oracle import (
 )
 from ..smoke_contract_oracle import assert_contract_rejects_a_broken_forward
 from ..test_sam.dead_component_oracle import fit_one_step_moved_variables
+from .test_inference import brute_force
 
 B, T, D, K, V = 4, 7, 2, 3, 5
 #: Valid lengths of the padded batch: full, middle, one step, empty.
@@ -692,7 +699,7 @@ def _loss_and_grads(model, inputs, y):
 @pytest.mark.parametrize("variant", CATEGORICAL_READERS)
 def test_a_padded_categorical_symbol_is_ignored(variant):
     """Padded symbols may be -1 or out of range: neither the outputs at valid steps, the
-    loss nor the gradients see them. (Ignored by the mask, not by scoring 0: D-022.)"""
+    loss nor the gradients see them (the mask skips them; their emission is a neutral 0)."""
     model = _model(variant, obs_type="categorical")
     x = _inputs("categorical")
     y = _y(model)
@@ -728,8 +735,9 @@ def _assert_loud(model, clean_x, bad_x, clean_y, bad_y):
 @pytest.mark.parametrize("bad_symbol", [-1, V, V + 7])
 @pytest.mark.parametrize("variant", CATEGORICAL_READERS)
 def test_an_out_of_range_symbol_at_a_valid_step_is_loud(variant, bad_symbol):
-    """D-022: it used to score log p = 0 (certain) in the generative emission and to embed
-    as token 0 in the CRF, silently. XLA drops in-graph asserts, so it scores the sentinel."""
+    """D-022/D-027: it scores a neutral 0 in the generative emission and embeds as token 0
+    in the CRF; XLA drops in-graph asserts, so the model adds the sentinel per bad step to
+    the sequence log-likelihood, outside the forward pass."""
     model = _model(variant, obs_type="categorical")
     x = _inputs("categorical")
     y = _y(model)
@@ -752,11 +760,92 @@ def test_an_out_of_range_gold_label_at_a_valid_step_is_loud(bad_label):
     assert _loss(model, x, padded) == _loss(model, x, y)
 
 
+def _out_of_range_reference(model, bad, bad_steps):
+    """Brute-force posteriors and Viterbi of ``bad`` with each bad step UNINFORMATIVE.
+
+    The potentials come from the same sequence with each bad symbol replaced by token 0,
+    which is what the encoder reads for it (the embedding maps a bad symbol to 0). In
+    generative mode that step's emission row is then set to 0 in every state, i.e. the
+    observation is missing; in the CRF the step stays the token-0 potentials it is.
+    """
+    tokens = {"obs": bad["obs"].copy(), "mask": bad["mask"]}
+    for row, step in bad_steps:
+        tokens["obs"][row, step] = 0
+    out = {k: _np(v).astype("float64") for k, v in model(tokens, training=False).items()}
+    if model.mode == "generative":
+        for row, step in bad_steps:
+            out["log_emit"][row, step] = 0.0
+    lengths = bad["mask"].sum(axis=1).astype(int)
+    return brute_force(out["log_pi"], out["log_A"], out["log_emit"], lengths)
+
+
+@pytest.mark.parametrize("bad_symbol", [-1, V, V + 7])
+@pytest.mark.parametrize("variant", CATEGORICAL_READERS)
+def test_an_out_of_range_symbol_leaves_viterbi_and_posteriors_exact(variant, bad_symbol):
+    """D-027: the bad symbol's penalty lives outside the potentials, so the decoding
+    helpers stay exact distributions over the in-range evidence.
+
+    With the sentinel inside log_emit (D-022's first fix), one bad step made every
+    posterior of its row 1.0 (rows summed to K) and Viterbi decode garbage.
+    """
+    model = _model(variant, obs_type="categorical")
+    x = _inputs("categorical")
+    bad_steps = [(0, 3), (1, 1)]  # a full-length row and a padded one, both at valid steps
+    bad = {"obs": x["obs"].copy(), "mask": x["mask"]}
+    for row, step in bad_steps:
+        bad["obs"][row, step] = bad_symbol
+    _, best_path, best_score, reference = _out_of_range_reference(model, bad, bad_steps)
+
+    posteriors = _np(model.posteriors(bad)).astype("float64")
+    valid = x["mask"] > 0
+    np.testing.assert_allclose(posteriors.sum(axis=-1)[valid], 1.0, rtol=0, atol=1e-5)
+    assert (posteriors[~valid] == 0.0).all()
+    np.testing.assert_allclose(posteriors, reference, rtol=0, atol=1e-5)
+
+    path, score = model.viterbi(bad)
+    path, score = _np(path), _np(score).astype("float64")
+    np.testing.assert_array_equal(path, best_path)
+    assert np.isfinite(score).all()
+    np.testing.assert_allclose(score, best_score, rtol=0, atol=1e-4)
+
+
 def test_n_states_one_is_finite():
     model = _model("neural-hmm", n_states=1)
     out = model(_inputs())
     assert np.isfinite(_loss(model, _inputs()))
     assert (_np(out["log_A"]) == 0.0).all()
+
+
+@pytest.mark.parametrize("transition_class", [StaticTransition, InputDependentTransition])
+def test_at_one_state_the_transition_knobs_change_nothing(transition_class):
+    """D-027: why band_width and self_loop_init are unread at n_states=1 (and why the rule
+    is K = 1 only). At one state every topology mask is all-true and the 1x1 transition
+    normalizes to log 1 = 0, so neither knob (nor the topology) changes an output or
+    receives a gradient; at two states each one changes the output."""
+    context = np.random.default_rng(0).normal(size=(2, 5, 3)).astype("float32")
+
+    def outputs(n_states, **kwargs):
+        layer = transition_class(n_states, **kwargs)
+        layer.build(context.shape)
+        if transition_class is InputDependentTransition:  # a live context projection
+            kernel = layer.context_projection.kernel
+            kernel.assign(np.random.default_rng(1).normal(size=kernel.shape).astype("float32"))
+        with tf.GradientTape() as tape:
+            log_pi, log_A = layer(context)
+            total = keras.ops.sum(log_pi) + keras.ops.sum(log_A * np.arange(1.0, 6.0)[None, :, None, None])
+        grad = tape.gradient(total, layer.transition_logits)
+        return _np(log_pi), _np(log_A), _np(grad)
+
+    variants = [{"topology": "banded", "band_width": 0}, {"topology": "banded", "band_width": 3},
+                {"topology": "left_to_right"}, {"self_loop_init": 7.0}]
+    single = outputs(1)
+    assert (single[0] == 0.0).all() and (single[1] == 0.0).all() and (single[2] == 0.0).all()
+    for kwargs in variants:
+        for got, want in zip(outputs(1, **kwargs), single):
+            np.testing.assert_array_equal(got, want, err_msg=str(kwargs))
+    two = outputs(2)
+    for kwargs in variants:
+        assert not np.array_equal(outputs(2, **kwargs)[1], two[1]), kwargs
 
 
 # ---------------------------------------------------------------------
@@ -774,10 +863,13 @@ GENERATIVE_CASES = (
     + [("left-to-right-segmenter", "transformer")]
 )
 GENERATIVE_IDS = [f"{variant}-{encoder or 'none'}" for variant, encoder in GENERATIVE_CASES]
-#: Vocabulary and longest length of the exact enumeration: 3 + 9 + 27 + 81 sequences.
-ENUM_V, ENUM_T = 3, 4
-#: |sum_x p(x) - 1| bound. The measured float32 error at HEAD is at most 3.3e-7; the
-#: no-shift mutant misses by 7.5e-3 (io-hmm/conv) to 0.17 (autoregressive/lstm).
+#: Vocabulary and longest length of the exact enumeration: 3 + 9 + ... + 729 sequences.
+#: Length 6, not 4 (D-027): at 4, a leak starting at step 4 passed every autoregressive
+#: and segmenter case, since neither the enumeration nor the per-step arm reached it.
+ENUM_V, ENUM_T = 3, 6
+#: |sum_x p(x) - 1| bound. The measured float32 error at lengths up to 6 is at most
+#: 4.0e-7 (GPU 1); the no-shift mutant misses by 7.5e-3 (io-hmm/conv) to 0.17
+#: (autoregressive/lstm) at lengths up to 4, the step-4 leak by 5e-4 to 0.99 at 5 and 6.
 NORMALIZATION_ATOL = 1e-5
 
 
@@ -853,6 +945,7 @@ def test_the_generative_potentials_read_only_the_past(variant, encoder_type):
         assert not np.array_equal(_np(out["log_emit"])[:, s], _np(clean["log_emit"])[:, s])
 
     model = _randomized(variant, encoder_type, "categorical")
+    # Arm 2 runs over all ENUM_T = 6 steps, so a leak that starts late is seen (D-027).
     base = np.random.default_rng(6).integers(0, ENUM_V, ENUM_T).astype("int32")
     symbols = np.repeat(base[None], ENUM_T * ENUM_V, axis=0)
     for s in range(ENUM_T):
@@ -861,6 +954,36 @@ def test_the_generative_potentials_read_only_the_past(variant, encoder_type):
     log_emit = _np(out["log_emit"]).astype("float64").reshape(ENUM_T, ENUM_V, ENUM_T, K)
     per_step = np.stack([_logsumexp(log_emit[s, :, s, :], axis=0) for s in range(ENUM_T)])  # (T, K)
     assert np.abs(per_step).max() <= NORMALIZATION_ATOL, f"log sum_v p(x_s = v | z_s = k): {per_step}"
+
+
+#: The generative cases with an input-dependent potential, and which potential reads
+#: x_{t-1}: the emission (autoregressive, segmenter) or the transition INTO t (io-hmm).
+LIVE_CASES = [(variant, encoder) for variant, encoder in GENERATIVE_CASES if variant != "neural-hmm"]
+LIVE_IDS = [f"{variant}-{encoder}" for variant, encoder in LIVE_CASES]
+
+
+@pytest.mark.parametrize("variant,encoder_type", LIVE_CASES, ids=LIVE_IDS)
+def test_the_generative_potentials_read_the_previous_step(variant, encoder_type):
+    """The shift is exactly ONE step (D-027): perturbing x_{s-1} alone must change
+    log_emit[:, s] (an autoregressive emission) or log_A[:, s] (io-hmm), in every row.
+
+    The normalization and read-only-the-past arms cannot see a shift by two: h_t built
+    from x_{<t-1} is still a valid likelihood, but the model no longer conditions on the
+    previous observation (an all-green suite measured it, review pass 2, concern 3).
+    """
+    steps = 6
+    model = _randomized(variant, encoder_type, "gaussian")
+    key = "log_A" if variant == "io-hmm" else "log_emit"
+    rng = np.random.default_rng(7)
+    obs = rng.normal(size=(2, steps, D)).astype("float32")
+    mask = np.ones((2, steps), dtype="float32")
+    clean = _np(model({"obs": obs, "mask": mask}, training=False)[key])
+    for s in range(1, steps):
+        moved = obs.copy()
+        moved[:, s - 1] += 3.0 * rng.normal(size=moved[:, s - 1].shape).astype("float32")
+        out = _np(model({"obs": moved, "mask": mask}, training=False)[key])
+        change = np.abs(out[:, s] - clean[:, s]).reshape(2, -1).max(axis=1)
+        assert (change > 1e-4).all(), f"{key}[:, {s}] did not read x_{s - 1}: max change per row {change}"
 
 
 # ---------------------------------------------------------------------
@@ -1004,6 +1127,10 @@ INAPPLICABLE = [
     # band_width off the banded topology
     ("neural-hmm", {}, "band_width", 2, "topology='ergodic'"),
     ("neural-hmm", {"topology": "left_to_right"}, "band_width", 2, "topology='left_to_right'"),
+    # one state (D-027): every topology mask is all-true and the 1x1 transition is log 1
+    ("left-to-right-segmenter", {"n_states": 1}, "band_width", 2, "n_states=1"),
+    ("neural-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
+    ("io-hmm", {"n_states": 1}, "self_loop_init", 0.5, "n_states=1"),
     # the emission: no density floor for symbols or CRF potentials, no state embeddings in a CRF
     ("neural-hmm", {"obs_type": "categorical"}, "min_scale", 0.5, "categorical emission"),
     ("neural-crf-tagger", {}, "min_scale", 0.5, "mode='discriminative'"),
@@ -1048,6 +1175,25 @@ def test_every_preset_constructs_and_sets_only_what_it_reads(variant, obs_type):
     unread = NeuralHMM.unread_arguments({**preset, **_shape_kwargs({"obs_type": obs_type})})
     assert not set(preset) & set(unread), sorted(set(preset) & set(unread))
     model = create_neural_hmm(variant, **_shape_kwargs({"obs_type": obs_type}))
+    assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
+
+
+@pytest.mark.parametrize("obs_type", ["gaussian", "poisson", "categorical"])
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_every_preset_builds_at_one_state(variant, obs_type):
+    """The n_states=1 rows (D-027) must not stop a preset from building at K = 1: a preset
+    key the rule lists there (the segmenter's band_width) holds its default."""
+    shape = _shape_kwargs({"obs_type": obs_type, "n_states": 1})
+    preset = NeuralHMM.MODEL_VARIANTS[variant]
+    unread = NeuralHMM.unread_arguments({**preset, **shape})
+    assert {"band_width", "self_loop_init"} <= set(unread)
+    assert all(preset[name] == _defaults()[name] for name in set(preset) & set(unread))
+    model = create_neural_hmm(variant, **shape)
+    x = _inputs(obs_type)
+    out = model(x, training=False)
+    assert (_np(out["log_A"]) == 0.0).all() and (_np(out["log_pi"]) == 0.0).all()
+    y = None if model.mode == "generative" else np.where(x["mask"] > 0, 0, -1).astype("int32")
+    assert np.isfinite(_loss(model, x, y))
     assert NeuralHMM.from_config(model.get_config()).get_config() == model.get_config()
 
 

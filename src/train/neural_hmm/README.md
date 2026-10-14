@@ -65,6 +65,8 @@ right-padded (mask 0, state `-1`, observation 0).
 | `true_viterbi_acc` | the accuracy of Viterbi decoding with the TRUE parameters, through the model package's own `inference.viterbi_decode`: the ceiling |
 | `majority_rate` | the share of valid test steps holding the most frequent state: the floor |
 
+**The matched-accuracy convention.** `viterbi_acc_matched` is one-to-one matched accuracy: the mapping from model states to true states is the one-to-one (Hungarian) assignment fitted on the same test labels it is then scored on. This is the standard convention for unsupervised state induction, where one-to-one (and many-to-one) accuracy is computed against the evaluated labels; fitting the assignment on those labels can only raise the score relative to a mapping fitted elsewhere, by an amount that shrinks with the number of scored steps against the `K!` candidate assignments (`K <= 4` here, and 18673 to 18979 scored test steps per run, `test_valid_steps`). The true model is held to the same rule: its states are named after the true ones, so `true_viterbi_acc` is its direct accuracy, and the same Hungarian assignment fitted on its own test path is the identity on all nine runs in §7 (re-derived read-only from each run's `config.json` through `load_splits` and `true_viterbi_path`), so its matched and direct accuracies are equal and the comparison is like for like.
+
 ## 4. Flags
 
 | Flag | Default | Read by |
