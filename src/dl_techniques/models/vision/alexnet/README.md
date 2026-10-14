@@ -50,7 +50,7 @@ with Batch Normalization.
   ├─ LRN                                     →  26 × 26 × 256
   ├─ pool2   3×3 / 2    pad 1                    →  13 × 13 × 256
   │
-  ├─ conv3   3×3 / 1   pad 1   384 (groups=2)   →  13 × 13 × 384
+  ├─ conv3   3×3 / 1   pad 1   384              →  13 × 13 × 384
   ├─ ReLU
   ├─ conv4   3×3 / 1   pad 1   384 (groups=2)   →  13 × 13 × 384
   ├─ ReLU
@@ -59,18 +59,19 @@ with Batch Normalization.
   ├─ pool3   3×3 / 2    pad 0                    →   6 × 6 × 256
   │
   ├─ flatten 9216
-  ├─ fc6     4096 → BatchNorm → ReLU → dropout 0.5    (ClassificationHead dense_block)
-  ├─ fc7     2048 → BatchNorm → ReLU → dropout 0.5    (dense_block_1, hidden_dim // 2)
+  ├─ fc6     4096 → ReLU → dropout 0.5    (ClassificationHead dense_block)
+  ├─ fc7     4096 → ReLU → dropout 0.5    (dense_block_1)
   └─ fc8     1000, linear → LOGITS                    (classifier)
 ```
 
-**The fully connected stages are the shared vision `ClassificationHead`, not the
-paper's.** The paper has fc6 4096 → fc7 4096 with no BatchNorm; the head's second block
-is always `hidden_dim // 2` wide and each block carries a BatchNorm. fc8 is linear, so
-the model returns **logits**: the paper's softmax belongs in the loss — compile with
+**The fully connected stages are the shared vision `ClassificationHead`, configured
+as the paper's**: `block_dims=(4096, 4096)` and `normalization_type=None`, so fc6 and
+fc7 are each Dense → ReLU → dropout, the released Caffe model's `fc → relu → drop`
+order, with no BatchNorm. The model's `kernel_initializer` and `bias_initializer` reach
+fc6–fc8. fc8 is linear, so the model returns **logits**: the paper's softmax belongs in the loss — compile with
 `SparseCategoricalCrossentropy(from_logits=True)` and apply `keras.ops.softmax` to read
-probabilities. Archives saved before 2026-10-14, when the head still ended in a
-softmax, are not supported.
+probabilities. Archives saved before 2026-10-14 (a softmax fc8, a 2048-wide BatchNorm'd
+fc7, or a grouped conv3) do not load and are not supported.
 
 Every spatial extent above is **measured**, not copied from the paper's diagram, and
 each one matches it.
@@ -85,34 +86,36 @@ each one matches it.
 | `conv2` | (None, 26, 26, 256) | 307,456 |
 | `lrn2` | (None, 26, 26, 256) | 65,536 |
 | `pool2` | (None, 13, 13, 256) | 0 |
-| `conv3` | (None, 13, 13, 384) | 442,752 |
+| `conv3` | (None, 13, 13, 384) | 885,120 |
 | `conv4` | (None, 13, 13, 384) | 663,936 |
 | `conv5` | (None, 13, 13, 256) | 442,624 |
 | `pool3` | (None, 6, 6, 256) | 0 |
 | `flatten` | (None, 9216) | 0 |
-| `fc6` (`dense_block`) | (None, 4096) | 37,769,216 |
-| `fc7` (`dense_block_1`) | (None, 2048) | 8,398,848 |
-| `fc8` (`classifier`) | (None, 1000) | 2,049,000 |
-| **Total** | | **50,183,528** |
+| `fc6` (`dense_block`) | (None, 4096) | 37,752,832 |
+| `fc7` (`dense_block_1`) | (None, 4096) | 16,781,312 |
+| `fc8` (`classifier`) | (None, 1000) | 4,097,000 |
+| **Total** | | **61,039,976** |
 
 Re-derive with `m = create_alexnet(); m.build((None, 227, 227, 3)); m.count_params()`
 and each layer's `count_params()` (the fc rows are
-`m.classification_head.dense_blocks[0]`, `[1]` and `.classifier`). fc6 and fc7 include
-their BatchNorm's 4 x width values, half of them non-trainable moving statistics.
+`m.classification_head.dense_blocks[0]`, `[1]` and `.classifier`). The trainable count,
+`sum(w.numpy().size for w in m.trainable_weights)`, is **60,965,224**: the total less
+the two LRN bands.
 
 Three things about those numbers are worth stating plainly, because each one is
 usually reported incorrectly:
 
-- **The folklore figure is high.** "About 62 million" is in wide circulation; the
-  exact sum for the paper's 4096-4096 stack at this configuration is **60,597,608**,
-  and this port, with its 2048-wide fc7, totals **50,183,528**. This
-  package prints its own measured figure rather than the folklore one.
+- **The folklore figure is high.** "About 62 million" is in wide circulation. The
+  paper's layer list (Section 3.5) summed by hand, every layer with a bias, is
+  **60,965,224** learnable parameters, and that is exactly this port's trainable count.
+  The census test `tests/test_models/test_a_vision_classifier_emits_logits.py` checks
+  it against that hand sum.
 - **`lrn1`/`lrn2` are not free.** Each LRN holds its `C × C` neighbourhood band as a
   **non-trainable** weight — 96² and 256², i.e. **74,752** parameters of the total.
   A layer with no learnable values still costs memory here. They do not appear in
   `trainable_parameters`.
-- **`conv3` reads 442,752, not 885,120.** It is grouped like the rest: 384 filters ×
-  (256/2) input channels × 9 + bias. See below.
+- **`conv3` reads 885,120, not 442,752.** It is the one layer after conv1 that is not
+  grouped: 384 filters × 256 input channels × 9 + bias. See below.
 
 ---
 
@@ -206,11 +209,15 @@ a port that drops it is not the original AlexNet.
 
 ## 5. Grouped convolutions are not decoration
 
-`conv2`–`conv5` use `groups=2`. The paper splits each across two GPUs, and each
-output channel there connects to only **half** the preceding feature map. On one
-device `groups=2` is the standard expression of that, and it changes the
-architecture: `conv3` takes 384 × (256/2) × 9 + 384 parameters rather than
-384 × 256 × 9 + 384.
+`conv2`, `conv4` and `conv5` use `groups=2`; `conv3` does not. The paper (Section
+3.5): "The kernels of the second, fourth, and fifth convolutional layers are connected
+only to those kernel maps in the previous layer which reside on the same GPU. The
+kernels of the third convolutional layer are connected to all kernel maps in the second
+layer." The released Caffe model (`bvlc_alexnet`) agrees: `group: 2` on conv2, conv4
+and conv5 only. On one device `groups=2` is the standard expression of that split, and
+it changes the architecture: conv4 takes 384 × (384/2) × 9 + 384 parameters rather than
+384 × 384 × 9 + 384, while conv3 takes the full 384 × 256 × 9 + 384. Before 2026-10-14
+this port grouped conv3 too, which the paper's own text contradicts.
 
 ---
 
@@ -237,8 +244,8 @@ model.fit(images, labels, epochs=90, batch_size=256)
 | `num_classes` | 1000 | Width of fc8, the linear logits layer |
 | `input_shape` | (227, 227, 3) | Spatial shape plus channels |
 | `dropout_rate` | 0.5 | After fc6 and fc7 |
-| `kernel_initializer` | `'glorot_uniform'` | All five convolutions (the head uses its own) |
-| `bias_initializer` | `'zeros'` | Every bias |
+| `kernel_initializer` | `'glorot_uniform'` | All five convolutions and fc6–fc8, one clone per layer |
+| `bias_initializer` | `'zeros'` | Every conv and fc bias |
 | `include_top` | `True` | `False` stops at `pool3` and returns a feature map |
 | `lrn_hyperparameters` | paper's | Forwarded to both LRN layers |
 
@@ -288,9 +295,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.alexnet.train_alexnet \
     --dataset cifar10 --epochs 90 --batch-size 128
 ```
 
-The paper's recipe is **90 epochs, SGD with momentum 0.9, learning rate 0.1 halved
-every 30 epochs, weight decay 5e-4, batch size 256**. On modern hardware that
-schedule is aggressive; expect to tune it.
+The paper's recipe (Section 5) is **SGD with momentum 0.9, weight decay 5e-4, batch
+size 128, learning rate 0.01 divided by 10 whenever the validation error stopped
+improving (three times), roughly 90 epochs**. The plateau schedule is manual; expect
+to tune it.
 
 > **Never double weight decay.** `AdamW` applies decoupled decay internally, so do not
 > *also* pass `kernel_regularizer=L2(...)`.
@@ -299,7 +307,7 @@ schedule is aggressive; expect to tune it.
 
 ## 10. Performance and cost
 
-- **50.2M parameters, 96% of them fully connected.** fc6 alone is 37.8M. This is the
+- **61.0M parameters, 96% of them fully connected.** fc6 alone is 37.8M. This is the
   architecture's defining cost and the reason it is rarely trained from scratch today.
 - **Memory during training** is dominated by activations at 56×56×96 and
   26×26×256, not by parameters.

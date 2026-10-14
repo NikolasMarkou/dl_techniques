@@ -12,9 +12,9 @@ choice matters on small inputs. A shortcut carries a projection only where
 identity cannot apply directly (a stride-2 stage boundary, or stage 0
 under the bottleneck design); everywhere else it is parameter-free.
 
-The head is the shared vision `ClassificationHead` (global average pool,
-two dense blocks, a linear `Dense(num_classes)`), and the model returns its
-pre-softmax LOGITS: compile with `from_logits=True` and apply
+The head is the shared vision `ClassificationHead` configured as the
+paper's: global average pool, then one linear `Dense(num_classes)`
+(`block_dims=()`), and the model returns its pre-softmax LOGITS: compile with `from_logits=True` and apply
 `keras.ops.softmax` to read probabilities. With deep supervision on, every
 stage but the last gets its own head of the same kind, and the model returns
 the logits list `[final_output, stage3, stage2, stage1]` (deepest head
@@ -83,9 +83,10 @@ class ResNet(keras.Model):
     cannot be taken verbatim: at the first block of every stage after the first
     (stride-2 shape change), plus stage 0's first block under the bottleneck
     design (channel widening at stride 1). The head is the shared
-    ``ClassificationHead``: GAP, two ``DenseBlock`` layers (``hidden_dim`` and
-    ``hidden_dim // 2`` wide) and a linear ``Dense(num_classes)``, and the model
-    returns its logits. With ``enable_deep_supervision=True`` every stage but
+    ``ClassificationHead`` configured as the paper's (He et al., Sec. 3.4:
+    "global average pooling and a 1000-way fully-connected layer"): GAP, then
+    a linear ``Dense(num_classes)`` with no hidden block (``block_dims=()``),
+    and the model returns its logits. With ``enable_deep_supervision=True`` every stage but
     the last receives its own head of the same kind (the last stage is the main
     head's own), and the model returns the logits list
     ``[final_output, stage3, stage2, stage1]``.
@@ -131,7 +132,7 @@ class ResNet(keras.Model):
                         ▼                       ▼  ▼  ▼ (deep supervision)
         ┌──────────────────────────────────────┐ ┌──────────────┐
         │  ClassificationHead (if include_top) │ │ Classific.   │
-        │  GAP → 2×DenseBlock → Dense, logits  │ │ Head / stage │
+        │  GAP → Dense, logits                 │ │ Head / stage │
         └───────────────┬──────────────────────┘ └──────┬───────┘
                         │                               │
                         ▼                               ▼
@@ -164,8 +165,8 @@ class ResNet(keras.Model):
         Defaults to ``'bottleneck'``.
     :type block_type: Literal['basic', 'bottleneck']
     :param kernel_regularizer: Optional regularizer applied to every convolution
-        kernel of the stem and the blocks. The ``ClassificationHead`` takes no
-        regularizer, so the head's dense kernels are not regularized.
+        kernel of the stem and the blocks, and to the classifier kernel of the
+        main and every supervision head.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param normalization_type: Normalization layer identifier passed to
         ``create_normalization_layer``. Defaults to ``'batch_norm'``.
@@ -205,7 +206,8 @@ class ResNet(keras.Model):
     :type stem_type: Literal['imagenet', 'cifar']
     :param head_config_overrides: Optional dict merged into the configuration of
         the main and every supervision ``ClassificationHead`` (e.g.,
-        ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). ``name``,
+        ``{'block_dims': (512,), 'dropout_rate': 0.2}`` adds a hidden block).
+        ``name``,
         ``num_classes`` and ``task_type`` are owned by the model and raise
         ``ValueError``. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
@@ -450,6 +452,9 @@ class ResNet(keras.Model):
             'use_global_pooling': True,
             'pooling_type': 'avg',  # GAP for ResNet
             'use_attention': False,
+            # The paper's head: GAP, then one FC. No hidden block.
+            'block_dims': (),
+            'kernel_regularizer': self.kernel_regularizer,
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.
@@ -482,6 +487,8 @@ class ResNet(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': False,
+                'block_dims': (),
+                'kernel_regularizer': self.kernel_regularizer,
                 # Per-stage suffix: this model builds N heads, so they need
                 # distinct names. Deterministic, because an unnamed head takes
                 # Keras' auto suffix in process-creation order, which breaks

@@ -32,6 +32,15 @@ One row per consumer class, four arms per row:
     fails this arm too.
 
 Adding a consumer is one entry in :data:`SUBJECTS`.
+
+Step 3 of the same plan (decision D-013) added two more arms. Each consumer's
+head is configured as its paper's or reference implementation's
+(``test_the_head_has_the_reference_shape``, one row per class in
+:data:`REFERENCE_HEAD_OWNERS`), and the model's own initializer and regularizer
+knobs reach the classifier (``test_the_model_knobs_reach_the_classifier``). Two
+parameter counts are pinned against external references: ResNet-50 against
+torchvision's published count and AlexNet against the paper's layer list
+summed by hand.
 """
 
 from typing import Callable, Dict, Tuple
@@ -46,41 +55,42 @@ NUM_CLASSES = 5
 BATCH = 3
 
 
-def _resnet() -> keras.Model:
+def _resnet(**knobs) -> keras.Model:
     from dl_techniques.models.vision.resnet import ResNet
     return ResNet(num_classes=NUM_CLASSES, blocks_per_stage=[1, 1],
                   filters_per_stage=[8, 16], block_type="basic",
-                  input_shape=(32, 48, 3))
+                  input_shape=(32, 48, 3), **knobs)
 
 
-def _convnext_v1() -> keras.Model:
+def _convnext_v1(**knobs) -> keras.Model:
     from dl_techniques.models.vision.convnext import ConvNeXtV1
     return ConvNeXtV1(num_classes=NUM_CLASSES, depths=[1, 1], dims=[8, 16],
-                      input_shape=(32, 48, 3))
+                      input_shape=(32, 48, 3), **knobs)
 
 
-def _convnext_v2() -> keras.Model:
+def _convnext_v2(**knobs) -> keras.Model:
     from dl_techniques.models.vision.convnext import ConvNeXtV2
     return ConvNeXtV2(num_classes=NUM_CLASSES, depths=[1, 1], dims=[8, 16],
-                      input_shape=(32, 48, 3))
+                      input_shape=(32, 48, 3), **knobs)
 
 
-def _alexnet() -> keras.Model:
+def _alexnet(**knobs) -> keras.Model:
     # Square: AlexNet's flatten width is 256 * extent ** 2 for ONE extent.
     # 67 is the smallest input above MIN_SPATIAL_EXTENT (55) that keeps the
     # fc6 kernel small.
     from dl_techniques.models.vision.alexnet import AlexNet
-    return AlexNet(num_classes=NUM_CLASSES, input_shape=(67, 67, 3))
+    return AlexNet(num_classes=NUM_CLASSES, input_shape=(67, 67, 3), **knobs)
 
 
-def _cbam() -> keras.Model:
+def _cbam(**knobs) -> keras.Model:
     from dl_techniques.models.vision.cbam import CBAMNet
     return CBAMNet(num_classes=NUM_CLASSES, dims=[8, 16],
-                   input_shape=(32, 48, 3))
+                   input_shape=(32, 48, 3), **knobs)
 
 
 #: class name -> (builder, per-sample input shape).
-SUBJECTS: Dict[str, Tuple[Callable[[], keras.Model], Tuple[int, int, int]]] = {
+#: Each builder takes extra constructor keywords (``**knobs``).
+SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
     "ConvNeXtV1": (_convnext_v1, (32, 48, 3)),
     "ConvNeXtV2": (_convnext_v2, (32, 48, 3)),
@@ -182,3 +192,138 @@ def test_a_stock_from_logits_fit_step_moves_the_classifier(subject: str) -> None
     assert not np.array_equal(before, after), (
         f"{subject}: one fit step left the classifier kernel unchanged"
     )
+
+
+# ---------------------------------------------------------------------
+# D-013: each head is its reference's, and the model's knobs reach it
+# ---------------------------------------------------------------------
+
+#: Which sublayers of ``classification_head`` own weights, per class, at the
+#: reference configuration. ResNet: He et al. Sec. 3.4, GAP + one FC (also
+#: torchvision ``avgpool`` + ``fc``). CBAMNet: the CBAM paper evaluates on
+#: ResNets, so GAP + one FC. ConvNeXt V1/V2: facebookresearch ConvNeXt and
+#: ConvNeXt-V2 ``self.head(self.norm(x.mean([-2, -1])))``, GAP + LayerNorm + FC.
+#: AlexNet: Krizhevsky et al. Sec. 3.5 and the Caffe ``bvlc_alexnet``,
+#: fc6 4096 + fc7 4096 (ReLU, dropout, no normalization) + fc8.
+REFERENCE_HEAD_OWNERS: Dict[str, set] = {
+    "ResNet": {"classifier"},
+    "CBAMNet": {"classifier"},
+    "ConvNeXtV1": {"pooled_norm", "classifier"},
+    "ConvNeXtV2": {"pooled_norm", "classifier"},
+    "AlexNet": {"dense_block", "dense_block_1", "classifier"},
+}
+
+
+def test_the_head_has_the_reference_shape(subject: str) -> None:
+    model, shape = _build(subject)
+    model(_images(shape), training=False)
+    head = model.classification_head
+    # Paths read ``<model>/classification_head/<owner>/...``.
+    owners = {
+        parts[parts.index("classification_head") + 1]
+        for parts in (w.path.split("/") for w in head.weights)
+    }
+    assert owners == REFERENCE_HEAD_OWNERS[subject], (
+        f"{subject} head weight owners {sorted(owners)}, the reference head "
+        f"has {sorted(REFERENCE_HEAD_OWNERS[subject])}"
+    )
+    # No normalization inside any hidden block of these reference heads.
+    assert all(block.norm is None for block in head.dense_blocks), subject
+    if subject.startswith("ConvNeXt"):
+        assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
+        assert head.pooled_norm.epsilon == pytest.approx(1e-6)
+    if subject == "AlexNet":
+        assert [b.units for b in head.dense_blocks] == [4096, 4096]
+        assert [b.dropout_rate for b in head.dense_blocks] == [0.5, 0.5]
+
+
+_L2 = 3e-4
+
+#: Per class: the knobs the model advertises, and what each must set on the
+#: head's classifier. ResNet and ConvNeXt take no kernel_initializer knob; the
+#: ConvNeXt head draws from the class's ``HEAD_INITIALIZER``.
+KNOBS: Dict[str, Dict[str, object]] = {
+    "ResNet": {"kernel_regularizer": keras.regularizers.L2(_L2)},
+    "ConvNeXtV1": {"kernel_regularizer": keras.regularizers.L2(_L2)},
+    "ConvNeXtV2": {"kernel_regularizer": keras.regularizers.L2(_L2)},
+    "CBAMNet": {"kernel_regularizer": keras.regularizers.L2(_L2),
+                "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
+    "AlexNet": {"kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+                "bias_initializer": keras.initializers.Constant(0.5)},
+}
+
+
+def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
+    builder, shape = SUBJECTS[subject]
+    keras.utils.set_random_seed(0)
+    model = builder(**KNOBS[subject])
+    model(_images(shape), training=False)
+    classifier = model.classification_head.classifier
+    knobs = KNOBS[subject]
+    if "kernel_regularizer" in knobs:
+        assert isinstance(classifier.kernel_regularizer, keras.regularizers.L2), (
+            f"{subject}: kernel_regularizer did not reach the classifier"
+        )
+        assert classifier.kernel_regularizer.l2 == pytest.approx(_L2)
+    if "kernel_initializer" in knobs:
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "RandomNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.123)
+    if "bias_initializer" in knobs:
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(classifier.bias),
+            np.full(classifier.bias.shape, 0.5, "float32"))
+    if subject.startswith("ConvNeXt"):
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "TruncatedNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.02), (
+            f"{subject}: the reference head draws at trunc_normal_(std=.02)"
+        )
+
+
+def _trainable_count(model: keras.Model) -> int:
+    return sum(int(np.prod(w.shape)) for w in model.trainable_weights)
+
+
+#: torchvision ``models.resnet50()``: ``sum(p.numel() for p in m.parameters())``
+#: is 25,557,032, the figure torchvision's model table publishes. PyTorch
+#: counts BatchNorm gamma/beta and not the running statistics, which is
+#: exactly Keras' trainable set here.
+TORCHVISION_RESNET50_PARAMETERS = 25_557_032
+
+
+def _alexnet_paper_parameter_count() -> int:
+    """AlexNet's learnable parameters from Krizhevsky et al. 2012, Sec. 3.5.
+
+    conv1 96 kernels 11x11x3; conv2 256 of 5x5x48; conv3 384 of 3x3x256 (the
+    one layer "connected to all kernel maps in the second layer"); conv4 384
+    of 3x3x192; conv5 256 of 3x3x192; fc 9216 -> 4096 -> 4096 -> 1000. Every
+    layer has a bias. Written out here, not imported, so the oracle does not
+    come from the code under test.
+
+    :return: 60,965,224.
+    :rtype: int
+    """
+    convs = [(11, 11, 3, 96), (5, 5, 48, 256), (3, 3, 256, 384),
+             (3, 3, 192, 384), (3, 3, 192, 256)]
+    fcs = [(6 * 6 * 256, 4096), (4096, 4096), (4096, 1000)]
+    total = sum(kh * kw * cin * cout + cout for kh, kw, cin, cout in convs)
+    total += sum(fin * fout + fout for fin, fout in fcs)
+    return total
+
+
+def test_resnet50_has_the_torchvision_parameter_count() -> None:
+    from dl_techniques.models.vision.resnet import ResNet
+    model = ResNet.from_variant("resnet50", num_classes=1000,
+                                input_shape=(224, 224, 3))
+    model.build((None, 224, 224, 3))
+    assert _trainable_count(model) == TORCHVISION_RESNET50_PARAMETERS
+
+
+def test_alexnet_has_the_paper_parameter_count() -> None:
+    from dl_techniques.models.vision.alexnet import create_alexnet
+    expected = _alexnet_paper_parameter_count()
+    assert expected == 60_965_224, "the hand sum itself changed"
+    model = create_alexnet()
+    model.build((None, 227, 227, 3))
+    assert _trainable_count(model) == expected

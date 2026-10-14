@@ -56,16 +56,17 @@ Full data flow at the ImageNet default (`stem_type='imagenet'`, 224x224 input):
     stage 3  blocks_per_stage[2] blocks, first stride 2    -> (14, 14, 256|1024)
     stage 4  blocks_per_stage[3] blocks, first stride 2    -> ( 7,  7, 512|2048)
     head     ClassificationHead: global average pool
-             -> DenseBlock(256) -> DenseBlock(128)
              -> linear dense(num_classes)                  -> (num_classes,) LOGITS
 ```
 
-The head is the shared vision `ClassificationHead` from `layers/heads/vision`, not
-torchvision's single `fc`: each `DenseBlock` is Dense, BatchNorm, ReLU. Its last layer is
-linear, so the model returns logits. Pass `head_config_overrides` (for example
-`{'hidden_dim': 512}`) to resize it; `name`, `num_classes` and `task_type` are owned by
-the model and raise `ValueError`. Archives saved before 2026-10-14, when the head still
-ended in a softmax, are not supported.
+The head is the shared vision `ClassificationHead` from `layers/heads/vision`, configured
+as the paper's (He et al., Sec. 3.4, "global average pooling and a 1000-way
+fully-connected layer"; torchvision's `avgpool` + `fc`): GAP, then one linear `Dense` with
+no hidden block (`block_dims=()`). The model's `kernel_regularizer` reaches that `Dense`.
+The model returns logits. Pass `head_config_overrides` (for example
+`{'block_dims': (512,)}`) to add hidden blocks; `name`, `num_classes` and `task_type` are
+owned by the model and raise `ValueError`. Archives saved before 2026-10-14 (a softmax
+head, or the two-`DenseBlock` head) do not load and are not supported.
 
 Channel counts read `basic|bottleneck`: a bottleneck block emits `4x` its nominal filters.
 
@@ -123,7 +124,7 @@ model = create_resnet("resnet50", num_classes=1000, input_shape=(224, 224, 3))
 # exist until a shape is known ("ValueError: You tried to call `count_params` on
 # layer 'res_net', but the layer isn't built").
 model.build((None, 224, 224, 3))
-print(f"{model.count_params():,}")          # 24,249,128
+print(f"{model.count_params():,}")          # 25,610,152
 
 logits = model(np.random.rand(2, 224, 224, 3).astype("float32"), training=False)
 print(logits.shape)                         # (2, 1000)
@@ -155,11 +156,11 @@ model.fit(x, y, epochs=1, batch_size=8, verbose=0)
 
 | Variant | `blocks_per_stage` | `block_type` | `count_params()` @ 1000 classes | Notes |
 |---|---|---|---:|---|
-| `resnet18` | `[2, 2, 2, 2]` | basic | 11,480,872 | cheapest |
-| `resnet34` | `[3, 4, 6, 3]` | basic | 21,596,456 | |
-| `resnet50` | `[3, 4, 6, 3]` | bottleneck | 24,249,128 | most common |
-| `resnet101` | `[3, 4, 23, 3]` | bottleneck | 43,293,480 | |
-| `resnet152` | `[3, 8, 36, 3]` | bottleneck | 58,983,208 | deepest |
+| `resnet18` | `[2, 2, 2, 2]` | basic | 11,699,112 | cheapest |
+| `resnet34` | `[3, 4, 6, 3]` | basic | 21,814,696 | |
+| `resnet50` | `[3, 4, 6, 3]` | bottleneck | 25,610,152 | most common |
+| `resnet101` | `[3, 4, 23, 3]` | bottleneck | 44,654,504 | |
+| `resnet152` | `[3, 8, 36, 3]` | bottleneck | 60,344,232 | deepest |
 
 All five use `filters_per_stage = [64, 128, 256, 512]`. § 17 splits the parameter column into
 trainable and non-trainable; it is `count_params()` after `build((None, 224, 224, 3))`, an
@@ -457,22 +458,21 @@ accuracy claim reappears here).
 
 | Variant | Trainable params | Non-trainable (BN stats) | `count_params()` | MACs | FLOPs (2xMACs) |
 |:---|---:|---:|---:|---:|---:|
-| ResNet-18  | 11,470,504 |  10,368 | 11,480,872 |  1.818 G |  3.635 G |
-| ResNet-34  | 21,578,664 |  17,792 | 21,596,456 |  3.669 G |  7.338 G |
-| ResNet-50  | 24,195,240 |  53,888 | 24,249,128 |  4.103 G |  8.205 G |
-| ResNet-101 | 43,187,368 | 106,112 | 43,293,480 |  7.822 G | 15.644 G |
-| ResNet-152 | 58,831,016 | 152,192 | 58,983,208 | 11.543 G | 23.085 G |
+| ResNet-18  | 11,689,512 |   9,600 | 11,699,112 |  1.818 G |  3.636 G |
+| ResNet-34  | 21,797,672 |  17,024 | 21,814,696 |  3.669 G |  7.338 G |
+| ResNet-50  | 25,557,032 |  53,120 | 25,610,152 |  4.104 G |  8.208 G |
+| ResNet-101 | 44,549,160 | 105,344 | 44,654,504 |  7.823 G | 15.646 G |
+| ResNet-152 | 60,192,808 | 151,424 | 60,344,232 | 11.544 G | 23.088 G |
 
 **Read the unit before comparing.** "ResNet-50 is 4.1 GFLOPs" in the literature counts
 multiply-**accumulates**; the profiler here counts the multiply and the add separately, hence
 8.205 G for the same network. Compare the **MACs** column, which matches the usual published
-values (1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding. The Trainable column is NOT
-torchvision's: the `ClassificationHead` (§ 3) replaces torchvision's single `fc`, which
-puts it 219,008 below torchvision for the basic-block variants and 1,361,792 below for the
-bottleneck ones. Keras counts BatchNorm's `moving_mean`/`moving_variance` and PyTorch does
-not; that is the Non-trainable column, 768 of it from the head's two BatchNorms. The model
-returns logits, so the head's softmax is not on the output path and the FLOPs column does
-not count it.
+values (1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding. The Trainable column equals
+torchvision's published counts exactly (11,689,512 / 21,797,672 / 25,557,032 / 44,549,160
+/ 60,192,808), because the head is the paper's GAP + one `fc`. Keras counts BatchNorm's
+`moving_mean`/`moving_variance` and PyTorch does not; that is the Non-trainable column. The
+model returns logits, so the head's softmax is not on the output path and the FLOPs column
+does not count it.
 
 Re-derive the parameter columns:
 

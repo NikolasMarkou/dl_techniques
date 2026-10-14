@@ -101,8 +101,14 @@ from tests.optimizer_state import build_optimizer_state
 #: 14 ``classification_head/`` = 34, resnet 30 + 14 = 44. ``build()`` and a
 #: forward call still materialize the identical set, which is the property
 #: this file defends.
+#:
+#: RE-MEASURED again 2026-10-14 (same plan, step 3, D-013): ``cbam`` 34 -> 22
+#: and ``resnet`` 44 -> 32, the 2026-08-22 values. The head is the paper's
+#: GAP + one ``Dense`` again (``block_dims=()``), 2 weights: cbam 20 backbone +
+#: 2 ``classification_head/classifier`` = 22, resnet 30 + 2 = 32, listed the
+#: same way.
 FIXED = {
-    "cbam": 34,
+    "cbam": 22,
     "distilbert": 24,
     "fnet": 23,
     "gemma": 22,
@@ -130,7 +136,7 @@ FIXED = {
     "pw_fnet": 100,
     "qwen": 104,
     "relgt": 49,
-    "resnet": 44,
+    "resnet": 32,
     "scunet": 148,
     "sd3_mmdit": 124,
     "tabm": 5,

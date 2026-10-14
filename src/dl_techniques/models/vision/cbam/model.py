@@ -11,8 +11,9 @@ never invert or amplify it. The backbone stacks one
 `Conv2D -> BatchNorm -> CBAM -> MaxPooling2D` stage per entry in `dims`, with
 CBAM between the normalization and the pooling. Every stage halves both
 spatial axes, so an input needs to survive `2 ** len(dims)` reductions. The
-classification head is the shared vision `ClassificationHead` (global average
-pool, two dense blocks, a linear `Dense(num_classes)`), so the output is
+classification head is the shared vision `ClassificationHead` configured as
+the CBAM paper's ResNet heads (global average pool, then one linear
+`Dense(num_classes)`; `block_dims=()`), so the output is
 pre-softmax logits: compile with `from_logits=True` and apply
 `keras.ops.softmax` to read probabilities. No pretrained weights ship with
 this model: `pretrained=True` raises `NotImplementedError`.
@@ -38,6 +39,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 from dl_techniques.utils.model_build import materialize_sublayers
@@ -72,12 +74,6 @@ class CBAMNet(keras.Model):
         │ global average pool          │
         └──────────────────────────────┘
               │ [B, dims[-1]]
-              ▼
-        ┌──────────────────────────────┐
-        │ 2 x DenseBlock (256, 128),   │
-        │ batch norm, relu             │
-        └──────────────────────────────┘
-              │ [B, 128]
               ▼
         ┌──────────────────────────────┐
         │ dense num_classes, linear    │
@@ -132,12 +128,11 @@ class CBAMNet(keras.Model):
     :type attention_ratio: int
     :param attention_kernel_size: Kernel size for the spatial-attention convolution in each CBAM block. Checked here for positivity; oddness is left to ``CBAM``.
     :type attention_kernel_size: int
-    :param kernel_initializer: Initializer for the stage Conv2D kernels. The
-        ``ClassificationHead`` takes no initializer and uses its own defaults.
+    :param kernel_initializer: Initializer for the stage Conv2D kernels and
+        the head's classifier kernel.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for the stage Conv2D
-        kernels. The ``ClassificationHead`` takes no regularizer, so its dense
-        kernels are not regularized.
+        kernels and the head's classifier kernel.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param include_top: Whether to include the classification head. If False, returns the final stage's feature maps.
     :type include_top: bool
@@ -221,7 +216,10 @@ class CBAMNet(keras.Model):
                     kernel_size=3,
                     activation='relu',
                     padding='same',
-                    kernel_initializer=self.kernel_initializer,
+                    # One clone per conv: a shared seedless initializer replays
+                    # one draw, so stage_1's kernel started as stage_0's prefix
+                    # (measured Pearson r = 0.999999999999997).
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"stage_{i}_conv"
                 ),
@@ -255,6 +253,10 @@ class CBAMNet(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': False,
+                # The CBAM paper evaluates on ResNets: GAP, then one FC.
+                'block_dims': (),
+                'kernel_initializer': self.kernel_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
                 # by-name matching that weight transfer relies on.

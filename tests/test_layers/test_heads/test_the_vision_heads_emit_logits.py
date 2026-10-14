@@ -308,3 +308,188 @@ def test_no_overrides_returns_a_copy(overrides) -> None:
     head_config = {"name": "classification_head", "num_classes": 10}
     merged = merge_head_config_overrides(head_config, overrides)
     assert merged == head_config and merged is not head_config
+
+
+# ---------------------------------------------------------------------
+# D-013: the head can express a reference head, and the model's knobs reach it
+# ---------------------------------------------------------------------
+#
+# Added at plan-2026-10-14T062616-81938e81 step 3. Before it the head always
+# built two norm'd DenseBlocks and gave every Dense the Keras defaults, so a
+# consumer could not be GAP + FC (ResNet), GAP + LayerNorm + FC (ConvNeXt) or
+# 4096-4096 without a norm (AlexNet), and its kernel_initializer and
+# kernel_regularizer stopped at the backbone.
+
+def _truncated_normal_std_factor() -> float:
+    """Realized std of a unit normal truncated at +-2 sigma, from the closed form.
+
+    ``sqrt(1 - 2 * a * phi(a) / (2 * Phi(a) - 1))`` at ``a = 2``. Keras'
+    ``TruncatedNormal`` resamples outside two standard deviations, so its draws
+    have this fraction of the nominal ``stddev``.
+
+    :return: About 0.87962.
+    :rtype: float
+    """
+    import math
+    a = 2.0
+    pdf = math.exp(-a * a / 2.0) / math.sqrt(2.0 * math.pi)
+    mass = math.erf(a / math.sqrt(2.0))
+    return math.sqrt(1.0 - 2.0 * a * pdf / mass)
+
+
+def _owners(head: ClassificationHead) -> set:
+    return {w.path.split("/")[1] for w in head.weights}
+
+
+def test_empty_block_dims_leaves_pool_and_classifier_only() -> None:
+    head = _head(block_dims=())
+    out = head(_inputs(FEATURE_SHAPE))
+    assert head.dense_blocks == [], f"built {len(head.dense_blocks)} blocks"
+    assert _owners(head) == {"classifier"}, (
+        f"block_dims=() should leave the classifier as the only weight owner, "
+        f"got {sorted(_owners(head))}"
+    )
+    channels = FEATURE_SHAPE[-1]
+    assert [tuple(w.shape) for w in head.weights] == [
+        (channels, NUM_CLASSES), (NUM_CLASSES,)
+    ], "the classifier does not read the pooled channels directly"
+    assert tuple(out["logits"].shape) == (FEATURE_SHAPE[0], NUM_CLASSES)
+
+
+def test_block_dims_sets_every_width_and_none_keeps_the_two_block_default() -> None:
+    explicit = _head(block_dims=(10, 6, 4), normalization_type=None)
+    explicit(_inputs(FEATURE_SHAPE))
+    assert [b.units for b in explicit.dense_blocks] == [10, 6, 4]
+    assert [b.name for b in explicit.dense_blocks] == [
+        "dense_block", "dense_block_1", "dense_block_2"
+    ]
+    # normalization_type=None: no block owns a norm, so no norm weight exists.
+    assert all(b.norm is None for b in explicit.dense_blocks)
+    assert not any("norm" in w.path for w in explicit.weights), [
+        w.path for w in explicit.weights if "norm" in w.path
+    ]
+    assert tuple(explicit.classifier.kernel.shape) == (4, NUM_CLASSES)
+
+    default = _head()
+    assert [b.units for b in default.dense_blocks] == [HIDDEN_DIM, HIDDEN_DIM // 2]
+
+
+@pytest.mark.parametrize("bad", [(0,), (8, -1), (2.5,), (True,)])
+def test_block_dims_refuses_a_width_that_is_not_a_positive_int(bad) -> None:
+    with pytest.raises(ValueError, match="block_dims"):
+        _head(block_dims=bad)
+
+
+@pytest.mark.usefixtures("tf32_disabled")
+def test_the_pooled_norm_is_a_layer_norm_of_the_pooled_vector() -> None:
+    """GAP, LayerNorm, linear classifier, against a float64 numpy oracle."""
+    head = _head(block_dims=(), pooled_normalization_type="layer_norm")
+    x = _inputs(FEATURE_SHAPE)
+    logits = keras.ops.convert_to_numpy(head(x, training=False)["logits"])
+    assert _owners(head) == {"pooled_norm", "classifier"}
+
+    norm = head.pooled_norm
+    pooled = x.astype(np.float64).mean(axis=(1, 2))
+    mean = pooled.mean(axis=-1, keepdims=True)
+    var = pooled.var(axis=-1, keepdims=True)
+    gamma = keras.ops.convert_to_numpy(norm.gamma).astype(np.float64)
+    beta = keras.ops.convert_to_numpy(norm.beta).astype(np.float64)
+    normed = (pooled - mean) / np.sqrt(var + norm.epsilon) * gamma + beta
+    kernel = keras.ops.convert_to_numpy(head.classifier.kernel).astype(np.float64)
+    bias = keras.ops.convert_to_numpy(head.classifier.bias).astype(np.float64)
+    expected = normed @ kernel + bias
+
+    height, width, channels = FEATURE_SHAPE[1:]
+    atol = reassociation_atol(
+        [height * width, channels, channels], 1, float(np.abs(expected).max()))
+    np.testing.assert_allclose(logits, expected, rtol=0, atol=atol)
+
+
+def test_the_kernel_and_bias_initializers_reach_every_dense() -> None:
+    nominal = 5.0  # glorot at these fans draws near 0.2-0.3: 15-20x away
+    head = _head(
+        block_dims=(32,),
+        kernel_initializer=keras.initializers.TruncatedNormal(stddev=nominal),
+        bias_initializer=keras.initializers.Constant(0.25),
+    )
+    head(_inputs(FEATURE_SHAPE))
+    expected_std = nominal * _truncated_normal_std_factor()
+    kernels = [w for w in head.weights if w.path.endswith("kernel")]
+    biases = [w for w in head.weights if w.path.endswith("bias")]
+    assert {w.path.split("/")[1] for w in kernels} == {"dense_block", "classifier"}
+    for w in kernels:
+        values = keras.ops.convert_to_numpy(w).ravel().astype(np.float64)
+        # 6 standard errors of a sample std: se(std)/std ~ 1/sqrt(2n).
+        rel = 6.0 / np.sqrt(2.0 * values.size)
+        assert values.std() == pytest.approx(expected_std, rel=rel), (
+            f"{w.path} drew at std {values.std():.4f}; the head's "
+            f"kernel_initializer realizes {expected_std:.4f}"
+        )
+    for w in biases:
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(w), np.full(w.shape, 0.25, "float32"),
+            err_msg=f"{w.path} did not take the head's bias_initializer")
+
+
+def test_no_two_dense_kernels_replay_one_draw() -> None:
+    """A seedless initializer INSTANCE replays its sample at every site."""
+    head = _head(block_dims=(12,),
+                 kernel_initializer=keras.initializers.RandomUniform(-1.0, 1.0))
+    head(_inputs(FEATURE_SHAPE))
+    block = keras.ops.convert_to_numpy(
+        head.dense_blocks[0].dense.kernel).ravel()
+    classifier = keras.ops.convert_to_numpy(head.classifier.kernel).ravel()
+    n = min(block.size, classifier.size)
+    assert not np.array_equal(block[:n], classifier[:n]), (
+        "the classifier kernel is the block kernel's prefix: one initializer "
+        "instance was shared instead of cloned"
+    )
+
+
+def test_the_regularizer_adds_one_loss_per_dense() -> None:
+    l2 = 0.01
+    head = _head(block_dims=(8, 4), kernel_regularizer=keras.regularizers.L2(l2))
+    head(_inputs(FEATURE_SHAPE))
+    kernels = [w for w in head.weights if w.path.endswith("kernel")]
+    assert len(kernels) == 3
+    losses = sorted(float(keras.ops.convert_to_numpy(v)) for v in head.losses)
+    expected = sorted(
+        l2 * float(np.sum(np.square(keras.ops.convert_to_numpy(k).astype(np.float64))))
+        for k in kernels
+    )
+    assert len(losses) == 3, f"{len(losses)} regularization losses for 3 Dense kernels"
+    np.testing.assert_allclose(losses, expected, rtol=1e-5)
+
+
+def test_the_new_options_round_trip_by_value(tmp_path) -> None:
+    head = _head(
+        block_dims=(9,),
+        normalization_type=None,
+        pooled_normalization_type="layer_norm",
+        kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+        bias_initializer=keras.initializers.Constant(0.1),
+        kernel_regularizer=keras.regularizers.L2(1e-3),
+    )
+    config = head.get_config()
+    assert config["block_dims"] == [9]
+    assert config["pooled_normalization_type"] == "layer_norm"
+    assert config["kernel_initializer"]["config"]["stddev"] == 0.02
+    assert config["bias_initializer"]["config"]["value"] == 0.1
+    assert config["kernel_regularizer"]["config"]["l2"] == pytest.approx(1e-3)
+
+    inp = keras.Input(shape=FEATURE_SHAPE[1:])
+    model = keras.Model(inp, head(inp)["logits"])
+    x = _inputs(FEATURE_SHAPE)
+    before = keras.ops.convert_to_numpy(model(x, training=False))
+    path = tmp_path / "head_d013.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+    reloaded_head = loaded.get_layer(head.name)
+    assert reloaded_head.block_dims == (9,)
+    assert len(reloaded_head.losses) == 2, "the regularizer did not survive reload"
+    for w0, w1 in zip(model.weights, loaded.weights):
+        assert w0.path == w1.path
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(w0), keras.ops.convert_to_numpy(w1))
+    np.testing.assert_array_equal(
+        keras.ops.convert_to_numpy(loaded(x, training=False)), before)

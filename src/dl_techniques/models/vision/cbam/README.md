@@ -61,7 +61,7 @@ Input (B, H, W, 3)
    ├─► ...                                                  one stage per entry of `dims`
    │
    └─► Head (include_top): ClassificationHead
-         GlobalAveragePooling2D -> DenseBlock(256) -> DenseBlock(128)
+         GlobalAveragePooling2D
          -> Dense(num_classes), linear                     (B, num_classes) logits
 ```
 
@@ -71,11 +71,14 @@ Inside one CBAM block:
 F ──► ChannelAttention ──► Mc ──► multiply ──► F' ──► SpatialAttention ──► Ms ──► multiply ──► F''
 ```
 
-The head is the shared vision `ClassificationHead` (each `DenseBlock` is Dense, BatchNorm,
-ReLU) and its last layer is **linear**, so the model outputs **logits** — compile with
-`from_logits=True` and apply `keras.ops.softmax` to read probabilities. With
-`include_top=False` the final stage's 4-D feature map is returned. Archives saved before
-2026-10-14, when the head still ended in a softmax, are not supported.
+The head is the shared vision `ClassificationHead` configured as the classifier of the
+ResNets the CBAM paper evaluates on: global average pooling, then one **linear**
+`Dense(num_classes)` with no hidden block (`block_dims=()`). The model's
+`kernel_initializer` and `kernel_regularizer` reach that `Dense`. The model outputs
+**logits** — compile with `from_logits=True` and apply `keras.ops.softmax` to read
+probabilities. With `include_top=False` the final stage's 4-D feature map is returned.
+Archives saved before 2026-10-14 (a softmax head, or the two-`DenseBlock` head) do not load
+and are not supported.
 
 ---
 
@@ -277,8 +280,8 @@ custom_cbam = CBAM(
 ```
 
 `CBAMNet` itself exposes a single `kernel_regularizer`, which reaches the stage `Conv2D`
-layers only: the `ClassificationHead` takes no regularizer, so its dense kernels are not
-regularized. Per-branch control means building the blocks yourself.
+layers and the head's classifier, not the CBAM blocks. Per-branch control means building
+the blocks yourself.
 
 ---
 

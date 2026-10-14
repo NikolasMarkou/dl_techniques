@@ -5,13 +5,14 @@ five convolutional stages -- each convolution followed by ReLU, with a local
 response normalization and a max pool on the first two -- and three fully connected
 stages.
 
-The fully connected stages are the shared vision ``ClassificationHead``, not a
-transcription of the paper's. fc6 is a 4096-wide ``DenseBlock`` (Dense,
-BatchNorm, ReLU, dropout), fc7 a 2048-wide one (the head's second block is
-always ``hidden_dim // 2``), and fc8 a linear ``Dense(num_classes)``. The paper
-has a 4096-4096 stack with no BatchNorm. The model returns the pre-softmax
-LOGITS of fc8; the paper's softmax belongs in the loss, so compile with
-``SparseCategoricalCrossentropy(from_logits=True)``.
+The fully connected stages are the shared vision ``ClassificationHead``
+configured as the paper's: ``block_dims=(4096, 4096)`` with
+``normalization_type=None``, so fc6 and fc7 are each Dense, ReLU, dropout --
+the released Caffe model's ``fc -> relu -> drop`` order -- and fc8 is a linear
+``Dense(num_classes)``. The model's ``kernel_initializer`` and
+``bias_initializer`` reach fc6-fc8 as well as the convolutions. The model
+returns the pre-softmax LOGITS of fc8; the paper's softmax belongs in the
+loss, so compile with ``SparseCategoricalCrossentropy(from_logits=True)``.
 
 Padding
 -------
@@ -34,23 +35,29 @@ pool -- is exactly what produces the paper's figure.
 Parameter count
 ---------------
 
-Measured **50,183,528** at the default ``input_shape=(227, 227, 3)`` and
-``num_classes=1000``: 1,891,712 convolutional, 74,752 of non-trainable LRN band
-weights, and 48,217,064 in the fully connected head (12,288 of them the
-non-trainable BatchNorm moving statistics). The paper's own 4096-4096 stack would
-total 60,597,608; the gap is fc7's 2048 width. **96%** of the total sits in the
+Measured **61,039,976** at the default ``input_shape=(227, 227, 3)`` and
+``num_classes=1000``: 2,334,080 convolutional, 74,752 of non-trainable LRN band
+weights, and 58,631,144 in fc6-fc8. The **60,965,224** trainable parameters are
+exactly the paper's layer list summed by hand (conv1 11x11x3x96, conv2
+5x5x48x256, conv3 3x3x256x384, conv4 3x3x192x384, conv5 3x3x192x256, fc
+9216-4096-4096-1000, every layer with a bias). **96%** of the total sits in the
 fully connected stages, which is the main cost of the architecture -- see the
 README for what that means for fine-tuning. Re-derive with
-``create_alexnet().build((None, 227, 227, 3))`` then ``count_params()``.
+``create_alexnet().build((None, 227, 227, 3))`` then ``count_params()`` and
+``sum(w.numpy().size for w in model.trainable_weights)``.
 
 Grouped convolutions
 --------------------
 
-``conv2`` through ``conv5`` use ``groups=2``. This is not decoration: the paper
-splits each of those layers across two GPUs and only ever connects a channel to
-half the preceding feature map. ``groups=2`` is the standard single-device
-expression of that, and it is why these layers take 96/256/384/384/256 filters
-rather than a doubled width.
+``conv2``, ``conv4`` and ``conv5`` use ``groups=2``; ``conv1`` and ``conv3``
+do not. The paper (Section 3.5) splits the network across two GPUs: "The
+kernels of the second, fourth, and fifth convolutional layers are connected
+only to those kernel maps in the previous layer which reside on the same GPU.
+The kernels of the third convolutional layer are connected to all kernel maps
+in the second layer." The released Caffe model agrees (``group: 2`` on conv2,
+conv4 and conv5 only). ``groups=2`` is the standard single-device expression of
+that split. So conv3 takes ``3 x 3 x 256`` kernels, 885,120 parameters, and
+conv4 and conv5 take ``3 x 3 x 192``.
 
 References:
     -   Krizhevsky, A., Sutskever, I., & Hinton, G. E. (2012). "ImageNet
@@ -71,6 +78,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.vision import (
@@ -115,14 +123,14 @@ class AlexNet(keras.Model):
           -> LRN, pool1 3x3/2 pad 1      ->  28 x 28 x 96
           -> conv2 5x5/1  pad 1, 256 g2  ->  26 x 26 x 256
           -> LRN, pool2 3x3/2 pad 1      ->  13 x 13 x 256
-          -> conv3 3x3/1  pad 1, 384 g2  ->  13 x 13 x 384
+          -> conv3 3x3/1  pad 1, 384     ->  13 x 13 x 384
           -> conv4 3x3/1  pad 1, 384 g2  ->  13 x 13 x 384
           -> conv5 3x3/1  pad 1, 256 g2  ->  13 x 13 x 256
           -> pool3 3x3/2 pad 0           ->   6 x 6 x 256
           -> flatten 9216
-          -> fc6 4096, BatchNorm, ReLU, dropout 0.5   (ClassificationHead)
-          -> fc7 2048, BatchNorm, ReLU, dropout 0.5   (hidden_dim // 2)
-          -> fc8 1000, linear: the output is logits
+          -> fc6 4096, ReLU, dropout 0.5   (ClassificationHead dense_block)
+          -> fc7 4096, ReLU, dropout 0.5   (dense_block_1)
+          -> fc8 1000, linear: the output is logits (classifier)
 
     Every output spatial extent above is measured, not copied from the paper's
     diagram, and each matches it.
@@ -142,7 +150,8 @@ class AlexNet(keras.Model):
     :type input_shape: Tuple[int, int, int]
     :param dropout_rate: Dropout applied after fc6 and fc7. The paper uses 0.5.
     :type dropout_rate: float
-    :param kernel_initializer: Initializer for all five convolutions.
+    :param kernel_initializer: Initializer for all five convolutions and the
+        three fully connected layers. Each layer draws from its own clone.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for every conv and dense bias.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
@@ -188,28 +197,28 @@ class AlexNet(keras.Model):
         conv2          (None, 26, 26, 256)          307,456
         lrn2           (None, 26, 26, 256)            65,536
         pool2          (None, 13, 13, 256)                 0
-        conv3          (None, 13, 13, 384)          442,752
+        conv3          (None, 13, 13, 384)          885,120
         conv4          (None, 13, 13, 384)          663,936
         conv5          (None, 13, 13, 256)          442,624
         pool3          (None, 6, 6, 256)                   0
         flatten        (None, 9216)                       0
-        fc6 dense_block    (None, 4096)           37,769,216
-        fc7 dense_block_1  (None, 2048)            8,398,848
-        fc8 classifier     (None, 1000)            2,049,000
+        fc6 dense_block    (None, 4096)           37,752,832
+        fc7 dense_block_1  (None, 4096)           16,781,312
+        fc8 classifier     (None, 1000)            4,097,000
         ----------------------------------------------------
-        Total                                     50,183,528
+        Total                                     61,039,976
 
-    ``conv3`` reads 442,752 rather than the 885,120 an ungrouped ``conv3`` would
-    need, because it is grouped like the rest: 384 filters x (256/2) input channels
-    x 9 + bias. That is the paper's 2-GPU split, not an omission.
+    ``conv3`` reads 885,120 (384 filters x 256 input channels x 9 + bias): it is
+    the one convolution after conv1 that the paper connects to every kernel map
+    of the layer before. conv2, conv4 and conv5 are grouped, so their kernels
+    read half the preceding width.
 
     ``lrn1`` and ``lrn2`` are not free. Each LRN holds its neighbourhood band as a
     non-trainable ``C x C`` weight -- 96² for lrn1 and 256² for lrn2 -- because a
     bare tensor built in ``build()`` does not survive being built inside a parent's
     ``scratch_graph``. Those are 74,752 of the total and they are **not**
     learnable; ``count_params()`` counts them, ``trainable_parameters`` does not.
-    fc6 and fc7 each count their BatchNorm's 2 x width trainable and 2 x width
-    non-trainable values.
+    Everything else is trainable: 60,965,224 values.
     """
 
     def __init__(
@@ -236,7 +245,7 @@ class AlexNet(keras.Model):
         :type input_shape: Tuple[int, int, int]
         :param dropout_rate: Dropout after fc6 and fc7.
         :type dropout_rate: float
-        :param kernel_initializer: Initializer for all convolutions.
+        :param kernel_initializer: Initializer for all convolutions and fc6-fc8.
         :type kernel_initializer: Union[str, keras.initializers.Initializer]
         :param bias_initializer: Initializer for every bias.
         :type bias_initializer: Union[str, keras.initializers.Initializer]
@@ -305,7 +314,13 @@ class AlexNet(keras.Model):
         conv_spec = [
             ("conv1", 96, 11, 4, 1),
             ("conv2", 256, 5, 1, 2),
-            ("conv3", 384, 3, 1, 2),
+            # DECISION plan-2026-10-14T062616-81938e81/D-014
+            # conv3 is NOT grouped: it alone reads every conv2 map (paper Sec.
+            # 3.5; the Caffe bvlc_alexnet conv3 has no group). Do NOT set
+            # groups=2 here to "match the 2-GPU split": that was this port's
+            # defect until 2026-10-14 and dropped 442,368 conv3 weights.
+            # See decisions.md D-014.
+            ("conv3", 384, 3, 1, 1),
             ("conv4", 384, 3, 1, 2),
             ("conv5", 256, 3, 1, 2),
         ]
@@ -344,8 +359,8 @@ class AlexNet(keras.Model):
                 padding="valid",
                 groups=groups,
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 name=layer_name,
             ))
 
@@ -402,11 +417,15 @@ class AlexNet(keras.Model):
         head_config.update({
             'num_classes': self.num_classes,
             'dropout_rate': self.dropout_rate,
-            'normalization_type': 'batch_norm',
+            # fc6 and fc7: Dense, ReLU, dropout, no normalization, 4096 wide
+            # each (paper Sec. 3.5; Caffe fc6/relu6/drop6, fc7/relu7/drop7).
+            'block_dims': (4096, 4096),
+            'normalization_type': None,
             'activation_type': 'relu',
+            'kernel_initializer': self.kernel_initializer,
+            'bias_initializer': self.bias_initializer,
             'use_global_pooling': False,  # AlexNet uses flatten, not pooling
             'use_attention': False,
-            'hidden_dim': 4096,  # fc6 width; the head makes fc7 hidden_dim // 2
             # Deterministic layer name: an unnamed head takes Keras'
             # auto suffix in process-creation order, which breaks the
             # by-name matching that weight transfer relies on.

@@ -7,9 +7,12 @@ from the paper's prose:
    states its padding -- it omits the parameter -- so the port transcribes the
    released Caffe model. That transcription is verified against the paper's own
    Figure 3 label, and the two obvious alternatives are shown NOT to reach it.
-2. **The grouped convolutions really are grouped.** ``conv3`` in particular reads
-   442,752 parameters, not the 885,120 an ungrouped layer would need, and that is
-   the paper's two-GPU split rather than a missing layer.
+2. **conv2, conv4 and conv5 are grouped and conv3 is not.** The paper (Sec. 3.5)
+   connects conv3 "to all kernel maps in the second layer" and splits the other
+   three across its two GPUs; the released Caffe model's ``group: 2`` sits on
+   conv2, conv4 and conv5 only. So ``conv3`` reads 885,120 parameters and
+   ``conv4`` reads 663,936, half of an ungrouped 3x3x384x384. Until 2026-10-14
+   this port grouped conv3 too, and this file pinned that as the paper's split.
 
 The LRN behaviour itself is tested in
 ``tests/test_layers/test_norms/test_local_response_norm.py``; what is pinned here is
@@ -163,22 +166,30 @@ class TestTheStageTableMatchesTheModel:
 
 
 class TestTheConvolutionsAreGrouped:
-    """The paper splits conv2-conv5 across two GPUs; ``groups=2`` is that."""
+    """The paper splits conv2, conv4 and conv5 across two GPUs; ``groups=2`` is that."""
 
-    @pytest.mark.parametrize("name", ["conv2", "conv3", "conv4", "conv5"])
-    def test_conv2_through_conv5_are_split_in_two(self, name):
+    @pytest.mark.parametrize("name", ["conv2", "conv4", "conv5"])
+    def test_conv2_conv4_and_conv5_are_split_in_two(self, name):
         model = AlexNet()
         assert getattr(model, name).groups == 2
 
-    def test_conv1_is_not_grouped(self):
-        """conv1 reads the image directly and was never split."""
-        assert AlexNet().conv1.groups == 1
+    @pytest.mark.parametrize("name", ["conv1", "conv3"])
+    def test_conv1_and_conv3_are_not_grouped(self, name):
+        """conv1 reads the image; conv3 reads every conv2 map (paper Sec. 3.5)."""
+        assert getattr(AlexNet(), name).groups == 1
 
-    def test_grouping_halves_the_parameter_count_of_the_affected_layers(self):
-        """conv3 reads 442,752, not the 885,120 an ungrouped layer would need."""
+    def test_conv3_reads_the_full_conv2_width(self):
+        """conv3 reads 885,120: 384 kernels of 3x3x256, plus bias."""
         model = AlexNet()
         _ = model(_sample(batch=1))
-        assert model.conv3.count_params() == 384 * (256 // 2) * 9 + 384
+        assert model.conv3.kernel.shape == (3, 3, 256, 384)
+        assert model.conv3.count_params() == 384 * 256 * 9 + 384
+
+    def test_grouping_halves_the_parameter_count_of_the_affected_layers(self):
+        """conv4 reads 663,936, not the 1,327,488 an ungrouped layer would need."""
+        model = AlexNet()
+        _ = model(_sample(batch=1))
+        assert model.conv4.count_params() == 384 * (384 // 2) * 9 + 384
 
     def test_conv5_kernel_records_the_halved_input_width(self):
         model = AlexNet()
@@ -417,24 +428,29 @@ class TestGradientsReachEveryStage:
 
 class TestParameterAccounting:
     def test_the_total_matches_the_documented_figure(self):
-        """The docstring prints 50,183,528; this keeps it honest."""
+        """The docstring prints 61,039,976; this keeps it honest.
+
+        Re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 3) with
+        ``create_alexnet().build((None, 227, 227, 3)); count_params()``: the
+        paper's 60,965,224 learnable values plus the two LRN bands' 74,752.
+        """
         model = AlexNet()
         _ = model(_sample(batch=1))
-        assert model.count_params() == 50_183_528
+        assert model.count_params() == 61_039_976
 
     def test_the_breakdown_matches_the_documented_table(self):
         model = AlexNet()
         _ = model(_sample(batch=1))
         assert model.conv1.count_params() == 34_944
         assert model.conv2.count_params() == 307_456
-        assert model.conv3.count_params() == 442_752
+        assert model.conv3.count_params() == 885_120
         assert model.conv4.count_params() == 663_936
         assert model.conv5.count_params() == 442_624
-        # Classification head layers (DenseBlocks + classifier)
+        # fc6, fc7, fc8: the head's two DenseBlocks (no norm) and classifier.
         head = model.classification_head
-        assert head.dense_blocks[0].count_params() == 37_769_216  # dense_block (4096 units)
-        assert head.dense_blocks[1].count_params() == 8_398_848   # dense_block_1 (2048 units)
-        assert head.classifier.count_params() == 2_049_000         # classifier (1000 units)
+        assert head.dense_blocks[0].count_params() == 9216 * 4096 + 4096  # fc6
+        assert head.dense_blocks[1].count_params() == 4096 * 4096 + 4096  # fc7
+        assert head.classifier.count_params() == 4096 * 1000 + 1000       # fc8
 
     def test_ninety_six_percent_of_the_parameters_are_fully_connected(self):
         """The architecture's defining cost, recorded as a number."""
@@ -472,7 +488,9 @@ class TestParameterAccounting:
     def test_the_include_top_model_is_much_smaller(self):
         model = create_alexnet(include_top=False)
         _ = model(_sample(batch=1))
-        assert model.count_params() < 2_000_000
+        # The five convs (2,334,080) plus the two LRN bands (74,752), nothing else:
+        # under 4% of the 61,039,976-parameter headed model.
+        assert model.count_params() == 2_334_080 + 74_752
 
 
 class TestSerialization:
@@ -566,12 +584,12 @@ class TestTheGuardFailsWhenTheArchitectureIsBroken:
     def test_dropping_a_group_would_be_caught(self):
         model = AlexNet()
         _ = model(_sample(batch=1))
-        assert model.conv3.groups == 2
-        grouped = model.conv3.count_params()
+        assert model.conv4.groups == 2
+        grouped = model.conv4.count_params()
         # NOT exactly half: the bias (384) is not halved, so the KERNEL is what
         # halves. Asserting grouped == ungrouped // 2 is off by 192.
-        assert grouped != (384 * 256 * 9 + 384)
-        assert grouped - 384 == (384 * 256 * 9) // 2, (
+        assert grouped != (384 * 384 * 9 + 384)
+        assert grouped - 384 == (384 * 384 * 9) // 2, (
             "grouping halves the kernel; if it did not, the groups=2 claim in "
             "the docstring is wrong"
         )

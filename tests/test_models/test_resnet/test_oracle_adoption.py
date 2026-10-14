@@ -51,9 +51,11 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-10-12 at ``blocks_per_stage=[1, 1]``, ``block_type='basic'``.
-#: Updated for ClassificationHead with DenseBlocks (vision heads factory).
-GF_N_WEIGHTS_BASIC = 28
+#: At ``blocks_per_stage=[1, 1]``, ``block_type='basic'``: 18 backbone trainable
+#: weights plus the GAP + FC head's classifier kernel and bias = 20. Re-derived
+#: by this file's own report at plan-2026-10-14T062616-81938e81 step 3 (D-013),
+#: when the head lost the two DenseBlocks' 8 trainable weights (28 before).
+GF_N_WEIGHTS_BASIC = 20
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -210,9 +212,12 @@ class TestResNetLazyBuildContract:
     ============================  ===========  ==========================
     """
 
-    #: Measured 2026-10-12 on GPU 1; see the class docstring.
-    N_WEIGHTS_BASIC = 44
-    N_WEIGHTS_DEEP_SUPERVISED = 141
+    #: The class docstring's 2026-08-24 figures, valid again since
+    #: plan-2026-10-14T062616-81938e81 step 3 (D-013) made every head GAP + FC:
+    #: each two-DenseBlock head of 2026-10-09..14 carried 12 more weights
+    #: (2 Dense x 2 + 2 BatchNorm x 4), so 44 = 32 + 12 and 141 = 93 + 4 x 12.
+    N_WEIGHTS_BASIC = 32
+    N_WEIGHTS_DEEP_SUPERVISED = 93
 
     @staticmethod
     def _unbuilt_basic() -> ResNet:

@@ -40,8 +40,13 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-10-13 with modular head setup. GF_N_WEIGHTS updated from 18 to 26.
-GF_N_WEIGHTS = 26
+#: 8 trainable weights per stage (conv kernel+bias, BatchNorm gamma+beta, the
+#: channel-attention MLP's 2 bias-free kernels, the spatial conv kernel+bias)
+#: x 2 stages, plus the head's single classifier kernel+bias = 18. Back to the
+#: 2026-08-21 figure since plan-2026-10-14T062616-81938e81 step 3 (D-013) made
+#: the head GAP + FC again; the 26 of 2026-10-13 counted the two DenseBlocks'
+#: 8 extra trainable weights. Re-derived by the test below's own report.
+GF_N_WEIGHTS = 18
 
 #: The CBAM sub-module weight-path fragments that must be PRESENT in the report.
 #: Without this the count above could be met by 18 backbone weights and no

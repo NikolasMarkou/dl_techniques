@@ -29,31 +29,31 @@ this profiler counts the multiply and the add separately, so its "FLOPs" are
 without noticing that is a silent 2x error.
 
 MEASURED, 224x224x3, num_classes=1000, include_top=True, stem_type='imagenet',
-re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 2) with the
+re-derived 2026-10-14 (plan-2026-10-14T062616-81938e81 step 3, D-013) with the
 README's own snippet for the parameter columns and ``profile_flops`` below
-for the FLOPs column, run once per variant on CPU:
+for the FLOPs column, run once per variant on CPU
+(``CUDA_VISIBLE_DEVICES="" python <probe>`` calling
+``ResNet.from_variant(v, num_classes=1000, input_shape=(224, 224, 3))``):
 
     variant     trainable    non-train    count_params()      MACs      FLOPs
-    resnet18   11,470,504       10,368      11,480,872     1.818 G    3.635 G
-    resnet34   21,578,664       17,792      21,596,456     3.669 G    7.338 G
-    resnet50   24,195,240       53,888      24,249,128     4.103 G    8.205 G
-    resnet101  43,187,368      106,112      43,293,480     7.822 G   15.644 G
-    resnet152  58,831,016      152,192      58,983,208    11.543 G   23.085 G
+    resnet18   11,689,512        9,600      11,699,112     1.818 G    3.636 G
+    resnet34   21,797,672       17,024      21,814,696     3.669 G    7.338 G
+    resnet50   25,557,032       53,120      25,610,152     4.104 G    8.208 G
+    resnet101  44,549,160      105,344      44,654,504     7.823 G   15.646 G
+    resnet152  60,192,808      151,424      60,344,232    11.544 G   23.088 G
 
-The head is the shared vision ``ClassificationHead`` (GAP, a 256-wide and a
-128-wide ``DenseBlock`` with BatchNorm, a linear ``Dense(1000)``), not
-torchvision's single ``Dense(1000)``. So the trainable column is NOT the
-torchvision figure: it is 219,008 lower for the basic-block variants (512
-features into the head) and 1,361,792 lower for the bottleneck variants (2048),
-the difference between torchvision's ``fc`` and this head. Keras counts BatchNorm's
-``moving_mean``/``moving_variance`` and PyTorch does not; the head's two
-BatchNorms add 768 of them to the non-trainable column.
+The head is the shared vision ``ClassificationHead`` configured as the paper's
+(``block_dims=()``: GAP, then one linear ``Dense(1000)``), so the trainable
+column IS the torchvision figure, to the parameter: 11,689,512 / 21,797,672 /
+25,557,032 / 44,549,160 / 60,192,808. That is an external reference, not a
+self-capture. Keras counts BatchNorm's ``moving_mean``/``moving_variance`` and
+PyTorch does not; that is the non-trainable column.
 
-The FLOPs column moved by exactly -5,000 on 2026-10-14: the model now returns
-the head's logits, so the 1000-wide softmax the head computes for its
-``'probabilities'`` key is no longer on the output path and the frozen graph
-prunes it. resnet18 3,635,296,112 -> 3,635,291,112, resnet50 8,205,465,456 ->
-8,205,460,456.
+History. Between 2026-10-09 and 2026-10-14 the head carried two BatchNorm'd
+``DenseBlock``s (256 then 128 wide), which put the trainable column 219,008
+(basic) and 1,361,792 (bottleneck) below torchvision. The FLOPs pins then read
+3,635,291,112 and 8,205,460,456; they are now 3,635,727,976 and 8,208,182,888
+(the two hidden Dense layers are gone and the wider classifier is back).
 
 RED PROOFS -- three named injections, ACTUAL observed text.
 
@@ -109,29 +109,28 @@ from dl_techniques.models.vision.resnet import ResNet
 
 INPUT_SHAPE = (224, 224, 3)
 
-# Trainable-parameter counts with the shared ClassificationHead (see the module
-# docstring for why they are not the torchvision figures).
+# Trainable-parameter counts: torchvision's published figures, which this
+# model reproduces exactly with its GAP + fc head (see the module docstring).
 EXPECTED_TRAINABLE = {
-    "resnet18": 11_470_504,
-    "resnet34": 21_578_664,
-    "resnet50": 24_195_240,
-    "resnet101": 43_187_368,
-    "resnet152": 58_831_016,
+    "resnet18": 11_689_512,
+    "resnet34": 21_797_672,
+    "resnet50": 25_557_032,
+    "resnet101": 44_549_160,
+    "resnet152": 60_192_808,
 }
 EXPECTED_NON_TRAINABLE = {
-    "resnet18": 10_368,
-    "resnet34": 17_792,
-    "resnet50": 53_888,
-    "resnet101": 106_112,
-    "resnet152": 152_192,
+    "resnet18": 9_600,
+    "resnet34": 17_024,
+    "resnet50": 53_120,
+    "resnet101": 105_344,
+    "resnet152": 151_424,
 }
 # total_float_ops (2 x MACs), as printed in README section 17. Re-derived
-# 2026-10-14 by `profile_flops(ResNet.from_variant(v, num_classes=1000,
-# input_shape=INPUT_SHAPE), INPUT_SHAPE)` on CPU: the logits output prunes the
-# head's softmax (-5,000 each).
+# 2026-10-14 (step 3) by `profile_flops(ResNet.from_variant(v, num_classes=1000,
+# input_shape=INPUT_SHAPE), INPUT_SHAPE)` on CPU.
 EXPECTED_FLOPS = {
-    "resnet18": 3_635_291_112,
-    "resnet50": 8_205_460_456,
+    "resnet18": 3_635_727_976,
+    "resnet50": 8_208_182_888,
 }
 
 

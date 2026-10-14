@@ -50,7 +50,7 @@ is descriptive only — the factory never reads it.
 | `DetectionHead` | `num_classes` (required), `num_anchors=9`, `bbox_dims=4` |
 | `SegmentationHead` | `num_classes` (required), `upsampling_factor=4`, `use_skip_connections=True` |
 | `InstanceSegmentationHead` | `num_classes` (required), `num_instances=100`, `mask_size=(28, 28)` |
-| `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'` |
+| `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'`, `block_dims=None` (hidden `DenseBlock` widths; `None` is `(hidden_dim, hidden_dim // 2)`, `()` is none), `pooled_normalization_type=None` (a norm on the pooled vector), `kernel_initializer='glorot_uniform'`, `bias_initializer='zeros'`, `kernel_regularizer=None` (all three reach every `Dense`, the classifier included) |
 | `DepthEstimationHead` | `output_channels=1`, `min_depth=0.1`, `max_depth=100.0`, `use_log_depth=True` |
 | `EnhancementHead` | `output_channels=3`, `scale_factor=1` |
 | `MultiTaskHead` | `task_configs` (required dict), `shared_backbone_dim=256`, `use_task_specific_attention=True` |

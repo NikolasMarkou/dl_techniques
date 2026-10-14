@@ -127,7 +127,7 @@ class ConvNeXtV2(keras.Model):
                         ▼
         ┌──────────────────────────────────────┐
         │  ClassificationHead (include_top):   │
-        │  GAP → 2×DenseBlock → Dense, logits  │
+        │  GAP → LayerNorm → Dense, logits     │
         └───────────────┬──────────────────────┘
                         │
                         ▼
@@ -176,12 +176,12 @@ class ConvNeXtV2(keras.Model):
     :param activation: Activation used inside each block, resolved through
         :func:`deserialize_activation`. Defaults to ``"gelu"``.
     :type activation: str
-    :param use_bias: Whether convolutions and the classifier use a bias, and
-        whether every LayerNormalization centers. Defaults to True.
+    :param use_bias: Whether convolutions use a bias, and whether every
+        backbone LayerNormalization centers. The head's classifier and its
+        pooled LayerNorm always carry a bias, as the reference's do. Defaults to True.
     :type use_bias: bool
     :param kernel_regularizer: Optional regularizer applied to the stem, the
-        downsampling layers and the blocks. The ``ClassificationHead`` takes no
-        regularizer, so the head's dense kernels are not regularized.
+        downsampling layers, the blocks and the head's classifier kernel.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param dropout_rate: Dropout rate applied within blocks. Defaults to 0.0.
     :type dropout_rate: float
@@ -211,7 +211,8 @@ class ConvNeXtV2(keras.Model):
     :type input_shape: Tuple[int, ...]
     :param head_config_overrides: Optional dict merged into the
         ``ClassificationHead`` configuration (e.g.,
-        ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). ``name``,
+        ``{'block_dims': (512,), 'dropout_rate': 0.2}`` adds a hidden
+        block). ``name``,
         ``num_classes`` and ``task_type`` are owned by the model and raise
         ``ValueError``. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
@@ -267,7 +268,15 @@ class ConvNeXtV2(keras.Model):
     # Architecture constants
     LAYERNORM_EPSILON = 1e-6
     STEM_INITIALIZER = "truncated_normal"
-    HEAD_INITIALIZER = "truncated_normal"
+    # DECISION plan-2026-10-14T062616-81938e81/D-013
+    # The reference initializes the head Linear with trunc_normal_(std=.02).
+    # Do NOT revert to the "truncated_normal" string: Keras' default stddev is
+    # 0.05. A config dict, not an instance: a shared instance replays one draw.
+    # See decisions.md D-013.
+    HEAD_INITIALIZER: Dict[str, Any] = {
+        "class_name": "TruncatedNormal",
+        "config": {"mean": 0.0, "stddev": 0.02},
+    }
 
     def __init__(
             self,
@@ -494,6 +503,12 @@ class ConvNeXtV2(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'avg',  # GAP for ConvNeXt
                 'use_attention': False,
+                # The reference head, as in convnext_v1._build_head: GAP,
+                # LayerNorm(eps=1e-6), Linear, no hidden block.
+                'block_dims': (),
+                'pooled_normalization_type': 'layer_norm',
+                'kernel_initializer': self.HEAD_INITIALIZER,
+                'kernel_regularizer': self.kernel_regularizer,
                 # See convnext_v1._build_head: an unnamed head takes a
                 # process-order-dependent suffix, which silently defeats the
                 # by-name matching that weight transfer relies on.

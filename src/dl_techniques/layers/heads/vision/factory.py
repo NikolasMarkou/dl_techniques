@@ -57,7 +57,7 @@ is ``softmax(out['logits'])``. Compile a model that returns the logits with
 
 import keras
 from keras import layers, ops
-from typing import Dict, List, Optional, Union, Tuple, Any, Literal
+from typing import Dict, List, Optional, Union, Tuple, Any, Literal, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -73,6 +73,7 @@ from ...attention.factory import (
     assemble_attention_config,
 )
 from ...norms import create_normalization_layer, NormalizationType
+from dl_techniques.initializers import clone_initializer
 from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -1784,9 +1785,19 @@ class ClassificationHead(BaseVisionHead):
     """
     One label for a whole image.
 
-    Spatial features are collapsed to one vector per image, pushed through
-    two dense blocks, and scored by a linear ``Dense``. Use this for image
-    classification.
+    Spatial features are collapsed to one vector per image, optionally
+    normalized, pushed through ``len(block_dims)`` dense blocks, and scored by
+    a linear ``Dense``. Use this for image classification.
+
+    The defaults (``block_dims=None``) give two hidden blocks, ``hidden_dim``
+    then ``hidden_dim // 2`` wide. A model that reproduces a paper sets the
+    shape itself: ``block_dims=()`` is pool then linear classifier (ResNet's
+    GAP + FC), ``pooled_normalization_type='layer_norm'`` with
+    ``block_dims=()`` is ConvNeXt's GAP + LayerNorm + FC, and
+    ``block_dims=(4096, 4096)`` with ``normalization_type=None`` is AlexNet's
+    fc6/fc7. ``kernel_initializer``, ``bias_initializer`` and
+    ``kernel_regularizer`` reach every ``Dense`` the head builds, the
+    classifier included, so a model's own knobs govern its head.
 
     This head builds and applies ``attention`` (when ``use_attention`` is
     set) and nothing else from :class:`BaseVisionHead`. Its
@@ -1816,7 +1827,12 @@ class ClassificationHead(BaseVisionHead):
                  └───────┬────────────┘
                          ▼ (B, C) or (B, H*W*C)
         ┌─────────────────────────────────┐
-        │ dense_blocks: 2 x DenseBlock    │
+        │ pooled_norm          (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ dense_blocks: one DenseBlock    │
+        │ per block_dims entry (0 or more)│
         └────────────────┬────────────────┘
                          ▼
         ┌─────────────────────────────────┐
@@ -1858,13 +1874,38 @@ class ClassificationHead(BaseVisionHead):
         ``use_global_pooling`` is set: ``'avg'`` or ``'max'`` pooling for 4D
         feature maps, ``'cls_token'`` (position 0) for 3D sequence inputs.
     :type pooling_type: Literal['avg', 'max', 'cls_token']
+    :param block_dims: Width of each hidden ``DenseBlock``, in order. ``None``
+        means ``(hidden_dim, hidden_dim // 2)``. ``()`` builds no hidden
+        block, so the pooled vector goes straight to the classifier. Each
+        block is Dense, then ``normalization_type`` (none when that is
+        ``None``), ``activation_type`` and ``dropout_rate``.
+    :type block_dims: Optional[Sequence[int]]
+    :param pooled_normalization_type: Normalization applied to the pooled
+        (or flattened) vector before the first block or the classifier.
+        ``None`` (the default) builds none.
+    :type pooled_normalization_type: Optional[NormalizationType]
+    :param kernel_initializer: Initializer for every ``Dense`` kernel in the
+        head, the classifier included. Each ``Dense`` gets its own
+        ``clone_initializer`` copy, so no two kernels replay one draw.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+    :param bias_initializer: Initializer for every ``Dense`` bias in the head.
+    :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for every ``Dense`` kernel in the
+        head, the classifier included. ``None`` adds no loss.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :raises ValueError: If ``block_dims`` holds a width that is not a
+        positive integer.
 
     :ivar pooling: Global pooling layer, built only when
         ``use_global_pooling`` is set.
     :vartype pooling: keras.layers.Layer
-    :ivar dense_blocks: Two ``DenseBlock`` layers, ``hidden_dim`` wide then
-        ``hidden_dim // 2`` wide.
+    :ivar pooled_norm: Normalization of the pooled vector, built only when
+        ``pooled_normalization_type`` is set.
+    :vartype pooled_norm: keras.layers.Layer
+    :ivar dense_blocks: One ``DenseBlock`` per ``block_dims`` entry, named
+        ``dense_block``, ``dense_block_1``, ... in order.
     :vartype dense_blocks: List[DenseBlock]
     :ivar classifier: Output ``Dense(num_classes)``, linear (no activation).
     :vartype classifier: keras.layers.Dense
@@ -1875,6 +1916,11 @@ class ClassificationHead(BaseVisionHead):
             num_classes: int,
             use_global_pooling: bool = True,
             pooling_type: Literal['avg', 'max', 'cls_token'] = 'avg',
+            block_dims: Optional[Sequence[int]] = None,
+            pooled_normalization_type: Optional[NormalizationType] = None,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -1886,17 +1932,56 @@ class ClassificationHead(BaseVisionHead):
         :type use_global_pooling: bool
         :param pooling_type: ``'avg'``, ``'max'`` or ``'cls_token'``.
         :type pooling_type: Literal['avg', 'max', 'cls_token']
+        :param block_dims: Hidden block widths; ``None`` is
+            ``(hidden_dim, hidden_dim // 2)``, ``()`` is none.
+        :type block_dims: Optional[Sequence[int]]
+        :param pooled_normalization_type: Normalization of the pooled vector,
+            or ``None``.
+        :type pooled_normalization_type: Optional[NormalizationType]
+        :param kernel_initializer: Initializer for every ``Dense`` kernel.
+        :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+        :param bias_initializer: Initializer for every ``Dense`` bias.
+        :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+        :param kernel_regularizer: Regularizer for every ``Dense`` kernel.
+        :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If a ``block_dims`` entry is not a positive int.
         """
         super().__init__(**kwargs)
+
+        if block_dims is not None:
+            block_dims = tuple(block_dims)
+            bad = [d for d in block_dims
+                   if isinstance(d, bool) or not isinstance(d, int) or d <= 0]
+            if bad:
+                raise ValueError(
+                    f"block_dims must hold positive integers, got {block_dims}"
+                )
 
         self.num_classes = num_classes
         self.use_global_pooling = use_global_pooling
         self.pooling_type = pooling_type
+        self.block_dims = block_dims
+        self.pooled_normalization_type = pooled_normalization_type
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._create_classification_layers()
+
+    def _resolved_block_dims(self) -> Tuple[int, ...]:
+        """
+        The hidden block widths this head builds.
+
+        :return: ``block_dims``, or ``(hidden_dim, hidden_dim // 2)`` when it
+            is ``None``.
+        :rtype: Tuple[int, ...]
+        """
+        if self.block_dims is None:
+            return (self.hidden_dim, self.hidden_dim // 2)
+        return self.block_dims
 
     def _create_common_layers(self) -> None:
         """
@@ -1920,10 +2005,12 @@ class ClassificationHead(BaseVisionHead):
 
     def _create_classification_layers(self) -> None:
         """
-        Build the pooling layer, the dense blocks and the classifier.
+        Build the pooling layer, the pooled norm, the dense blocks and the
+        classifier.
 
-        Pooling is built only when ``use_global_pooling`` is set. The two
-        dense blocks are ``hidden_dim`` and ``hidden_dim // 2`` wide.
+        Pooling is built only when ``use_global_pooling`` is set, the pooled
+        norm only when ``pooled_normalization_type`` is set. One dense block
+        is built per resolved ``block_dims`` entry.
 
         For ``pooling_type='cls_token'`` (used with 3D sequence inputs like
         Vision Transformer outputs), no pooling layer is built; instead the
@@ -1941,6 +2028,12 @@ class ClassificationHead(BaseVisionHead):
                 self.pooling = layers.GlobalMaxPooling2D()
         # For 'cls_token', no pooling layer is built; extraction happens in call()
 
+        if self.pooled_normalization_type is not None:
+            self.pooled_norm = create_normalization_layer(
+                self.pooled_normalization_type,
+                name='pooled_norm'
+            )
+
         # Dense layers for classification.
         #
         # Named explicitly. `DenseBlock` builds a `Dense` (plus a norm) inside
@@ -1951,27 +2044,36 @@ class ClassificationHead(BaseVisionHead):
         # `dense_block`, and every weight path under them differed. Naming them
         # makes the path stable across a save/load, which is what by-name weight
         # transfer and any weight-path-keyed comparison rely on.
+        #
+        # DECISION plan-2026-10-14T062616-81938e81/D-013
+        # Every Dense here, the classifier included, takes the head's own
+        # initializers and regularizer, each kernel through a fresh
+        # clone_initializer() copy. Do NOT drop them back to the Dense
+        # defaults: the consuming model's kernel_initializer and
+        # kernel_regularizer would then silently stop at its backbone. Do NOT
+        # hand one initializer instance to every Dense: a seedless Keras 3
+        # initializer replays one draw at every site. See decisions.md D-013.
         self.dense_blocks = [
             DenseBlock(
-                units=self.hidden_dim,
+                units=units,
                 normalization_type=self.normalization_type,
                 activation_type=self.activation_type,
                 dropout_rate=self.dropout_rate,
-                name='dense_block'
-            ),
-            DenseBlock(
-                units=self.hidden_dim // 2,
-                normalization_type=self.normalization_type,
-                activation_type=self.activation_type,
-                dropout_rate=self.dropout_rate,
-                name='dense_block_1'
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                name='dense_block' if index == 0 else f'dense_block_{index}'
             )
+            for index, units in enumerate(self._resolved_block_dims())
         ]
 
         # Final classifier: linear. The softmax for 'probabilities' is
         # applied in call(), so 'logits' stays the pre-softmax score.
         self.classifier = layers.Dense(
             units=self.num_classes,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
+            kernel_regularizer=self.kernel_regularizer,
             name='classifier'
         )
 
@@ -2007,6 +2109,9 @@ class ClassificationHead(BaseVisionHead):
                 flat = None if (dim is None or flat is None) else flat * dim
             shape = (shape[0], flat)
 
+        if self.pooled_normalization_type is not None:
+            self.pooled_norm.build(shape)
+
         for dense_block in self.dense_blocks:
             dense_block.build(shape)
             shape = tuple(dense_block.compute_output_shape(shape))
@@ -2022,7 +2127,8 @@ class ClassificationHead(BaseVisionHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Pool or flatten, run the dense blocks, then classify.
+        Pool or flatten, apply the pooled norm if built, run the dense
+        blocks, then classify.
 
         No FFN runs here, whatever ``use_ffn`` says; none is built.
 
@@ -2052,6 +2158,9 @@ class ClassificationHead(BaseVisionHead):
                 x = self.pooling(x)
         else:
             x = layers.Flatten()(x)
+
+        if self.pooled_normalization_type is not None:
+            x = self.pooled_norm(x, training=training)
 
         # Dense layers
         for dense_block in self.dense_blocks:
@@ -2095,15 +2204,29 @@ class ClassificationHead(BaseVisionHead):
         """
         Return the constructor arguments for serialization.
 
-        :return: Config dict carrying ``num_classes``, ``use_global_pooling``
-            and ``pooling_type``, on top of the base configuration.
+        :return: Config dict carrying ``num_classes``, ``use_global_pooling``,
+            ``pooling_type``, ``block_dims``, ``pooled_normalization_type``
+            and the serialized initializers and regularizer, on top of the
+            base configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
             'use_global_pooling': self.use_global_pooling,
-            'pooling_type': self.pooling_type
+            'pooling_type': self.pooling_type,
+            'block_dims': (
+                None if self.block_dims is None else list(self.block_dims)
+            ),
+            'pooled_normalization_type': self.pooled_normalization_type,
+            'kernel_initializer': keras.initializers.serialize(
+                self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(
+                self.bias_initializer),
+            'kernel_regularizer': (
+                keras.regularizers.serialize(self.kernel_regularizer)
+                if self.kernel_regularizer is not None else None
+            ),
         })
         return config
 

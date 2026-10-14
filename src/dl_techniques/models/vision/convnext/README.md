@@ -58,16 +58,21 @@ Input (H, W, 3)
    ├─► Stage 3: N3 x ConvNeXt block                              (H/S⁴, W/S⁴, D3)
    │
    └─► Head (include_top): ClassificationHead
-         GlobalAveragePooling -> DenseBlock(256) -> DenseBlock(128)
+         GlobalAveragePooling -> LayerNorm(eps 1e-6)
          -> Dense(num_classes), linear                           (B, num_classes) logits
 ```
 
-The head is the shared vision `ClassificationHead` (each `DenseBlock` is Dense, LayerNorm,
-GELU), not the paper's GAP -> LayerNorm -> Dense. Its last layer is linear, so the model returns
+The head is the shared vision `ClassificationHead` configured as the reference's
+(`facebookresearch/ConvNeXt` and `ConvNeXt-V2`, `self.norm(x.mean([-2, -1]))` then
+`self.head`): GAP, a LayerNorm on the pooled vector (`pooled_normalization_type='layer_norm'`,
+epsilon 1e-6), then a linear `Dense(num_classes)` with no hidden block (`block_dims=()`). The
+classifier kernel draws from `TruncatedNormal(stddev=0.02)` (`HEAD_INITIALIZER`, the reference's
+`trunc_normal_(std=.02)`) and takes the model's `kernel_regularizer`. The model returns
 **logits**: compile with `from_logits=True` and apply `keras.ops.softmax` to read probabilities.
-`head_config_overrides` (for example `{'hidden_dim': 512}`) resizes it; `name`, `num_classes`
-and `task_type` are owned by the model and raise `ValueError`. Archives saved before 2026-10-14,
-when the head still ended in a softmax, are not supported.
+`head_config_overrides` (for example `{'block_dims': (512,)}`) reshapes it; `name`,
+`num_classes` and `task_type` are owned by the model and raise `ValueError`. Archives saved
+before 2026-10-14 (a softmax head, or the two-`DenseBlock` head) do not load and are not
+supported.
 
 `S` is the `strides` argument, default 4. Note the **divergence from the paper**: the inter-stage
 downsamples here reuse the stem stride, so with the default `S = 4` a four-stage model reduces

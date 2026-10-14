@@ -96,8 +96,14 @@ class TestShippedVariantsAreUnaffected:
             "checkpoint's stem kernel shape depends on this"
         )
 
+    # count_params() at num_classes=3 with the paper's GAP + FC head
+    # (plan-2026-10-14T062616-81938e81 step 3, D-013): the 1000-class figures
+    # of README section 17 (11,699,112 / 21,814,696 / 25,610,152) minus the
+    # 1000-wide fc (513,000 basic, 2,049,000 bottleneck) plus the 3-wide one
+    # (1,539 / 6,147). The two-DenseBlock head of 2026-10-09..14 read
+    # 11,352,259 / 21,467,843 / 24,120,515.
     @pytest.mark.parametrize("variant,params", [
-        ("resnet18", 11352259), ("resnet34", 21467843), ("resnet50", 24120515),
+        ("resnet18", 11_187_651), ("resnet34", 21_303_235), ("resnet50", 23_567_299),
     ])
     def test_the_parameter_count_is_unchanged(self, variant, params, images):
         model = ResNet.from_variant(variant, num_classes=3,
