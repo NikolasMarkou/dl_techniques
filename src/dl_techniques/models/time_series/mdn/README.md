@@ -47,10 +47,10 @@ Consider `y = x * sin(x)` and then invert it: for one value of `y` there are man
 ┌─────────────────────────────────────────────────────────────┐
 │  One input, several correct outputs                         │
 │                                                             │
-│  MSE regression:  predicts the mean of the modes -> lands    │
-│                   in a gap where no training point exists.   │
-│  Fixed-variance:  reports one uncertainty everywhere, even   │
-│                   where the data are clean.                  │
+│  MSE regression:  predicts the mean of the modes -> lands   │
+│                   in a gap where no training point exists.  │
+│  Fixed-variance:  reports one uncertainty everywhere, even  │
+│                   where the data are clean.                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
