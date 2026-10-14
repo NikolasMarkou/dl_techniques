@@ -1,14 +1,17 @@
 """RADConvNet: a ConvNeXt-shaped classification backbone built on RAD-Conv.
 
-Swaps ConvNeXt's fixed depthwise K×K convolution for
-:class:`~dl_techniques.layers.conv_blocks.rad_conv.RADConv2D` -- an
-axis-aligned, input-adaptive region-integration operator (Maleki & Imani,
-2025) -- as the spatial mixer inside each block, keeping the surrounding
-ConvNeXt-style scaffold (patchify stem, staged blocks, LayerNorm +
-strided-conv downsampling, inverted-bottleneck MLP, GAP + Dense head)
-unchanged. Each block is transform-only (returns ``F(x)``); the residual add
-is owned by :meth:`RADConvNet.call`, matching the house convention set by
-``ConvNextV1Block``/``ConvNeXtV1``.
+Defines :class:`RADConvNet`, four stages of blocks with a patchify stem and an
+optional classification head, plus the :func:`create_rad_convnet` factory. The
+spatial mixer inside each block is
+:class:`~dl_techniques.layers.conv_blocks.rad_conv.RADConv2D` rather than ConvNeXt's
+fixed depthwise K x K convolution: it predicts, per kernel element and channel group,
+four boundary offsets that define an axis-aligned integration rectangle, so even a
+``rad_kernel_size=1`` block can aggregate over a receptive field spanning the whole
+feature map. Everything around it stays ConvNeXt-shaped: patchify stem, staged
+blocks, LayerNorm plus strided-conv downsampling, inverted-bottleneck MLP, and a
+GAP + Dense head. Each block is transform-only and returns ``F(x)``; the residual add
+belongs to :meth:`RADConvNet.call`. Because that integration costs more per channel
+than a depthwise convolution, the default widths are smaller than ConvNeXt's.
 
 References:
     - Maleki & Imani, 2025. Region-Aware Deformable Convolutions.
@@ -35,55 +38,125 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.rad_convnet.model")
 class RADConvNet(keras.Model):
-    """RADConvNet: ConvNeXt-style backbone with RAD-Conv spatial mixing.
+    """Classify images with RAD-Conv blocks in a ConvNeXt-shaped pyramid.
+
+    The stem patchifies by ``strides``, each later stage is preceded by a
+    LayerNorm and a 2x2 stride-2 convolution, and the head pools, normalizes and
+    projects. Height and width should divide by ``strides * 2 ** (stages - 1)``,
+    since the stem convolution uses valid padding for any stride above 1.
 
     Architecture:
 
     .. code-block:: text
 
-        Input [B, H, W, C_in]
-              │
-              ▼
-        Stem: Conv S×S /S -> LayerNorm    (S = strides, patchify)
-              │
-              ▼
-        Stage 0: D0 x Block(dims[0])
-              │
-        Downsample: LayerNorm -> Conv 2x2 /2
-              │
-        Stage 1: D1 x Block(dims[1])
-              │
-             ...
-              │
-        GAP -> LayerNorm -> Dense(num_classes)   (if include_top)
+        input [B, H, W, C_in]
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ stem_conv  S x S / S  │
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ stem_norm             │
+        └───────────────────────┘
+                 │  [B, H/S, W/S, dims[0]]
+                 ▼
+        ┌───────────────────────┐
+        │ stage 0  blocks       │  depths[0] blocks
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ downsample_norm       │
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ downsample_conv 2x2   │  stride 2, dims[i]
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ stage i  blocks       │  depths[i] blocks
+        └───────────────────────┘
+                 │  one downsample before every later stage
+                 ▼
+           ┌─────┴──────────┐
+           ▼                ▼
+        include_top        else
+           │                │
+           ▼                ▼
+        gap, head_norm      features [B, H', W', dims[-1]]
+           │
+           ├──► num_classes > 0  ──► logits [B, num_classes]
+           └──► num_classes == 0 ──► [B, dims[-1]]
 
-    Block internals (transform-only, returns F(x); residual owned by `call`):
+    Block:
 
     .. code-block:: text
 
-        x -> RADConv2D(K, groups) -> LayerNorm
-              -> Dense 1x1 (4x expand) -> activation -> Dense 1x1 (reduce)
-              -> F(x)
+        x
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ rad_conv  RADConv2D   │
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ norm  layernorm       │
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ expand  dense 4x      │
+        └───────────────────────┘
+                 │
+                 ▼
+              activation
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ dropout               │  (dropout_rate > 0 only)
+        └───────────────────────┘
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ reduce  dense -> dim  │
+        └───────────────────────┘
+                 │
+                 ▼
+               F(x)
 
-    RAD-Conv predicts, per kernel element and channel group, four boundary
-    offsets that define an axis-aligned integration rectangle -- so even a
-    ``rad_kernel_size=1`` block can aggregate over a receptive field that
-    spans the whole feature map, unlike a standard 1x1 convolution.
+    The block returns F(x) and ``call`` adds the residual.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant  depths        dims
+        tiny     [2, 2, 4, 2]  [32, 64, 128, 256]
+        small    [3, 3, 9, 3]  [48, 96, 192, 384]
+        base     [3, 3, 9, 3]  [64, 128, 256, 512]
+
+    The constructor's own defaults match tiny.
 
     :param num_classes: Number of output classes; only used when
         ``include_top=True``. ``0`` returns pooled, normalized features.
         Defaults to ``1000``.
     :type num_classes: int
     :param depths: Number of blocks per stage. ``None`` resolves to
-        ``[2, 2, 4, 2]``.
+        ``[2, 2, 4, 2]``. Must have the same length as ``dims``, which sets the
+        number of stages.
     :type depths: Optional[List[int]]
     :param dims: Channel count per stage. ``None`` resolves to
-        ``[32, 64, 128, 256]`` -- deliberately smaller than ConvNeXt's
-        ``[96, 192, 384, 768]`` defaults: RAD-Conv's exact region integration
-        is materially more expensive per channel than a depthwise conv.
+        ``[32, 64, 128, 256]``, smaller than ConvNeXt's
+        ``[96, 192, 384, 768]`` because RAD-Conv's exact region integration
+        costs more per channel than a depthwise convolution.
     :type dims: Optional[List[int]]
-    :param rad_kernel_size: RAD-Conv kernel size (number of kernel elements
-        ``K = kh * kw``) used inside every block. Defaults to ``3``.
+    :param rad_kernel_size: RAD-Conv kernel size used inside every block, an int
+        or an ``(kh, kw)`` pair. Defaults to ``3``.
     :type rad_kernel_size: Union[int, Tuple[int, int]]
     :param rad_groups: RAD-Conv channel groups used inside every block.
         Defaults to ``1``.
@@ -91,26 +164,27 @@ class RADConvNet(keras.Model):
     :param mlp_ratio: Inverted-bottleneck expansion ratio of the pointwise
         MLP following each RAD-Conv. Defaults to ``4``.
     :type mlp_ratio: int
-    :param activation: Activation used inside each block's MLP. Defaults to
-        ``"gelu"``.
+    :param activation: Activation used inside each block's MLP. One shared
+        ``Activation`` layer serves every block. Defaults to ``"gelu"``.
     :type activation: str
     :param use_bias: Whether convolutions/dense layers use a bias and whether
         LayerNormalization centers. Defaults to ``True``.
     :type use_bias: bool
     :param dropout_rate: Dropout rate applied after the MLP's expansion
-        activation. Defaults to ``0.0``.
+        activation. At ``0.0`` no Dropout layer is created. Defaults to ``0.0``.
     :type dropout_rate: float
     :param strides: Patchify factor, used as both kernel size and stride of
-        the stem convolution and of every inter-stage downsample. Defaults
-        to ``4``.
+        the stem convolution. The inter-stage downsamples are always 2x2 with
+        stride 2. Defaults to ``4``.
     :type strides: int
     :param include_top: Whether to include the GAP + LayerNorm + Dense head.
         Defaults to ``True``.
     :type include_top: bool
-    :param input_shape: ``(height, width, channels)``, excluding batch.
+    :param input_shape: ``(height, width, channels)``, excluding batch. Stored
+        for serialization; the graph is built from the shape ``build`` receives.
         ``None`` resolves to ``(None, None, 3)``.
     :type input_shape: Tuple[int, ...]
-    :param kwargs: Additional keyword arguments for the ``keras.Model`` base
+    :param **kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
     :raises ValueError: If ``depths``/``dims`` differ in length, ``strides``
@@ -199,7 +273,11 @@ class RADConvNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the patchify stem: strided conv + LayerNorm."""
+        """Build the patchify stem: strided conv + LayerNorm.
+
+        Padding is valid for any stride above 1, so the stem divides the input
+        rather than padding it.
+        """
         self.stem_conv = keras.layers.Conv2D(
             filters=self.dims[0],
             kernel_size=self.strides,
@@ -214,7 +292,10 @@ class RADConvNet(keras.Model):
         )
 
     def _build_downsample_layer(self, stage_idx: int) -> None:
-        """Build the LayerNorm + strided-conv downsample feeding ``stage_idx``."""
+        """Build the LayerNorm + strided-conv downsample feeding ``stage_idx``.
+
+        :param stage_idx: Index of the stage this downsample feeds, 1 or above.
+        """
         norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
@@ -234,9 +315,11 @@ class RADConvNet(keras.Model):
     def _build_stage(self, stage_idx: int) -> None:
         """Build the blocks of stage ``stage_idx``.
 
-        Each block is ``RADConv2D -> LayerNorm -> Dense(4x) -> activation
-        -> [Dropout] -> Dense(reduce)``, transform-only -- the residual add
-        happens in :meth:`call`.
+        Each block is held as a role-keyed dict: ``rad_conv``, ``norm``,
+        ``expand``, ``reduce`` and ``dropout``, which is ``None`` unless
+        ``dropout_rate`` is above 0.
+
+        :param stage_idx: Index of the stage to build.
         """
         dim = self.dims[stage_idx]
         blocks = []
@@ -270,7 +353,10 @@ class RADConvNet(keras.Model):
         self.stages_list.append(blocks)
 
     def _build_head(self) -> None:
-        """Build the GAP + LayerNorm + Dense classification head."""
+        """Build the GAP + LayerNorm + Dense classification head.
+
+        The Dense classifier exists only when ``num_classes`` is above 0.
+        """
         self.gap = keras.layers.GlobalAveragePooling2D(name="gap")
         self.head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON, center=self.use_bias, scale=True, name="head_norm"
@@ -306,11 +392,12 @@ class RADConvNet(keras.Model):
         inputs: "keras.KerasTensor",
         training: Optional[bool] = None,
     ) -> "keras.KerasTensor":
-        """Forward pass.
+        """Run the stem, the stages with their downsamples, and the optional head.
 
         :param inputs: ``(batch_size, height, width, channels)`` input.
         :type inputs: keras.KerasTensor
-        :param training: Whether the model is in training mode.
+        :param training: Whether the model is in training mode. Reaches the
+            block dropout only.
         :type training: Optional[bool]
         :return: Output tensor; shape per the class docstring.
         :rtype: keras.KerasTensor
@@ -344,11 +431,12 @@ class RADConvNet(keras.Model):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape.
+        """Compute the output shape by walking the stem, stages and head.
 
         :param input_shape: Input shape, channels-last.
         :type input_shape: tuple
-        :return: Output shape.
+        :return: Output shape, matching whichever branch of the class
+            docstring's Output shape applies.
         :rtype: tuple
         """
         current_shape = input_shape
@@ -422,11 +510,12 @@ class RADConvNet(keras.Model):
         :param input_shape: ``(height, width, channels)``. Defaults to
             ``(None, None, 3)``.
         :type input_shape: Tuple[int, ...]
-        :param kwargs: Additional keyword args forwarded to the constructor,
+        :param **kwargs: Additional keyword args forwarded to the constructor,
             overriding any variant default they name.
         :return: A configured ``RADConvNet``.
         :rtype: RADConvNet
-        :raises ValueError: If ``variant`` is not recognized.
+        :raises ValueError: If ``variant`` is not recognized, or a resolved
+            argument fails the constructor's checks.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -458,9 +547,11 @@ def create_rad_convnet(
     :param input_shape: ``(height, width, channels)``. Defaults to
         ``(None, None, 3)``.
     :type input_shape: Optional[Tuple[int, ...]]
-    :param kwargs: Additional keyword arguments forwarded to the constructor.
+    :param **kwargs: Additional keyword arguments forwarded to the constructor.
     :return: A configured ``RADConvNet``.
     :rtype: RADConvNet
+    :raises ValueError: If ``variant`` is unknown, or a forwarded argument is
+        invalid.
     """
     return RADConvNet.from_variant(
         variant, num_classes=num_classes, input_shape=input_shape, **kwargs
