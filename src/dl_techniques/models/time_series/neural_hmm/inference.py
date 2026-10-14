@@ -32,7 +32,7 @@ References:
       Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
 """
 
-from typing import Tuple
+from typing import Any, Callable, Tuple
 
 import keras
 
@@ -40,7 +40,7 @@ import keras
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.dtype_policy import accumulation_dtype
+from dl_techniques.utils.dtype_policy import accumulation_dtype, mask_sentinel
 
 # ---------------------------------------------------------------------
 
@@ -63,7 +63,7 @@ class LogSpaceOutputSpec:
     float16 for log-probabilities that ``call()`` returns in float32 (D-010).
     """
 
-    def compute_output_spec(self, *args, **kwargs):
+    def compute_output_spec(self, *args: Any, **kwargs: Any) -> Any:
         """Return Keras' output spec with each tensor in the accumulation dtype.
 
         :param args: The layer's call arguments (symbolic tensors).
@@ -78,7 +78,12 @@ class LogSpaceOutputSpec:
 # ---------------------------------------------------------------------
 
 
-def _prepare(log_pi, log_A, log_emit, mask):
+def _prepare(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
     """Check ranks, promote to the accumulation dtype and build the validity mask.
 
     :param log_pi: ``(B, K)`` initial log-potentials.
@@ -105,7 +110,7 @@ def _prepare(log_pi, log_A, log_emit, mask):
     )
 
 
-def _time_loop(body, carry, num_steps, reverse=False):
+def _time_loop(body: Callable[[Any, Any], Any], carry: Any, num_steps: Any, reverse: bool = False) -> Any:
     """Apply ``carry = body(t, carry)`` for every transition step ``t = 1, ..., T - 1``.
 
     With ``reverse=True`` the steps run ``t = T - 1, ..., 1`` instead. ``num_steps`` is
@@ -126,10 +131,10 @@ def _time_loop(body, carry, num_steps, reverse=False):
     # so differentiating it under XLA raises "XLA compilation requires a fixed tensor
     # list size" (measured, CPU jit_compile=True); maximum_iterations sizes the
     # gradient accumulators.
-    def cond(t, _):
+    def cond(t: Any, _: Any) -> Any:
         return keras.ops.greater_equal(t, 1) if reverse else keras.ops.less(t, num_steps)
 
-    def step(t, state):
+    def step(t: Any, state: Any) -> Tuple[Any, Any]:
         return (t - 1 if reverse else t + 1), body(t, state)
 
     first = num_steps - 1 if reverse else 1
@@ -137,7 +142,7 @@ def _time_loop(body, carry, num_steps, reverse=False):
     return carry
 
 
-def _write(history, t, value):
+def _write(history: keras.KerasTensor, t: Any, value: keras.KerasTensor) -> keras.KerasTensor:
     """Return ``history`` with ``history[:, t] = value``, without a scatter.
 
     :param history: ``(B, T, ...)`` tensor.
@@ -151,7 +156,7 @@ def _write(history, t, value):
     return keras.ops.where(at_t, keras.ops.expand_dims(value, 1), history)
 
 
-def _select(values, index, n_states):
+def _select(values: keras.KerasTensor, index: keras.KerasTensor, n_states: int) -> keras.KerasTensor:
     """Return ``values[b, index[b]]`` per row by a one-hot select (no take_along_axis).
 
     :param values: ``(B, K)`` tensor.
@@ -163,7 +168,12 @@ def _select(values, index, n_states):
     return keras.ops.sum(keras.ops.where(chosen, values, keras.ops.zeros_like(values)), axis=-1)
 
 
-def _forward_alphas(log_pi, log_A, log_emit, valid):
+def _forward_alphas(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    valid: keras.KerasTensor,
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Run the forward recursion and return every step's alpha.
 
     :param log_pi: ``(B, K)`` accumulation-dtype initial log-potentials.
@@ -179,7 +189,7 @@ def _forward_alphas(log_pi, log_A, log_emit, valid):
     alpha = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
     alphas = _write(keras.ops.zeros_like(log_emit), 0, alpha)
 
-    def body(t, carry):
+    def body(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         alpha, alphas = carry
         # DECISION plan-2026-10-13T192257-1bb3bf1f/D-003: alpha sits on the SOURCE axis
         # (``alpha[:, :, None] + log_A[:, t]``, logsumexp over axis 1). Do NOT
@@ -194,7 +204,7 @@ def _forward_alphas(log_pi, log_A, log_emit, valid):
     return _time_loop(body, (alpha, alphas), num_steps)
 
 
-def _empty_to_zero(values, valid):
+def _empty_to_zero(values: keras.KerasTensor, valid: keras.KerasTensor) -> keras.KerasTensor:
     """Return ``values`` with the entries of sequences that have no valid step set to 0.
 
     :param values: ``(B,)`` tensor.
@@ -204,7 +214,12 @@ def _empty_to_zero(values, valid):
     return keras.ops.where(keras.ops.any(valid, axis=1), values, keras.ops.zeros_like(values))
 
 
-def forward_log_likelihood(log_pi, log_A, log_emit, mask):
+def forward_log_likelihood(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> keras.KerasTensor:
     """Return the log partition function of every sequence, by the forward algorithm.
 
     ``logZ = log sum_z exp(log_pi[z_0] + log_emit[0, z_0]
@@ -226,26 +241,36 @@ def forward_log_likelihood(log_pi, log_A, log_emit, mask):
     return _empty_to_zero(keras.ops.logsumexp(alpha_last, axis=-1), valid)
 
 
-def path_log_score(log_pi, log_A, log_emit, states, mask):
+def path_log_score(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    states: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> keras.KerasTensor:
     """Return the unnormalized log score of a given state path for every sequence.
 
     ``log_pi[z_0] + log_emit[0, z_0] + sum_{t>=1} (log_A[t, z_{t-1}, z_t]
     + log_emit[t, z_t])`` summed over valid steps only, so state values at padded steps
     are ignored and may hold anything, including ``-1``. A sequence with no valid step
     scores 0, matching :func:`forward_log_likelihood`, so ``logZ - score`` is the
-    path's negative log-probability and is 0 for an empty sequence.
+    path's negative log-probability and is 0 for an empty sequence. A state outside
+    ``[0, K)`` at a VALID step adds :func:`~dl_techniques.utils.dtype_policy.mask_sentinel`
+    (``-1e9`` in float32) per such step, so the path's log-probability is hugely negative
+    rather than silently missing that step's terms.
 
     :param log_pi: ``(B, K)`` initial log-potentials.
     :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
     :param log_emit: ``(B, T, K)`` emission log-potentials.
-    :param states: ``(B, T)`` integer states in ``[0, K)`` at valid steps.
+    :param states: ``(B, T)`` integer states, in ``[0, K)`` at valid steps.
     :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
     :return: ``(B,)`` path score, in the accumulation dtype.
     :raises ValueError: If an input does not have the documented rank.
     """
     log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
     n_states = log_emit.shape[-1]
-    picked = keras.ops.one_hot(keras.ops.cast(states, "int32"), n_states) > 0  # (B,T,K)
+    states = keras.ops.cast(states, "int32")
+    picked = keras.ops.one_hot(states, n_states) > 0  # (B,T,K)
 
     # Select with where, never by multiplying a one-hot: 0 * -inf is NaN.
     start = keras.ops.sum(keras.ops.where(picked[:, 0], log_pi, keras.ops.zeros_like(log_pi)), axis=-1)
@@ -259,10 +284,26 @@ def path_log_score(log_pi, log_A, log_emit, states, mask):
     emit = keras.ops.where(valid, emit, keras.ops.zeros_like(emit))
     trans = keras.ops.where(valid[:, 1:], trans, keras.ops.zeros_like(trans))
     start = keras.ops.where(valid[:, 0], start, keras.ops.zeros_like(start))
-    return start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1)
+
+    # DECISION plan-2026-10-13T192257-1bb3bf1f/D-022: a state outside [0, K) at a VALID
+    # step has an all-zero one-hot, so the selects above silently drop its start,
+    # emission and transition terms. Add mask_sentinel per such step instead, so a bad
+    # gold label makes the CRF loss huge. Do NOT assert in-graph (XLA drops
+    # tf.debugging asserts) and do NOT use -inf (logZ - (-inf) is inf, and its gradient
+    # NaN). Padded steps are exempt: they may hold -1 or anything else.
+    in_range = keras.ops.logical_and(states >= 0, states < n_states)
+    bad = keras.ops.logical_and(valid, keras.ops.logical_not(in_range))
+    sentinel = keras.ops.full_like(emit, mask_sentinel(keras.backend.standardize_dtype(emit.dtype)))
+    penalty = keras.ops.where(bad, sentinel, keras.ops.zeros_like(emit))
+    return start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1) + keras.ops.sum(penalty, axis=1)
 
 
-def viterbi_decode(log_pi, log_A, log_emit, mask) -> Tuple:
+def viterbi_decode(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Return the highest-scoring state path of every sequence and its score.
 
     :param log_pi: ``(B, K)`` initial log-potentials.
@@ -281,7 +322,7 @@ def viterbi_decode(log_pi, log_A, log_emit, mask) -> Tuple:
 
     delta = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
 
-    def forward(t, carry):
+    def forward(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         delta, backpointers = carry
         scores = delta[:, :, None] + log_A[:, t]  # (B, K_source, K_destination)
         moved = keras.ops.max(scores, axis=1) + log_emit[:, t]
@@ -296,7 +337,7 @@ def viterbi_decode(log_pi, log_A, log_emit, mask) -> Tuple:
     last = keras.ops.cast(keras.ops.argmax(delta, axis=-1), "int32")
     path = _write(keras.ops.zeros_like(identity[:, :, 0]), num_steps - 1, last)
 
-    def backward(t, carry):
+    def backward(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         state, path = carry
         previous = _select(backpointers[:, t], state, n_states)
         return previous, _write(path, t - 1, previous)
@@ -306,7 +347,12 @@ def viterbi_decode(log_pi, log_A, log_emit, mask) -> Tuple:
     return path, _empty_to_zero(keras.ops.max(delta, axis=-1), valid)
 
 
-def state_posteriors(log_pi, log_A, log_emit, mask):
+def state_posteriors(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> keras.KerasTensor:
     """Return the posterior state marginals ``p(z_t = k | x)`` by forward-backward.
 
     :param log_pi: ``(B, K)`` initial log-potentials.
@@ -322,7 +368,7 @@ def state_posteriors(log_pi, log_A, log_emit, mask):
     log_z = keras.ops.logsumexp(alpha_last, axis=-1)
     num_steps = keras.ops.shape(log_emit)[1]
 
-    def body(t, carry):
+    def body(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         beta, betas = carry
         # beta_{t-1}[i] = logsumexp_j(log_A[t, i, j] + log_emit[t, j] + beta_t[j]): the
         # reduction runs over the DESTINATION axis (2). A padded step t freezes beta.

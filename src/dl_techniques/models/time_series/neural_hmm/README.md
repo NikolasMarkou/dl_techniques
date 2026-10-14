@@ -60,7 +60,7 @@ A classical HMM has exact, cheap inference (likelihood, decoding, posteriors in 
 
 **Padding.** The mask marks a contiguous valid PREFIX (right padding). A padded step contributes no emission and no transition: the recursion freezes. So the log-likelihood of a padded sequence equals that of the truncated sequence, Viterbi paths hold `-1` at padded steps, and posteriors are 0 there. A sequence with no valid step has `log Z = 0`.
 
-**Causality.** In generative mode the encoder is causal and reads the input shifted right by one step, so `h_t` summarizes `x_{<t}` only and `p(x_t | z_t, x_{<t})` stays a proper factorization of `p(x)`. Categorical symbols are shifted after the embedding, so symbol 0 stays a real symbol.
+**Causality.** In generative mode the encoder is causal and reads the input shifted right by one step, so `h_t` summarizes `x_{<t}` only and `p(x_t | z_t, x_{<t})` stays a proper factorization of `p(x)`. Categorical symbols are shifted after the embedding, so symbol 0 stays a real symbol. A model without the shift once passed every package and trainer test while `sum_x p(x)` reached 1.174, so the shift is checked directly: for every generative preset and every encoder type, with randomized weights, `sum_x p(x) = 1` by exact enumeration and step `t`'s potentials read `x_{<t}` only (`tests/test_models/test_neural_hmm/test_model.py`, `test_the_generative_model_is_a_normalized_distribution` and `test_the_generative_potentials_read_only_the_past`).
 
 **Arbitrary sequence length.** Every recursion runs on `keras.ops.while_loop`, so `predict` and `evaluate` work at any sequence length in one process (Keras retraces them with an unknown time axis from the second length on), and the loss differentiates under XLA.
 
@@ -179,7 +179,7 @@ Methods: `call(inputs, training=None) -> dict`; `compute_loss(x, y, y_pred, samp
 
 ### Emissions (`emissions.py`)
 
-`GenerativeEmission(n_states, obs_type, obs_dim=None, vocab_size=None, state_emb_dim=16, hidden_dim=64, context_dim=0, min_scale=1e-3)`: a fixed `create_ffn_layer("mlp")` head (`hidden_dim` wide) maps each state embedding, with `h_t` appended when `context_dim > 0`, to the distribution's parameters. Gaussian (`sd = softplus(raw) + min_scale`), Poisson (`rate = softplus(raw) + min_scale`, including `-log x!`) or categorical (`log_softmax`; any symbol outside `[0, V)` scores 0). `DiscriminativeEmission(n_states)`: one `Dense(K)`.
+`GenerativeEmission(n_states, obs_type, obs_dim=None, vocab_size=None, state_emb_dim=16, hidden_dim=64, context_dim=0, min_scale=1e-3)`: a fixed `create_ffn_layer("mlp")` head (`hidden_dim` wide) maps each state embedding, with `h_t` appended when `context_dim > 0`, to the distribution's parameters. Gaussian (`sd = softplus(raw) + min_scale`), Poisson (`rate = softplus(raw) + min_scale`, including `-log x!`) or categorical (`log_softmax`; any symbol outside `[0, V)`, `-1` padding included, scores the finite sentinel `mask_sentinel`, `-1e9` in float32, never 0). `DiscriminativeEmission(n_states)`: one `Dense(K)`.
 
 ### Inference functions (`inference.py`)
 
@@ -188,7 +188,7 @@ All take `log_pi (B, K)`, `log_A (B, T, K, K)`, `log_emit (B, T, K)` and `mask (
 | Function | Returns |
 |----------|---------|
 | `forward_log_likelihood(log_pi, log_A, log_emit, mask)` | `(B,)` `log Z` |
-| `path_log_score(log_pi, log_A, log_emit, states, mask)` | `(B,)` score of a given path; padded state values are ignored |
+| `path_log_score(log_pi, log_A, log_emit, states, mask)` | `(B,)` score of a given path; padded state values are ignored, and a state outside `[0, K)` at a valid step adds `-1e9` (float32) per step |
 | `viterbi_decode(log_pi, log_A, log_emit, mask)` | `(path (B, T) int32, score (B,))`, `-1` at padding |
 | `state_posteriors(log_pi, log_A, log_emit, mask)` | `(B, T, K)`, 0 at padding |
 
@@ -341,6 +341,8 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 **Q. `compile(loss=...)` seems to have no effect.** It has none: the objective is `compute_loss` (§5).
 
 **Q. Padded steps hold NaN.** That is allowed: padded content is replaced before any layer reads it, so neither the loss nor the gradients change.
+
+**Q. The log-likelihood is near `-1e9` and the loss is enormous.** An input is out of range at a VALID step: a categorical symbol outside `[0, vocab_size)`, or in discriminative mode a gold label outside `[0, n_states)`. Each such step adds `mask_sentinel` (`-1e9` in float32 and float64) to the sequence's log-likelihood instead of passing silently (before, the symbol scored `log p = 0` and the label's terms were dropped). It is a value, not an assertion, because XLA drops in-graph assertions; the gradients stay finite. Padded steps may hold any value. `viterbi` and `posteriors` do not flag such inputs.
 
 **Q. A warning about a softmax over an axis of size 1.** A `transformer` encoder called on a sequence of length 1 attends over one key; Keras warns, and the result (weight 1) is correct.
 

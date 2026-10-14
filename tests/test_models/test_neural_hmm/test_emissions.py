@@ -7,7 +7,8 @@ Guards (SC3):
 * the log-densities equal scipy on the head's own parameters: ``norm.logpdf`` (gaussian)
   and ``poisson.logpmf`` including ``x = 0`` (poisson, so the ``-log x!`` term is present),
   summed over features, in float64 to 1e-9; float32 within a derived rounding bound;
-  categorical rows normalize over the vocabulary and equal a numpy ``log_softmax``;
+  categorical rows normalize over the vocabulary and equal a numpy ``log_softmax``; a
+  symbol outside the vocabulary scores ``mask_sentinel``, not 0 (D-022);
 * ``min_scale`` changes the output (gaussian, poisson);
 * the context path is live, with a rank-4 ``(B, T, K, E + H)`` head input (A3);
 * under ``mixed_float16`` an observation 1e3 away from the mean at ``scale = min_scale``
@@ -29,6 +30,7 @@ from dl_techniques.models.time_series.neural_hmm.emissions import (
     DiscriminativeEmission,
     GenerativeEmission,
 )
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from tests.numerics import reassociation_atol
 
 from ..precision_arm_oracle import precision_policy
@@ -181,11 +183,19 @@ def test_categorical_rows_normalize_over_the_vocabulary():
     np.testing.assert_allclose(total, 0.0, rtol=0, atol=ATOL_F64)
 
 
-def test_a_categorical_symbol_outside_the_vocabulary_scores_zero():
-    """Documented: ``-1`` padding contributes 0, and inference ignores padded steps anyway."""
+def test_a_categorical_symbol_outside_the_vocabulary_scores_the_sentinel():
+    """D-022: an all-zero one-hot used to score 0 = log 1, a certain observation.
+
+    Every out-of-range symbol, ``-1`` included, now scores ``mask_sentinel`` in every
+    state. ``-1`` padding is still ignored, by the inference functions skipping padded
+    steps rather than by a 0 here; test_model.py pins that at the model level.
+    """
     layer = _emission("categorical")
-    out = _np(layer(np.array([[0, -1, V]], "int32")))
-    assert np.all(out[0, 1:] == 0.0) and np.all(out[0, 0] < 0.0)
+    out = _np(layer(np.array([[0, -1, V, V + 5, -7, V - 1]], "int32")))
+    sentinel = mask_sentinel("float32")
+    assert np.all(out[0, 1:5] == sentinel), out[0]
+    in_range = out[0, [0, 5]]
+    assert np.all(in_range < 0.0) and np.all(in_range > 0.5 * sentinel), in_range
 
 
 def test_the_discriminative_potentials_are_an_affine_map_of_the_context():

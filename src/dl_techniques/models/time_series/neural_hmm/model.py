@@ -69,6 +69,7 @@ import keras
 # Local Imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 
@@ -378,6 +379,14 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         if self.encoder is not None:
             features = self._features(obs, valid)
             if self.mode == "generative":
+                # DECISION plan-2026-10-13T192257-1bb3bf1f/D-022: this one-step right shift
+                # is what makes generative mode a likelihood: h_t, which parameterizes the
+                # emission of x_t and the transition into t, reads x_{<t} only. Do NOT
+                # remove it or move it after the encoder: the causal encoder alone gives
+                # h_t = f(x_{<=t}), and a no-shift mutant measured sum_x p(x) = 1.174 while
+                # every other test stayed green. Guarded by test_model.py's
+                # test_the_generative_model_is_a_normalized_distribution and
+                # test_the_generative_potentials_read_only_the_past.
                 # Shift right by one step AFTER the embedding, so that the zero start
                 # vector is not the embedding of a real symbol (token 0 is one).
                 features = keras.ops.concatenate([keras.ops.zeros_like(features[:, :1]), features[:, :-1]], axis=1)
@@ -395,10 +404,11 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     def _observations(self, inputs: Dict[str, keras.KerasTensor]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Return the observations with padded steps neutralized, and the boolean mask.
 
-        Padded float steps become 0 and padded symbols ``-1`` (which every categorical
-        emission scores 0). The inference functions ignore padded steps, but a NaN there
-        would still reach the weights' gradients, since ``where`` passes ``0 * NaN``
-        back through the branch it did not select.
+        Padded float steps become 0 and padded symbols ``-1`` (which the categorical
+        emission scores ``mask_sentinel``, inertly: inference never reads a padded step).
+        The inference functions ignore padded steps, but a NaN there would still reach
+        the weights' gradients, since ``where`` passes ``0 * NaN`` back through the branch
+        it did not select.
 
         :param inputs: ``{"obs", "mask"}``.
         :return: ``(obs, valid)``, ``valid`` a ``(B, T)`` boolean tensor.
@@ -442,14 +452,39 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             return keras.ops.ones_like(log_emit[:, :, 0])
         return keras.ops.cast(keras.ops.cast(mask, "bool"), log_emit.dtype)
 
+    def _out_of_range_symbol_penalty(self, inputs: Dict[str, Any], mask: keras.KerasTensor) -> keras.KerasTensor:
+        """Return ``mask_sentinel`` times the count of valid steps holding a bad symbol.
+
+        A bad symbol is a ``categorical`` one outside ``[0, vocab_size)``. Only the
+        discriminative mode needs this term: it reads symbols through the embedding alone,
+        which maps a bad symbol to token 0, while the generative emission already scores
+        one with the sentinel (D-022).
+
+        :param inputs: ``{"obs", "mask"}``.
+        :param mask: ``(B, T)`` float mask in the accumulation dtype.
+        :return: ``(B,)`` penalty, 0 where every valid symbol is in range.
+        """
+        if self.obs_type != "categorical" or self.mode == "generative":
+            return keras.ops.zeros_like(mask[:, 0])
+        obs = keras.ops.cast(inputs["obs"], "int32")
+        in_range = keras.ops.logical_and(obs >= 0, obs < self.vocab_size)
+        bad = keras.ops.logical_and(mask > 0, keras.ops.logical_not(in_range))
+        sentinel = keras.ops.full_like(mask, mask_sentinel(keras.backend.standardize_dtype(mask.dtype)))
+        return keras.ops.sum(keras.ops.where(bad, sentinel, keras.ops.zeros_like(mask)), axis=1)
+
     def _sequence_log_likelihood(
         self,
+        inputs: Dict[str, Any],
         outputs: Dict[str, keras.KerasTensor],
         mask: keras.KerasTensor,
         states: Optional[keras.KerasTensor],
     ) -> keras.KerasTensor:
         """Return ``log p(x)`` (generative) or ``log p(states | x)`` (discriminative).
 
+        A ``categorical`` symbol or a gold state out of range at a valid step adds
+        ``mask_sentinel`` (``-1e9`` in float32) per such step instead of passing silently.
+
+        :param inputs: ``{"obs", "mask"}``, read for out-of-range symbols.
         :param outputs: The :meth:`call` dict.
         :param mask: ``(B, T)`` mask.
         :param states: ``(B, T)`` integer states; required in discriminative mode, must be
@@ -467,7 +502,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             return log_z
         if states is None:
             raise ValueError("mode='discriminative' needs the state labels: pass y=states of shape (B, T).")
-        return inference.path_log_score(log_pi, log_A, log_emit, states, mask) - log_z
+        score = inference.path_log_score(log_pi, log_A, log_emit, states, mask)
+        return score - log_z + self._out_of_range_symbol_penalty(inputs, mask)
 
     def compute_loss(
         self,
@@ -502,7 +538,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         if y_pred is None:
             y_pred = self(x, training=training)
         mask = self._valid_mask(x, y_pred["log_emit"])
-        nll = -self._sequence_log_likelihood(y_pred, mask, y)
+        nll = -self._sequence_log_likelihood(x, y_pred, mask, y)
         lengths = keras.ops.sum(mask, axis=1)
         weights = keras.ops.ones_like(nll) if sample_weight is None else keras.ops.reshape(
             keras.ops.cast(sample_weight, nll.dtype), (-1,)
@@ -524,7 +560,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         :raises ValueError: If ``states`` does not match the mode.
         """
         outputs = self(inputs, training=False)
-        return self._sequence_log_likelihood(outputs, self._valid_mask(inputs, outputs["log_emit"]), states)
+        return self._sequence_log_likelihood(inputs, outputs, self._valid_mask(inputs, outputs["log_emit"]), states)
 
     def viterbi(self, inputs: Dict[str, Any]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Return the most likely state path of every sequence.

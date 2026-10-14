@@ -22,6 +22,12 @@ Guards (SC5), each through the shared oracle with its real signature:
 * numerics: padded likelihood equals the truncated sequence's per preset (float64),
   NaN in padded content changes neither the loss nor the gradients, length-0/length-1
   sequences, ``mixed_float16`` (float32 outputs, D-010) and float64 arms;
+* the generative right shift (D-022), per generative preset and encoder type with
+  randomized weights: ``sum_x p(x) = 1`` by exact enumeration, and step ``t``'s
+  potentials read ``x_{<t}`` only; both RED-proven against a no-shift mutant;
+* out-of-range inputs (D-022): a categorical symbol or a gold label outside its range at
+  a VALID step drives the log-likelihood to the sentinel's scale and the loss to a huge
+  finite value with finite gradients; at a padded step it stays ignored;
 * factories: ``from_variant`` overrides, ``pretrained=True``, unknown variants,
   ``create_neural_hmm`` == ``from_variant``.
 
@@ -29,6 +35,7 @@ Run on the CPU and with ``CUDA_VISIBLE_DEVICES=1``: the ``lstm`` paths take cuDN
 """
 
 import inspect
+import itertools
 import os
 
 import keras
@@ -47,6 +54,7 @@ from dl_techniques.models.time_series.neural_hmm.transitions import (
     InputDependentTransition,
     StaticTransition,
 )
+from dl_techniques.utils.dtype_policy import mask_sentinel
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 from ..knob_sensitivity_oracle import (
@@ -621,10 +629,25 @@ def test_the_helpers_agree_with_the_inference_module():
     np.testing.assert_allclose(_loss(model, x), -_np(model.log_likelihood(x)).sum() / sum(LENGTHS), rtol=1e-6)
 
 
-def test_a_categorical_padding_symbol_is_never_embedded():
-    """Padded symbols may be -1 or out of range; the embedding and the emission skip them."""
-    model = _model("io-hmm", obs_type="categorical")
+#: One preset per way a categorical symbol is read: the emission alone (neural-hmm), the
+#: emission and an encoder (io-hmm, autoregressive), the embedding alone (the CRF).
+CATEGORICAL_READERS = ["neural-hmm", "io-hmm", "autoregressive-neural-hmm", "neural-crf-tagger"]
+
+
+def _loss_and_grads(model, inputs, y):
+    with tf.GradientTape() as tape:
+        loss = model.compute_loss(inputs, y, model(inputs, training=False))
+    grads = tape.gradient(loss, model.trainable_variables)
+    return float(_np(loss)), [None if g is None else _np(g) for g in grads]
+
+
+@pytest.mark.parametrize("variant", CATEGORICAL_READERS)
+def test_a_padded_categorical_symbol_is_ignored(variant):
+    """Padded symbols may be -1 or out of range: neither the outputs at valid steps, the
+    loss nor the gradients see them. (Ignored by the mask, not by scoring 0: D-022.)"""
+    model = _model(variant, obs_type="categorical")
     x = _inputs("categorical")
+    y = _y(model)
     dirty = {"obs": x["obs"].copy(), "mask": x["mask"]}
     dirty["obs"][x["mask"] == 0] = -1
     dirty["obs"][-1, :] = V + 7  # the empty sequence holds an out-of-range symbol
@@ -632,7 +655,53 @@ def test_a_categorical_padding_symbol_is_never_embedded():
     valid = x["mask"] > 0
     assert np.array_equal(_np(clean["log_emit"])[valid], _np(noisy["log_emit"])[valid])
     assert np.array_equal(_np(clean["log_A"])[valid], _np(noisy["log_A"])[valid])
-    assert _loss(model, x) == _loss(model, dirty)
+    clean_loss, clean_grads = _loss_and_grads(model, x, y)
+    dirty_loss, dirty_grads = _loss_and_grads(model, dirty, y)
+    assert np.isfinite(dirty_loss) and dirty_loss == clean_loss
+    for g_clean, g_dirty in zip(clean_grads, dirty_grads):
+        if g_dirty is not None:
+            assert np.isfinite(g_dirty).all()
+            np.testing.assert_allclose(g_dirty, g_clean, rtol=1e-5, atol=1e-5)
+
+
+def _assert_loud(model, clean_x, bad_x, clean_y, bad_y):
+    """Row 0 (fully valid) holds the bad value: its log-likelihood is at the sentinel's
+    scale, every other row is untouched, and the loss is huge with finite gradients."""
+    sentinel = mask_sentinel("float32")
+    clean = _np(model.log_likelihood(clean_x, clean_y))
+    bad = _np(model.log_likelihood(bad_x, bad_y))
+    assert bad[0] <= 0.5 * sentinel, f"log-likelihood with the bad value: {bad[0]} (clean {clean[0]})"
+    np.testing.assert_array_equal(bad[1:], clean[1:])
+    loss, grads = _loss_and_grads(model, bad_x, bad_y)
+    assert np.isfinite(loss) and loss > 1e6, loss
+    assert all(g is None or np.isfinite(g).all() for g in grads)
+
+
+@pytest.mark.parametrize("bad_symbol", [-1, V, V + 7])
+@pytest.mark.parametrize("variant", CATEGORICAL_READERS)
+def test_an_out_of_range_symbol_at_a_valid_step_is_loud(variant, bad_symbol):
+    """D-022: it used to score log p = 0 (certain) in the generative emission and to embed
+    as token 0 in the CRF, silently. XLA drops in-graph asserts, so it scores the sentinel."""
+    model = _model(variant, obs_type="categorical")
+    x = _inputs("categorical")
+    y = _y(model)
+    bad = {"obs": x["obs"].copy(), "mask": x["mask"]}
+    bad["obs"][0, 3] = bad_symbol
+    _assert_loud(model, x, bad, y, y)
+
+
+@pytest.mark.parametrize("bad_label", [-1, K, K + 4])
+def test_an_out_of_range_gold_label_at_a_valid_step_is_loud(bad_label):
+    """D-022: its start, emission and transition terms used to drop out of the gold score."""
+    model = _model("neural-crf-tagger")
+    x = _inputs()
+    y = _labels()
+    bad = y.copy()
+    bad[0, 2] = bad_label
+    _assert_loud(model, x, x, y, bad)
+    padded = y.copy()
+    padded[x["mask"] == 0] = K + 4  # at padded steps any label stays ignored
+    assert _loss(model, x, padded) == _loss(model, x, y)
 
 
 def test_n_states_one_is_finite():
@@ -640,6 +709,110 @@ def test_n_states_one_is_finite():
     out = model(_inputs())
     assert np.isfinite(_loss(model, _inputs()))
     assert (_np(out["log_A"]) == 0.0).all()
+
+
+# ---------------------------------------------------------------------
+# the generative right-shift (D-022)
+# ---------------------------------------------------------------------
+
+#: Every generative preset with every encoder type it can take. The one-step right shift
+#: of the encoder input is what makes each of them a valid likelihood; removing it once
+#: left all 739 package and trainer tests green while sum_x p(x) reached 1.174
+#: (review-iter-1, concern 1). neural-hmm builds no encoder and is the control.
+GENERATIVE_CASES = (
+    [("neural-hmm", None)]
+    + [("autoregressive-neural-hmm", encoder) for encoder in ENCODER_TYPES]
+    + [("io-hmm", encoder) for encoder in ENCODER_TYPES]
+    + [("left-to-right-segmenter", "transformer")]
+)
+GENERATIVE_IDS = [f"{variant}-{encoder or 'none'}" for variant, encoder in GENERATIVE_CASES]
+#: Vocabulary and longest length of the exact enumeration: 3 + 9 + 27 + 81 sequences.
+ENUM_V, ENUM_T = 3, 4
+#: |sum_x p(x) - 1| bound. The measured float32 error at HEAD is at most 3.3e-7; the
+#: no-shift mutant misses by 7.5e-3 (io-hmm/conv) to 0.17 (autoregressive/lstm).
+NORMALIZATION_ATOL = 1e-5
+
+
+def _every_sequence(length, steps=ENUM_T, seed=0):
+    """All ENUM_V**length sequences of one valid length, right-padded with random symbols."""
+    prefix = np.array(list(itertools.product(range(ENUM_V), repeat=length)), dtype="int32")
+    pad = np.random.default_rng(seed).integers(0, ENUM_V, (len(prefix), steps - length)).astype("int32")
+    return {"obs": np.concatenate([prefix, pad], axis=1), "mask": _mask([length] * len(prefix), steps)}
+
+
+def _randomized(variant, encoder_type, obs_type, seed=3):
+    """A built preset with every trainable weight redrawn from N(0, 0.7).
+
+    The default initialization hides an input dependence: io-hmm's context projection
+    starts at zero, so its transitions would not read the encoder at all.
+    """
+    overrides = {} if encoder_type is None else {"encoder_type": encoder_type}
+    if obs_type == "categorical":
+        overrides["vocab_size"] = ENUM_V
+        model = _model(variant, obs_type, **overrides)
+        model(_every_sequence(ENUM_T), training=False)
+    else:
+        model = _model(variant, obs_type, **overrides)
+        model(_inputs(obs_type), training=False)
+    rng = np.random.default_rng(seed)
+    for weight in model.trainable_weights:
+        weight.assign(rng.normal(0.0, 0.7, size=weight.shape).astype(weight.dtype))
+    return model
+
+
+def _logsumexp(values, axis):
+    peak = values.max(axis=axis, keepdims=True)
+    return np.squeeze(peak, axis) + np.log(np.exp(values - peak).sum(axis=axis))
+
+
+@pytest.mark.parametrize("variant,encoder_type", GENERATIVE_CASES, ids=GENERATIVE_IDS)
+def test_the_generative_model_is_a_normalized_distribution(variant, encoder_type):
+    """sum over every sequence x of each valid length L of p(x) is 1 (D-022).
+
+    Any leak of x_t into its own emission or into the transition into step t breaks this,
+    whichever encoder carries it. Padded steps hold random symbols, which must not count.
+    """
+    model = _randomized(variant, encoder_type, "categorical")
+    misses = {}
+    for length in range(1, ENUM_T + 1):
+        log_p = _np(model.log_likelihood(_every_sequence(length))).astype("float64")
+        misses[length] = float(np.exp(log_p).sum() - 1.0)
+    assert all(abs(miss) <= NORMALIZATION_ATOL for miss in misses.values()), f"sum_x p(x) - 1 per L: {misses}"
+
+
+@pytest.mark.parametrize("variant,encoder_type", GENERATIVE_CASES, ids=GENERATIVE_IDS)
+def test_the_generative_potentials_read_only_the_past(variant, encoder_type):
+    """Step t's transition and emission parameters read x_{<t} only (D-022).
+
+    Two arms. (1) Perturbing obs[:, s:] leaves log_emit[:, :s] and log_A[:, :s + 1]
+    bit-identical: log_A[:, s] is the transition INTO s, built before x_s is seen. (2) An
+    emission's parameters must not read the symbol they score. Arm 1 cannot see that leak:
+    log_emit[:, s] depends on x_s legitimately. So for sequences that share x_{<s} and
+    differ only at x_s, every state's emission must sum to 1 over the symbols at step s.
+    """
+    steps = 6
+    model = _randomized(variant, encoder_type, "gaussian")
+    rng = np.random.default_rng(5)
+    obs = rng.normal(size=(2, steps, D)).astype("float32")
+    mask = np.ones((2, steps), dtype="float32")
+    clean = model({"obs": obs, "mask": mask}, training=False)
+    for s in range(steps):
+        moved = obs.copy()
+        moved[:, s:] += 5.0 * rng.normal(size=moved[:, s:].shape).astype("float32")
+        out = model({"obs": moved, "mask": mask}, training=False)
+        assert np.array_equal(_np(out["log_emit"])[:, :s], _np(clean["log_emit"])[:, :s]), f"log_emit, s={s}"
+        assert np.array_equal(_np(out["log_A"])[:, :s + 1], _np(clean["log_A"])[:, :s + 1]), f"log_A, s={s}"
+        assert not np.array_equal(_np(out["log_emit"])[:, s], _np(clean["log_emit"])[:, s])
+
+    model = _randomized(variant, encoder_type, "categorical")
+    base = np.random.default_rng(6).integers(0, ENUM_V, ENUM_T).astype("int32")
+    symbols = np.repeat(base[None], ENUM_T * ENUM_V, axis=0)
+    for s in range(ENUM_T):
+        symbols[s * ENUM_V:(s + 1) * ENUM_V, s] = np.arange(ENUM_V)
+    out = model({"obs": symbols, "mask": np.ones(symbols.shape, "float32")}, training=False)
+    log_emit = _np(out["log_emit"]).astype("float64").reshape(ENUM_T, ENUM_V, ENUM_T, K)
+    per_step = np.stack([_logsumexp(log_emit[s, :, s, :], axis=0) for s in range(ENUM_T)])  # (T, K)
+    assert np.abs(per_step).max() <= NORMALIZATION_ATOL, f"log sum_v p(x_s = v | z_s = k): {per_step}"
 
 
 # ---------------------------------------------------------------------

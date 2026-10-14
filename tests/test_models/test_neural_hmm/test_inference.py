@@ -13,6 +13,8 @@ Guards:
   and posteriors to float64 reassociation), padded Viterbi entries are
   ``-1``, padded posteriors are exactly 0, and an empty sequence has ``logZ = 0`` and
   path score 0;
+* a state outside ``[0, K)`` at a VALID step adds ``mask_sentinel`` to the path score
+  per such step (D-022); at a padded step it stays ignored;
 * the gradient of ``logZ`` with respect to the emissions equals the brute-force
   posteriors, also when compiled with XLA and traced at a second sequence length;
 * the functions run with an unknown batch and time axis: in a ``tf.function`` with a
@@ -32,6 +34,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.models.time_series.neural_hmm import inference
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from tests.numerics import reassociation_atol
 
 # ---------------------------------------------------------------------
@@ -281,6 +284,24 @@ def test_an_empty_sequence_has_log_z_zero_score_zero_path_minus_one_and_zero_pos
     assert np.all(_np(score) == 0.0)
     assert np.all(_np(path) == -1)
     assert np.all(_np(inference.state_posteriors(log_pi, log_A, log_emit, mask)) == 0.0)
+
+
+@pytest.mark.parametrize("bad_state", [-1, 3, 7])
+def test_an_out_of_range_state_at_a_valid_step_adds_the_sentinel(bad_state):
+    """D-022: an all-zero one-hot used to drop the step's terms silently; now it is loud.
+
+    Row 0 is fully valid and gets the bad state at one step, then at two; rows 1 and 2
+    hold ``K + 3`` and ``0`` at their padded steps, which must stay ignored.
+    """
+    log_pi, log_A, log_emit, mask, states, _ = _make_case(3, 4, "dynamic")
+    sentinel = mask_sentinel("float64")
+    clean = _np(inference.path_log_score(log_pi, log_A, log_emit, states, mask))
+    for bad_steps in ([2], [0, 3]):
+        bad = states.copy()
+        bad[0, bad_steps] = bad_state
+        score = _np(inference.path_log_score(log_pi, log_A, log_emit, bad, mask))
+        assert score[0] <= (len(bad_steps) - 0.5) * sentinel, (bad_steps, score[0])
+        np.testing.assert_array_equal(score[1:], clean[1:])
 
 
 def test_a_wrong_rank_input_is_refused_naming_the_argument():
