@@ -1,14 +1,10 @@
-"""
-LightGlue token confidence: how sure is this layer about each keypoint's final match.
+"""LightGlue token confidence: per-keypoint confidence that a layer's match is final.
 
-A single ``Dense(1)`` plus sigmoid reads each (detached) descriptor and predicts whether
-the match found at this layer already equals the match of the last layer. It drives the
-early-stopping and pruning rules of LightGlue inference and is trained by an auxiliary
-loss. The descriptors are passed through ``stop_gradient`` first, so that auxiliary loss
-trains only this head and never reshapes the matcher's features.
-
-Weight mapping from the official PyTorch state dict (``token_confidence.i.token.0.*``,
-the sigmoid has no weights): ``layer.token_0.{kernel,bias}``, kernel by TRANSPOSE.
+:class:`MatchTokenConfidence` reads each descriptor with one ``Dense(1)`` and a sigmoid
+and predicts whether the match found at this layer already equals the last layer's
+match. LightGlue inference uses it for early stopping and pruning, and an auxiliary
+loss trains it. Descriptors pass through ``stop_gradient`` first, so that loss trains
+only this head and never reshapes the matcher's features.
 
 References:
     - Lindenberger, P., Sarlin, P.-E., & Pollefeys, M. (2023). "LightGlue: Local
@@ -30,18 +26,48 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.matching.token_confidence")
 class MatchTokenConfidence(keras.layers.Layer):
-    """Per-keypoint confidence head shared by both images of a pair.
+    """Predict per-keypoint match confidence for both images with one shared head.
 
     Computes ``sigmoid(token_0(stop_gradient(desc)))`` for each image with one set of
-    weights. The result is cast to at least float32 (``mask_dtype``) because it is
-    compared against thresholds. With ``return_logits=True`` the pre-sigmoid logits are
-    returned as well, so a loss can use a numerically stable log-sigmoid form
-    (``BCEWithLogits``) instead of a clipped probability whose gradient dies when the
-    head saturates.
+    weights. The Dense runs in the compute dtype; its logit is then cast to at least
+    float32 (``mask_dtype``) because the confidence is compared against thresholds.
+    With ``return_logits=True`` the logits come back too, so a loss can use a stable
+    log-sigmoid form (``BCEWithLogits``) instead of a clipped probability whose
+    gradient dies when the head saturates. The gradient with respect to ``desc0`` and
+    ``desc1`` is exactly zero; ``token_0`` still receives gradient.
 
-    :param dim: Descriptor width.
+    .. code-block:: text
+
+        desc0 [B, M, D]      desc1 [B, N, D]
+               │                    │
+               ▼                    ▼
+        stop_gradient        stop_gradient
+               │                    │
+               ▼                    ▼
+        ┌──────────────────────────────┐
+        │ token_0  Dense(1)            │  shared
+        └──────────────────────────────┘
+               │                    │
+               ▼                    ▼
+        logit0 [B, M]        logit1 [B, N]
+               │                    │
+               ▼                    ▼
+        sigmoid              sigmoid
+               │                    │
+               ▼                    ▼
+        confidence0 [B, M]   confidence1 [B, N]
+
+    Torch weight mapping (the ``Linear`` weight transposes into the kernel, the bias
+    copies; the sigmoid has no weights):
+
+    .. code-block:: text
+
+        torch (token_confidence.i.)  Keras
+        token.0.{weight,bias}        token_0.{kernel,bias}
+
+    :param dim: Descriptor width ``D``. Must be positive.
     :type dim: int
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param **kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :ivar token_0: ``Dense(1)``, named after torch ``token.0``.
 
@@ -49,16 +75,11 @@ class MatchTokenConfidence(keras.layers.Layer):
         desc0: ``(B, M, dim)``.
         desc1: ``(B, N, dim)``.
         return_logits: Python bool, default ``False``. When ``True`` the output is the
-            4-tuple ``(confidence0, confidence1, logit0, logit1)``; the default 2-tuple
-            API is unchanged.
+            4-tuple ``(confidence0, confidence1, logit0, logit1)``.
 
     Output:
-        ``(confidence0 (B, M), confidence1 (B, N))`` in ``(0, 1)``. The gradient with
-        respect to ``desc0`` and ``desc1`` is exactly zero by construction; the head's own
-        kernel and bias still receive gradient.
-
-    :raises ValueError: From ``__init__`` for a non-positive ``dim``; from ``build()``
-        for a wrong rank or last dimension.
+        ``(confidence0 (B, M), confidence1 (B, N))`` in ``[0, 1]``; a saturated logit
+        rounds to exactly 0 or 1.
 
     Example:
 
@@ -68,6 +89,12 @@ class MatchTokenConfidence(keras.layers.Layer):
     """
 
     def __init__(self, dim: int, **kwargs: Any) -> None:
+        """Validate ``dim`` and create ``token_0``.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``dim`` is not positive.
+        """
         super().__init__(**kwargs)
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -75,9 +102,12 @@ class MatchTokenConfidence(keras.layers.Layer):
         self.token_0 = keras.layers.Dense(1, dtype=self.dtype_policy, name="token_0")
 
     def build(self, desc0_shape: Tuple[Any, ...], desc1_shape: Optional[Tuple[Any, ...]] = None) -> None:
-        """Build the Dense head explicitly.
+        """Build the Dense head explicitly. Returns at once if already built.
 
-        :raises ValueError: If a descriptor shape is not rank 3 with last dim ``dim``.
+        :param desc0_shape: ``(batch, M, dim)``. An unknown last dimension is accepted.
+        :param desc1_shape: ``(batch, N, dim)``. Checked only when given.
+        :raises ValueError: If a given descriptor shape is not rank 3 with last dim
+            ``dim``.
         """
         if self.built:
             return
@@ -99,10 +129,13 @@ class MatchTokenConfidence(keras.layers.Layer):
         return keras.ops.sigmoid(self._logit(desc))
 
     def call(self, desc0: Any, desc1: Any, return_logits: bool = False) -> Tuple[Any, ...]:
-        """Return the two ``(B, N)`` confidence maps, plus the logits on request.
+        """Return the two confidence maps, plus the logits on request.
 
-        :param return_logits: If True return ``(conf0, conf1, logit0, logit1)``.
-        :return: ``(conf0, conf1)`` or ``(conf0, conf1, logit0, logit1)``.
+        :param desc0: ``(B, M, dim)``.
+        :param desc1: ``(B, N, dim)``.
+        :param return_logits: If ``True``, also return the logits.
+        :return: ``(conf0 (B, M), conf1 (B, N))``, or
+            ``(conf0, conf1, logit0, logit1)``; all in at least float32.
         """
         logit0, logit1 = self._logit(desc0), self._logit(desc1)
         conf0, conf1 = keras.ops.sigmoid(logit0), keras.ops.sigmoid(logit1)
@@ -112,7 +145,11 @@ class MatchTokenConfidence(keras.layers.Layer):
 
     def compute_output_shape(self, desc0_shape: Tuple[Any, ...],
                              desc1_shape: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
-        """``((B, M), (B, N))``."""
+        """Return ``((B, M), (B, N))``; ``desc1_shape`` is required.
+
+        Covers the default call only: with ``return_logits=True`` the call returns
+        four tensors, and the two logit shapes are not listed here.
+        """
         return tuple(desc0_shape[:2]), tuple(desc1_shape[:2])
 
     def get_config(self) -> Dict[str, Any]:
@@ -120,3 +157,5 @@ class MatchTokenConfidence(keras.layers.Layer):
         config = super().get_config()
         config.update({"dim": self.dim})
         return config
+
+# ---------------------------------------------------------------------

@@ -1,53 +1,14 @@
-"""
-LightGlue transformer blocks: rotary self-attention and bidirectional cross-attention.
+"""LightGlue transformer blocks: rotary self-attention and bidirectional cross-attention.
 
-One LightGlue layer is a self-attention block on each image followed by a single
-cross-attention block that updates both images at once. Both blocks end in the same
-message-passing FFN: the node state ``x`` is concatenated with the attention message,
-pushed through ``Dense(2d) -> LayerNorm -> GELU -> Dense(d)`` and added back to ``x``.
-
-Architecture:
-    ::
-
-        LightGlueSelfBlock                      LightGlueCrossBlock
-
-        x (B,L,d)   freqs (2,B,1,L,Dh)          x0 (B,M,d)          x1 (B,N,d)
-          |                                        |                   |
-          | Wqkv: Dense(3d)                        | to_qk, to_v       | to_qk, to_v   (SHARED)
-          v                                        v                   v
-        (B,L,H,Dh,3) -> q, k, v                 qk0 * Dh^-1/4       qk1 * Dh^-1/4
-          |                                        \\                  /
-          | rotary(q), rotary(k)                    sim = qk0 qk1^T   (computed ONCE)
-          v                                        /                  \\
-        softmax(q k^T * Dh^-1/2, mask) v     softmax_row(sim) v1   softmax_col(sim)^T v0
-          |                                        |                   |
-          | out_proj                               | to_out            | to_out        (SHARED)
-          v                                        v                   v
-        x + ffn([x, message])                   x0 + ffn([x0, m0])  x1 + ffn([x1, m1])  (SHARED ffn)
-
-Weight mapping from the official PyTorch state dict (``transformers.i.self_attn.*`` and
-``transformers.i.cross_attn.*``). Every sublayer is a Keras attribute named after its
-torch counterpart, so the mapping is mechanical: a ``Linear`` weight of shape
-``(out, in)`` is assigned to the Dense ``kernel`` by TRANSPOSE (``kernel = W.T``), the
-bias is copied, a LayerNorm ``weight``/``bias`` maps to ``gamma``/``beta``.
-
-    ==========================================  ====================================
-    torch key                                   Keras variable
-    ==========================================  ====================================
-    ``self_attn.Wqkv.{weight,bias}``            ``block.Wqkv.{kernel,bias}``
-    ``self_attn.out_proj.{weight,bias}``        ``block.out_proj.{kernel,bias}``
-    ``cross_attn.to_qk.{weight,bias}``          ``block.to_qk.{kernel,bias}``
-    ``cross_attn.to_v.{weight,bias}``           ``block.to_v.{kernel,bias}``
-    ``cross_attn.to_out.{weight,bias}``         ``block.to_out.{kernel,bias}``
-    ``*.ffn.0.{weight,bias}``                   ``block.ffn_0.{kernel,bias}``
-    ``*.ffn.1.{weight,bias}``                   ``block.ffn_1.{gamma,beta}``
-    ``*.ffn.3.{weight,bias}``                   ``block.ffn_3.{kernel,bias}``
-    ==========================================  ====================================
-
-The fused ``Wqkv`` output columns are laid out ``(num_heads, head_dim, 3)``: column
-``h * Dh * 3 + c * 3 + s`` is head ``h``, channel ``c``, slot ``s`` in ``{q, k, v}``
-(torch ``qkv.unflatten(-1, (H, -1, 3))``). A ``(3, H, Dh)`` layout has identical shapes
-and silently permutes every pretrained weight, so it is guarded by a value test.
+One LightGlue layer runs :class:`LightGlueSelfBlock` on each image, then one
+:class:`LightGlueCrossBlock` that updates both images at once. Both blocks end in the
+same message-passing FFN: the node state ``x`` is concatenated with the attention
+message, passed through ``Dense(2d) -> LayerNorm -> GELU -> Dense(d)`` and added back
+to ``x``. Every sublayer is named after its torch counterpart, so converting the
+official state dict is mechanical; each class lists its keys. The fused ``Wqkv``
+columns are laid out ``(H, Dh, 3)``, and reading them as ``(3, H, Dh)`` keeps every
+shape while silently permuting pretrained weights. Softmax runs in at least float32,
+and rows of padded keypoints come out finite but meaningless.
 
 References:
     - Lindenberger, P., Sarlin, P.-E., & Pollefeys, M. (2023). "LightGlue: Local
@@ -118,12 +79,11 @@ def _build_ffn_sublayers(block: keras.layers.Layer, dim: int) -> None:
 
 
 def _ffn_activation(x: Any) -> Any:
-    """Exact (erf) GELU, torch ``nn.GELU()``. The tanh approximation is a different function.
+    """Exact (erf) GELU, matching torch ``nn.GELU()``; not the tanh approximation.
 
-    Spelled ``0.5 x (1 + erf(x / sqrt 2))`` with ``keras.ops.erf`` rather than
-    ``keras.activations.gelu(approximate=False)``: measured under a float64 policy
-    the TensorFlow backend's ``gelu`` is wrong by about 4.5e-9 (its ``sqrt(2)``
-    constant is single precision), which the float64 parity test catches.
+    Written as ``0.5 x (1 + erf(x / sqrt 2))`` because, under a float64 policy, the
+    TensorFlow backend's ``keras.activations.gelu`` uses a single-precision
+    ``sqrt(2)`` and is off by about 4.5e-9.
     """
     return 0.5 * x * (1.0 + keras.ops.erf(x * (1.0 / math.sqrt(2.0))))
 
@@ -131,10 +91,10 @@ def _ffn_activation(x: Any) -> Any:
 def _ffn_residual(block: keras.layers.Layer, x: Any, message: Any) -> Any:
     """``x + ffn(concat([x, message]))`` with the block's ``ffn_0``/``ffn_1``/``ffn_3``.
 
-    Interface contract: ``block`` must carry the three sublayers made by
-    :func:`_make_ffn_sublayers` and built by :func:`_build_ffn_sublayers`; ``x`` and
-    ``message`` are ``(B, N, d)`` of one dtype. Returns ``(B, N, d)``. Not a layer on
-    purpose: the weights stay attributes of the block, matching the torch names.
+    ``block`` must carry the three sublayers made by :func:`_make_ffn_sublayers` and
+    built by :func:`_build_ffn_sublayers`; ``x`` and ``message`` are ``(B, N, d)`` of
+    one dtype. Returns ``(B, N, d)``. A function rather than a layer, so the weights
+    stay attributes of the block under their torch names.
     """
     hidden = keras.ops.concatenate([x, message], axis=-1)
     hidden = block.ffn_0(hidden)
@@ -143,22 +103,18 @@ def _ffn_residual(block: keras.layers.Layer, x: Any, message: Any) -> Any:
     return x + block.ffn_3(hidden)
 
 
-# DECISION plan-2026-10-02T084508-dd2c07ac/D-009
-# The fused Wqkv columns are (H, Dh, 3), exactly torch's unflatten(-1, (H, -1, 3)). Do NOT
-# switch to the more usual (3, H, Dh): the shapes are identical, so only values show it, and
-# every converted official checkpoint would be silently permuted. Guards:
-# tests/test_layers/test_matching/test_lightglue_blocks.py::TestMutationGuards::
-# test_wrong_qkv_layout_is_caught and tests/test_models/test_lightglue/test_torch_reference.py.
-# See decisions.md D-009.
+# DECISION plan-2026-10-02T084508-dd2c07ac/D-009: Wqkv columns stay (H, Dh, 3), as torch.
+# (3, H, Dh) has the same shapes and silently permutes every checkpoint. See decisions.md.
 def _split_qkv(qkv: Any, num_heads: int, head_dim: int) -> Tuple[Any, Any, Any]:
     """Split a fused ``(B, L, 3 * H * Dh)`` projection into q, k, v of ``(B, H, L, Dh)``.
 
-    The column layout is ``(H, Dh, 3)`` (torch ``unflatten(-1, (H, -1, 3))``), NOT
-    ``(3, H, Dh)``. Both give the same shapes.
+    Column ``h * Dh * 3 + c * 3 + s`` is head ``h``, channel ``c``, slot ``s`` in
+    ``{q, k, v}``: the ``(H, Dh, 3)`` layout of torch ``unflatten(-1, (H, -1, 3))``.
+    A ``(3, H, Dh)`` reading gives the same shapes and wrong values.
     """
     shape = keras.ops.shape(qkv)
     grouped = keras.ops.reshape(qkv, (shape[0], shape[1], num_heads, head_dim, 3))
-    grouped = keras.ops.transpose(grouped, (0, 2, 1, 3, 4))      # (B, H, L, Dh, 3)
+    grouped = keras.ops.transpose(grouped, (0, 2, 1, 3, 4))
     return grouped[..., 0], grouped[..., 1], grouped[..., 2]
 
 
@@ -188,27 +144,102 @@ def _check_build_shape(name: str, shape: Tuple[Any, ...], dim: int) -> None:
 
 @register_dl_technique("dl_techniques.layers.matching.lightglue_blocks")
 class LightGlueSelfBlock(keras.layers.Layer):
-    """LightGlue self-attention block with learned-Fourier rotary and the concat-FFN.
+    """Update node states by rotary self-attention and the concat-FFN residual.
 
-    Computes ``x + ffn(concat([x, out_proj(attention(x))]))`` where the attention uses
-    a fused ``Wqkv`` projection, rotary-encoded queries and keys and scale
-    ``head_dim ** -0.5``.
+    Computes ``x + ffn(concat([x, out_proj(attention(x))]))``, where the attention
+    uses a fused ``Wqkv`` projection, rotary-encoded queries and keys, and scale
+    ``head_dim ** -0.5``. The softmax chain runs in at least float32
+    (``mask_dtype``) whatever the policy; the context is cast back to the compute
+    dtype. A query row that keeps no key (a padded row, or an image with no real
+    keypoints) is spread over all keys by :func:`apply_attention_mask`, so every
+    output is finite. Only rows of real keypoints are meaningful: the reference
+    zeroes the others, this layer does not, and downstream code must ignore them.
 
-    The softmax chain runs in at least float32 (``mask_dtype``) whatever the policy and
-    the context is cast back to the compute dtype. A query row that keeps no key (a
-    padded row, or an image with no real keypoints) is rescued by
-    :func:`apply_attention_mask` into a finite spread over all keys, so every output is
-    finite. Only rows of REAL keypoints are meaningful; the reference zeroes the other
-    rows, this layer does not, and downstream code must ignore them.
+    Self-attention:
 
-    :param dim: Node width ``d``. Must be divisible by ``num_heads``.
+    .. code-block:: text
+
+        x [B, L, d]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ Wqkv  Dense(3d)     │
+        └─────────────────────┘
+                 │  [B, L, 3d], columns (H, Dh, 3)
+                 ▼
+        q, k, v [B, H, L, Dh]
+                 │
+                 ▼
+        rotary on q and k  ◄── freqs [2, B, 1, L, Dh]
+                 │
+                 ▼
+        softmax(q k^T * Dh^-1/2, mask) @ v
+                 │  [B, H, L, Dh]
+                 ▼
+        merge heads [B, L, d]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ out_proj  Dense(d)  │
+        └─────────────────────┘
+                 │  message [B, L, d]
+                 ▼
+        x + ffn([x, message])
+                 │
+                 ▼
+        y [B, L, d]
+
+    FFN residual, shared in form by both blocks:
+
+    .. code-block:: text
+
+        concat([x, message]) [B, N, 2d]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ ffn_0  Dense(2d)    │
+        └─────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ ffn_1  LayerNorm    │
+        └─────────────────────┘
+                 │
+                 ▼
+        exact (erf) GELU
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ ffn_3  Dense(d)     │
+        └─────────────────────┘
+                 │
+                 ▼
+                 + ◄── x
+                 │
+                 ▼
+        [B, N, d]
+
+    Torch weight mapping (``Linear`` weights transpose into kernels, biases copy):
+
+    .. code-block:: text
+
+        torch (transformers.i.self_attn.)  Keras
+        Wqkv.{weight,bias}                 Wqkv.{kernel,bias}
+        out_proj.{weight,bias}             out_proj.{kernel,bias}
+        ffn.0.{weight,bias}                ffn_0.{kernel,bias}
+        ffn.1.{weight,bias}                ffn_1.{gamma,beta}
+        ffn.3.{weight,bias}                ffn_3.{kernel,bias}
+
+    :param dim: Node width ``d``. Must be positive and divisible by ``num_heads``.
     :type dim: int
-    :param num_heads: Number of attention heads. ``dim // num_heads`` must be even.
+    :param num_heads: Number of attention heads. Must be positive, and
+        ``dim // num_heads`` must be even.
     :type num_heads: int
-    :param layer_norm_epsilon: Epsilon of the FFN LayerNorm. The reference uses 1e-5,
-        which differs from the Keras default of 1e-3 and changes outputs.
+    :param layer_norm_epsilon: Epsilon of the FFN LayerNorm. Must be positive. The
+        reference uses 1e-5, which differs from the Keras default of 1e-3 and
+        changes outputs.
     :type layer_norm_epsilon: float
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param **kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :ivar Wqkv: Fused projection ``Dense(3 * dim)``.
     :ivar out_proj: Message projection ``Dense(dim)``.
@@ -223,10 +254,7 @@ class LightGlueSelfBlock(keras.layers.Layer):
         mask: Optional ``(B, L)`` keep mask, bool or 0/1, 1 = real keypoint.
 
     Output shape:
-        ``(B, L, dim)``, the dtype of ``x`` under the layer's compute dtype.
-
-    :raises ValueError: From ``__init__`` for bad ``dim`` / ``num_heads`` / epsilon or an
-        odd head dimension; from ``build()`` for a wrong rank or last dimension.
+        ``(B, L, dim)`` in the compute dtype.
 
     Example:
 
@@ -245,6 +273,14 @@ class LightGlueSelfBlock(keras.layers.Layer):
             layer_norm_epsilon: float = 1e-5,
             **kwargs: Any
     ) -> None:
+        """Validate the arguments and create the sublayers.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``dim`` or ``num_heads`` is not positive, ``dim`` is not
+            divisible by ``num_heads``, ``dim // num_heads`` is odd, or
+            ``layer_norm_epsilon`` is not positive.
+        """
         super().__init__(**kwargs)
         _validate_dims(dim, num_heads, layer_norm_epsilon)
 
@@ -265,9 +301,10 @@ class LightGlueSelfBlock(keras.layers.Layer):
             freqs_shape: Optional[Tuple[Any, ...]] = None,
             mask_shape: Optional[Tuple[Any, ...]] = None,
     ) -> None:
-        """Build every sublayer explicitly.
+        """Build every sublayer explicitly. Returns at once if already built.
 
-        :param x_shape: ``(batch, num_points, dim)``.
+        :param x_shape: ``(batch, num_points, dim)``. An unknown last dimension is
+            accepted.
         :param freqs_shape: Rotary table shape; accepted for the call signature, unused.
         :param mask_shape: Mask shape; accepted for the call signature, unused.
         :raises ValueError: If ``x_shape`` is not rank 3 or its last dim is not ``dim``.
@@ -281,11 +318,12 @@ class LightGlueSelfBlock(keras.layers.Layer):
         super().build(x_shape)
 
     def call(self, x: Any, freqs: Any, mask: Optional[Any] = None) -> Any:
-        """Rotary self-attention then the concat-FFN residual.
+        """Run rotary self-attention, then the concat-FFN residual.
 
         :param x: ``(B, L, dim)``.
-        :param freqs: ``(2, B, 1, L, head_dim)``.
-        :param mask: Optional ``(B, L)`` keep mask, 1 = real.
+        :param freqs: ``(2, B, 1, L, head_dim)``. Required.
+        :param mask: Optional ``(B, L)`` keep mask, 1 = real. A pair is kept only
+            when both its query and its key are real.
         :return: ``(B, L, dim)``.
         """
         q, k, v = _split_qkv(self.Wqkv(x), self.num_heads, self.head_dim)
@@ -297,11 +335,11 @@ class LightGlueSelfBlock(keras.layers.Layer):
             keras.ops.cast(q, md), keras.ops.transpose(keras.ops.cast(k, md), (0, 1, 3, 2))
         ) * self.scale
         if mask is not None:
-            real = keras.ops.cast(mask, md) > 0.0                          # (B, L)
+            real = keras.ops.cast(mask, md) > 0.0
             keep = keras.ops.logical_and(real[:, None, :, None], real[:, None, None, :])
             logits = apply_attention_mask(logits, keep)
         weights = keras.ops.softmax(logits, axis=-1)
-        context = keras.ops.matmul(keras.ops.cast(weights, v.dtype), v)    # (B, H, L, Dh)
+        context = keras.ops.matmul(keras.ops.cast(weights, v.dtype), v)
 
         message = self.out_proj(_merge_heads(context, self.dim))
         return _ffn_residual(self, x, message)
@@ -331,27 +369,76 @@ class LightGlueSelfBlock(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.matching.lightglue_blocks")
 class LightGlueCrossBlock(keras.layers.Layer):
-    """LightGlue bidirectional cross-attention block.
+    """Update both images' node states by bidirectional cross-attention.
 
-    One shared ``to_qk`` and one shared ``to_v`` project both images. The similarity
-    ``sim = (qk0 * s)(qk1 * s)^T`` with ``s = head_dim ** -0.25`` is computed ONCE
-    and softmaxed over the other image's axis for each direction (rows for 0 -> 1,
-    columns for 1 -> 0). Both directions then share ``to_out`` and the FFN, exactly as
-    in the reference, so image 0 and image 1 use the same weights.
+    One ``to_qk`` and one ``to_v`` project both images. The similarity
+    ``sim = (qk0 * s)(qk1 * s)^T`` with ``s = head_dim ** -0.25`` is computed once
+    and softmaxed over the other image's axis in each direction. Both directions
+    share ``to_out`` and the FFN, as in the reference, so image 0 and image 1 use
+    the same weights.
 
-    Masking and numerics follow :class:`LightGlueSelfBlock`: float32-or-wider softmax,
-    rescue of keep-nothing rows (finite, only real rows meaningful). When one image has
-    no real keypoint, the rows of the OTHER image are rescued into a spread over padded
-    keys; the reference would output zeros there.
+    The softmax runs in at least float32. With both masks, a pair is kept only when
+    both keypoints are real, and keep-nothing rows are spread over all keys as in
+    :class:`LightGlueSelfBlock`; when one image has no real keypoint, the other
+    image's rows spread over padded keys where the reference outputs zeros. With one
+    mask, only that image's padded keys are hidden from the other image; no rows are
+    masked.
 
-    :param dim: Node width ``d``. Must be divisible by ``num_heads``.
+    Architecture:
+
+    .. code-block:: text
+
+        x0 [B, M, d]              x1 [B, N, d]
+               │                           │
+               ▼                           ▼
+        ┌──────────────────┐      ┌──────────────────┐
+        │ to_qk, to_v      │      │ to_qk, to_v      │
+        │ (shared weights) │      │ (shared weights) │
+        └──────────────────┘      └──────────────────┘
+               │  qk0 * Dh^-1/4, v0        │  qk1 * Dh^-1/4, v1
+               └─────────────┬─────────────┘
+                             ▼
+            sim = qk0 qk1^T [B, H, M, N], once
+                             │
+               ┌─────────────┴─────────────┐
+               ▼                           ▼
+        softmax over N, @ v1      softmax of sim^T, @ v0
+               │  [B, H, M, Dh]            │  [B, H, N, Dh]
+               ▼                           ▼
+        ┌──────────────────┐      ┌──────────────────┐
+        │ to_out (shared)  │      │ to_out (shared)  │
+        └──────────────────┘      └──────────────────┘
+               │  m0                       │  m1
+               ▼                           ▼
+        x0 + ffn([x0, m0])        x1 + ffn([x1, m1])
+               │                           │
+               ▼                           ▼
+        y0 [B, M, d]              y1 [B, N, d]
+
+    Each ffn is the FFN residual drawn on :class:`LightGlueSelfBlock`.
+
+    Torch weight mapping (``Linear`` weights transpose into kernels, biases copy):
+
+    .. code-block:: text
+
+        torch (transformers.i.cross_attn.)  Keras
+        to_qk.{weight,bias}                 to_qk.{kernel,bias}
+        to_v.{weight,bias}                  to_v.{kernel,bias}
+        to_out.{weight,bias}                to_out.{kernel,bias}
+        ffn.0.{weight,bias}                 ffn_0.{kernel,bias}
+        ffn.1.{weight,bias}                 ffn_1.{gamma,beta}
+        ffn.3.{weight,bias}                 ffn_3.{kernel,bias}
+
+    :param dim: Node width ``d``. Must be positive and divisible by ``num_heads``.
     :type dim: int
-    :param num_heads: Number of attention heads. ``dim // num_heads`` must be even
-        (kept equal to the self block so one head count configures both).
+    :param num_heads: Number of attention heads. Must be positive, and
+        ``dim // num_heads`` must be even, the same check as the self block even
+        though this block uses no rotary.
     :type num_heads: int
-    :param layer_norm_epsilon: Epsilon of the FFN LayerNorm (reference 1e-5).
+    :param layer_norm_epsilon: Epsilon of the FFN LayerNorm (reference 1e-5). Must
+        be positive.
     :type layer_norm_epsilon: float
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param **kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :ivar to_qk: ``Dense(dim)`` shared by both images.
     :ivar to_v: ``Dense(dim)`` shared by both images.
@@ -369,8 +456,6 @@ class LightGlueCrossBlock(keras.layers.Layer):
     Output shape:
         Tuple ``((B, M, dim), (B, N, dim))``.
 
-    :raises ValueError: As :class:`LightGlueSelfBlock`.
-
     Example:
 
     .. code-block:: python
@@ -386,6 +471,14 @@ class LightGlueCrossBlock(keras.layers.Layer):
             layer_norm_epsilon: float = 1e-5,
             **kwargs: Any
     ) -> None:
+        """Validate the arguments and create the sublayers.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``dim`` or ``num_heads`` is not positive, ``dim`` is not
+            divisible by ``num_heads``, ``dim // num_heads`` is odd, or
+            ``layer_norm_epsilon`` is not positive.
+        """
         super().__init__(**kwargs)
         _validate_dims(dim, num_heads, layer_norm_epsilon)
 
@@ -393,7 +486,7 @@ class LightGlueCrossBlock(keras.layers.Layer):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.layer_norm_epsilon = layer_norm_epsilon
-        # sim scale 1/sqrt(Dh) split as Dh**-0.25 on each side
+        # The 1/sqrt(Dh) similarity scale, split as Dh**-0.25 on each side.
         self.side_scale = compute_attention_scale(self.head_dim) ** 0.5
 
         policy = self.dtype_policy
@@ -409,10 +502,10 @@ class LightGlueCrossBlock(keras.layers.Layer):
             mask0_shape: Optional[Tuple[Any, ...]] = None,
             mask1_shape: Optional[Tuple[Any, ...]] = None,
     ) -> None:
-        """Build every sublayer explicitly.
+        """Build every sublayer explicitly. Returns at once if already built.
 
-        :param x0_shape: ``(batch, M, dim)``.
-        :param x1_shape: ``(batch, N, dim)``.
+        :param x0_shape: ``(batch, M, dim)``. An unknown last dimension is accepted.
+        :param x1_shape: ``(batch, N, dim)``. Checked only when given.
         :param mask0_shape: Accepted for the call signature, unused.
         :param mask1_shape: Accepted for the call signature, unused.
         :raises ValueError: If a state shape is not rank 3 or its last dim is not ``dim``.
@@ -436,6 +529,10 @@ class LightGlueCrossBlock(keras.layers.Layer):
     ) -> Tuple[Any, Any]:
         """Cross-attend in both directions from one similarity, then the shared FFN.
 
+        :param x0: ``(B, M, dim)``.
+        :param x1: ``(B, N, dim)``.
+        :param mask0: Optional ``(B, M)`` keep mask, 1 = real.
+        :param mask1: Optional ``(B, N)`` keep mask, 1 = real.
         :return: ``(y0, y1)`` of shapes ``(B, M, dim)`` and ``(B, N, dim)``.
         """
         h, dh = self.num_heads, self.head_dim
@@ -447,8 +544,8 @@ class LightGlueCrossBlock(keras.layers.Layer):
         md = mask_dtype(self.compute_dtype)
         sim = keras.ops.matmul(
             keras.ops.cast(qk0, md), keras.ops.transpose(keras.ops.cast(qk1, md), (0, 1, 3, 2))
-        )                                                                   # (B, H, M, N)
-        sim_t = keras.ops.transpose(sim, (0, 1, 3, 2))                      # (B, H, N, M)
+        )
+        sim_t = keras.ops.transpose(sim, (0, 1, 3, 2))
         if mask0 is not None and mask1 is not None:
             real0 = keras.ops.cast(mask0, md) > 0.0
             real1 = keras.ops.cast(mask1, md) > 0.0
@@ -456,8 +553,7 @@ class LightGlueCrossBlock(keras.layers.Layer):
             sim = apply_attention_mask(sim, keep)
             sim_t = apply_attention_mask(sim_t, keras.ops.transpose(keep, (0, 1, 3, 2)))
         elif mask0 is not None or mask1 is not None:
-            # One-sided mask: padded keys of that image are masked for the other image.
-            # keep is (B, 1, 1, N) against sim (B, H, M, N), and (B, 1, 1, M) for the transpose.
+            # One-sided mask: hide only that image's padded keys from the other image.
             if mask1 is not None:
                 real1 = keras.ops.cast(mask1, md) > 0.0
                 sim = apply_attention_mask(sim, real1[:, None, None, :])
@@ -465,10 +561,10 @@ class LightGlueCrossBlock(keras.layers.Layer):
                 real0 = keras.ops.cast(mask0, md) > 0.0
                 sim_t = apply_attention_mask(sim_t, real0[:, None, None, :])
 
-        attn0 = keras.ops.cast(keras.ops.softmax(sim, axis=-1), v1.dtype)    # 0 -> 1
-        attn1 = keras.ops.cast(keras.ops.softmax(sim_t, axis=-1), v0.dtype)  # 1 -> 0
-        ctx0 = keras.ops.matmul(attn0, v1)                                  # (B, H, M, Dh)
-        ctx1 = keras.ops.matmul(attn1, v0)                                  # (B, H, N, Dh)
+        attn0 = keras.ops.cast(keras.ops.softmax(sim, axis=-1), v1.dtype)
+        attn1 = keras.ops.cast(keras.ops.softmax(sim_t, axis=-1), v0.dtype)
+        ctx0 = keras.ops.matmul(attn0, v1)
+        ctx1 = keras.ops.matmul(attn1, v0)
 
         m0 = self.to_out(_merge_heads(ctx0, self.dim))
         m1 = self.to_out(_merge_heads(ctx1, self.dim))
@@ -481,7 +577,7 @@ class LightGlueCrossBlock(keras.layers.Layer):
             mask0_shape: Optional[Tuple[Any, ...]] = None,
             mask1_shape: Optional[Tuple[Any, ...]] = None,
     ) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
-        """Output shapes are those of ``x0`` and ``x1``."""
+        """Return the shapes of ``x0`` and ``x1``; ``x1_shape`` is required."""
         return tuple(x0_shape), tuple(x1_shape)
 
     def get_config(self) -> Dict[str, Any]:

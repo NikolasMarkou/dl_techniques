@@ -1,43 +1,19 @@
-"""
-Learned-Fourier rotary position encoding for keypoint matching (LightGlue).
+"""Learned-Fourier rotary position encoding for LightGlue keypoint matching.
 
-LightGlue does not rotate its queries and keys with a fixed position ladder. It
-learns the frequencies. A keypoint ``p`` (normalised xy, optionally with scale
-and orientation) is projected by a bias-free linear map to ``head_dim // 2``
-phases, and the cosine and sine of those phases form a rotation table that every
-self-attention layer reuses. The table is computed once per image.
+:class:`LearnedFourierRotaryEncoding` turns keypoint coordinates into a
+cosine/sine table that self-attention uses to rotate its queries and keys.
+Instead of a fixed frequency ladder, the frequencies are learned: a bias-free
+linear map projects each keypoint to ``head_dim // 2`` phases. The table is
+computed once per image and reused by every self-attention layer. Channels
+rotate in adjacent pairs, the interleaved convention of the reference code
+and its published weights::
 
-Architecture:
-    ::
+    [t'_{2j}  ]   [cos phi_j  -sin phi_j] [t_{2j}  ]
+    [t'_{2j+1}] = [sin phi_j   cos phi_j] [t_{2j+1}]
 
-        keypoints (B, N, M)
-              |
-              |  phases = keypoints @ W          W: (M, head_dim // 2), no bias,
-              v                                     init N(0, gamma^-4 variance)
-        phases (B, N, head_dim // 2)
-              |
-              |  cos, sin, then repeat_interleave(2) along channels
-              v
-        table (2, B, 1, N, head_dim)      slot 0 = cos, slot 1 = sin
-              |
-              |  apply_rotary(table, t) = t * cos + rotate_half(t) * sin
-              v
-        rotated q / k (B, H, N, head_dim)
-
-Foundational Mathematics:
-    The channels of a head are read as ``head_dim / 2`` ADJACENT pairs
-    ``(t_{2j}, t_{2j+1})``. Pair ``j`` is rotated by the phase ``phi_j``::
-
-        [t'_{2j}  ]   [cos phi_j  -sin phi_j] [t_{2j}  ]
-        [t'_{2j+1}] = [sin phi_j   cos phi_j] [t_{2j+1}]
-
-    This is the INTERLEAVED convention, the one the reference code and its
-    published weights use. Two things must agree with it or every pretrained
-    weight is silently wrong: the cos/sin tables are built with
-    ``repeat_interleave(2)`` (``[c0, c0, c1, c1, ...]``, NEVER ``tile``, which
-    gives ``[c0, c1, ..., c0, c1, ...]``), and ``rotate_half`` maps each adjacent
-    pair ``(a, b)`` to ``(-b, a)`` (NEVER the split-half ``(-x2, x1)`` of the two
-    contiguous halves). Neither mistake changes a shape.
+A split-half layout keeps every shape and silently breaks pretrained weights.
+The table comes back in float32, or float64 under a float64 policy, never in
+a narrower compute dtype; :func:`apply_rotary_interleaved` casts it at use.
 
 References:
     - Lindenberger, P., Sarlin, P.-E., & Pollefeys, M. (2023). "LightGlue: Local
@@ -62,11 +38,11 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 def rotate_half_interleaved(x: Any) -> Any:
-    """Map every ADJACENT channel pair ``(a, b)`` to ``(-b, a)``.
+    """Map every adjacent channel pair ``(a, b)`` to ``(-b, a)``.
 
-    This is the reference ``rotate_half`` (unflatten the last axis to
-    ``(-1, 2)``, stack ``(-x2, x1)``, flatten). It is NOT the split-half rotation
-    used by the Llama-style RoPE layers elsewhere in this repository.
+    Matches the reference ``rotate_half``: unflatten the last axis to
+    ``(-1, 2)``, stack ``(-x2, x1)``, flatten. The split-half rotation of the
+    Llama-style RoPE layers elsewhere in this repository is a different map.
 
     :param x: Tensor whose last dimension is even.
     :type x: Any
@@ -84,9 +60,8 @@ def rotate_half_interleaved(x: Any) -> Any:
 def apply_rotary_interleaved(freqs: Any, t: Any) -> Any:
     """Apply a cached rotation table: ``t * cos + rotate_half(t) * sin``.
 
-    The table is cast to ``t``'s dtype here, at the point of use, because the
-    layer emits it in a never-narrowing work dtype (see
-    :class:`LearnedFourierRotaryEncoding`).
+    The table is cast to ``t``'s dtype here, because the layer returns it in
+    float32 or float64 (see :class:`LearnedFourierRotaryEncoding`).
 
     :param freqs: ``(2, ..., N, head_dim)`` table, slot 0 cosine and slot 1 sine,
         each already ``repeat_interleave(2)``. ``freqs[0]`` must broadcast
@@ -107,25 +82,61 @@ def apply_rotary_interleaved(freqs: Any, t: Any) -> Any:
 
 @register_dl_technique("dl_techniques.layers.matching.learned_fourier_rotary")
 class LearnedFourierRotaryEncoding(keras.layers.Layer):
-    """Learned-Fourier rotation table from keypoint coordinates (LightGlue ``posenc``).
+    """Build a learned-Fourier rotation table from keypoints (LightGlue ``posenc``).
 
     Projects ``(B, N, M)`` keypoints with a trainable bias-free matrix to
     ``head_dim // 2`` phases and returns the stacked cosine/sine table
-    ``(2, B, 1, N, head_dim)`` built with ``repeat_interleave(2)``. The singleton
-    axis is the head axis, so the table broadcasts over heads. One instance is
-    shared by all self-attention layers of a model.
+    ``(2, B, 1, N, head_dim)``. Axis 2 is the head axis, so the table
+    broadcasts over heads; one instance is meant to serve every
+    self-attention layer of a model.
 
-    The phases and the trigonometry run in a never-narrowing WORK dtype
-    (float32, or float64 under a float64 policy) and the table is RETURNED in
-    that work dtype, not in the compute dtype: cos/sin of a phase that was first
-    rounded to float16 would be wrong by up to the float16 resolution times the
-    phase magnitude. Consumers cast at use, which :meth:`apply_rotary` does. The
-    keypoints and the kernel reach ``call`` already narrowed by Keras'
-    autocast under a mixed policy; that rounding is outside what this layer can
-    recover.
+    The phases and the trigonometry run in float32, or float64 under a
+    float64 policy, and the table is returned in that dtype, not the compute
+    dtype: cos/sin of a phase rounded to float16 would be off by up to the
+    float16 resolution times the phase. :meth:`apply_rotary` casts at use.
+    Under a mixed policy Keras autocasts the keypoints and the kernel before
+    ``call``, and this layer cannot undo that rounding.
+
+    Table construction:
+
+    .. code-block:: text
+
+        keypoints [B, N, M]
+                 │
+                 ▼
+        cast to work dtype
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ @ kernel [M, D/2]   │  no bias
+        └─────────────────────┘
+                 │  phases [B, N, D/2]
+                 ├────────────────┐
+                 ▼                ▼
+        cos, repeat 2      sin, repeat 2
+                 │                │
+                 └───────┬────────┘
+                         ▼
+        stack on axis 0, expand axis 2
+                         │
+                         ▼
+        table [2, B, 1, N, D]
+
+    D is head_dim; M is num_input_features; repeat is repeat_interleave.
+
+    Channel layout, interleaved:
+
+    .. code-block:: text
+
+        phases       phi0         phi1         ...
+        cos slot     c0    c0     c1    c1     ...
+        t            t0    t1     t2    t3     ...
+        rotate_half  -t1   t0     -t3   t2     ...
+
+    ``tile`` would give ``c0 c1 ... c0 c1``; both keep every shape.
 
     :param head_dim: Per-head channel count the table is built for. Must be a
-        positive even integer.
+        positive even integer; the type is not checked.
     :type head_dim: int
     :param num_input_features: Width ``M`` of the coordinates: 2 for normalised
         xy, 4 when scale and orientation are appended. Must be positive.
@@ -134,7 +145,7 @@ class LearnedFourierRotaryEncoding(keras.layers.Layer):
         normal with standard deviation ``gamma ** -2`` (reference convention).
         Must be positive.
     :type gamma: float
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param **kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :ivar kernel: Trainable phase projection, shape ``(num_input_features,
         head_dim // 2)``. A torch ``Wr.weight`` of shape ``(head_dim // 2, M)``
@@ -146,12 +157,6 @@ class LearnedFourierRotaryEncoding(keras.layers.Layer):
 
     Output shape:
         ``(2, batch, 1, num_points, head_dim)``.
-
-    :raises ValueError: If ``head_dim`` is not a positive even integer, or
-        ``num_input_features`` or ``gamma`` is not positive. Raised from
-        ``__init__``.
-    :raises ValueError: If the input is not rank 3 or its last dimension is not
-        ``num_input_features``. Raised from ``build()``.
 
     Example:
 
@@ -173,6 +178,13 @@ class LearnedFourierRotaryEncoding(keras.layers.Layer):
             gamma: float = 1.0,
             **kwargs: Any
     ) -> None:
+        """Validate and store the arguments.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``head_dim`` is not positive and even, or
+            ``num_input_features`` or ``gamma`` is not positive.
+        """
         super().__init__(**kwargs)
 
         if head_dim <= 0 or head_dim % 2 != 0:
@@ -186,16 +198,16 @@ class LearnedFourierRotaryEncoding(keras.layers.Layer):
         self.num_input_features = num_input_features
         self.gamma = gamma
 
-        # Created in build()
         self.kernel = None
 
     def build(self, input_shape: Tuple[Any, ...]) -> None:
-        """Create the phase projection.
+        """Create the phase projection. Returns at once if already built.
 
         :param input_shape: ``(batch, num_points, num_input_features)``.
         :type input_shape: Tuple[Any, ...]
-        :raises ValueError: If the input is not rank 3 or its last dimension is not
-            ``num_input_features``.
+        :raises ValueError: If the input is not rank 3 or its last dimension is
+            not ``num_input_features``; an unknown (``None``) last dimension
+            fails too.
         """
         if self.built:
             return
@@ -222,21 +234,21 @@ class LearnedFourierRotaryEncoding(keras.layers.Layer):
 
         :param keypoints: Normalised keypoints ``(B, N, M)``.
         :type keypoints: keras.KerasTensor
-        :return: ``(2, B, 1, N, head_dim)`` table in the work dtype.
+        :return: ``(2, B, 1, N, head_dim)`` table in float32, or float64 under
+            a float64 policy.
         :rtype: keras.KerasTensor
         """
-        # Never-narrowing work dtype, same rule as ContinuousRoPE: a hard
-        # `cast(.., "float32")` would break float64, a cast to the compute dtype would
-        # do the trigonometry in float16. The table stays in the work dtype.
+        # Same rule as ContinuousRoPE: keep float64, never do the trigonometry in
+        # float16. The table stays in this dtype.
         work_dtype = "float64" if self.compute_dtype == "float64" else "float32"
         phases = keras.ops.matmul(
             keras.ops.cast(keypoints, work_dtype),
             keras.ops.cast(self.kernel, work_dtype),
         )
-        # repeat is repeat_interleave: [c0, c1] -> [c0, c0, c1, c1]. NOT tile.
+        # repeat is repeat_interleave: [c0, c1] -> [c0, c0, c1, c1], not tile.
         cos = keras.ops.repeat(keras.ops.cos(phases), 2, axis=-1)
         sin = keras.ops.repeat(keras.ops.sin(phases), 2, axis=-1)
-        # (2, B, N, Dh) -> (2, B, 1, N, Dh): the singleton is the head axis.
+        # The new axis 2 is the head axis.
         return keras.ops.expand_dims(keras.ops.stack([cos, sin], axis=0), axis=2)
 
     def compute_output_shape(self, input_shape: Tuple[Any, ...]) -> Tuple[Any, ...]:
