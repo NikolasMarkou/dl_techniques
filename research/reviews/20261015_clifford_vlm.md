@@ -66,8 +66,10 @@ must not set them (`nano_vlm/model.py:373` raises). Default `scale_factor=1`
 **s=2 legal → Sv=1+5²=26**; decoder positions `26+512 = 538`. `Dt=384, depth=6`,
 GQA 6Q/2KV on all layers, mixed 5:1 (`5×sliding(w=32) + 1×full`, global last),
 GeGLU, sandwich norm (all via `Gemma3TransformerBlock`, §2.3), tied `learned`
-word table (`V×384 ≈ 12.3M @32k`), `max_seq_len=512` text. Vision
-`cli_mode=full, ctx_mode=diff`, `LayerScale 1e-5`,
+word table, English-only tiktoken `gpt2` (`vocab_size=50257`, shared with the
+CLIP trainer which documents the same English-only rationale and avoids
+multilingual `cl100k`; pad with `eot_token` 50256 per that convention),
+`max_seq_len=512` text. Vision `cli_mode=full, ctx_mode=diff`, `LayerScale 1e-5`,
 `vision_use_global_context=False`, external residual mandatory (GUIDE §5:
 `x=block(x)` collapses ~1e-5/block).
 Trade accepted: ~4× cheaper pixels and faster iteration than 640px vs a lower
@@ -127,7 +129,24 @@ ModernBERT measurement).
   (`SequenceLengthError` guard); packed long-form data;
   batch 8–16 + accumulation + bf16. Attention ~1.1M scores/layer (~45× ship).
 
-### 2.6 Text generation — confirmed available, unchanged
+### 2.7 Parameter budget (~40M @50257, nano-ladder vision assumed)
+
+| Part | Params | Notes |
+|---|---|---|
+| Clifford vision (12 blocks `[128,128,256,256]`) | ~3.5M | D²-dominated (`Linear_det` D² + product proj `2·\|S\|·D²`); DWConvs negligible |
+| CLS + `ModalityProjection` (256→s=2→1024→384) | ~0.4M | Dense 1024×384 + LN |
+| Decoder 6× (GQA 6Q/2KV + GeGLU~1152 + sandwich) | ~10.3M | ~1.7M/layer (attn ~0.4M, GeGLU ~1.3M) |
+| Tied word table 50257×384 (English `gpt2`) | **19.3M** | biggest line item (~48%); no output `Dense` when tied |
+| Detection head (Q=100, 2–3 cross layers + embeds) | ~5M | queries 38k, ~2.1M/layer, class 31k, box-MLP ~0.4M |
+| Segmentation head | ~1M | small conv stack + skips |
+| **Total** | **~40M** | cf. `NanoVLM mini` measured 34.7M (@32k) — same class |
+
+Movers: vocab (32k → −7M), mini-ladder vision (+~5M), depth 12 (+~15M),
+untied output (+19.3M second matrix — don't). Record per-part budgets as build
+assertions (e.g. fail if vision >6M) once the package lands. Exact
+`count_params()` replaces this table at build time.
+
+### 2.8 Text generation — confirmed available, unchanged
 
 `generate()` (`nano_vlm/model.py:564`) is model-level logic, unaffected by the
 Clifford adapter, GQA choice, or detection head: image encoded once via
@@ -213,9 +232,11 @@ SmolVLM (`blog/smolvlm`): `HuggingFaceM4/the_cauldron` (1.88M multi-task) +
 DocVQA/TextVQA. Oumi VL-SFT table confirms IDs below.
 
 * **Stage 1 alignment (short):** `allenai/pixmo-cap`, `nlphuji/flickr30k`.
-* **Stage 2 instruction (128–256, packed):** `liuhaotian/LLaVA-Instruct-150K`,
+* **Stage 2 instruction (128–512, packed):** `liuhaotian/LLaVA-Instruct-150K`,
   `HuggingFaceH4/llava-instruct-mix-vsft`, `HuggingFaceM4/the_cauldron`
-  (sampled 50–100k first).
+  (sampled 50–100k first). English filter at load (fastText or HF metadata;
+  LLaVA samples are ~all English). Packing mandatory to fill 512 —
+  caption batches leave late positions untrained.
 * **Stage 3 text-in-image:** `facebook/textvqa` (45k/28k OpenImages — PICK).
   `HuggingFaceM4/Docmatix` deferred to a higher-res/long-ctx variant (doc text
   needs more than 320px to stay legible). `hiyouga/geometry3k` (MathVista proxy).
@@ -300,7 +321,8 @@ Proposal: 20k validity / 10k single-cell / 5k full-solve equivalents per family
 * Locked: 320px COCO res · post-residual taps · closed-80 · NO YOLO (structured
   DETR-style head, S3+S4 keys, Q=100) · generic seg head · GQA 6Q/2KV ·
   mixed 5:1 local/global @ship (w=32, global last) · 512 ship ctx · generate()
-  intact · COCO/CC3M CLIP-only · maze 3-topology + montage pairs ·
+  intact · English-only tiktoken `gpt2` (vocab 50257, eot-pad) · ~40M budget ·
+  COCO/CC3M CLIP-only · maze 3-topology + montage pairs ·
   Keras-native loss weights + calibration + 2-phase curriculum ·
   package-owned mixed decoder (`TextDecoder` untouched).
 * Remaining: puzzle sample counts (§5 proposal) · sibling-vs-single joint model ·
