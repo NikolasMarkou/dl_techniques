@@ -10,9 +10,12 @@ pretrains the two towers independently before contrastive training:
   ``train.cliffordnet.train_cliffordnet_nlp``).
 
 Pretraining mutates the existing ``CliffordCLIP`` object in-place via thin
-throwaway wrappers — no save/reload between phases. Defaults: 50,000 steps
-per pretraining helper. Disable with ``--skip-pretrain`` or
-``--pretrain-{vision,lm}-steps 0``.
+throwaway wrappers — no save/reload between phases — trained with stock
+``fit``. Defaults: 50,000 steps per pretraining helper. Disable with
+``--skip-pretrain`` or ``--pretrain-{vision,lm}-steps 0``. Under
+``--synthetic`` every stage runs on in-memory data (random CIFAR-shaped
+images with 100 labels, random-word text), so a smoke run reaches both
+pretraining stages without CIFAR-100 or Wikipedia on disk.
 
 The training recipe borrows schedule ideas from the Penguin-VL paper
 (arXiv:2603.06569):
@@ -120,10 +123,12 @@ Example::
         --variant nano --image-size 112 --epochs 10 --peak-lr 5e-4 \\
         --batch-size 64 --gpu 0
 
-    # smoke test
+    # smoke test, every stage (two pretraining steps each)
     python -m train.cliffordnet.train_clip --synthetic --epochs 1 \\
         --image-size 64 --batch-size 8 --max-train-samples 64 \\
-        --skip-pretrain --steps-per-epoch 2 --output-dir /tmp/cliffordclip_smoke
+        --pretrain-vision-steps 2 --pretrain-vision-batch-size 8 \\
+        --pretrain-lm-steps 2 --pretrain-lm-batch-size 2 \\
+        --steps-per-epoch 2 --output-dir /tmp/cliffordclip_smoke
 
 Training is stock ``keras.Model.fit`` on the contrastive bridge of
 ``train.clip.train_clip`` (`compile_for_contrastive_training`), which stacks
@@ -637,8 +642,9 @@ class GammaProbeCallback(keras.callbacks.Callback):
 #
 # The two pretraining helpers train the *existing* ``CliffordCLIP`` sub-layers
 # in place via a throwaway wrapper that attaches a task-specific head
-# (classifier for vision, LM head for text). Weights land directly in
-# ``clip_model`` — no save/reload, no cross-model weight transfer.
+# (classifier for vision, LM head for text), through stock ``compile``/``fit``.
+# Weights land directly in ``clip_model`` — no save/reload, no cross-model
+# weight transfer.
 #
 # Why not train standalone ``CliffordNet`` / ``CliffordNetLM`` and transfer?
 # Layer names don't match (``clifford_block_N`` vs ``vision_clifford_block_N``
@@ -646,92 +652,59 @@ class GammaProbeCallback(keras.callbacks.Callback):
 # need a per-layer name map. Wrapping is simpler and keeps the whole thing
 # in one process.
 
+# DECISION plan-2026-10-14T062616-81938e81/D-069: every direct CliffordCLIP
+# sub-layer gets exactly one pretraining role by NAME, from the tables below,
+# and an unclassified sub-layer raises. Do NOT go back to hand-kept attribute
+# lists read with getattr(model, name, None): four of those names
+# (vision_global_pool, vision_global_max_pool, vision_query_pool,
+# text_query_pool) had stopped existing, the lookups skipped them in silence,
+# the attention context pools were never frozen, and the default vision
+# pretraining died on AttributeError.
+# test_the_pretraining_freeze_rules_name_real_layers.py checks every name and
+# prefix against a built model. See decisions.md D-069.
 
-def _iter_clip_sublayers(clip_model: CliffordCLIP):
-    """Yield every ``keras.layers.Layer`` tracked by CliffordCLIP we care about."""
-    _stem_attrs = (
-        "vision_stem_conv", "vision_stem_conv1", "vision_stem_bn1",
-        "vision_stem_conv2", "vision_stem_norm",
-    )
-    _vision_head_attrs = (
-        "vision_global_pool", "vision_global_max_pool",
-        "vision_head_norm", "vision_head_dropout",
-    )
-    _text_embed_attrs = (
-        "token_embedding", "position_embedding",
-        "text_embed_norm", "text_embed_dropout",
-    )
-    _text_head_attrs = ("text_head_norm", "text_head_dropout")
-    _projection_attrs = (
-        "vision_head_geo", "text_head_geo",
-        "vision_query_pool", "text_query_pool",
-        "vision_head_scale", "text_head_scale",
-        "vision_projection", "text_projection",
-    )
-    for name in _stem_attrs:
-        layer = getattr(clip_model, name, None)
-        if layer is not None:
-            yield layer
-    for block in clip_model.vision_blocks:
-        yield block
-    # New under hierarchical vision: PatchMerging downsamples + optional
-    # Dense projections between stages. Both must be visible to the freeze
-    # sweep so that vision pretrain can actually train them.
-    for merge in getattr(clip_model, "vision_merge_layers", []):
-        yield merge
-    for proj in getattr(clip_model, "vision_merge_projections", []):
-        if proj is not None:
-            yield proj
-    for name in _vision_head_attrs:
-        layer = getattr(clip_model, name, None)
-        if layer is not None:
-            yield layer
-    for name in _text_embed_attrs:
-        layer = getattr(clip_model, name, None)
-        if layer is not None:
-            yield layer
-    for block in clip_model.text_blocks:
-        yield block
-    for name in _text_head_attrs:
-        layer = getattr(clip_model, name, None)
-        if layer is not None:
-            yield layer
-    for name in _projection_attrs:
-        layer = getattr(clip_model, name, None)
-        if layer is not None:
-            yield layer
+#: Vision backbone: what the CIFAR-100 classifier runs (stem, staged blocks
+#: and their drop-paths, PatchMerging, the stage projections, the mean-pool
+#: anchor and the head norm/dropout).
+_VISION_BACKBONE_PREFIXES: Tuple[str, ...] = (
+    "vision_stem", "vision_clifford_block_", "vision_drop_path_",
+    "vision_patch_merge_", "vision_merge_proj_",
+)
+_VISION_BACKBONE_NAMES: Tuple[str, ...] = (
+    "vision_det_pool", "vision_head_norm", "vision_head_dropout",
+)
 
+#: Text backbone: what the causal-LM wrapper runs.
+_TEXT_BACKBONE_PREFIXES: Tuple[str, ...] = (
+    "text_clifford_block_", "text_drop_path_",
+)
+_TEXT_BACKBONE_NAMES: Tuple[str, ...] = (
+    "token_embedding", "position_embedding", "text_embed_norm",
+    "text_embed_dropout", "text_head_norm", "text_head_dropout",
+)
 
-# Projection / Clifford-head / cross-modal layers — always frozen during
-# pretraining (they'd learn against a nonexistent contrastive objective).
+#: The projections and the Clifford head (geometric products, context pools,
+#: the text mean pool, LayerScale gates): always frozen during pretraining,
+#: since they would learn against an objective that does not exist yet.
 _PRETRAIN_ALWAYS_FROZEN = frozenset({
     "vision_projection", "text_projection",
     "vision_head_geo", "text_head_geo",
-    "vision_query_pool", "text_query_pool",
+    "vision_ctx_pool", "text_ctx_pool", "text_det_pool",
     "vision_head_scale", "text_head_scale",
-    "vision_global_max_pool",
 })
 
 
+def _iter_clip_sublayers(clip_model: CliffordCLIP) -> List[keras.layers.Layer]:
+    """Every direct sub-layer of ``clip_model`` (lists flattened), in tracking order."""
+    return list(clip_model.layers)
+
+
 def _is_vision_backbone(name: str) -> bool:
-    return (
-        name.startswith("vision_stem")
-        or name.startswith("vision_clifford_block_")
-        or name.startswith("vision_patch_merge_")
-        or name.startswith("vision_merge_proj_")
-        or name in ("vision_global_pool", "vision_head_norm", "vision_head_dropout")
-    )
+    return name in _VISION_BACKBONE_NAMES or name.startswith(_VISION_BACKBONE_PREFIXES)
 
 
 def _is_text_backbone(name: str) -> bool:
-    return (
-        name in (
-            "token_embedding", "position_embedding",
-            "text_embed_norm", "text_embed_dropout",
-            "text_head_norm", "text_head_dropout",
-        )
-        or name.startswith("text_clifford_block_")
-    )
+    return name in _TEXT_BACKBONE_NAMES or name.startswith(_TEXT_BACKBONE_PREFIXES)
 
 
 def _freeze_clip_for_pretrain(
@@ -741,16 +714,24 @@ def _freeze_clip_for_pretrain(
 
     The learnable ``logit_scale`` scalar is also frozen — it has no role
     before contrastive training and must not drift under weight decay.
+
+    :raises RuntimeError: For a sub-layer with no pretraining role (a layer
+        added to CliffordCLIP without a row in the tables above).
     """
     assert train_tower in ("vision", "text"), train_tower
     for layer in _iter_clip_sublayers(clip_model):
         name = layer.name
         if name in _PRETRAIN_ALWAYS_FROZEN:
             layer.trainable = False
-        elif train_tower == "vision":
-            layer.trainable = _is_vision_backbone(name)
+        elif _is_vision_backbone(name):
+            layer.trainable = train_tower == "vision"
+        elif _is_text_backbone(name):
+            layer.trainable = train_tower == "text"
         else:
-            layer.trainable = _is_text_backbone(name)
+            raise RuntimeError(
+                f"CliffordCLIP sub-layer {name!r} has no pretraining role; add "
+                "it to the vision/text backbone tables or _PRETRAIN_ALWAYS_FROZEN"
+            )
     if clip_model.logit_scale is not None:
         clip_model.logit_scale.trainable = False
 
@@ -766,12 +747,13 @@ def _unfreeze_clip(clip_model: CliffordCLIP) -> None:
 class _VisionClassifier(keras.Model):
     """Pretraining wrapper that reuses CliffordCLIP vision sub-layers.
 
-    Forward path: ``_apply_vision_body`` (stem + staged Clifford blocks +
-    PatchMerging downsamples) → ``vision_global_pool`` → ``vision_head_norm``
-    → (optional ``vision_head_dropout``) → fresh ``Dense(num_classes)``.
-    The projection / Clifford-head sub-layers are intentionally skipped —
-    they have no meaning outside contrastive training and should be frozen
-    anyway.
+    Forward path: ``_vision_tokens`` (stem + staged Clifford blocks +
+    PatchMerging downsamples, flattened to a token sequence) →
+    ``vision_det_pool`` (the mean, the model's CLIP anchor) →
+    ``vision_head_norm`` → (optional ``vision_head_dropout``) → fresh
+    ``Dense(num_classes)``. The projection / Clifford-head sub-layers are
+    intentionally skipped — they have no meaning outside contrastive training
+    and are frozen anyway.
     """
 
     def __init__(
@@ -783,14 +765,40 @@ class _VisionClassifier(keras.Model):
             num_classes, name="pretrain_vision_classifier",
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the fresh classifier on the pooled width.
+
+        ``clip_model`` is built already. Without this method Keras' default
+        ``build`` ran nothing, warned that the classifier had unbuilt state,
+        and marked the wrapper built anyway.
+        """
+        self.classifier.build((input_shape[0], self.clip_model.vision_channels))
+        super().build(input_shape)
+
     def call(self, images, training: Optional[bool] = None):
         m = self.clip_model
-        x = m._apply_vision_body(images, training=training)
-        x = m.vision_global_pool(x)
+        x = m.vision_det_pool(m._vision_tokens(images, training=training))
         x = m.vision_head_norm(x)
         if m.vision_head_dropout is not None:
             x = m.vision_head_dropout(x, training=training)
         return self.classifier(x)
+
+
+#: Image side of the CIFAR-100 pretraining set, which ``--synthetic`` mimics.
+_CIFAR_IMAGE_SHAPE: Tuple[int, int, int] = (32, 32, 3)
+_CIFAR100_CLASSES = 100
+
+
+def _synthetic_cifar100(num_samples: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Random CIFAR-100-shaped images in ``[0, 1]`` and labels in ``[0, 100)``.
+
+    The ``--synthetic`` stand-in for ``load_dataset("cifar100")``: the same
+    dtype, range and shapes, so the same augmentation pipeline consumes it.
+    """
+    rng = np.random.default_rng(seed)
+    images = rng.uniform(0.0, 1.0, (num_samples, *_CIFAR_IMAGE_SHAPE)).astype(np.float32)
+    labels = rng.integers(0, _CIFAR100_CLASSES, num_samples).astype(np.int64)
+    return images, labels
 
 
 def _run_pretrain_vision(
@@ -802,7 +810,13 @@ def _run_pretrain_vision(
 
     Reuses the augmentation + normalisation pipeline from
     ``train.cliffordnet.train_cliffordnet`` (AutoAugment CIFAR-10 policy,
-    random crop, HFlip, per-channel normalise, RandomErasing).
+    random crop, HFlip, per-channel normalise, RandomErasing). Under
+    ``--synthetic`` the arrays are random (two training batches and one
+    validation batch) and the pipeline is the same.
+
+    The step budget is honoured: an epoch is one pass over the training set
+    or the budget, whichever is shorter, and the epoch count is the budget
+    over that, rounded up.
     """
     from train.cliffordnet.train_cliffordnet import (
         build_train_dataset as _cifar_build_train,
@@ -811,14 +825,20 @@ def _run_pretrain_vision(
     from train.common import load_dataset
 
     steps_budget = int(args.pretrain_vision_steps)
+    batch_size = args.pretrain_vision_batch_size
     logger.info("=" * 60)
     logger.info(f"Pretrain vision: CIFAR-100 pretrain ({steps_budget:,} steps)")
     logger.info("=" * 60)
 
-    (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
-        "cifar100", batch_size=args.pretrain_vision_batch_size,
-    )
-    if num_classes != 100:
+    if args.synthetic:
+        x_train, y_train = _synthetic_cifar100(2 * batch_size, seed=args.seed)
+        x_test, y_test = _synthetic_cifar100(batch_size, seed=args.seed + 1)
+        num_classes = _CIFAR100_CLASSES
+    else:
+        (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
+            "cifar100", batch_size=batch_size,
+        )
+    if num_classes != _CIFAR100_CLASSES:
         raise RuntimeError(
             f"Pretrain vision expected CIFAR-100 (100 classes); "
             f"got num_classes={num_classes}"
@@ -826,16 +846,16 @@ def _run_pretrain_vision(
 
     train_ds = _cifar_build_train(
         x_train, y_train,
-        batch_size=args.pretrain_vision_batch_size,
+        batch_size=batch_size,
         dataset_name="cifar100",
         random_erasing_prob=0.25,
     )
     val_ds = _cifar_build_eval(
         x_test, y_test,
-        batch_size=args.pretrain_vision_batch_size,
+        batch_size=batch_size,
         dataset_name="cifar100",
     )
-    steps_per_epoch = max(1, len(x_train) // args.pretrain_vision_batch_size)
+    steps_per_epoch = max(1, min(len(x_train) // batch_size, steps_budget))
     pretrain_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
     warmup_steps = max(1, int(0.05 * steps_budget))
     decay_steps = max(1, steps_budget - warmup_steps)
@@ -861,7 +881,7 @@ def _run_pretrain_vision(
     wrapper = _VisionClassifier(
         clip_model, num_classes=num_classes, name="pretrain_vision_wrapper",
     )
-    wrapper.build((None, 32, 32, 3))
+    wrapper.build((None, *_CIFAR_IMAGE_SHAPE))
 
     n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
     n_total = sum(int(np.prod(v.shape)) for v in wrapper.variables)
@@ -881,7 +901,7 @@ def _run_pretrain_vision(
     tb_dir = os.path.join(run_dir, "tensorboard", "pretrain_vision")
     os.makedirs(tb_dir, exist_ok=True)
     wrapper.fit(
-        train_ds,
+        train_ds.repeat(),
         validation_data=val_ds,
         epochs=pretrain_epochs,
         steps_per_epoch=steps_per_epoch,
@@ -920,6 +940,12 @@ class _TextLMWrapper(keras.Model):
         self.context_length = context_length
         self.lm_head = keras.layers.Dense(vocab_size, name="pretrain_lm_head")
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the fresh LM head on the text width (see ``_VisionClassifier.build``)."""
+        self.lm_head.build(
+            (input_shape[0], self.context_length, self.clip_model.text_channels))
+        super().build(input_shape)
+
     def call(self, input_ids, training: Optional[bool] = None):
         m = self.clip_model
         positions = keras.ops.arange(self.context_length)
@@ -945,6 +971,20 @@ class _TextLMWrapper(keras.Model):
         return {"logits": self.lm_head(x)}
 
 
+def _synthetic_articles(num_articles: int, seed: int) -> List[str]:
+    """Random-word articles: the ``--synthetic`` stand-in for Wikipedia.
+
+    Each article is 60 words drawn from a seeded 200-word vocabulary of
+    lowercase strings, so the tokenizer and the packing pipeline run exactly
+    as on real text.
+    """
+    rng = np.random.default_rng(seed)
+    letters = np.array(list("abcdefghijklmnopqrstuvwxyz"))
+    words = ["".join(rng.choice(letters, size=int(rng.integers(2, 9))))
+             for _ in range(200)]
+    return [" ".join(rng.choice(words, size=60)) for _ in range(num_articles)]
+
+
 def _run_pretrain_lm(
     clip_model: CliffordCLIP,
     args: argparse.Namespace,
@@ -954,13 +994,15 @@ def _run_pretrain_lm(
 
     Uses the same context length as CliffordCLIP (``args.context_length``)
     so the in-place position_embedding remains shape-compatible with the
-    subsequent contrastive training. Tokenizer is plain tiktoken ``gpt2``
-    (vocab 50257, EOT 50256); the 4 extra specials that
-    ``train_cliffordnet_nlp.py`` declares for MLM are not emitted in the
-    CLM path, so we can pretrain without them.
+    subsequent contrastive training, and the run's own tokenizer
+    (``--tokenizer-encoding``, the one the model's vocabulary was sized
+    from; default ``gpt2``, vocab 50257, EOT 50256). The 4 extra specials
+    that ``train_cliffordnet_nlp.py`` declares for MLM are not emitted in the
+    CLM path, so we can pretrain without them. Under ``--synthetic`` the
+    articles are random words (:func:`_synthetic_articles`) and the packing
+    pipeline is the same.
     """
     from train.common.nlp import preprocess_clm_packed_dataset
-    from dl_techniques.datasets.nlp import load_wikipedia_train_val
     from dl_techniques.losses import MaskedCausalLMLoss
     import tiktoken
 
@@ -969,42 +1011,40 @@ def _run_pretrain_lm(
     logger.info(f"Pretrain LM: Wikipedia CLM pretrain ({steps_budget:,} steps)")
     logger.info("=" * 60)
 
-    # Tokenizer — plain gpt2, no specials; mirrors what train_clip.py uses.
-    encoder = tiktoken.get_encoding("gpt2")
+    encoder = tiktoken.get_encoding(args.tokenizer_encoding)
     vocab_size = encoder.n_vocab
     eot_token_id = int(encoder.eot_token)
     logger.info(
-        f"Pretrain LM tokenizer: gpt2, vocab_size={vocab_size}, "
-        f"eot_token_id={eot_token_id}"
+        f"Pretrain LM tokenizer: {args.tokenizer_encoding}, "
+        f"vocab_size={vocab_size}, eot_token_id={eot_token_id}"
     )
-    if vocab_size != clip_model.vocab_size:
-        raise RuntimeError(
-            f"Vocab mismatch: tokenizer n_vocab={vocab_size}, "
-            f"clip_model.vocab_size={clip_model.vocab_size}. "
-            "Rebuild CliffordCLIP with vocab_size=50257 or change tokenizer."
-        )
 
-    # Wikipedia data — fail fast if cache dir is absent.
-    if not os.path.isdir(args.pretrain_lm_hf_cache):
-        raise RuntimeError(
-            f"Wikipedia cache dir not found: {args.pretrain_lm_hf_cache}. "
-            "Point --pretrain-lm-hf-cache at a pre-downloaded HF cache or "
-            "pass --pretrain-lm-steps 0 / --skip-pretrain to bypass LM pretrain."
+    if args.synthetic:
+        train_raw = tf.data.Dataset.from_tensor_slices(
+            _synthetic_articles(num_articles=16, seed=args.seed))
+    else:
+        from dl_techniques.datasets.nlp import load_wikipedia_train_val
+        # Wikipedia data — fail fast if cache dir is absent.
+        if not os.path.isdir(args.pretrain_lm_hf_cache):
+            raise RuntimeError(
+                f"Wikipedia cache dir not found: {args.pretrain_lm_hf_cache}. "
+                "Point --pretrain-lm-hf-cache at a pre-downloaded HF cache or "
+                "pass --pretrain-lm-steps 0 / --skip-pretrain to bypass LM pretrain."
+            )
+        train_raw, _val_raw = load_wikipedia_train_val(
+            cache_dir=args.pretrain_lm_hf_cache,
+            min_article_length=args.pretrain_lm_min_article_length,
+            val_fraction=0.02,
+            max_val_samples=5000,
+            max_train_samples=None,
+            seed=args.seed,
+            num_shards=args.pretrain_lm_shuffle_shards,
         )
-    train_raw, _val_raw = load_wikipedia_train_val(
-        cache_dir=args.pretrain_lm_hf_cache,
-        min_article_length=args.pretrain_lm_min_article_length,
-        val_fraction=0.02,
-        max_val_samples=5000,
-        max_train_samples=None,
-        seed=args.seed,
-        num_shards=args.pretrain_lm_shuffle_shards,
-    )
 
     chunk_length = args.context_length + 1  # +1 for the causal shift.
     train_ds = preprocess_clm_packed_dataset(
         train_raw,
-        encoding_name="gpt2",
+        encoding_name=args.tokenizer_encoding,
         chunk_length=chunk_length,
         batch_size=args.pretrain_lm_batch_size,
         eot_token_id=eot_token_id,
@@ -1119,20 +1159,14 @@ def _build_optimizer(
     # original CLIP training recipe also excludes biases and LayerNorm
     # gains; we keep the exclusion minimal (just the temperature) because
     # that is the one we have direct evidence is being harmed by decay.
-    # ``exclude_from_weight_decay`` accepts substring patterns matched
-    # against ``variable.path``. It must be called before the first
-    # apply_gradients (i.e. before the optimizer is built) — we do it here
-    # while the optimizer is still fresh.
-    if hasattr(optimizer, "exclude_from_weight_decay"):
-        try:
-            optimizer.exclude_from_weight_decay(var_names=["logit_scale"])
-            logger.info(
-                "Excluded 'logit_scale' from AdamW weight decay."
-            )
-        except (ValueError, AttributeError) as exc:
-            logger.warning(
-                f"Could not exclude logit_scale from weight decay: {exc}"
-            )
+    # ``exclude_from_weight_decay`` matches each pattern against the
+    # variable's leaf ``name`` (``re.search``), not its path, and must be
+    # called before the optimizer is built — we do it here while it is still
+    # fresh. No fallback: a failure here would let decay pull the temperature
+    # down, so it raises (test_the_pretraining_freeze_rules_name_real_layers.py
+    # checks the pattern matches exactly ``logit_scale``).
+    optimizer.exclude_from_weight_decay(var_names=["logit_scale"])
+    logger.info("Excluded 'logit_scale' from AdamW weight decay.")
 
     logger.info(
         f"CLIP optimizer: cosine_decay peak_lr={train_cfg.peak_lr}, "
@@ -1391,12 +1425,6 @@ def train(args: argparse.Namespace) -> Path:
     # Resolve skip flag up-front so later checks read the effective values.
     if args.skip_pretrain:
         args.pretrain_vision_steps = 0
-        args.pretrain_lm_steps = 0
-    if args.synthetic and args.pretrain_lm_steps > 0:
-        logger.warning(
-            "--synthetic + pretrain_lm_steps > 0: Wikipedia is not synthetic; "
-            "forcing pretrain_lm_steps=0 for this run."
-        )
         args.pretrain_lm_steps = 0
 
     if args.pretrain_vision_steps > 0:
@@ -1831,7 +1859,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--synthetic", action="store_true",
-        help="Use random tensors instead of COCO 2017 (smoke test).",
+        help=(
+            "Smoke test on in-memory data for every stage: random "
+            "image-caption pairs instead of --dataset, random CIFAR-shaped "
+            "images with 100 labels instead of CIFAR-100, random-word "
+            "articles instead of Wikipedia."
+        ),
     )
 
     # Infra

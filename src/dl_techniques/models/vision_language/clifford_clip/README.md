@@ -79,8 +79,11 @@ image [B, H, W, C]              text [B, L] int32
          '-----------> logits <------------------'
                          |  * exp(logit_scale), capped
                          v
-        logits_per_image, logits_per_text  [B, B]
+        logits_per_image [B_img, B_txt], logits_per_text [B_txt, B_img]
 ```
+
+Either tower runs alone: an image-only or a text-only input returns that tower's
+features and no logit keys (§ 6).
 
 `logit_scale` stays float32 even under a mixed-precision policy.
 
@@ -238,7 +241,14 @@ tokens = keras.random.randint((4, 64), 0, 100277, dtype="int32")
 out = model({"image": images, "text": tokens})
 # out has keys: image_features, text_features,
 # logits_per_image, logits_per_text, logit_scale
+
+# One modality: that tower's features only, no logit keys (the vanilla CLIP contract).
+model({"image": images})   # {"image_features"}
+model({"text": tokens})    # {"text_features"}; the tuple form (None, tokens) too
 ```
+
+A caption bank is encoded without a dummy image batch. `compute_output_shape` reports the
+same keys for each input form; an input with neither modality raises `ValueError`.
 
 Custom config (bypassing `from_variant`):
 
@@ -279,9 +289,10 @@ restored = keras.models.load_model("cliffordclip_nano.keras")
 | Projection head | Plain pooled anchor -> `Dense` | Selectable; default injects a Clifford geometric-product residual (§ 3) |
 | Registration key | `dl_techniques.models.clip.model` | `dl_techniques.models.clifford_clip.model` |
 
-Both share the CLIP training contract: `call` returns `image_features`, `text_features`,
-`logits_per_image`, `logits_per_text`, `logit_scale`, and the contrastive loss lives
-outside the model in `dl_techniques.losses.CLIPContrastiveLoss`.
+Both share the CLIP call contract: with both modalities `call` returns `image_features`,
+`text_features`, `logits_per_image`, `logits_per_text`, `logit_scale`; with one, only that
+tower's features (until 2026-10-15 CliffordCLIP required both and raised `KeyError`). The
+contrastive loss lives outside the model in `dl_techniques.losses.CLIPContrastiveLoss`.
 
 ---
 

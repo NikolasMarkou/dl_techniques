@@ -1119,6 +1119,27 @@ class CliffordCLIP(keras.Model):
                 next_boundary_stage += 1
         return x
 
+    def _vision_tokens(
+        self,
+        images: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Apply the vision body and flatten its last-stage map to tokens.
+
+        Interface contract (callers: :meth:`encode_image`, and the vision
+        pretraining classifier of ``train/cliffordnet/train_clip.py``, which
+        pools these tokens with ``vision_det_pool`` exactly as the CLIP anchor
+        does): returns ``(B, H' * W', vision_stage_channels[-1])`` in
+        row-major order; it raises nothing of its own.
+
+        :param images: Image tensor ``(B, H, W, C)``.
+        :param training: Whether in training mode.
+        :return: Token tensor ``(B, H' * W', D)``.
+        """
+        x = self._apply_vision_body(images, training=training)
+        shape = keras.ops.shape(x)
+        return keras.ops.reshape(x, (shape[0], shape[1] * shape[2], shape[3]))
+
     def encode_image(
         self,
         images: keras.KerasTensor,
@@ -1133,17 +1154,9 @@ class CliffordCLIP(keras.Model):
             raw projected features (useful for auxiliary losses).
         :return: Embedding tensor ``(B, embed_dim)``.
         """
-        x = self._apply_vision_body(images, training=training)
-
         # Flattened to a token sequence so the generic SequencePooling layers
         # handle every pooling view; z_det, the mean, is the CLIP anchor.
-        b, h, w, d = (
-            keras.ops.shape(x)[0],
-            keras.ops.shape(x)[1],
-            keras.ops.shape(x)[2],
-            keras.ops.shape(x)[3],
-        )
-        seq = keras.ops.reshape(x, (b, h * w, d))
+        seq = self._vision_tokens(images, training=training)
         z_det = self.vision_det_pool(seq)
         z_ctx = (
             self.vision_ctx_pool(seq, training=training)
@@ -1256,46 +1269,84 @@ class CliffordCLIP(keras.Model):
         scale = keras.ops.exp(ls)
         return keras.ops.minimum(scale, keras.ops.cast(self.logit_scale_max, "float32"))
 
+    @staticmethod
+    def _split_modalities(inputs: Any) -> Tuple[Any, Any]:
+        """Return ``(image part, text part)`` of an input or an input shape.
+
+        Interface contract (callers: :meth:`call` with tensors,
+        :meth:`compute_output_shape` with shapes): a dict is read by its
+        ``"image"`` and ``"text"`` keys, a tuple or list by position
+        (``(images,)``, ``(None, input_ids)``, ``(images, input_ids)``);
+        a missing part is ``None``.
+
+        :param inputs: The ``call`` input, or its shape.
+        :return: ``(images, input_ids)``, either possibly ``None``.
+        :raises ValueError: When both parts are missing.
+        """
+        if isinstance(inputs, dict):
+            images, input_ids = inputs.get("image"), inputs.get("text")
+        else:
+            images = inputs[0] if len(inputs) > 0 else None
+            input_ids = inputs[1] if len(inputs) > 1 else None
+        if images is None and input_ids is None:
+            raise ValueError(
+                "CliffordCLIP needs an 'image' input, a 'text' input, or both; "
+                "got neither"
+            )
+        return images, input_ids
+
     def call(
         self,
         inputs: Union[
             Dict[str, keras.KerasTensor],
-            Tuple[keras.KerasTensor, keras.KerasTensor],
+            Tuple[keras.KerasTensor, ...],
         ],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        """Encode both modalities and return features with their similarity matrices.
+        """Encode the modalities given; with both, add their similarity matrices.
 
-        :param inputs: Dict with ``"image"`` and ``"text"`` keys, or a
-            tuple ``(images, input_ids)``.
+        The vanilla CLIP's partial contract (``clip/model.py``): training
+        needs both modalities, while inference may pass either one, and then
+        only that tower's features come back and the logit keys are absent,
+        so a caption bank is encoded without a dummy image batch.
+
+        :param inputs: Dict with ``"image"`` and/or ``"text"`` keys, or a
+            tuple ``(images,)``, ``(None, input_ids)`` or
+            ``(images, input_ids)``.
         :param training: Whether in training mode.
-        :return: Dict with ``image_features``, ``text_features``,
-            ``logits_per_image``, ``logits_per_text``, and the float32
-            ``logit_scale``.
+        :return: ``image_features`` if images were given, ``text_features``
+            if text was given, and with both also ``logits_per_image``
+            ``(B_image, B_text)``, ``logits_per_text`` ``(B_text, B_image)``
+            and the float32 ``logit_scale``.
+        :raises ValueError: When neither modality is given.
         """
-        if isinstance(inputs, dict):
-            images = inputs["image"]
-            input_ids = inputs["text"]
-        else:
-            images, input_ids = inputs[0], inputs[1]
+        # DECISION plan-2026-10-14T062616-81938e81/D-070: one modality in, that
+        # tower's features out, no logit keys -- the vanilla CLIP contract. Do
+        # NOT require both keys again (an image-only or text-only call raised
+        # KeyError, so a caption bank needed a dummy image batch), and do NOT
+        # fill the missing tower with a dummy. See decisions.md D-070.
+        images, input_ids = self._split_modalities(inputs)
+        outputs: Dict[str, keras.KerasTensor] = {}
+        if images is not None:
+            outputs["image_features"] = self.encode_image(images, training=training)
+        if input_ids is not None:
+            outputs["text_features"] = self.encode_text(input_ids, training=training)
+        if images is None or input_ids is None:
+            return outputs
 
-        image_features = self.encode_image(images, training=training)
-        text_features = self.encode_text(input_ids, training=training)
-
+        image_features = outputs["image_features"]
         scale = self._get_logit_scale()
         # Cast to the features' dtype, or an fp16 matmul raises on mixed dtypes.
         scale_c = keras.ops.cast(scale, image_features.dtype)
         logits_per_image, logits_per_text = compute_clip_logits(
-            image_features, text_features, scale_c
+            image_features, outputs["text_features"], scale_c
         )
-
-        return {
-            "image_features": image_features,
-            "text_features": text_features,
+        outputs.update({
             "logits_per_image": logits_per_image,
             "logits_per_text": logits_per_text,
             "logit_scale": scale,
-        }
+        })
+        return outputs
 
     # ------------------------------------------------------------------
     # Shape inference
@@ -1305,28 +1356,29 @@ class CliffordCLIP(keras.Model):
         self,
         input_shape: Union[
             Dict[str, Tuple[Optional[int], ...]],
-            Tuple[Optional[int], ...],
+            Tuple[Optional[Tuple[Optional[int], ...]], ...],
         ],
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute the shapes of all five outputs.
+        """Compute the shapes of the outputs ``call`` returns for this input.
 
-        :param input_shape: Dict of per-modality shapes, or ``(image, text)``.
-        :return: Dict of output name to shape; the logits are ``(B, B)`` and
-            ``logit_scale`` is scalar.
+        :param input_shape: Dict of per-modality shapes, or a tuple of them
+            in ``call``'s positional forms.
+        :return: Dict of output name to shape, holding exactly the keys
+            ``call`` returns; ``logits_per_image`` is ``(B_image, B_text)``,
+            ``logits_per_text`` its transpose and ``logit_scale`` a scalar.
+        :raises ValueError: When neither modality's shape is given.
         """
-        if isinstance(input_shape, dict):
-            image_shape = input_shape.get("image")
-            text_shape = input_shape.get("text")
-        else:
-            image_shape, text_shape = input_shape[0], input_shape[1]
-        batch = image_shape[0] if image_shape is not None else text_shape[0]
-        return {
-            "image_features": (batch, self.embed_dim),
-            "text_features": (batch, self.embed_dim),
-            "logits_per_image": (batch, batch),
-            "logits_per_text": (batch, batch),
-            "logit_scale": (),
-        }
+        image_shape, text_shape = self._split_modalities(input_shape)
+        shapes: Dict[str, Tuple[Optional[int], ...]] = {}
+        if image_shape is not None:
+            shapes["image_features"] = (image_shape[0], self.embed_dim)
+        if text_shape is not None:
+            shapes["text_features"] = (text_shape[0], self.embed_dim)
+        if image_shape is not None and text_shape is not None:
+            shapes["logits_per_image"] = (image_shape[0], text_shape[0])
+            shapes["logits_per_text"] = (text_shape[0], image_shape[0])
+            shapes["logit_scale"] = ()
+        return shapes
 
     # ------------------------------------------------------------------
     # Serialization

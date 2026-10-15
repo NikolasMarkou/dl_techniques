@@ -204,14 +204,27 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip \
     --skip-pretrain --max-train-samples 100000 \
     --batch-size 32 --image-size 112 --epochs 4 --gpu 0
 
-# smoke with no data at all
-MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gpu 0
+# smoke with no data at all: every stage, two pretraining steps each
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic \
+    --image-size 64 --batch-size 8 --max-train-samples 64 --epochs 1 --steps-per-epoch 2 \
+    --pretrain-vision-steps 2 --pretrain-vision-batch-size 8 \
+    --pretrain-lm-steps 2 --pretrain-lm-batch-size 2 \
+    --output-dir /tmp/cliffordclip_smoke --gpu 0
 ```
+
+Pretraining is on by default (50000 steps per tower) and runs before the CLIP stage on the
+same `CliffordCLIP`, through stock `fit`: the vision tower as a CIFAR-100 classifier (the
+mean-pooled anchor, the head norm, a fresh `Dense`), the text tower as a causal LM. Each stage
+freezes everything but its tower's backbone, chosen by sub-layer name from the tables in
+`train_clip.py`; a sub-layer no table names raises. `--synthetic` covers both stages with
+in-memory data, so the smoke above reaches them with no CIFAR-100 or Wikipedia on disk. A
+pretraining budget shorter than one CIFAR-100 epoch is honoured (it used to train a full
+epoch).
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--variant` | `nano` | `CliffordCLIP.MODEL_VARIANTS`: `base`, `large`, `mini`, `nano`, `nano_g`, `small`. |
-| `--dataset` | `coco2017` | or `cc3m`; `--synthetic` overrides both with random tensors. |
+| `--dataset` | `coco2017` | or `cc3m`; `--synthetic` replaces it, CIFAR-100 and Wikipedia with in-memory data. |
 | `--coco-root` | `/media/arxwn/data0_4tb/datasets/coco_2017` | needs `train2017/`, `val2017/`, `annotations/`. |
 | `--cc3m-root` | `/media/arxwn/data0_4tb/datasets/cc3m` | output of `prepare_cc3m.py`; needs `train/`, `validation/`, `*_captions.jsonl`. |
 | `--batch-size` | `128` | 32 is the size proven to fit `mini` on 12 GB at 112^2. |
@@ -228,10 +241,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gp
 | `--head-cli-mode` | `full` | Clifford components in the projection head. |
 | `--vision-patch-size` | `4` | |
 | `--dropout-rate` | `0.1` | |
-| `--tokenizer-encoding` | `gpt2` | English-trained, 50257 tokens. |
+| `--tokenizer-encoding` | `gpt2` | English-trained, 50257 tokens. LM pretraining uses it too. |
 | `--text-use-global-context` | off | Global-context pooling in the text tower only. |
 | `--skip-pretrain` | off | Zeros both pretrain step counts. |
-| `--pretrain-vision-steps` | `50000` | CIFAR-100 vision pretraining; 0 disables. |
+| `--pretrain-vision-steps` | `50000` | CIFAR-100 vision pretraining; 0 disables. An epoch is one pass or the budget, whichever is shorter. |
 | `--pretrain-lm-steps` | `50000` | Wikipedia LM pretraining; 0 disables. |
 | `--pretrain-vision-lr` / `-wd` / `-batch-size` | `1e-3` / `0.1` / `128` | |
 | `--pretrain-lm-lr` / `-wd` / `-batch-size` | `3e-4` / `0.01` / `8` | |
