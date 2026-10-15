@@ -72,7 +72,7 @@ from train.common.run_io import default_experiment_name, prepare_run_dir, save_t
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
 from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
 from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
-from dl_techniques.models.vision_language.sam.sam1.model import SAM
+from dl_techniques.models.vision_language.sam.sam1.model import SAM, create_sam
 from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 from dl_techniques.models.vision_language.sam.sam1.training_model import (
     IOU_SUPERVISION,
@@ -509,19 +509,22 @@ def create_dataset(
 # ---------------------------------------------------------------------------
 # MODEL
 # ---------------------------------------------------------------------------
-def create_sam(config: SAMTrainingConfig) -> SAM:
+def build_sam(config: SAMTrainingConfig) -> SAM:
     """
     Build the SAM to train.
+
+    Not named ``create_sam``: that is the model package's variant factory,
+    which this function calls for every released variant.
 
     Args:
         config: The run's config.
 
     Returns:
         An unbuilt :class:`SAM`. ``tiny`` is assembled here at reduced width;
-        every other variant delegates to ``SAM.from_variant``.
+        every other variant comes from the package factory ``create_sam``.
     """
     if config.variant != "tiny":
-        return SAM.from_variant(config.variant)
+        return create_sam(config.variant)
 
     grid = config.image_size // PATCH_SIZE
     geometry = TINY_GEOMETRY
@@ -578,7 +581,7 @@ def create_training_model(config: SAMTrainingConfig) -> SAMTrainingModel:
         ``ValueError: y_true and y_pred have different structures`` (D-036).
     """
     model = SAMTrainingModel(
-        create_sam(config),
+        build_sam(config),
         multimask_output=config.multimask_output,
         seed=config.seed,
         num_refinement_rounds=config.num_refinement_rounds,

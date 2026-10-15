@@ -731,7 +731,9 @@ def refuse_pretrained(pretrained: Any, model_label: str) -> None:
 
     Interface contract (callers: ``CLIP.from_variant``,
     ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``,
-    ``NanoVLM.from_variant``, and the variant-table-free factories
+    ``NanoVLM.from_variant``, ``CliffordCLIP.from_variant``,
+    ``SAM.from_variant``, ``SAM2.from_variant``, ``Sam3Image.from_variant``,
+    and the variant-table-free factories
     ``create_shared_token_decoder``, ``create_ideogram4_transformer``,
     ``create_ideogram4_autoencoder``, ``create_sd3_mmdit``, ``create_sd3_vae``
     and ``create_sd3_pipeline``). The

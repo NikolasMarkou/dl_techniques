@@ -118,9 +118,11 @@ Two structural notes that are easy to get backwards:
 ## 3. Quick Start
 
 ```python
-from dl_techniques.models.vision_language.sam.sam3 import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3 import create_sam3
 
-model = Sam3Image.from_variant("tiny")     # RANDOM weights — no checkpoint ships
+model = create_sam3("tiny")   # RANDOM weights; same as Sam3Image.from_variant("tiny")
+# create_sam3("tiny", pretrained=True) raises NotImplementedError: no checkpoint
+# ships. A local .keras archive loads with keras.models.load_model(path).
 
 outputs = model({"image": images, "token_ids": ids}, training=False)
 outputs["pred_logits"]   # (B, num_queries)      open-vocabulary class score

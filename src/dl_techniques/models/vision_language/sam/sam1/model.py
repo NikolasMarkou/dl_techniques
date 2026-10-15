@@ -40,8 +40,7 @@ References:
 """
 
 import keras
-from keras import ops
-from typing import Tuple, List, Any, Dict, Optional, Literal, Sequence
+from typing import Tuple, Any, Dict, Optional, Literal, Sequence, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -52,6 +51,7 @@ from .prompt_encoder import PromptEncoder
 from .image_encoder import ImageEncoderViT
 from .transformer import DEFAULT_ATTENTION_DROPOUT_RATE, TwoWayTransformer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 
@@ -247,8 +247,8 @@ class SAM(keras.Model):
         self.binarize_masks = bool(binarize_masks)
 
         # Convert normalization parameters to tensors
-        self.pixel_mean = ops.array(pixel_mean, dtype="float32")
-        self.pixel_std = ops.array(pixel_std, dtype="float32")
+        self.pixel_mean = keras.ops.array(pixel_mean, dtype="float32")
+        self.pixel_std = keras.ops.array(pixel_std, dtype="float32")
 
         # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as list, not
         # the constructor's tuple default -- get_config has always emitted a list. See decisions.md.
@@ -318,8 +318,8 @@ class SAM(keras.Model):
         # Materialize lazily-built attention/transformer sublayers via a dummy
         # forward (image-only; no prompts needed to trigger the full graph).
         dummy_inputs = {
-            "image": ops.zeros((1, img_size, img_size, 3), dtype="float32"),
-            "original_size": ops.convert_to_tensor((img_size, img_size)),
+            "image": keras.ops.zeros((1, img_size, img_size, 3), dtype="float32"),
+            "original_size": keras.ops.convert_to_tensor((img_size, img_size)),
         }
         self(dummy_inputs, multimask_output=True)
 
@@ -365,7 +365,7 @@ class SAM(keras.Model):
 
         image = inputs['image']
 
-        input_image_shape = ops.shape(image)[1:3]
+        input_image_shape = keras.ops.shape(image)[1:3]
         image = self.preprocess(image)
         image_embeddings = self.image_encoder(image, training=training)
 
@@ -395,7 +395,7 @@ class SAM(keras.Model):
         # gradient-dead, but stays the default to match reference SAM's own
         # output contract; low_res_logits is the training target either way. See decisions.md.
         if self.binarize_masks:
-            masks = ops.cast(masks > self.mask_threshold, dtype='uint8')
+            masks = keras.ops.cast(masks > self.mask_threshold, dtype='uint8')
 
         return {
             "masks": masks,
@@ -423,7 +423,7 @@ class SAM(keras.Model):
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-005: refuse an oversize
         # image here, at the point of violation -- otherwise pad_h/pad_w go
-        # negative and ops.pad raises an uncatchable-as-ValueError OpError. See decisions.md.
+        # negative and keras.ops.pad raises an uncatchable-as-ValueError OpError. See decisions.md.
         static_shape = tuple(x.shape)
         if len(static_shape) == 4:
             for axis_name, dim in (
@@ -445,17 +445,17 @@ class SAM(keras.Model):
         # DECISION plan-2026-08-19T163559-499b6f0e/D-063: pixel_mean/pixel_std
         # are fixed float32 constants, so they must be cast to the tensor's
         # dtype at every use, not once in __init__ -- the dtype policy can change after construction. See decisions.md.
-        x = ops.cast(x, self.compute_dtype)
-        x = (x - ops.cast(self.pixel_mean, x.dtype)) / ops.cast(
+        x = keras.ops.cast(x, self.compute_dtype)
+        x = (x - keras.ops.cast(self.pixel_mean, x.dtype)) / keras.ops.cast(
             self.pixel_std, x.dtype)
 
         # Pad to encoder size
-        h, w = ops.shape(x)[1], ops.shape(x)[2]
+        h, w = keras.ops.shape(x)[1], keras.ops.shape(x)[2]
         pad_h = self.image_encoder.img_size - h
         pad_w = self.image_encoder.img_size - w
 
         # Add padding to bottom and right
-        x = ops.pad(x, [[0, 0], [0, pad_h], [0, pad_w], [0, 0]])
+        x = keras.ops.pad(x, [[0, 0], [0, pad_h], [0, pad_w], [0, 0]])
 
         return x
 
@@ -481,14 +481,14 @@ class SAM(keras.Model):
             ``(batch_size, num_masks, original_H, original_W)``.
         :rtype: keras.KerasTensor
         """
-        masks = ops.image.resize(
+        masks = keras.ops.image.resize(
             masks,
             (self.image_encoder.img_size, self.image_encoder.img_size),
             interpolation="bilinear",
             data_format="channels_first"
         )
         masks = masks[..., :input_size[0], :input_size[1]]
-        masks = ops.image.resize(
+        masks = keras.ops.image.resize(
             masks,
             original_size,
             interpolation="bilinear",
@@ -513,6 +513,7 @@ class SAM(keras.Model):
     def from_variant(
         cls,
         variant: Literal['vit_b', 'vit_l', 'vit_h'],
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
     ) -> 'SAM':
         """
@@ -522,6 +523,11 @@ class SAM(keras.Model):
             ``'vit_l'`` (1024 dim, 24 layers, ~300M params), or ``'vit_h'``
             (1280 dim, 32 layers, ~630M params).
         :type variant: Literal['vit_b', 'vit_l', 'vit_h']
+        :param pretrained: Must be falsy. No SAM weights are distributed, and
+            SAM has no task head, so there is no backbone-only load to offer
+            for a path: a whole ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
         :param kwargs: Additional arguments passed to the SAM constructor
             (e.g. ``mask_threshold``, ``pixel_mean``). One key is
             intercepted rather than forwarded: ``dropout_rate`` reaches
@@ -532,6 +538,8 @@ class SAM(keras.Model):
         :rtype: SAM
         :raises ValueError: If ``variant`` is not supported, or if
             ``dropout_rate`` is outside ``[0.0, 1.0)``.
+        :raises NotImplementedError: If ``pretrained`` is truthy (``True`` or
+            a path), before anything is built.
 
         Example:
             ```python
@@ -553,6 +561,9 @@ class SAM(keras.Model):
                 f"Unknown variant: '{variant}'. "
                 f"Supported variants are: {sorted(cls.MODEL_VARIANTS)}"
             )
+        # The D-033 ruling (plan-2026-10-14T062616-81938e81): no backbone/head
+        # split, so a path is refused like True.
+        refuse_pretrained(pretrained, "SAM")
 
         config = cls.MODEL_VARIANTS[variant]
 
@@ -689,5 +700,29 @@ class SAM(keras.Model):
             'iou_predictions': (batch_size, num_masks),
             'low_res_logits': (batch_size, num_masks, None, None),
         }
+
+
+def create_sam(
+    variant: str,
+    pretrained: Union[bool, str] = False,
+    **kwargs: Any
+) -> SAM:
+    """
+    Create a SAM 1 model from a named variant; delegates to :meth:`SAM.from_variant`.
+
+    :param variant: One of ``SAM.MODEL_VARIANTS``: ``'vit_b'``, ``'vit_l'``,
+        ``'vit_h'``.
+    :type variant: str
+    :param pretrained: Must be falsy; see :meth:`SAM.from_variant`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Forwarded to :meth:`SAM.from_variant` (``dropout_rate`` and
+        the SAM constructor arguments).
+    :type kwargs: Any
+    :return: A configured, unbuilt SAM.
+    :rtype: SAM
+    :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
+    """
+    return SAM.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

@@ -24,7 +24,6 @@ import tempfile
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision_language.sam.sam3 import Sam3Image
 from dl_techniques.models.vision_language.sam.sam3.sam3_image import COMPONENT_KEYS
@@ -279,7 +278,9 @@ class TestConstruction:
         of the released reference, and it is exported because it owns weights
         and round-trips independently. The counts are split so that adding a
         class and adding a helper are not interchangeable here: an unannounced
-        twelfth-plus class still fires even if the total happens to match."""
+        twelfth-plus class still fires even if the total happens to match.
+        Plan-2026-10-14T062616-81938e81 step 11 adds exactly ONE function,
+        the GUIDE section 1 factory ``create_sam3`` (D-047)."""
         import dl_techniques.models.vision_language.sam.sam3 as package
         assert "Sam3Image" in package.__all__
         exported = {name: getattr(package, name) for name in package.__all__}
@@ -290,7 +291,8 @@ class TestConstruction:
         assert "Sam3TrainingModel" in classes
         assert "Sam3EncoderQuerySelection" in classes
         assert functions == [
-            "compile_sam3_trainer", "pack_predictions", "pack_targets"]
+            "compile_sam3_trainer", "create_sam3", "pack_predictions",
+            "pack_targets"]
 
     def test_unknown_variant_is_refused(self):
         with pytest.raises(ValueError, match="Unknown SAM 3 variant"):
@@ -463,9 +465,9 @@ class TestFusionOracle:
 
     @staticmethod
     def fuse(class_logit, presence_logit, clamp=10.0):
-        cls = ops.convert_to_tensor(
+        cls = keras.ops.convert_to_tensor(
             np.array(class_logit, dtype="float32").reshape(1, 1, -1, 1))
-        pres = ops.convert_to_tensor(
+        pres = keras.ops.convert_to_tensor(
             np.array(presence_logit, dtype="float32").reshape(1, 1, 1))
         return np.array(Sam3Image._fuse(cls, pres, clamp)).reshape(-1)
 
@@ -614,7 +616,7 @@ class TestBoxRefinement:
         # head that emits zeros for any reason, including a dead one. Its
         # liveness arm is `test_a_live_box_head_moves_the_boxes` below.
         out = model(batch, training=False)
-        anchor = np.array(ops.sigmoid(model.transformer.reference_points))
+        anchor = np.array(keras.ops.sigmoid(model.transformer.reference_points))
         np.testing.assert_allclose(np.array(out["pred_boxes"]),
                                    np.broadcast_to(anchor, (2, 5, 4)),
                                    atol=1e-6)
@@ -643,12 +645,12 @@ class TestBoxRefinement:
             training=False)
         from dl_techniques.models.vision_language.sam.sam3 import Sam3TransformerDecoder as Dec
         delta = Dec._run_mlp(model.transformer.bbox_embed, hidden)
-        expected = np.array(ops.sigmoid(
+        expected = np.array(keras.ops.sigmoid(
             delta + Dec._inverse_sigmoid(anchors)))[-1]
         np.testing.assert_allclose(
             np.array(model(batch, training=False)["pred_boxes"]), expected,
             atol=1e-5)
-        assert np.max(np.abs(expected - np.array(ops.sigmoid(
+        assert np.max(np.abs(expected - np.array(keras.ops.sigmoid(
             model.transformer.reference_points)))) > 1e-4
 
 

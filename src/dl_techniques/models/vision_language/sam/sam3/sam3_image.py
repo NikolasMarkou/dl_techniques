@@ -57,7 +57,6 @@ References:
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import keras
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -72,6 +71,7 @@ from dl_techniques.models.vision_language.sam.sam3.query_selection import Sam3En
 from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 #: The six composed components, in the order they run. Serialization iterates
 #: this tuple rather than repeating the names, so a component added to the
@@ -414,13 +414,23 @@ class Sam3Image(keras.Model):
     # -----------------------------------------------------------------
 
     @classmethod
-    def from_variant(cls, variant: str, **kwargs: Any) -> "Sam3Image":
+    def from_variant(
+            cls,
+            variant: str,
+            pretrained: Union[bool, str] = False,
+            **kwargs: Any,
+    ) -> "Sam3Image":
         """Construct every component from one variant table entry.
 
         :param variant: ``'sam3'`` (the released configuration), ``'small'`` (a
             trainable-on-12-GB geometry, NOT a published size) or ``'tiny'``
             (a development geometry that is NOT a published size).
         :type variant: str
+        :param pretrained: Must be falsy. No SAM 3 weights are distributed, and
+            Sam3Image has no backbone/head split, so there is no partial load
+            to offer for a path: a whole ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
         :param kwargs: Explicit overrides. A table key is overridden in the
             table; anything else is forwarded to ``__init__``. Passing ``None``
             explicitly is the same as omitting the argument (S-3).
@@ -428,6 +438,8 @@ class Sam3Image(keras.Model):
         :return: The configured model.
         :rtype: Sam3Image
         :raises ValueError: If ``variant`` is unknown.
+        :raises NotImplementedError: If ``pretrained`` is truthy (``True`` or
+            a path), before anything is built.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -437,6 +449,9 @@ class Sam3Image(keras.Model):
                 f"package's own development geometries, and the other published "
                 f"SAM 3 configurations were never read by this implementation "
                 f"and are not invented here.")
+        # The D-033 ruling (plan-2026-10-14T062616-81938e81): no backbone/head
+        # split, so a path is refused like True.
+        refuse_pretrained(pretrained, "Sam3Image")
         table = dict(cls.MODEL_VARIANTS[variant])
         overrides = {k: v for k, v in kwargs.items() if v is not None}
         table.update({k: v for k, v in overrides.items() if k in table})
@@ -497,8 +512,8 @@ class Sam3Image(keras.Model):
     @staticmethod
     def _flatten(feature: Any) -> Any:
         """Fold a channels-last map's spatial axes into one token axis."""
-        shape = ops.shape(feature)
-        return ops.reshape(feature, (shape[0], shape[1] * shape[2], shape[3]))
+        shape = keras.ops.shape(feature)
+        return keras.ops.reshape(feature, (shape[0], shape[1] * shape[2], shape[3]))
 
     @staticmethod
     def _build_once(component: keras.layers.Layer, *shapes: Any) -> None:
@@ -690,7 +705,7 @@ class Sam3Image(keras.Model):
                 "pred_boxes": proposals["selected_boxes"],
                 "pred_masks": seg["pred_masks"],
                 "semantic_seg": seg["semantic_seg"],
-                "presence_logit": ops.max(
+                "presence_logit": keras.ops.max(
                     proposals["selected_objectness"], axis=1),
             })
         return blocks
@@ -782,7 +797,7 @@ class Sam3Image(keras.Model):
             # DECISION plan-2026-08-06T185813-fd80240f/D-006: proposals enter
             # the decoder detached; never remove this stop_gradient.
             # The head is supervised by its own packed block already; removing this reopens a credit-assignment path through the decoder with no shape/dtype symptom, only silent gradient changes. See decisions.md.
-            reference_boxes = ops.stop_gradient(proposals["selected_boxes"])
+            reference_boxes = keras.ops.stop_gradient(proposals["selected_boxes"])
 
         # `tgt` is deliberately NOT passed: query CONTENT stays the decoder's
         # learned `query_embed` table and only the POSITIONAL part comes from
@@ -803,7 +818,7 @@ class Sam3Image(keras.Model):
         # is the box this model reports.
         delta = Sam3TransformerDecoder._run_mlp(self.transformer.bbox_embed,
                                                 hidden)
-        outputs_coord = ops.sigmoid(
+        outputs_coord = keras.ops.sigmoid(
             delta + Sam3TransformerDecoder._inverse_sigmoid(anchors))
 
         if self.supervise_joint_box_scores:
@@ -843,12 +858,12 @@ class Sam3Image(keras.Model):
         #
         # The presence multiplied here is the decoder's, the only presence
         # signal in this package.
-        presence = ops.sigmoid(presence_logits)
+        presence = keras.ops.sigmoid(presence_logits)
         if detach:
-            presence = ops.stop_gradient(presence)
-        return ops.clip(
+            presence = keras.ops.stop_gradient(presence)
+        return keras.ops.clip(
             Sam3TransformerDecoder._inverse_sigmoid(
-                ops.sigmoid(outputs_class) * ops.expand_dims(presence, 2)),
+                keras.ops.sigmoid(outputs_class) * keras.ops.expand_dims(presence, 2)),
             -clamp, clamp)
 
     def compute_output_shape(
@@ -905,5 +920,29 @@ class Sam3Image(keras.Model):
         for key in COMPONENT_KEYS:
             config[key] = keras.saving.deserialize_keras_object(config[key])
         return cls(**config)
+
+
+def create_sam3(
+        variant: str,
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any,
+) -> Sam3Image:
+    """Build a SAM 3 image model from a variant name; delegates to :meth:`Sam3Image.from_variant`.
+
+    :param variant: ``'sam3'`` (the released configuration), ``'small'`` or
+        ``'tiny'`` (this package's development geometries).
+    :type variant: str
+    :param pretrained: Must be falsy; see :meth:`Sam3Image.from_variant`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Overrides forwarded to :meth:`Sam3Image.from_variant`; a
+        table key overrides the table, anything else reaches ``__init__``, and
+        ``None`` defers to the table (S-3).
+    :type kwargs: Any
+    :return: The configured model.
+    :rtype: Sam3Image
+    :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
+    """
+    return Sam3Image.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

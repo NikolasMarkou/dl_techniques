@@ -178,6 +178,11 @@ def _resolve_required_arg(param_name: str, fn) -> Tuple[Any, str]:
         return 8, ""
     if param_name == "input_shape":
         return (32, 32, 3), ""
+    if param_name in ("image_size", "context_length"):
+        # Sizes like the others: CliffordCLIP's from_variant and factory take
+        # both as required arguments (they describe the data, not the
+        # variant), and `pretrained=True` raises before any model is built.
+        return 32, ""
     return None, f"required argument {param_name!r} has no generic resolution"
 
 
@@ -5871,7 +5876,10 @@ def _sweep_step_overrides(roots=None, src_root=None):
 #: ``CLIPTrainer.train_step`` deleted, the CLIP trainer trains through stock
 #: ``fit`` (plan-2026-10-14T062616-81938e81 D-036). 32 keys since 2026-10-15:
 #: ``NanoVLMTrainer.train_step`` deleted, the NanoVLM trainer trains through
-#: stock ``fit`` (plan-2026-10-14T062616-81938e81 D-038).
+#: stock ``fit`` (plan-2026-10-14T062616-81938e81 D-038). 30 keys since
+#: 2026-10-15: ``ContrastiveCliffordCLIP.train_step``/``test_step`` deleted, the
+#: CliffordCLIP trainer trains through the D-036 stock-``fit`` bridge
+#: (plan-2026-10-14T062616-81938e81 D-045).
 #:
 #: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
 #: growth predicate -- but they fail the liveness test below, which is
@@ -5914,8 +5922,6 @@ _FROZEN_STEP_OVERRIDES = {
      "VQVAERotationTrick", "train_step"),
     ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "test_step"),
     ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "train_step"),
-    ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "test_step"),
-    ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "train_step"),
     ("src/train/hrm/train_hrm.py", "HRMTrainer", "train_step"),
     # DECISION plan-2026-10-13T035756-5dd4d94d/D-018
     # WHAT NOT TO DO: do not convert this step to stock fit() as a drive-by. The
@@ -6049,20 +6055,20 @@ class TestCustomStepOverridePopulationIsFrozen:
         )
 
     def test_the_frozen_population_is_the_measured_one(self):
-        """Anti-vacuity: the frozen set is exactly the 32 keys measured.
+        """Anti-vacuity: the frozen set is exactly the 30 keys measured.
 
         No 0.8 floor here -- a freeze is an equality, and a floor would let the
-        set decay to 27 unnoticed.
+        set decay to 25 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 32
+        assert len(_FROZEN_STEP_OVERRIDES) == 30
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
-            19,
-            12,
+            18,
+            11,
             1,
         ), (
-            "the step-override mix moved off the measured 19/12/1; reconcile "
+            "the step-override mix moved off the measured 18/11/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 

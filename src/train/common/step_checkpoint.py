@@ -83,6 +83,11 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         dynamically from the first logged row. A tuple writes a fixed-schema CSV
         (``extrasaction="ignore"``, ``restval=""``) and adds ``epoch`` / ``lr``
         columns to each row.
+    :param saved_model: The model written to ``step_*.keras`` and
+        ``final.keras`` and handed to the analyzer. ``None`` (the default) is
+        the model ``fit`` trains (``self.model``). Pass the inner model when
+        ``fit`` trains a training-only wrapper that is never saved, such as
+        the contrastive bridge ``train.clip.train_clip.StackedCLIPLogits``.
     """
 
     def __init__(
@@ -98,8 +103,10 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         step_counter: Optional[Any] = None,
         gc_on_save: bool = False,
         csv_fields: Optional[Sequence[str]] = None,
+        saved_model: Optional[keras.Model] = None,
     ) -> None:
         super().__init__()
+        self._saved_model = saved_model
         self.save_every_steps = save_every_steps
         self.analyze_every_steps = analyze_every_steps
         self.max_checkpoints = max_checkpoints
@@ -150,6 +157,11 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             f"log every {log_every_steps} steps, "
             f"plot every {plot_every_steps} steps"
         )
+
+    @property
+    def checkpoint_model(self) -> keras.Model:
+        """The model this callback saves and analyzes (see ``saved_model``)."""
+        return self.model if self._saved_model is None else self._saved_model
 
     @property
     def global_step(self) -> int:
@@ -212,7 +224,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         os.makedirs(self._ckpt_dir, exist_ok=True)
         path = os.path.join(self._ckpt_dir, "final.keras")
         try:
-            self.model.save(path)
+            self.checkpoint_model.save(path)
             logger.info(f"Final checkpoint saved: {path}")
         except Exception:
             # LESSON: periodic side-effect callbacks must surface failures
@@ -351,7 +363,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             self._ckpt_dir, f"step_{self.global_step:07d}.keras"
         )
         try:
-            self.model.save(path)
+            self.checkpoint_model.save(path)
         except Exception:
             # LESSON: periodic side-effect callbacks must surface failures
             # loudly. Log and skip cleanup so the next save can retry.
@@ -389,7 +401,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         )
         try:
             analyzer = ModelAnalyzer(
-                models={self.model_name: self.model},
+                models={self.model_name: self.checkpoint_model},
                 config=self._analysis_config,
                 output_dir=step_dir,
             )

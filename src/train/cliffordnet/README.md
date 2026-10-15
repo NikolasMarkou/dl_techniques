@@ -210,7 +210,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gp
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--variant` | `nano` | `nano`, `mini`, `small`, `base`, `large`. |
+| `--variant` | `nano` | `CliffordCLIP.MODEL_VARIANTS`: `base`, `large`, `mini`, `nano`, `nano_g`, `small`. |
 | `--dataset` | `coco2017` | or `cc3m`; `--synthetic` overrides both with random tensors. |
 | `--coco-root` | `/media/arxwn/data0_4tb/datasets/coco_2017` | needs `train2017/`, `val2017/`, `annotations/`. |
 | `--cc3m-root` | `/media/arxwn/data0_4tb/datasets/cc3m` | output of `prepare_cc3m.py`; needs `train/`, `validation/`, `*_captions.jsonl`. |
@@ -218,11 +218,12 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gp
 | `--image-size` | `112` | Single stage; there is no resolution curriculum. |
 | `--context-length` | `64` | |
 | `--epochs` | `10` | |
+| `--steps-per-epoch` | one pass | Cap on CLIP steps per epoch; also sizes the cosine schedule. |
 | `--peak-lr` | `5e-4` | Cosine decay + linear warmup. |
 | `--warmup-ratio` | `0.03` | |
 | `--weight-decay` | `0.1` | `logit_scale` is excluded from it. |
 | `--loss` | `clip` | `clip` (symmetric InfoNCE) or `siglip`. |
-| `--label-smoothing` | `0.1` | Set 0.0 to match the CLIP paper exactly. |
+| `--label-smoothing` | `0.1` with `clip` | Set 0.0 to match the CLIP paper exactly. Refused with `--loss siglip` (no smoothing there). |
 | `--head-kind` | `learned_query_residual` | `plain`, `mean_max`, `learned_query`, `learned_query_residual`. |
 | `--head-cli-mode` | `full` | Clifford components in the projection head. |
 | `--vision-patch-size` | `4` | |
@@ -246,20 +247,25 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gp
 | `--max-train-samples` / `--max-val-samples` | none | |
 | `--cache-decoded` | off | See gotchas. |
 | `--mixed-bfloat16` | off | No LossScaleOptimizer needed; `logit_scale` stays fp32. |
-| `--seed` | `42` | |
+| `--seed` | `42` | Seeds Python, numpy and Keras/TF (`set_seeds`) and the LM-pretrain loader. |
+| `--output-dir` | `results/cliffordclip_<variant>_<timestamp>` | Run directory. |
 | `--gpu` | none | Parsed from `sys.argv` before `import tensorflow`, so the late "GPU setup error" log line is benign. |
 
-Output:
+Training is stock `compile`/`fit` on the contrastive bridge of `src/train/clip/train_clip.py`
+(`compile_for_contrastive_training` with the `--loss` loss as its inner loss). Output:
 
 ```
-results/cliffordclip_<variant>_<timestamp>/
+results/cliffordclip_<variant>_<timestamp>/      (or --output-dir)
   checkpoints/step_NNNNNNN.keras + final.keras
   retrieval_probes/probes.jsonl
-  tensorboard/{train,validation}/
-  training_log.csv
+  tensorboard/clip/   (and tensorboard/pretrain_{vision,lm}/ when those stages run)
+  training_log.csv    step rows: loss, clip_i2t_accuracy, clip_i2t_recall@5, logit_scale
   cliffordclip_<variant>.keras
   training_summary.txt
 ```
+
+Every `.keras` above is the bare `CliffordCLIP`, never the training wrapper, so
+`keras.models.load_model(path)` returns the model directly.
 
 `CliffordCLIP` is **not** exported from
 `dl_techniques.models.vision.cliffordnet` (that package exports `CliffordNet`

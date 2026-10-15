@@ -214,10 +214,13 @@ contrastive temperature update sees balanced gradient magnitudes; `nano` / `nano
 `CliffordNet` / `CliffordNetLM` `nano` (channels=128, depth=12, shifts=[1,2]) so the CLIP
 backbone can be ablated against the vanilla classifier / LM at matched capacity.
 
-There is **no module-level `create_clifford_clip()` factory function** — unlike the
-sibling `clip` package's `create_clip`, `CliffordCLIP`
-exposes only the `CliffordCLIP.from_variant(...)` classmethod and the bare constructor.
-Use `from_variant` for a preset, or the constructor directly for a custom config.
+`create_clifford_clip(variant, vocab_size, image_size, context_length, pretrained=False,
+**kwargs)` is the module-level factory; it delegates to `CliffordCLIP.from_variant` with the
+same arguments. `vocab_size`, `image_size` and `context_length` are required by both: they
+describe the data (tokenizer, image resolution, caption length), not the variant.
+`pretrained=True` or a path raises `NotImplementedError`: no weights are distributed, and a
+local `.keras` archive loads with `keras.models.load_model(path)`. Use the factory or
+`from_variant` for a preset, or the constructor directly for a custom config.
 
 ---
 
@@ -291,6 +294,10 @@ per launch:
 ```
 results/cliffordclip_<variant>_<timestamp>/
 ```
+
+(or `--output-dir`). It trains with stock `compile`/`fit` through the stacking bridge of
+`src/train/clip/train_clip.py` (`compile_for_contrastive_training`), and every `.keras` it
+writes, step checkpoints included, is the bare `CliffordCLIP`, never the training wrapper.
 
 See `src/train/cliffordnet/README.md` for the full protocol, flags and CC3M-smoke
 head-variant sweep results.

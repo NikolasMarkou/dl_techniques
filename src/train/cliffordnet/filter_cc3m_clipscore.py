@@ -59,12 +59,11 @@ from train.common.image_text import (
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
 from dl_techniques.utils.logger import logger
 
-# Checkpoints saved by ``train_clip.py`` are the BARE ``CliffordCLIP``
-# (``ContrastiveCliffordCLIP.clip_model`` is the saved object), so
-# ``{"CliffordCLIP": CliffordCLIP}`` is sufficient. The Clifford head/blocks
-# auto-register via ``@register_dl_technique``; a bare checkpoint carries
-# no ``CLIPContrastiveLoss``. A future wrapper checkpoint would make
-# ``load_model`` raise a clear "Unknown object" naming the class to add here.
+# Every checkpoint ``train_clip.py`` writes (step, final and run-root) is the
+# BARE ``CliffordCLIP``; the trainer never saves its stock-fit bridge
+# (plan-2026-10-14T062616-81938e81 D-045), so ``{"CliffordCLIP": CliffordCLIP}``
+# is sufficient. The Clifford head/blocks auto-register via
+# ``@register_dl_technique``; a bare checkpoint carries no compiled loss.
 _CUSTOM_OBJECTS = {"CliffordCLIP": CliffordCLIP}
 
 

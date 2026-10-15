@@ -3,8 +3,10 @@
 ``sam1/``, ``sam2/`` and ``sam3/`` are each a full architecture with its own
 ``MODEL_VARIANTS`` and ``from_variant``: SAM 1 is an image encoder, prompt
 encoder and mask decoder; SAM 2 adds a memory bank and memory attention for
-video; SAM 3 adds text-conditioned open-vocabulary segmentation. Nothing is
-shared between them beyond the repo's layer library, and none deprecates the
+video; SAM 3 adds text-conditioned open-vocabulary segmentation. SAM 2
+imports two of SAM 1's public classes (``TwoWayTransformer``,
+``PromptEncoder``) and nothing private; SAM 3 imports neither sibling. Beyond
+that nothing is shared but the repo's layer library, and none deprecates the
 others.
 
 This package exports nothing; import from the subpackage directly::

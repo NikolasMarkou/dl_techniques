@@ -121,6 +121,8 @@ SAM2ImageEncoder ───── drop `scalp` levels; vision_features = last of 
 from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
 
 model = create_sam2("tiny")            # RANDOM weights — no checkpoint ships
+# create_sam2(variant, pretrained=False, **kwargs) delegates to SAM2.from_variant;
+# pretrained=True (or a path) raises NotImplementedError.
 
 # Image path: traceable, touches neither the memory bank nor memory attention.
 outputs = model({"image": images, "points": (coords, labels)})

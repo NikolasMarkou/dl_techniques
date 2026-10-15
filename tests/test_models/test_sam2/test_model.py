@@ -30,7 +30,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 import dl_techniques.models.vision_language.sam.sam2.model as model_module
 from dl_techniques.utils.keras_registration import LEGACY_ALIAS_PREFIX
@@ -44,7 +43,7 @@ from dl_techniques.models.vision_language.sam.sam2.model import (
     SAM2,
     create_sam2,
 )
-from dl_techniques.models.vision_language.sam.sam2.neck import SAM2FpnNeck, SAM2ImageEncoder
+from dl_techniques.models.vision_language.sam.sam2.neck import SAM2ImageEncoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
 from ..test_sam.dead_component_oracle import (
@@ -137,7 +136,7 @@ def max_abs_diff(a: Any, b: Any) -> float:
     :rtype: float
     """
     return float(np.max(np.abs(
-        ops.convert_to_numpy(a) - ops.convert_to_numpy(b))))
+        keras.ops.convert_to_numpy(a) - keras.ops.convert_to_numpy(b))))
 
 
 def pin_object_score(model: SAM2, value: float) -> None:
@@ -868,10 +867,10 @@ class TestGraphTrace:
     def test_the_trace_guard_is_not_vacuous(self) -> None:
         """The mutation that ACTUALLY fires on this stack.
 
-        The plan named a dynamic-size ``ops.image.resize``; step 2 measured that
+        The plan named a dynamic-size ``keras.ops.image.resize``; step 2 measured that
         INERT (a dynamic size traces fine here -- the real constraint is that
         the ``size`` argument be ``len()``-able). Step 3's measured substitute
-        is ``ops.convert_to_numpy`` inside the traced body, which raises
+        is ``keras.ops.convert_to_numpy`` inside the traced body, which raises
         ``NotImplementedError``.
         """
         model = tiny_model()
@@ -881,7 +880,7 @@ class TestGraphTrace:
             tf.TensorSpec((BATCH, TINY_IMAGE, TINY_IMAGE, 3), tf.float32)])
         def traced(x: Any) -> Any:
             out = model({"image": x})["low_res_logits"]
-            return out + float(np.sum(ops.convert_to_numpy(out)))
+            return out + float(np.sum(keras.ops.convert_to_numpy(out)))
 
         with pytest.raises(NotImplementedError):
             traced.get_concrete_function()
@@ -1013,12 +1012,12 @@ def compiled_tiny() -> SAM2:
     """A built, compiled model ready for one ``fit()`` step.
 
     ``jit_compile=False`` is REQUIRED, not stylistic: the trunk's stem
-    positional embedding uses a bicubic ``ops.image.resize``, which XLA refuses
+    positional embedding uses a bicubic ``keras.ops.image.resize``, which XLA refuses
     to convert (``tf2xla conversion failed``). Measured at this HEAD.
 
     The object score is pinned POSITIVE (D-043). ``NO_OBJ_SCORE`` suppression
     replaces the mask logits with a constant wherever the score is negative,
-    and ``ops.where`` passes no gradient through the replaced branch -- so on a
+    and ``keras.ops.where`` passes no gradient through the replaced branch -- so on a
     randomly initialized model the mask path would be starved for roughly half
     of all seeds and this instrument's partition would be a coin flip. That is
     upstream's behaviour too, not an artifact of this port: real training
@@ -1196,7 +1195,7 @@ class TestStreaming:
             model.stream_step(source, frame_idx=0, is_conditioning=True)
             model.stream_step(other, frame_idx=1)
             out = model.stream_step(other, frame_idx=2)
-            loss = ops.sum(ops.square(out["low_res_logits"]))
+            loss = keras.ops.sum(keras.ops.square(out["low_res_logits"]))
         return tape.gradient(loss, source)
 
     def test_gradient_does_not_reach_frame_zero(self) -> None:
@@ -1211,7 +1210,10 @@ class TestStreaming:
         satisfied by a model whose streaming path is dead altogether."""
         model = tiny_model()
         source = tf.Variable(images(1, seed=7))
-        with mock.patch.object(model_module.ops, "stop_gradient", lambda x: x):
+        # `model.py` calls `keras.ops.stop_gradient` (no module-level `ops`
+        # binding since plan-2026-10-14T062616-81938e81 step 11), so the
+        # attribute is patched where the call site looks it up.
+        with mock.patch.object(keras.ops, "stop_gradient", lambda x: x):
             gradient = self._gradient_through_the_stream(
                 model, source, images(1, seed=8))
         assert gradient is not None, (
@@ -1219,7 +1221,7 @@ class TestStreaming:
             "if it does not, the frames are not actually connected and the "
             "positive arm of this guard proves nothing"
         )
-        assert float(np.max(np.abs(ops.convert_to_numpy(gradient)))) > 0.0
+        assert float(np.max(np.abs(keras.ops.convert_to_numpy(gradient)))) > 0.0
 
     def test_the_single_frame_path_does_carry_gradient(self) -> None:
         """The control for the control: one frame IS differentiable.
@@ -1233,10 +1235,10 @@ class TestStreaming:
         model.stream_reset()
         with tf.GradientTape() as tape:
             out = model.stream_step(source, frame_idx=0, is_conditioning=True)
-            loss = ops.sum(ops.square(out["low_res_logits"]))
+            loss = keras.ops.sum(keras.ops.square(out["low_res_logits"]))
         gradient = tape.gradient(loss, source)
         assert gradient is not None
-        assert float(np.max(np.abs(ops.convert_to_numpy(gradient)))) > 0.0
+        assert float(np.max(np.abs(keras.ops.convert_to_numpy(gradient)))) > 0.0
 
     def test_the_first_frame_takes_the_no_memory_path(self) -> None:
         """``directly_add_no_mem_embed`` skips memory attention entirely."""
@@ -1265,14 +1267,14 @@ class TestStreaming:
         model = tiny_model()
         pin_object_score(model, 5.0)
         model.stream_reset()
-        reference = ops.convert_to_numpy(
+        reference = keras.ops.convert_to_numpy(
             model.stream_step(images(1), frame_idx=0,
                               is_conditioning=True)["low_res_logits"])
 
         model.no_mem_embed.assign(
             np.full(model.no_mem_embed.shape, 5.0, dtype="float32"))
         model.stream_reset()
-        perturbed = ops.convert_to_numpy(
+        perturbed = keras.ops.convert_to_numpy(
             model.stream_step(images(1), frame_idx=0,
                               is_conditioning=True)["low_res_logits"])
         assert float(np.max(np.abs(reference - perturbed))) > 1e-4
@@ -1339,7 +1341,7 @@ class TestTemporalEmbedding:
             "no object pointers reached the readout, so the tail assertion "
             "below is vacuous"
         )
-        tail = ops.convert_to_numpy(
+        tail = keras.ops.convert_to_numpy(
             encoding[:, -readout.num_obj_ptr_tokens:, :])
         assert float(np.max(np.abs(tail))) > 1e-6, (
             "the object-pointer tail of the temporal encoding is all zeros -- "
@@ -1378,7 +1380,7 @@ class TestTemporalEmbedding:
             f"{readout.obj_ptr_tpos}, so this test cannot discriminate"
         )
 
-        tail = ops.convert_to_numpy(ops.squeeze(
+        tail = keras.ops.convert_to_numpy(keras.ops.squeeze(
             model._object_pointer_temporal_encoding(readout), axis=0))
         assert tail.shape == (readout.num_obj_ptr_tokens, TINY_MEM_DIM)
 
@@ -1412,7 +1414,7 @@ class TestTemporalEmbedding:
             model.stream_reset()
             model.stream_step(images(1), frame_idx=0, is_conditioning=True)
             out = model.stream_step(images(1, seed=1), frame_idx=1)
-            return ops.convert_to_numpy(out["low_res_logits"])
+            return keras.ops.convert_to_numpy(out["low_res_logits"])
 
         reference = two_frames()
         table = np.zeros(model.maskmem_tpos_enc.shape, dtype="float32")
@@ -1432,7 +1434,7 @@ class TestTemporalEmbedding:
             model.stream_reset()
             model.stream_step(images(1), frame_idx=0, is_conditioning=True)
             out = model.stream_step(images(1, seed=1), frame_idx=1)
-            return ops.convert_to_numpy(out["low_res_logits"])
+            return keras.ops.convert_to_numpy(out["low_res_logits"])
 
         table = np.zeros(model.maskmem_tpos_enc.shape, dtype="float32")
         table[model.num_maskmem - 1] = 3.0
@@ -1470,14 +1472,14 @@ class TestObjectPointerBlend:
         model = tiny_model()
         model.no_obj_ptr.assign(np.full((1, TINY_DIM), 9.0, dtype="float32"))
         pointer = np.ones((BATCH, TINY_DIM), dtype="float32")
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             pointer, np.full((BATCH, 1), 30.0, dtype="float32")))
         assert np.max(np.abs(blended - pointer)) < 1e-5
 
     def test_a_saturated_negative_score_returns_no_obj_ptr(self) -> None:
         model = tiny_model()
         model.no_obj_ptr.assign(np.full((1, TINY_DIM), 9.0, dtype="float32"))
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.ones((BATCH, TINY_DIM), dtype="float32"),
             np.full((BATCH, 1), -30.0, dtype="float32")))
         assert np.max(np.abs(blended - 9.0)) < 1e-4
@@ -1486,7 +1488,7 @@ class TestObjectPointerBlend:
         """A batch whose rows disagree -- a uniform batch would be vacuous."""
         model = tiny_model()
         model.no_obj_ptr.assign(np.full((1, TINY_DIM), 9.0, dtype="float32"))
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.ones((2, TINY_DIM), dtype="float32"),
             np.array([[30.0], [-30.0]], dtype="float32")))
         assert np.max(np.abs(blended[0] - 1.0)) < 1e-5
@@ -1544,7 +1546,7 @@ class TestObjectPointerBlendAtIntermediateLambda:
         the flag off -- carries the discrimination between the two formulas.
         """
         model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=True)
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
             np.zeros((BATCH, 1), dtype="float32")))
         np.testing.assert_allclose(blended, 5.0, atol=1e-5)
@@ -1558,7 +1560,7 @@ class TestObjectPointerBlendAtIntermediateLambda:
         which is why three green tests never saw it.
         """
         model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=False)
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
             np.zeros((BATCH, 1), dtype="float32")))
 
@@ -1582,7 +1584,7 @@ class TestObjectPointerBlendAtIntermediateLambda:
             self, score: float, lam: float) -> None:
         """Three more intermediate points, none of them a coincidence point."""
         model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=False)
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
             np.full((BATCH, 1), score, dtype="float32")))
 
@@ -1623,7 +1625,7 @@ class TestObjectPointerBlendAtIntermediateLambda:
         """
         model = self.make()
         assert model.soft_no_obj_ptr is False
-        blended = ops.convert_to_numpy(model._blend_object_pointer(
+        blended = keras.ops.convert_to_numpy(model._blend_object_pointer(
             np.full((1, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
             np.full((1, 1), 0.5, dtype="float32")))
 
@@ -1650,14 +1652,14 @@ class TestBestIouSelection:
         The two rows deliberately select DIFFERENT indices: a batch that
         agreed would be satisfied by a global argmax too.
         """
-        tensor = ops.convert_to_tensor(np.asarray([
+        tensor = keras.ops.convert_to_tensor(np.asarray([
             [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]],
             [[4.0, 4.0], [5.0, 5.0], [6.0, 6.0]],
         ], dtype="float32"))
-        iou = ops.convert_to_tensor(
+        iou = keras.ops.convert_to_tensor(
             np.asarray([[0.1, 0.9, 0.2], [0.7, 0.2, 0.1]], dtype="float32"))
 
-        picked = ops.convert_to_numpy(
+        picked = keras.ops.convert_to_numpy(
             model_module._select_best_by_iou(tensor, iou))
         assert picked.shape == (2, 1, 2)
         np.testing.assert_allclose(picked[0, 0], [2.0, 2.0])
@@ -1669,13 +1671,13 @@ class TestBestIouSelection:
         This is the arm that explains why the defect was invisible: every
         single-mask test in this file would pass under either implementation.
         """
-        tensor = ops.convert_to_tensor(
+        tensor = keras.ops.convert_to_tensor(
             np.arange(2 * 1 * 3, dtype="float32").reshape(2, 1, 3))
-        iou = ops.convert_to_tensor(np.asarray([[0.4], [0.6]], dtype="float32"))
-        picked = ops.convert_to_numpy(
+        iou = keras.ops.convert_to_tensor(np.asarray([[0.4], [0.6]], dtype="float32"))
+        picked = keras.ops.convert_to_numpy(
             model_module._select_best_by_iou(tensor, iou))
         np.testing.assert_allclose(
-            picked, ops.convert_to_numpy(tensor)[:, 0:1])
+            picked, keras.ops.convert_to_numpy(tensor)[:, 0:1])
 
     def test_it_ranks_by_iou_and_not_by_position(self) -> None:
         """A rank-reversing IoU vector must move the selection.
@@ -1683,14 +1685,14 @@ class TestBestIouSelection:
         A helper that ignored ``iou`` entirely and returned index 0 passes the
         no-op arm above; only a reversal separates them.
         """
-        tensor = ops.convert_to_tensor(np.asarray(
+        tensor = keras.ops.convert_to_tensor(np.asarray(
             [[[1.0], [2.0], [3.0]]], dtype="float32"))
-        first = ops.convert_to_numpy(model_module._select_best_by_iou(
+        first = keras.ops.convert_to_numpy(model_module._select_best_by_iou(
             tensor,
-            ops.convert_to_tensor(np.asarray([[0.9, 0.1, 0.0]], "float32"))))
-        last = ops.convert_to_numpy(model_module._select_best_by_iou(
+            keras.ops.convert_to_tensor(np.asarray([[0.9, 0.1, 0.0]], "float32"))))
+        last = keras.ops.convert_to_numpy(model_module._select_best_by_iou(
             tensor,
-            ops.convert_to_tensor(np.asarray([[0.0, 0.1, 0.9]], "float32"))))
+            keras.ops.convert_to_tensor(np.asarray([[0.0, 0.1, 0.9]], "float32"))))
         np.testing.assert_allclose(first[0, 0], [1.0])
         np.testing.assert_allclose(last[0, 0], [3.0])
 
@@ -1725,7 +1727,7 @@ class TestBestIouSelection:
         )
 
         head = model.mask_decoder.iou_prediction_head.layers[-1]
-        original = ops.convert_to_numpy(head.bias)
+        original = keras.ops.convert_to_numpy(head.bias)
 
         def pointer_when_winner_is(slice_position: int) -> np.ndarray:
             """Force the multimask slice index that wins, return the pointer."""
@@ -1737,13 +1739,13 @@ class TestBestIouSelection:
             head.bias.assign(bias)
             out = model(inputs, multimask_output=True)
             winner = int(np.argmax(
-                ops.convert_to_numpy(out["iou_predictions"])[0]))
+                keras.ops.convert_to_numpy(out["iou_predictions"])[0]))
             assert winner == slice_position, (
                 f"forcing token {slice_position + 1} did not make slice "
                 f"position {slice_position} the argmax (got {winner}); the "
                 f"probe no longer controls the ranking"
             )
-            return ops.convert_to_numpy(out["object_pointer"])[0]
+            return keras.ops.convert_to_numpy(out["object_pointer"])[0]
 
         try:
             first = pointer_when_winner_is(0)
@@ -1817,7 +1819,7 @@ class TestBestIouSelection:
             head.bias.assign(bias)
             out = model(inputs, multimask_output=True)
             winner = int(np.argmax(
-                ops.convert_to_numpy(out["iou_predictions"])[0]))
+                keras.ops.convert_to_numpy(out["iou_predictions"])[0]))
             assert winner == slice_position, (
                 f"the IoU argmax is at slice position {winner}, not the "
                 f"forced {slice_position}; a gather at position 0 is in range "
@@ -1826,7 +1828,7 @@ class TestBestIouSelection:
             )
             assert int(out["iou_predictions"].shape[1]) == 3
             assert tuple(out["object_pointer"].shape) == (1, model.hidden_dim)
-            return ops.convert_to_numpy(out["object_pointer"])[0]
+            return keras.ops.convert_to_numpy(out["object_pointer"])[0]
 
         at_zero = pointer_when_winner_is(0)
         at_two = pointer_when_winner_is(2)
@@ -1862,7 +1864,7 @@ class TestAbsentObjectMaskSuppression:
         model = tiny_model()
         pin_object_score(model, -5.0)
 
-        logits = ops.convert_to_numpy(
+        logits = keras.ops.convert_to_numpy(
             model({"image": images()}, multimask_output=True)["low_res_logits"])
 
         assert np.all(logits == np.float32(NO_OBJ_SCORE)), (
@@ -1882,12 +1884,12 @@ class TestAbsentObjectMaskSuppression:
         inputs = {"image": images()}
 
         pin_object_score(model, 5.0)
-        visible = ops.convert_to_numpy(
+        visible = keras.ops.convert_to_numpy(
             model(inputs, multimask_output=True)["low_res_logits"])
         pin_object_score(model, -5.0)
         _ = model(inputs, multimask_output=True)
         pin_object_score(model, 5.0)
-        again = ops.convert_to_numpy(
+        again = keras.ops.convert_to_numpy(
             model(inputs, multimask_output=True)["low_res_logits"])
 
         assert np.all(visible != np.float32(NO_OBJ_SCORE))
@@ -1906,9 +1908,9 @@ class TestAbsentObjectMaskSuppression:
         """
         model = tiny_model()
         logits = np.arange(2 * 3 * 2 * 2, dtype="float32").reshape(2, 3, 2, 2)
-        out = ops.convert_to_numpy(model._suppress_absent_object(
-            ops.convert_to_tensor(logits),
-            ops.convert_to_tensor(np.asarray([[-5.0], [5.0]], "float32"))))
+        out = keras.ops.convert_to_numpy(model._suppress_absent_object(
+            keras.ops.convert_to_tensor(logits),
+            keras.ops.convert_to_tensor(np.asarray([[-5.0], [5.0]], "float32"))))
 
         assert np.all(out[0] == np.float32(NO_OBJ_SCORE))
         np.testing.assert_array_equal(out[1], logits[1])
@@ -1929,21 +1931,21 @@ class TestAbsentObjectMaskSuppression:
 
         model.stream_reset()
         outputs = model.stream_step(image, frame_idx=0, is_conditioning=True)
-        stored = ops.convert_to_numpy(model.memory_bank.cond_frames[0].features)
+        stored = keras.ops.convert_to_numpy(model.memory_bank.cond_frames[0].features)
 
         assert np.all(
-            ops.convert_to_numpy(outputs["low_res_logits"])
+            keras.ops.convert_to_numpy(outputs["low_res_logits"])
             == np.float32(NO_OBJ_SCORE)), (
             "the streaming path returned an unsuppressed mask, so this "
             "reconstruction would be comparing two different things"
         )
 
         features = model.image_encoder(image, training=False)["vision_features"]
-        sentinel = ops.convert_to_tensor(np.full(
+        sentinel = keras.ops.convert_to_tensor(np.full(
             (1, model.image_size, model.image_size, 1), NO_OBJ_SCORE,
             dtype="float32"))
         memory, _ = model.memory_encoder([features, sentinel])
-        expected = ops.convert_to_numpy(model._mark_occlusion(
+        expected = keras.ops.convert_to_numpy(model._mark_occlusion(
             memory, np.full((1, 1), -5.0, dtype="float32")))
 
         # The bank stores memory FLATTENED over the spatial grid
@@ -1973,9 +1975,9 @@ class TestSpatialNoObjectEmbedding:
         memory = np.zeros((BATCH, TINY_GRID, TINY_GRID, TINY_MEM_DIM),
                           dtype="float32")
 
-        occluded = ops.convert_to_numpy(model._mark_occlusion(
+        occluded = keras.ops.convert_to_numpy(model._mark_occlusion(
             memory, np.full((BATCH, 1), -5.0, dtype="float32")))
-        visible = ops.convert_to_numpy(model._mark_occlusion(
+        visible = keras.ops.convert_to_numpy(model._mark_occlusion(
             memory, np.full((BATCH, 1), 5.0, dtype="float32")))
 
         np.testing.assert_allclose(occluded, 3.0, atol=1e-6)
@@ -1986,7 +1988,7 @@ class TestSpatialNoObjectEmbedding:
         model = tiny_model()
         model.no_obj_embed_spatial.assign(
             np.full((1, TINY_MEM_DIM), 3.0, dtype="float32"))
-        marked = ops.convert_to_numpy(model._mark_occlusion(
+        marked = keras.ops.convert_to_numpy(model._mark_occlusion(
             np.zeros((2, TINY_GRID, TINY_GRID, TINY_MEM_DIM), dtype="float32"),
             np.asarray([[-5.0], [5.0]], dtype="float32")))
         np.testing.assert_allclose(marked[0], 3.0, atol=1e-6)
@@ -2013,20 +2015,20 @@ class TestSpatialNoObjectEmbedding:
         ``no_obj_embed_spatial`` reaching the bank and nothing else.
         """
         model = tiny_model()
-        features = ops.convert_to_tensor(np.zeros(
+        features = keras.ops.convert_to_tensor(np.zeros(
             (1, TINY_GRID, TINY_GRID, TINY_DIM), dtype="float32"))
         mask_edge = TINY_GRID * 4
         rng = np.random.default_rng(11)
         outputs = {
-            "low_res_logits": ops.convert_to_tensor(rng.standard_normal(
+            "low_res_logits": keras.ops.convert_to_tensor(rng.standard_normal(
                 (1, 1, mask_edge, mask_edge)).astype("float32")),
-            "iou_predictions": ops.convert_to_tensor(
+            "iou_predictions": keras.ops.convert_to_tensor(
                 np.asarray([[0.5]], dtype="float32")),
             # Strictly negative: the frame is predicted OCCLUDED, which is the
             # only case in which this embedding contributes anything.
-            "object_score_logits": ops.convert_to_tensor(
+            "object_score_logits": keras.ops.convert_to_tensor(
                 np.asarray([[-5.0]], dtype="float32")),
-            "object_pointer": ops.convert_to_tensor(
+            "object_pointer": keras.ops.convert_to_tensor(
                 np.zeros((1, TINY_DIM), dtype="float32")),
         }
 
@@ -2035,7 +2037,7 @@ class TestSpatialNoObjectEmbedding:
             model.no_obj_embed_spatial.assign(
                 np.full((1, TINY_MEM_DIM), value, dtype="float32"))
             model._store_memory(0, features, outputs, is_conditioning=True)
-            return ops.convert_to_numpy(
+            return keras.ops.convert_to_numpy(
                 model.memory_bank.cond_frames[0].features)
 
         moved = float(np.max(np.abs(stored(7.0) - stored(0.0))))
@@ -2090,11 +2092,11 @@ class TestOutputContract:
         model = tiny_model()
         pin_object_score(model, 5.0)
         x = images()
-        plain = ops.convert_to_numpy(model({"image": x})["low_res_logits"])
+        plain = keras.ops.convert_to_numpy(model({"image": x})["low_res_logits"])
         boxes = np.tile(
             np.array([[[8.0, 8.0, 40.0, 40.0]]], dtype="float32"),
             (BATCH, 1, 1))
-        prompted = ops.convert_to_numpy(
+        prompted = keras.ops.convert_to_numpy(
             model({"image": x, "boxes": boxes})["low_res_logits"])
         assert float(np.max(np.abs(plain - prompted))) > 1e-5
 

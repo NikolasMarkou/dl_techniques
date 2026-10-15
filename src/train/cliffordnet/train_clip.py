@@ -36,8 +36,10 @@ ideal initialisation for VLM vision encoders. This script implements
 standard CLIP contrastive training because that is what the user asked
 for; the distillation reconstruction losses described in the Penguin-VL
 paper (amplitude/direction/relation) require a frozen teacher encoder and
-are intentionally left out. Adding them is a matter of plugging a teacher
-forward pass into the loss in :class:`ContrastiveCliffordCLIP.train_step`.
+are intentionally left out. Adding them would mean a teacher forward pass
+inside the compiled loss of the stock ``compile``/``fit`` bridge
+(``train.clip.train_clip.compile_for_contrastive_training``) this script
+trains through.
 
 Dataset: uses the ``coco_captions`` tfds builder by default. Pass
 ``--synthetic`` for a CPU-friendly smoke test that generates random
@@ -121,7 +123,14 @@ Example::
     # smoke test
     python -m train.cliffordnet.train_clip --synthetic --epochs 1 \\
         --image-size 64 --batch-size 8 --max-train-samples 64 \\
-        --skip-pretrain
+        --skip-pretrain --steps-per-epoch 2 --output-dir /tmp/cliffordclip_smoke
+
+Training is stock ``keras.Model.fit`` on the contrastive bridge of
+``train.clip.train_clip`` (`compile_for_contrastive_training`), which stacks
+the two logit matrices into one output for the compiled loss. Every ``.keras``
+the run writes (``checkpoints/step_*.keras``, ``checkpoints/final.keras``,
+``cliffordclip_<variant>.keras``) is the bare :class:`CliffordCLIP`, never the
+training wrapper.
 """
 
 from __future__ import annotations
@@ -132,8 +141,8 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from dl_techniques.utils.keras_registration import register_dl_technique
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Early GPU binding — MUST run before TensorFlow is imported.
@@ -174,8 +183,13 @@ from train.common import (
     load_cc3m_local_split,
     load_coco2017_local_split,
     make_image_text_tf_dataset,
+    set_seeds,
     setup_gpu,
     validate_model_loading,
+)
+from train.clip.train_clip import (
+    as_contrastive_fit_batches,
+    compile_for_contrastive_training,
 )
 
 
@@ -196,7 +210,6 @@ class CliffordCLIPTrainConfig:
     weight_decay: float = 0.1
     lr_alpha: float = 1e-2  # cosine decay final fraction of peak_lr
     min_warmup_lr: float = 1e-8
-    loss: str = "clip"  # contrastive loss variant: "clip" | "siglip"
 
 
 # Image preprocessing, caption tokenisation, split loaders, and the
@@ -212,160 +225,95 @@ class CliffordCLIPTrainConfig:
 
 
 # =============================================================================
-# Contrastive training wrapper
+# Contrastive training: the inner loss and the logged temperature
 # =============================================================================
+#
+# DECISION plan-2026-10-14T062616-81938e81/D-045: train through stock
+# `compile`/`fit` on the stacking bridge of `train.clip.train_clip`
+# (`compile_for_contrastive_training`, D-036): `StackedCLIPLogits` stacks the
+# two logit matrices into one output and `StackedCLIPContrastiveLoss` hands
+# them to the inner loss built below. Do NOT bring back a training wrapper
+# with its own `train_step`/`test_step` (the old `ContrastiveCliffordCLIP`,
+# whose D-003 said a dict-output CLIP could not use stock fit; the bridge is
+# the measured counterexample), and do NOT save the bridge: every `.keras`
+# this run writes is the bare CliffordCLIP (`StepCheckpointCallback(
+# saved_model=...)`). The step-override census in test_package_api_contract.py
+# no longer lists this file. See decisions.md D-045.
 
 
-@register_dl_technique("dl_techniques.train.cliffordnet.train_clip")
-class ContrastiveCliffordCLIP(keras.Model):
-    """Thin wrapper that plugs a CLIP contrastive loss into ``fit()``.
+def build_contrastive_loss(loss: str, label_smoothing: float) -> keras.losses.Loss:
+    """The inner contrastive loss for ``--loss``.
 
-    Delegates the forward pass to an inner :class:`CliffordCLIP`. Overrides
-    ``train_step``/``test_step`` to apply the shared
-    :class:`dl_techniques.losses.CLIPContrastiveLoss` to the similarity
-    matrix returned by the inner model. This keeps the base model reusable
-    for inference/encoders while letting the training script use the
-    standard Keras training loop and the shared ``train.common`` callbacks.
+    Interface contract (callers: `train`, tests): returns a
+    `keras.losses.Loss` whose ``call(None, {'logits_per_image',
+    'logits_per_text'})`` is the per-sample loss, the shape
+    ``train.clip.train_clip.StackedCLIPContrastiveLoss`` requires of its
+    ``inner``. Neither loss applies a temperature of its own.
 
-    ``CLIPContrastiveLoss`` is instantiated with ``apply_temperature=False``
-    because :class:`CliffordCLIP` already applies the learnable
-    ``exp(logit_scale)`` temperature inside its forward pass — scaling
-    again in the loss would compound the temperature.
+    :param loss: ``"clip"`` or ``"siglip"`` (the parser's ``--loss`` choices).
+    :param label_smoothing: CLIP label smoothing; must be ``0.0`` for
+        ``"siglip"``, which has no smoothing (the parser enforces it).
+    :return: The loss.
+    :raises ValueError: For an unknown ``loss``, or label smoothing with
+        ``"siglip"``.
+    """
+    # DECISION plan-2026-07-15T114613-5add9baa/D-002: --loss selects CLIP vs
+    # SigLIP (both consume the same {logits_per_image, logits_per_text} dict
+    # schema); default "clip" is byte-identical to the prior hardcoded path
+    # (O1). SigLIP is built with temperature=1.0 / use_learnable_temperature=
+    # False on purpose -- CliffordCLIP already applies exp(logit_scale) in its
+    # forward pass, so do NOT enable a second temperature here (it would
+    # compound the scaling, exactly as apply_temperature=False guards on the
+    # CLIP path). See decisions.md D-002.
+    if loss == "siglip":
+        if label_smoothing:
+            raise ValueError(
+                f"--loss siglip has no label smoothing; got "
+                f"label_smoothing={label_smoothing}"
+            )
+        return SigLIPContrastiveLoss(
+            temperature=1.0,
+            use_learnable_temperature=False,
+            name="siglip_contrastive_loss",
+        )
+    if loss == "clip":
+        return CLIPContrastiveLoss(
+            apply_temperature=False,
+            label_smoothing=label_smoothing,
+            name="clip_contrastive_loss",
+        )
+    raise ValueError(f"unknown contrastive loss {loss!r}; expected 'clip' or 'siglip'")
+
+
+class LogitScaleLogger(keras.callbacks.Callback):
+    """Write the model's effective temperature into ``logs`` as ``logit_scale``.
+
+    The clipped ``exp(logit_scale)`` the forward pass multiplies into the
+    logits (``CliffordCLIP._get_logit_scale``), after every training batch and
+    at every epoch end, so the step CSV of `StepCheckpointCallback` and the
+    ``fit`` history keep the column the old wrapper's ``train_step`` logged.
+    Place it BEFORE the callbacks that read ``logs``: Keras hands every
+    callback the same dict, in list order.
+
+    :param clip_model: The :class:`CliffordCLIP` being trained (not the
+        training wrapper).
     """
 
-    def __init__(
-        self,
-        clip_model: Optional[CliffordCLIP] = None,
-        label_smoothing: float = 0.0,
-        loss: str = "clip",
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
+    def __init__(self, clip_model: CliffordCLIP) -> None:
+        super().__init__()
         self.clip_model = clip_model
-        self.label_smoothing = label_smoothing
-        self.loss = loss
-        # DECISION plan-2026-07-15T114613-5add9baa/D-002: --loss selects CLIP vs
-        # SigLIP (both consume the same {logits_per_image, logits_per_text} dict
-        # schema); default "clip" is byte-identical to the prior hardcoded path
-        # (O1). SigLIP is built with temperature=1.0 / use_learnable_temperature=
-        # False on purpose -- CliffordCLIP already applies exp(logit_scale) in its
-        # forward pass, so do NOT enable a second temperature here (it would
-        # compound the scaling, exactly as apply_temperature=False guards on the
-        # CLIP path). See decisions.md D-002.
-        if loss == "siglip":
-            self.loss_fn = SigLIPContrastiveLoss(
-                temperature=1.0,
-                use_learnable_temperature=False,
-                name="siglip_contrastive_loss",
-            )
-        else:
-            self.loss_fn = CLIPContrastiveLoss(
-                apply_temperature=False,
-                label_smoothing=label_smoothing,
-                name="clip_contrastive_loss",
+
+    def _write(self, logs: Optional[Dict[str, Any]]) -> None:
+        if logs is not None:
+            logs["logit_scale"] = float(
+                keras.ops.convert_to_numpy(self.clip_model._get_logit_scale())
             )
 
-    def call(
-        self,
-        inputs,
-        training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
-        return self.clip_model(inputs, training=training)
+    def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._write(logs)
 
-    def _contrastive_loss(
-        self, outputs: Dict[str, keras.KerasTensor]
-    ) -> keras.KerasTensor:
-        # DECISION plan-2026-08-30T203107-30455f66/D-001: reduce POLYMORPHICALLY.
-        # The contract this site requires is now only what every
-        # `keras.losses.Loss` already has: a `call(y_true, y_pred)` accepting the
-        # {logits_per_image, logits_per_text} dict schema. Do NOT go back to
-        # `self.loss_fn.reduced_loss(...)`: that method exists only on
-        # `CLIPContrastiveLoss`, so `--loss siglip` -- an advertised CLI choice
-        # built at :257-261 -- died on its FIRST batch, train or eval, with
-        # `AttributeError: 'SigLIPContrastiveLoss' object has no attribute
-        # 'reduced_loss'`. Adding `reduced_loss` to SigLIP would fix that one
-        # instance and leave the trap armed for the next `--loss` entry; this
-        # removes the class of bug. `ops.mean(call(None, ...))` is byte-for-byte
-        # what `CLIPContrastiveLoss.reduced_loss` did internally, so the CLIP
-        # path's scalar is unchanged (pinned at atol=1e-6 by the guard below).
-        # `reduced_loss` itself is gone (plan-2026-10-14T062616-81938e81 D-036:
-        # its last caller, the src/train/clip loop, moved to stock fit). Do NOT
-        # call `self.loss_fn(None, ...)` either -- the base `Loss.__call__`
-        # converts `y_true` to a tensor and RAISES on None (decisions.md D-030),
-        # which is why `call` is invoked directly.
-        # Guard: tests/test_train/test_cliffordnet/
-        # test_the_siglip_loss_path_runs_a_step.py. See decisions.md D-001.
-        return keras.ops.mean(
-            self.loss_fn.call(
-                None,
-                {
-                    "logits_per_image": outputs["logits_per_image"],
-                    "logits_per_text": outputs["logits_per_text"],
-                },
-            )
-        )
-
-    # DECISION plan-2026-07-15T114613-5add9baa/D-003: custom train_step RETAINED
-    # -- a dict-output CLIP model cannot route a single contrastive loss through
-    # stock compile()/fit() (Keras maps one loss per output key); the
-    # no-custom-train_step convention's tf.data escape does not apply (loss
-    # consumes the model's OWN dict output {logits_per_image, logits_per_text},
-    # not an external label). Empirically (S3 probe): stock compile(loss=one)
-    # -> KeyError "path ('logits_per_image',) ... can't be found"; per-key dict
-    # loss -> ValueError "Unsupported y_pred format: SymbolicTensor" (the loss
-    # is fed one key's tensor, but it needs BOTH keys at once). So the wrapper
-    # reduces the loss's own `call(None, dict_output)` in _contrastive_loss
-    # (polymorphically since D-001; it was CLIPContrastiveLoss.reduced_loss).
-    # Revisit only if CliffordCLIP.call returns a single tensor. See D-003.
-    def train_step(self, data):
-        if isinstance(data, tuple):
-            data = data[0]
-        with tf.GradientTape() as tape:
-            outputs = self.clip_model(data, training=True)
-            loss = self._contrastive_loss(outputs)
-        grads = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-        return {
-            "loss": loss,
-            "logit_scale": outputs["logit_scale"],
-        }
-
-    def test_step(self, data):
-        if isinstance(data, tuple):
-            data = data[0]
-        outputs = self.clip_model(data, training=False)
-        loss = self._contrastive_loss(outputs)
-        return {
-            "loss": loss,
-            "logit_scale": outputs["logit_scale"],
-        }
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config["clip_model"] = keras.saving.serialize_keras_object(
-            self.clip_model
-        )
-        config["label_smoothing"] = self.label_smoothing
-        config["loss"] = self.loss
-        return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ContrastiveCliffordCLIP":
-        # Explicit keys only. ``Model.get_config`` also stores standard
-        # base-class fields (``name``, ``dtype``, ``trainable``); we accept
-        # ``name`` because it round-trips cleanly, and silently drop the rest
-        # rather than forwarding arbitrary ``**config`` -- that would mask
-        # typos in saved configs and couple this loader to keras internals.
-        inner = keras.saving.deserialize_keras_object(config.pop("clip_model"))
-        label_smoothing = config.pop("label_smoothing", 0.0)
-        loss = config.pop("loss", "clip")
-        name = config.get("name", None)
-        return cls(
-            clip_model=inner,
-            label_smoothing=label_smoothing,
-            loss=loss,
-            name=name,
-        )
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._write(logs)
 
 
 # =============================================================================
@@ -502,7 +450,8 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
         training wrapper).
     :param save_dir: Run directory. ``retrieval_probes/probes.jsonl`` is
         created under it.
-    :param probe_every_steps: Run a probe every N training steps.
+    :param probe_every_steps: Run a probe every N training steps. ``0`` (or
+        less) disables the probe.
     :param initial_step: Starting step count (for resume).
     """
 
@@ -545,7 +494,9 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
 
     def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         self._global_step += 1
-        if self._probe_ds is None:
+        # `--probe-every-steps 0` is the documented "disabled"; without this
+        # guard the modulo below raised ZeroDivisionError on the first batch.
+        if self._probe_ds is None or self.probe_every_steps <= 0:
             return
         if self._global_step % self.probe_every_steps != 0:
             return
@@ -607,9 +558,9 @@ class GammaProbeCallback(keras.callbacks.Callback):
     gamma mean every N steps is the cheap A/B telemetry that tells whether
     the learned-query-residual arm is actually using its extra machinery.
 
-    The ``model`` Keras attaches via ``set_model`` is the
-    :class:`ContrastiveCliffordCLIP` training wrapper; the head_scale layers
-    live on the inner :class:`CliffordCLIP` (``self.model.clip_model``).
+    The ``model`` Keras attaches via ``set_model`` is the training wrapper
+    (``train.clip.train_clip.StackedCLIPLogits``); the head_scale layers live
+    on the inner :class:`CliffordCLIP` (``self.model.clip_model``).
 
     Heads other than ``learned_query_residual`` (notably ``head_kind="plain"``)
     have NO ``vision_head_scale`` / ``text_head_scale`` (they are ``None``),
@@ -639,8 +590,8 @@ class GammaProbeCallback(keras.callbacks.Callback):
         return self._global_step
 
     def _inner_clip(self) -> Optional[CliffordCLIP]:
-        # ``model`` is the ContrastiveCliffordCLIP wrapper; the heads live on
-        # the inner CliffordCLIP. Bare CliffordCLIP (no wrapper) is tolerated.
+        # ``model`` is the StackedCLIPLogits wrapper; the heads live on the
+        # inner CliffordCLIP. Bare CliffordCLIP (no wrapper) is tolerated.
         return getattr(self.model, "clip_model", self.model)
 
     @staticmethod
@@ -970,9 +921,8 @@ class _TextLMWrapper(keras.Model):
         self.lm_head = keras.layers.Dense(vocab_size, name="pretrain_lm_head")
 
     def call(self, input_ids, training: Optional[bool] = None):
-        from keras import ops
         m = self.clip_model
-        positions = ops.arange(self.context_length)
+        positions = keras.ops.arange(self.context_length)
         x = m.token_embedding(input_ids) + m.position_embedding(positions)
         x = m.text_embed_norm(x)
         x = m.text_embed_dropout(x, training=training)
@@ -1264,9 +1214,13 @@ def _prepare_datasets(
     return train_images, train_tokens, val_images, val_tokens
 
 
-def train(args: argparse.Namespace) -> None:
+def train(args: argparse.Namespace) -> Path:
+    """Run one CliffordCLIP training job; return the run directory."""
     logger.info("Starting CliffordCLIP training")
     setup_gpu(args.gpu)
+    # `--seed` was read by the LM-pretrain loader only, while its help text
+    # promised global tf/keras seeding; this makes the help true.
+    set_seeds(args.seed)
 
     # Set the global mixed-precision policy BEFORE any layer/model is built so
     # it applies to every weight. bf16 needs no LossScaleOptimizer (unlike fp16).
@@ -1322,7 +1276,9 @@ def train(args: argparse.Namespace) -> None:
     n_val_pairs = len(val_tokens)
     n_train_distinct = _distinct_image_count(train_images)
     n_val_distinct = _distinct_image_count(val_images)
-    summary_steps_per_epoch = max(1, n_train_pairs // args.batch_size)
+    summary_steps_per_epoch = (
+        args.steps_per_epoch or max(1, n_train_pairs // args.batch_size)
+    )
     summary_total_steps = summary_steps_per_epoch * args.epochs
 
     logger.info("=" * 60)
@@ -1381,23 +1337,6 @@ def train(args: argparse.Namespace) -> None:
     )
     clip_model.summary(print_fn=logger.info)
 
-    wrapper = ContrastiveCliffordCLIP(
-        clip_model=clip_model,
-        label_smoothing=args.label_smoothing,
-        loss=args.loss,
-    )
-    wrapper.build(
-        {
-            "image": (
-                None,
-                args.image_size,
-                args.image_size,
-                3,
-            ),
-            "text": (None, args.context_length),
-        }
-    )
-
     # --- Results dir ---
     # Single timestamped run dir per launch. Layout mirrors
     # ``train_cliffordnet_nlp.py``:
@@ -1408,12 +1347,15 @@ def train(args: argparse.Namespace) -> None:
     #     training_log.csv               <- step-level metrics
     #     cliffordclip_<variant>.keras   <- final model (convenience)
     #     training_summary.txt
-    from datetime import datetime
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join(
-        "results",
-        f"cliffordclip_{args.variant}_{run_ts}",
-    )
+    if args.output_dir:
+        results_dir = args.output_dir
+    else:
+        from datetime import datetime
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir = os.path.join(
+            "results",
+            f"cliffordclip_{args.variant}_{run_ts}",
+        )
     os.makedirs(results_dir, exist_ok=True)
     logger.info(f"Run directory: {results_dir}")
 
@@ -1428,6 +1370,8 @@ def train(args: argparse.Namespace) -> None:
         log_every_steps=args.log_every_steps,
         analyze_every_steps=0,
         gc_on_save=True,
+        # The CliffordCLIP, never the stock-fit bridge that trains it (D-045).
+        saved_model=clip_model,
     )
     retrieval_probe_cb = RetrievalProbeCallback(
         clip_model=clip_model,
@@ -1479,22 +1423,24 @@ def train(args: argparse.Namespace) -> None:
         )
 
     # --- CLIP contrastive training ---
-    train_ds = make_image_text_tf_dataset(
+    # `({'image', 'text'}, zeros(N))`: stock `fit` needs a `y` to call the
+    # loss at all; the bridge's loss and metrics ignore it.
+    train_ds = as_contrastive_fit_batches(make_image_text_tf_dataset(
         train_images,
         train_tokens,
         image_size=args.image_size,
         batch_size=args.batch_size,
         training=True,
         cache_decoded=args.cache_decoded,
-    )
-    val_ds = make_image_text_tf_dataset(
+    ))
+    val_ds = as_contrastive_fit_batches(make_image_text_tf_dataset(
         val_images,
         val_tokens,
         image_size=args.image_size,
         batch_size=args.batch_size,
         training=False,
         cache_decoded=args.cache_decoded,
-    )
+    ))
 
     # A smaller slice of val used for in-training retrieval probes.
     # Intentionally capped so each probe is fast; the full-val
@@ -1515,10 +1461,10 @@ def train(args: argparse.Namespace) -> None:
         cache_decoded=True,
     )
 
-    # steps_per_epoch for the cosine schedule. For list-backed datasets
-    # we can't rely on cardinality being known.
-    n_train = len(train_tokens)
-    steps_per_epoch = max(1, n_train // args.batch_size)
+    # steps_per_epoch for `fit` and the cosine schedule: `--steps-per-epoch`,
+    # or one pass. For list-backed datasets we can't rely on cardinality being
+    # known; the training pipeline repeats, so a cap never runs it dry.
+    steps_per_epoch = summary_steps_per_epoch
 
     train_cfg = CliffordCLIPTrainConfig(
         image_size=args.image_size,
@@ -1527,7 +1473,6 @@ def train(args: argparse.Namespace) -> None:
         peak_lr=args.peak_lr,
         warmup_ratio=args.warmup_ratio,
         weight_decay=args.weight_decay,
-        loss=args.loss,
     )
 
     logger.info(
@@ -1537,7 +1482,11 @@ def train(args: argparse.Namespace) -> None:
     )
 
     optimizer = _build_optimizer(train_cfg, steps_per_epoch)
-    wrapper.compile(optimizer=optimizer)
+    wrapper = compile_for_contrastive_training(
+        clip_model,
+        optimizer,
+        inner_loss=build_contrastive_loss(args.loss, args.label_smoothing),
+    )
 
     tb_dir = os.path.join(results_dir, "tensorboard", "clip")
     os.makedirs(tb_dir, exist_ok=True)
@@ -1552,7 +1501,11 @@ def train(args: argparse.Namespace) -> None:
 
     retrieval_probe_cb.set_probe_dataset(probe_ds, stage_label="clip")
 
-    callbacks = stage_local + list(persistent_callbacks)
+    # LogitScaleLogger first: it writes `logit_scale` into the `logs` dict
+    # every later callback (TensorBoard, the step CSV, History) reads.
+    callbacks = (
+        [LogitScaleLogger(clip_model)] + stage_local + list(persistent_callbacks)
+    )
     logger.info(
         f"CLIP training: tensorboard={tb_dir}; "
         f"step-checkpoints + retrieval probes inherited from run-level state"
@@ -1589,35 +1542,34 @@ def train(args: argparse.Namespace) -> None:
             ])
 
     # --- Save final model ---
+    # Not inside a broad `except`: the saved model is the run's product, and a
+    # failed save logged as a warning let a run end "complete" without it.
     final_path = os.path.join(results_dir, f"cliffordclip_{args.variant}.keras")
-    try:
-        clip_model.save(final_path)
-        logger.info(f"Saved final CliffordCLIP to: {final_path}")
-        sample = {
-            "image": np.zeros(
-                (2, args.image_size, args.image_size, 3),
-                dtype=np.float32,
-            ),
-            "text": np.zeros((2, args.context_length), dtype=np.int32),
-        }
-        # DECISION plan-2026-09-16T114148-70556a67/D-005: use .predict(), not a
-        # direct __call__, to build `expected`. validate_model_loading always
-        # evaluates the RELOADED model via .predict() (train/common/evaluation.py),
-        # and .predict()'s compiled/XLA-fused numerics diverge from a bare eager
-        # __call__ by ~1e-4-1e-3 on this 12-layer network -- MEASURED reproducible
-        # even with zero save/reload involved (same model, same weights). Mixing
-        # __call__ (expected) with .predict() (loaded) therefore fires this
-        # warning on every run regardless of whether weights survive the
-        # round-trip; do not "fix" this by loosening tolerance or by chasing a
-        # weight-materialization bug in CliffordCLIP.build() -- see decisions.md
-        # D-005.
-        expected = clip_model.predict(sample, verbose=0)
-        validate_model_loading(
-            final_path, sample, expected,
-            custom_objects={"CliffordCLIP": CliffordCLIP},
-        )
-    except Exception as exc:
-        logger.warning(f"Failed to save/validate final model: {exc}")
+    clip_model.save(final_path)
+    logger.info(f"Saved final CliffordCLIP to: {final_path}")
+    sample = {
+        "image": np.zeros(
+            (2, args.image_size, args.image_size, 3),
+            dtype=np.float32,
+        ),
+        "text": np.zeros((2, args.context_length), dtype=np.int32),
+    }
+    # DECISION plan-2026-09-16T114148-70556a67/D-005: use .predict(), not a
+    # direct __call__, to build `expected`. validate_model_loading always
+    # evaluates the RELOADED model via .predict() (train/common/evaluation.py),
+    # and .predict()'s compiled/XLA-fused numerics diverge from a bare eager
+    # __call__ by ~1e-4-1e-3 on this 12-layer network -- MEASURED reproducible
+    # even with zero save/reload involved (same model, same weights). Mixing
+    # __call__ (expected) with .predict() (loaded) therefore fires this
+    # warning on every run regardless of whether weights survive the
+    # round-trip; do not "fix" this by loosening tolerance or by chasing a
+    # weight-materialization bug in CliffordCLIP.build() -- see decisions.md
+    # D-005.
+    expected = clip_model.predict(sample, verbose=0)
+    validate_model_loading(
+        final_path, sample, expected,
+        custom_objects={"CliffordCLIP": CliffordCLIP},
+    )
 
     # --- Retrieval eval on val split at final resolution ---
     logger.info("Computing retrieval recall@K on val split...")
@@ -1663,6 +1615,7 @@ def train(args: argparse.Namespace) -> None:
             f.write(f"  {k}: {v:.4f}\n")
     logger.info(f"Summary: {summary_path}")
     logger.info("Training complete.")
+    return Path(results_dir)
 
 
 # =============================================================================
@@ -1678,7 +1631,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Model
     parser.add_argument(
         "--variant", type=str, default="nano",
-        choices=["nano", "mini", "small", "base", "large"],
+        choices=sorted(CliffordCLIP.MODEL_VARIANTS),
     )
     parser.add_argument("--vision-patch-size", type=int, default=4)
     parser.add_argument("--context-length", type=int, default=64)
@@ -1725,6 +1678,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # CLIP training (single stage at the configured resolution)
     parser.add_argument("--image-size", type=int, default=112)
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--steps-per-epoch", type=int, default=None,
+        help=(
+            "Cap on CLIP training steps per epoch (default: one pass over the "
+            "training pairs). Also sizes the cosine schedule."
+        ),
+    )
     parser.add_argument("--peak-lr", type=float, default=5e-4)
 
     # Pretraining (optional independent pretraining — vision on CIFAR-100, text on Wikipedia)
@@ -1818,11 +1778,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--label-smoothing", type=float, default=0.1,
+        "--label-smoothing", type=float, default=None,
         help=(
-            "CLIP contrastive loss label smoothing in [0, 1]. Small values "
-            "(~0.1) regularise against overconfident matches on noisy "
-            "captions. Set 0.0 to match the original CLIP paper exactly."
+            "CLIP contrastive loss label smoothing in [0, 1] (default 0.1 "
+            "with --loss clip). Small values (~0.1) regularise against "
+            "overconfident matches on noisy captions. Set 0.0 to match the "
+            "original CLIP paper exactly. Refused with --loss siglip, which "
+            "has no label smoothing."
         ),
     )
 
@@ -1873,6 +1835,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     # Infra
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Run directory (default: results/cliffordclip_<variant>_<timestamp>).",
+    )
     parser.add_argument("--gpu", type=int, default=None)
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -1898,13 +1864,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+#: ``--label-smoothing`` when it is not given, for ``--loss clip``.
+_DEFAULT_CLIP_LABEL_SMOOTHING = 0.1
+
+
+def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse the command line; resolve ``--label-smoothing`` per ``--loss``."""
     parser = _build_arg_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.loss == "siglip" and args.label_smoothing is not None:
+        parser.error("--label-smoothing applies to --loss clip only")
+    if args.label_smoothing is None:
+        args.label_smoothing = (
+            _DEFAULT_CLIP_LABEL_SMOOTHING if args.loss == "clip" else 0.0
+        )
+    if args.steps_per_epoch is not None and args.steps_per_epoch < 1:
+        parser.error("--steps-per-epoch must be at least 1")
+    return args
+
+
+def main(argv: Optional[Sequence[str]] = None) -> Optional[Path]:
+    """Entry point; returns the run directory (``None`` if interrupted)."""
+    args = parse_arguments(argv)
     try:
-        train(args)
+        return train(args)
     except KeyboardInterrupt:
         logger.info("Training interrupted by user.")
+        return None
     except Exception as exc:
         logger.error(f"Unexpected error: {exc}", exc_info=True)
         raise

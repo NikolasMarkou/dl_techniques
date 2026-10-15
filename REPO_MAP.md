@@ -239,7 +239,8 @@ model or the trainer.
 Nearly every leaf model package binds a `create_*` factory in its own `__init__.py`,
 declares a curated `__all__`, and carries a `README.md`. The exceptions that bind no factory
 are the four `time_series` leaves (`mdn`, `deepar`, `prism`, `tirex` — the family init
-re-exports them instead), `common/power_sampling/`, and `sam/sam1/` + `sam/sam3/`.
+re-exports them instead) and `common/power_sampling/`. (`sam/sam1/` and `sam/sam3/` bind
+`create_sam` and `create_sam3` since 2026-10-15.)
 
 Many leaf model packages have neither a same-named trainer nor any import from
 `src/train/`. **Having no trainer is normal here, not a defect to fix**, and it says nothing

@@ -37,7 +37,7 @@ from train.sam.train_sam import (
     build_parser,
     config_from_argv,
     create_dataset,
-    create_sam,
+    build_sam,
     create_training_model,
     parse_arguments,
     resolved_output_dir,
@@ -485,7 +485,7 @@ class TestModelConstruction:
             build_reduced_sam,
         )
 
-        trainer_sam = create_sam(SAMTrainingConfig(image_size=IMG_SIZE))
+        trainer_sam = build_sam(SAMTrainingConfig(image_size=IMG_SIZE))
         trainer_sam.build(None)
         fixture_sam = build_reduced_sam()
         fixture_sam.build(None)
@@ -502,7 +502,7 @@ class TestModelConstruction:
             build_reduced_sam,
         )
 
-        other = create_sam(SAMTrainingConfig(image_size=128))
+        other = build_sam(SAMTrainingConfig(image_size=128))
         other.build(None)
         fixture_sam = build_reduced_sam()
         fixture_sam.build(None)
@@ -512,7 +512,7 @@ class TestModelConstruction:
         self,
     ) -> None:
         """Reduced WIDTH, not reduced geometry -- the paths under test differ."""
-        sam = create_sam(SAMTrainingConfig(image_size=256))
+        sam = build_sam(SAMTrainingConfig(image_size=256))
         assert sam.image_encoder.patch_size == PATCH_SIZE
         assert sam.image_encoder.window_size == 14
         assert sam.image_encoder.use_rel_pos is True
@@ -520,7 +520,7 @@ class TestModelConstruction:
 
     def test_the_tiny_prompt_encoder_grid_tracks_the_image_size(self) -> None:
         for image_size in (128, 256):
-            sam = create_sam(SAMTrainingConfig(image_size=image_size))
+            sam = build_sam(SAMTrainingConfig(image_size=image_size))
             grid = image_size // PATCH_SIZE
             assert sam.prompt_encoder.image_embedding_size == (grid, grid)
             assert sam.prompt_encoder.input_image_size == (
@@ -644,19 +644,19 @@ def _obs_source_kwarg(key: str) -> Callable[[SAMTrainingConfig], Any]:
 
 def _obs_variant_call(config: SAMTrainingConfig) -> Any:
     """
-    Which variant name reaches ``SAM.from_variant`` -- the call site, not a
-    built model. Building a real ``vit_b`` is ~90M parameters and 1024px, which
-    no ordinary gate can afford; the tiny branch is covered behaviourally by
-    ``TestModelConstruction`` instead.
+    Which variant name reaches the package factory ``create_sam`` -- the call
+    site, not a built model. Building a real ``vit_b`` is ~90M parameters and
+    1024px, which no ordinary gate can afford; the tiny branch is covered
+    behaviourally by ``TestModelConstruction`` instead.
     """
     seen: List[Any] = []
 
-    def recorder(name: str) -> Any:
+    def recorder(name: str, **kwargs: Any) -> Any:
         seen.append(name)
-        return create_sam(_probe_config())
+        return build_sam(_probe_config())
 
-    with mock.patch.object(train_sam_module.SAM, "from_variant", recorder):
-        create_sam(config)
+    with mock.patch.object(train_sam_module, "create_sam", recorder):
+        build_sam(config)
     return seen
 
 

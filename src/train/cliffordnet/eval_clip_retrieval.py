@@ -105,26 +105,17 @@ from train.common.image_text import (
     load_coco2017_local_split,
     make_image_text_tf_dataset,
 )
-from train.cliffordnet.train_clip import (
-    _compute_retrieval_metrics,
-    ContrastiveCliffordCLIP,
-)
+from train.cliffordnet.train_clip import _compute_retrieval_metrics
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
-from dl_techniques.losses import CLIPContrastiveLoss
 from dl_techniques.utils.logger import logger
 
-# DECISION plan_2026-05-31_42743977/D-005
-# ``StepCheckpointCallback`` saves the ``ContrastiveCliffordCLIP`` WRAPPER for
-# ``checkpoints/step_*.keras`` and ``checkpoints/final.keras``; only the run-root
-# ``cliffordclip_<variant>.keras`` is the bare ``CliffordCLIP`` (unwrapped at
-# ``evaluate()`` via ``.clip_model``). The signal-floor gate MUST eval a
-# mid-training ``step_*.keras`` (a wrapper), so both the wrapper and loss classes
-# are registered here; do NOT assume a bare checkpoint. See decisions.md D-005.
-_CUSTOM_OBJECTS = {
-    "CliffordCLIP": CliffordCLIP,
-    "ContrastiveCliffordCLIP": ContrastiveCliffordCLIP,
-    "CLIPContrastiveLoss": CLIPContrastiveLoss,
-}
+# Every checkpoint ``train_clip.py`` writes -- ``checkpoints/step_*.keras``,
+# ``checkpoints/final.keras`` and ``cliffordclip_<variant>.keras`` -- is the
+# bare ``CliffordCLIP``: the trainer passes it to ``StepCheckpointCallback`` as
+# ``saved_model`` and never saves its stock-fit bridge
+# (plan-2026-10-14T062616-81938e81 D-045). A wrapper archive written before
+# that change names the deleted ``ContrastiveCliffordCLIP`` and does not load.
+_CUSTOM_OBJECTS = {"CliffordCLIP": CliffordCLIP}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -177,11 +168,12 @@ def evaluate(args: argparse.Namespace) -> Dict[str, float]:
     model = keras.models.load_model(
         args.checkpoint, compile=False, custom_objects=_CUSTOM_OBJECTS,
     )
-    # Checkpoints from StepCheckpointCallback are the ContrastiveCliffordCLIP
-    # WRAPPER (step_*.keras, final.keras); the run-root cliffordclip_<variant>.keras
-    # is the bare CliffordCLIP. Unwrap to the inner CliffordCLIP either way so the
-    # gate can eval mid-training step checkpoints.
-    clip_model = getattr(model, "clip_model", model)
+    if not isinstance(model, CliffordCLIP):
+        raise TypeError(
+            f"{args.checkpoint} holds a {type(model).__name__}, not a "
+            "CliffordCLIP; train_clip.py saves the bare CliffordCLIP"
+        )
+    clip_model = model
     logger.info(f"Loaded CliffordCLIP: {clip_model.count_params():,} params")
 
     encoder = tiktoken.get_encoding("gpt2")

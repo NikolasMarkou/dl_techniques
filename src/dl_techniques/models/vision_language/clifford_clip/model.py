@@ -36,7 +36,6 @@ References:
 from __future__ import annotations
 
 import keras
-from keras import initializers, ops, regularizers
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------------
@@ -63,6 +62,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------------
 
@@ -94,7 +94,7 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 # DECISION plan-2026-08-19T163559-499b6f0e/D-072: one shared Initializer instance;
 # pass clone_initializer(...) to every consumer, or the two towers come out with 763
 # bit-identical weight pairs. See decisions.md.
-_DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+_DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 
 # DECISION plan-2026-08-23T091307-9a110062/D-480: BatchNorm momentum is 0.9, the torch
 # convention CliffordNet's stem uses; keras_momentum = 1 - torch_momentum, so this is
@@ -594,10 +594,10 @@ class CliffordCLIP(keras.Model):
             )
         self.head_kind = head_kind
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self._build_vision_tower()
         self._build_text_tower()
@@ -1017,7 +1017,7 @@ class CliffordCLIP(keras.Model):
         self.logit_scale = self.add_weight(
             name="logit_scale",
             shape=(),
-            initializer=initializers.Constant(self.logit_scale_init),
+            initializer=keras.initializers.Constant(self.logit_scale_init),
             trainable=True,
             dtype="float32",
         )
@@ -1029,7 +1029,7 @@ class CliffordCLIP(keras.Model):
             self.vision_pos_embed = self.add_weight(
                 name="vision_pos_embed",
                 shape=(1, post_stem, post_stem, self._vision_stem_channels),
-                initializer=initializers.TruncatedNormal(stddev=0.02),
+                initializer=keras.initializers.TruncatedNormal(stddev=0.02),
                 trainable=True,
             )
 
@@ -1138,12 +1138,12 @@ class CliffordCLIP(keras.Model):
         # Flattened to a token sequence so the generic SequencePooling layers
         # handle every pooling view; z_det, the mean, is the CLIP anchor.
         b, h, w, d = (
-            ops.shape(x)[0],
-            ops.shape(x)[1],
-            ops.shape(x)[2],
-            ops.shape(x)[3],
+            keras.ops.shape(x)[0],
+            keras.ops.shape(x)[1],
+            keras.ops.shape(x)[2],
+            keras.ops.shape(x)[3],
         )
-        seq = ops.reshape(x, (b, h * w, d))
+        seq = keras.ops.reshape(x, (b, h * w, d))
         z_det = self.vision_det_pool(seq)
         z_ctx = (
             self.vision_ctx_pool(seq, training=training)
@@ -1166,9 +1166,9 @@ class CliffordCLIP(keras.Model):
         if normalize:
             # The 1e-8 epsilon underflows to 0.0 in fp16, so normalize in float32
             # and cast back; at float32 the casts are identities.
-            mixed_f = ops.cast(mixed, "float32")
-            mixed_f = mixed_f / (ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8)
-            mixed = ops.cast(mixed_f, mixed.dtype)
+            mixed_f = keras.ops.cast(mixed, "float32")
+            mixed_f = mixed_f / (keras.ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8)
+            mixed = keras.ops.cast(mixed_f, mixed.dtype)
         return mixed
 
     def encode_text(
@@ -1188,8 +1188,8 @@ class CliffordCLIP(keras.Model):
         :param normalize: L2-normalize the output.
         :return: Embedding tensor ``(B, embed_dim)``.
         """
-        seq_len = ops.shape(input_ids)[1]
-        positions = ops.arange(seq_len)
+        seq_len = keras.ops.shape(input_ids)[1]
+        positions = keras.ops.arange(seq_len)
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
         x = self.text_embed_norm(x)
         x = self.text_embed_dropout(x, training=training)
@@ -1202,8 +1202,8 @@ class CliffordCLIP(keras.Model):
             x = self.text_head_dropout(x, training=training)
 
         # Pad mask (1 = real token, 0 = pad).
-        non_pad = ops.cast(
-            ops.not_equal(input_ids, self.pad_token_id), x.dtype
+        non_pad = keras.ops.cast(
+            keras.ops.not_equal(input_ids, self.pad_token_id), x.dtype
         )
 
         # Last-non-pad-token index (the canonical CLIP text anchor).
@@ -1237,11 +1237,11 @@ class CliffordCLIP(keras.Model):
         mixed = self.text_projection(mixed)
         if normalize:
             # Same fp16-safe normalize as encode_image.
-            mixed_f = ops.cast(mixed, "float32")
+            mixed_f = keras.ops.cast(mixed, "float32")
             mixed_f = mixed_f / (
-                ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8
+                keras.ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8
             )
-            mixed = ops.cast(mixed_f, mixed.dtype)
+            mixed = keras.ops.cast(mixed_f, mixed.dtype)
         return mixed
 
     # ------------------------------------------------------------------
@@ -1252,9 +1252,9 @@ class CliffordCLIP(keras.Model):
         """Return ``exp(logit_scale)`` clipped to ``logit_scale_max``."""
         # DECISION plan-2026-07-15T114613-5add9baa/D-001: exponentiate in float32, as
         # OpenCLIP does; in fp16 exp() overflows past log(65504). See decisions.md.
-        ls = ops.cast(self.logit_scale, "float32")
-        scale = ops.exp(ls)
-        return ops.minimum(scale, ops.cast(self.logit_scale_max, "float32"))
+        ls = keras.ops.cast(self.logit_scale, "float32")
+        scale = keras.ops.exp(ls)
+        return keras.ops.minimum(scale, keras.ops.cast(self.logit_scale_max, "float32"))
 
     def call(
         self,
@@ -1284,7 +1284,7 @@ class CliffordCLIP(keras.Model):
 
         scale = self._get_logit_scale()
         # Cast to the features' dtype, or an fp16 matmul raises on mixed dtypes.
-        scale_c = ops.cast(scale, image_features.dtype)
+        scale_c = keras.ops.cast(scale, image_features.dtype)
         logits_per_image, logits_per_text = compute_clip_logits(
             image_features, text_features, scale_c
         )
@@ -1373,16 +1373,16 @@ class CliffordCLIP(keras.Model):
                 "head_cli_mode": self.head_cli_mode,
                 "head_kind": self.head_kind,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(
+                "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),
-                "bias_initializer": initializers.serialize(
+                "bias_initializer": keras.initializers.serialize(
                     self.bias_initializer
                 ),
-                "kernel_regularizer": regularizers.serialize(
+                "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
-                "bias_regularizer": regularizers.serialize(
+                "bias_regularizer": keras.regularizers.serialize(
                     self.bias_regularizer
                 ),
             }
@@ -1391,27 +1391,34 @@ class CliffordCLIP(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CliffordCLIP":
-        """Rebuild a model, deserializing the two regularizers.
+        """Rebuild a model, deserializing the two keras.regularizers.
 
         :param config: Dict as returned by :meth:`get_config`.
         :return: A new model instance.
         """
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
-                config[key] = regularizers.deserialize(config[key])
+                config[key] = keras.regularizers.deserialize(config[key])
         return cls(**config)
 
     # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-047: image_size and
+    # context_length are REQUIRED here and in create_clifford_clip, like
+    # vocab_size. Do not restore the 224/77 defaults: they were a copy of the
+    # constructor's own, and a factory carrying them too would be a second copy
+    # kept in lockstep. They describe the data, not the variant. See
+    # decisions.md D-047.
     @classmethod
     def from_variant(
         cls,
         variant: str,
         vocab_size: int,
-        image_size: int = 224,
-        context_length: int = 77,
+        image_size: int,
+        context_length: int,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any,
     ) -> "CliffordCLIP":
         """Construct a CliffordCLIP from a predefined variant.
@@ -1421,19 +1428,31 @@ class CliffordCLIP(keras.Model):
             tower (analogue of :class:`CliffordNet.lite_g`).
         :param vocab_size: Vocabulary size (use the tokenizer's
             ``vocab_size``).
-        :param image_size: Image resolution.
-        :param context_length: Maximum text sequence length.
+        :param image_size: Image resolution of the training data. Required, like
+            ``vocab_size``: the stem and stage ladder are checked against it,
+            and no resolution is a property of the variant.
+        :param context_length: Maximum text sequence length of the tokenized
+            captions. Required for the same reason.
+        :param pretrained: Must be falsy. No CliffordCLIP weights are
+            distributed, and the model has no task head, so there is no
+            backbone-only load to offer for a path: a whole ``.keras`` archive
+            loads with ``keras.models.load_model(path)``.
         :param **kwargs: Override any default hyperparameter.
         :return: A configured model.
         :rtype: CliffordCLIP
         :raises ValueError: If ``variant`` is unknown, or a resolved argument fails
             the constructor's checks.
+        :raises NotImplementedError: If ``pretrained`` is truthy (``True`` or a
+            path), before anything is built.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. "
                 f"Available: {list(cls.MODEL_VARIANTS.keys())}"
             )
+        # The D-033 ruling (plan-2026-10-14T062616-81938e81): a dual encoder
+        # has no backbone/head split, so a path is refused like True.
+        refuse_pretrained(pretrained, "CliffordCLIP")
         defaults = dict(cls.MODEL_VARIANTS[variant])
         defaults.update(kwargs)
         logger.info(f"Creating CliffordCLIP-{variant.upper()}")
@@ -1445,9 +1464,45 @@ class CliffordCLIP(keras.Model):
         )
 
 
+def create_clifford_clip(
+    variant: str,
+    vocab_size: int,
+    image_size: int,
+    context_length: int,
+    pretrained: Union[bool, str] = False,
+    **kwargs: Any,
+) -> CliffordCLIP:
+    """Create a CliffordCLIP from a named variant; delegates to :meth:`CliffordCLIP.from_variant`.
+
+    :param variant: One of ``CliffordCLIP.MODEL_VARIANTS``: ``"nano"``,
+        ``"nano_g"``, ``"mini"``, ``"small"``, ``"base"``, ``"large"``.
+    :param vocab_size: The tokenizer's vocabulary size.
+    :param image_size: Image resolution of the training data.
+    :param context_length: Maximum text sequence length.
+    :param pretrained: Must be falsy; see :meth:`CliffordCLIP.from_variant`.
+    :param kwargs: Constructor arguments overriding the variant's defaults.
+    :return: A configured, unbuilt CliffordCLIP.
+    :rtype: CliffordCLIP
+    :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
+
+    Example:
+        .. code-block:: python
+
+            model = create_clifford_clip(
+                "nano", vocab_size=50257, image_size=112, context_length=64
+            )
+    """
+    return CliffordCLIP.from_variant(
+        variant, vocab_size, image_size, context_length,
+        pretrained=pretrained, **kwargs,
+    )
+
+
 # ===========================================================================
 # Contrastive loss
 # ===========================================================================
 #
-# Training uses dl_techniques.losses.CLIPContrastiveLoss, which matches this
-# model's output schema; see train/cliffordnet/train_clip.py for a usage example.
+# Training uses dl_techniques.losses.CLIPContrastiveLoss (or SigLIPContrastiveLoss),
+# which matches this model's output schema; train/cliffordnet/train_clip.py trains
+# it under stock compile/fit through the stacking bridge of train/clip/train_clip.py.

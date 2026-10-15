@@ -109,9 +109,11 @@ mechanisms, lives in the module docstrings:
 
 ```python
 import keras
-from dl_techniques.models.vision_language.sam.sam1 import SAM, resize_longest_side
+from dl_techniques.models.vision_language.sam.sam1 import create_sam, resize_longest_side
 
-model = SAM.from_variant('vit_b')          # RANDOM weights — no checkpoint ships
+model = create_sam('vit_b')   # RANDOM weights; same as SAM.from_variant('vit_b')
+# create_sam('vit_b', pretrained=True) raises NotImplementedError: no checkpoint
+# ships. A local .keras archive loads with keras.models.load_model(path).
 
 # preprocess() pads only, so pin the longest side yourself first.
 image = resize_longest_side(image, model.image_encoder.img_size)

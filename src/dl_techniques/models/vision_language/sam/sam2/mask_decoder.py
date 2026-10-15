@@ -20,7 +20,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
@@ -29,12 +28,12 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from dl_techniques.layers.norms import create_normalization_layer
 
-# Reuse, do not re-implement: SAM 1's transformer and its MLP-head builder are
-# imported UNCHANGED (a second instance of the former, a plain function call for
-# the latter). `models/vision_language/sam/sam1/__init__.py` does not re-export either name, so both
-# imports must name the submodule directly -- exactly as `train_sam.py` does.
+# Reuse, do not re-implement: SAM 1's public `TwoWayTransformer` is imported
+# UNCHANGED (a second instance). `models/vision_language/sam/sam1/__init__.py`
+# does not re-export it, so the import names the submodule directly -- exactly
+# as `train_sam.py` does. The MLP-head builder is NOT imported from sam1: see
+# `build_mlp_head` below.
 from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
-from dl_techniques.models.vision_language.sam.sam1.mask_decoder import _build_mlp_head
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -42,6 +41,62 @@ from dl_techniques.utils.activation_serialization import (
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+
+# DECISION plan-2026-10-14T062616-81938e81/D-046: SAM 2's own copy of the MLP
+# head builder, not an import of sam1's private `_build_mlp_head`. Do not
+# re-import it, and do not make sam1's helper public for sam2's sake: a private
+# name crossing a sibling package is the coupling the family docstring
+# (`sam/__init__.py`) rules out, and promoting it would make a sam1-internal
+# helper part of two packages' contracts. The copy builds the identical
+# `keras.Sequential` (same Dense widths, activations and names, so the same
+# weight paths). See decisions.md D-046.
+def build_mlp_head(
+    *,
+    num_layers: int,
+    hidden_dim: int,
+    output_dim: int,
+    activation: str,
+    dense_name_template: str,
+    name: str,
+) -> keras.Sequential:
+    """Build reference SAM 2's MLP head: ``num_layers`` Dense layers, last one linear.
+
+    Interface contract (callers: :class:`SAM2MaskDecoder` for its hypernetwork,
+    IoU and object-score heads, and ``SAM2`` for ``obj_ptr_proj`` in
+    ``model.py``). The reference ``MLP(input_dim, hidden_dim, output_dim,
+    num_layers)``: ``num_layers - 1`` hidden layers of width ``hidden_dim``,
+    then one linear ``output_dim`` layer, so the head can emit signed logits.
+
+    :param num_layers: Total number of Dense layers; at least 1 (callers
+        validate).
+    :type num_layers: int
+    :param hidden_dim: Width of every layer except the last.
+    :type hidden_dim: int
+    :param output_dim: Width of the last layer.
+    :type output_dim: int
+    :param activation: Activation of every layer except the last.
+    :type activation: str
+    :param dense_name_template: Sub-layer name pattern with one ``{n}``
+        placeholder for the 1-based layer index, e.g. ``"iou_dense{n}"``.
+    :type dense_name_template: str
+    :param name: Name of the returned ``Sequential``.
+    :type name: str
+    :return: An unbuilt :class:`keras.Sequential` of ``num_layers`` Dense
+        layers.
+    :rtype: keras.Sequential
+    """
+    dense_layers = []
+    for index in range(num_layers):
+        is_last = index == num_layers - 1
+        dense_layers.append(
+            keras.layers.Dense(
+                output_dim if is_last else hidden_dim,
+                activation=None if is_last else activation,
+                name=dense_name_template.format(n=index + 1),
+            )
+        )
+    return keras.Sequential(dense_layers, name=name)
+
 
 #: Depth of each mask-token hypernetwork MLP. Fixed by the reference
 #: implementation (``MLP(dim, dim, dim // 8, 3)``) and deliberately independent
@@ -240,11 +295,11 @@ class SAM2MaskDecoder(keras.layers.Layer):
         # this repo. The cost is a few unused (but built and saved) weights in
         # the flags-off configuration; the shipped SAM 2 configuration turns
         # every one of these flags ON.
-        self.iou_token = layers.Embedding(1, transformer_dim, name="iou_token")
-        self.mask_tokens = layers.Embedding(
+        self.iou_token = keras.layers.Embedding(1, transformer_dim, name="iou_token")
+        self.mask_tokens = keras.layers.Embedding(
             self.num_mask_tokens, transformer_dim, name="mask_tokens"
         )
-        self.obj_score_token = layers.Embedding(
+        self.obj_score_token = keras.layers.Embedding(
             1, transformer_dim, name="obj_score_token"
         )
 
@@ -253,17 +308,17 @@ class SAM2MaskDecoder(keras.layers.Layer):
         # BETWEEN them (`dc1 -> +feat_s1 -> ln1 -> act1 -> dc2 -> +feat_s0 ->
         # act2`). A Sequential cannot express that, and destructuring one at
         # call time is exactly the reference's own workaround.
-        self.dc1 = layers.Conv2DTranspose(
+        self.dc1 = keras.layers.Conv2DTranspose(
             transformer_dim // 4, kernel_size=2, strides=2, name="upsample_conv1"
         )
         self.ln1 = create_normalization_layer(
             normalization_type, name="upsample_norm1"
         )
-        self.act1 = layers.Activation(activation, name="upsample_act1")
-        self.dc2 = layers.Conv2DTranspose(
+        self.act1 = keras.layers.Activation(activation, name="upsample_act1")
+        self.dc2 = keras.layers.Conv2DTranspose(
             transformer_dim // 8, kernel_size=2, strides=2, name="upsample_conv2"
         )
-        self.act2 = layers.Activation(activation, name="upsample_act2")
+        self.act2 = keras.layers.Activation(activation, name="upsample_act2")
 
         # Lateral 1x1 projections for the two high-resolution skips. The neck
         # emits every FPN level at `transformer_dim` channels, so these map
@@ -273,10 +328,10 @@ class SAM2MaskDecoder(keras.layers.Layer):
         #
         # DECISION plan-2026-08-04T044628-4c240b4c/D-022: these convs are applied
         # here inside predict_masks, not from the caller as the reference does -- keeps the decoder testable in isolation with identical weights either way. See decisions.md.
-        self.conv_s0 = layers.Conv2D(
+        self.conv_s0 = keras.layers.Conv2D(
             transformer_dim // 8, kernel_size=1, name="conv_s0"
         )
-        self.conv_s1 = layers.Conv2D(
+        self.conv_s1 = keras.layers.Conv2D(
             transformer_dim // 4, kernel_size=1, name="conv_s1"
         )
 
@@ -285,7 +340,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
         self.output_hypernetworks_mlps: List[keras.Sequential] = []
         for i in range(self.num_mask_tokens):
             self.output_hypernetworks_mlps.append(
-                _build_mlp_head(
+                build_mlp_head(
                     num_layers=_HYPERNETWORK_MLP_DEPTH,
                     hidden_dim=transformer_dim,
                     output_dim=transformer_dim // 8,
@@ -295,7 +350,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
                 )
             )
 
-        self.iou_prediction_head = _build_mlp_head(
+        self.iou_prediction_head = build_mlp_head(
             num_layers=self.iou_head_depth,
             hidden_dim=self.iou_head_hidden_dim,
             output_dim=self.num_mask_tokens,
@@ -304,7 +359,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
             name="iou_prediction_head",
         )
 
-        self.pred_obj_score_head = _build_mlp_head(
+        self.pred_obj_score_head = build_mlp_head(
             num_layers=3 if pred_obj_scores_mlp else 1,
             hidden_dim=transformer_dim,
             output_dim=1,
@@ -460,13 +515,13 @@ class SAM2MaskDecoder(keras.layers.Layer):
             token_parts.append(self.obj_score_token.weights[0])
         token_parts.append(self.iou_token.weights[0])
         token_parts.append(self.mask_tokens.weights[0])
-        output_tokens = ops.concatenate(token_parts, axis=0)
+        output_tokens = keras.ops.concatenate(token_parts, axis=0)
 
-        output_tokens = ops.expand_dims(output_tokens, 0)
-        batch_size = ops.shape(image_embeddings)[0]
-        output_tokens = ops.broadcast_to(
+        output_tokens = keras.ops.expand_dims(output_tokens, 0)
+        batch_size = keras.ops.shape(image_embeddings)[0]
+        output_tokens = keras.ops.broadcast_to(
             output_tokens,
-            (batch_size, ops.shape(output_tokens)[1], ops.shape(output_tokens)[2]),
+            (batch_size, keras.ops.shape(output_tokens)[1], keras.ops.shape(output_tokens)[2]),
         )
 
         # Only two sparse batch sizes are meaningful: 1 (one prompt set shared
@@ -487,16 +542,16 @@ class SAM2MaskDecoder(keras.layers.Layer):
                 f"rows onto an image batch of {static_batch}: sparse_batch "
                 f"must be 1 or exactly batch_size={static_batch}."
             )
-        sparse_batch = ops.shape(sparse_prompt_embeddings)[0]
-        sparse_prompt_embeddings = ops.tile(
+        sparse_batch = keras.ops.shape(sparse_prompt_embeddings)[0]
+        sparse_prompt_embeddings = keras.ops.tile(
             sparse_prompt_embeddings, [batch_size // sparse_batch, 1, 1]
         )
 
-        tokens = ops.concatenate([output_tokens, sparse_prompt_embeddings], axis=1)
+        tokens = keras.ops.concatenate([output_tokens, sparse_prompt_embeddings], axis=1)
 
         src = image_embeddings + dense_prompt_embeddings
         pos_src = image_pe
-        b, h, w, c = ops.shape(src)
+        b, h, w, c = keras.ops.shape(src)
 
         hs, src_out = self.transformer(src, pos_src, tokens, training=training)
 
@@ -504,7 +559,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
         iou_token_out = hs[:, s, :]
         mask_tokens_out = hs[:, s + 1 : s + 1 + self.num_mask_tokens, :]
 
-        src_out = ops.reshape(src_out, (b, h, w, c))
+        src_out = keras.ops.reshape(src_out, (b, h, w, c))
 
         # Additive high-resolution fusion, BEFORE the norm/activation.
         if self.use_high_res_features:
@@ -526,16 +581,16 @@ class SAM2MaskDecoder(keras.layers.Layer):
                     mask_tokens_out[:, i, :], training=training
                 )
             )
-        hyper_in = ops.stack(hyper_in_list, axis=1)
+        hyper_in = keras.ops.stack(hyper_in_list, axis=1)
 
-        b_up, h_up, w_up, c_up = ops.shape(upscaled)
-        upscaled_flat = ops.reshape(upscaled, (b_up, h_up * w_up, c_up))
-        masks = ops.matmul(hyper_in, ops.transpose(upscaled_flat, (0, 2, 1)))
-        masks = ops.reshape(masks, (b_up, self.num_mask_tokens, h_up, w_up))
+        b_up, h_up, w_up, c_up = keras.ops.shape(upscaled)
+        upscaled_flat = keras.ops.reshape(upscaled, (b_up, h_up * w_up, c_up))
+        masks = keras.ops.matmul(hyper_in, keras.ops.transpose(upscaled_flat, (0, 2, 1)))
+        masks = keras.ops.reshape(masks, (b_up, self.num_mask_tokens, h_up, w_up))
 
         iou_pred = self.iou_prediction_head(iou_token_out, training=training)
         if self.iou_prediction_use_sigmoid:
-            iou_pred = ops.sigmoid(iou_pred)
+            iou_pred = keras.ops.sigmoid(iou_pred)
 
         if self.pred_obj_scores:
             # Index 0 is the obj-score token's OWN transformer output.
@@ -543,7 +598,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
                 hs[:, 0, :], training=training
             )
         else:
-            object_score_logits = 10.0 * ops.ones(
+            object_score_logits = 10.0 * keras.ops.ones(
                 (batch_size, 1), dtype=masks.dtype
             )
 
@@ -573,16 +628,16 @@ class SAM2MaskDecoder(keras.layers.Layer):
         # DECISION plan-2026-08-04T044628-4c240b4c/D-034: sum the two areas in
         # float32, never mask_logits.dtype -- at the shipped 256x256=65536 logits/mask, float16 overflows (max 65504), turning a confident mask's stability into NaN. See decisions.md.
         delta = self.dynamic_multimask_stability_delta
-        shape = ops.shape(mask_logits)
-        flat = ops.reshape(mask_logits, (shape[0], shape[1], -1))
-        area_i = ops.sum(ops.cast(flat > delta, "float32"), axis=-1)
-        area_u = ops.sum(ops.cast(flat > -delta, "float32"), axis=-1)
+        shape = keras.ops.shape(mask_logits)
+        flat = keras.ops.reshape(mask_logits, (shape[0], shape[1], -1))
+        area_i = keras.ops.sum(keras.ops.cast(flat > delta, "float32"), axis=-1)
+        area_u = keras.ops.sum(keras.ops.cast(flat > -delta, "float32"), axis=-1)
         # `area_u == 0` means the mask is empty even at the permissive
         # threshold: it is trivially self-consistent, so the score is 1.0. The
         # division is made safe FIRST -- a `where` alone still evaluates the
         # NaN branch and poisons the gradient.
-        safe_u = ops.where(area_u > 0, area_u, ops.ones_like(area_u))
-        return ops.where(area_u > 0, area_i / safe_u, ops.ones_like(area_i))
+        safe_u = keras.ops.where(area_u > 0, area_u, keras.ops.ones_like(area_u))
+        return keras.ops.where(area_u > 0, area_i / safe_u, keras.ops.ones_like(area_i))
 
     def _dynamic_multimask_via_stability(
         self,
@@ -603,13 +658,13 @@ class SAM2MaskDecoder(keras.layers.Layer):
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-024: argmax must be per
         # batch element (take_along_axis(axis=1)), never a single argmax over the whole tensor -- shapes match and batch-1 fixtures can't tell the two apart. See decisions.md.
-        best_idx = ops.argmax(multimask_iou, axis=-1)
-        idx_masks = ops.reshape(best_idx, (-1, 1, 1, 1))
-        best_multimask_logits = ops.take_along_axis(
+        best_idx = keras.ops.argmax(multimask_iou, axis=-1)
+        idx_masks = keras.ops.reshape(best_idx, (-1, 1, 1, 1))
+        best_multimask_logits = keras.ops.take_along_axis(
             multimask_logits, idx_masks, axis=1
         )
-        best_multimask_iou = ops.take_along_axis(
-            multimask_iou, ops.reshape(best_idx, (-1, 1)), axis=1
+        best_multimask_iou = keras.ops.take_along_axis(
+            multimask_iou, keras.ops.reshape(best_idx, (-1, 1)), axis=1
         )
 
         singlemask_logits = all_mask_logits[:, 0:1, :, :]
@@ -618,12 +673,12 @@ class SAM2MaskDecoder(keras.layers.Layer):
         stability = self._get_stability_scores(singlemask_logits)
         is_stable = stability >= self.dynamic_multimask_stability_thresh
 
-        masks_out = ops.where(
-            ops.reshape(is_stable, (-1, 1, 1, 1)),
+        masks_out = keras.ops.where(
+            keras.ops.reshape(is_stable, (-1, 1, 1, 1)),
             singlemask_logits,
             best_multimask_logits,
         )
-        iou_out = ops.where(is_stable, singlemask_iou, best_multimask_iou)
+        iou_out = keras.ops.where(is_stable, singlemask_iou, best_multimask_iou)
         return masks_out, iou_out
 
     # -----------------------------------------------------------------

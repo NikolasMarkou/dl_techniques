@@ -50,12 +50,13 @@ References:
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
-from keras import ops
 
-from dl_techniques.models.vision_language.sam.sam1.mask_decoder import _build_mlp_head
 from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
-from dl_techniques.models.vision_language.sam.sam2.mask_decoder import SAM2MaskDecoder
+from dl_techniques.models.vision_language.sam.sam2.mask_decoder import (
+    SAM2MaskDecoder,
+    build_mlp_head,
+)
 from dl_techniques.models.vision_language.sam.sam2.memory_attention import (
     DEFAULT_DROPOUT_RATE,
     SAM2MemoryAttention,
@@ -65,6 +66,7 @@ from dl_techniques.models.vision_language.sam.sam2.memory_encoder import SAM2Mem
 from dl_techniques.models.vision_language.sam.sam2.neck import SAM2ImageEncoder
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +104,7 @@ def _sine_positional_encoding_1d(
     caller today, but the shape rule is general):
 
     :param positions: ``(N,)`` scalar positions, already normalized by the
-        caller. Anything ``ops.convert_to_tensor`` accepts.
+        caller. Anything ``keras.ops.convert_to_tensor`` accepts.
     :type positions: Any
     :param dim: Output width. Must be positive and EVEN -- the two halves are
         the sines and the cosines of the same ``dim // 2`` frequencies.
@@ -126,15 +128,15 @@ def _sine_positional_encoding_1d(
             f"halves are equal-width, got {dim}"
         )
     half = dim // 2
-    frequency_index = ops.arange(half, dtype="float32")
-    divisor = ops.power(
-        ops.cast(temperature, "float32"),
-        2.0 * ops.floor(frequency_index / 2.0) / float(half),
+    frequency_index = keras.ops.arange(half, dtype="float32")
+    divisor = keras.ops.power(
+        keras.ops.cast(temperature, "float32"),
+        2.0 * keras.ops.floor(frequency_index / 2.0) / float(half),
     )
-    angles = ops.expand_dims(
-        ops.cast(ops.convert_to_tensor(positions), "float32"), axis=-1
+    angles = keras.ops.expand_dims(
+        keras.ops.cast(keras.ops.convert_to_tensor(positions), "float32"), axis=-1
     ) / divisor
-    return ops.concatenate([ops.sin(angles), ops.cos(angles)], axis=-1)
+    return keras.ops.concatenate([keras.ops.sin(angles), keras.ops.cos(angles)], axis=-1)
 
 
 def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
@@ -163,10 +165,10 @@ def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
     not by the predicted IoU, which is itself one of the things being trained.
     See ``progress.md`` "Iteration 2 -- carried constraints".
     """
-    index = ops.argmax(iou_predictions, axis=-1)
-    index = ops.cast(ops.reshape(index, (-1,) + (1,) * (len(tensor.shape) - 1)),
+    index = keras.ops.argmax(iou_predictions, axis=-1)
+    index = keras.ops.cast(keras.ops.reshape(index, (-1,) + (1,) * (len(tensor.shape) - 1)),
                      "int32")
-    return ops.take_along_axis(tensor, index, axis=1)
+    return keras.ops.take_along_axis(tensor, index, axis=1)
 
 
 @register_dl_technique("dl_techniques.models.sam2.model")
@@ -322,7 +324,7 @@ class SAM2(keras.Model):
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-036: obj_ptr_proj,
         # obj_ptr_tpos_proj, and no_obj_embed_spatial are not optional and have no config flags -- omitting any is silent, and the only symptom is object pointers losing temporal distinction. See decisions.md.
-        self.obj_ptr_proj = _build_mlp_head(
+        self.obj_ptr_proj = build_mlp_head(
             num_layers=_OBJ_PTR_PROJ_DEPTH,
             hidden_dim=self.hidden_dim,
             output_dim=self.hidden_dim,
@@ -438,7 +440,12 @@ class SAM2(keras.Model):
     # -----------------------------------------------------------------
 
     @classmethod
-    def from_variant(cls, variant: str, **kwargs: Any) -> "SAM2":
+    def from_variant(
+            cls,
+            variant: str,
+            pretrained: Union[bool, str] = False,
+            **kwargs: Any,
+    ) -> "SAM2":
         """Construct every component from the composed variant tables.
 
         The trunk/neck geometry is READ from ``Hiera.MODEL_VARIANTS`` and
@@ -447,6 +454,11 @@ class SAM2(keras.Model):
 
         :param variant: ``'tiny'`` or ``'hiera_l'``.
         :type variant: str
+        :param pretrained: Must be falsy. No SAM 2 weights are distributed, and
+            SAM 2 has no task head, so there is no backbone-only load to offer
+            for a path: a whole ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
         :param kwargs: Explicit overrides. Any value given here wins over the
             variant table (S-3); passing ``None`` explicitly is the same as
             omitting the argument. ``dropout_rate`` is one of these: it is a
@@ -458,6 +470,8 @@ class SAM2(keras.Model):
         :raises ValueError: If ``variant`` is unknown, if ``dropout_rate`` is
             outside ``[0.0, 1.0)``, or if ``image_size`` is overridden here —
             it belongs to ``Hiera.MODEL_VARIANTS``, which is its single home.
+        :raises NotImplementedError: If ``pretrained`` is truthy (``True`` or
+            a path), before anything is built.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -466,6 +480,9 @@ class SAM2(keras.Model):
                 f"the other published SAM 2 sizes' numbers were never read by "
                 f"this implementation and are not invented here."
             )
+        # The D-033 ruling (plan-2026-10-14T062616-81938e81): no backbone/head
+        # split, so a path is refused like True.
+        refuse_pretrained(pretrained, "SAM2")
         if kwargs.get("image_size") is not None:
             raise ValueError(
                 "image_size cannot be overridden through SAM2.from_variant: it "
@@ -692,7 +709,7 @@ class SAM2(keras.Model):
         must account for: on any batch row whose ``object_score_logits`` is
         ``<= 0`` it is not a prediction at all but the uniform constant
         :data:`NO_OBJ_SCORE` (``-1024``), written by
-        :meth:`_suppress_absent_object` (D-043). ``ops.where`` passes no
+        :meth:`_suppress_absent_object` (D-043). ``keras.ops.where`` passes no
         gradient through the unselected branch, so on such a row the mask
         path is gradient-free and the decoder learns nothing from a mask loss.
         The score head itself is likewise unreachable from a mask loss --
@@ -805,7 +822,7 @@ class SAM2(keras.Model):
         # DECISION plan-2026-08-04T044628-4c240b4c/D-044: the gather is
         # conditional on the pointer axis exceeding length 1 -- an unconditional gather raises when use_multimask_token_for_obj_ptr's default leaves the pointer axis at 1 while iou is 3. See decisions.md.
         if int(pointer_tokens.shape[1]) > 1:
-            selected_token = ops.squeeze(
+            selected_token = keras.ops.squeeze(
                 _select_best_by_iou(pointer_tokens, iou), axis=1)
         else:
             selected_token = pointer_tokens[:, 0, :]
@@ -832,9 +849,9 @@ class SAM2(keras.Model):
             :data:`NO_OBJ_SCORE`, the rest are untouched.
         :rtype: Any
         """
-        appearing = ops.reshape(score, (-1, 1, 1, 1)) > 0
-        return ops.where(
-            appearing, logits, ops.cast(NO_OBJ_SCORE, logits.dtype))
+        appearing = keras.ops.reshape(score, (-1, 1, 1, 1)) > 0
+        return keras.ops.where(
+            appearing, logits, keras.ops.cast(NO_OBJ_SCORE, logits.dtype))
 
     def _blend_object_pointer(self, pointer: Any, score: Any) -> Any:
         """Interpolate the predicted pointer towards the learned ``no_obj_ptr``.
@@ -850,13 +867,13 @@ class SAM2(keras.Model):
         :rtype: Any
         """
         appearing = (
-            ops.sigmoid(score) if self.soft_no_obj_ptr
-            else ops.cast(score > 0, pointer.dtype)
+            keras.ops.sigmoid(score) if self.soft_no_obj_ptr
+            else keras.ops.cast(score > 0, pointer.dtype)
         )
-        appearing = ops.cast(appearing, pointer.dtype)
+        appearing = keras.ops.cast(appearing, pointer.dtype)
         if self.fixed_no_obj_ptr:
             pointer = appearing * pointer
-        no_obj = ops.cast(self.no_obj_ptr, pointer.dtype)
+        no_obj = keras.ops.cast(self.no_obj_ptr, pointer.dtype)
         return pointer + (1.0 - appearing) * no_obj
 
     # -----------------------------------------------------------------
@@ -961,10 +978,10 @@ class SAM2(keras.Model):
             num_obj_ptr_tokens)``.
         :rtype: Tuple[Any, int, int]
         """
-        shape = ops.shape(features)
+        shape = keras.ops.shape(features)
         batch, grid_h, grid_w = shape[0], features.shape[1], features.shape[2]
-        tokens = ops.reshape(features, (batch, grid_h * grid_w, self.hidden_dim))
-        tokens_pos = ops.reshape(
+        tokens = keras.ops.reshape(features, (batch, grid_h * grid_w, self.hidden_dim))
+        tokens_pos = keras.ops.reshape(
             features_pos, (batch, grid_h * grid_w, self.hidden_dim))
 
         readout = self.memory_bank.read(
@@ -972,25 +989,25 @@ class SAM2(keras.Model):
 
         if readout.memory is None:
             if self.directly_add_no_mem_embed:
-                conditioned = tokens + ops.cast(self.no_mem_embed, tokens.dtype)
+                conditioned = tokens + keras.ops.cast(self.no_mem_embed, tokens.dtype)
                 return (
-                    ops.reshape(
+                    keras.ops.reshape(
                         conditioned, (batch, grid_h, grid_w, self.hidden_dim)),
                     0, 0,
                 )
             # DECISION plan-2026-08-04T044628-4c240b4c/D-027: this is a one-token
             # dummy memory (zeros, position from no_mem_pos_enc), not upstream's no_mem_embed.expand -- that parameter is hidden_dim-wide and cannot narrow to mem_dim. See decisions.md.
-            memory = ops.zeros((batch, 1, self.mem_dim), dtype=tokens.dtype)
-            memory_pos = ops.broadcast_to(
-                ops.cast(self.no_mem_pos_enc, tokens.dtype),
+            memory = keras.ops.zeros((batch, 1, self.mem_dim), dtype=tokens.dtype)
+            memory_pos = keras.ops.broadcast_to(
+                keras.ops.cast(self.no_mem_pos_enc, tokens.dtype),
                 (batch, 1, self.mem_dim),
             )
             num_ptr_tokens = 0
         else:
             # H-4: every fed-back boundary is detached. Without this, tracking N
             # frames builds one N-deep recurrent graph instead of N decodes.
-            memory = ops.stop_gradient(readout.memory)
-            memory_pos = ops.stop_gradient(readout.memory_pos)
+            memory = keras.ops.stop_gradient(readout.memory)
+            memory_pos = keras.ops.stop_gradient(readout.memory_pos)
             memory_pos = memory_pos + self._temporal_embedding(readout, memory)
             num_ptr_tokens = readout.num_obj_ptr_tokens
 
@@ -1003,7 +1020,7 @@ class SAM2(keras.Model):
             training=False,
         )
         return (
-            ops.reshape(conditioned, (batch, grid_h, grid_w, self.hidden_dim)),
+            keras.ops.reshape(conditioned, (batch, grid_h, grid_w, self.hidden_dim)),
             int(memory.shape[1]),
             num_ptr_tokens,
         )
@@ -1037,16 +1054,16 @@ class SAM2(keras.Model):
         for slot, count in zip(readout.tpos_slots, readout.frame_token_counts):
             per_token.extend([int(slot)] * int(count))
 
-        table = ops.reshape(
+        table = keras.ops.reshape(
             self.maskmem_tpos_enc, (self.num_maskmem, self.mem_dim))
-        encoding = ops.take(
-            table, ops.convert_to_tensor(per_token, dtype="int32"), axis=0)
-        encoding = ops.expand_dims(encoding, axis=0)
+        encoding = keras.ops.take(
+            table, keras.ops.convert_to_tensor(per_token, dtype="int32"), axis=0)
+        encoding = keras.ops.expand_dims(encoding, axis=0)
         if readout.num_obj_ptr_tokens:
-            encoding = ops.concatenate(
+            encoding = keras.ops.concatenate(
                 [encoding, self._object_pointer_temporal_encoding(readout)],
                 axis=1)
-        return ops.cast(encoding, memory.dtype)
+        return keras.ops.cast(encoding, memory.dtype)
 
     def _object_pointer_temporal_encoding(self, readout: Any) -> Any:
         """Sine-encode and project the pointer tail's temporal differences.
@@ -1091,7 +1108,7 @@ class SAM2(keras.Model):
         # for a plain Dense; it stops being inert if this projection ever gains
         # dropout or normalization.
         encoding = self.obj_ptr_tpos_proj(encoding, training=False)
-        return ops.expand_dims(encoding, axis=0)
+        return keras.ops.expand_dims(encoding, axis=0)
 
     def _store_memory(
             self,
@@ -1117,21 +1134,21 @@ class SAM2(keras.Model):
         # built from different masks.
         logits = _select_best_by_iou(
             outputs["low_res_logits"], outputs["iou_predictions"])
-        logits = ops.transpose(logits, (0, 2, 3, 1))
+        logits = keras.ops.transpose(logits, (0, 2, 3, 1))
         # A Python tuple of ints from config: `len()`-able, so this resize is
         # graph-legal as well as eager-legal.
-        high_res = ops.image.resize(
+        high_res = keras.ops.image.resize(
             logits, (self.image_size, self.image_size),
             interpolation="bilinear")
 
         memory, memory_pos = self.memory_encoder([
-            ops.stop_gradient(features), ops.stop_gradient(high_res)])
+            keras.ops.stop_gradient(features), keras.ops.stop_gradient(high_res)])
         memory = self._mark_occlusion(memory, outputs["object_score_logits"])
         self.memory_bank.add_frame(
             frame_idx,
             maskmem_features=memory,
             maskmem_pos_enc=memory_pos,
-            obj_ptr=ops.stop_gradient(outputs["object_pointer"]),
+            obj_ptr=keras.ops.stop_gradient(outputs["object_pointer"]),
             is_conditioning=is_conditioning,
         )
 
@@ -1150,10 +1167,10 @@ class SAM2(keras.Model):
         :return: ``(B, h, w, mem_dim)`` memory with the occlusion mark added.
         :rtype: Any
         """
-        appearing = ops.cast(
-            ops.reshape(score, (-1, 1, 1, 1)) > 0, memory.dtype)
-        embedding = ops.cast(
-            ops.reshape(self.no_obj_embed_spatial, (1, 1, 1, self.mem_dim)),
+        appearing = keras.ops.cast(
+            keras.ops.reshape(score, (-1, 1, 1, 1)) > 0, memory.dtype)
+        embedding = keras.ops.cast(
+            keras.ops.reshape(self.no_obj_embed_spatial, (1, 1, 1, self.mem_dim)),
             memory.dtype)
         return memory + (1.0 - appearing) * embedding
 
@@ -1249,56 +1266,26 @@ def _as_layer(component: Union[keras.layers.Layer, Dict[str, Any]]) -> Any:
 
 def create_sam2(
         variant: str = "hiera_l",
-        num_maskmem: Optional[int] = None,
-        multimask_output: Optional[bool] = None,
-        directly_add_no_mem_embed: Optional[bool] = None,
-        memory_temporal_stride_for_eval: Optional[int] = None,
-        max_obj_ptrs_in_encoder: Optional[int] = None,
-        mem_dim: Optional[int] = None,
-        dropout_rate: Optional[float] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any,
 ) -> SAM2:
-    """Build a SAM 2 model from a variant name with optional overrides.
-
-    Every keyword defaults to ``None``, which means "defer to the variant
-    table" (S-3). An explicit value ALWAYS wins, including a falsy one such as
-    ``multimask_output=False`` — which is why the sentinel is ``None`` and not a
-    concrete default.
+    """Build a SAM 2 model from a variant name; delegates to :meth:`SAM2.from_variant`.
 
     :param variant: ``'tiny'`` or ``'hiera_l'``.
     :type variant: str
-    :param num_maskmem: Override the spatial memory slot count.
-    :type num_maskmem: Optional[int]
-    :param multimask_output: Override the default mask-selection mode.
-    :type multimask_output: Optional[bool]
-    :param directly_add_no_mem_embed: Override the empty-memory policy.
-    :type directly_add_no_mem_embed: Optional[bool]
-    :param memory_temporal_stride_for_eval: Override the selection stride.
-    :type memory_temporal_stride_for_eval: Optional[int]
-    :param max_obj_ptrs_in_encoder: Override the object-pointer cap.
-    :type max_obj_ptrs_in_encoder: Optional[int]
-    :param mem_dim: Override the memory token width.
-    :type mem_dim: Optional[int]
-    :param dropout_rate: Override the memory-attention dropout rate. ``None``
-        defers to the variant table, whose shipped value is
-        ``DEFAULT_DROPOUT_RATE`` (0.1) for both variants.
-    :type dropout_rate: Optional[float]
-    :param kwargs: Further overrides forwarded to :meth:`SAM2.from_variant`.
+    :param pretrained: Must be falsy; see :meth:`SAM2.from_variant`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Overrides forwarded to :meth:`SAM2.from_variant`, e.g.
+        ``num_maskmem``, ``multimask_output``, ``mem_dim``, ``dropout_rate``.
+        ``None`` defers to the variant table (S-3); an explicit value always
+        wins, including a falsy one such as ``multimask_output=False``.
     :type kwargs: Any
     :return: The configured model.
     :rtype: SAM2
+    :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
-    return SAM2.from_variant(
-        variant,
-        num_maskmem=num_maskmem,
-        multimask_output=multimask_output,
-        directly_add_no_mem_embed=directly_add_no_mem_embed,
-        memory_temporal_stride_for_eval=memory_temporal_stride_for_eval,
-        max_obj_ptrs_in_encoder=max_obj_ptrs_in_encoder,
-        mem_dim=mem_dim,
-        dropout_rate=dropout_rate,
-        **kwargs,
-    )
+    return SAM2.from_variant(variant, pretrained=pretrained, **kwargs)
 
 
 # ---------------------------------------------------------------------

@@ -29,8 +29,8 @@ Example:
 
 .. code-block:: python
 
-    from dl_techniques.models.vision_language.sam.sam3 import Sam3Image
-    model = Sam3Image.from_variant("tiny")
+    from dl_techniques.models.vision_language.sam.sam3 import create_sam3
+    model = create_sam3("tiny")
     outputs = model({"image": images, "token_ids": ids}, training=False)
 """
 
@@ -39,7 +39,7 @@ from .maskformer_segmentation import Sam3SegmentationHead
 from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
 from .query_selection import Sam3EncoderQuerySelection
-from .sam3_image import Sam3Image
+from .sam3_image import Sam3Image, create_sam3
 from .text_encoder_ve import Sam3TextEncoder
 from .training_model import (
     Sam3TrainingModel, compile_sam3_trainer, pack_predictions, pack_targets)
@@ -58,6 +58,7 @@ __all__ = [
     "Sam3ViTDetBackbone",
     "Sam3ViTDetBlock",
     "compile_sam3_trainer",
+    "create_sam3",
     "pack_predictions",
     "pack_targets",
 ]

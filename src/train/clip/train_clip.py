@@ -296,20 +296,29 @@ class StackedCLIPLogits(keras.Model):
 
 
 class StackedCLIPContrastiveLoss(keras.losses.Loss):
-    """`CLIPContrastiveLoss` on the stacked logits of `StackedCLIPLogits`.
+    """A contrastive loss on the stacked logits of `StackedCLIPLogits`.
 
-    ``y_true`` is ignored: the targets of a contrastive batch are its own
-    diagonal. ``call`` returns the per-sample vector of the inner loss's
-    ``call`` (not its ``__call__``, which converts a ``None`` label and raises,
-    decisions.md D-030 of plan-2026-08-19T163559-499b6f0e), so the reduction
-    is applied once, by this loss's own ``__call__``. The inner loss keeps
-    ``apply_temperature=False``: the model already multiplies by its learnable
-    ``exp(logit_scale)``, and a second temperature would compound it.
+    Interface contract (callers: `compile_for_contrastive_training`, the
+    MobileCLIP ``fit`` proofs, tests): ``inner`` is any `keras.losses.Loss`
+    whose ``call(y_true, y_pred)`` accepts the
+    ``{'logits_per_image', 'logits_per_text'}`` dict and returns one value per
+    sample (`CLIPContrastiveLoss`, `SigLIPContrastiveLoss`); the default is
+    ``CLIPContrastiveLoss()``. ``y_true`` is ignored: the targets of a
+    contrastive batch are its own diagonal. ``call`` returns the per-sample
+    vector of the inner loss's ``call`` (not its ``__call__``, which converts a
+    ``None`` label and raises, decisions.md D-030 of
+    plan-2026-08-19T163559-499b6f0e), so the reduction is applied once, by
+    this loss's own ``__call__``. An inner loss must not apply a temperature
+    of its own (``CLIPContrastiveLoss`` keeps ``apply_temperature=False``,
+    ``SigLIPContrastiveLoss`` ``temperature=1.0``): the model already
+    multiplies by its learnable ``exp(logit_scale)``, and a second temperature
+    would compound it.
     """
 
-    def __init__(self, name: str = 'clip_contrastive_loss', **kwargs: Any) -> None:
+    def __init__(self, inner: Optional[keras.losses.Loss] = None,
+                 name: str = 'clip_contrastive_loss', **kwargs: Any) -> None:
         super().__init__(name=name, **kwargs)
-        self.inner = CLIPContrastiveLoss()
+        self.inner = CLIPContrastiveLoss() if inner is None else inner
 
     def call(self, y_true: Any, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         return self.inner.call(None, unstack_clip_logits(y_pred))
@@ -353,11 +362,14 @@ def build_clip_optimizer(learning_rate: float, warmup_steps: int) -> keras.optim
 def compile_for_contrastive_training(
     clip_model: keras.Model,
     optimizer: keras.optimizers.Optimizer,
+    inner_loss: Optional[keras.losses.Loss] = None,
 ) -> StackedCLIPLogits:
     """Wrap ``clip_model`` and compile it for stock ``fit``.
 
-    Interface contract (callers: `main`, tests): returns a compiled
-    `StackedCLIPLogits` with loss `StackedCLIPContrastiveLoss` and metrics
+    Interface contract (callers: `main`, the CliffordCLIP trainer
+    ``train.cliffordnet.train_clip``, tests): returns a compiled
+    `StackedCLIPLogits` with loss ``StackedCLIPContrastiveLoss(inner_loss)``
+    (``inner_loss=None`` is ``CLIPContrastiveLoss()``) and metrics
     ``clip_i2t_accuracy`` and ``clip_i2t_recall@5``. Feed its ``fit`` the
     batches of `as_contrastive_fit_batches`. ``clip_model`` itself is not
     compiled; save it, not the wrapper.
@@ -365,22 +377,30 @@ def compile_for_contrastive_training(
     wrapper = StackedCLIPLogits(clip_model)
     wrapper.compile(
         optimizer=optimizer,
-        loss=StackedCLIPContrastiveLoss(),
+        loss=StackedCLIPContrastiveLoss(inner_loss),
         metrics=[StackedCLIPAccuracy(), StackedCLIPRecallAtK(k=5)],
     )
     return wrapper
 
 
 def as_contrastive_fit_batches(dataset: tf.data.Dataset) -> tf.data.Dataset:
-    """``(images, tokens)`` batches to ``({'image', 'text'}, zeros(N))``.
+    """Contrastive batches to ``({'image', 'text'}, zeros(N))``.
 
-    The zeros are the ``y`` that ``fit`` needs to call a loss at all (a
-    ``None`` label raises inside `keras.losses.Loss.__call__`); the loss and
-    the metrics ignore it.
+    Interface contract (callers: `main`, the CliffordCLIP trainer, tests): an
+    element is either an ``(images, tokens)`` pair or an
+    ``{'image', 'text'}`` dict (the batches of
+    ``train.common.make_image_text_tf_dataset``). The zeros are the ``y``
+    that ``fit`` needs to call a loss at all (a ``None`` label raises inside
+    `keras.losses.Loss.__call__`); the loss and the metrics ignore it.
     """
-    def to_fit_inputs(images, tokens):
-        dummy = tf.zeros(tf.shape(tokens)[:1], dtype=tf.float32)
-        return {'image': images, 'text': tokens}, dummy
+    def to_fit_inputs(*element):
+        if len(element) == 1:
+            inputs = element[0]
+        else:
+            images, tokens = element
+            inputs = {'image': images, 'text': tokens}
+        dummy = tf.zeros(tf.shape(inputs['text'])[:1], dtype=tf.float32)
+        return inputs, dummy
 
     return dataset.map(to_fit_inputs)
 

@@ -445,7 +445,9 @@ def test_degenerate_1x1_config_raises():
     8x8 and the final stage would be 8/2^4 < 1 -> rejected.
     """
     with pytest.raises(ValueError, match="spatial"):
-        CliffordCLIP.from_variant("nano", vocab_size=50257, image_size=32)
+        CliffordCLIP.from_variant(
+            "nano", vocab_size=50257, image_size=32, context_length=16
+        )
 
 
 def test_end_to_end_fit_with_clip_contrastive_loss():

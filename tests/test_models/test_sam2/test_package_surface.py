@@ -117,14 +117,24 @@ class TestExportSurface:
         )
 
     def test_the_surface_mirrors_sam_one_in_shape(self) -> None:
-        """S-2 is a claim about SHAPE: model + factory-ish + one helper.
+        """S-2 is a claim about SHAPE: model + factory + one helper.
 
-        Compared structurally, not by name: SAM 1 exports 3 names too, and if
-        someone broadens SAM 1's surface this test says so rather than letting
-        SAM 2 quietly follow.
+        Compared structurally, not by name. SAM 1's surface was broadened
+        deliberately on 2026-10-15 (plan-2026-10-14T062616-81938e81 D-047): it
+        gained the factory `create_sam`, which SAM 2 already had, so both now
+        export exactly one `create_*` factory, and SAM 1 has one name more
+        (`SAMTrainingModel`, which SAM 2 keeps behind its submodule). If
+        someone broadens either surface again this test says so rather than
+        letting the other quietly follow.
         """
         sam1 = importlib.import_module("dl_techniques.models.vision_language.sam.sam1")
-        assert len(sam1.__all__) == len(sam2.__all__) == 3
+        assert len(sam1.__all__) == 4 and len(sam2.__all__) == 3
+
+        def factories(package):
+            return [name for name in package.__all__ if name.startswith("create_")]
+
+        assert factories(sam1) == ["create_sam"]
+        assert factories(sam2) == ["create_sam2"]
 
 
 # ---------------------------------------------------------------------
