@@ -56,6 +56,7 @@ from dl_techniques.utils.clip_utils import (
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 
@@ -937,6 +938,7 @@ class CLIP(keras.Model):
     def from_variant(
         cls,
         variant: str,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
     ) -> "CLIP":
         """Create a CLIP model from a predefined variant.
@@ -944,11 +946,18 @@ class CLIP(keras.Model):
         :param variant: One of ``"ViT-B/32"``, ``"ViT-B/16"``, ``"ViT-L/14"``,
             ``"ViT-H/14"``.
         :type variant: str
+        :param pretrained: Must be falsy. No CLIP weights are distributed, and
+            CLIP has no task head, so there is no backbone-only load to offer
+            for a path: a whole ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
         :param kwargs: Additional arguments overriding the variant's defaults.
         :type kwargs: Any
         :return: A CLIP instance configured for the specified variant.
         :rtype: CLIP
         :raises ValueError: If the variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is truthy (``True`` or a
+            path), before anything is built.
 
         Example:
             .. code-block:: python
@@ -964,6 +973,12 @@ class CLIP(keras.Model):
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
+        # DECISION plan-2026-10-14T062616-81938e81/D-033: refuse a path too; do
+        # not route it through pretrained_path_or_raise and a backbone-only load.
+        # CLIP's output is the contrastive pair itself, there is no task head to
+        # leave fresh, so a path load is a whole-archive load, which
+        # keras.models.load_model(path) already is. See decisions.md D-033.
+        refuse_pretrained(pretrained, "CLIP")
 
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)  # Allow overriding defaults
@@ -975,55 +990,32 @@ class CLIP(keras.Model):
 
 # ---------------------------------------------------------------------
 
-def create_clip_model(**kwargs: Any) -> CLIP:
-    """Convenience function to create a CLIP model with a custom configuration.
+def create_clip(
+    variant: str,
+    pretrained: Union[bool, str] = False,
+    **kwargs: Any
+) -> CLIP:
+    """Create a CLIP model from a named variant; delegates to :meth:`CLIP.from_variant`.
 
-    A thin wrapper around the :class:`CLIP` constructor.
-
-    :param kwargs: Keyword arguments for the :class:`CLIP` constructor.
-    :type kwargs: Any
-    :return: A configured CLIP instance.
-    :rtype: CLIP
-
-    Example:
-        .. code-block:: python
-
-            model = create_clip_model(
-                image_size=384,
-                patch_size=16,
-                vision_layers=24,
-                embed_dim=768
-            )
-    """
-    logger.info("Creating custom CLIP model")
-    return CLIP(**kwargs)
-
-# ---------------------------------------------------------------------
-
-def create_clip_variant(variant: str, **kwargs: Any) -> CLIP:
-    """Convenience function to create a CLIP model from a predefined variant.
-
-    :param variant: The model variant string (e.g. ``"ViT-B/16"``).
+    :param variant: One of ``CLIP.MODEL_VARIANTS``: ``"ViT-B/32"``,
+        ``"ViT-B/16"``, ``"ViT-L/14"``, ``"ViT-H/14"``.
     :type variant: str
-    :param kwargs: Additional arguments overriding the variant's defaults.
+    :param pretrained: Must be falsy; see :meth:`CLIP.from_variant`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Constructor arguments overriding the variant's defaults,
+        e.g. ``image_size``, ``context_length``, ``vocab_size``.
     :type kwargs: Any
-    :return: A configured CLIP instance.
+    :return: A configured, unbuilt CLIP instance.
     :rtype: CLIP
     :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
 
     Example:
         .. code-block:: python
 
-            # Create standard ViT-B/16
-            model = create_clip_variant("ViT-B/16")
-
-            # Create with modifications
-            model = create_clip_variant(
-                "ViT-B/16",
-                dropout_rate=0.1,
-                attention_dropout_rate=0.1
-            )
+            model = create_clip("ViT-B/16")
+            model = create_clip("ViT-B/16", image_size=384, dropout_rate=0.1)
     """
-    return CLIP.from_variant(variant, **kwargs)
+    return CLIP.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

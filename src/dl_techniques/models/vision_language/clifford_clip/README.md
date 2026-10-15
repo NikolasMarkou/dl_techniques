@@ -215,7 +215,7 @@ contrastive temperature update sees balanced gradient magnitudes; `nano` / `nano
 backbone can be ablated against the vanilla classifier / LM at matched capacity.
 
 There is **no module-level `create_clifford_clip()` factory function** — unlike the
-sibling `clip` package's `create_clip_model` / `create_clip_variant`, `CliffordCLIP`
+sibling `clip` package's `create_clip`, `CliffordCLIP`
 exposes only the `CliffordCLIP.from_variant(...)` classmethod and the bare constructor.
 Use `from_variant` for a preset, or the constructor directly for a custom config.
 

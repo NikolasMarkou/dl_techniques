@@ -41,7 +41,8 @@ archive's own config, so a caller decides from what the checkpoint actually
 holds rather than from a class default. :func:`load_backbone_from_checkpoint`
 is the language models' load rule built from those pieces, in one place, and
 :func:`pretrained_path_or_raise` is the factories' shared reading of their
-``pretrained`` argument.
+``pretrained`` argument; :func:`refuse_pretrained` is its sibling for a model
+with no backbone/head split, which refuses a path as well as ``True``.
 """
 
 from __future__ import annotations
@@ -722,3 +723,32 @@ def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]
     if not os.path.exists(pretrained):
         raise FileNotFoundError(f"Weights file not found: {pretrained}")
     return pretrained
+
+
+def refuse_pretrained(pretrained: Any, model_label: str) -> None:
+    """Refuse every truthy ``pretrained`` for a model with no backbone/head split.
+
+    Interface contract (callers: ``CLIP.from_variant``,
+    ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``). The
+    sibling of :func:`pretrained_path_or_raise` for the models whose output IS
+    the model, such as a contrastive dual encoder: with no task head there is
+    no partial (backbone-only) load to offer, and a whole-archive load is what
+    ``keras.models.load_model(path)`` already does.
+
+    :param pretrained: The ``from_variant`` argument. Falsy (``False``,
+        ``None``, ``""``) means random initialization and returns.
+    :param model_label: Name used in the refusal message.
+    :raises NotImplementedError: for any truthy value, ``True`` or a path: no
+        pretrained weights are distributed, and a silent random initialization
+        would be indistinguishable from a successful load. Raised before any
+        model is built.
+    """
+    if not pretrained:
+        return
+    raise NotImplementedError(
+        f"Pretrained {model_label} weights are not distributed with "
+        f"dl_techniques (got pretrained={pretrained!r}), and {model_label} has "
+        "no backbone/head split for a partial load. Load a local .keras "
+        "archive with keras.models.load_model(path), or pass "
+        "pretrained=False to random-init."
+    )

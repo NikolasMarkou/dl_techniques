@@ -4169,8 +4169,6 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/vision/mobilenet/mobilenet_v2.py", "create_mobilenetv2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/vision/mobilenet/mobilenet_v3.py", "create_mobilenetv3"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/vision/mobilenet/mobilenet_v4.py", "create_mobilenetv4"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/vision_language/mobile_clip/mobile_clip_v1.py", "create_mobile_clip_model"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/vision_language/mobile_clip/mobile_clip_v2.py", "create_mobile_clip_v2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/vision/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     # The two `models/vision/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
     # D-129). Their recorded reason -- "duplicated from from_variant" -- was

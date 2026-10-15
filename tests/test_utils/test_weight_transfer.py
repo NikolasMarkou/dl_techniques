@@ -38,6 +38,7 @@ from dl_techniques.utils.weight_transfer import (
     load_weights_or_raise,
     pretrained_path_or_raise,
     read_checkpoint_config,
+    refuse_pretrained,
     vocab_change,
 )
 
@@ -692,6 +693,22 @@ class TestPretrainedPathOrRaise:
         path = tmp_path / "w.keras"
         path.write_bytes(b"")
         assert pretrained_path_or_raise(str(path), "M") == str(path)
+
+
+class TestRefusePretrained:
+    """The sibling for models with no backbone/head split: a path is refused too."""
+
+    def test_a_falsy_argument_means_random_init(self):
+        for falsy in (False, None, ""):
+            assert refuse_pretrained(falsy, "M") is None
+
+    def test_true_and_an_existing_path_are_both_refused(self, tmp_path):
+        path = tmp_path / "w.keras"
+        path.write_bytes(b"")
+        for truthy in (True, 1, str(path)):
+            with pytest.raises(NotImplementedError,
+                               match=r"keras\.models\.load_model\(path\)"):
+                refuse_pretrained(truthy, "M")
 
 
 # ---------------------------------------------------------------------------

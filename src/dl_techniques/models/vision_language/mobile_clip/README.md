@@ -11,7 +11,7 @@ This package ships **two** models that share a text tower and a class structure 
 - **`MobileClipV2Model`** (`mobile_clip_v2.py`) — MobileCLIP2, **the faithful port**, over a real FastViT MCi tower.
 - **`MobileClipModel`** (`mobile_clip_v1.py`) — MobileCLIP, **deliberately non-faithful on the image branch**: `keras.applications` CNNs stand in for the MCi backbones.
 
-Neither ships pretrained weights; `pretrained=True` raises `NotImplementedError` on both factories. Neither makes an accuracy claim. Read [§14](#14-deviations-from-the-reference-implementation-v2) before comparing against any published number, and [§15](#15-v1-vs-v2-which-should-i-use) to choose.
+Neither ships pretrained weights; `pretrained=True` (or a path) raises `NotImplementedError` from both `from_variant` classmethods and both factories, which only delegate to them. Neither makes an accuracy claim. Read [§14](#14-deviations-from-the-reference-implementation-v2) before comparing against any published number, and [§15](#15-v1-vs-v2-which-should-i-use) to choose.
 
 ---
 
@@ -411,7 +411,7 @@ def test_forward_pass_shapes():
 
 **My override of one text field wiped out the rest of the row.** `from_variant` overrides at the top level. Merge: `text_config={**row['text_config'], 'num_layers': 2}`.
 
-**`NotImplementedError: No pretrained MobileCLIP2 weights are distributed`.** Correct behaviour. Build with `pretrained=False` and warm-start from a local file — prefer `dl_techniques.utils.weight_transfer.load_weights_or_raise(model, path)`, which raises when a load changes zero variables. Raw `load_weights` is silent about a checkpoint that matches nothing.
+**`NotImplementedError: Pretrained MobileCLIP2 weights are not distributed`.** Correct behaviour, for `True` and for a path alike: a dual encoder has no task head, so there is no backbone-only load. A whole local `.keras` archive loads with `keras.models.load_model(path)`. To warm-start a model you built with `pretrained=False`, prefer `dl_techniques.utils.weight_transfer.load_weights_or_raise(model, path)`, which raises when a load changes zero variables. Raw `load_weights` is silent about a checkpoint that matches nothing.
 
 **Should I add a projection head on top of v2's image tower?** No. Its terminal `Dense` already *is* the CLIP projection, and the model raises if `projection_dim` appears in `image_config`. Use `projection_dim=None` on a standalone `FastVitImageEncoder` only for non-CLIP pooled features.
 

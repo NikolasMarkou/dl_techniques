@@ -20,8 +20,9 @@ the image tower's stochastic-depth branches default to their random path
 at `training=None`. With `output_dict=False` this model returns a
 five-tuple, including both logits matrices, unlike v1's three-tuple.
 
-No pretrained weights are ported; `create_mobile_clip_v2(pretrained=True)`
-raises `NotImplementedError`. See `README.md` for the deviations that void
+No pretrained weights are ported; `pretrained=True` (or a path) raises
+`NotImplementedError` from `MobileClipV2Model.from_variant` and
+`create_mobile_clip_v2`. See `README.md` for the deviations that void
 any comparison against published numbers.
 
 References:
@@ -49,6 +50,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.clip_utils import compute_clip_logits
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 # fastvit is a standalone backbone package, not private to this model; its
 # terminal Dense(projection_dim) is the CLIP image projection.
 from dl_techniques.models.vision.fastvit import FastVitImageEncoder
@@ -815,6 +817,7 @@ class MobileClipV2Model(keras.Model):
     def from_variant(
             cls,
             variant: str,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "MobileClipV2Model":
         """
@@ -823,11 +826,18 @@ class MobileClipV2Model(keras.Model):
         ``kwargs`` override the row at the TOP level, so passing
         ``text_config=`` REPLACES the row's sub-dict wholesale. To change one
         field, merge explicitly — see the class docstring's example.
+
+        ``pretrained`` must be falsy: no MobileCLIP2 checkpoints ship with this
+        package, and a truthy value (``True`` or a path) raises
+        ``NotImplementedError`` before anything is built. A local ``.keras``
+        archive loads with ``keras.models.load_model(path)``.
         """
         # `_resolve_model_variant` validates and returns a DEEP copy — a shallow
         # one would hand out the class table's own nested sub-dicts, and the
         # model would then mutate them process-wide.
         config = _resolve_model_variant(variant)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
+        refuse_pretrained(pretrained, "MobileCLIP2")
         config['variant'] = variant
         logger.info(f"Creating MobileCLIP2 model from variant '{variant}'")
         config.update(kwargs)
@@ -896,28 +906,16 @@ class MobileClipV2Model(keras.Model):
 
 def create_mobile_clip_v2(
         variant: str = "mobileclip2_s0",
-        pretrained: bool = False,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> MobileClipV2Model:
     """
-    Convenience function to create MobileCLIP2 models.
+    Convenience function to create MobileCLIP2 models; delegates to
+    :meth:`MobileClipV2Model.from_variant`.
 
-    :raises NotImplementedError: If ``pretrained=True`` — no MobileCLIP2
+    :raises NotImplementedError: If ``pretrained`` is truthy — no MobileCLIP2
         checkpoints ship with this package.
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
-    if pretrained:
-        raise NotImplementedError(
-            f"No pretrained MobileCLIP2 weights are distributed with dl_techniques "
-            f"(requested variant '{variant}'). Build the architecture with "
-            f"pretrained=False and warm-start from a local checkpoint instead: "
-            f"model = create_mobile_clip_v2('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras'). Prefer "
-            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
-            f"path), which raises when a load changes ZERO variables -- raw "
-            f"load_weights is silent about a checkpoint that matches nothing."
-        )
-    model = MobileClipV2Model.from_variant(variant, **kwargs)
-    return model
+    return MobileClipV2Model.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

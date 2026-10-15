@@ -10,9 +10,10 @@ text tower is a plain, faithful CLIP transformer, shared with v2. Causal
 masking is per-variant: `b` uses it, `s0`/`s1`/`s2` do not.
 
 No pretrained weights ship with this package, and no MobileCLIP number
-should be compared against this model's output: `create_mobile_clip_model(pretrained=True)`
-raises `NotImplementedError` rather than silently returning random weights.
-Warm-start from a local checkpoint with `model.load_weights(path)` instead.
+should be compared against this model's output: `pretrained=True` (or a path)
+raises `NotImplementedError` from `MobileClipModel.from_variant` and
+`create_mobile_clip_model` rather than silently returning random weights.
+Load a local `.keras` archive with `keras.models.load_model(path)` instead.
 The faithful FastViT-based port is `mobile_clip_v2.py`.
 
 References:
@@ -32,6 +33,7 @@ from keras import ops
 from typing import Optional, Union, Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 from .components import MobileClipTextEncoder, MobileClipImageEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -291,16 +293,27 @@ class MobileClipModel(keras.Model):
     def from_variant(
             cls,
             variant: str,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "MobileClipModel":
         """
         Create a Mobile CLIP model from a predefined variant.
+
+        :param variant: One of ``MODEL_VARIANTS``.
+        :param pretrained: Must be falsy; no MobileCLIP checkpoints ship with
+            this package. A local ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :raises ValueError: If the variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is truthy, before
+            anything is built.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
+        refuse_pretrained(pretrained, "MobileCLIP")
 
         config = cls.MODEL_VARIANTS[variant].copy()
         logger.info(f"Creating Mobile CLIP-{variant.upper()} model")
@@ -341,29 +354,16 @@ class MobileClipModel(keras.Model):
 
 def create_mobile_clip_model(
         variant: str = "s0",
-        pretrained: bool = False,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> MobileClipModel:
-    """Build a Mobile CLIP model from a named variant.
+    """Build a Mobile CLIP model from a named variant; delegates to `from_variant`.
 
     :param variant: One of `MobileClipModel.MODEL_VARIANTS` (default `"s0"`).
-    :param pretrained: Must stay `False`; no checkpoints ship with this package.
+    :param pretrained: Must stay falsy; no checkpoints ship with this package.
     :return: The constructed model.
-    :raises NotImplementedError: If `pretrained=True`.
+    :raises NotImplementedError: If `pretrained` is truthy.
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
-    if pretrained:
-        raise NotImplementedError(
-            f"No pretrained MobileCLIP weights are distributed with dl_techniques "
-            f"(requested variant '{variant}'). Build the architecture with "
-            f"pretrained=False and warm-start from a local checkpoint instead: "
-            f"model = create_mobile_clip_model('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras'). Prefer "
-            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
-            f"path), which raises when a load changes ZERO variables -- raw "
-            f"load_weights is silent about a checkpoint that matches nothing."
-        )
-    model = MobileClipModel.from_variant(variant, **kwargs)
-    return model
+    return MobileClipModel.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

@@ -237,10 +237,10 @@ Map images and text into a single shared embedding space with a CLIP dual encode
 
 ```python
 import keras
-from dl_techniques.models.vision_language.clip.model import create_clip_variant
+from dl_techniques.models.vision_language.clip import create_clip
 
 # CLIP ViT-B/32: a dual encoder mapping images and text into one space
-model = create_clip_variant("ViT-B/32")
+model = create_clip("ViT-B/32")
 model.build({"image": (None, 224, 224, 3), "text": (None, 77)})
 
 images = keras.random.normal((4, 224, 224, 3))

@@ -127,9 +127,8 @@ print(sorted(model({'text': tokens}, training=False)))   # ['text_features']
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
 | **`CLIP`** | `...clip.model.CLIP` | The dual-encoder `keras.Model`. |
-| **`CLIP.from_variant`** | `...clip.model.CLIP.from_variant` | Build from a `MODEL_VARIANTS` key; kwargs override the row. |
-| **`create_clip_variant`** | `...clip.model.create_clip_variant` | Thin wrapper around `from_variant`. |
-| **`create_clip_model`** | `...clip.model.create_clip_model` | Thin wrapper around the constructor, for custom configs. |
+| **`CLIP.from_variant`** | `...clip.model.CLIP.from_variant` | Build from a `MODEL_VARIANTS` key; kwargs override the row. `pretrained` must be falsy: `True` or a path raises `NotImplementedError` before anything is built. |
+| **`create_clip`** | `...clip.create_clip` | `create_clip(variant, pretrained=False, **kwargs)`, the package's one factory; it only delegates to `from_variant`. A custom configuration is `CLIP(**config)`. |
 | **`TransformerLayer`** | `...layers.transformers.TransformerLayer` | The block both towers are built from. |
 
 `CliffordCLIP`, a separate Clifford-algebra architecture sharing this model's contrastive
@@ -166,9 +165,9 @@ Other constructor arguments (with defaults): `image_size=224`, `vocab_size=49408
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision_language.clip.model import create_clip_variant
+from dl_techniques.models.vision_language.clip import create_clip
 
-model = create_clip_variant("ViT-B/32")
+model = create_clip("ViT-B/32")
 model.build({'image': (None, 224, 224, 3), 'text': (None, 77)})
 
 image = np.random.rand(1, 224, 224, 3).astype("float32")
@@ -228,7 +227,7 @@ model.logit_scale.assign(keras.ops.minimum(model.logit_scale, keras.ops.log(100.
 
 ```python
 keras.mixed_precision.set_global_policy('mixed_float16')
-model = create_clip_variant("ViT-B/16")
+model = create_clip("ViT-B/16")
 ```
 
 `model.fit()` inserts the loss-scale optimizer automatically.
@@ -242,6 +241,7 @@ model = create_clip_variant("ViT-B/16")
 - **Batch size is the main lever.** Contrastive learning scales with negatives per positive; the original CLIP trained above 32,000. On one GPU, gradient accumulation is how you approximate it.
 - **Padding**: right-pad with id `0`. Pooling silently reads the wrong position otherwise (§4.2).
 - **Temperature**: watch `exp(logit_scale)`. There is no clamp here.
+- **Trainer**: `python -m train.clip.train_clip` builds `create_clip(--variant)` (size flags such as `--vision-layers` override the row) and trains it with `CLIPContrastiveLoss`. It needs exactly one data source: `--synthetic` (random pairs generated in memory) or `--image-dir` with `--captions-file`, whose word vocabulary is built from the captions with pad id 0. It writes `config.json`, `training_log.csv`, `training_history.json` and `final_model.keras` to `--output-dir` (default `results/clip_<variant>_<timestamp>`).
 
 ---
 

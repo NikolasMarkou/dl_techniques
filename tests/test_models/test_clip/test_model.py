@@ -26,11 +26,8 @@ import tensorflow as tf
 import tempfile
 import os
 
-from dl_techniques.models.vision_language.clip.model import (
-    CLIP,
-    create_clip_model,
-    create_clip_variant
-)
+import dl_techniques.models.vision_language.clip as clip_package
+from dl_techniques.models.vision_language.clip.model import CLIP, create_clip
 
 
 class TestCLIPModelInitialization:
@@ -523,91 +520,72 @@ class TestCLIPEdgeCases:
 
 
 class TestCreateCLIPFactory:
-    """Test the create_clip_model factory function."""
+    """``create_clip(variant, pretrained=False, **kwargs)`` only delegates.
 
-    def test_create_clip_model_basic(self):
-        """Test basic create_clip_model functionality."""
-        model = create_clip_model(
-            image_size=224,
-            vision_layers=6,
-            text_layers=4,
-            embed_dim=256
-        )
+    The package's one factory (GUIDE section 1). ``create_clip_model`` and
+    ``create_clip_variant`` were deleted with no alias; a custom configuration
+    is ``CLIP(**config)``.
+    """
 
-        assert isinstance(model, CLIP)
-        assert model.image_size == 224
-        assert model.vision_layers == 6
-        assert model.text_layers == 4
-        assert model.embed_dim == 256
+    def test_the_package_exports_exactly_the_class_and_one_factory(self):
+        assert set(clip_package.__all__) == {"CLIP", "create_clip"}
+        for gone in ("create_clip_model", "create_clip_variant"):
+            assert not hasattr(clip_package, gone), gone
 
-    def test_create_clip_model_with_custom_parameters(self):
-        """Test create_clip_model with custom parameters."""
-        model = create_clip_model(
-            image_size=384,
-            patch_size=32,
-            vision_width=576,  # Fixed: 576/12 = 48
-            vision_heads=12,
-            text_width=512,  # Fixed: 512/8 = 64
-            text_heads=8,
-            dropout_rate=0.1,
-            attention_dropout_rate=0.05
-        )
+    @pytest.mark.parametrize("variant", sorted(CLIP.MODEL_VARIANTS))
+    def test_create_clip_equals_from_variant(self, variant):
+        """Same constructor config as ``from_variant``, for every variant."""
+        def config(model):
+            cfg = model.get_config()
+            cfg.pop("name")
+            return cfg
 
+        from_factory = create_clip(variant, dropout_rate=0.1)
+        from_class = CLIP.from_variant(variant, dropout_rate=0.1)
+        assert isinstance(from_factory, CLIP)
+        assert config(from_factory) == config(from_class)
+        for key, value in CLIP.MODEL_VARIANTS[variant].items():
+            assert getattr(from_factory, key) == value, key
+        assert from_factory.dropout_rate == 0.1
+
+    def test_overrides_reach_the_constructor(self):
+        model = create_clip("ViT-B/32", image_size=384, attention_dropout_rate=0.05)
         assert model.image_size == 384
         assert model.patch_size == 32
-        assert model.vision_width == 576
-        assert model.text_width == 512
-        assert model.dropout_rate == 0.1
         assert model.attention_dropout_rate == 0.05
 
-    def test_create_clip_model_functional(self):
-        """Test that created model is functional."""
-        model = create_clip_model(
-            vision_layers=2,  # Small for testing
-            text_layers=2,
-            embed_dim=128
-        )
+    def test_an_unknown_variant_lists_the_known_ones(self):
+        with pytest.raises(ValueError, match="Unknown variant") as info:
+            create_clip("Invalid-Variant")
+        for variant in CLIP.MODEL_VARIANTS:
+            assert variant in str(info.value)
 
-        # Build and test
-        model.build({
-            'image': (None, 224, 224, 3),
-            'text': (None, 32)
-        })
+    @pytest.mark.parametrize("entry", ["from_variant", "create_clip"])
+    def test_pretrained_true_raises_before_anything_is_built(self, entry):
+        """No weights ship; the refusal comes before construction.
 
-        test_images = keras.random.normal((2, 224, 224, 3))
-        test_tokens = ops.cast(
-            keras.random.uniform((2, 32), minval=1, maxval=1000),
-            dtype='int32'
-        )
+        ``bogus_kw`` makes the order observable: had ``CLIP(**config)`` run
+        first, Keras would raise ``ValueError: Unrecognized keyword arguments``
+        instead of ``NotImplementedError``.
+        """
+        fn = CLIP.from_variant if entry == "from_variant" else create_clip
+        with pytest.raises(NotImplementedError, match=r"keras\.models\.load_model"):
+            fn("ViT-B/32", pretrained=True, bogus_kw=1)
 
-        outputs = model({'image': test_images, 'text': test_tokens}, training=False)
+    @pytest.mark.parametrize("entry", ["from_variant", "create_clip"])
+    def test_a_path_is_refused_too(self, entry, tmp_path):
+        """CLIP has no task head, so a path has no backbone-only load (D-033).
 
-        assert 'image_features' in outputs
-        assert 'text_features' in outputs
-        assert outputs['image_features'].shape == (2, 128)
+        The file exists, so a refusal cannot be a missing-file error.
+        """
+        archive = tmp_path / "clip.keras"
+        archive.write_bytes(b"not read")
+        fn = CLIP.from_variant if entry == "from_variant" else create_clip
+        with pytest.raises(NotImplementedError, match=r"keras\.models\.load_model"):
+            fn("ViT-B/32", pretrained=str(archive))
 
-    def test_create_clip_variant_basic(self):
-        """Test create_clip_variant with predefined configurations."""
-        variants = ["ViT-B/32", "ViT-B/16", "ViT-L/14", "ViT-H/14"]
-
-        for variant in variants:
-            model = create_clip_variant(variant)
-            assert isinstance(model, CLIP)
-
-            # Check that different variants have different configurations
-            if variant == "ViT-B/32":
-                assert model.patch_size == 32
-            elif variant == "ViT-B/16":
-                assert model.patch_size == 16
-
-    def test_create_clip_variant_invalid(self):
-        """Test create_clip_variant with invalid variant name."""
-        with pytest.raises(ValueError, match="Unknown variant"):
-            create_clip_variant("Invalid-Variant")
-
-    def test_create_clip_variant_functional(self):
-        """Test that created variant is functional."""
-        model = create_clip_variant("ViT-B/16")
+    def test_pretrained_false_builds_a_working_model(self):
+        model = create_clip("ViT-B/16", pretrained=False)
 
         model.build({
             'image': (None, 224, 224, 3),
@@ -623,6 +601,11 @@ class TestCreateCLIPFactory:
         outputs = model({'image': test_images, 'text': test_tokens}, training=False)
         assert outputs['image_features'].shape == (2, 512)  # ViT-B/16 embed_dim
 
+    def test_unknown_constructor_kwargs_are_refused(self):
+        """CLIP is a subclassed model, so Keras refuses an unknown keyword."""
+        with pytest.raises(ValueError, match="bogus_kw"):
+            create_clip("ViT-B/32", bogus_kw=1)
+
 
 class TestCLIPIntegration:
     """Integration tests for CLIP components working together."""
@@ -630,7 +613,7 @@ class TestCLIPIntegration:
     def test_end_to_end_similarity_computation(self):
         """Test complete similarity computation workflow."""
         # Create model with small architecture for testing
-        model = create_clip_model(
+        model = CLIP(
             vision_layers=3,
             text_layers=3,
             embed_dim=256,
@@ -678,7 +661,7 @@ class TestCLIPIntegration:
 
     def test_component_consistency(self):
         """Test consistency between individual encoding and full forward pass."""
-        model = create_clip_model(
+        model = CLIP(
             vision_layers=2,
             text_layers=2,
             embed_dim=128
@@ -718,7 +701,7 @@ class TestCLIPIntegration:
 
     def test_gradient_flow_integration(self):
         """Test that gradients flow through the entire model."""
-        model = create_clip_model(
+        model = CLIP(
             vision_layers=2,
             text_layers=2,
             embed_dim=64  # Small for faster testing

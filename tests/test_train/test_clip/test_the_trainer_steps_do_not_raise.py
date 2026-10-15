@@ -39,7 +39,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
-from dl_techniques.models.vision_language.clip.model import create_clip_model
+from dl_techniques.models.vision_language.clip.model import CLIP
 from train.clip.train_clip import CLIPTrainer
 
 # ---------------------------------------------------------------------
@@ -86,7 +86,7 @@ def test_the_old_spelling_is_the_defect_not_a_style_choice():
 @pytest.fixture(scope="module")
 def trainer():
     keras.utils.set_random_seed(0)
-    model = create_clip_model(
+    model = CLIP(
         image_size=IMAGE_SIZE, patch_size=16, vision_layers=1, vision_width=32,
         vision_heads=2, vision_kv_heads=2, vocab_size=VOCAB,
         context_length=CONTEXT, text_layers=1, text_width=32, text_heads=2,
@@ -140,7 +140,7 @@ def restore_global_policy():
 
 def _tiny_clip():
     keras.utils.set_random_seed(0)
-    return create_clip_model(
+    return CLIP(
         image_size=IMAGE_SIZE, patch_size=16, vision_layers=1, vision_width=32,
         vision_heads=2, vision_kv_heads=2, vocab_size=VOCAB,
         context_length=CONTEXT, text_layers=1, text_width=32, text_heads=2,

@@ -53,6 +53,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
+from dl_techniques.utils.clip_utils import compute_clip_logits
 from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import MobileClipV2Model
 
 # ---------------------------------------------------------------------
@@ -182,7 +183,13 @@ def _finite(x) -> bool:
 
 
 class _StackedLogitsModel(keras.Model):
-    """Adapts the 5-key CLIP output down to the single tensor `fit()` wants."""
+    """Adapts a CLIP-family output down to the single tensor `fit()` wants.
+
+    v1 (`MobileClipModel`) emits features and `logit_scale` but no logits
+    matrices; for it the logits are formed here with `compute_clip_logits`,
+    the helper v2 and `CLIP` call inside their own `call`. Shared with
+    `test_the_mobile_clip_models_train_under_stock_fit.py`.
+    """
 
     def __init__(self, clip_model: MobileClipV2Model, **kwargs):
         # An EXPLICIT name is load-bearing: Keras derives the default name from
@@ -196,6 +203,13 @@ class _StackedLogitsModel(keras.Model):
 
     def call(self, inputs, training=None):
         out = self.clip_model(inputs, training=training)
+        if 'logits_per_image' not in out:
+            out['logits_per_image'], out['logits_per_text'] = (
+                compute_clip_logits(
+                    out['image_features'], out['text_features'],
+                    out['logit_scale'],
+                )
+            )
         return ops.stack(
             [out['logits_per_image'], out['logits_per_text']], axis=1
         )
