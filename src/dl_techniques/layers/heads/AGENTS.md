@@ -114,8 +114,18 @@ this package merge) still resolve.
   raise), `merge_head_config_overrides(...)` and
   `build_model_vision_head(task_type, head_config, head_config_overrides)`,
   the one call every vision model builds its head with (19 sites).
-- `vlm/factory.py` — `create_vlm_head(task_config, ...)`,
-  `create_multi_task_vlm_head(...)`.
+- `vlm/factory.py` — `VLM_HEAD_DISPATCH` (the one task-type to head-class
+  table, 4 rows), `create_vlm_head(task_config, ...)`,
+  `create_multi_task_vlm_head(...)`. **No model, trainer or application
+  constructs a VLM head today**; the callers are `layers/heads` and the tests
+  (`vlm/README.md` § 1 has the grep).
+- `validation.py` — the two checks the domains share: `positive_int(value,
+  name, owner)` (every vision count, `VQAHead.num_heads`, the
+  `VLMTaskConfig` counts) and `static_rank(x, name, owner)` (a head that
+  branches on rank reads it once, through `keras.ops.ndim`, and refuses an
+  unknown rank by name; the VLM heads use it, the NLP heads' five
+  `len(ops.shape(...))` sites are listed for it in
+  `test_the_heads_read_a_static_rank.py`).
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
   `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
   `VLMTaskConfig`, `TaskConfiguration`, `parse_task_list`,
@@ -134,11 +144,21 @@ this package merge) still resolve.
     has **no `call()`** — so the factory returned an object that constructed fine and died
     on first use with `NotImplementedError`, naming the base class rather than the task.
   `vision/` already got this right (`raise ValueError(f"Unsupported task type: …")`); the
-  other two now match it. **`BaseVLMHead` is not a usable head** and must never be returned
-  from dispatch, including for the entries once commented `# Placeholder`. Only 4 VLM tasks
-  have a real head today (captioning, VQA, visual grounding, image-text matching). To add
-  one: implement the head and map it — do not restore the fallback.
-  Pinned by `tests/test_layers/test_heads/test_head_dispatch_no_silent_fallback.py`.
+  other two now match it. **`BaseVLMHead` is not a usable head**: it refuses direct
+  construction with `TypeError`, and `VLM_HEAD_DISPATCH` holds no placeholder row for it.
+  Only 4 VLM tasks have a real head today (captioning, VQA, visual grounding, image-text
+  matching). To add one: implement the head and add it to the table — do not restore the
+  fallback. Pinned by `tests/test_layers/test_heads/test_head_dispatch_no_silent_fallback.py`
+  and `test_the_vlm_dispatch_names_exactly_four_heads.py`.
+- **VLM padding masks.** A VLM head reads optional `vision_mask` / `text_mask` /
+  `question_mask` keys (`(batch, length)`, 1 = real) next to the features they describe, and
+  every pooling and attention over a sequence honours them. The means and the max go through
+  `SequencePooling`, built with `kernel_initializer='zeros'` so it draws no random seed
+  (D-055); no mask means bit-identical outputs and fixed-seed weights to the pre-mask heads.
+  Pinned by `test_the_vlm_heads_honour_padding_masks.py`.
+- **`VLMTaskConfig` holds only read fields.** Six fields; a head refuses a set `vocab_size`
+  (captioning only) or `num_classes` (VQA only) it does not read, and `__post_init__` fills in
+  nothing (D-058). Pinned by `test_the_vlm_task_config_holds_only_live_fields.py`.
 - **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for the four strategies
   in `_DELEGATED_POOLING_STRATEGIES` -- `cls`/`mean`/`max`/`last` -- delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
   layer (built in `__init__`/`build`, Golden Rule). The `attention` strategy

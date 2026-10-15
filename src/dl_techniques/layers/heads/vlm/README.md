@@ -10,6 +10,16 @@ The `dl_techniques.layers.heads.vlm` module provides a unified, model-agnostic s
 
 This separation allows you to build complex, multi-task VLMs by combining a shared set of encoders with a collection of lightweight, specialized heads.
 
+**No model consumes these heads today.** No package under `dl_techniques/models/`, no trainer under
+`src/train/` and nothing under `src/applications/` constructs a VLM head; none of the in-tree
+vision-language models (CLIP, MobileCLIP, CliffordCLIP, FastVLM, NanoVLM, SAM) builds one. The only
+callers are `layers/heads` itself and the tests. Re-derive it: this lists every file outside
+`layers/heads` that constructs one, and printed nothing on 2026-10-15:
+
+```bash
+grep -rln --include=*.py "create_vlm_head(\|create_multi_task_vlm_head(\|VQAHead(\|ImageTextMatchingHead(\|VisualGroundingHead(\|ImageCaptioningHead(\|create_head(.vlm" src/ | grep -v "layers/heads/"
+```
+
 ### Architecture: Two Types of Heads
 
 The framework provides two distinct categories of heads, offering a balance between specialization and flexibility:
@@ -42,9 +52,26 @@ head_inputs = {
     # VQAHead reads this key INSTEAD of 'text_features'; the other three
     # heads read 'text_features'. A MultiTaskVLMHead mixing VQA with another
     # task therefore needs both keys.
-    'question_features': text_tensor
+    'question_features': text_tensor,
+
+    # Optional padding masks, one per sequence input: [Batch, Length],
+    # 1 (or True) = a real token, 0 = padding.
+    'vision_mask': vision_keep,
+    'text_mask': text_keep,
+    'question_mask': question_keep,
 }
 ```
+
+**Padding masks.** Every place a head pools or attends over a sequence honours that sequence's mask:
+the captioning cross-attention (`vision_mask`) and self-attention (`text_mask`, combined with the
+causal mask), the VQA mean, max and attention pooling, the grounding query mean (`text_mask`) and
+region pick (`vision_mask`), and both matching means. The means and the max go through the shared
+`SequencePooling` layer, so a masked mean averages the real positions only. With no mask a head
+treats every position as real and computes exactly what it did before masks existed (measured
+bit-identical, weights and outputs, for every head at a fixed seed on CPU). A mask for an input that
+is already pooled (rank 2) raises `ValueError`. Outputs that belong to a padded position (captioning
+`'logits'` at a padded text token, grounding `'confidence'` of a padded region) are still returned;
+leave them out of the loss.
 
 **Output Contract:**
 Heads always return a dictionary containing task-specific tensors.
@@ -77,7 +104,7 @@ The factory function `create_vlm_head` automatically selects the correct head cl
 *   **Head Class**: `ImageCaptioningHead` (Standalone Architecture)
 *   **Description**: A full, autoregressive Transformer decoder that generates a text sequence conditioned on vision features.
 *   **Inputs**: `vision_features` `[B, Patches, Dim]`, `text_features` (embedded partial caption) `[B, Seq, Dim]`.
-*   **Key Config**: Requires `vocab_size`. Configured with `num_layers`, `num_heads`.
+*   **Key Config**: Requires `vocab_size` in the `VLMTaskConfig`; `num_classes` must be unset. Configured with `num_layers`, `num_heads`. The text features must be `hidden_size` wide (refused in `build` otherwise); the vision width is free.
 
 ```python
 config = VLMTaskConfig(name="coco_caption", task_type=VLMTaskType.IMAGE_CAPTIONING, vocab_size=50257)
@@ -89,11 +116,11 @@ head = create_vlm_head(config, num_layers=6, num_heads=12)
 *   **Head Class**: `VQAHead` (Standalone Architecture)
 *   **Description**: A custom classification model that pools vision and text features and passes them through an MLP to predict an answer from a fixed vocabulary.
 *   **Inputs**: `vision_features` `[B, Patches, Dim]`, `question_features` `[B, Seq, Dim]`.
-*   **Key Config**: Requires `num_classes`. Configured with `pooling_strategy`, `hidden_dims`.
+*   **Key Config**: Requires `num_classes` in the `VLMTaskConfig`; `vocab_size` must be unset. Configured with `pooling_strategy`, `hidden_dims` and, for `'attention'` only, `num_heads` (default 8; it must divide `hidden_size`, and `'mean'`/`'max'` refuse it). `'attention'` needs both inputs `hidden_size` wide (refused in `build`); `'mean'`/`'max'` take any widths, and rank-2 (already pooled) inputs.
 
 ```python
 config = VLMTaskConfig(name="vqa_v2", task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING, num_classes=3129)
-head = create_vlm_head(config, pooling_strategy="attention", hidden_dims=[512, 256])
+head = create_vlm_head(config, pooling_strategy="attention", num_heads=8, hidden_dims=[512, 256])
 ```
 
 ### 3.3. Visual Grounding
@@ -113,7 +140,7 @@ head = create_vlm_head(config, fusion_strategy='gated')
 *   **Head Class**: `ImageTextMatchingHead` (Fusion-Based)
 *   **Description**: A dual-purpose head. It projects features for CLIP-style contrastive alignment and separately fuses features to produce a fine-grained matching logit (`'match_score'`) for a single image-text pair.
 *   **Inputs**: `vision_features` and `text_features`, each `[B, Dim]` (used as given) or `[B, Seq, Dim]` (mean-pooled over axis 1 first). Both must be `hidden_size` wide for the fusion.
-*   **Key Config**: Configured with `projection_dim`, `temperature`, `fusion_strategy`, and the post-fusion options in §4.2.
+*   **Key Config**: Configured with `projection_dim`, `temperature`, `fusion_strategy`, and the post-fusion options in §4.2. `temperature` is the starting value of a learnable weight, a positive finite number; `get_config` stores that starting value, and the trained value travels with the weights.
 
 ```python
 config = VLMTaskConfig(name="retrieval", task_type=VLMTaskType.IMAGE_TEXT_MATCHING)
@@ -122,6 +149,21 @@ head = create_vlm_head(config, projection_dim=256, fusion_strategy='concatenatio
 ---
 
 ## 4. Configuration Reference
+
+### 4.0. `VLMTaskConfig`
+
+Six fields, each read by a head. `task_type` may be a `VLMTaskType` or its string value (`'image_captioning'`); every field is validated on construction (`ValueError` naming it).
+
+| Field | Default | Read by |
+|:---|:---|:---|
+| `name` | required | every head: the layer is named `<name>_head` |
+| `task_type` | required | `get_head_class`, through `VLM_HEAD_DISPATCH` |
+| `vocab_size` | `None` | `ImageCaptioningHead` only (required there, refused elsewhere) |
+| `hidden_size` | `768` | every head's working width (`VQAHead` reads it only with `'attention'` pooling) |
+| `dropout_rate` | `0.1` | every head, in `[0, 1)` |
+| `num_classes` | `None` | `VQAHead` only (required there, refused elsewhere) |
+
+Removed on 2026-10-15, with no replacement: `max_text_length`, `vision_hidden_size`, `text_hidden_size`, `fusion_hidden_size`, `use_cross_attention`, `fusion_type`, `pooling_type`, `use_task_specific_heads`, `temperature`, `beam_size` and `loss_weight`. No head read any of them; the fusion and pooling choices are the heads' own `fusion_strategy`/`pooling_strategy` arguments, and the matching temperature is `ImageTextMatchingHead(temperature=...)`. Passing one raises `TypeError`, and an archive whose config carries one no longer loads. `num_classes` is no longer filled in for any task type (it used to be 3/7/3 for three task types with no head, and never for VQA). `vocab_size` no longer defaults to 50000.
 
 ### 4.1. Standalone Head Configurations
 These heads have unique parameters for their specialized architectures.
@@ -132,6 +174,7 @@ These heads have unique parameters for their specialized architectures.
 | | `num_heads` | `int` | `12`| Number of attention heads in each decoder layer. |
 | | `ffn_type` | `Literal[str]`| `'swiglu'`| FFN type for decoder blocks. See FFN table below. |
 | `VQAHead` | `pooling_strategy`| `Literal[str]`| `'attention'`| How to pool vision/text sequences. Options: `'mean'`, `'max'`, `'attention'`. |
+| | `num_heads` | `Optional[int]` | `None` (8 with `'attention'`) | Head count of the attention pooling; must divide `hidden_size`. Refused by `'mean'`/`'max'`. |
 | | `hidden_dims` | `List[int]` | `[512, 256]`| A list of hidden layer sizes for the final classifier MLP. |
 
 ### 4.2. Fusion-Based Head Configurations (`BaseVLMHead`, `ImageTextMatchingHead`)
@@ -139,7 +182,7 @@ These heads have unique parameters for their specialized architectures.
 
 | Option | Type | Default | Description |
 |:---|:---|:---|:---|
-| `fusion_strategy` | `FusionStrategy`| `'gated'` (grounding), `'concatenation'` (matching) | The core fusion mechanism. Six strategies work: `'concatenation'`, `'addition'`, `'multiplication'`, `'gated'`, `'bilinear'`, `'tensor_fusion'`. `'cross_attention'` (one output per modality) and `'attention_pooling'` (rank-2 output) raise `ValueError` at build: the heads need one rank-preserving tensor. The `BaseVLMHead` signature default `'cross_attention'` is therefore never usable; both subclasses override it. |
+| `fusion_strategy` | `FusionStrategy`| `'gated'` (grounding), `'concatenation'` (matching) | The core fusion mechanism. Six strategies work: `'concatenation'`, `'addition'`, `'multiplication'`, `'gated'`, `'bilinear'`, `'tensor_fusion'`. `'cross_attention'` (one output per modality) and `'attention_pooling'` (rank-2 output) raise `ValueError` at build: the heads need one rank-preserving tensor. `BaseVLMHead` itself has no default and cannot be constructed (`TypeError`); each subclass supplies its own default. |
 | `fusion_config` | `Dict` | `{}` | A dictionary of fine-grained parameters for the chosen `fusion_strategy`. |
 | `normalization_type`| `NormalizationType`| `'layer_norm'`| `ImageTextMatchingHead` only. Normalization after the fusion. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, etc. |
 | `use_post_fusion_ffn`| `bool` | `True` | `ImageTextMatchingHead` only. Runs a Transformer-style FFN after the post-fusion norm; `False` creates none. |
@@ -163,6 +206,8 @@ The choice of `fusion_strategy` for fusion-based heads is critical and task-depe
 ---
 
 ## 6. Multi-Task Integration Example
+
+`MultiTaskVLMHead.call(inputs, training=None, *, task_name=None)`: `task_name` is keyword-only, so the second positional slot is `training` as on every head. With `task_name` the call returns that head's dict; without it, a dict of task name to output. The symbolic call (`keras.Input`) and `compute_output_shape(input_shape, task_name=...)` follow `task_name` the same way. `create_multi_task_vlm_head` refuses an empty task set and, for a list, two configs with one `name` (keying by name would keep only the last).
 
 The `create_multi_task_vlm_head` factory simplifies building complex VLMs with a shared backbone. Crucially, it allows you to pass task-specific configurations for each head type.
 

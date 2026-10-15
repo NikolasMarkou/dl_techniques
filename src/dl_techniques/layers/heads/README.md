@@ -79,6 +79,11 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
 | **vision** | `DetectionHead`, `SegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead` | `VisionTaskType` / `TaskConfiguration` |
 | **vlm** | `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead` | `VLMTaskType` / `VLMTaskConfig` |
 
+**Consumers.** The vision heads are built by the `models/vision` packages and FastVLM, and the NLP
+heads by the headed language models. **No model, trainer or application constructs a VLM head
+today**; the VLM heads are a library whose only callers are this package and its tests
+(`vlm/README.md` § 1 has the grep that says so).
+
 ## Output contract: logits
 
 No head in this package applies an activation to a class-like score. Every such output is a
@@ -120,5 +125,8 @@ there it defaults to 0.0 and a positive rate is refused unless attention or the 
 - **NLP pooling reuse.** `BaseNLPHead` delegates `cls`/`mean`/`max`/`last` pooling to
   the shared `SequencePooling` layer; the learnable `attention` pooling stays
   inline (a distinct mechanism + weight set). See `AGENTS.md`.
+- **VLM padding masks.** The VLM heads take optional `vision_mask` / `text_mask` /
+  `question_mask` keep masks in their input dict and honour them in every pooling and
+  attention; their means and max also go through `SequencePooling`. See `vlm/README.md` § 2.
 - **`VisionTaskType` has no alias.** Vision's task enum was renamed from a generic name to
   `VisionTaskType`; the old name is gone, so import `VisionTaskType`.

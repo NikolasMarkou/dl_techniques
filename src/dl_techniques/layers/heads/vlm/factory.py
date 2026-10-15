@@ -11,7 +11,8 @@ Flamingo features.
 Classes
 -------
 * :class:`BaseVLMHead` -- shared construction for the fusion stack. Two heads
-  inherit from it. It has no ``call``, so it is not a usable head on its own.
+  inherit from it. It has no ``call`` and refuses to be constructed on its
+  own.
 * :class:`ImageCaptioningHead` -- a transformer decoder over text, cross-
   attending to vision. It does NOT inherit from :class:`BaseVLMHead`.
 * :class:`VQAHead` -- pools each modality, concatenates, classifies. It does
@@ -25,8 +26,9 @@ Classes
 
 Helpers
 -------
-* :func:`get_head_class` -- task type to head class. Four of the 47
-  ``VLMTaskType`` members have a head; every other member raises
+* :data:`VLM_HEAD_DISPATCH` -- the one table from task type to head class.
+  Four of the 47 ``VLMTaskType`` members have a head.
+* :func:`get_head_class` -- reads that table; every other member raises
   ``ValueError``.
 * :func:`create_vlm_head` -- build one head from a ``VLMTaskConfig``.
 * :func:`create_multi_task_vlm_head` -- build a :class:`MultiTaskVLMHead`
@@ -37,6 +39,16 @@ The task types and the configuration dataclass live in ``vlm/task_types.py``.
 Every feature width comes from the input shapes handed to ``build``; no head
 takes a declared ``vision_dim`` or ``text_dim``. Each head owns exactly the
 sub-layers its ``call`` runs, and takes no argument its ``call`` does not use.
+
+Padding masks ride in the input dict next to the features they describe:
+``vision_mask`` for ``vision_features``, ``text_mask`` for ``text_features``
+and ``question_mask`` for ``question_features``. Each is a ``(batch, length)``
+keep predicate, 1 for a real token and 0 for padding, the convention every
+attention layer in the package uses. A head given no mask treats every
+position as real, exactly as before masks existed.
+
+No model in ``dl_techniques.models`` and no trainer in ``src/train``
+constructs a VLM head today; the heads are a library for callers to compose.
 
 Example
 -------
@@ -52,9 +64,10 @@ Example
 """
 
 import inspect
+import math
+import numbers
 
 import keras
-from keras import layers, ops
 from typing import Dict, List, Optional, Union, Tuple, Any, Sequence
 
 # ---------------------------------------------------------------------
@@ -72,9 +85,12 @@ from ...ffn.factory import (
 from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
 from ...norms import NormalizationType
 from ...norms.factory import create_normalization_layer
+from ...sequence_pooling import SequencePooling
+from ....utils.dtype_policy import mask_sentinel
 from ....utils.logger import logger
 from ....utils.masking import MaskFactory
 from ....utils.tensors import is_single_shape
+from ..validation import positive_int, static_rank
 from .task_types import VLMTaskConfig, VLMTaskType
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -181,6 +197,161 @@ def _ffn_width_kwargs(ffn_type: str, width: int) -> Dict[str, int]:
 
 
 # ---------------------------------------------------------------------
+# Padding masks and per-head config fields
+# ---------------------------------------------------------------------
+
+#: The mask key for each feature key a head reads.
+_MASK_KEYS = {
+    "vision_features": "vision_mask",
+    "text_features": "text_mask",
+    "question_features": "question_mask",
+}
+
+#: The ``VLMTaskConfig`` fields only one head reads, and that head.
+_PER_HEAD_CONFIG_FIELDS = {
+    "vocab_size": "ImageCaptioningHead",
+    "num_classes": "VQAHead",
+}
+
+
+def _check_task_config_fields(
+    task_config: VLMTaskConfig,
+    owner: str,
+    required: Tuple[str, ...] = (),
+) -> None:
+    """Refuse a per-head config field this head does not read, and require its own.
+
+    Interface contract, shared by the four task heads' ``__init__``:
+
+    * Each field of :data:`_PER_HEAD_CONFIG_FIELDS` named in ``required`` must
+      be set; ``None`` raises ``ValueError`` naming ``owner`` and the field.
+    * Each other field of that table must be ``None``; a set value raises
+      ``ValueError`` naming the field and the one head that reads it.
+    * Returns ``None``. ``hidden_size`` and ``dropout_rate`` are read by every
+      head and are not checked here; ``VLMTaskConfig`` validates all values.
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-058
+    Refuse, do not ignore. Do NOT let a head accept a ``num_classes`` or a
+    ``vocab_size`` it never reads: the old config carried both for every head
+    (``vocab_size`` defaulted to 50000) and a grounding or matching head
+    silently dropped them. See decisions.md D-058.
+
+    :param task_config: The head's validated task config.
+    :type task_config: VLMTaskConfig
+    :param owner: Head class name, for the error message.
+    :type owner: str
+    :param required: The per-head fields this head reads and needs.
+    :type required: Tuple[str, ...]
+    :return: None.
+    :rtype: None
+    :raises ValueError: If a required field is unset, or another one is set.
+    """
+    for field_name, reader in _PER_HEAD_CONFIG_FIELDS.items():
+        value = getattr(task_config, field_name)
+        if field_name in required:
+            if value is None:
+                raise ValueError(
+                    f"{owner} requires task_config.{field_name}, a positive "
+                    f"integer; got None."
+                )
+        elif value is not None:
+            raise ValueError(
+                f"{owner}: task_config.{field_name}={value!r} is not read by "
+                f"this head; only {reader} reads it. Leave it unset."
+            )
+
+
+def _weightless_pooling(strategy: str, name: str) -> SequencePooling:
+    """Build the weightless ``SequencePooling`` a head reduces one modality with.
+
+    Interface contract, shared by :class:`VQAHead`,
+    :class:`VisualGroundingHead` and :class:`ImageTextMatchingHead` (five
+    sites): ``strategy`` is ``'mean'`` or ``'max'``, the layer owns no weight,
+    and constructing it consumes no random draw.
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-055
+    Pass ``kernel_initializer='zeros'``. Do NOT drop it as a no-op: the mean
+    and max strategies read no initializer, but ``SequencePooling.__init__``
+    resolves its ``'glorot_uniform'`` default, and a seedless Keras random
+    initializer takes a seed from the global Python RNG when it is created.
+    Measured: that one draw moved the fixed-seed initial weights of every VQA,
+    grounding and matching head (and every multi-task head after them).
+    ``'zeros'`` draws nothing, so a fixed seed builds the same weights as
+    before masks existed. See decisions.md D-055.
+
+    :param strategy: ``'mean'`` or ``'max'``.
+    :type strategy: str
+    :param name: Layer name.
+    :type name: str
+    :return: The pooling layer.
+    :rtype: SequencePooling
+    """
+    return SequencePooling(strategy=strategy, kernel_initializer="zeros", name=name)
+
+
+def _pool_sequence(
+    pooling: keras.layers.Layer,
+    inputs: Dict[str, Any],
+    features_key: str,
+    owner: str,
+) -> keras.KerasTensor:
+    """Pool one modality over its sequence axis, honouring its padding mask.
+
+    Interface contract, shared by :class:`VQAHead`,
+    :class:`VisualGroundingHead` and :class:`ImageTextMatchingHead`:
+
+    * A rank-3 ``inputs[features_key]`` is reduced over axis 1 by ``pooling``,
+      a weightless ``SequencePooling`` (``'mean'`` or ``'max'``), with the
+      mask under ``_MASK_KEYS[features_key]`` when the dict holds one. The
+      masked mean divides by the number of real positions (at least 1), and
+      the masked max never selects a padded position; that rule lives in
+      ``SequencePooling`` and is not restated here. With no mask the result is
+      exactly ``keras.ops.mean``/``keras.ops.max`` over axis 1.
+    * A rank-2 input is already pooled and is returned unchanged; a mask for
+      it raises ``ValueError``, because there is nothing to mask.
+    * Any other rank, or an unknown one, raises ``ValueError`` naming
+      ``owner`` and ``features_key``.
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-055
+    Pool through ``SequencePooling``. Do NOT write a masked mean here: the
+    package already has one rule for it (count clamped to 1, a dtype-aware
+    max sentinel), and a second copy is a lockstep invariant. See
+    decisions.md D-055.
+
+    :param pooling: The head's weightless ``SequencePooling`` for this input.
+    :type pooling: keras.layers.Layer
+    :param inputs: The head's input dict.
+    :type inputs: Dict[str, Any]
+    :param features_key: Which features to pool.
+    :type features_key: str
+    :param owner: Head class name, for the error message.
+    :type owner: str
+    :return: ``(batch, width)``.
+    :rtype: keras.KerasTensor
+    :raises ValueError: On a mask for a rank-2 input, or a rank other than 2
+        or 3.
+    """
+    features = inputs[features_key]
+    mask_key = _MASK_KEYS[features_key]
+    mask = inputs.get(mask_key)
+    rank = static_rank(features, features_key, owner)
+    if rank == 2:
+        if mask is not None:
+            raise ValueError(
+                f"{owner}: {mask_key} was given for a rank-2 {features_key}. "
+                f"A rank-2 input is already pooled, so there is nothing to "
+                f"mask; drop {mask_key} or pass the rank-3 sequence."
+            )
+        return features
+    if rank != 3:
+        raise ValueError(
+            f"{owner}: {features_key} must be rank 2 (pooled) or rank 3 "
+            f"(batch, length, width), got rank {rank}."
+        )
+    return pooling(features, mask=mask)
+
+
+# ---------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------
 
@@ -215,11 +386,8 @@ def _deserialize_task_config(
     """
     if isinstance(config, VLMTaskConfig):
         return config
-    cfg = dict(config)
-    task_type = cfg.get("task_type")
-    if isinstance(task_type, str):
-        cfg["task_type"] = VLMTaskType.from_string(task_type)
-    return VLMTaskConfig(**cfg)
+    # VLMTaskConfig parses the string task type itself.
+    return VLMTaskConfig(**dict(config))
 
 
 # ---------------------------------------------------------------------
@@ -232,11 +400,12 @@ class BaseVLMHead(keras.layers.Layer):
     Shared construction for the fusion layer two VLM heads use.
 
     This class creates the ``MultiModalFusion`` layer and stores the
-    configuration it needs. It has no ``call``, so it is not a usable head on
-    its own. :class:`VisualGroundingHead` and :class:`ImageTextMatchingHead`
-    inherit from it and supply their own forward pass.
-    :class:`ImageCaptioningHead`, :class:`VQAHead` and
-    :class:`MultiTaskVLMHead` do not inherit from it at all.
+    configuration it needs. It has no ``call``, so it is not a head:
+    constructing it directly raises ``TypeError``.
+    :class:`VisualGroundingHead` and :class:`ImageTextMatchingHead` inherit
+    from it and supply their own forward pass. :class:`ImageCaptioningHead`,
+    :class:`VQAHead` and :class:`MultiTaskVLMHead` do not inherit from it at
+    all.
 
     It owns exactly one sub-layer, ``fusion``, because that is the one layer
     both subclasses run. Each subclass calls :meth:`_build_fusion_stack` from
@@ -278,7 +447,8 @@ class BaseVLMHead(keras.layers.Layer):
     :param task_config: Task configuration. ``hidden_size`` becomes
         ``hidden_dim``, the working width of the fusion.
     :type task_config: VLMTaskConfig
-    :param fusion_strategy: Which ``MultiModalFusion`` strategy to build.
+    :param fusion_strategy: Which ``MultiModalFusion`` strategy to build. It
+        has no default here; each subclass supplies its own.
     :type fusion_strategy: FusionStrategy
     :param fusion_config: Extra keyword arguments for ``MultiModalFusion``.
     :type fusion_config: Optional[Dict[str, Any]]
@@ -293,7 +463,7 @@ class BaseVLMHead(keras.layers.Layer):
     def __init__(
         self,
         task_config: VLMTaskConfig,
-        fusion_strategy: FusionStrategy = "cross_attention",
+        fusion_strategy: FusionStrategy,
         fusion_config: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -312,7 +482,20 @@ class BaseVLMHead(keras.layers.Layer):
         :param kwargs: Additional arguments for the base Layer class.
         :return: None.
         :rtype: None
+        :raises TypeError: If this class is constructed directly rather than
+            through a subclass.
         """
+        # DECISION plan-2026-10-14T062616-81938e81/D-059
+        # Refuse direct construction. Do NOT hand back a bare BaseVLMHead: it
+        # has no call(), so it constructed fine and raised
+        # NotImplementedError, naming the base class, on first use. See
+        # decisions.md D-059.
+        if type(self) is BaseVLMHead:
+            raise TypeError(
+                "BaseVLMHead is the shared base of VisualGroundingHead and "
+                "ImageTextMatchingHead and has no call(); construct one of "
+                "those, or create_vlm_head() for a task type."
+            )
         super().__init__(name=f"{task_config.name}_head", **kwargs)
 
         # Store configuration
@@ -320,10 +503,10 @@ class BaseVLMHead(keras.layers.Layer):
         self.fusion_strategy = fusion_strategy
         self.fusion_config = fusion_config or {}
 
-        # `VLMTaskConfig.__post_init__` in task_types.py always fills
-        # `hidden_size`, from `max(vision_hidden_size, text_hidden_size)`, so a
-        # head never sees None here. Three sites had drifted to two different
-        # fallback expressions for a value that was never missing.
+        # `VLMTaskConfig.__post_init__` in task_types.py refuses any
+        # `hidden_size` that is not a positive integer, so a head never sees
+        # None here. Three sites had drifted to two different fallback
+        # expressions for a value that was never missing.
         #
         # DECISION plan-2026-07-30T081929-1645aa52/D-014
         # Read `hidden_size` straight. Do NOT re-add an `or <fallback>` in any
@@ -551,17 +734,24 @@ class ImageCaptioningHead(keras.layers.Layer):
                     (B, S, vocab_size)  (B, S, hidden_dim)
 
     The causal mask comes from ``MaskFactory.create_causal_mask``, not from
-    ``ops.tril``. See the note in ``call``.
+    ``keras.ops.tril``. See the note in ``call``.
 
     Input shape:
         ``{'vision_features': (batch, num_vision, vision_width),
-        'text_features': (batch, seq_len, hidden_dim)}``.
+        'text_features': (batch, seq_len, hidden_dim)}``, plus the optional
+        keep masks ``'vision_mask': (batch, num_vision)`` and
+        ``'text_mask': (batch, seq_len)``. The vision mask is the
+        cross-attention's key mask. The text mask is combined with the causal
+        mask in each self-attention, so a real token never attends to a
+        padded one, which matters for left padding; the outputs at padded
+        text positions are not meaningful and belong out of the loss.
 
     Output shape:
         ``{'logits': (batch, seq_len, vocab_size), 'hidden_states':
         (batch, seq_len, hidden_dim)}``.
 
     :param task_config: Configuration object for the task.
+        ``vocab_size`` is required; ``num_classes`` must be unset.
     :type task_config: VLMTaskConfig
     :param num_layers: Number of decoder layers.
     :type num_layers: int
@@ -611,19 +801,15 @@ class ImageCaptioningHead(keras.layers.Layer):
         of D-023. Every failing type died earlier inside ``validate_ffn_config``
         on a DIFFERENT required key.
 
-        Related, and also measured rather than assumed: four
-        ``fusion_strategy``/pooling combinations build successfully and then
-        fail inside ``call()``. They are:
-
-        * ``VisualGroundingHead`` with ``fusion_strategy="attention_pooling"``.
-        * ``VQAHead`` with ``pooling_strategy`` ``"mean"`` or ``"max"`` on 2-D
-          inputs.
-        * ``ImageCaptioningHead`` with a text width other than ``hidden_dim``.
-        * ``ImageCaptioningHead`` with 2-D vision features.
-
-        None of them breaks a configuration that ever worked. ``build()`` is
-        merely more permissive than ``call()`` there, so a guard would only
-        relocate the error message.
+        Related, and also measured rather than assumed: four combinations once
+        built and then failed inside ``call()``. Three are now refused in
+        ``build()``, by name (D-011, D-056): ``VisualGroundingHead`` with
+        ``fusion_strategy="attention_pooling"``, ``ImageCaptioningHead`` with a
+        text width other than ``hidden_dim``, and ``VQAHead`` attention pooling
+        with a width other than ``hidden_dim``. ``VQAHead`` ``"mean"``/``"max"``
+        now takes 2-D (already pooled) inputs. The fourth,
+        ``ImageCaptioningHead`` with 2-D vision features, still fails in the
+        cross-attention.
     :type ffn_type: FFNType
     :param ffn_expansion_factor: Width multiplier for the decoder FFN's hidden
         layer. Defaults to 4.
@@ -676,10 +862,14 @@ class ImageCaptioningHead(keras.layers.Layer):
         :param ffn_expansion_factor: FFN width multiplier.
         :type ffn_expansion_factor: int
         :param kwargs: Additional arguments for the base Layer class.
-        :raises ValueError: If ``hidden_dim`` is not divisible by ``num_heads``.
+        :raises ValueError: If ``hidden_dim`` is not divisible by
+            ``num_heads``, ``task_config.vocab_size`` is unset, or
+            ``task_config.num_classes`` is set.
         :return: None.
         :rtype: None
         """
+        _check_task_config_fields(
+            task_config, "ImageCaptioningHead", required=("vocab_size",))
         super().__init__(name=f"{task_config.name}_head", **kwargs)
         self.task_config = task_config
         # D-014: dead fallback removed (see BaseVLMHead.__init__).
@@ -773,7 +963,7 @@ class ImageCaptioningHead(keras.layers.Layer):
             self.norm_layers.extend([norm1, norm2, norm3])
 
         # Final projection to vocabulary
-        self.output_proj = layers.Dense(
+        self.output_proj = keras.layers.Dense(
             self.task_config.vocab_size, name=f"{self.name}_output_proj"
         )
 
@@ -806,6 +996,20 @@ class ImageCaptioningHead(keras.layers.Layer):
         batch = text_shape[0]
         seq_len = text_shape[1]
 
+        # DECISION plan-2026-10-14T062616-81938e81/D-056
+        # Refuse a text width other than hidden_dim here, at build. Do NOT
+        # rely on the residual add: before this check the head built and
+        # then failed inside MultiHeadCrossAttention.call, naming neither the
+        # head nor text_features. See decisions.md D-056.
+        if text_shape[-1] is not None and text_shape[-1] != self.hidden_dim:
+            raise ValueError(
+                f"ImageCaptioningHead: text_features is {text_shape[-1]} wide, "
+                f"but the decoder adds every sub-block back onto it without a "
+                f"projection, so it must be task_config.hidden_size="
+                f"{self.hidden_dim} wide. Project the text embeddings first; "
+                f"vision_features may be any width."
+            )
+
         # The decoder stream carries `hidden_dim` throughout (see the residual
         # note above).
         stream_shape = (batch, seq_len, self.hidden_dim)
@@ -835,7 +1039,8 @@ class ImageCaptioningHead(keras.layers.Layer):
         embedding table, and the residual adds carry no projection, so the text
         width must equal ``hidden_dim``.
 
-        :param inputs: Dict with ``vision_features`` and ``text_features``.
+        :param inputs: Dict with ``vision_features`` and ``text_features``,
+            and optionally ``vision_mask`` and ``text_mask``.
         :type inputs: Dict[str, keras.KerasTensor]
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
@@ -845,13 +1050,15 @@ class ImageCaptioningHead(keras.layers.Layer):
         vision_features = inputs["vision_features"]
         # The text is assumed pre-embedded; this head holds no embedding table.
         text_features = inputs["text_features"]
+        vision_mask = inputs.get("vision_mask")
+        text_mask = inputs.get("text_mask")
 
         x = text_features
-        seq_len = ops.shape(x)[1]
+        seq_len = keras.ops.shape(x)[1]
         # Lower-triangular KEEP mask: 1 = attend to current and past, 0 = future.
         #
         # Build it from `MaskFactory.create_causal_mask`, an arange index
-        # comparison, and not from `ops.tril`. `ops.tril` and `ops.triu` share an
+        # comparison, and not from `keras.ops.tril`. `keras.ops.tril` and `keras.ops.triu` share an
         # implementation that routes through a `tf.cond` rejecting a Python-bool
         # predicate once traced, raising `TypeError: pred must not be a Python
         # bool`. That works eagerly and fails on every graph path: `tf.function`,
@@ -872,14 +1079,20 @@ class ImageCaptioningHead(keras.layers.Layer):
         # Promoting it is deferred because it touches two shipped,
         # mixed-precision-sensitive call sites and must preserve the cast target
         # below. That target is `backend.floatx()` because it is what the
-        # previous `ops.ones(...)` defaulted to, which keeps the change
+        # previous `keras.ops.ones(...)` defaulted to, which keeps the change
         # numerically inert.
-        causal_mask = ops.cast(
-            ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
+        causal_mask = keras.ops.cast(
+            keras.ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
             keras.config.floatx(),
         )
         # Expand to the (1, S, S) full-mask form the attention layers expect.
-        causal_mask = ops.expand_dims(causal_mask, 0)
+        causal_mask = keras.ops.expand_dims(causal_mask, 0)
+        if text_mask is not None:
+            # A padded token is no key for any query: (1, S, S) * (B, 1, S).
+            # A query row left with no key (a left-padded position) is
+            # rescued by the attention layer; its output is padding anyway.
+            causal_mask = causal_mask * keras.ops.expand_dims(
+                keras.ops.cast(text_mask, causal_mask.dtype), 1)
 
         for i in range(self.num_layers):
             # Self-attention with causal mask
@@ -888,9 +1101,11 @@ class ImageCaptioningHead(keras.layers.Layer):
             )
             x = self.norm_layers[i * 3](x + attn_output)
 
-            # Cross-attention to vision features
+            # Cross-attention to vision features. `vision_mask` (B, N_vis) is
+            # a key-padding mask, shared by every text query.
             cross_attn_output = self.cross_attention_layers[i](
-                x, kv_input=vision_features, training=training
+                x, kv_input=vision_features, attention_mask=vision_mask,
+                training=training
             )
             x = self.norm_layers[i * 3 + 1](x + cross_attn_output)
 
@@ -1023,27 +1238,48 @@ class VQAHead(keras.layers.Layer):
     modality's own channel count, so it is ``D_vis + D_txt``. ``attention``
     maps both to ``embed_dim``, so it is ``2 * embed_dim``.
 
+    Every pooling honours the optional keep masks ``'vision_mask'`` and
+    ``'question_mask'`` (``(batch, length)``, 1 = real token). ``mean`` and
+    ``max`` reduce over the real positions only. ``attention`` passes each
+    mask as the key mask of the direction that attends to that modality, then
+    mean-pools each attended result over its own real positions.
+
     Input shape:
         ``{'vision_features': (batch, num_vision, vision_width),
-        'question_features': (batch, seq_len, text_width)}``.
+        'question_features': (batch, seq_len, text_width)}``, plus the
+        optional masks. ``mean`` and ``max`` also take rank-2 (already
+        pooled) features, and refuse a mask for them. ``attention`` needs
+        both inputs rank 3 and ``hidden_size`` wide, checked in ``build``.
 
     Output shape:
         ``{'answer_logits': (batch, num_classes)}``.
 
     :param task_config: Configuration object for the task. ``num_classes``
-        must be positive and ``hidden_size`` becomes ``embed_dim``.
+        is required and ``vocab_size`` must be unset. ``hidden_size`` becomes
+        ``embed_dim``; only the ``"attention"`` strategy reads it.
     :type task_config: VLMTaskConfig
     :param hidden_dims: Widths of the classifier MLP's hidden layers.
     :type hidden_dims: Sequence[int]
     :param pooling_strategy: One of ``"mean"``, ``"max"`` or ``"attention"``.
     :type pooling_strategy: str
+    :param num_heads: Head count of the ``"attention"`` strategy's
+        cross-attention. ``None`` means 8. It must divide ``hidden_size``.
+        The other two strategies run no attention and refuse a value.
+    :type num_heads: Optional[int]
     :param kwargs: Additional arguments for the base Layer.
 
     :ivar embed_dim: Attention width, taken from ``task_config.hidden_size``.
     :vartype embed_dim: int
+    :ivar num_heads: The resolved head count, or ``None`` without attention.
+    :vartype num_heads: Optional[int]
     :ivar attention_pooling: Cross-attention layer, or ``None`` when the
         strategy is not ``"attention"``.
     :vartype attention_pooling: Optional[keras.layers.Layer]
+    :ivar vision_pooling: Weightless ``SequencePooling`` over the vision
+        sequence (``'max'`` for the max strategy, ``'mean'`` otherwise).
+    :vartype vision_pooling: SequencePooling
+    :ivar question_pooling: The same, over the question sequence.
+    :vartype question_pooling: SequencePooling
     :ivar hidden_layers: The classifier MLP's ``Dense`` layers.
     :vartype hidden_layers: List[keras.layers.Dense]
     :ivar dropout_layers: One ``Dropout`` per hidden layer.
@@ -1057,15 +1293,16 @@ class VQAHead(keras.layers.Layer):
         task_config: VLMTaskConfig,
         hidden_dims: Sequence[int] = (512, 256),
         pooling_strategy: str = "attention",
+        num_heads: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         """
         Store the configuration and create the pooling and MLP sub-layers.
 
         ``attention_pooling`` is created only for the ``"attention"``
-        strategy; the other two need no layer. One ``Dense`` and one
-        ``Dropout`` are created per entry in ``hidden_dims``, plus the output
-        ``Dense``.
+        strategy. The two weightless ``SequencePooling`` layers are created
+        for every strategy. One ``Dense`` and one ``Dropout`` are created per
+        entry in ``hidden_dims``, plus the output ``Dense``.
 
         The layer name is derived from ``task_config.name``, so a caller must
         not pass ``name``.
@@ -1076,18 +1313,45 @@ class VQAHead(keras.layers.Layer):
         :type hidden_dims: Sequence[int]
         :param pooling_strategy: One of ``"mean"``, ``"max"``, ``"attention"``.
         :type pooling_strategy: str
+        :param num_heads: Attention head count; ``None`` means 8. Only the
+            ``"attention"`` strategy takes one.
+        :type num_heads: Optional[int]
         :param kwargs: Additional arguments for the base Layer class.
-        :raises ValueError: If ``task_config.num_classes`` is missing or not
-            positive, or if ``pooling_strategy`` is not one of the three.
+        :raises ValueError: If ``task_config.num_classes`` is unset or
+            ``task_config.vocab_size`` is set, if ``pooling_strategy`` is not
+            one of the three, if ``num_heads`` is not a positive integer or
+            does not divide ``hidden_size``, or if ``num_heads`` is given
+            without the ``"attention"`` strategy.
         :return: None.
         :rtype: None
         """
-        super().__init__(name=f"{task_config.name}_head", **kwargs)
-
-        if task_config.num_classes is None or task_config.num_classes <= 0:
-            raise ValueError("VQAHead requires a positive num_classes in task_config.")
+        _check_task_config_fields(task_config, "VQAHead", required=("num_classes",))
         if pooling_strategy not in ["mean", "max", "attention"]:
             raise ValueError(f"Unsupported pooling_strategy: {pooling_strategy}")
+
+        # DECISION plan-2026-10-14T062616-81938e81/D-056
+        # The head count is an argument, resolved to 8 only where it is read.
+        # Do NOT hardcode it again (hidden_size=36 died inside the attention
+        # factory naming neither VQAHead nor a knob the caller could change),
+        # and do NOT accept it for mean/max, which run no attention (a
+        # default-valued dead knob is the D-030 defect). See decisions.md
+        # D-056.
+        if pooling_strategy == "attention":
+            num_heads = positive_int(
+                8 if num_heads is None else num_heads, "num_heads", "VQAHead")
+            if task_config.hidden_size % num_heads != 0:
+                raise ValueError(
+                    f"VQAHead: task_config.hidden_size={task_config.hidden_size} "
+                    f"must be divisible by num_heads={num_heads} for the "
+                    f"attention pooling; pass num_heads=... to match."
+                )
+        elif num_heads is not None:
+            raise ValueError(
+                f"VQAHead: num_heads={num_heads!r} is read only by "
+                f"pooling_strategy='attention'; pooling_strategy="
+                f"{pooling_strategy!r} runs no attention. Leave it unset."
+            )
+        super().__init__(name=f"{task_config.name}_head", **kwargs)
 
         # Store configuration
         self.task_config = task_config
@@ -1098,6 +1362,7 @@ class VQAHead(keras.layers.Layer):
         # shape and every `== [..]` assertion in the suites are unchanged.
         self.hidden_dims = list(hidden_dims)
         self.pooling_strategy = pooling_strategy
+        self.num_heads = num_heads
         # D-014: dead fallback removed (see BaseVLMHead.__init__).
         self.embed_dim = self.task_config.hidden_size
 
@@ -1106,24 +1371,29 @@ class VQAHead(keras.layers.Layer):
             self.attention_pooling = create_attention_layer(
                 "multi_head_cross",
                 dim=self.embed_dim,
-                num_heads=8,
+                num_heads=self.num_heads,
                 dropout_rate=self.task_config.dropout_rate,
                 name="attention_pooling",
             )
         else:
             self.attention_pooling = None
 
+        # Weightless; `max` reduces with `max`, the other two with `mean`.
+        reduction = "max" if self.pooling_strategy == "max" else "mean"
+        self.vision_pooling = _weightless_pooling(reduction, "vision_pooling")
+        self.question_pooling = _weightless_pooling(reduction, "question_pooling")
+
         self.hidden_layers = []
         self.dropout_layers = []
         for i, hidden_dim in enumerate(self.hidden_dims):
             self.hidden_layers.append(
-                layers.Dense(hidden_dim, activation="gelu", name=f"hidden_{i}")
+                keras.layers.Dense(hidden_dim, activation="gelu", name=f"hidden_{i}")
             )
             self.dropout_layers.append(
-                layers.Dropout(self.task_config.dropout_rate, name=f"dropout_{i}")
+                keras.layers.Dropout(self.task_config.dropout_rate, name=f"dropout_{i}")
             )
 
-        self.output_layer = layers.Dense(
+        self.output_layer = keras.layers.Dense(
             self.task_config.num_classes, name="output_layer"
         )
 
@@ -1152,14 +1422,33 @@ class VQAHead(keras.layers.Layer):
 
         if self.pooling_strategy == "attention":
             # One cross-attention layer is reused in BOTH directions
-            # (vision<-question and question<-vision), so it is built once with
-            # [query, kv] = [vision, question]; the reversed call requires the
-            # two feature widths to match, which is a pre-existing contract of
-            # this head, not something introduced here.
+            # (vision<-question and question<-vision), so each modality is a
+            # query once and must be `embed_dim` wide. The attention layer
+            # checks only the query of the direction it is built with, so
+            # the question width used to pass build and fail in call; both
+            # are checked here (D-056).
+            for key, shape in (("vision_features", vision_shape),
+                               ("question_features", question_shape)):
+                if shape[-1] is not None and shape[-1] != self.embed_dim:
+                    raise ValueError(
+                        f"VQAHead: {key} is {shape[-1]} wide, but "
+                        f"pooling_strategy='attention' runs one cross-attention "
+                        f"in both directions, so both inputs must be "
+                        f"task_config.hidden_size={self.embed_dim} wide. Project "
+                        f"them first, or use pooling_strategy='mean' or 'max', "
+                        f"which take any widths."
+                    )
             self.attention_pooling.build([vision_shape, question_shape])
             pooled_width = self.embed_dim * 2
         else:
             pooled_width = vision_shape[-1] + question_shape[-1]
+
+        # The poolers are weightless; building them only marks them built.
+        attended = self.pooling_strategy == "attention"
+        self.vision_pooling.build(
+            vision_shape[:-1] + (self.embed_dim,) if attended else vision_shape)
+        self.question_pooling.build(
+            question_shape[:-1] + (self.embed_dim,) if attended else question_shape)
 
         x_shape = (batch, pooled_width)
         for hidden_layer, dropout_layer in zip(self.hidden_layers, self.dropout_layers):
@@ -1183,36 +1472,42 @@ class VQAHead(keras.layers.Layer):
         inputs. ``"attention"`` runs one cross-attention layer in both
         directions and mean-pools each attended result.
 
-        :param inputs: Dict with ``vision_features`` and ``question_features``.
+        :param inputs: Dict with ``vision_features`` and ``question_features``,
+            and optionally ``vision_mask`` and ``question_mask``.
         :type inputs: Dict[str, keras.KerasTensor]
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
         :return: Dict with a single ``answer_logits`` entry.
         :rtype: Dict[str, keras.KerasTensor]
-        :raises ValueError: If ``pooling_strategy`` is not one of the three.
+        :raises ValueError: If ``pooling_strategy`` is not one of the three,
+            or a mask is given for a rank-2 input.
         """
-        vision_features = inputs["vision_features"]
-        question_features = inputs["question_features"]
-
-        if self.pooling_strategy == "mean":
-            vision_pooled = ops.mean(vision_features, axis=1)
-            text_pooled = ops.mean(question_features, axis=1)
-        elif self.pooling_strategy == "max":
-            vision_pooled = ops.max(vision_features, axis=1)
-            text_pooled = ops.max(question_features, axis=1)
+        if self.pooling_strategy in ("mean", "max"):
+            vision_pooled = _pool_sequence(
+                self.vision_pooling, inputs, "vision_features", "VQAHead")
+            text_pooled = _pool_sequence(
+                self.question_pooling, inputs, "question_features", "VQAHead")
         elif self.pooling_strategy == "attention":
+            vision_features = inputs["vision_features"]
+            question_features = inputs["question_features"]
+            vision_mask = inputs.get("vision_mask")
+            question_mask = inputs.get("question_mask")
+            # Each direction masks the modality it attends TO, then the
+            # attended sequence is mean-pooled over its own real positions.
             vision_attended = self.attention_pooling(
-                vision_features, kv_input=question_features, training=training
+                vision_features, kv_input=question_features,
+                attention_mask=question_mask, training=training
             )
             text_attended = self.attention_pooling(
-                question_features, kv_input=vision_features, training=training
+                question_features, kv_input=vision_features,
+                attention_mask=vision_mask, training=training
             )
-            vision_pooled = ops.mean(vision_attended, axis=1)
-            text_pooled = ops.mean(text_attended, axis=1)
+            vision_pooled = self.vision_pooling(vision_attended, mask=vision_mask)
+            text_pooled = self.question_pooling(text_attended, mask=question_mask)
         else:
             raise ValueError(f"Unknown pooling strategy: {self.pooling_strategy}")
 
-        x = ops.concatenate([vision_pooled, text_pooled], axis=-1)
+        x = keras.ops.concatenate([vision_pooled, text_pooled], axis=-1)
 
         for hidden_layer, dropout_layer in zip(self.hidden_layers, self.dropout_layers):
             x = hidden_layer(x)
@@ -1225,14 +1520,20 @@ class VQAHead(keras.layers.Layer):
         """
         Return the output shape, mirroring the ``call`` return value.
 
-        :param input_shape: Shape dict; only ``vision_features`` is read, for
-            its batch axis.
+        ``call`` concatenates the two pooled vectors, so the batch axis is
+        whichever of the two inputs states it (VLM-4 review item: this read
+        the vision batch alone and lost a batch only the question stated).
+
+        :param input_shape: Shape dict with ``vision_features`` and
+            ``question_features``.
         :type input_shape: Dict
         :return: Shape for ``answer_logits``.
         :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
-        vision_shape = input_shape["vision_features"]
-        return {"answer_logits": (vision_shape[0], self.task_config.num_classes)}
+        batch = input_shape["vision_features"][0]
+        if batch is None:
+            batch = input_shape["question_features"][0]
+        return {"answer_logits": (batch, self.task_config.num_classes)}
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -1247,6 +1548,7 @@ class VQAHead(keras.layers.Layer):
                 "task_config": _serialize_task_config(self.task_config),
                 "hidden_dims": self.hidden_dims,
                 "pooling_strategy": self.pooling_strategy,
+                "num_heads": self.num_heads,
             }
         )
         return config
@@ -1310,7 +1612,7 @@ class VisualGroundingHead(BaseVLMHead):
     unaffected, because the sigmoid is monotonic and ``argmax`` of the
     logits is ``argmax`` of their sigmoid. The box is a range map, not a
     class score: ``bbox_regressor`` is linear, and ``call`` applies
-    ``ops.sigmoid`` to its output so ``'bbox'`` lies in ``(0, 1)``.
+    ``keras.ops.sigmoid`` to its output so ``'bbox'`` lies in ``(0, 1)``.
 
     **Architecture Overview:**
 
@@ -1353,18 +1655,26 @@ class VisualGroundingHead(BaseVLMHead):
                └──────────┬──────────┘
                           ▼
                ┌─────────────────────┐
-               │ ops.sigmoid in call │
+               │ keras.ops.sigmoid in call │
                └──────────┬──────────┘
                           ▼
                     'bbox' (B, 4)
 
-    The region is picked with ``ops.argmax`` and ``ops.take_along_axis``. See
+    The region is picked with ``keras.ops.argmax`` and ``keras.ops.take_along_axis``. See
     the note in ``call`` about why NumPy fancy indexing cannot be used.
+
+    Two optional keep masks (``(batch, length)``, 1 = real): ``'text_mask'``
+    restricts the query mean to the real text tokens, and ``'vision_mask'``
+    keeps a padded region out of the pick, so ``'bbox'`` and
+    ``'grounded_features'`` come from a real region. ``'confidence'`` still
+    holds one logit for every region, padded ones included; leave those out
+    of the loss.
 
     Input shape:
         ``{'vision_features': (batch, num_regions, hidden_dim),
-        'text_features': (batch, seq_len, hidden_dim)}``. A rank-2
-        ``text_features`` is accepted and used as the query directly.
+        'text_features': (batch, seq_len, hidden_dim)}``, plus the optional
+        masks. A rank-2 ``text_features`` is accepted and used as the query
+        directly; a ``'text_mask'`` for it is refused.
 
     Output shape:
         ``{'bbox': (batch, 4), 'confidence': (batch, num_regions),
@@ -1381,22 +1691,30 @@ class VisualGroundingHead(BaseVLMHead):
     :vartype bbox_regressor: keras.layers.Dense
     :ivar confidence_scorer: Linear ``Dense`` producing one logit per region.
     :vartype confidence_scorer: keras.layers.Dense
+    :ivar text_pooling: Weightless ``SequencePooling('mean')`` for the query.
+    :vartype text_pooling: SequencePooling
     """
 
     def __init__(self, **kwargs: Any) -> None:
         """
-        Default the fusion strategy, then create the two task layers.
+        Default the fusion strategy, then create the task layers.
 
         :param kwargs: Arguments for :class:`BaseVLMHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If ``task_config`` sets ``vocab_size`` or
+            ``num_classes``, which this head does not read.
         """
+        if "task_config" in kwargs:
+            _check_task_config_fields(kwargs["task_config"], "VisualGroundingHead")
         # A gated strategy scores per-region interactions, which is what this
         # head needs; the caller can still override it.
         kwargs.setdefault("fusion_strategy", "gated")
         super().__init__(**kwargs)
 
-        self.bbox_regressor = layers.Dense(4, name=f"{self.name}_bbox_regressor")
+        self.text_pooling = _weightless_pooling("mean", f"{self.name}_text_pooling")
+
+        self.bbox_regressor = keras.layers.Dense(4, name=f"{self.name}_bbox_regressor")
         # DECISION plan-2026-10-14T062616-81938e81/D-003
         # Linear: 'confidence' carries region logits under its old name. Do
         # NOT put activation='sigmoid' back: the sigmoid belongs to the loss
@@ -1404,7 +1722,7 @@ class VisualGroundingHead(BaseVLMHead):
         # layers/heads, and the argmax region pick is the same either way.
         # The bbox sigmoid in call() is a range map and stays. See
         # decisions.md D-003.
-        self.confidence_scorer = layers.Dense(
+        self.confidence_scorer = keras.layers.Dense(
             1, name=f"{self.name}_confidence"
         )
 
@@ -1434,6 +1752,7 @@ class VisualGroundingHead(BaseVLMHead):
         text_tiled_shape = (batch, num_regions, text_shape[-1])
 
         fused_shape = self._build_fusion_stack([vision_shape, text_tiled_shape])
+        self.text_pooling.build(text_shape)
 
         # confidence_scorer sees the per-region fused tensor; bbox_regressor sees
         # only the single top-scoring region, i.e. the same width without the
@@ -1452,32 +1771,34 @@ class VisualGroundingHead(BaseVLMHead):
         Score every region, then box the top-scoring one.
 
         :param inputs: Dict with ``vision_features``, shaped
-            ``(B, N_regions, D_vis)``, and ``text_features``.
+            ``(B, N_regions, D_vis)``, and ``text_features``, and optionally
+            ``vision_mask`` and ``text_mask``.
         :type inputs: Dict[str, keras.KerasTensor]
         :param training: Keras training flag, forwarded to the fusion layer.
         :type training: Optional[bool]
         :return: Dict with ``bbox`` (sigmoid range map), ``confidence``
             (region logits) and ``grounded_features``.
         :rtype: Dict[str, keras.KerasTensor]
-        :raises ValueError: If ``vision_features`` is not rank 3.
+        :raises ValueError: If ``vision_features`` is not rank 3, or a
+            ``text_mask`` is given for a rank-2 ``text_features``.
         """
         vision_features = inputs["vision_features"]
-        text_features = inputs["text_features"]
+        vision_mask = inputs.get("vision_mask")
 
-        if len(ops.shape(vision_features)) != 3:
-            raise ValueError("VisualGrounding requires spatial vision features.")
+        if static_rank(vision_features, "vision_features", "VisualGroundingHead") != 3:
+            raise ValueError(
+                "VisualGroundingHead: vision_features must be rank 3, "
+                "(batch, num_regions, width); the regions are scored one by one."
+            )
 
-        # Pool text features to a single query vector.
-        text_query = (
-            ops.mean(text_features, axis=1)
-            if len(ops.shape(text_features)) == 3
-            else text_features
-        )
+        # Pool text features to a single query vector, over the real tokens.
+        text_query = _pool_sequence(
+            self.text_pooling, inputs, "text_features", "VisualGroundingHead")
 
         # Align text query with each visual region for fusion.
-        num_regions = ops.shape(vision_features)[1]
-        text_expanded = ops.expand_dims(text_query, axis=1)
-        text_expanded = ops.tile(text_expanded, [1, num_regions, 1])
+        num_regions = keras.ops.shape(vision_features)[1]
+        text_expanded = keras.ops.expand_dims(text_query, axis=1)
+        text_expanded = keras.ops.tile(text_expanded, [1, num_regions, 1])
 
         # Fuse each region with the text query. The output is [B, N_regions, D_fused].
         fused_per_region = self.fusion([vision_features, text_expanded], training=training)
@@ -1485,29 +1806,40 @@ class VisualGroundingHead(BaseVLMHead):
         # Score each aligned region's features: one logit per region.
         region_scores = self.confidence_scorer(fused_per_region)
         # Drop the trailing size-1 axis, leaving [B, N_regions].
-        region_scores = ops.squeeze(region_scores, axis=-1)
+        region_scores = keras.ops.squeeze(region_scores, axis=-1)
+
+        # Pick among the real regions only. The padded regions keep their
+        # logits in 'confidence'; only the pick and what follows it ignore
+        # them. Without a mask the scores are used as they are.
+        pick_scores = region_scores
+        if vision_mask is not None:
+            pick_scores = keras.ops.where(
+                keras.ops.cast(vision_mask, "bool"),
+                region_scores,
+                keras.ops.cast(mask_sentinel(region_scores.dtype), region_scores.dtype),
+            )
 
         # Regress the bounding box from the top-scoring region's features.
         #
-        # Gather one region per batch element with `ops.take_along_axis`, not
+        # Gather one region per batch element with `keras.ops.take_along_axis`, not
         # with NumPy-style fancy indexing such as
         # `fused[batch_indices, top_indices]`. TF tensors reject that form
         # outright: "Only integers, slices (`:`), ellipsis, tf.newaxis and
         # scalar tf.int32/tf.int64 tensors are valid indices". It failed
         # eagerly, not only under tracing, which left this head dead on its
         # forward pass.
-        top_indices = ops.argmax(region_scores, axis=1)
-        gather_index = ops.reshape(ops.cast(top_indices, "int32"), (-1, 1, 1))
-        gather_index = ops.broadcast_to(
-            gather_index, (ops.shape(fused_per_region)[0], 1, ops.shape(fused_per_region)[2])
+        top_indices = keras.ops.argmax(pick_scores, axis=1)
+        gather_index = keras.ops.reshape(keras.ops.cast(top_indices, "int32"), (-1, 1, 1))
+        gather_index = keras.ops.broadcast_to(
+            gather_index, (keras.ops.shape(fused_per_region)[0], 1, keras.ops.shape(fused_per_region)[2])
         )
-        top_features = ops.squeeze(
-            ops.take_along_axis(fused_per_region, gather_index, axis=1), axis=1
+        top_features = keras.ops.squeeze(
+            keras.ops.take_along_axis(fused_per_region, gather_index, axis=1), axis=1
         )
         bbox = self.bbox_regressor(top_features)
 
         return {
-            "bbox": ops.sigmoid(bbox),
+            "bbox": keras.ops.sigmoid(bbox),
             "confidence": region_scores,
             "grounded_features": top_features,
         }
@@ -1594,10 +1926,15 @@ class ImageTextMatchingHead(BaseVLMHead):
     and ``logits`` are ``(batch, batch)``. Row ``i``, column ``j`` is image
     ``i`` against caption ``j``.
 
+    Each mean honours an optional keep mask (``'vision_mask'``,
+    ``'text_mask'``, ``(batch, length)``, 1 = real): it averages the real
+    positions only.
+
     Input shape:
         ``{'vision_features': (batch, num_vision, vision_width),
-        'text_features': (batch, seq_len, text_width)}``. Rank-2 inputs are
-        accepted and used unpooled.
+        'text_features': (batch, seq_len, text_width)}``, plus the optional
+        masks. Rank-2 inputs are accepted and used unpooled; a mask for one
+        is refused.
 
     Output shape:
         ``{'similarity_matrix': (batch, batch), 'logits': (batch, batch),
@@ -1609,8 +1946,10 @@ class ImageTextMatchingHead(BaseVLMHead):
     :type task_config: VLMTaskConfig
     :param projection_dim: Width of the shared contrastive embedding space.
     :type projection_dim: int
-    :param temperature: Starting value of the learnable temperature. The
-        logits are the similarity matrix divided by it.
+    :param temperature: Starting value of the learnable temperature, a
+        positive finite number. The logits are the similarity matrix divided
+        by it. It is stored in the config as the starting value; the trained
+        value is a weight and travels with the weights.
     :type temperature: float
     :param normalization_type: Which registered normalization to build for
         ``post_fusion_norm``.
@@ -1653,9 +1992,16 @@ class ImageTextMatchingHead(BaseVLMHead):
     :ivar post_fusion_ffn: FFN after the norm, created when
         ``use_post_fusion_ffn`` is set.
     :vartype post_fusion_ffn: keras.layers.Layer
-    :ivar temperature: Learnable scalar weight. It is a weight, not a config
-        entry, so a ``.keras`` round-trip restores it with the other weights.
+    :ivar temperature: Learnable scalar weight. A ``.keras`` round-trip
+        restores its trained value with the other weights; the config holds
+        the starting value (``initial_temperature``).
     :vartype temperature: keras.Variable
+    :ivar initial_temperature: The constructor's ``temperature``.
+    :vartype initial_temperature: float
+    :ivar vision_pooling: Weightless ``SequencePooling('mean')``.
+    :vartype vision_pooling: SequencePooling
+    :ivar text_pooling: Weightless ``SequencePooling('mean')``.
+    :vartype text_pooling: SequencePooling
     """
 
     def __init__(
@@ -1690,7 +2036,17 @@ class ImageTextMatchingHead(BaseVLMHead):
         :param kwargs: Arguments for :class:`BaseVLMHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If ``temperature`` is not a positive finite
+            number, or ``task_config`` sets ``vocab_size`` or ``num_classes``.
         """
+        _check_task_config_fields(task_config, "ImageTextMatchingHead")
+        if (isinstance(temperature, bool)
+                or not isinstance(temperature, numbers.Real)
+                or not math.isfinite(temperature) or temperature <= 0):
+            raise ValueError(
+                f"ImageTextMatchingHead: temperature must be a positive finite "
+                f"number (the logits are divided by it), got {temperature!r}"
+            )
         kwargs.setdefault("fusion_strategy", "concatenation")
         super().__init__(task_config=task_config, **kwargs)
 
@@ -1701,22 +2057,31 @@ class ImageTextMatchingHead(BaseVLMHead):
         self._create_post_fusion_layers()
 
         self.projection_dim = projection_dim
-        self.vision_proj = layers.Dense(projection_dim, name=f"{self.name}_vision_proj")
-        self.text_proj = layers.Dense(projection_dim, name=f"{self.name}_text_proj")
+        self.vision_proj = keras.layers.Dense(projection_dim, name=f"{self.name}_vision_proj")
+        self.text_proj = keras.layers.Dense(projection_dim, name=f"{self.name}_text_proj")
         # DECISION plan-2026-10-14T062616-81938e81/D-003
         # Linear: 'match_score' carries a match logit under its old name. Do
         # NOT put activation='sigmoid' back: a from_logits=True loss would
         # squash it twice, as for every class-like output of layers/heads.
         # See decisions.md D-003.
-        self.similarity_head = layers.Dense(
+        self.similarity_head = keras.layers.Dense(
             1, name=f"{self.name}_similarity"
         )
+        # DECISION plan-2026-10-14T062616-81938e81/D-057
+        # Keep the starting value in the config. Do NOT drop it again on the
+        # grounds that the weight is saved: the weight restores the TRAINED
+        # value only where weights are loaded, and from_config(get_config())
+        # of a head built with temperature=0.5 started at 0.07. See
+        # decisions.md D-057.
+        self.initial_temperature = float(temperature)
         self.temperature = self.add_weight(
             name=f"{self.name}_temperature",
             shape=(),
-            initializer=keras.initializers.Constant(temperature),
+            initializer=keras.initializers.Constant(self.initial_temperature),
             trainable=True,
         )
+        self.vision_pooling = _weightless_pooling("mean", f"{self.name}_vision_pooling")
+        self.text_pooling = _weightless_pooling("mean", f"{self.name}_text_pooling")
 
     def _create_post_fusion_layers(self) -> None:
         """
@@ -1853,6 +2218,8 @@ class ImageTextMatchingHead(BaseVLMHead):
 
         self.vision_proj.build(vision_pooled_shape)
         self.text_proj.build(text_pooled_shape)
+        self.vision_pooling.build(vision_shape)
+        self.text_pooling.build(text_shape)
 
         processed_shape = self._build_fusion_stack(
             [(batch, 1, vision_shape[-1]), (batch, 1, text_shape[-1])],
@@ -1903,7 +2270,8 @@ class ImageTextMatchingHead(BaseVLMHead):
         A rank-3 input is mean-pooled over axis 1. A rank-2 input is used as
         it is.
 
-        :param inputs: Dict with ``vision_features`` and ``text_features``.
+        :param inputs: Dict with ``vision_features`` and ``text_features``,
+            and optionally ``vision_mask`` and ``text_mask``.
         :type inputs: Dict[str, keras.KerasTensor]
         :param training: Keras training flag, forwarded to the fusion, norm
             and FFN layers.
@@ -1912,27 +2280,20 @@ class ImageTextMatchingHead(BaseVLMHead):
             (one match logit per pair), ``vision_embeddings`` and
             ``text_embeddings``.
         :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If an input's rank is not 2 or 3 (or unknown), or
+            a mask is given for a rank-2 input.
         """
-        vision_features = inputs["vision_features"]
-        text_features = inputs["text_features"]
-
-        vision_pooled = (
-            ops.mean(vision_features, axis=1)
-            if len(ops.shape(vision_features)) == 3
-            else vision_features
-        )
-        text_pooled = (
-            ops.mean(text_features, axis=1)
-            if len(ops.shape(text_features)) == 3
-            else text_features
-        )
+        vision_pooled = _pool_sequence(
+            self.vision_pooling, inputs, "vision_features", "ImageTextMatchingHead")
+        text_pooled = _pool_sequence(
+            self.text_pooling, inputs, "text_features", "ImageTextMatchingHead")
 
         # 1. Contrastive Alignment part
         vision_projected = self.vision_proj(vision_pooled)
         text_projected = self.text_proj(text_pooled)
-        vision_norm = ops.normalize(vision_projected, axis=-1)
-        text_norm = ops.normalize(text_projected, axis=-1)
-        similarity_matrix = ops.matmul(vision_norm, ops.transpose(text_norm))
+        vision_norm = keras.ops.normalize(vision_projected, axis=-1)
+        text_norm = keras.ops.normalize(text_projected, axis=-1)
+        similarity_matrix = keras.ops.matmul(vision_norm, keras.ops.transpose(text_norm))
         logits = similarity_matrix / self.temperature
 
         # 2. Fine-grained matching logit.
@@ -1940,10 +2301,10 @@ class ImageTextMatchingHead(BaseVLMHead):
         # (B, S, D) inputs, and the pooled features are rank-2 (B, D). Expand
         # to (B, 1, D) for the fusion, then squeeze the (B, 1, F) result back
         # to (B, F) for the rank-2 post-fusion norm, FFN and similarity head.
-        vision_pooled_3d = ops.expand_dims(vision_pooled, axis=1)
-        text_pooled_3d = ops.expand_dims(text_pooled, axis=1)
+        vision_pooled_3d = keras.ops.expand_dims(vision_pooled, axis=1)
+        text_pooled_3d = keras.ops.expand_dims(text_pooled, axis=1)
         fused = self.fusion([vision_pooled_3d, text_pooled_3d], training=training)
-        fused = ops.squeeze(fused, axis=1)
+        fused = keras.ops.squeeze(fused, axis=1)
         processed = self.post_fusion_norm(fused, training=training)
         if self.use_post_fusion_ffn:
             processed = self.post_fusion_ffn(processed, training=training)
@@ -1952,7 +2313,7 @@ class ImageTextMatchingHead(BaseVLMHead):
         return {
             "similarity_matrix": similarity_matrix,
             "logits": logits,
-            "match_score": ops.squeeze(match_score, axis=-1),
+            "match_score": keras.ops.squeeze(match_score, axis=-1),
             "vision_embeddings": vision_norm,
             "text_embeddings": text_norm,
         }
@@ -1978,8 +2339,8 @@ class ImageTextMatchingHead(BaseVLMHead):
         """
         Return the constructor arguments needed to rebuild this head.
 
-        ``temperature`` is absent on purpose. It is a weight, so it is
-        restored with the other weights rather than from the config.
+        ``temperature`` is the starting value the head was built with. The
+        trained value is a weight and is restored with the other weights.
 
         :return: Serializable layer configuration.
         :rtype: Dict[str, Any]
@@ -1988,7 +2349,7 @@ class ImageTextMatchingHead(BaseVLMHead):
         config.update(
             {
                 "projection_dim": self.projection_dim,
-                # temperature is a weight, will be saved automatically
+                "temperature": self.initial_temperature,
                 "normalization_type": self.normalization_type,
                 "use_post_fusion_ffn": self.use_post_fusion_ffn,
                 "ffn_type": self.ffn_type,
@@ -2027,7 +2388,7 @@ class MultiTaskVLMHead(keras.layers.Layer):
         └─────────────────────┬──────────────────┘
                               ▼
         ┌──────────────────────────────────────────────┐
-        │ call(inputs, task_name=None)                 │
+        │ call(inputs, training=None, *, task_name)    │
         └──────────┬───────────────────────┬───────────┘
                    │ yes                   │ no
                    ▼                       ▼
@@ -2036,7 +2397,11 @@ class MultiTaskVLMHead(keras.layers.Layer):
         │ that head's output  │ │ {name: output, ...} │
         └─────────────────────┘ └─────────────────────┘
 
-    A ``task_name`` that is not in ``task_heads`` raises ``ValueError``.
+    ``task_name`` is keyword-only, so the second positional slot is
+    ``training``, as on every other head. A ``task_name`` that is not in
+    ``task_heads`` raises ``ValueError``, on the eager and on the symbolic
+    path, and the symbolic output and ``compute_output_shape`` follow
+    ``task_name`` as the eager call does.
 
     Keyword routing has three tiers. Wrapper-owned arguments
     (``task_configs``, ``task_specific_kwargs``) are consumed here. ``task_specific_kwargs``
@@ -2059,7 +2424,7 @@ class MultiTaskVLMHead(keras.layers.Layer):
         each task name to that head's output.
 
     :param task_configs: Mapping of task name to its ``VLMTaskConfig``. One
-        head is built per entry.
+        head is built per entry. At least one entry.
     :type task_configs: Dict[str, VLMTaskConfig]
     :param task_specific_kwargs: Per-task constructor overrides, keyed by the
         same task names as ``task_configs``. Merged over the shared keywords,
@@ -2115,9 +2480,14 @@ class MultiTaskVLMHead(keras.layers.Layer):
             NO head raises. Partial application is reported via
             ``logger.info``. Use ``task_specific_kwargs`` to target one head
             exactly. Those ARE validated strictly, since they name a head.
-        :raises ValueError: If ``task_specific_kwargs`` names a task absent from
-            ``task_configs``.
+        :raises ValueError: If ``task_configs`` is empty, or
+            ``task_specific_kwargs`` names a task absent from ``task_configs``.
         """
+        if not task_configs:
+            raise ValueError(
+                "MultiTaskVLMHead needs at least one task in task_configs; an "
+                "empty wrapper returns {} for any input."
+            )
         # Keras base arguments belong to THIS layer; everything else is intended
         # for the per-task heads. Forwarding `name` into a head raises (each head
         # sets its own `name=f"{task_config.name}_head"`), and forwarding
@@ -2249,49 +2619,106 @@ class MultiTaskVLMHead(keras.layers.Layer):
 
         super().build(input_shape)
 
+    def _selected_heads(self, task_name: Optional[str]) -> Dict[str, keras.layers.Layer]:
+        """Return the heads a call runs: one for ``task_name``, else all of them.
+
+        :param task_name: A configured task name, or ``None``.
+        :type task_name: Optional[str]
+        :return: Task name to head.
+        :rtype: Dict[str, keras.layers.Layer]
+        :raises ValueError: If ``task_name`` names no configured task.
+        """
+        if task_name is None:
+            return dict(self.task_heads)
+        if task_name not in self.task_heads:
+            raise ValueError(
+                f"Unknown task: {task_name!r}. Configured tasks: "
+                f"{sorted(self.task_heads)}."
+            )
+        return {task_name: self.task_heads[task_name]}
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-060
+    # `task_name` is keyword-only and `training` keeps the second positional
+    # slot. Do NOT move `task_name` back in front of `training`: a positional
+    # flag then landed in `task_name` (`.call(inputs, True)` raised "Unknown
+    # task: True", a tensor flag "Tensor is unhashable"). See decisions.md
+    # D-060.
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],
-        task_name: Optional[str] = None,
         training: Optional[bool] = None,
+        *,
+        task_name: Optional[str] = None,
     ) -> Union[Dict[str, Any], Dict[str, Dict[str, Any]]]:
         """
         Run one task head, or every one of them.
 
         :param inputs: One shared input dict, handed to each head unchanged.
         :type inputs: Dict[str, keras.KerasTensor]
-        :param task_name: Which head to run. ``None`` runs them all.
-        :type task_name: Optional[str]
         :param training: Keras training flag, forwarded to each head.
         :type training: Optional[bool]
+        :param task_name: Keyword only. Which head to run; ``None`` runs them
+            all.
+        :type task_name: Optional[str]
         :return: That head's output, or a dict of task name to output.
         :rtype: Union[Dict[str, Any], Dict[str, Dict[str, Any]]]
         :raises ValueError: If ``task_name`` names no configured task.
         """
-        if task_name:
-            if task_name not in self.task_heads:
-                raise ValueError(f"Unknown task: {task_name}")
-            return self.task_heads[task_name](inputs, training=training)
+        outputs = {
+            name: head(inputs, training=training)
+            for name, head in self._selected_heads(task_name).items()
+        }
+        return outputs[task_name] if task_name is not None else outputs
 
-        outputs = {}
-        for name, head in self.task_heads.items():
-            outputs[name] = head(inputs, training=training)
-        return outputs
-
-    def compute_output_shape(self, input_shape: Dict) -> Dict[str, Any]:
-        """Returns a dict of per-task output shapes.
-
-        Mirrors the no-``task_name`` ``call()`` path, which routes the shared
-        inputs to every task head.
+    def compute_output_shape(
+        self, input_shape: Dict, *, task_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Return the output shapes ``call`` returns for the same ``task_name``.
 
         :param input_shape: Shared input shapes (dict keyed by feature name).
-        :return: Mapping of task name to that head's output shape(s).
+        :type input_shape: Dict
+        :param task_name: Keyword only, as in ``call``.
+        :type task_name: Optional[str]
+        :return: That head's output shapes, or task name to output shapes.
         :rtype: Dict[str, Any]
+        :raises ValueError: If ``task_name`` names no configured task.
         """
-        return {
+        shapes = {
             name: head.compute_output_shape(input_shape)
-            for name, head in self.task_heads.items()
+            for name, head in self._selected_heads(task_name).items()
         }
+        return shapes[task_name] if task_name is not None else shapes
+
+    def compute_output_spec(
+        self,
+        inputs: Dict[str, Any],
+        training: Optional[bool] = None,
+        *,
+        task_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the symbolic outputs ``call`` returns for the same ``task_name``.
+
+        Keras' default routes a symbolic call through
+        ``compute_output_shape`` with the input shapes only, so ``task_name``
+        never reached it and a symbolic ``head(inputs, task_name='itm')``
+        returned every task's outputs. Each selected head reports its own
+        spec instead.
+
+        :param inputs: Symbolic shared inputs.
+        :type inputs: Dict[str, Any]
+        :param training: Unused; accepted because ``call`` takes it.
+        :type training: Optional[bool]
+        :param task_name: Keyword only, as in ``call``.
+        :type task_name: Optional[str]
+        :return: That head's output spec, or task name to output spec.
+        :rtype: Dict[str, Any]
+        :raises ValueError: If ``task_name`` names no configured task.
+        """
+        specs = {
+            name: head.compute_output_spec(inputs)
+            for name, head in self._selected_heads(task_name).items()
+        }
+        return specs[task_name] if task_name is not None else specs
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -2354,83 +2781,75 @@ class MultiTaskVLMHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-def get_head_class(task_type: VLMTaskType) -> type:
+# DECISION plan-2026-10-14T062616-81938e81/D-059
+# One table, read by get_head_class and therefore by create_vlm_head and
+# MultiTaskVLMHead. Do NOT add a row that maps a task type to BaseVLMHead as a
+# placeholder (DENSE_CAPTIONING and VISUAL_DIALOGUE were, only to be rejected
+# a line later), and do NOT restore a default: a task type with no head
+# raises. See decisions.md D-059 (and D-052, the vision table).
+VLM_HEAD_DISPATCH: Dict[VLMTaskType, type] = {
+    VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
+    VLMTaskType.VISUAL_QUESTION_ANSWERING: VQAHead,
+    VLMTaskType.VISUAL_GROUNDING: VisualGroundingHead,
+    VLMTaskType.IMAGE_TEXT_MATCHING: ImageTextMatchingHead,
+}
+
+
+def get_head_class(task_type: Union[VLMTaskType, str]) -> type:
     """
     Return the head class for a VLM task type, or raise.
 
-    Four task types have a real head: image captioning, visual question
-    answering, visual grounding, and image-text matching. Every other member
-    of ``VLMTaskType`` raises. There is no silent fallback, matching the
-    sibling ``heads/vision/factory.py``.
+    The class comes from :data:`VLM_HEAD_DISPATCH`. Four task types have a
+    head: image captioning, visual question answering, visual grounding, and
+    image-text matching. Every other member of ``VLMTaskType`` raises. There
+    is no silent fallback, matching the sibling ``heads/vision/factory.py``.
 
-    To add support for a task type, implement its head and map it here. Do not
-    restore a default.
+    To add support for a task type, implement its head and add it to the
+    table. Do not restore a default.
 
-    :param task_type: The VLM task type to look up.
-    :type task_type: VLMTaskType
+    This used to be ``head_mapping.get(task_type, BaseVLMHead)``, so 41 of the
+    47 members quietly returned ``BaseVLMHead``, which has no ``call()``: the
+    object constructed fine and died with ``NotImplementedError``, naming the
+    base class rather than the task, the moment it was used.
+
+    :param task_type: The VLM task type, as a member or its string value.
+    :type task_type: Union[VLMTaskType, str]
     :return: The head class for that task type.
     :rtype: type
-    :raises ValueError: If no head is implemented for ``task_type``.
+    :raises ValueError: If no head is implemented for ``task_type``, or the
+        string names no task type.
     """
-    head_mapping = {
-        VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
-        # Mapped to BaseVLMHead and then rejected below. BaseVLMHead has no
-        # call(), so it is not a usable head and cannot stand in for one.
-        VLMTaskType.DENSE_CAPTIONING: BaseVLMHead,
-        VLMTaskType.VISUAL_QUESTION_ANSWERING: VQAHead,
-        VLMTaskType.VISUAL_GROUNDING: VisualGroundingHead,
-        VLMTaskType.IMAGE_TEXT_MATCHING: ImageTextMatchingHead,
-        # Mapped to BaseVLMHead and then rejected below, for the same reason.
-        VLMTaskType.VISUAL_DIALOGUE: BaseVLMHead,
-    }
-    # No silent fallback, and BaseVLMHead is not a usable head.
-    #
-    # This used to be `return head_mapping.get(task_type, BaseVLMHead)`, so 41
-    # of the 47 VLMTaskType members quietly returned BaseVLMHead. That class
-    # has no `call()` method -- it is fusion, norm and an optional FFN and
-    # nothing else -- so the factory handed back an object that constructs fine
-    # and then dies the moment it is used:
-    #
-    #     create_vlm_head(VLMTaskConfig(task_type=VIDEO_CAPTIONING), ...)
-    #     head({'vision_features': v, 'text_features': t})
-    #     -> NotImplementedError: Layer BaseVLMHead does not have a call() method
-    #
-    # The error names BaseVLMHead, not the task, so the caller had no way to
-    # tell that their task type was never implemented. The same applies to the
-    # two entries above that map to BaseVLMHead by hand: a stand-in that
-    # cannot be called is not a head, so they are rejected here too.
-    head_class = head_mapping.get(task_type)
-    if head_class is None or head_class is BaseVLMHead:
-        implemented = sorted(
-            t.name for t, c in head_mapping.items() if c is not BaseVLMHead
-        )
+    if isinstance(task_type, str):
+        task_type = VLMTaskType.from_string(task_type)
+    head_class = VLM_HEAD_DISPATCH.get(task_type)
+    if head_class is None:
+        implemented = sorted(t.name for t in VLM_HEAD_DISPATCH)
         raise ValueError(
             f"No VLM head is implemented for task type '{task_type.name}'. "
-            f"Implemented task types: {implemented}. "
-            f"(This previously returned a bare BaseVLMHead, which has no call() method and "
-            f"raised NotImplementedError only once the head was actually used.)"
+            f"Implemented task types: {implemented}."
         )
-
     return head_class
 
 
 def create_vlm_head(
     task_config: Union[VLMTaskConfig, Dict[str, Any]], **kwargs: Any
-) -> Union[BaseVLMHead, keras.layers.Layer]:
+) -> keras.layers.Layer:
     """
     Build one VLM head from a task configuration.
 
     The task type in ``task_config`` picks the class. An unsupported task type
     raises rather than returning a default head.
 
-    :param task_config: VLMTaskConfig object or dict with task configuration.
+    :param task_config: VLMTaskConfig object, or a dict of its fields. A dict
+        may give ``task_type`` as its string value, as ``VLMTaskConfig``
+        itself accepts.
     :type task_config: Union[VLMTaskConfig, Dict[str, Any]]
     :param kwargs: Additional configuration for the head, such as
         ``fusion_strategy`` or ``num_layers``. Which keywords are accepted
         depends on the head class the task type selects; any other raises
         ``ValueError``.
     :return: A configured VLM head for the given task.
-    :rtype: Union[BaseVLMHead, keras.layers.Layer]
+    :rtype: keras.layers.Layer
     :raises ValueError: If no head is implemented for the task type.
     """
     if isinstance(task_config, dict):
@@ -2447,7 +2866,9 @@ def create_multi_task_vlm_head(
     """
     Build a :class:`MultiTaskVLMHead` from task configurations.
 
-    A list is keyed by each configuration's ``name``. A dict is used as it is.
+    A list is keyed by each configuration's ``name``, and two configurations
+    with one name are refused (keying would keep only the last). A dict is
+    used as it is. An empty list or dict is refused.
 
     :param task_configs: List or dict of VLMTaskConfig objects.
     :type task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]]
@@ -2475,10 +2896,20 @@ def create_multi_task_vlm_head(
         keys. Duplicating the same tensor under both is fine.
     :return: Configured multi-task VLM head instance.
     :rtype: MultiTaskVLMHead
-    :raises ValueError: If a keyword is wrapper-owned, is accepted by no head,
-        or names a task absent from ``task_configs``.
+    :raises ValueError: If ``task_configs`` is empty or a list repeats a
+        name, or a keyword is wrapper-owned, is accepted by no head, or names
+        a task absent from ``task_configs``.
     """
     if isinstance(task_configs, list):
+        names = [config.name for config in task_configs]
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            raise ValueError(
+                f"Duplicate task name(s) {', '.join(repr(n) for n in repeated)} "
+                f"in task_configs: a list is keyed by each config's name, so "
+                f"all but the last would be dropped. Give each task its own "
+                f"name."
+            )
         task_configs = {config.name: config for config in task_configs}
 
     return MultiTaskVLMHead(task_configs=task_configs, **kwargs)

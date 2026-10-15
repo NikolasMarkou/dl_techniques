@@ -357,14 +357,11 @@ class TestVLMConfigRoundtrip:
                 VLMTaskConfig(name="grd", task_type=VLMTaskType.VISUAL_GROUNDING,
                               hidden_size=DIM),
             ),
-            "base": BaseVLMHead(
-                task_config=VLMTaskConfig(name="base",
-                                          task_type=VLMTaskType.VISUAL_DIALOGUE,
-                                          hidden_size=DIM),
-            ),
+            # No "base": BaseVLMHead refuses direct construction (D-059);
+            # test_the_vlm_heads_refuse_bad_arguments_early.py pins that.
         }
 
-    @pytest.mark.parametrize("name", ["captioning", "vqa", "itm", "grounding", "base"])
+    @pytest.mark.parametrize("name", ["captioning", "vqa", "itm", "grounding"])
     def test_config_is_json_serializable_and_reconstructs(self, name):
         head = self._heads()[name]
         config = head.get_config()
@@ -689,9 +686,14 @@ def _family_payload(text_key: str = "text_features"):
 
 
 def _family_config(name: str, task_type: VLMTaskType) -> VLMTaskConfig:
+    # Each head refuses the per-head field it does not read (D-058): only
+    # captioning takes a vocabulary and only VQA a class count.
+    extra = {
+        VLMTaskType.IMAGE_CAPTIONING: {"vocab_size": VOCAB},
+        VLMTaskType.VISUAL_QUESTION_ANSWERING: {"num_classes": NUM_CLASSES},
+    }.get(task_type, {})
     return VLMTaskConfig(
-        name=name, task_type=task_type, vocab_size=VOCAB,
-        hidden_size=_FAMILY_DIM, num_classes=NUM_CLASSES,
+        name=name, task_type=task_type, hidden_size=_FAMILY_DIM, **extra,
     )
 
 
@@ -1115,7 +1117,7 @@ def _tsk_configs(dim: int = _TSK_DIM):
         ),
         "itm": VLMTaskConfig(
             name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
-            vocab_size=VOCAB, hidden_size=dim,
+            hidden_size=dim,
         ),
     }
 
@@ -1792,11 +1794,11 @@ def _hetero_configs():
         ),
         "itm": VLMTaskConfig(
             name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
-            vocab_size=VOCAB, hidden_size=_HETERO_DIM,
+            hidden_size=_HETERO_DIM,
         ),
         "vqa": VLMTaskConfig(
             name="vqa", task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING,
-            vocab_size=VOCAB, hidden_size=_HETERO_DIM, num_classes=NUM_CLASSES,
+            hidden_size=_HETERO_DIM, num_classes=NUM_CLASSES,
         ),
     }
 

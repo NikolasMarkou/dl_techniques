@@ -6,9 +6,8 @@ six head layers and two factory functions (``create_vlm_head``,
 ``VLMTaskType``, ``VLMTaskConfig`` and ``VLMTaskConfiguration``.
 
 ``BaseVLMHead`` is exported but is not a usable head. It defines no ``call``,
-only the shared fusion, normalization and optional feed-forward stages its
-subclasses build on. ``create_vlm_head`` refuses to return it. Use one of the
-four task heads instead.
+only the shared fusion layer its two subclasses build on, and constructing it
+directly raises ``TypeError``. Use one of the four task heads instead.
 
 Import from this package rather than from the submodule::
 
@@ -25,6 +24,8 @@ The wider facade ``dl_techniques.layers.heads.create_head('vlm', ...)`` calls
 ``MultiTaskVLMHead`` fans one input dict to every sub-head. ``VQAHead`` reads
 ``question_features`` while the other three read ``text_features``, so a
 wrapper that mixes VQA with another task needs both keys in that dict.
+
+No model or trainer in the repository constructs a VLM head today.
 """
 
 from .task_types import VLMTaskType, VLMTaskConfig, VLMTaskConfiguration

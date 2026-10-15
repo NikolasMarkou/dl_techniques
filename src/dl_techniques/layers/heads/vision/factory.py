@@ -79,8 +79,6 @@ is ``softmax(out['logits'])``. Compile a model that returns the logits with
 ``from_logits=True``.
 """
 
-import numbers
-
 import keras
 from typing import (
     Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union)
@@ -105,6 +103,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
 )
 from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
+from ..validation import positive_int
 from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -195,41 +194,6 @@ def _validated_block_dims(
             f"block_dims must hold positive integers, got {block_dims}"
         )
     return block_dims
-
-
-def _positive_int(value: Any, name: str, owner: str) -> int:
-    """
-    Check that a count argument is a positive integer, and return it as one.
-
-    Interface contract, shared by every head's count arguments
-    (``hidden_dim``, ``num_classes``, ``num_anchors``, ``bbox_dims``,
-    ``num_instances``, ``output_channels``, ``scale_factor``):
-
-    * An ``int`` above 0, or a numpy integer above 0 (a count read from an
-      array or a ``.npy`` config), is returned as a plain ``int``.
-    * Anything else raises ``ValueError`` naming ``owner`` and ``name``:
-      ``bool`` (an ``int`` subclass, so ``True`` would build a one-class
-      layer), a float such as ``2.5``, a string, ``0`` and negatives.
-
-    Call it in ``__init__`` before any layer is created, so the refusal names
-    the argument instead of surfacing later as a ``Conv2D`` ``filters=0``.
-
-    :param value: The caller's value.
-    :type value: Any
-    :param name: Argument name, for the error message.
-    :type name: str
-    :param owner: Head class name, for the error message.
-    :type owner: str
-    :return: ``value`` as an ``int``.
-    :rtype: int
-    :raises ValueError: If ``value`` is not a positive integer.
-    """
-    if (isinstance(value, bool) or not isinstance(value, numbers.Integral)
-            or value <= 0):
-        raise ValueError(
-            f"{owner}: {name} must be a positive integer, got {value!r}"
-        )
-    return int(value)
 
 
 def _require_hidden_dim_at_least(
@@ -578,7 +542,7 @@ class BaseVisionHead(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Store configuration
-        self.hidden_dim = _positive_int(
+        self.hidden_dim = positive_int(
             hidden_dim, 'hidden_dim', type(self).__name__)
         self.normalization_type = normalization_type
         self.activation_type = activation_type
@@ -889,9 +853,9 @@ class DetectionHead(BaseVisionHead):
         super().__init__(**kwargs)
 
         owner = type(self).__name__
-        self.num_classes = _positive_int(num_classes, 'num_classes', owner)
-        self.num_anchors = _positive_int(num_anchors, 'num_anchors', owner)
-        self.bbox_dims = _positive_int(bbox_dims, 'bbox_dims', owner)
+        self.num_classes = positive_int(num_classes, 'num_classes', owner)
+        self.num_anchors = positive_int(num_anchors, 'num_anchors', owner)
+        self.bbox_dims = positive_int(bbox_dims, 'bbox_dims', owner)
         self.input_format = input_format
         self.patch_grid_size = patch_grid_size
         self.use_regression = use_regression
@@ -1262,7 +1226,7 @@ class SegmentationHead(BaseVisionHead):
         """
         super().__init__(**kwargs)
 
-        self.num_classes = _positive_int(
+        self.num_classes = positive_int(
             num_classes, 'num_classes', type(self).__name__)
         self.upsampling_factor = upsampling_factor
         self.use_skip_connections = use_skip_connections
@@ -1916,7 +1880,7 @@ class DepthEstimationHead(BaseVisionHead):
         kwargs.setdefault('use_ffn', False)
         _refuse_dropout_no_layer_applies(kwargs, type(self).__name__)
         super().__init__(**kwargs)
-        self.output_channels = _positive_int(
+        self.output_channels = positive_int(
             output_channels, 'output_channels', type(self).__name__)
         self.decoder_style = decoder_style
         if decoder_style == "dpt":
@@ -2474,7 +2438,7 @@ class ClassificationHead(BaseVisionHead):
                 self.hidden_dim, 2, type(self).__name__,
                 "the default block_dims are (hidden_dim, hidden_dim // 2)")
 
-        self.num_classes = _positive_int(
+        self.num_classes = positive_int(
             num_classes, 'num_classes', type(self).__name__)
         self.use_global_pooling = use_global_pooling
         self.pooling_type = pooling_type
@@ -2876,8 +2840,8 @@ class InstanceSegmentationHead(BaseVisionHead):
         super().__init__(**kwargs)
 
         owner = type(self).__name__
-        self.num_classes = _positive_int(num_classes, 'num_classes', owner)
-        self.num_instances = _positive_int(
+        self.num_classes = positive_int(num_classes, 'num_classes', owner)
+        self.num_instances = positive_int(
             num_instances, 'num_instances', owner)
         self.mask_size = mask_size
 
@@ -3187,9 +3151,9 @@ class EnhancementHead(BaseVisionHead):
             ('use_attention', 'use_ffn', 'dropout_rate'))
         super().__init__(**kwargs)
         owner = type(self).__name__
-        self.output_channels = _positive_int(
+        self.output_channels = positive_int(
             output_channels, 'output_channels', owner)
-        self.scale_factor = _positive_int(scale_factor, 'scale_factor', owner)
+        self.scale_factor = positive_int(scale_factor, 'scale_factor', owner)
         self.block_dims = _validated_block_dims(block_dims)
         self.output_use_bias = bool(output_use_bias)
         resolved_dims = (

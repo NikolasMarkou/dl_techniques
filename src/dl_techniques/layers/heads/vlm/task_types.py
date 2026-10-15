@@ -10,16 +10,18 @@ classes live here:
 * :class:`VLMTaskConfiguration` -- a validated set of tasks, plus a query for
   whether that set needs text generation.
 
-``vlm/factory.py`` reads these objects and picks the head class to build.
-Only 4 of the 47 task names reach a real head. Two more are mapped to
-``BaseVLMHead`` and then rejected by the same function, because
-``BaseVLMHead`` defines no ``call()``. The other 41 raise ``ValueError``.
-The table in :class:`VLMTaskType` lists all three groups.
+``vlm/factory.py`` reads these objects and picks the head class to build,
+from its one table, ``VLM_HEAD_DISPATCH``. Only 4 of the 47 task names have a
+head; the other 43 raise ``ValueError``. The table in :class:`VLMTaskType`
+lists both groups.
 """
 
+import numbers
 from enum import Enum, unique
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, List, Optional, Set
+
+from ..validation import positive_int
 
 
 # ---------------------------------------------------------------------
@@ -35,12 +37,10 @@ class VLMTaskType(Enum):
 
     **Head dispatch:**
 
-    ``vlm/factory.py``'s ``get_head_class`` decides which head class runs a
-    task. Four members reach a real head. Two are mapped to ``BaseVLMHead``
-    in that function's own table and are then rejected by it, because
-    ``BaseVLMHead`` defines no ``call()``. The remaining 41 are absent from
-    the table. Both failing groups raise ``ValueError`` when the head is
-    created, not when it is called. The three groups sum to 47.
+    ``vlm/factory.py``'s ``VLM_HEAD_DISPATCH`` decides which head class runs
+    a task, and ``get_head_class`` reads it. Four members have a head. The
+    other 43 are absent from the table and raise ``ValueError`` when the head
+    is created, not when it is called. The two groups sum to 47.
 
     .. code-block:: text
 
@@ -51,12 +51,9 @@ class VLMTaskType(Enum):
         VISUAL_GROUNDING           VisualGroundingHead
         IMAGE_TEXT_MATCHING        ImageTextMatchingHead
 
-        Mapped to BaseVLMHead, then rejected -- 2
+        Not in the table -- raises ValueError -- 43
         --------------------------------------------
-        DENSE_CAPTIONING, VISUAL_DIALOGUE
-
-        Not in the table -- raises ValueError -- 41
-        --------------------------------------------
+        DENSE_CAPTIONING, VISUAL_DIALOGUE,
         VISUAL_STORYTELLING, IMAGE_PARAGRAPH_CAPTIONING,
         VISUAL_REASONING, VISUAL_COMMONSENSE_REASONING,
         CHART_QUESTION_ANSWERING, DIAGRAM_UNDERSTANDING,
@@ -106,8 +103,8 @@ class VLMTaskType(Enum):
 
     Note:
         The dispatch table restates a mapping that lives in
-        ``get_head_class``. That function is the arbiter. If the two
-        disagree, the function is right.
+        ``VLM_HEAD_DISPATCH``. That table is the arbiter. If the two
+        disagree, the table is right.
 
     Example:
         >>> task = VLMTaskType.from_string("visual_grounding")
@@ -339,153 +336,116 @@ class VLMTaskConfig:
     """
     The hyperparameters of one VLM task head.
 
-    A dataclass. It holds vocabulary, dimension, fusion, pooling and
-    generation settings, and nothing else. ``vlm/factory.py``'s
-    ``create_vlm_head`` takes one of these and builds the matching head.
-    Only ``name`` and ``task_type`` are required.
+    A dataclass holding the six fields a head reads, and nothing else.
+    ``vlm/factory.py``'s ``create_vlm_head`` takes one of these and builds the
+    matching head. Only ``name`` and ``task_type`` are required.
 
-    :meth:`__post_init__` fills in three fields that are left at ``None``.
-    Note that ``hidden_size`` and ``fusion_hidden_size`` default to 768, not
-    to ``None``, so a caller has to pass ``None`` by hand to reach those two
-    fixups. ``num_classes`` does default to ``None`` and is filled for three
-    task types.
-
-    **Defaults:**
+    **Fields and their readers:**
 
     .. code-block:: text
 
-        Field                    Default
-        -----------------------  -----------
-        name                     required
-        task_type                required
-        vocab_size               50000
-        max_text_length          512
-        hidden_size              768
-        vision_hidden_size       768
-        text_hidden_size         768
-        fusion_hidden_size       768
-        dropout_rate             0.1
-        num_classes              None
-        use_cross_attention      True
-        fusion_type              "attention"
-        pooling_type             "avg"
-        use_task_specific_heads  True
-        temperature              1.0
-        beam_size                1
-        loss_weight              1.0
+        Field          Default  Read by
+        -------------  -------  -------------------------------------------
+        name           required every head: the layer is named <name>_head
+        task_type      required get_head_class: picks the head class
+        vocab_size     None     ImageCaptioningHead (required there)
+        hidden_size    768      every head's working width (VQAHead reads
+                                it only with pooling_strategy='attention')
+        dropout_rate   0.1      every head
+        num_classes    None     VQAHead (required there)
+
+    A head refuses a set ``vocab_size`` or ``num_classes`` it does not read,
+    so a config cannot carry a setting that silently does nothing. The two
+    pooling and fusion choices are head arguments, not config fields:
+    ``VQAHead(pooling_strategy=...)`` and
+    ``VisualGroundingHead``/``ImageTextMatchingHead(fusion_strategy=...)``.
+
+    :meth:`__post_init__` parses a string ``task_type`` and validates every
+    field. It fills in nothing: no task type gets an invented class count.
 
     Note:
         This class does not check that ``task_type`` has a head. That check
         happens later, in ``get_head_class``. Building a config for one of
-        the 43 unsupported task types succeeds; creating its head raises.
+        the 43 task types with no head succeeds; creating its head raises.
 
     Example:
         >>> config = VLMTaskConfig(
         ...     name="caption",
-        ...     task_type=VLMTaskType.IMAGE_CAPTIONING,
+        ...     task_type="image_captioning",
+        ...     vocab_size=50257,
         ... )
-        >>> config.fusion_hidden_size
-        768
+        >>> config.task_type
+        VLMTaskType.IMAGE_CAPTIONING
 
     :param name: Unique identifier for the task. Multi-task heads key their
-        sub-heads on it.
+        sub-heads on it, and the head's layer name is ``<name>_head``.
     :type name: str
-    :param task_type: Which VLM task this head serves.
-    :type task_type: VLMTaskType
-    :param vocab_size: Size of the text vocabulary.
-    :type vocab_size: int
-    :param max_text_length: Maximum text sequence length in tokens.
-    :type max_text_length: int
-    :param hidden_size: Hidden dimension of the task head. ``None`` means
-        take the larger of the two encoder dimensions.
-    :type hidden_size: Optional[int]
-    :param vision_hidden_size: Hidden dimension of the vision encoder.
-    :type vision_hidden_size: Optional[int]
-    :param text_hidden_size: Hidden dimension of the text encoder.
-    :type text_hidden_size: Optional[int]
-    :param fusion_hidden_size: Hidden dimension of the fusion stage.
-        ``None`` means derive it from ``fusion_type``.
-    :type fusion_hidden_size: Optional[int]
-    :param dropout_rate: Dropout rate used inside the head.
+    :param task_type: Which VLM task this head serves, as a member or its
+        string value (parsed by :meth:`VLMTaskType.from_string`).
+    :type task_type: Union[VLMTaskType, str]
+    :param vocab_size: Size of the text vocabulary the captioning head
+        projects to. ``None`` for every other head.
+    :type vocab_size: Optional[int]
+    :param hidden_size: Working width of the head.
+    :type hidden_size: int
+    :param dropout_rate: Dropout rate used inside the head, in ``[0, 1)``.
     :type dropout_rate: float
-    :param num_classes: Number of output classes. Only classification tasks
-        use it. ``None`` means unset, and is filled for three task types.
+    :param num_classes: Size of the VQA answer vocabulary. ``None`` for every
+        other head.
     :type num_classes: Optional[int]
-    :param use_cross_attention: Whether the head attends across modalities.
-    :type use_cross_attention: bool
-    :param fusion_type: How the vision and text streams are combined.
-    :type fusion_type: Literal["concat", "add", "multiply", "attention"]
-    :param pooling_type: How vision features are pooled to one vector.
-    :type pooling_type: Literal["avg", "max", "cls"]
-    :param use_task_specific_heads: Whether to add task-specific output
-        projections.
-    :type use_task_specific_heads: bool
-    :param temperature: Sampling temperature for generation tasks.
-    :type temperature: float
-    :param beam_size: Beam width for beam search. 1 means greedy decoding.
-    :type beam_size: int
-    :param loss_weight: Weight of this task's loss in multi-task training.
-    :type loss_weight: float
+    :raises TypeError: If ``task_type`` is neither a ``VLMTaskType`` nor a
+        string.
+    :raises ValueError: If ``task_type`` is an unknown string, ``name`` is not
+        a non-empty string, a count is not a positive integer, or
+        ``dropout_rate`` is outside ``[0, 1)``.
     """
 
     name: str
     task_type: VLMTaskType
-    vocab_size: int = 50000
-    max_text_length: int = 512
-    hidden_size: Optional[int] = 768
-    vision_hidden_size: Optional[int] = 768
-    text_hidden_size: Optional[int] = 768
-    fusion_hidden_size: Optional[int] = 768
+    vocab_size: Optional[int] = None
+    hidden_size: int = 768
     dropout_rate: float = 0.1
     num_classes: Optional[int] = None
-    use_cross_attention: bool = True
-    fusion_type: Literal["concat", "add", "multiply", "attention"] = "attention"
-    pooling_type: Literal["avg", "max", "cls"] = "avg"
-    use_task_specific_heads: bool = True
-    temperature: float = 1.0
-    beam_size: int = 1
-    loss_weight: float = 1.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """
-        Fill in the fields that were left at ``None``.
+        Parse a string ``task_type`` and validate every field.
 
-        ``hidden_size`` becomes the larger of ``vision_hidden_size`` and
-        ``text_hidden_size``. ``fusion_hidden_size`` becomes their sum when
-        ``fusion_type`` is ``"concat"``, because concatenation stacks the two
-        streams instead of mixing them. For every other fusion type it becomes
-        ``hidden_size``. ``num_classes`` is filled for three task
-        types only: 3 for ``MULTIMODAL_SENTIMENT_ANALYSIS``, 7 for
-        ``MULTIMODAL_EMOTION_RECOGNITION``, 3 for ``VISUAL_ENTAILMENT``.
-        Every other task keeps ``num_classes`` as it was.
-
-        The ``2`` fallback in the ``default_classes.get`` call is never
-        reached. The surrounding test already restricts the task type to the
-        same three keys the dict holds.
+        :return: None.
+        :rtype: None
         """
-        if self.hidden_size is None:
-            self.hidden_size = max(self.vision_hidden_size, self.text_hidden_size)
-
-        if self.fusion_hidden_size is None:
-            if self.fusion_type == "concat":
-                self.fusion_hidden_size = (
-                    self.vision_hidden_size + self.text_hidden_size
-                )
-            else:
-                self.fusion_hidden_size = self.hidden_size
-
-        classification_tasks = [
-            VLMTaskType.MULTIMODAL_SENTIMENT_ANALYSIS,
-            VLMTaskType.MULTIMODAL_EMOTION_RECOGNITION,
-            VLMTaskType.VISUAL_ENTAILMENT,
-        ]
-        if self.task_type in classification_tasks and self.num_classes is None:
-            default_classes = {
-                VLMTaskType.MULTIMODAL_SENTIMENT_ANALYSIS: 3,
-                VLMTaskType.MULTIMODAL_EMOTION_RECOGNITION: 7,
-                VLMTaskType.VISUAL_ENTAILMENT: 3,
-            }
-            self.num_classes = default_classes.get(self.task_type, 2)
+        # DECISION plan-2026-10-14T062616-81938e81/D-058
+        # Fill nothing in here. Do NOT restore a default `num_classes`: the
+        # old table filled 3/7/3 for three task types that have no head and
+        # never filled VQA, the one head that reads the field. Do NOT re-add
+        # the 11 deleted fields either (`fusion_type`, `pooling_type`,
+        # `temperature`, `loss_weight`, ...): no head read any of them, and
+        # the heads' real choices are their own arguments. See decisions.md
+        # D-058.
+        owner = type(self).__name__
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError(
+                f"{owner}: name must be a non-empty string, got {self.name!r}"
+            )
+        if isinstance(self.task_type, str):
+            self.task_type = VLMTaskType.from_string(self.task_type)
+        elif not isinstance(self.task_type, VLMTaskType):
+            raise TypeError(
+                f"{owner}: task_type must be a VLMTaskType or its string "
+                f"value, got {self.task_type!r}"
+            )
+        self.hidden_size = positive_int(self.hidden_size, "hidden_size", owner)
+        for field_name in ("vocab_size", "num_classes"):
+            value = getattr(self, field_name)
+            if value is not None:
+                setattr(self, field_name, positive_int(value, field_name, owner))
+        rate = self.dropout_rate
+        if (isinstance(rate, bool) or not isinstance(rate, numbers.Real)
+                or not 0.0 <= rate < 1.0):
+            raise ValueError(
+                f"{owner}: dropout_rate must be a number in [0, 1), got "
+                f"{rate!r}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -520,10 +480,9 @@ class VLMTaskConfiguration:
         MEDICAL_REPORT_GENERATION
 
     Note:
-        Five of those seven have no head. Only ``IMAGE_CAPTIONING`` reaches
-        a real head class, and ``DENSE_CAPTIONING`` and ``VISUAL_DIALOGUE``
-        are rejected placeholders. So ``requires_generation()`` can return
-        ``True`` for a set no factory can build.
+        Six of those seven have no head. Only ``IMAGE_CAPTIONING`` reaches
+        a head class. So ``requires_generation()`` can return ``True`` for a
+        set no factory can build.
 
     Example:
         >>> config = VLMTaskConfiguration([VLMTaskType.IMAGE_CAPTIONING])
