@@ -47,12 +47,8 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -520,37 +516,33 @@ class ConvNeXtV1(keras.Model):
         ``include_top=False``.
         """
         if self.include_top:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'dropout_rate': self.dropout_rate,
-                'normalization_type': 'layer_norm',
-                'activation_type': 'gelu',
-                'use_global_pooling': True,
-                'pooling_type': 'avg',  # GAP for ConvNeXt
-                'use_attention': False,
-                # The reference head: GAP, LayerNorm(eps=1e-6), Linear
-                # (facebookresearch/ConvNeXt{,-V2} models/convnext*.py:
-                # self.norm(x.mean([-2, -1])) then self.head). No hidden block.
-                # The factory's layer_norm epsilon is the reference's 1e-6.
-                'block_dims': (),
-                'pooled_normalization_type': 'layer_norm',
-                'kernel_initializer': self.HEAD_INITIALIZER,
-                'kernel_regularizer': self.kernel_regularizer,
-                # An unnamed head is named `classification_head` in whichever
-                # process creates it first and `classification_head_1`, `_2`, ...
-                # afterwards. Weight transfer matches layers BY NAME, so a
-                # checkpoint written by one process and loaded by another left
-                # the classifier at its initialization while the report still
-                # read as a success. Naming it makes the path stable.
-                'name': 'classification_head',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self._head_config_overrides
-            )
-
-            self.classification_head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
+            self.classification_head = build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    'num_classes': self.num_classes,
+                    'dropout_rate': self.dropout_rate,
+                    'normalization_type': 'layer_norm',
+                    'activation_type': 'gelu',
+                    'use_global_pooling': True,
+                    'pooling_type': 'avg',  # GAP for ConvNeXt
+                    'use_attention': False,
+                    # The reference head: GAP, LayerNorm(eps=1e-6), Linear
+                    # (facebookresearch/ConvNeXt{,-V2} models/convnext*.py:
+                    # self.norm(x.mean([-2, -1])) then self.head). No hidden block.
+                    # The factory's layer_norm epsilon is the reference's 1e-6.
+                    'block_dims': (),
+                    'pooled_normalization_type': 'layer_norm',
+                    'kernel_initializer': self.HEAD_INITIALIZER,
+                    'kernel_regularizer': self.kernel_regularizer,
+                    # An unnamed head is named `classification_head` in whichever
+                    # process creates it first and `classification_head_1`, `_2`, ...
+                    # afterwards. Weight transfer matches layers BY NAME, so a
+                    # checkpoint written by one process and loaded by another left
+                    # the classifier at its initialization while the report still
+                    # read as a success. Naming it makes the path stable.
+                    'name': 'classification_head',
+                },
+                self._head_config_overrides,
             )
         else:
             self.classification_head = None

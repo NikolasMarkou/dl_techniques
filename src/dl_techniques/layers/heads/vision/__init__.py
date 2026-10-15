@@ -1,7 +1,7 @@
 """Public API of the vision heads sub-package.
 
-Sixteen names are exported, from two modules. ``vision/factory.py``
-provides the eight head layers, three factory functions
+Eighteen names are exported, from two modules. ``vision/factory.py``
+provides the ten head layers, three factory functions
 (``create_vision_head``, ``create_multi_task_head``,
 ``create_enhancement_head``) and ``HeadConfiguration``.
 ``vision/task_types.py`` provides ``VisionTaskType``,
@@ -10,10 +10,13 @@ provides the eight head layers, three factory functions
 ``BaseVisionHead`` is exported but is not a usable head. It defines no
 ``call``. It builds ``attention`` when ``use_attention`` is set and ``ffn``
 when ``use_ffn`` is set, and nothing else. Each head normalizes and drops
-inside its own ``ConvBlock`` or ``DenseBlock``. Use one of the seven task
+inside its own ``ConvBlock`` or ``DenseBlock``. Use one of the nine task
 heads instead.
 ``get_task_suggestions`` and ``validate_task_combination`` are NOT exported;
-import them from ``.task_types`` when you need them.
+import them from ``.task_types`` when you need them. Nor are
+``VISION_HEAD_DISPATCH``, ``merge_head_config_overrides`` and
+``build_model_vision_head`` (the one-call head builder every vision model
+uses); import them from ``.factory``.
 
 Import from this package rather than from the submodule::
 
@@ -32,6 +35,8 @@ from .factory import (
     DetectionHead,
     SegmentationHead,
     DepthEstimationHead,
+    SurfaceNormalsHead,
+    OpticalFlowHead,
     ClassificationHead,
     InstanceSegmentationHead,
     MultiTaskHead,
@@ -53,6 +58,8 @@ __all__ = [
     "DetectionHead",
     "SegmentationHead",
     "DepthEstimationHead",
+    "SurfaceNormalsHead",
+    "OpticalFlowHead",
     "ClassificationHead",
     "InstanceSegmentationHead",
     "MultiTaskHead",

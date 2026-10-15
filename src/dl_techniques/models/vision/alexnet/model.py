@@ -81,11 +81,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from .spatial_guard import (
     STAGES,
     final_feature_extent,
@@ -413,27 +410,25 @@ class AlexNet(keras.Model):
         flat_features = 256 * feature_extent * feature_extent
         self._flat_features = flat_features
 
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'dropout_rate': self.dropout_rate,
-            # fc6 and fc7: Dense, ReLU, dropout, no normalization, 4096 wide
-            # each (paper Sec. 3.5; Caffe fc6/relu6/drop6, fc7/relu7/drop7).
-            'block_dims': (4096, 4096),
-            'normalization_type': None,
-            'activation_type': 'relu',
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
-            'use_global_pooling': False,  # AlexNet uses flatten, not pooling
-            'use_attention': False,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'dropout_rate': self.dropout_rate,
+                # fc6 and fc7: Dense, ReLU, dropout, no normalization, 4096 wide
+                # each (paper Sec. 3.5; Caffe fc6/relu6/drop6, fc7/relu7/drop7).
+                'block_dims': (4096, 4096),
+                'normalization_type': None,
+                'activation_type': 'relu',
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'use_global_pooling': False,  # AlexNet uses flatten, not pooling
+                'use_attention': False,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
+            },
         )
 
     def build(self, input_shape: Any) -> None:

@@ -42,7 +42,10 @@ from dl_techniques.layers.heads.vision.factory import (
     EnhancementHead,
     InstanceSegmentationHead,
     MultiTaskHead,
+    OpticalFlowHead,
     SegmentationHead,
+    SurfaceNormalsHead,
+    create_vision_head,
 )
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
@@ -61,6 +64,14 @@ def _multi_task(task_type_form: Callable[[VisionTaskType], Any]) -> MultiTaskHea
                     "use_skip_connections": False},
             "dep": {"task_type": task_type_form(VisionTaskType.DEPTH_ESTIMATION),
                     "hidden_dim": HIDDEN_DIM},
+            "nrm": {"task_type": task_type_form(VisionTaskType.SURFACE_NORMALS),
+                    "hidden_dim": HIDDEN_DIM},
+            "flw": {"task_type": task_type_form(VisionTaskType.OPTICAL_FLOW),
+                    "hidden_dim": HIDDEN_DIM},
+            "kpt": {"task_type": task_type_form(VisionTaskType.KEYPOINT_DETECTION),
+                    "num_classes": 5, "hidden_dim": HIDDEN_DIM},
+            "sr": {"task_type": task_type_form(VisionTaskType.SUPER_RESOLUTION),
+                   "hidden_dim": HIDDEN_DIM},
         },
         use_task_specific_attention=False,
     )
@@ -93,6 +104,10 @@ _SUBJECTS: Tuple[Tuple[str, Callable[[], keras.layers.Layer], Any], ...] = (
         hidden_dim=HIDDEN_DIM, decoder_style="dpt", dpt_dims=[16, 8],
         dpt_upsample_factor=4), SPATIAL),
     ("enhancement", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM), SPATIAL),
+    ("surface_normals", lambda: SurfaceNormalsHead(hidden_dim=HIDDEN_DIM), SPATIAL),
+    ("optical_flow", lambda: OpticalFlowHead(hidden_dim=HIDDEN_DIM), SPATIAL),
+    ("keypoint_detection", lambda: create_vision_head(
+        "keypoint_detection", num_classes=5, hidden_dim=HIDDEN_DIM), SPATIAL),
     ("multi_task_enum_task_types", lambda: _multi_task(lambda t: t), SPATIAL),
     ("multi_task_string_task_types", lambda: _multi_task(lambda t: t.value), SPATIAL),
 )

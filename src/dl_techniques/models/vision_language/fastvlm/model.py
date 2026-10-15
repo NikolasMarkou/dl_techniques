@@ -42,12 +42,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.factory import AttentionType
 from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, ConvolutionalStem
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
@@ -545,29 +541,28 @@ class FastVLM(keras.Model):
             kernel_initializer=self.kernel_initializer,
             name='conv_exp'
         )
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            'block_dims': (),
-            'normalization_type': None,
-            # The model's activation by name. No reference block applies it;
-            # a block added by an override does, and the head's activation
-            # factory refuses a name it cannot build.
-            'activation_type': getattr(
-                self.activation, '__name__', str(self.activation)),
-            'dropout_rate': 0.0,
-            'classifier_dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            # Deterministic layer name: by-name weight transfer depends on it.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
+        head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'block_dims': (),
+                'normalization_type': None,
+                # The model's activation by name. No reference block applies it;
+                # a block added by an override does, and the head's activation
+                # factory refuses a name it cannot build.
+                'activation_type': getattr(
+                    self.activation, '__name__', str(self.activation)),
+                'dropout_rate': 0.0,
+                'classifier_dropout_rate': self.dropout_rate,
+                'kernel_initializer': self.kernel_initializer,
+                # Deterministic layer name: by-name weight transfer depends on it.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
-        head = create_vision_head(VisionTaskType.CLASSIFICATION, **head_config)
         return conv_exp, head
 
     def call(

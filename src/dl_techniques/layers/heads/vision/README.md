@@ -1,9 +1,10 @@
 # `dl_techniques.layers.heads.vision`
 
 Task heads that sit on top of a vision backbone: they take the backbone's feature map and produce
-detections, masks, depth, class logits or an enhanced image. Two modules, sixteen exported names —
-eight head classes, three factory functions, `HeadConfiguration`, and the task-type vocabulary
-(`VisionTaskType`, `TaskConfiguration`, `CommonTaskConfigurations`, `parse_task_list`).
+detections, masks, depth, surface normals, optical flow, class logits or an enhanced image. Two
+modules, eighteen exported names — ten head classes, three factory functions, `HeadConfiguration`,
+and the task-type vocabulary (`VisionTaskType`, `TaskConfiguration`, `CommonTaskConfigurations`,
+`parse_task_list`).
 
 ```python
 from dl_techniques.layers.heads.vision import create_vision_head
@@ -12,25 +13,34 @@ head = create_vision_head('detection', num_classes=80, num_anchors=9)
 
 The wider facade `dl_techniques.layers.heads.create_head('vision', ...)` calls `create_vision_head`
 for you. `get_task_suggestions` and `validate_task_combination` are **not** exported from the
-package; import them from `.task_types`. Nor is `merge_head_config_overrides`, the helper a model
-uses to merge its `head_config_overrides` into its head config (it refuses `name`, `num_classes` and
-`task_type`, which the model owns); import it from `.factory`.
+package; import them from `.task_types`. Nor are three names in `.factory`:
+`VISION_HEAD_DISPATCH` (the one table from task type to head class, read by every helper here),
+`merge_head_config_overrides` (merges a model's `head_config_overrides` into its head config,
+refusing `name`, `num_classes` and `task_type`, which the model owns), and
+`build_model_vision_head(task_type, head_config, head_config_overrides=None)`, the one call a vision
+model builds its head with: the `HeadConfiguration` default preset, then the model's own keys, then
+the merged overrides, then `create_vision_head`. Every vision model with a head (19 sites, FastVLM
+included) uses it; a new one should too.
 
 ## Head dispatch: 10 of 37 task types reach a head
 
-`VisionTaskType` names 37 tasks. `create_vision_head` is the arbiter of which head class runs which;
-**the other 27 raise `ValueError("Unsupported task type: ...")`.**
+`VisionTaskType` names 37 tasks. `VISION_HEAD_DISPATCH` is the arbiter of which head class runs
+which; `create_vision_head`, `MultiTaskHead`, `create_enhancement_head` and `HeadConfiguration` all
+read it, and **the other 27 raise `ValueError("Unsupported task type: ...")`**. A per-task default
+in the table (keypoint `num_anchors=1, use_regression=False`, super-resolution `scale_factor=2`)
+yields to the caller's value. `VisionTaskType.get_output_types(task)` names exactly the keys of the
+head's output (`'output'` for segmentation's bare tensor) and raises for the 27.
 
 | Task type | Head built | Output |
 |---|---|---|
 | `detection` | `DetectionHead` | `{'classifications': (B, H, W, A*C), 'regressions': (B, H, W, A*4)}` |
-| `keypoint_detection` | `DetectionHead` | same two keys |
+| `keypoint_detection` | `DetectionHead(num_anchors=1, use_regression=False)` | `{'classifications': (B, H, W, C)}`, one keypoint logit vector per location (SuperPoint: `C=65`, 64 cell positions plus a dustbin) |
 | `segmentation` | `SegmentationHead` | one tensor `(B, H*4, W*4, num_classes)` of class logits (no dict, no softmax) |
 | `instance_segmentation` | `InstanceSegmentationHead` | detection's two keys plus `'instance_masks'`, mask logits (no sigmoid) |
 | `classification` | `ClassificationHead` | `{'logits': (B, C), 'probabilities': (B, C)}` |
 | `depth_estimation` | `DepthEstimationHead` | `{'depth': (B, 8H, 8W, 1), 'confidence': same}` |
-| `surface_normals` | `DepthEstimationHead(output_channels=3)` | same keys, 3 channels |
-| `optical_flow` | `DepthEstimationHead(output_channels=2)` | same keys, 2 channels |
+| `surface_normals` | `SurfaceNormalsHead` | `{'normals': (B, 8H, 8W, 3)}`, unit vectors (a linear conv, then L2-normalized per pixel) |
+| `optical_flow` | `OpticalFlowHead` | `{'flow': (B, 8H, 8W, 2)}`, signed, unbounded (a linear conv) |
 | `denoising` | `EnhancementHead` | `{'enhanced': (B, H, W, 3)}` |
 | `super_resolution` | `EnhancementHead(scale_factor=2)` | `{'enhanced': (B, 2H, 2W, 3)}` |
 
@@ -53,8 +63,17 @@ is descriptive only — the factory never reads it.
 | `InstanceSegmentationHead` | `num_classes` (required), `num_instances=100`, `mask_size=(28, 28)` |
 | `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'`, `block_dims=None` (hidden `DenseBlock` widths; `None` is `(hidden_dim, hidden_dim // 2)`, `()` is none), `pooled_normalization_type=None` (a norm on the pooled vector), `normalization_kwargs=None` (to every head norm), `classifier_dropout_rate=0.0` (a dropout on the classifier input), `block_use_bias=True` (the hidden blocks' Dense bias; `False` before a `batch_norm`), `kernel_initializer='glorot_uniform'`, `bias_initializer='zeros'`, `kernel_regularizer=None`, `bias_regularizer=None` (the last four reach every `Dense`, the classifier included) |
 | `DepthEstimationHead` | `output_channels=1`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract). Progressive only: `min_depth` (0.1), `max_depth` (100.0), `use_log_depth` (`True`). DPT only: `dpt_dims` (`[256, 128, 64, 32]`), `dpt_use_bias` (`False`), `dpt_activation` (`'relu'`), `dpt_output_activation` (`'linear'`), `dpt_upsample_factor` (16; a power of 2, at most `2 ** len(dpt_dims)`), `dpt_kernel_initializer` (`'he_normal'`, cloned per conv), `dpt_kernel_regularizer` (none). Each mode-specific argument defaults to `None`, meaning the value in parentheses in its own mode; the other mode refuses it with `ValueError` and stores `None`. The DPT mode also refuses `normalization_type` and `activation_type` (only the progressive `ConvBlock`s read them) |
+| `SurfaceNormalsHead`, `OpticalFlowHead` | none of their own: the `BaseVisionHead` options only. No `output_channels` (3 and 2 by definition; passing it raises `ValueError`). The decoder is the progressive depth decoder (`hidden_dim >= 8`), named `normals_*` / `flow_*` |
 | `EnhancementHead` | `output_channels=3`, `scale_factor=1`, `block_dims=None` (refinement `ConvBlock` widths; `None` is three at `hidden_dim`, `()` is none, so the head is ONE 3x3 conv: the tail conv SCUNet and DarkIR use, with the model applying any skip or residual), `output_use_bias=True` (the output conv's bias; SCUNet's tail has none) |
-| `MultiTaskHead` | `task_configs` (required dict), `shared_backbone_dim=256`, `use_task_specific_attention=True` |
+| `MultiTaskHead` | `task_configs` (required dict; stored as a copy by Keras' attribute tracking, nested dicts included), `shared_backbone_dim=256`, `use_task_specific_attention=True` |
+
+Every count (`hidden_dim`, `num_classes`, `num_anchors`, `bbox_dims`, `num_instances`,
+`output_channels`, `scale_factor`) must be a positive integer (a numpy integer is accepted), or the
+constructor raises `ValueError` naming it. So does a `hidden_dim` too small for the widths a head
+halves it into: 8 for the progressive decoders and for a `SegmentationHead` that upsamples, 4 for a
+`SegmentationHead` at `upsampling_factor=1`, 2 for a `ClassificationHead` with the default
+`block_dims`. `ClassificationHead` refuses a `pooling_type` other than `'avg'`, `'max'` and
+`'cls_token'`.
 
 Every head also takes the shared `BaseVisionHead` options:
 
@@ -63,7 +82,7 @@ Every head also takes the shared `BaseVisionHead` options:
 | `hidden_dim` | `256` | Internal width. |
 | `normalization_type` | `'layer_norm'` | Any `norms/` factory key. |
 | `activation_type` | `'gelu'` | Any `activations/` factory key. |
-| `dropout_rate` | `0.1` | `0.0` and refused above 0 in `EnhancementHead`, which applies no dropout. |
+| `dropout_rate` | `0.1` | Reaches the class-score blocks and the attention/FFN. `0.0` and refused above 0 in `EnhancementHead`, which applies no dropout. `0.0` in the depth, normals and flow heads, whose decoders take none (as in DPT, RAFT, PWC-Net), and refused above 0 there unless `use_attention` or `use_ffn` is on. The instance-mask branch takes none either (Mask R-CNN); there it reaches the detection branch. |
 | `use_attention` | `False` | See the gotchas — the default `attention_type` needs 3D input. |
 | `attention_type` | `'multi_head'` | Any `ATTENTION_REGISTRY` key. |
 | `use_ffn` | `True` | `False` and refused in `ClassificationHead` and `EnhancementHead`. |
@@ -71,7 +90,8 @@ Every head also takes the shared `BaseVisionHead` options:
 | `ffn_expansion_factor` | `4` | |
 
 `HeadConfiguration` supplies presets for those: `get_default_config(task)` and
-`get_efficient_config(task)`, each returning a plain dict you can splat into a head. Both apply
+`get_efficient_config(task)`, each returning a plain dict you can splat into a head, for each of the
+10 task types with a head (a task with no head raises `ValueError`). Both apply
 `PRESET_FIXED_KEYS` last, so a classification preset carries `use_ffn=False` and a denoising or
 super-resolution preset `use_attention=False, use_ffn=False, dropout_rate=0.0`. A third preset,
 `get_high_performance_config`, was deleted on 2026-10-14: its `attention_type='differential'`
@@ -88,7 +108,11 @@ returns `'probabilities' = keras.ops.softmax('logits')`, computed in the compute
 softmax under `mixed_float16`, as in the NLP `TextClassificationHead`).
 
 The one squashed output is the progressive `DepthEstimationHead`'s sigmoid, a range map the depth is
-scaled from; its `'confidence'` is that sigmoid output. The DPT decoder (`decoder_style='dpt'`) is
+scaled from; its `'confidence'` is that sigmoid output. Surface normals and optical flow are not
+range maps: `SurfaceNormalsHead` L2-normalizes a linear conv per pixel (Bae et al. 2021,
+`norm_normalize`; DSINE, `F.normalize`), in float32 under a float16 policy, and `OpticalFlowHead`
+returns a linear conv (RAFT `FlowHead`, PWC-Net `predict_flow`). Until 2026-10-15 both were a
+`DepthEstimationHead` whose every component was squeezed into `[0.1, 100]`. The DPT decoder (`decoder_style='dpt'`) is
 different: `'depth'` is `dpt_output_conv` under `dpt_output_activation` (`'linear'` by default;
 DepthAnything passes `'relu'`, the reference Depth Anything head's final ReLU), there is no range
 scaling, and `'confidence'` is the last decoder stage's features, `dpt_dims[-1]` channels wide.
@@ -120,7 +144,8 @@ Heads consume a **4D feature map** `(B, H, W, C)`. The exceptions take a ViT-sty
 `SegmentationHead` with `use_skip_connections=True` also accepts a list `[*skips, features]` — the
 highest-level map goes last, and the skips are concatenated deepest-first, one after each refinement
 block. The refinement blocks keep the resolution and the upsampling runs only after them, so every
-skip must have the feature map's own height and width.
+skip must have the feature map's own height and width; a skip of another known height or width is
+refused with `ValueError` before the concatenation.
 
 ```python
 import keras
@@ -161,7 +186,7 @@ cheap_det = create_vision_head('detection', **cfg)
 
 - **`BaseVisionHead` is exported but is not a usable head.** It defines no `call`. It builds
   `attention` and `ffn` when their flags ask, and nothing else; each head normalizes and drops
-  inside its own `ConvBlock` / `DenseBlock`. Use one of the seven task heads.
+  inside its own `ConvBlock` / `DenseBlock`. Use one of the nine task heads.
 - **`ClassificationHead(use_ffn=True)` and `EnhancementHead(use_attention=True, use_ffn=True or
   dropout_rate > 0)` raise `ValueError`.** Their `call` never runs those layers, so the arguments
   default to off there and any other value is refused rather than stored and ignored.
@@ -183,11 +208,19 @@ cheap_det = create_vision_head('detection', **cfg)
   dicts were also forwarded to `MultiTaskHead`, which refused them, so these forms built only
   depth tasks.)
 - **`MultiTaskHead` accepts `task_type` as a `VisionTaskType` member or its string value**, and
-  `get_config` stores the string, so a model holding it survives a `.keras` round trip.
+  `get_config` stores the string, so a model holding it survives a `.keras` round trip. It builds
+  each head through `create_vision_head`, so it serves the same 10 task types; another raises
+  `ValueError` naming the entry. A dict input needs each task's name or a `'shared'` entry; one with
+  neither raises `ValueError` naming the task. `CommonTaskConfigurations` holds 22 presets, each
+  buildable this way (four that named a task with no head were deleted on 2026-10-15, and
+  `IMAGE_ENHANCEMENT` lost `DEHAZE`).
+- **`create_enhancement_head` builds enhancement heads only.** It takes `'denoising'` or
+  `'super_resolution'` (enum or string; a string used to skip the x2 default) and refuses any other
+  task type with `ValueError`.
 - **Detection outputs are per-cell, not per-anchor-row.** `classifications` is
   `(B, H, W, num_anchors * num_classes)` and `regressions` is `(B, H, W, num_anchors * bbox_dims)`;
   reshaping to `(B, num_anchors, num_classes)` is the caller's job.
 - **`SegmentationHead` returns a bare tensor**, not a dict, unlike every other head here.
-- **Depth-family heads upsample by 8x** with the default progressive decoder — a `(2, 16, 16, 64)`
+- **Depth, normals and flow heads upsample by 8x** with the progressive decoder — a `(2, 16, 16, 64)`
   input gives `(2, 128, 128, C)` — and by `dpt_upsample_factor` (16 by default) with the DPT
   decoder. Size your backbone stride accordingly.

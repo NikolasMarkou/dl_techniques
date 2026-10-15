@@ -1,16 +1,16 @@
 """Vision task heads, and the factory that picks one.
 
-This module holds eight layer classes and five module-level helpers. The
-classes turn a backbone feature map into task predictions. The helpers pick a
-class and configure it.
+This module holds ten layer classes, the dispatch table and six public
+helpers. The classes turn a backbone feature map into task predictions. The
+helpers pick a class and configure it.
 
 The heads take a feature map, not an image. Nothing here knows which backbone
 produced it, so the same head works on a ResNet, a ViT or a ConvNeXt stage.
 
 Classes
 -------
-* :class:`BaseVisionHead` -- shared construction. Six heads inherit from it.
-  It has no ``call``.
+* :class:`BaseVisionHead` -- shared construction. Eight heads inherit from
+  it. It has no ``call``.
 * :class:`DetectionHead` -- class scores and box offsets, per anchor.
 * :class:`SegmentationHead` -- one map of per-pixel class logits, upsampled
   towards input size. The only head here that returns a bare tensor.
@@ -21,6 +21,10 @@ Classes
 * :class:`InstanceSegmentationHead` -- detection outputs plus per-instance
   mask logits.
 * :class:`EnhancementHead` -- a restored or upscaled image.
+* :class:`SurfaceNormalsHead` -- a unit surface normal per pixel (a linear
+  conv, then L2-normalized).
+* :class:`OpticalFlowHead` -- a signed 2D displacement per pixel (a linear
+  conv).
 * :class:`MultiTaskHead` -- several heads behind one layer. It does not
   inherit from :class:`BaseVisionHead`.
 
@@ -29,21 +33,33 @@ masks and the detection scores are logits; compile with ``from_logits=True``
 or apply ``softmax``/``sigmoid`` yourself. The one output squashed inside a
 head is the progressive :class:`DepthEstimationHead`'s sigmoid, a range map
 that the depth is scaled from, not a class score. Its DPT decoder applies
-``dpt_output_activation`` instead (``'linear'`` by default).
+``dpt_output_activation`` instead (``'linear'`` by default). The normals are
+unit vectors and the flow is unbounded and signed.
+
+Every count argument (``hidden_dim``, ``num_classes``, ``num_anchors``,
+``bbox_dims``, ``num_instances``, ``output_channels``, ``scale_factor``) is
+refused at construction, by name, unless it is a positive integer, and so is
+a ``hidden_dim`` too small for the widths a head halves it into.
 
 Helpers
 -------
+* :data:`VISION_HEAD_DISPATCH` -- the one table from task type to head
+  class and per-task defaults, read by every helper below.
 * :func:`create_vision_head` -- task type to head. It handles 10 of the 37
   ``VisionTaskType`` members and raises ``ValueError`` for the other 27.
-* :func:`create_enhancement_head` -- build an :class:`EnhancementHead`, with
-  a default scale factor for super-resolution.
+* :func:`create_enhancement_head` -- build an :class:`EnhancementHead` for
+  denoising or super-resolution (``scale_factor=2`` by default), refusing
+  any other task type.
 * :func:`create_multi_task_head` -- build a :class:`MultiTaskHead` from any
   of three configuration formats.
-* :class:`HeadConfiguration` -- two keyword-argument presets per task type:
-  default and efficient.
+* :class:`HeadConfiguration` -- two keyword-argument presets per task type
+  with a head: default and efficient.
 * :func:`merge_head_config_overrides` -- merge a model's
   ``head_config_overrides`` into its head config, refusing the keys the model
   owns (``name``, ``num_classes``, ``task_type``).
+* :func:`build_model_vision_head` -- a model's head in one call: the
+  preset, the model's keys, the caller's overrides, then
+  :func:`create_vision_head`. Every vision model that owns a head uses it.
 
 The task types and the configuration objects live in
 ``vision/task_types.py``. The ``VisionTaskType`` docstring there lists the 10
@@ -63,9 +79,11 @@ is ``softmax(out['logits'])``. Compile a model that returns the logits with
 ``from_logits=True``.
 """
 
+import numbers
+
 import keras
-from keras import layers, ops
-from typing import Dict, List, Optional, Union, Tuple, Any, Literal, Sequence
+from typing import (
+    Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -179,6 +197,251 @@ def _validated_block_dims(
     return block_dims
 
 
+def _positive_int(value: Any, name: str, owner: str) -> int:
+    """
+    Check that a count argument is a positive integer, and return it as one.
+
+    Interface contract, shared by every head's count arguments
+    (``hidden_dim``, ``num_classes``, ``num_anchors``, ``bbox_dims``,
+    ``num_instances``, ``output_channels``, ``scale_factor``):
+
+    * An ``int`` above 0, or a numpy integer above 0 (a count read from an
+      array or a ``.npy`` config), is returned as a plain ``int``.
+    * Anything else raises ``ValueError`` naming ``owner`` and ``name``:
+      ``bool`` (an ``int`` subclass, so ``True`` would build a one-class
+      layer), a float such as ``2.5``, a string, ``0`` and negatives.
+
+    Call it in ``__init__`` before any layer is created, so the refusal names
+    the argument instead of surfacing later as a ``Conv2D`` ``filters=0``.
+
+    :param value: The caller's value.
+    :type value: Any
+    :param name: Argument name, for the error message.
+    :type name: str
+    :param owner: Head class name, for the error message.
+    :type owner: str
+    :return: ``value`` as an ``int``.
+    :rtype: int
+    :raises ValueError: If ``value`` is not a positive integer.
+    """
+    if (isinstance(value, bool) or not isinstance(value, numbers.Integral)
+            or value <= 0):
+        raise ValueError(
+            f"{owner}: {name} must be a positive integer, got {value!r}"
+        )
+    return int(value)
+
+
+def _require_hidden_dim_at_least(
+        hidden_dim: int,
+        minimum: int,
+        owner: str,
+        reason: str
+) -> None:
+    """
+    Refuse a ``hidden_dim`` too small for the widths a head derives from it.
+
+    Interface contract, shared by the heads that halve ``hidden_dim``
+    (:class:`SegmentationHead`, :class:`ClassificationHead`, and the
+    progressive decoder of :class:`DepthEstimationHead`,
+    :class:`SurfaceNormalsHead` and :class:`OpticalFlowHead`):
+
+    * ``hidden_dim >= minimum`` returns ``None``.
+    * Otherwise ``ValueError`` names ``owner``, ``hidden_dim``, ``minimum``
+      and ``reason`` (the halving that would reach 0), instead of the
+      ``filters=0``/``units=0`` error the derived layer raised.
+
+    :param hidden_dim: The head's validated ``hidden_dim``.
+    :type hidden_dim: int
+    :param minimum: Smallest width every derived layer can take.
+    :type minimum: int
+    :param owner: Head class name, for the error message.
+    :type owner: str
+    :param reason: Which derived width needs the minimum.
+    :type reason: str
+    :return: None.
+    :rtype: None
+    :raises ValueError: If ``hidden_dim < minimum``.
+    """
+    if hidden_dim < minimum:
+        raise ValueError(
+            f"{owner} needs hidden_dim >= {minimum}, got {hidden_dim}: "
+            f"{reason}"
+        )
+
+
+def _refuse_dropout_no_layer_applies(
+        kwargs: Dict[str, Any],
+        head_name: str
+) -> None:
+    """
+    Default ``dropout_rate`` to 0.0 for a head whose decoder applies no
+    dropout, and refuse a positive rate that no layer would read.
+
+    Interface contract, shared by :class:`DepthEstimationHead`,
+    :class:`SurfaceNormalsHead` and :class:`OpticalFlowHead`:
+
+    * ``kwargs`` is the head's ``**kwargs`` before they reach
+      :class:`BaseVisionHead`, with ``use_attention`` and ``use_ffn`` already
+      defaulted. An absent ``dropout_rate`` is set to ``0.0`` in place.
+    * A positive rate is accepted only with ``use_attention`` or ``use_ffn``
+      on: it is then the attention/FFN dropout. Otherwise ``ValueError``
+      names the head and the argument.
+    * Returns ``None``.
+
+    :param kwargs: The head's keyword arguments, mutated in place.
+    :type kwargs: Dict[str, Any]
+    :param head_name: Class name, for the error message.
+    :type head_name: str
+    :return: None.
+    :rtype: None
+    :raises ValueError: If a positive ``dropout_rate`` would reach no layer.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-050
+    # Do NOT hand dropout_rate to the decoder ConvBlocks to make it "live":
+    # no reference decoder for these tasks has a dropout (DPT/MiDaS depth,
+    # Omnidata normals, RAFT FlowHead, PWC-Net predict_flow, the Mask R-CNN
+    # mask branch). Do NOT go back to storing the base default 0.1 either: it
+    # reached no layer with attention and the FFN off. See decisions.md D-050.
+    rate = kwargs.setdefault('dropout_rate', 0.0)
+    if rate and not (kwargs.get('use_attention') or kwargs.get('use_ffn')):
+        raise ValueError(
+            f"{head_name} applies dropout_rate={rate!r} nowhere: its decoder "
+            f"takes no dropout, and it reaches only the attention or FFN "
+            f"stage, both off here. Pass dropout_rate=0.0, or turn on "
+            f"use_attention or use_ffn."
+        )
+
+
+# ---------------------------------------------------------------------
+# Progressive decoder, shared by the dense-regression heads
+# ---------------------------------------------------------------------
+
+#: Doublings of the progressive decoder: three stride-2 transposed convs, so
+#: the output is 8x the input, and the width halves three times from
+#: ``hidden_dim`` (``hidden_dim // 8`` channels at the end).
+_PROGRESSIVE_DOUBLINGS = 3
+
+
+def _create_progressive_decoder(
+        head: "BaseVisionHead",
+        prefix: str
+) -> Tuple[List[ConvBlock], List[keras.layers.Conv2DTranspose]]:
+    """
+    Create the progressive decoder: three ``ConvBlock`` then stride-2
+    ``Conv2DTranspose`` stages, each halving the width.
+
+    Interface contract, shared by :class:`DepthEstimationHead` (progressive
+    mode, ``prefix='depth'``) and :class:`SurfaceNormalsHead` /
+    :class:`OpticalFlowHead` (``prefix`` = their output key):
+
+    * Stage ``i`` is ``ConvBlock(hidden_dim // 2**i)`` named
+      ``f'{prefix}_conv_{i}'``, then ``Conv2DTranspose(hidden_dim //
+      2**(i+1), 3, strides=2)`` named ``f'{prefix}_upsample_{i}'``. The
+      ``ConvBlock`` s take the head's ``normalization_type`` and
+      ``activation_type`` and no dropout (anchor D-050).
+    * Returns two FLAT lists paired by index (anchor D-027: a nested list is
+      not saved by Keras).
+    * Raises ``ValueError`` when ``hidden_dim < 8``, the width the last
+      transposed conv needs.
+
+    :param head: The head that owns the decoder; its ``hidden_dim``,
+        ``normalization_type`` and ``activation_type`` are read.
+    :type head: BaseVisionHead
+    :param prefix: Layer-name prefix.
+    :type prefix: str
+    :return: ``(conv_blocks, upsamples)``.
+    :rtype: Tuple[List[ConvBlock], List[keras.layers.Conv2DTranspose]]
+    :raises ValueError: If ``hidden_dim`` is below 8.
+    """
+    _require_hidden_dim_at_least(
+        head.hidden_dim, 2 ** _PROGRESSIVE_DOUBLINGS, type(head).__name__,
+        "the progressive decoder halves it three times, and its last "
+        "transposed conv takes hidden_dim // 8 channels")
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-027
+    # Two FLAT lists, paired by index. Do NOT nest them back into a list of
+    # [conv, upsample] pairs: Keras does not track a layer inside a nested
+    # list for saving, so a .keras round trip silently restored none of these
+    # six kernels (measured: the reloaded depth differed by up to 17.3 with no
+    # warning). See decisions.md D-027.
+    conv_blocks: List[ConvBlock] = []
+    upsamples: List[keras.layers.Conv2DTranspose] = []
+    channels = head.hidden_dim
+    for i in range(_PROGRESSIVE_DOUBLINGS):
+        conv_blocks.append(
+            ConvBlock(
+                filters=channels,
+                kernel_size=3,
+                normalization_type=head.normalization_type,
+                activation_type=head.activation_type,
+                name=f'{prefix}_conv_{i}'
+            )
+        )
+        upsamples.append(
+            keras.layers.Conv2DTranspose(
+                filters=channels // 2,
+                kernel_size=3,
+                strides=2,
+                padding='same',
+                name=f'{prefix}_upsample_{i}'
+            )
+        )
+        channels = channels // 2
+    return conv_blocks, upsamples
+
+
+def _build_progressive_decoder(
+        conv_blocks: List[ConvBlock],
+        upsamples: List[keras.layers.Conv2DTranspose],
+        shape: Tuple[Optional[int], ...]
+) -> Tuple[Optional[int], ...]:
+    """
+    Build the decoder from :func:`_create_progressive_decoder` stage by stage.
+
+    :param conv_blocks: The decoder's ``ConvBlock`` s.
+    :type conv_blocks: List[ConvBlock]
+    :param upsamples: The decoder's transposed convs, paired by index.
+    :type upsamples: List[keras.layers.Conv2DTranspose]
+    :param shape: The decoder's input shape.
+    :type shape: Tuple[Optional[int], ...]
+    :return: The decoder's output shape.
+    :rtype: Tuple[Optional[int], ...]
+    """
+    for conv_block, upsample in zip(conv_blocks, upsamples):
+        conv_block.build(shape)
+        shape = tuple(conv_block.compute_output_shape(shape))
+        upsample.build(shape)
+        shape = tuple(upsample.compute_output_shape(shape))
+    return shape
+
+
+def _run_progressive_decoder(
+        conv_blocks: List[ConvBlock],
+        upsamples: List[keras.layers.Conv2DTranspose],
+        x: keras.KerasTensor,
+        training: Optional[bool]
+) -> keras.KerasTensor:
+    """
+    Apply the decoder from :func:`_create_progressive_decoder`.
+
+    :param conv_blocks: The decoder's ``ConvBlock`` s.
+    :type conv_blocks: List[ConvBlock]
+    :param upsamples: The decoder's transposed convs, paired by index.
+    :type upsamples: List[keras.layers.Conv2DTranspose]
+    :param x: The decoder's input.
+    :type x: keras.KerasTensor
+    :param training: Keras training flag, forwarded to each ``ConvBlock``.
+    :type training: Optional[bool]
+    :return: The decoder's output, 8x the input resolution.
+    :rtype: keras.KerasTensor
+    """
+    for conv_block, upsample in zip(conv_blocks, upsamples):
+        x = conv_block(x, training=training)
+        x = upsample(x)
+    return x
+
+
 # ---------------------------------------------------------------------
 # Base Head Class
 # ---------------------------------------------------------------------
@@ -225,8 +488,12 @@ class BaseVisionHead(keras.layers.Layer):
         the subclass task layers
 
     There is no common normalization or dropout stage. Each head normalizes
-    and drops inside its own ``ConvBlock`` or ``DenseBlock``, and those read
-    ``normalization_type`` and ``dropout_rate`` from this class.
+    inside its own ``ConvBlock`` or ``DenseBlock``, which read
+    ``normalization_type`` from this class. ``dropout_rate`` reaches the
+    class-score blocks (detection, segmentation refine, classification) and
+    the attention/FFN stage; the dense-regression decoders (depth, normals,
+    flow, the instance-mask branch, enhancement) take no dropout, as their
+    reference decoders have none.
 
     Two heads run less than this picture. :class:`ClassificationHead` runs
     ``attention`` only and refuses ``use_ffn=True``. :class:`EnhancementHead`
@@ -234,16 +501,17 @@ class BaseVisionHead(keras.layers.Layer):
     ``use_ffn=True`` and ``dropout_rate > 0``. :class:`MultiTaskHead` does not inherit from this class at all. Read the
     subclass diagram, not this one, for what a given head runs.
 
-    :param hidden_dim: Working width of the head. The sub-blocks and the FFN
-        use it as their channel count.
+    :param hidden_dim: Working width of the head, a positive integer. The
+        sub-blocks and the FFN use it as their channel count.
     :type hidden_dim: int
     :param normalization_type: Which registered normalization to build, and
         the value handed to each sub-block.
     :type normalization_type: NormalizationType
     :param activation_type: Activation each sub-block uses.
     :type activation_type: ActivationType
-    :param dropout_rate: Dropout rate handed to the sub-blocks, the FFN and
-        the attention layer.
+    :param dropout_rate: Dropout rate handed to the class-score sub-blocks,
+        the FFN and the attention layer. The dense-regression heads default
+        it to 0.0 and refuse a rate no layer would apply.
     :type dropout_rate: float
     :param use_attention: Whether to build an attention layer.
     :type use_attention: bool
@@ -310,7 +578,8 @@ class BaseVisionHead(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Store configuration
-        self.hidden_dim = hidden_dim
+        self.hidden_dim = _positive_int(
+            hidden_dim, 'hidden_dim', type(self).__name__)
         self.normalization_type = normalization_type
         self.activation_type = activation_type
         self.dropout_rate = dropout_rate
@@ -548,7 +817,8 @@ class DetectionHead(BaseVisionHead):
 
     :class:`InstanceSegmentationHead` holds one of these as a sub-layer.
     :func:`create_vision_head` also returns this class for keypoint
-    detection, unchanged.
+    detection, defaulting ``num_anchors=1`` and ``use_regression=False``: one
+    keypoint score vector per location, as SuperPoint's detector head.
 
     Input shape:
         ``(batch, height, width, channels)`` for spatial format, or
@@ -613,12 +883,15 @@ class DetectionHead(BaseVisionHead):
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If ``num_classes``, ``num_anchors`` or
+            ``bbox_dims`` is not a positive integer.
         """
         super().__init__(**kwargs)
 
-        self.num_classes = num_classes
-        self.num_anchors = num_anchors
-        self.bbox_dims = bbox_dims
+        owner = type(self).__name__
+        self.num_classes = _positive_int(num_classes, 'num_classes', owner)
+        self.num_anchors = _positive_int(num_anchors, 'num_anchors', owner)
+        self.bbox_dims = _positive_int(bbox_dims, 'bbox_dims', owner)
         self.input_format = input_format
         self.patch_grid_size = patch_grid_size
         self.use_regression = use_regression
@@ -650,7 +923,7 @@ class DetectionHead(BaseVisionHead):
             name="cls_conv"
         )
 
-        self.cls_head = layers.Conv2D(
+        self.cls_head = keras.layers.Conv2D(
             filters=self.num_anchors * self.num_classes,
             kernel_size=1,
             padding='same',
@@ -668,7 +941,7 @@ class DetectionHead(BaseVisionHead):
                 name="reg_conv"
             )
 
-            self.reg_head = layers.Conv2D(
+            self.reg_head = keras.layers.Conv2D(
                 filters=self.num_anchors * self.bbox_dims,
                 kernel_size=1,
                 padding='same',
@@ -760,9 +1033,9 @@ class DetectionHead(BaseVisionHead):
             # Now reshape to spatial for conv branches
             if self.patch_grid_size is None:
                 raise ValueError("patch_grid_size must be set for sequence input format")
-            batch_size = ops.shape(x)[0]
+            batch_size = keras.ops.shape(x)[0]
             h, w = self.patch_grid_size
-            x = ops.reshape(x, (batch_size, h, w, -1))
+            x = keras.ops.reshape(x, (batch_size, h, w, -1))
         else:
             # Spatial input: apply common processing on spatial features
             if self.use_attention:
@@ -989,7 +1262,8 @@ class SegmentationHead(BaseVisionHead):
         """
         super().__init__(**kwargs)
 
-        self.num_classes = num_classes
+        self.num_classes = _positive_int(
+            num_classes, 'num_classes', type(self).__name__)
         self.upsampling_factor = upsampling_factor
         self.use_skip_connections = use_skip_connections
         self.skip_channel_mode = skip_channel_mode
@@ -1017,6 +1291,18 @@ class SegmentationHead(BaseVisionHead):
                 f"got {upsampling_factor!r}"
             )
         self._num_upsamples = upsampling_factor.bit_length() - 1
+
+        # Every upsample conv is created at hidden_dim // 8 channels (explicit
+        # mode resizes it in build), and in auto mode the refine blocks take
+        # hidden_dim, // 2 and // 4.
+        if self._num_upsamples:
+            _require_hidden_dim_at_least(
+                self.hidden_dim, 8, type(self).__name__,
+                "its upsample convs are created at hidden_dim // 8 channels")
+        elif self.skip_channel_mode != "explicit":
+            _require_hidden_dim_at_least(
+                self.hidden_dim, 4, type(self).__name__,
+                "its third refine block takes hidden_dim // 4 channels")
 
         self._create_segmentation_layers()
 
@@ -1086,7 +1372,7 @@ class SegmentationHead(BaseVisionHead):
                 filters = self.hidden_dim // 8
             
             self.upsample_layers.append(
-                layers.Conv2DTranspose(
+                keras.layers.Conv2DTranspose(
                     filters=filters if filters else self.hidden_dim // 8,
                     kernel_size=3,
                     strides=2,
@@ -1103,7 +1389,7 @@ class SegmentationHead(BaseVisionHead):
         # from_logits=False one hides the probabilities inside the head where
         # no consumer can choose. Range maps (the depth sigmoid) are the only
         # squashed outputs in this module. See decisions.md D-003.
-        self.seg_head = layers.Conv2D(
+        self.seg_head = keras.layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
             padding='same',
@@ -1162,6 +1448,7 @@ class SegmentationHead(BaseVisionHead):
         else:
             base_shape = input_shape[-1] if shape_list else input_shape
             skip_shapes = []
+        self._check_skip_resolution(base_shape, skip_shapes)
 
         # In explicit mode, validate skip channels
         if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
@@ -1246,6 +1533,8 @@ class SegmentationHead(BaseVisionHead):
         else:
             x_main = x if not isinstance(x, list) else x[-1]
             skip_features = []
+        self._check_skip_resolution(
+            tuple(x_main.shape), [tuple(s.shape) for s in skip_features])
 
         # Apply common processing
         if self.use_attention:
@@ -1259,7 +1548,7 @@ class SegmentationHead(BaseVisionHead):
 
             # Add skip connections if available
             if self.use_skip_connections and i < len(skip_features):
-                x_main = ops.concatenate([x_main, skip_features[i]], axis=-1)
+                x_main = keras.ops.concatenate([x_main, skip_features[i]], axis=-1)
 
         # Upsample to original resolution
         for upsample_layer in self.upsample_layers:
@@ -1270,11 +1559,44 @@ class SegmentationHead(BaseVisionHead):
 
         return seg_output
 
+    @staticmethod
+    def _check_skip_resolution(
+            base_shape: Tuple[Optional[int], ...],
+            skip_shapes: List[Tuple[Optional[int], ...]]
+    ) -> None:
+        """
+        Refuse a skip whose height or width differs from the feature map's.
+
+        The refine blocks keep the resolution and the upsampling runs only
+        after them, so each skip is concatenated at the feature map's own
+        height and width. A dimension unknown on either side (``None``) is
+        not checked here.
+
+        :param base_shape: Shape of the highest-level feature map.
+        :type base_shape: Tuple[Optional[int], ...]
+        :param skip_shapes: Shapes of the skips, in concatenation order.
+        :type skip_shapes: List[Tuple[Optional[int], ...]]
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a known skip height or width differs.
+        """
+        base_hw = tuple(base_shape[1:3])
+        for i, skip_shape in enumerate(skip_shapes):
+            skip_hw = tuple(skip_shape[1:3])
+            if any(a is not None and b is not None and a != b
+                   for a, b in zip(base_hw, skip_hw)):
+                raise ValueError(
+                    f"SegmentationHead skip {i} is {skip_hw}, but every skip "
+                    f"must have the feature map's height and width "
+                    f"{base_hw}: the skips are concatenated after the refine "
+                    f"blocks, before any upsampling."
+                )
+
     def _reshape_sequence_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Reshape sequence (B, N, D) to spatial (B, H, W, D)."""
-        batch_size = ops.shape(x)[0]
+        batch_size = keras.ops.shape(x)[0]
         h, w = self.patch_grid_size
-        return ops.reshape(x, (batch_size, h, w, -1))
+        return keras.ops.reshape(x, (batch_size, h, w, -1))
 
     def compute_output_shape(
             self,
@@ -1426,10 +1748,14 @@ class DepthEstimationHead(BaseVisionHead):
     log(min_depth))``. Otherwise it is read linearly: ``x * (max_depth -
     min_depth) + min_depth``.
 
-    :func:`create_vision_head` reuses this class for two other tasks. Surface
-    normals get ``output_channels=3`` and optical flow gets
-    ``output_channels=2``. Neither changes the scaling, so a flow vector
-    comes out squeezed into the depth range.
+    Surface normals and optical flow have heads of their own,
+    :class:`SurfaceNormalsHead` and :class:`OpticalFlowHead`: they share
+    this progressive decoder, but neither output is a depth range.
+
+    Neither decoder applies dropout (the DPT/MiDaS depth head has none), so
+    ``dropout_rate`` defaults to 0.0 here and a positive rate is refused
+    unless ``use_attention`` or ``use_ffn`` is on, where it is that stage's
+    dropout.
 
     ``decoder_style='dpt'`` (the DepthAnything decoder) runs one
     ``Conv2D -> BatchNormalization -> activation`` stage per ``dpt_dims``
@@ -1588,8 +1914,10 @@ class DepthEstimationHead(BaseVisionHead):
         # Set defaults for DepthEstimationHead before calling parent constructor
         kwargs.setdefault('use_attention', False)
         kwargs.setdefault('use_ffn', False)
+        _refuse_dropout_no_layer_applies(kwargs, type(self).__name__)
         super().__init__(**kwargs)
-        self.output_channels = output_channels
+        self.output_channels = _positive_int(
+            output_channels, 'output_channels', type(self).__name__)
         self.decoder_style = decoder_style
         if decoder_style == "dpt":
             for key in _PROGRESSIVE_ONLY_BASE_KNOBS:
@@ -1627,42 +1955,13 @@ class DepthEstimationHead(BaseVisionHead):
         """
 
         if self.decoder_style == "progressive":
-            # Progressive upsampling with refinement (original behavior).
-            #
-            # DECISION plan-2026-10-14T062616-81938e81/D-027
-            # Two FLAT lists, paired by index. Do NOT nest them back into a
-            # list of [conv, upsample] pairs: Keras does not track a layer
-            # inside a nested list for saving, so a .keras round trip
-            # silently restored none of these six kernels (measured: the
-            # reloaded depth differed by up to 17.3 with no warning). See
-            # decisions.md D-027.
-            self.depth_conv_blocks = []
-            self.depth_upsamples = []
-            channels = self.hidden_dim
-
-            for i in range(3):
-                self.depth_conv_blocks.append(
-                    ConvBlock(
-                        filters=channels,
-                        kernel_size=3,
-                        normalization_type=self.normalization_type,
-                        activation_type=self.activation_type,
-                        name=f'depth_conv_{i}'
-                    )
-                )
-                self.depth_upsamples.append(
-                    layers.Conv2DTranspose(
-                        filters=channels // 2,
-                        kernel_size=3,
-                        strides=2,
-                        padding='same',
-                        name=f'depth_upsample_{i}'
-                    )
-                )
-                channels = channels // 2
+            # Progressive upsampling with refinement: the shared decoder,
+            # named depth_conv_{i} / depth_upsample_{i} (two flat lists).
+            self.depth_conv_blocks, self.depth_upsamples = (
+                _create_progressive_decoder(self, 'depth'))
 
             # Depth prediction layer
-            self.depth_head = layers.Conv2D(
+            self.depth_head = keras.layers.Conv2D(
                 filters=self.output_channels,
                 kernel_size=3,
                 padding='same',
@@ -1761,15 +2060,9 @@ class DepthEstimationHead(BaseVisionHead):
         :rtype: None
         """
         if self.decoder_style == "progressive":
-            shape = self._common_processed_shape(input_shape)
-
-            for conv_block, upsample in zip(self.depth_conv_blocks,
-                                            self.depth_upsamples):
-                conv_block.build(shape)
-                shape = tuple(conv_block.compute_output_shape(shape))
-                upsample.build(shape)
-                shape = tuple(upsample.compute_output_shape(shape))
-
+            shape = _build_progressive_decoder(
+                self.depth_conv_blocks, self.depth_upsamples,
+                self._common_processed_shape(input_shape))
             self.depth_head.build(shape)
         else:
             # DPT style: build all dpt layers
@@ -1820,10 +2113,8 @@ class DepthEstimationHead(BaseVisionHead):
 
         if self.decoder_style == "progressive":
             # Progressive refinement and upsampling
-            for conv_block, upsample in zip(self.depth_conv_blocks,
-                                            self.depth_upsamples):
-                x = conv_block(x, training=training)
-                x = upsample(x)
+            x = _run_progressive_decoder(
+                self.depth_conv_blocks, self.depth_upsamples, x, training)
 
             # Predict normalized depth
             depth_normalized = self.depth_head(x)
@@ -1831,9 +2122,9 @@ class DepthEstimationHead(BaseVisionHead):
             # Scale to actual depth range
             if self.use_log_depth:
                 # Convert from log space
-                log_min = ops.log(self.min_depth)
-                log_max = ops.log(self.max_depth)
-                depth = ops.exp(depth_normalized * (log_max - log_min) + log_min)
+                log_min = keras.ops.log(self.min_depth)
+                log_max = keras.ops.log(self.max_depth)
+                depth = keras.ops.exp(depth_normalized * (log_max - log_min) + log_min)
             else:
                 # Linear scaling
                 depth = depth_normalized * (self.max_depth - self.min_depth) + self.min_depth
@@ -2021,7 +2312,7 @@ class ClassificationHead(BaseVisionHead):
     the layer's compute dtype exactly as the NLP ``TextClassificationHead``
     does. Under ``mixed_float16`` it is therefore a float16 softmax.
 
-    With ``use_global_pooling=False`` the flatten is a ``layers.Flatten()``
+    With ``use_global_pooling=False`` the flatten is a ``keras.layers.Flatten()``
     created inside ``call`` on every invocation. It is not a stored
     sub-layer, so it appears in no weight list. ``Flatten`` holds no weights,
     so this costs correctness nothing.
@@ -2083,8 +2374,10 @@ class ClassificationHead(BaseVisionHead):
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :raises ValueError: If ``block_dims`` holds a width that is not a
-        positive integer, or ``classifier_dropout_rate`` is outside
-        ``[0, 1)``.
+        positive integer, ``classifier_dropout_rate`` is outside ``[0, 1)``,
+        ``pooling_type`` is not ``'avg'``, ``'max'`` or ``'cls_token'``,
+        ``num_classes`` is not a positive integer, or ``hidden_dim < 2``
+        with the default ``block_dims``.
 
     :ivar pooling: Global pooling layer, built only when
         ``use_global_pooling`` is set.
@@ -2101,6 +2394,10 @@ class ClassificationHead(BaseVisionHead):
     :ivar classifier: Output ``Dense(num_classes)``, linear (no activation).
     :vartype classifier: keras.layers.Dense
     """
+
+    #: The ``pooling_type`` values ``call`` implements: global average and
+    #: max pooling of a 4D map, and position 0 of a 3D sequence.
+    _POOLING_TYPES: Tuple[str, ...] = ('avg', 'max', 'cls_token')
 
     def __init__(
             self,
@@ -2152,8 +2449,10 @@ class ClassificationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         :raises ValueError: If a ``block_dims`` entry is not a positive int,
-            ``classifier_dropout_rate`` is outside ``[0, 1)``, or
-            ``use_ffn`` is ``True``.
+            ``classifier_dropout_rate`` is outside ``[0, 1)``,
+            ``use_ffn`` is ``True``, ``num_classes`` is not a positive int,
+            ``pooling_type`` is not one of ``_POOLING_TYPES``, or the default
+            blocks would get a width of 0 (``hidden_dim < 2``).
         """
         _refuse_common_layers_call_never_runs(
             kwargs, type(self).__name__, ('use_ffn',))
@@ -2165,8 +2464,18 @@ class ClassificationHead(BaseVisionHead):
                 f"classifier_dropout_rate must be in [0, 1), got "
                 f"{classifier_dropout_rate}"
             )
+        if pooling_type not in self._POOLING_TYPES:
+            raise ValueError(
+                f"ClassificationHead: pooling_type must be one of "
+                f"{list(self._POOLING_TYPES)}, got {pooling_type!r}"
+            )
+        if block_dims is None:
+            _require_hidden_dim_at_least(
+                self.hidden_dim, 2, type(self).__name__,
+                "the default block_dims are (hidden_dim, hidden_dim // 2)")
 
-        self.num_classes = num_classes
+        self.num_classes = _positive_int(
+            num_classes, 'num_classes', type(self).__name__)
         self.use_global_pooling = use_global_pooling
         self.pooling_type = pooling_type
         self.block_dims = block_dims
@@ -2213,9 +2522,9 @@ class ClassificationHead(BaseVisionHead):
         # Global pooling
         if self.use_global_pooling and self.pooling_type in ('avg', 'max'):
             if self.pooling_type == 'avg':
-                self.pooling = layers.GlobalAveragePooling2D()
+                self.pooling = keras.layers.GlobalAveragePooling2D()
             else:
-                self.pooling = layers.GlobalMaxPooling2D()
+                self.pooling = keras.layers.GlobalMaxPooling2D()
         # For 'cls_token', no pooling layer is built; extraction happens in call()
 
         if self.pooled_normalization_type is not None:
@@ -2262,13 +2571,13 @@ class ClassificationHead(BaseVisionHead):
         ]
 
         if self.classifier_dropout_rate > 0.0:
-            self.classifier_dropout = layers.Dropout(
+            self.classifier_dropout = keras.layers.Dropout(
                 self.classifier_dropout_rate, name='classifier_dropout'
             )
 
         # Final classifier: linear. The softmax for 'probabilities' is
         # applied in call(), so 'logits' stays the pre-softmax score.
-        self.classifier = layers.Dense(
+        self.classifier = keras.layers.Dense(
             units=self.num_classes,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
@@ -2360,7 +2669,7 @@ class ClassificationHead(BaseVisionHead):
             else:
                 x = self.pooling(x)
         else:
-            x = layers.Flatten()(x)
+            x = keras.layers.Flatten()(x)
 
         if self.pooled_normalization_type is not None:
             x = self.pooled_norm(x, training=training)
@@ -2510,6 +2819,10 @@ class InstanceSegmentationHead(BaseVisionHead):
     ``mask_size`` is stored and serialized but no layer reads it. The masks
     come out at the input feature-map resolution.
 
+    ``dropout_rate`` reaches the detection branch (both inner ``ConvBlock``
+    s) and the attention/FFN stage when on. The mask branch takes none, as
+    the Mask R-CNN mask head has none.
+
     Input shape:
         ``(batch, height, width, channels)``.
 
@@ -2557,11 +2870,15 @@ class InstanceSegmentationHead(BaseVisionHead):
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If ``num_classes`` or ``num_instances`` is not a
+            positive integer.
         """
         super().__init__(**kwargs)
 
-        self.num_classes = num_classes
-        self.num_instances = num_instances
+        owner = type(self).__name__
+        self.num_classes = _positive_int(num_classes, 'num_classes', owner)
+        self.num_instances = _positive_int(
+            num_instances, 'num_instances', owner)
         self.mask_size = mask_size
 
         # Create sub-heads
@@ -2593,6 +2910,12 @@ class InstanceSegmentationHead(BaseVisionHead):
 
         # Mask feature extraction. Named explicitly, as in EnhancementHead:
         # an auto-suffixed name makes the weight paths process-dependent.
+        #
+        # DECISION plan-2026-10-14T062616-81938e81/D-050
+        # No dropout_rate here: the Mask R-CNN mask branch has no dropout.
+        # dropout_rate is the detection branch's (the inner DetectionHead's
+        # ConvBlocks). Do NOT thread it in to make the base knob "reach"
+        # this branch. See decisions.md D-050.
         self.mask_conv_blocks = [
             ConvBlock(
                 filters=self.hidden_dim,
@@ -2610,7 +2933,7 @@ class InstanceSegmentationHead(BaseVisionHead):
         # NOT put activation='sigmoid' back: the sigmoid belongs to the loss
         # (from_logits=True) or the caller, as for every class-like output of
         # layers/heads. See decisions.md D-003.
-        self.mask_head = layers.Conv2D(
+        self.mask_head = keras.layers.Conv2D(
             filters=self.num_instances,
             kernel_size=1,
             name='mask_head'
@@ -2855,15 +3178,18 @@ class EnhancementHead(BaseVisionHead):
         :return: None.
         :rtype: None
         :raises ValueError: If ``use_attention`` or ``use_ffn`` is ``True``,
-            ``dropout_rate`` is above 0, or a ``block_dims`` entry is not a
-            positive integer.
+            ``dropout_rate`` is above 0, a ``block_dims`` entry is not a
+            positive integer, or ``output_channels`` or ``scale_factor`` is
+            not a positive integer.
         """
         _refuse_common_layers_call_never_runs(
             kwargs, type(self).__name__,
             ('use_attention', 'use_ffn', 'dropout_rate'))
         super().__init__(**kwargs)
-        self.output_channels = output_channels
-        self.scale_factor = scale_factor
+        owner = type(self).__name__
+        self.output_channels = _positive_int(
+            output_channels, 'output_channels', owner)
+        self.scale_factor = _positive_int(scale_factor, 'scale_factor', owner)
         self.block_dims = _validated_block_dims(block_dims)
         self.output_use_bias = bool(output_use_bias)
         resolved_dims = (
@@ -2888,7 +3214,7 @@ class EnhancementHead(BaseVisionHead):
 
         if self.scale_factor > 1:
             # For super-resolution
-            self.upsample = layers.Conv2DTranspose(
+            self.upsample = keras.layers.Conv2DTranspose(
                 filters=self.output_channels,
                 kernel_size=3,
                 strides=self.scale_factor,
@@ -2898,7 +3224,7 @@ class EnhancementHead(BaseVisionHead):
             )
         else:
             # For denoising and other tasks
-            self.output_conv = layers.Conv2D(
+            self.output_conv = keras.layers.Conv2D(
                 filters=self.output_channels,
                 kernel_size=3,
                 padding='same',
@@ -3004,6 +3330,273 @@ class EnhancementHead(BaseVisionHead):
 
 
 # ---------------------------------------------------------------------
+# Dense vector heads: surface normals and optical flow
+# ---------------------------------------------------------------------
+
+def _unit_normalize(x: keras.KerasTensor) -> keras.KerasTensor:
+    """
+    L2-normalize the last axis, in float32 or wider, then return the input
+    dtype.
+
+    A float16 sum of squares overflows above about 256 per component (65504
+    is float16's ceiling), and ``rsqrt`` of ``inf`` is 0, which would turn a
+    large normal into the zero vector; so a narrower float is normalized in
+    float32 and cast back. ``epsilon=1e-12`` is ``torch.nn.functional
+    .normalize``'s, the call DSINE ends its normals head with.
+
+    :param x: Tensor whose last axis holds the vectors.
+    :type x: keras.KerasTensor
+    :return: ``x / max(||x||, 1e-12)`` along the last axis, in ``x``'s dtype.
+    :rtype: keras.KerasTensor
+    """
+    dtype = keras.backend.standardize_dtype(x.dtype)
+    if dtype in ('float16', 'bfloat16'):
+        normalized = keras.ops.normalize(
+            keras.ops.cast(x, 'float32'), axis=-1, order=2, epsilon=1e-12)
+        return keras.ops.cast(normalized, dtype)
+    return keras.ops.normalize(x, axis=-1, order=2, epsilon=1e-12)
+
+
+class _DenseVectorHeadBase(BaseVisionHead):
+    """
+    A per-pixel vector map at eight times the input resolution.
+
+    The shared body of :class:`SurfaceNormalsHead` and
+    :class:`OpticalFlowHead`: the optional attention and FFN, the progressive
+    decoder :class:`DepthEstimationHead` uses (three ``ConvBlock`` then
+    stride-2 ``Conv2DTranspose`` stages), then ``output_conv``, a linear 3x3
+    conv to ``_CHANNELS`` channels, optionally L2-normalized per pixel.
+
+    A subclass sets three class attributes: ``_OUTPUT_KEY`` (the one output
+    key, also the layer-name prefix), ``_CHANNELS`` (fixed by the geometry,
+    so there is no ``output_channels`` argument) and ``_UNIT_NORM``.
+
+    The decoder applies no dropout, so ``dropout_rate`` defaults to 0.0 and
+    a positive rate is refused unless ``use_attention`` or ``use_ffn`` is
+    on. ``use_attention`` and ``use_ffn`` default to ``False``.
+
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar decoder_conv_blocks: The three decoder ``ConvBlock`` s.
+    :vartype decoder_conv_blocks: List[ConvBlock]
+    :ivar decoder_upsamples: The three stride-2 ``Conv2DTranspose`` layers.
+    :vartype decoder_upsamples: List[keras.layers.Conv2DTranspose]
+    :ivar output_conv: Linear ``Conv2D(_CHANNELS, 3)``.
+    :vartype output_conv: keras.layers.Conv2D
+    """
+
+    _OUTPUT_KEY: str = ''
+    _CHANNELS: int = 0
+    _UNIT_NORM: bool = False
+
+    def __init__(self, **kwargs: Any) -> None:
+        """
+        Build the decoder and the output conv.
+
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If ``output_channels`` is passed, a positive
+            ``dropout_rate`` would reach no layer, or ``hidden_dim < 8``.
+        """
+        owner = type(self).__name__
+        if 'output_channels' in kwargs:
+            raise ValueError(
+                f"{owner} emits {self._CHANNELS} channels by definition and "
+                f"takes no output_channels (got "
+                f"{kwargs['output_channels']!r})."
+            )
+        kwargs.setdefault('use_attention', False)
+        kwargs.setdefault('use_ffn', False)
+        _refuse_dropout_no_layer_applies(kwargs, owner)
+        super().__init__(**kwargs)
+
+        self.decoder_conv_blocks, self.decoder_upsamples = (
+            _create_progressive_decoder(self, self._OUTPUT_KEY))
+        # Linear: RAFT's FlowHead and PWC-Net's predict_flow end in a 3x3 conv
+        # to 2 channels with no activation; the normals heads of Bae et al.
+        # 2021 and DSINE end in a linear conv that is then L2-normalized.
+        self.output_conv = keras.layers.Conv2D(
+            filters=self._CHANNELS,
+            kernel_size=3,
+            padding='same',
+            name=f'{self._OUTPUT_KEY}_head'
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the decoder and the output conv on the common-processed shape.
+
+        :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
+        """
+        shape = _build_progressive_decoder(
+            self.decoder_conv_blocks, self.decoder_upsamples,
+            self._common_processed_shape(input_shape))
+        self.output_conv.build(shape)
+        # The common attention and ffn, on the raw input shape.
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> Dict[str, keras.KerasTensor]:
+        """
+        Run the common stages, the decoder and the output conv.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: ``{_OUTPUT_KEY: (batch, 8 * height, 8 * width,
+            _CHANNELS)}``.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
+        x = inputs
+        if self.use_attention:
+            x = self.attention(x, training=training)
+        if self.use_ffn:
+            x = self.ffn(x, training=training)
+        x = _run_progressive_decoder(
+            self.decoder_conv_blocks, self.decoder_upsamples, x, training)
+        x = self.output_conv(x)
+        if self._UNIT_NORM:
+            x = _unit_normalize(x)
+        return {self._OUTPUT_KEY: x}
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """
+        Report the output shape: 8x the input height and width.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``{_OUTPUT_KEY: (batch, 8 * height, 8 * width, _CHANNELS)}``.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        """
+        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        scale = 2 ** _PROGRESSIVE_DOUBLINGS
+        return {self._OUTPUT_KEY: (
+            batch,
+            height * scale if height is not None else None,
+            width * scale if width is not None else None,
+            self._CHANNELS,
+        )}
+
+
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+class SurfaceNormalsHead(_DenseVectorHeadBase):
+    """
+    A unit surface normal per pixel, at eight times the input resolution.
+
+    The progressive decoder, then a linear 3x3 conv to 3 channels, then a
+    per-pixel L2 normalization, so every output vector has unit length and
+    any sign. Reference: Bae et al. 2021 (``surface_normal_uncertainty``,
+    ``norm_normalize``: the xyz channels over their L2 norm) and DSINE (Bae
+    and Davison 2024: ``F.normalize(normal, dim=1)`` after a linear
+    prediction head). The norm is taken in float32 under a float16 policy.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention, ffn       (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ 3 x (normals_conv_i ConvBlock,  │
+        │ normals_upsample_i stride 2)    │
+        └────────────────┬────────────────┘
+                         ▼ 8x spatial, hidden_dim // 8 channels
+        ┌─────────────────────────────────┐
+        │ normals_head: Conv2D 3x3, 3 ch  │
+        │ linear                          │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ x / max(||x||_2, 1e-12)         │
+        └────────────────┬────────────────┘
+                         ▼
+                     'normals'  (B, 8H, 8W, 3), unit length
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'normals': (batch, 8 * height, 8 * width, 3)}``.
+
+    :param kwargs: Arguments for :class:`BaseVisionHead`. There is no
+        ``output_channels``: a normal has 3 components.
+    """
+
+    _OUTPUT_KEY = 'normals'
+    _CHANNELS = 3
+    _UNIT_NORM = True
+
+
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+class OpticalFlowHead(_DenseVectorHeadBase):
+    """
+    A signed 2D displacement per pixel, at eight times the input resolution.
+
+    The progressive decoder, then a linear 3x3 conv to 2 channels: no
+    activation and no range map, so the flow takes any sign and magnitude.
+    Reference: RAFT's ``FlowHead`` (``conv2(relu(conv1(x)))``, ``conv2 =
+    nn.Conv2d(hidden_dim, 2, 3, padding=1)``) and PWC-Net's ``predict_flow``
+    (``nn.Conv2d(in_planes, 2, 3, 1, 1, bias=True)``).
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention, ffn       (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ 3 x (flow_conv_i ConvBlock,     │
+        │ flow_upsample_i stride 2)       │
+        └────────────────┬────────────────┘
+                         ▼ 8x spatial, hidden_dim // 8 channels
+        ┌─────────────────────────────────┐
+        │ flow_head: Conv2D 3x3, 2 ch     │
+        │ linear                          │
+        └────────────────┬────────────────┘
+                         ▼
+                       'flow'  (B, 8H, 8W, 2), signed
+
+    The flow is in whatever units the training target uses; the head does
+    not rescale it to the 8x output resolution.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'flow': (batch, 8 * height, 8 * width, 2)}``.
+
+    :param kwargs: Arguments for :class:`BaseVisionHead`. There is no
+        ``output_channels``: a flow vector has 2 components.
+    """
+
+    _OUTPUT_KEY = 'flow'
+    _CHANNELS = 2
+    _UNIT_NORM = False
+
+
+# ---------------------------------------------------------------------
 # Multi-Task Head
 # ---------------------------------------------------------------------
 
@@ -3018,8 +3611,13 @@ class MultiTaskHead(keras.layers.Layer):
     its own.
 
     A dict input is read per task name. A task name missing from the dict
-    falls back to the ``'shared'`` entry. A single tensor is sent to every
-    head unchanged.
+    falls back to the ``'shared'`` entry; a task with neither raises
+    ``ValueError`` naming it. A single tensor is sent to every head
+    unchanged.
+
+    Each head is built by :func:`create_vision_head`, so this layer serves
+    exactly the ten task types that function dispatches, with the same
+    per-task defaults, and refuses the other 27 naming the entry.
 
     **Architecture Overview:**
 
@@ -3036,13 +3634,10 @@ class MultiTaskHead(keras.layers.Layer):
                        ▼            ▼            ▼
                   outputs[t1]  outputs[t2]  outputs[tN]
 
-        Each head is one of five classes:
+        Each head is what create_vision_head builds for its
+        task_type: the ten dispatched task types, see that function.
 
-        DetectionHead        SegmentationHead
-        DepthEstimationHead  ClassificationHead
-        InstanceSegmentationHead
-
-        Any other task type raises ValueError.
+        Any other task type raises ValueError naming the entry.
 
     Every head returns a dict, so ``call`` returns a dict of dicts: task name
     to that head's own output keys.
@@ -3055,8 +3650,11 @@ class MultiTaskHead(keras.layers.Layer):
         Dict mapping each task name to that head's output shapes.
 
     :param task_configs: Dict mapping a task name to that head's config. Each
-        config carries a ``'task_type'`` key naming one of the five classes,
-        as a :class:`VisionTaskType` member or its string value.
+        config carries a ``'task_type'`` key naming one of the ten dispatched
+        task types, as a :class:`VisionTaskType` member or its string value.
+        Keras' attribute tracking stores the outer dict and each config as
+        copies, so a later change to the caller's dicts reaches neither the
+        heads nor ``get_config``.
         ``get_config`` stores the string value, so the head survives a
         ``.keras`` round trip.
     :type task_configs: Dict[str, Dict[str, Any]]
@@ -3073,7 +3671,9 @@ class MultiTaskHead(keras.layers.Layer):
     :vartype task_heads: Dict[str, keras.layers.Layer]
 
     :raises ValueError: From ``_create_task_heads``, when a config names a
-        task type with no head.
+        task type with no head; from ``build``, ``call`` and
+        ``compute_output_shape``, when a dict input has neither the task's
+        name nor ``'shared'``.
     """
 
     def __init__(
@@ -3102,6 +3702,10 @@ class MultiTaskHead(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
+        # Not an alias of the caller's dict: Keras' attribute tracking stores
+        # a dict assigned to a layer as a TrackedDict copy, its nested dicts
+        # too (measured 2026-10-15, so a review's aliasing claim was refuted;
+        # pinned by test_the_multi_task_head_builds_every_dispatched_task.py).
         self.task_configs = task_configs
         self.shared_backbone_dim = shared_backbone_dim
         self.use_task_specific_attention = use_task_specific_attention
@@ -3117,7 +3721,9 @@ class MultiTaskHead(keras.layers.Layer):
         ``use_attention`` is forced to ``use_task_specific_attention``, so a
         per-task ``use_attention`` in the caller dict is overwritten.
 
-        Five task types are accepted. Any other raises.
+        Every head comes from :func:`create_vision_head`: the ten task types
+        it dispatches are accepted, with its per-task defaults. Any other
+        raises.
 
         :return: None.
         :rtype: None
@@ -3127,14 +3733,17 @@ class MultiTaskHead(keras.layers.Layer):
         self.task_heads = {}
 
         for task_name, config in self.task_configs.items():
-            # Copy before pop: do NOT mutate the caller's config dict (the
-            # entries of self.task_configs are the caller's objects). Mutating
-            # them stripped 'task_type' as a side-effect and broke get_config()
-            # round-trips and repeated construction. See decisions.md / SC6.
+            # Copy before pop: popping 'task_type' from the stored config
+            # stripped it as a side effect and broke get_config() round trips
+            # and repeated construction.
             config = dict(config)
-            task_type = config.pop('task_type')
-            if isinstance(task_type, str):
-                task_type = VisionTaskType.from_string(task_type)
+            task_type = _as_vision_task_type(config.pop('task_type'))
+            if task_type not in VISION_HEAD_DISPATCH:
+                raise ValueError(
+                    f"MultiTaskHead task {task_name!r}: task type "
+                    f"{task_type.value!r} has no vision head. "
+                    f"{_dispatched_task_list()}"
+                )
 
             # Add shared configuration
             config['hidden_dim'] = config.get('hidden_dim', self.shared_backbone_dim)
@@ -3145,19 +3754,31 @@ class MultiTaskHead(keras.layers.Layer):
             # moved across a round trip.
             config.setdefault('name', f'{task_name}_head')
 
-            # Create appropriate head
-            if task_type == VisionTaskType.DETECTION:
-                self.task_heads[task_name] = DetectionHead(**config)
-            elif task_type == VisionTaskType.SEGMENTATION:
-                self.task_heads[task_name] = SegmentationHead(**config)
-            elif task_type == VisionTaskType.DEPTH_ESTIMATION:
-                self.task_heads[task_name] = DepthEstimationHead(**config)
-            elif task_type == VisionTaskType.CLASSIFICATION:
-                self.task_heads[task_name] = ClassificationHead(**config)
-            elif task_type == VisionTaskType.INSTANCE_SEGMENTATION:
-                self.task_heads[task_name] = InstanceSegmentationHead(**config)
-            else:
-                raise ValueError(f"Unsupported task type: {task_type}")
+            # One dispatch table for single and multi-task heads: a second
+            # if/elif here once served 5 of the 10 task types.
+            self.task_heads[task_name] = create_vision_head(task_type, **config)
+
+    @staticmethod
+    def _task_input(inputs: Dict[str, Any], task_name: str) -> Any:
+        """
+        The entry of a dict input (or input shape) that serves one task.
+
+        :param inputs: Dict keyed by task name, optionally with ``'shared'``.
+        :type inputs: Dict[str, Any]
+        :param task_name: The task whose entry is wanted.
+        :type task_name: str
+        :return: ``inputs[task_name]``, else ``inputs['shared']``.
+        :rtype: Any
+        :raises ValueError: If ``inputs`` has neither key.
+        """
+        if task_name in inputs:
+            return inputs[task_name]
+        if 'shared' in inputs:
+            return inputs['shared']
+        raise ValueError(
+            f"MultiTaskHead got a dict input with no entry for task "
+            f"{task_name!r} and no 'shared' entry; keys: {sorted(inputs)}"
+        )
 
     def build(
             self,
@@ -3177,7 +3798,7 @@ class MultiTaskHead(keras.layers.Layer):
         """
         for task_name, task_head in self.task_heads.items():
             if isinstance(input_shape, dict):
-                task_input_shape = input_shape.get(task_name, input_shape.get('shared'))
+                task_input_shape = self._task_input(input_shape, task_name)
             else:
                 task_input_shape = input_shape
             task_head.build(task_input_shape)
@@ -3209,7 +3830,7 @@ class MultiTaskHead(keras.layers.Layer):
         if isinstance(inputs, dict):
             # Task-specific inputs
             for task_name, task_head in self.task_heads.items():
-                task_input = inputs.get(task_name, inputs.get('shared'))
+                task_input = self._task_input(inputs, task_name)
                 outputs[task_name] = task_head(task_input, training=training)
         else:
             # Shared input for all tasks
@@ -3238,7 +3859,7 @@ class MultiTaskHead(keras.layers.Layer):
         output_shapes = {}
         for task_name, task_head in self.task_heads.items():
             if isinstance(input_shape, dict):
-                task_input_shape = input_shape.get(task_name, input_shape.get('shared'))
+                task_input_shape = self._task_input(input_shape, task_name)
             else:
                 task_input_shape = input_shape
             output_shapes[task_name] = task_head.compute_output_shape(task_input_shape)
@@ -3248,7 +3869,7 @@ class MultiTaskHead(keras.layers.Layer):
         """
         Return the constructor arguments for serialization.
 
-        ``task_configs`` is stored as the caller passed it, except that a
+        ``task_configs`` is the copy taken at construction, except that a
         :class:`VisionTaskType` ``task_type`` becomes its string value.
         Nothing here mutates the caller's dicts, so a round trip rebuilds the
         same heads.
@@ -3282,6 +3903,80 @@ class MultiTaskHead(keras.layers.Layer):
 # Factory Function
 # ---------------------------------------------------------------------
 
+#: The one dispatch table of the vision heads: each task type that has a
+#: head, mapped to ``(head class, per-task defaults)``. A default yields to a
+#: caller's value for the same key. :func:`create_vision_head`,
+#: :class:`MultiTaskHead`, :func:`create_enhancement_head` and
+#: :class:`HeadConfiguration` all read it, so they agree on which task types
+#: exist; :meth:`VisionTaskType.get_output_types` documents each one's keys
+#: (pinned against the heads by a test, since ``task_types.py`` cannot
+#: import this module).
+VISION_HEAD_DISPATCH: Dict[
+    VisionTaskType, Tuple[type, Dict[str, Any]]] = {
+    VisionTaskType.DETECTION: (DetectionHead, {}),
+    VisionTaskType.SEGMENTATION: (SegmentationHead, {}),
+    VisionTaskType.INSTANCE_SEGMENTATION: (InstanceSegmentationHead, {}),
+    VisionTaskType.CLASSIFICATION: (ClassificationHead, {}),
+    VisionTaskType.DEPTH_ESTIMATION: (DepthEstimationHead, {}),
+    # DECISION plan-2026-10-14T062616-81938e81/D-051
+    # Normals and flow have heads of their own. Do NOT route them back
+    # through DepthEstimationHead(output_channels=3/2): its sigmoid range map
+    # squeezed every component into [0.1, 100], so no normal was unit length
+    # and no flow was negative. See decisions.md D-051.
+    VisionTaskType.SURFACE_NORMALS: (SurfaceNormalsHead, {}),
+    VisionTaskType.OPTICAL_FLOW: (OpticalFlowHead, {}),
+    # DECISION plan-2026-10-14T062616-81938e81/D-052
+    # A keypoint head is a score map: one logit vector per location and no
+    # box regression (SuperPoint's detector: 64 cell positions + dustbin).
+    # Do NOT fall back to the DetectionHead defaults (9 anchors, 4-dim box
+    # regressions): that is a box detector under a keypoint name, and
+    # get_output_types documented keys it never returned. See decisions.md
+    # D-052.
+    VisionTaskType.KEYPOINT_DETECTION: (
+        DetectionHead, {'num_anchors': 1, 'use_regression': False}),
+    VisionTaskType.DENOISING: (EnhancementHead, {}),
+    VisionTaskType.SUPER_RESOLUTION: (EnhancementHead, {'scale_factor': 2}),
+}
+
+#: The two task types :func:`create_enhancement_head` serves.
+ENHANCEMENT_TASK_TYPES: Tuple[VisionTaskType, ...] = (
+    VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION)
+
+
+def _as_vision_task_type(task_type: Any) -> VisionTaskType:
+    """
+    Parse a task type given as an enum member or its string value.
+
+    :param task_type: A :class:`VisionTaskType` or a string that
+        :meth:`VisionTaskType.from_string` parses.
+    :type task_type: Any
+    :return: The enum member.
+    :rtype: VisionTaskType
+    :raises ValueError: If a string names no member, or the value is
+        neither a member nor a string.
+    """
+    if isinstance(task_type, VisionTaskType):
+        return task_type
+    if isinstance(task_type, str):
+        return VisionTaskType.from_string(task_type)
+    raise ValueError(
+        f"task_type must be a VisionTaskType or its string value, got "
+        f"{task_type!r}"
+    )
+
+
+def _dispatched_task_list() -> str:
+    """
+    One sentence naming the task types that have a head, for error messages.
+
+    :return: The sentence.
+    :rtype: str
+    """
+    names = ', '.join(sorted(t.value for t in VISION_HEAD_DISPATCH))
+    return (f"The {len(VISION_HEAD_DISPATCH)} task types with a head are: "
+            f"{names}.")
+
+
 def create_vision_head(
         task_type: Union[VisionTaskType, str],
         **kwargs: Any
@@ -3289,14 +3984,13 @@ def create_vision_head(
     """
     Build the vision head that serves a task type.
 
-    Ten of the 37 ``VisionTaskType`` members reach a head. The other 27 raise
-    ``ValueError``. There is no fallback head and never has been: a task with
-    no implementation fails loudly rather than returning a plausible wrong
-    one.
+    Ten of the 37 ``VisionTaskType`` members reach a head, through
+    :data:`VISION_HEAD_DISPATCH`. The other 27 raise ``ValueError``. There is
+    no fallback head and never has been: a task with no implementation fails
+    loudly rather than returning a plausible wrong one.
 
-    Five members get a class of their own. Three reuse another task's class,
-    two of them with a different output channel count. Denoising and
-    super-resolution route through :func:`create_enhancement_head`.
+    Seven members get a class of their own. Three reuse another task's class
+    with different defaults; a caller's value for a defaulted key wins.
 
     **Architecture Overview:**
 
@@ -3316,90 +4010,65 @@ def create_vision_head(
         INSTANCE_SEGMENTATION  InstanceSegmentationHead
         CLASSIFICATION         ClassificationHead
         DEPTH_ESTIMATION       DepthEstimationHead
-        SURFACE_NORMALS        DepthEstimationHead, 3 channels
-        OPTICAL_FLOW           DepthEstimationHead, 2 channels
-        KEYPOINT_DETECTION     DetectionHead
+        SURFACE_NORMALS        SurfaceNormalsHead
+        OPTICAL_FLOW           OpticalFlowHead
+        KEYPOINT_DETECTION     DetectionHead, num_anchors 1, no regression
         DENOISING              EnhancementHead
         SUPER_RESOLUTION       EnhancementHead, scale_factor 2
 
     The ``VisionTaskType`` docstring in ``vision/task_types.py`` names all 27
-    members that raise. This function is the arbiter if the two disagree.
+    members that raise. :data:`VISION_HEAD_DISPATCH` is the arbiter if the
+    two disagree.
 
     :param task_type: Task the head is for, as an enum member or its string
         value.
     :type task_type: Union[VisionTaskType, str]
-    :param kwargs: Forwarded to the chosen head class.
+    :param kwargs: Forwarded to the chosen head class, over the task's
+        defaults.
     :return: Configured vision head.
     :rtype: BaseVisionHead
     :raises ValueError: If the task type is one of the other 27.
     """
-
-    # Convert string to VisionTaskType if needed
-    if isinstance(task_type, str):
-        task_type = VisionTaskType.from_string(task_type)
-
-    # Create appropriate head based on task type
-    if task_type == VisionTaskType.DETECTION:
-        return DetectionHead(**kwargs)
-
-    elif task_type == VisionTaskType.SEGMENTATION:
-        return SegmentationHead(**kwargs)
-
-    elif task_type == VisionTaskType.DEPTH_ESTIMATION:
-        return DepthEstimationHead(**kwargs)
-
-    elif task_type == VisionTaskType.CLASSIFICATION:
-        return ClassificationHead(**kwargs)
-
-    elif task_type == VisionTaskType.INSTANCE_SEGMENTATION:
-        return InstanceSegmentationHead(**kwargs)
-
-    elif task_type == VisionTaskType.SURFACE_NORMALS:
-        # Surface normals use similar architecture to depth
-        return DepthEstimationHead(output_channels=3, **kwargs)
-
-    elif task_type == VisionTaskType.OPTICAL_FLOW:
-        # Optical flow predicts 2D motion vectors
-        return DepthEstimationHead(output_channels=2, **kwargs)
-
-    elif task_type == VisionTaskType.KEYPOINT_DETECTION:
-        # Keypoint detection is similar to detection with different outputs
-        return DetectionHead(**kwargs)
-
-    elif task_type in [VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION]:
-        # Image enhancement tasks
-        return create_enhancement_head(task_type, **kwargs)
-
-    else:
-        raise ValueError(f"Unsupported task type: {task_type}")
+    task_type = _as_vision_task_type(task_type)
+    if task_type not in VISION_HEAD_DISPATCH:
+        raise ValueError(
+            f"Unsupported task type: {task_type.value!r} has no vision head. "
+            f"{_dispatched_task_list()}"
+        )
+    head_class, defaults = VISION_HEAD_DISPATCH[task_type]
+    return head_class(**{**defaults, **kwargs})
 
 
 def create_enhancement_head(
-        task_type: VisionTaskType,
+        task_type: Union[VisionTaskType, str],
         **kwargs: Any
-) -> BaseVisionHead:
+) -> EnhancementHead:
     """
     Build an :class:`EnhancementHead` for a restoration task.
 
-    The only thing this function decides is the default scale factor.
-    Super-resolution gets ``scale_factor=2`` unless the caller passed one.
-    Every other task type is left alone, so the head keeps its own default of
-    1 and takes the same-resolution path.
+    Accepts the two enhancement task types, as enum members or their string
+    values; super-resolution gets ``scale_factor=2`` unless the caller passed
+    one, denoising the head's own same-resolution default. Every other task
+    type raises: this function builds enhancement heads only.
 
     The class itself lives at module scope. This function does not define it.
 
-    :param task_type: Task the head is for. Only
-        ``VisionTaskType.SUPER_RESOLUTION`` changes the outcome.
-    :type task_type: VisionTaskType
+    :param task_type: ``VisionTaskType.DENOISING`` or
+        ``VisionTaskType.SUPER_RESOLUTION``, or its string value.
+    :type task_type: Union[VisionTaskType, str]
     :param kwargs: Forwarded to :class:`EnhancementHead`.
     :return: Configured enhancement head.
-    :rtype: BaseVisionHead
+    :rtype: EnhancementHead
+    :raises ValueError: If the task type is not an enhancement task.
     """
-
-    if task_type == VisionTaskType.SUPER_RESOLUTION:
-        kwargs['scale_factor'] = kwargs.get('scale_factor', 2)
-
-    return EnhancementHead(**kwargs)
+    task_type = _as_vision_task_type(task_type)
+    if task_type not in ENHANCEMENT_TASK_TYPES:
+        raise ValueError(
+            f"create_enhancement_head builds "
+            f"{[t.value for t in ENHANCEMENT_TASK_TYPES]} only, got "
+            f"{task_type.value!r}; use create_vision_head for other tasks."
+        )
+    return create_vision_head(task_type, **kwargs)
 
 
 def create_multi_task_head(
@@ -3487,8 +4156,10 @@ class HeadConfiguration:
 
     This class builds no layer. Each static method returns a dict you pass to
     a head constructor or to :func:`create_vision_head`. The presets differ in
-    width, dropout, attention and FFN choice. Every head either preset
-    configures builds and runs (pinned by the head tests).
+    width, dropout, attention and FFN choice. Each of the ten task types in
+    :data:`VISION_HEAD_DISPATCH` has both presets, and every head either
+    preset configures builds and runs (pinned by the head tests). A task type
+    with no head has no preset: both methods raise ``ValueError``.
 
     A third, ``get_high_performance_config``, was deleted on 2026-10-14: its
     ``attention_type='differential'`` needs ``num_heads`` and ``head_dim``,
@@ -3502,10 +4173,13 @@ class HeadConfiguration:
         get_default_config(task_type)
                   │
                   ▼
+        no head for task_type? ──► ValueError
+                  │
+                  ▼
         base_config, 7 keys shared by every task
                   │
                   ▼
-        + the task_specific entry, for 5 of the task types
+        + the task_specific entry, for 8 of the 10 task types
                   │
                   ▼
         get_efficient_config
@@ -3536,18 +4210,25 @@ class HeadConfiguration:
         """
         Get the default preset for a task type.
 
-        Seven shared keys are always returned. Five task types add their own
-        keys on top: detection, segmentation, depth estimation,
-        classification and instance segmentation. Then the task's
-        :data:`PRESET_FIXED_KEYS` entry is applied, which turns off the
-        common layers classification and the two enhancement tasks never
-        run. Any other task type gets the seven shared keys and nothing more.
+        Seven shared keys are always returned. Eight task types add their
+        own keys on top: every dispatched type but the two enhancement
+        tasks. Then the task's :data:`PRESET_FIXED_KEYS` entry is applied,
+        which turns off the common layers classification and the two
+        enhancement tasks never run.
 
-        :param task_type: Task the preset is for.
+        :param task_type: Task the preset is for, as an enum member or its
+            string value.
         :type task_type: VisionTaskType
         :return: Keyword arguments for the matching head class.
         :rtype: Dict[str, Any]
+        :raises ValueError: If ``task_type`` has no head.
         """
+        task_type = _as_vision_task_type(task_type)
+        if task_type not in VISION_HEAD_DISPATCH:
+            raise ValueError(
+                f"HeadConfiguration has no preset for {task_type.value!r}: "
+                f"it has no vision head. {_dispatched_task_list()}"
+            )
 
         base_config = {
             'hidden_dim': 256,
@@ -3598,7 +4279,17 @@ class HeadConfiguration:
                 'mask_size': (28, 28),
                 'use_attention': True,
                 'attention_type': 'cbam'
-            }
+            },
+            VisionTaskType.SURFACE_NORMALS: {'use_attention': False},
+            VisionTaskType.OPTICAL_FLOW: {'use_attention': False},
+            VisionTaskType.KEYPOINT_DETECTION: {
+                # 65 is SuperPoint's detector: 64 positions in an 8x8 cell
+                # plus a dustbin, one score vector per cell.
+                'num_classes': 65,
+                'num_anchors': 1,
+                'use_regression': False,
+                'use_attention': False,
+            },
         }
 
         config = base_config.copy()
@@ -3617,12 +4308,15 @@ class HeadConfiguration:
         narrower ``hidden_dim``, no dropout, no attention, and a GLU FFN with
         a smaller expansion. :data:`PRESET_FIXED_KEYS` is applied last.
 
-        :param task_type: Task the preset is for.
+        :param task_type: Task the preset is for, as an enum member or its
+            string value.
         :type task_type: VisionTaskType
         :return: Keyword arguments for the matching head class.
         :rtype: Dict[str, Any]
+        :raises ValueError: If ``task_type`` has no head.
         """
 
+        task_type = _as_vision_task_type(task_type)
         config = HeadConfiguration.get_default_config(task_type)
         config.update({
             'hidden_dim': 128,
@@ -3692,3 +4386,55 @@ def merge_head_config_overrides(
 
     merged.update(overrides)
     return merged
+
+
+def build_model_vision_head(
+        task_type: Union[VisionTaskType, str],
+        head_config: Dict[str, Any],
+        head_config_overrides: Optional[Dict[str, Any]] = None
+) -> BaseVisionHead:
+    """
+    Build a model's vision head in one call: preset, then the model's own
+    keys, then the caller's overrides.
+
+    Interface contract, shared by every vision model that owns a task head
+    (19 construction sites in ``models/vision`` and FastVLM):
+
+    * Starts from :meth:`HeadConfiguration.get_default_config` for
+      ``task_type`` (so a task type with no head raises ``ValueError`` here).
+    * ``head_config`` holds the keys the model owns (``num_classes``,
+      ``name``, its reference head shape, its initializers); it replaces or
+      adds the matching preset entries. It is not mutated.
+    * ``head_config_overrides`` (the model's ``head_config_overrides``
+      argument) is merged last through :func:`merge_head_config_overrides`,
+      which refuses ``name``, ``num_classes`` and ``task_type``. ``None``
+      merges nothing.
+    * Returns ``create_vision_head(task_type, **merged)``; an unknown key is
+      refused by the head constructor.
+
+    It replaces the four-step ``get_default_config`` -> ``update`` ->
+    ``merge_head_config_overrides`` -> ``create_vision_head`` sequence each
+    model used to spell out, so the order of the three sources cannot drift
+    between models.
+
+    :param task_type: Task the head is for, as an enum member or its string
+        value.
+    :type task_type: Union[VisionTaskType, str]
+    :param head_config: The model's own head keys.
+    :type head_config: Dict[str, Any]
+    :param head_config_overrides: The caller's overrides, or ``None``.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :return: The configured head.
+    :rtype: BaseVisionHead
+    :raises ValueError: If ``task_type`` has no head, or the overrides name a
+        reserved key.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-053
+    # Preset, then the model's keys, then the caller's overrides: do NOT
+    # reorder (an override must win over the model's reference head shape,
+    # and the model's num_classes/name over the preset), and do NOT copy these
+    # three lines back into a model. See decisions.md D-053.
+    config = HeadConfiguration.get_default_config(task_type)
+    config.update(head_config)
+    config = merge_head_config_overrides(config, head_config_overrides)
+    return create_vision_head(task_type, **config)

@@ -39,12 +39,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -517,27 +513,24 @@ class SCUNet(keras.Model):
         # include_top, so a headless model carries no layer it never runs.
         self.enhancement_head = None
         if self.include_top:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
-            head_config.update({
-                'scale_factor': 1,
-                'output_channels': self.in_nc,
-                'hidden_dim': self.dim,
-                # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
-                # paper's `m_tail` (one bias-free 3x3 conv on `up1 + x1`); do NOT
-                # drop block_dims=()/output_use_bias=False for the default head,
-                # which replaced the long skip and tail. See decisions.md.
-                'block_dims': (),
-                'output_use_bias': False,
-                # Deterministic layer name: an unnamed head takes Keras' auto
-                # suffix in process-creation order, which breaks the by-name
-                # matching that weight transfer relies on.
-                'name': 'enhancement_head',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self.head_config_overrides
-            )
-            self.enhancement_head = create_vision_head(
-                VisionTaskType.DENOISING, **head_config
+            self.enhancement_head = build_model_vision_head(
+                VisionTaskType.DENOISING,
+                {
+                    'scale_factor': 1,
+                    'output_channels': self.in_nc,
+                    'hidden_dim': self.dim,
+                    # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
+                    # paper's `m_tail` (one bias-free 3x3 conv on `up1 + x1`); do NOT
+                    # drop block_dims=()/output_use_bias=False for the default head,
+                    # which replaced the long skip and tail. See decisions.md.
+                    'block_dims': (),
+                    'output_use_bias': False,
+                    # Deterministic layer name: an unnamed head takes Keras' auto
+                    # suffix in process-creation order, which breaks the by-name
+                    # matching that weight transfer relies on.
+                    'name': 'enhancement_head',
+                },
+                self.head_config_overrides,
             )
 
         self.m_down1 = keras.Sequential(self.m_down1, name="down1")

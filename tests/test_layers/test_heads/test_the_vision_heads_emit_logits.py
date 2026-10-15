@@ -67,7 +67,10 @@ from dl_techniques.layers.heads.vision.factory import (
     HeadConfiguration,
     InstanceSegmentationHead,
     MultiTaskHead,
+    OpticalFlowHead,
     SegmentationHead,
+    SurfaceNormalsHead,
+    VISION_HEAD_DISPATCH,
     create_vision_head,
     merge_head_config_overrides,
 )
@@ -882,13 +885,8 @@ PRESETS = {
     "efficient": HeadConfiguration.get_efficient_config,
 }
 
-#: Every task type create_vision_head dispatches, by the head it builds.
-PRESET_TASKS = [
-    VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION,
-    VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.CLASSIFICATION,
-    VisionTaskType.INSTANCE_SEGMENTATION, VisionTaskType.DENOISING,
-    VisionTaskType.SUPER_RESOLUTION,
-]
+#: Every task type create_vision_head dispatches.
+PRESET_TASKS = list(VISION_HEAD_DISPATCH)
 
 
 @pytest.mark.parametrize("preset", sorted(PRESETS))
@@ -940,6 +938,12 @@ ALL_HEADS = {
         num_classes=3, hidden_dim=HIDDEN_DIM, dropout_rate=0.1,
         use_attention=True, attention_type="cbam", use_ffn=True),
     "DepthEstimationHead": lambda: DepthEstimationHead(
+        hidden_dim=HIDDEN_DIM, dropout_rate=0.1, use_attention=True,
+        attention_type="cbam", use_ffn=True),
+    "SurfaceNormalsHead": lambda: SurfaceNormalsHead(
+        hidden_dim=HIDDEN_DIM, dropout_rate=0.1, use_attention=True,
+        attention_type="cbam", use_ffn=True),
+    "OpticalFlowHead": lambda: OpticalFlowHead(
         hidden_dim=HIDDEN_DIM, dropout_rate=0.1, use_attention=True,
         attention_type="cbam", use_ffn=True),
     "ClassificationHead": lambda: ClassificationHead(

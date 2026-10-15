@@ -42,12 +42,8 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
@@ -623,31 +619,27 @@ class SwinTransformer(keras.Model):
         )
         x = self.head_norm(x)
 
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            'block_dims': (),
-            # The official head has no dropout: drop_rate reaches pos_drop and
-            # the blocks only.
-            'dropout_rate': 0.0,
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            'bias_regularizer': self.bias_regularizer,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'block_dims': (),
+                # The official head has no dropout: drop_rate reaches pos_drop and
+                # the blocks only.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_regularizer': self.bias_regularizer,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
         x = self.classification_head(x)["logits"]
         self.head_layers = [self.head_norm, self.classification_head]

@@ -7,7 +7,8 @@ three functions live here.
   categories, compatible tasks and output shapes.
 * :class:`TaskConfiguration` -- a validated set of tasks, plus queries for
   what that set contains.
-* :class:`CommonTaskConfigurations` -- 26 ready-made task sets.
+* :class:`CommonTaskConfigurations` -- 22 ready-made task sets, each
+  buildable as a ``MultiTaskHead``.
 * :func:`parse_task_list`, :func:`get_task_suggestions` and
   :func:`validate_task_combination` -- module-level helpers.
 
@@ -32,12 +33,11 @@ class VisionTaskType(Enum):
 
     **Head Dispatch:**
 
-    ``vision/factory.py``'s ``create_vision_head`` decides which head class
-    runs a task. Ten members reach a head. Five get a class of their own.
-    Five reuse another task's class, two of them with a different output
-    channel count. Denoising and super-resolution route through
-    ``create_enhancement_head``, which returns an ``EnhancementHead``. The
-    remaining 27 members have no head and raise ``ValueError``.
+    ``vision/factory.py``'s ``VISION_HEAD_DISPATCH`` decides which head
+    class runs a task; ``create_vision_head``, ``MultiTaskHead`` and
+    ``HeadConfiguration`` all read it. Ten members reach a head. Seven get a
+    class of their own. Three reuse another task's class with different
+    defaults. The remaining 27 members have no head and raise ``ValueError``.
 
     .. code-block:: text
 
@@ -48,12 +48,12 @@ class VisionTaskType(Enum):
         INSTANCE_SEGMENTATION  InstanceSegmentationHead
         CLASSIFICATION         ClassificationHead
         DEPTH_ESTIMATION       DepthEstimationHead
+        SURFACE_NORMALS        SurfaceNormalsHead
+        OPTICAL_FLOW           OpticalFlowHead
 
         Reuses another task's head class
         --------------------------------------------
-        SURFACE_NORMALS     DepthEstimationHead(output_channels=3)
-        OPTICAL_FLOW        DepthEstimationHead(output_channels=2)
-        KEYPOINT_DETECTION  DetectionHead
+        KEYPOINT_DETECTION  DetectionHead(num_anchors=1, use_regression=False)
         DENOISING           EnhancementHead
         SUPER_RESOLUTION    EnhancementHead(scale_factor=2)
 
@@ -95,8 +95,8 @@ class VisionTaskType(Enum):
 
     Note:
         The dispatch table restates a mapping that lives in
-        ``create_vision_head``. That function is the arbiter. If the two
-        disagree, the function is right.
+        ``VISION_HEAD_DISPATCH``. That table is the arbiter. If the two
+        disagree, the table is right.
 
     Example:
         >>> task = VisionTaskType.from_string("depth_estimation")
@@ -328,87 +328,80 @@ class VisionTaskType(Enum):
     @classmethod
     def get_output_types(cls, task: "VisionTaskType") -> Dict[str, str]:
         """
-        Describe the tensors a task is expected to produce.
+        Describe the tensors the head for a task returns.
 
-        The shapes are documentation strings, not runtime shapes. Nothing
-        checks a head against them. 15 of the 37 members have an entry; the
-        rest fall back to the single generic key ``{"output":
-        "float32[...]"}``.
+        One entry per task type that has a head; each key is a key of that
+        head's output dict, and a head that returns a bare tensor
+        (segmentation) is described by the one key ``'output'``. The shape
+        strings are documentation, ``B`` the batch, ``H, W`` the input
+        feature map, ``A`` anchors, ``C`` classes. The keys are pinned against
+        the heads by
+        ``tests/test_layers/test_heads/test_the_output_types_describe_what_each_head_returns.py``.
 
         :param task: The task to describe.
         :type task: VisionTaskType
         :return: Output name mapped to a shape string.
         :rtype: Dict[str, str]
+        :raises ValueError: If ``task`` has no head, so there is no output
+            to describe.
         """
+        # DECISION plan-2026-10-14T062616-81938e81/D-052
+        # Describe what each head RETURNS, and nothing for a task with no
+        # head. Do NOT put back the aspirational entries (keypoints/
+        # visibility/scores, bboxes/classes/scores, normals/confidence, a
+        # generic {'output': ...} fallback): 9 of the 10 dispatched entries
+        # named keys no head returned. See decisions.md D-052.
         output_types = {
             cls.DETECTION: {
-                "bboxes": "float32[N, 4]",
-                "classes": "int32[N]",
-                "scores": "float32[N]"
+                "classifications": "float32[B, H, W, A*C] class logits per anchor",
+                "regressions": "float32[B, H, W, A*D] box offsets per anchor "
+                               "(absent with use_regression=False)",
             },
             cls.SEGMENTATION: {
-                "masks": "int32[H, W]",
-                "logits": "float32[H, W, C]"
+                "output": "float32[B, H*s, W*s, C] class logits, a bare "
+                          "tensor (s = upsampling_factor)",
             },
             cls.INSTANCE_SEGMENTATION: {
-                "instance_masks": "int32[H, W]",
-                "instance_ids": "int32[N]",
-                "bboxes": "float32[N, 4]",
-                "classes": "int32[N]"
+                "classifications": "float32[B, H, W, A*C] class logits per anchor",
+                "regressions": "float32[B, H, W, A*4] box offsets per anchor",
+                "instance_masks": "float32[B, H, W, num_instances] mask logits",
             },
             cls.CLASSIFICATION: {
-                "logits": "float32[C]",
-                "probabilities": "float32[C]"
+                "logits": "float32[B, C]",
+                "probabilities": "float32[B, C] softmax of the logits",
             },
             cls.DEPTH_ESTIMATION: {
-                "depth": "float32[H, W]",
-                "confidence": "float32[H, W]"
+                "depth": "float32[B, H*s, W*s, output_channels]",
+                "confidence": "progressive: the sigmoid map the depth is "
+                              "scaled from; DPT: the last decoder stage",
             },
             cls.SURFACE_NORMALS: {
-                "normals": "float32[H, W, 3]",
-                "confidence": "float32[H, W]"
+                "normals": "float32[B, 8H, 8W, 3] unit vectors",
             },
             cls.OPTICAL_FLOW: {
-                "flow": "float32[H, W, 2]",
-                "occlusion": "float32[H, W]"
+                "flow": "float32[B, 8H, 8W, 2] signed displacement",
             },
             cls.KEYPOINT_DETECTION: {
-                "keypoints": "float32[N, K, 2]",
-                "visibility": "float32[N, K]",
-                "scores": "float32[N]"
-            },
-            cls.POSE_ESTIMATION: {
-                "poses": "float32[N, P]",
-                "confidence": "float32[N]"
-            },
-            cls.EDGE_DETECTION: {
-                "edges": "float32[H, W]",
-                "gradients": "float32[H, W, 2]"
-            },
-            cls.SALIENCY_DETECTION: {
-                "saliency": "float32[H, W]",
-                "attention": "float32[H, W]"
+                "classifications": "float32[B, H, W, C] keypoint logits per "
+                                   "location (SuperPoint: 64 cell positions "
+                                   "+ dustbin)",
             },
             cls.DENOISING: {
-                "denoised": "float32[H, W, C]",
-                "noise_estimate": "float32[H, W, C]"
+                "enhanced": "float32[B, H, W, output_channels]",
             },
             cls.SUPER_RESOLUTION: {
-                "high_res": "float32[H*S, W*S, C]",
-                "upscale_factor": "int32"
-            },
-            cls.MATTING: {
-                "alpha": "float32[H, W]",
-                "foreground": "float32[H, W, C]",
-                "background": "float32[H, W, C]"
-            },
-            cls.COLORIZATION: {
-                "colored": "float32[H, W, 3]",
-                "confidence": "float32[H, W]"
+                "enhanced": "float32[B, H*s, W*s, output_channels] "
+                            "(s = scale_factor)",
             },
         }
 
-        return output_types.get(task, {"output": "float32[...]"})
+        if task not in output_types:
+            raise ValueError(
+                f"{task.value!r} has no vision head, so it has no output "
+                f"types; the {len(output_types)} task types with a head are "
+                f"{sorted(t.value for t in output_types)}"
+            )
+        return output_types[task]
 
     @classmethod
     def from_string(cls, task_str: str) -> "VisionTaskType":
@@ -805,6 +798,7 @@ class TaskConfiguration:
 
         :return: Task mapped to its output name/shape strings.
         :rtype: Dict[VisionTaskType, Dict[str, str]]
+        :raises ValueError: If an enabled task has no head.
         """
         return {task: VisionTaskType.get_output_types(task) for task in self._tasks}
 
@@ -927,65 +921,57 @@ class TaskConfiguration:
 # Predefined common task configurations
 class CommonTaskConfigurations:
     """
-    26 ready-made :class:`TaskConfiguration` presets.
+    22 ready-made :class:`TaskConfiguration` presets.
 
     Every attribute is a class-level instance, built once at import time.
     They are shared, so treat them as read-only; :attr:`TaskConfiguration.tasks`
     already returns a copy.
 
+    Every task in every preset has a vision head, so each preset builds a
+    ``MultiTaskHead`` through ``create_multi_task_head`` (pinned by
+    ``tests/test_layers/test_heads/test_the_multi_task_head_builds_every_dispatched_task.py``).
+    Four presets that named a task with no head were deleted on 2026-10-15
+    (``PANOPTIC_SEGMENTATION_ONLY``, ``GEOMETRIC_UNDERSTANDING``,
+    ``POSE_AND_STRUCTURE``, ``ALL_TASKS``), and ``IMAGE_ENHANCEMENT`` lost
+    ``DEHAZE``, which has no head.
+
     **Presets:**
 
-    The table lists three numbers per preset. They are its task count, how
-    many of those tasks ``create_vision_head`` can build a head for, and how
-    many categories the tasks span. ``Heads`` below ``N`` means the preset
-    names a task with no head.
+    The table lists two numbers per preset: its task count and how many
+    categories the tasks span.
 
     .. code-block:: text
 
-        Preset                                  N  Heads  Cats
-        -------------------------------------  --  -----  ----
-        DETECTION_ONLY                          1      1     1
-        SEGMENTATION_ONLY                       1      1     1
-        CLASSIFICATION_ONLY                     1      1     1
-        DEPTH_ONLY                              1      1     1
-        SURFACE_NORMALS_ONLY                    1      1     1
-        INSTANCE_SEGMENTATION_ONLY              1      1     1
-        PANOPTIC_SEGMENTATION_ONLY              1      0     1
-        DENOISING_ONLY                          1      1     1
-        SUPER_RESOLUTION_ONLY                   1      1     1
-        KEYPOINT_DETECTION_ONLY                 1      1     1
-        DETECTION_SEGMENTATION                  2      2     1
-        DETECTION_CLASSIFICATION                2      2     1
-        SEGMENTATION_CLASSIFICATION             2      2     1
-        DEPTH_NORMALS                           2      2     1
-        SEGMENTATION_DEPTH                      2      2     2
-        DETECTION_DEPTH                         2      2     2
-        DETECTION_INSTANCE_SEG                  2      2     1
-        SEGMENTATION_INSTANCE_SEG               2      2     1
-        DETECTION_SEGMENTATION_DEPTH            3      3     2
-        DETECTION_SEGMENTATION_CLASSIFICATION   3      3     1
-        GEOMETRIC_UNDERSTANDING                 3      2     2
-        PANOPTIC_UNDERSTANDING                  4      4     2
-        IMAGE_ENHANCEMENT                       3      2     1
-        POSE_AND_STRUCTURE                      3      1     1
-        ALL_CORE_TASKS                          5      5     2
-        ALL_TASKS                              37     10    12
+        Preset                                  N  Cats
+        -------------------------------------  --  ----
+        DETECTION_ONLY                          1     1
+        SEGMENTATION_ONLY                       1     1
+        CLASSIFICATION_ONLY                     1     1
+        DEPTH_ONLY                              1     1
+        SURFACE_NORMALS_ONLY                    1     1
+        INSTANCE_SEGMENTATION_ONLY              1     1
+        DENOISING_ONLY                          1     1
+        SUPER_RESOLUTION_ONLY                   1     1
+        KEYPOINT_DETECTION_ONLY                 1     1
+        DETECTION_SEGMENTATION                  2     1
+        DETECTION_CLASSIFICATION                2     1
+        SEGMENTATION_CLASSIFICATION             2     1
+        DEPTH_NORMALS                           2     1
+        SEGMENTATION_DEPTH                      2     2
+        DETECTION_DEPTH                         2     2
+        DETECTION_INSTANCE_SEG                  2     1
+        SEGMENTATION_INSTANCE_SEG               2     1
+        IMAGE_ENHANCEMENT                       2     1
+        DETECTION_SEGMENTATION_DEPTH            3     2
+        DETECTION_SEGMENTATION_CLASSIFICATION   3     1
+        PANOPTIC_UNDERSTANDING                  4     2
+        ALL_CORE_TASKS                          5     2
 
         N      = len(get_enabled_tasks())
-        Heads  = tasks create_vision_head dispatches
         Cats   = len(get_tasks_by_category())
 
-    ``ALL_TASKS`` turns compatibility validation off, because the full enum
-    contains both rejected pairs. Besides it, four presets name a task with
-    no head:
-    ``PANOPTIC_SEGMENTATION_ONLY``, ``GEOMETRIC_UNDERSTANDING``,
-    ``IMAGE_ENHANCEMENT`` and ``POSE_AND_STRUCTURE``.
-
-    Note:
-        The two listing methods do not cover all 26.
-        :meth:`get_all_configurations` returns 25, leaving out ``ALL_TASKS``.
-        :meth:`get_configurations_by_complexity` returns 24, leaving out
-        ``ALL_TASKS`` and ``PANOPTIC_SEGMENTATION_ONLY``.
+    Both listing methods cover all 22: :meth:`get_all_configurations` as one
+    list, :meth:`get_configurations_by_complexity` grouped by task count.
 
     Example:
         >>> cfg = CommonTaskConfigurations.DETECTION_SEGMENTATION_DEPTH
@@ -1004,7 +990,6 @@ class CommonTaskConfigurations:
 
     # Single task configurations - Specialized
     INSTANCE_SEGMENTATION_ONLY = TaskConfiguration([VisionTaskType.INSTANCE_SEGMENTATION])
-    PANOPTIC_SEGMENTATION_ONLY = TaskConfiguration([VisionTaskType.PANOPTIC_SEGMENTATION])
     DENOISING_ONLY = TaskConfiguration([VisionTaskType.DENOISING])
     SUPER_RESOLUTION_ONLY = TaskConfiguration([VisionTaskType.SUPER_RESOLUTION])
     KEYPOINT_DETECTION_ONLY = TaskConfiguration([VisionTaskType.KEYPOINT_DETECTION])
@@ -1030,9 +1015,6 @@ class CommonTaskConfigurations:
     DETECTION_SEGMENTATION_CLASSIFICATION = TaskConfiguration([
         VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION, VisionTaskType.CLASSIFICATION
     ])
-    GEOMETRIC_UNDERSTANDING = TaskConfiguration([
-        VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.SURFACE_NORMALS, VisionTaskType.EDGE_DETECTION
-    ])
 
     # Panoptic understanding (full scene parsing)
     PANOPTIC_UNDERSTANDING = TaskConfiguration([
@@ -1041,12 +1023,7 @@ class CommonTaskConfigurations:
 
     # Enhancement pipeline
     IMAGE_ENHANCEMENT = TaskConfiguration([
-        VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION, VisionTaskType.DEHAZE
-    ])
-
-    # Pose and structure
-    POSE_AND_STRUCTURE = TaskConfiguration([
-        VisionTaskType.POSE_ESTIMATION, VisionTaskType.KEYPOINT_DETECTION, VisionTaskType.EDGE_DETECTION
+        VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION
     ])
 
     # All core tasks
@@ -1055,19 +1032,15 @@ class CommonTaskConfigurations:
         VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.SURFACE_NORMALS
     ])
 
-    # All tasks (be careful with this one!)
-    ALL_TASKS = TaskConfiguration(VisionTaskType.all_tasks(), validate_compatibility=False)
-
     @classmethod
     def get_all_configurations(cls) -> List[TaskConfiguration]:
         """
-        List the presets, except ``ALL_TASKS``.
+        List every preset.
 
-        25 of the 26 presets are returned. ``ALL_TASKS`` is left out because
-        it enables every task and is not a configuration to iterate over.
-        The instances are the shared class attributes, not copies.
+        All 22 presets are returned. The instances are the shared class
+        attributes, not copies.
 
-        :return: 25 predefined TaskConfiguration instances.
+        :return: 22 predefined TaskConfiguration instances.
         :rtype: List[TaskConfiguration]
         """
         return [
@@ -1080,7 +1053,6 @@ class CommonTaskConfigurations:
 
             # Single tasks - Specialized
             cls.INSTANCE_SEGMENTATION_ONLY,
-            cls.PANOPTIC_SEGMENTATION_ONLY,
             cls.DENOISING_ONLY,
             cls.SUPER_RESOLUTION_ONLY,
             cls.KEYPOINT_DETECTION_ONLY,
@@ -1094,16 +1066,14 @@ class CommonTaskConfigurations:
             cls.DETECTION_DEPTH,
             cls.DETECTION_INSTANCE_SEG,
             cls.SEGMENTATION_INSTANCE_SEG,
+            cls.IMAGE_ENHANCEMENT,
 
             # Three-task combinations
             cls.DETECTION_SEGMENTATION_DEPTH,
             cls.DETECTION_SEGMENTATION_CLASSIFICATION,
-            cls.GEOMETRIC_UNDERSTANDING,
-            cls.PANOPTIC_UNDERSTANDING,
-            cls.IMAGE_ENHANCEMENT,
-            cls.POSE_AND_STRUCTURE,
 
             # Comprehensive
+            cls.PANOPTIC_UNDERSTANDING,
             cls.ALL_CORE_TASKS,
         ]
 
@@ -1112,10 +1082,9 @@ class CommonTaskConfigurations:
         """
         Group presets under four complexity labels.
 
-        The labels are "Single Task" (9), "Two Tasks" (8), "Three Tasks" (5)
-        and "Complex Multi-Task" (2), so 24 of the 26 presets appear.
-        ``ALL_TASKS`` and ``PANOPTIC_SEGMENTATION_ONLY`` are not listed.
-        The labels describe task count, not head count.
+        The labels are "Single Task" (9), "Two Tasks" (9), "Three Tasks" (2)
+        and "Complex Multi-Task" (2), so all 22 presets appear once. The
+        labels describe task count.
 
         :return: Complexity label mapped to its preset instances.
         :rtype: Dict[str, List[TaskConfiguration]]
@@ -1130,11 +1099,11 @@ class CommonTaskConfigurations:
                 cls.DETECTION_SEGMENTATION, cls.DETECTION_CLASSIFICATION,
                 cls.SEGMENTATION_CLASSIFICATION, cls.DEPTH_NORMALS,
                 cls.SEGMENTATION_DEPTH, cls.DETECTION_DEPTH,
-                cls.DETECTION_INSTANCE_SEG, cls.SEGMENTATION_INSTANCE_SEG
+                cls.DETECTION_INSTANCE_SEG, cls.SEGMENTATION_INSTANCE_SEG,
+                cls.IMAGE_ENHANCEMENT
             ],
             "Three Tasks": [
-                cls.DETECTION_SEGMENTATION_DEPTH, cls.DETECTION_SEGMENTATION_CLASSIFICATION,
-                cls.GEOMETRIC_UNDERSTANDING, cls.IMAGE_ENHANCEMENT, cls.POSE_AND_STRUCTURE
+                cls.DETECTION_SEGMENTATION_DEPTH, cls.DETECTION_SEGMENTATION_CLASSIFICATION
             ],
             "Complex Multi-Task": [
                 cls.PANOPTIC_UNDERSTANDING, cls.ALL_CORE_TASKS

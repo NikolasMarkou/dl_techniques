@@ -54,13 +54,8 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    create_multi_task_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -443,29 +438,25 @@ class ResNet(keras.Model):
 
     def _build_head(self) -> None:
         """Build classification head using the vision heads factory."""
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'dropout_rate': 0.0,  # ResNet doesn't use dropout in head by default
-            'normalization_type': self.normalization_type,
-            'activation_type': self.activation_type,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',  # GAP for ResNet
-            'use_attention': False,
-            # The paper's head: GAP, then one FC. No hidden block.
-            'block_dims': (),
-            'kernel_regularizer': self.kernel_regularizer,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'dropout_rate': 0.0,  # ResNet doesn't use dropout in head by default
+                'normalization_type': self.normalization_type,
+                'activation_type': self.activation_type,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',  # GAP for ResNet
+                'use_attention': False,
+                # The paper's head: GAP, then one FC. No hidden block.
+                'block_dims': (),
+                'kernel_regularizer': self.kernel_regularizer,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
 
     def _build_supervision_heads(self) -> None:
@@ -478,29 +469,25 @@ class ResNet(keras.Model):
         # DECISION plan-2026-08-17T183311-79c63e38/D-019: range(0, N-1), not range(1, N) or range(1, N-1).
         # Supervising the final stage duplicates the main head; skipping stage 0 loses the one stage the technique helps most. See decisions.md.
         for stage_idx in range(0, len(self.blocks_per_stage) - 1):
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'dropout_rate': 0.0,
-                'normalization_type': self.normalization_type,
-                'activation_type': self.activation_type,
-                'use_global_pooling': True,
-                'pooling_type': 'avg',
-                'use_attention': False,
-                'block_dims': (),
-                'kernel_regularizer': self.kernel_regularizer,
-                # Per-stage suffix: this model builds N heads, so they need
-                # distinct names. Deterministic, because an unnamed head takes
-                # Keras' auto suffix in process-creation order, which breaks
-                # the by-name matching that weight transfer relies on.
-                'name': f'supervision_head_{stage_idx}',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self._head_config_overrides
-            )
-
-            sup_head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
+            sup_head = build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    'num_classes': self.num_classes,
+                    'dropout_rate': 0.0,
+                    'normalization_type': self.normalization_type,
+                    'activation_type': self.activation_type,
+                    'use_global_pooling': True,
+                    'pooling_type': 'avg',
+                    'use_attention': False,
+                    'block_dims': (),
+                    'kernel_regularizer': self.kernel_regularizer,
+                    # Per-stage suffix: this model builds N heads, so they need
+                    # distinct names. Deterministic, because an unnamed head takes
+                    # Keras' auto suffix in process-creation order, which breaks
+                    # the by-name matching that weight transfer relies on.
+                    'name': f'supervision_head_{stage_idx}',
+                },
+                self._head_config_overrides,
             )
             self.supervision_heads.append({
                 "head": sup_head,

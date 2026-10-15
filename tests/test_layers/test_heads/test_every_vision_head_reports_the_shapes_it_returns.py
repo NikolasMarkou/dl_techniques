@@ -27,8 +27,11 @@ from dl_techniques.layers.heads.vision.factory import (
     DetectionHead,
     EnhancementHead,
     InstanceSegmentationHead,
+    OpticalFlowHead,
     SegmentationHead,
+    SurfaceNormalsHead,
 )
+from dl_techniques.layers.heads.vision import create_vision_head
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
 HIDDEN_DIM = 16
@@ -69,10 +72,18 @@ _SUBJECTS = (
         dpt_upsample_factor=4, output_channels=2), SPATIAL),
     ("enhancement", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM), SPATIAL),
     ("enhancement_x2", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM, scale_factor=2), SPATIAL),
+    ("surface_normals", lambda: SurfaceNormalsHead(hidden_dim=HIDDEN_DIM), SPATIAL),
+    ("optical_flow", lambda: OpticalFlowHead(hidden_dim=HIDDEN_DIM), SPATIAL),
+    ("keypoint_detection", lambda: create_vision_head(
+        "keypoint_detection", num_classes=65, hidden_dim=HIDDEN_DIM), SPATIAL),
     ("multi_task", lambda: create_multi_task_head(
-        [VisionTaskType.DETECTION, "depth_estimation"],
+        [VisionTaskType.DETECTION, "depth_estimation", "surface_normals",
+         "optical_flow", "denoising"],
         detection={"num_classes": 3, "hidden_dim": HIDDEN_DIM},
         depth_estimation={"hidden_dim": HIDDEN_DIM},
+        surface_normals={"hidden_dim": HIDDEN_DIM},
+        optical_flow={"hidden_dim": HIDDEN_DIM},
+        denoising={"hidden_dim": HIDDEN_DIM},
         use_task_specific_attention=False), SPATIAL),
 )
 

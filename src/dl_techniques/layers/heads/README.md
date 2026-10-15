@@ -76,7 +76,7 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
 | Domain | Heads | Task-type vocabulary |
 |--------|-------|----------------------|
 | **nlp** | `TextClassificationHead`, `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`, `TextGenerationHead`, `MultipleChoiceHead`, `MultiTaskNLPHead` | `NLPTaskType` / `NLPTaskConfig` |
-| **vision** | `DetectionHead`, `SegmentationHead`, `DepthEstimationHead`, `ClassificationHead`, `InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead` | `VisionTaskType` / `TaskConfiguration` |
+| **vision** | `DetectionHead`, `SegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead` | `VisionTaskType` / `TaskConfiguration` |
 | **vlm** | `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead` | `VLMTaskType` / `VLMTaskConfig` |
 
 ## Output contract: logits
@@ -91,19 +91,21 @@ is `softmax('logits')`, computed in the head's compute dtype. Two outputs are sq
 because they are range maps for regression targets, not class scores: the progressive
 `DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid (the DPT depth decoder applies
 its `dpt_output_activation`, `'linear'` by default; DepthAnything passes `'relu'`, the reference
-head's final ReLU). The per-domain READMEs give each head's keys.
+head's final ReLU). Surface normals are L2-normalized to unit length and optical flow is linear and
+signed. The per-domain READMEs give each head's keys.
 
 Every vision and VLM head owns only the sub-layers its `call` runs. Arguments that a head's `call`
 can never read are refused with `ValueError`: the VLM heads take no `vision_dim`/`text_dim` (widths
 come from the inputs) and no `activation_type`, the post-fusion options belong to
 `ImageTextMatchingHead` alone, and `DepthEstimationHead`'s two decoders each refuse the other's
-arguments. The vision heads' attention and FFN settings (`attention_type`, `ffn_type`,
-`dropout_rate`, ...) are still accepted when `use_attention`/`use_ffn` is off, and are read only
-when it is on.
+arguments. The vision heads' attention and FFN settings (`attention_type`, `ffn_type`, ...) are
+still accepted when `use_attention`/`use_ffn` is off, and are read only when it is on. The
+exception is `dropout_rate` on the depth, normals and flow heads, whose decoders take no dropout:
+there it defaults to 0.0 and a positive rate is refused unless attention or the FFN is on.
 
 ## Notes
 
-- **Serialization-stable names.** All 22 layer-class names are preserved verbatim; the
+- **Serialization-stable names.** All 22 layer-class names of the merge are preserved verbatim (two vision heads were added on 2026-10-15); the
   package was relocated via `git mv`, so the registry keys of existing `.keras` checkpoints still
   resolve. A name resolving is not the archive loading: the vision and VLM head layouts changed on
   2026-10-14/15 (see the vision and VLM READMEs), and archives saved before then either fail to

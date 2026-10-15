@@ -63,11 +63,8 @@ from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -1316,28 +1313,26 @@ class BeitForImageClassification(keras.Model):
         shared head's ``avg``/``max`` pooling only works on 4D feature maps.
         """
         if not self.use_mean_pooling:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'use_global_pooling': True,
-                'pooling_type': 'cls_token',
-                'use_attention': False,
-                'block_dims': (),
-                'classifier_dropout_rate': self.dropout_rate,
-                # No hidden block, so no block dropout either.
-                'dropout_rate': 0.0,
-                'kernel_initializer': {
-                    'class_name': 'TruncatedNormal',
-                    'config': {'stddev': self.backbone.initializer_range},
+            self.classification_head = build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    'num_classes': self.num_classes,
+                    'use_global_pooling': True,
+                    'pooling_type': 'cls_token',
+                    'use_attention': False,
+                    'block_dims': (),
+                    'classifier_dropout_rate': self.dropout_rate,
+                    # No hidden block, so no block dropout either.
+                    'dropout_rate': 0.0,
+                    'kernel_initializer': {
+                        'class_name': 'TruncatedNormal',
+                        'config': {'stddev': self.backbone.initializer_range},
+                    },
+                    # Deterministic layer name: an unnamed head takes Keras'
+                    # auto suffix in process-creation order, which breaks the
+                    # by-name matching that weight transfer relies on.
+                    'name': 'classification_head',
                 },
-                # Deterministic layer name: an unnamed head takes Keras'
-                # auto suffix in process-creation order, which breaks the
-                # by-name matching that weight transfer relies on.
-                'name': 'classification_head',
-            })
-
-            self.classification_head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
             )
         else:
             # Mean pooling path: SequencePooling -> Norm -> Dropout -> Dense.

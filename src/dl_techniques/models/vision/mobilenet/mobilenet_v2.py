@@ -47,12 +47,8 @@ from dl_techniques.models.vision.mobilenet.common import (
     materialize_for_summary,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -240,31 +236,27 @@ class MobileNetV2(keras.Model):
         global average pool, ``Dropout(dropout_rate)`` (0.2 there and here),
         one linear ``Dense``. The model returns logits.
         """
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            # No hidden block: the pooled vector, a dropout, then the
-            # classifier.
-            'block_dims': (),
-            'classifier_dropout_rate': self.dropout_rate,
-            # No hidden block, so no block dropout either.
-            'dropout_rate': 0.0,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                # No hidden block: the pooled vector, a dropout, then the
+                # classifier.
+                'block_dims': (),
+                'classifier_dropout_rate': self.dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
 
     def build(self, input_shape: Any) -> None:

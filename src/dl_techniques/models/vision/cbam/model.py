@@ -43,11 +43,8 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -244,27 +241,25 @@ class CBAMNet(keras.Model):
         self.head: List[keras.layers.Layer] = []
         if self.include_top:
             # Use factory ClassificationHead instead of custom head
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'dropout_rate': 0.0,  # CBAMNet doesn't use dropout in head
-                'normalization_type': 'batch_norm',
-                'activation_type': 'relu',
-                'use_global_pooling': True,
-                'pooling_type': 'avg',
-                'use_attention': False,
-                # The CBAM paper evaluates on ResNets: GAP, then one FC.
-                'block_dims': (),
-                'kernel_initializer': self.kernel_initializer,
-                'kernel_regularizer': self.kernel_regularizer,
-                # Deterministic layer name: an unnamed head takes Keras'
-                # auto suffix in process-creation order, which breaks the
-                # by-name matching that weight transfer relies on.
-                'name': 'classification_head',
-            })
-
-            self.classification_head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
+            self.classification_head = build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    'num_classes': self.num_classes,
+                    'dropout_rate': 0.0,  # CBAMNet doesn't use dropout in head
+                    'normalization_type': 'batch_norm',
+                    'activation_type': 'relu',
+                    'use_global_pooling': True,
+                    'pooling_type': 'avg',
+                    'use_attention': False,
+                    # The CBAM paper evaluates on ResNets: GAP, then one FC.
+                    'block_dims': (),
+                    'kernel_initializer': self.kernel_initializer,
+                    'kernel_regularizer': self.kernel_regularizer,
+                    # Deterministic layer name: an unnamed head takes Keras'
+                    # auto suffix in process-creation order, which breaks the
+                    # by-name matching that weight transfer relies on.
+                    'name': 'classification_head',
+                },
             )
             self.head = [self.classification_head]
         else:

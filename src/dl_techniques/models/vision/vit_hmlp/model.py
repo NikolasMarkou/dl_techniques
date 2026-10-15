@@ -46,12 +46,8 @@ from dl_techniques.layers.activations.common import (
     resolve_activation,
     serialize_activation,
 )
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -512,35 +508,31 @@ class ViTHMLP(keras.Model):
         # Classification head (if include_top) - uses ClassificationHead from vision heads factory
         self.classification_head = None
         if self.include_top:
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-            head_config.update({
-                'num_classes': self.num_classes,
-                'use_global_pooling': True,
-                'pooling_type': 'cls_token',  # Extract CLS token from sequence
-                'use_attention': False,  # ViT transformer already applies attention
-                # The reference fine-tuning head (Dosovitskiy et al. 2020,
-                # Sec. 3.1: "a single linear layer at fine-tuning time"; timm
-                # VisionTransformer: head_drop then head): the CLS token of the
-                # final norm, a dropout, one linear Dense. No hidden block.
-                'block_dims': (),
-                'classifier_dropout_rate': self.dropout_rate,
-                # No hidden block, so no block dropout either.
-                'dropout_rate': 0.0,
-                'kernel_initializer': self.kernel_initializer,
-                'bias_initializer': self.bias_initializer,
-                'kernel_regularizer': self.kernel_regularizer,
-                'bias_regularizer': self.bias_regularizer,
-                # Deterministic layer name: an unnamed head takes Keras'
-                # auto suffix in process-creation order, which breaks the
-                # by-name matching that weight transfer relies on.
-                'name': 'classification_head',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self._head_config_overrides
-            )
-
-            self.classification_head = create_vision_head(
-                VisionTaskType.CLASSIFICATION, **head_config
+            self.classification_head = build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    'num_classes': self.num_classes,
+                    'use_global_pooling': True,
+                    'pooling_type': 'cls_token',  # Extract CLS token from sequence
+                    'use_attention': False,  # ViT transformer already applies attention
+                    # The reference fine-tuning head (Dosovitskiy et al. 2020,
+                    # Sec. 3.1: "a single linear layer at fine-tuning time"; timm
+                    # VisionTransformer: head_drop then head): the CLS token of the
+                    # final norm, a dropout, one linear Dense. No hidden block.
+                    'block_dims': (),
+                    'classifier_dropout_rate': self.dropout_rate,
+                    # No hidden block, so no block dropout either.
+                    'dropout_rate': 0.0,
+                    'kernel_initializer': self.kernel_initializer,
+                    'bias_initializer': self.bias_initializer,
+                    'kernel_regularizer': self.kernel_regularizer,
+                    'bias_regularizer': self.bias_regularizer,
+                    # Deterministic layer name: an unnamed head takes Keras'
+                    # auto suffix in process-creation order, which breaks the
+                    # by-name matching that weight transfer relies on.
+                    'name': 'classification_head',
+                },
+                self._head_config_overrides,
             )
 
         # Feature-extraction pooling via the shared SequencePooling layer.

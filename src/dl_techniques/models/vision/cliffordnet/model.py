@@ -53,12 +53,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 
 # Matches the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -416,36 +412,32 @@ class CliffordNet(keras.Model):
         :rtype: None
         :raises ValueError: If ``head_config_overrides`` names a reserved key.
         """
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            'block_dims': (),
-            'pooled_normalization_type': 'layer_norm',
-            'normalization_kwargs': {'epsilon': self.LAYERNORM_EPSILON},
-            'classifier_dropout_rate': self.dropout_rate,
-            # No hidden block, so no block dropout either.
-            'dropout_rate': 0.0,
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            'bias_regularizer': self.bias_regularizer,
-            # An unnamed head is `classification_head` in whichever process
-            # builds it first and `classification_head_1`, `_2`, ... after.
-            # A `.keras` round trip re-enters the naming counter, so the loaded
-            # model came back as `classification_head_2` against the
-            # original's `classification_head_1` -- every weight path under the
-            # head differed, and by-name weight transfer could not match it.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'block_dims': (),
+                'pooled_normalization_type': 'layer_norm',
+                'normalization_kwargs': {'epsilon': self.LAYERNORM_EPSILON},
+                'classifier_dropout_rate': self.dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_regularizer': self.bias_regularizer,
+                # An unnamed head is `classification_head` in whichever process
+                # builds it first and `classification_head_1`, `_2`, ... after.
+                # A `.keras` round trip re-enters the naming counter, so the loaded
+                # model came back as `classification_head_2` against the
+                # original's `classification_head_1` -- every weight path under the
+                # head differed, and by-name weight transfer could not match it.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

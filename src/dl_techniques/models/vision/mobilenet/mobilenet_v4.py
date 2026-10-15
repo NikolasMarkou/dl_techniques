@@ -51,12 +51,8 @@ from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
 )
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -356,39 +352,35 @@ class MobileNetV4(keras.Model):
         reference epsilon and momentum, ReLU, ``Dropout(dropout_rate)``, one
         linear ``Dense``. The model returns logits.
         """
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': 'avg',
-            'use_attention': False,
-            # One hidden block: Dense(1280) -> BatchNorm -> ReLU -> dropout.
-            'block_dims': (self.HEAD_HIDDEN_DIM,),
-            'normalization_type': 'batch_norm',
-            # The family rule (common.py, D-111 of plan-2026-08-22): every
-            # BatchNorm runs at the reference epsilon, the head's too.
-            'normalization_kwargs': {
-                'epsilon': REFERENCE_BN_EPSILON,
-                'momentum': REFERENCE_BN_MOMENTUM,
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                # One hidden block: Dense(1280) -> BatchNorm -> ReLU -> dropout.
+                'block_dims': (self.HEAD_HIDDEN_DIM,),
+                'normalization_type': 'batch_norm',
+                # The family rule (common.py, D-111 of plan-2026-08-22): every
+                # BatchNorm runs at the reference epsilon, the head's too.
+                'normalization_kwargs': {
+                    'epsilon': REFERENCE_BN_EPSILON,
+                    'momentum': REFERENCE_BN_MOMENTUM,
+                },
+                # timm's conv_head is "never a bias": the BatchNorm after it would
+                # leave a bias with an identically-zero gradient (measured).
+                'block_use_bias': False,
+                'activation_type': 'relu',
+                'dropout_rate': self.dropout_rate,
+                'kernel_initializer': self.kernel_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
             },
-            # timm's conv_head is "never a bias": the BatchNorm after it would
-            # leave a bias with an identically-zero gradient (measured).
-            'block_use_bias': False,
-            'activation_type': 'relu',
-            'dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+            self._head_config_overrides,
         )
 
     @classmethod

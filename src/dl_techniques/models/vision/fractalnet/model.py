@@ -36,12 +36,8 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.fractal_block import FractalBlock
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
@@ -385,29 +381,25 @@ class FractalNet(keras.Model):
         :return: Classification logits ``(batch, num_classes)``
         :raises ValueError: If ``head_config_overrides`` names a reserved key.
         """
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
-        head_config.update({
-            'num_classes': self.num_classes,
-            'use_global_pooling': True,
-            'pooling_type': self.global_pool,
-            'use_attention': False,
-            'block_dims': (),
-            'classifier_dropout_rate': self.classifier_dropout_rate,
-            # No hidden block, so no block dropout either.
-            'dropout_rate': 0.0,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            # Deterministic layer name: an unnamed head takes Keras'
-            # auto suffix in process-creation order, which breaks the
-            # by-name matching that weight transfer relies on.
-            'name': 'classification_head',
-        })
-        head_config = merge_head_config_overrides(
-            head_config, self._head_config_overrides
-        )
-
-        self.classification_head = create_vision_head(
-            VisionTaskType.CLASSIFICATION, **head_config
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                'num_classes': self.num_classes,
+                'use_global_pooling': True,
+                'pooling_type': self.global_pool,
+                'use_attention': False,
+                'block_dims': (),
+                'classifier_dropout_rate': self.classifier_dropout_rate,
+                # No hidden block, so no block dropout either.
+                'dropout_rate': 0.0,
+                'kernel_initializer': self.kernel_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
+            },
+            self._head_config_overrides,
         )
         return self.classification_head(x)['logits']
 

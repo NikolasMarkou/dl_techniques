@@ -50,12 +50,8 @@ from typing import List, Optional, Tuple, Dict, Any, Union
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
-from dl_techniques.layers.heads.vision import (
-    create_vision_head,
-    VisionTaskType,
-    HeadConfiguration,
-)
-from dl_techniques.layers.heads.vision.factory import merge_head_config_overrides
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 
 from .components import FreMLP, DilatedBranch, SimpleGate, _add_list
 from dl_techniques.utils.logger import logger
@@ -1072,28 +1068,24 @@ class DarkIR(keras.Model):
         self.final_residual = None
         if self.include_top:
             self.final_residual = keras.layers.Add(name="final_residual")
-            head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
-            head_config.update({
-                'output_channels': self.img_channels,
-                'scale_factor': 1,  # Denoising: no upscaling
-                'hidden_dim': self.width,  # Match base feature width
-                # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
-                # official `ending` conv (one 3x3 conv, bias kept); do NOT drop
-                # block_dims=() for the default 3-ConvBlock head, which appended an
-                # extra network after the global residual. See decisions.md.
-                'block_dims': (),
-                'output_use_bias': True,
-                # Deterministic layer name: an unnamed head takes Keras' auto
-                # suffix in process-creation order, which breaks the by-name
-                # matching that weight transfer relies on.
-                'name': 'enhancement_head',
-            })
-            head_config = merge_head_config_overrides(
-                head_config, self.head_config_overrides
-            )
-
-            self.enhancement_head = create_vision_head(
-                VisionTaskType.DENOISING, **head_config
+            self.enhancement_head = build_model_vision_head(
+                VisionTaskType.DENOISING,
+                {
+                    'output_channels': self.img_channels,
+                    'scale_factor': 1,  # Denoising: no upscaling
+                    'hidden_dim': self.width,  # Match base feature width
+                    # DECISION plan-2026-10-14T062616-81938e81/D-022: the head IS the
+                    # official `ending` conv (one 3x3 conv, bias kept); do NOT drop
+                    # block_dims=() for the default 3-ConvBlock head, which appended an
+                    # extra network after the global residual. See decisions.md.
+                    'block_dims': (),
+                    'output_use_bias': True,
+                    # Deterministic layer name: an unnamed head takes Keras' auto
+                    # suffix in process-creation order, which breaks the by-name
+                    # matching that weight transfer relies on.
+                    'name': 'enhancement_head',
+                },
+                self.head_config_overrides,
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

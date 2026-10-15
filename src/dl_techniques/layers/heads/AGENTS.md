@@ -35,10 +35,11 @@ silently wins. The helper additionally binds `Custom>ClassName` as a legacy alia
 object — which is why the class keys of checkpoints written before the registration migration (and before
 this package merge) still resolve.
 
-## Layers (22 classes, grouped by domain)
+## Layers (24 classes, grouped by domain)
 
 > The count lives HERE and nowhere else in this file -- it was previously
-> restated in two places and both said 21 while the list below already had 22.
+> restated in two places and both said 21 while the list below already had 22
+> (24 since 2026-10-15, when `SurfaceNormalsHead` and `OpticalFlowHead` were added).
 > Re-derive rather than trust it:
 >
 > ```bash
@@ -48,15 +49,17 @@ this package merge) still resolve.
 >
 > The `\b` matters: without it the pattern also matches `NLPHead` inside
 > `NLPHeadConfiguration`, which is a config dataclass, not a layer, and yields 23.
-> Breakdown: 8 NLP + 8 vision + 6 VLM.
+> Breakdown: 8 NLP + 10 vision + 6 VLM. The private `_DenseVectorHeadBase`
+> (the shared body of the normals and flow heads) does not match the pattern.
 
 **NLP** (`nlp/factory.py`) — `BaseNLPHead`, `TextClassificationHead`,
 `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`,
 `TextGenerationHead`, `MultipleChoiceHead`, `MultiTaskNLPHead`.
 
 **Vision** (`vision/factory.py`) — `BaseVisionHead`, `DetectionHead`,
-`SegmentationHead`, `DepthEstimationHead`, `ClassificationHead`,
-`InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead`.
+`SegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`,
+`OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`,
+`EnhancementHead`, `MultiTaskHead`.
 
 **VLM** (`vlm/factory.py`) — `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`,
 `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead`.
@@ -104,9 +107,13 @@ this package merge) still resolve.
   `task_config.vocabulary_size` in its `config.json` to the model's
   `vocab_size` (or delete the key, and the model's vocabulary fills it), or
   rebuild the model with a corrected `task_config` and save it again.
-- `vision/factory.py` — `create_vision_head(task_type, ...)`,
-  `create_enhancement_head(...)`, `create_multi_task_head(...)`,
-  `HeadConfiguration`.
+- `vision/factory.py` — `VISION_HEAD_DISPATCH` (the one task-type to
+  head-class table every vision helper reads), `create_vision_head(task_type,
+  ...)`, `create_enhancement_head(...)`, `create_multi_task_head(...)`,
+  `HeadConfiguration` (presets for the 10 task types with a head; the rest
+  raise), `merge_head_config_overrides(...)` and
+  `build_model_vision_head(task_type, head_config, head_config_overrides)`,
+  the one call every vision model builds its head with (19 sites).
 - `vlm/factory.py` — `create_vlm_head(task_config, ...)`,
   `create_multi_task_vlm_head(...)`.
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
