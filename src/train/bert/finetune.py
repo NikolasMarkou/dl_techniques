@@ -11,7 +11,7 @@ import pickle
 
 import keras
 import tensorflow as tf
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from train.common import setup_gpu, set_seeds
 from train.common.nlp import (

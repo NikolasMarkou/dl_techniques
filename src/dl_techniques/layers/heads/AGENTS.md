@@ -179,6 +179,14 @@ this package merge) still resolve.
   dict with its own `attention_mask`, as a tuple or a list) and `MultipleChoiceHead` (a
   `(batch, num_choices, seq)` mask, folded with the choices) pool under the caller's mask; a mask
   for an already pooled input is refused. Pinned by `test_the_nlp_heads_honour_padding_masks.py`.
+  The token and QA heads' task attention attends under the same mask (D-072,
+  `BaseNLPHead._apply_task_attention`); an attention type that takes no `attention_mask` refuses
+  one. Pinned by `test_the_nlp_task_attention_ignores_padding.py`.
+- **Vision attention layout** (D-071). A vision head's attention stage runs in the layout its
+  type takes (`_SPATIAL_ATTENTION_TYPES` in `vision/factory.py` lists the map-only ones); a map is
+  flattened for a sequence type and a sequence head's tokens are placed on `patch_grid_size` for a
+  spatial type. Pinned, with the table re-measured, by
+  `test_a_vision_head_runs_attention_in_its_own_layout.py`.
 - **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for the four strategies
   in `_DELEGATED_POOLING_STRATEGIES` -- `cls`/`mean`/`max`/`last` -- delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
   layer (built in `__init__`/`build`, Golden Rule). The `attention` strategy
@@ -205,7 +213,11 @@ this package merge) still resolve.
   is refused with `ValueError`: the vision heads (D-020: no common
   norm/Dropout, `ClassificationHead` refuses `use_ffn`, `EnhancementHead`
   refuses attention/FFN/dropout), `DepthEstimationHead`'s two decoders, each of
-  which refuses the other's arguments (D-030), and the VLM heads (D-032:
+  which refuses the other's arguments (D-030), the arguments no layer of a
+  given mode reads (D-074: `DetectionHead(use_regression=False)` refuses
+  `bbox_dims`, the DPT decoder and the explicit `SegmentationHead` refuse
+  `hidden_dim` unless the attention or FFN stage reads it; each stores
+  `None`), and the VLM heads (D-032:
   `BaseVLMHead` owns only `fusion`; the post-fusion norm and FFN and their four
   arguments live on `ImageTextMatchingHead`; no
   `vision_dim`/`text_dim`/`activation_type`), and the NLP heads (D-062: a head

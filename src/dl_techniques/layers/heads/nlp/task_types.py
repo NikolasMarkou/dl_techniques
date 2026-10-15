@@ -11,7 +11,8 @@ here:
   task head, validated against the head its task type is routed to.
 * :class:`NLPTaskConfiguration` -- a validated set of tasks, plus queries for
   the capabilities that set needs.
-* :class:`CommonNLPTaskConfigurations` -- eleven ready-made task sets.
+* :class:`CommonNLPTaskConfigurations` -- ten ready-made task sets, each
+  naming only task types with a head.
 
 ``nlp/factory.py`` reads these objects and builds the head the table names.
 The types name tasks, not models, so heads on BERT, GPT and T5 all take the
@@ -838,11 +839,13 @@ class NLPTaskConfiguration:
 
 class CommonNLPTaskConfigurations:
     """
-    Eleven ready-made :class:`NLPTaskConfiguration` presets.
+    Ten ready-made :class:`NLPTaskConfiguration` presets.
 
     Every attribute is a class-level instance, built once at import time.
     They are shared, so treat them as read-only; :attr:`tasks` already
-    returns a copy.
+    returns a copy. Every task type a preset names is in
+    :data:`NLP_HEAD_DISPATCH`, so a multi-task head builds from any of them
+    (``test_every_nlp_preset_builds.py``).
 
     **Presets:**
 
@@ -858,9 +861,8 @@ class CommonNLPTaskConfigurations:
         SENTIMENT_ONLY             1  no     no    no      512
         QA_ONLY                    1  no     yes   no      512
         GENERATION_ONLY            1  no     no    yes    1024
-        TOKEN_TASKS                3  yes    no    no      512
+        TOKEN_TASKS                2  yes    no    no      512
         CLASSIFICATION_SUITE       3  no     no    no      512
-        INFORMATION_EXTRACTION     3  yes    no    no      512
         COMPREHENSION_SUITE        3  no     yes   no      512
         SIMILARITY_SUITE           3  no     yes   no      512
         GLUE_TASKS                 5  no     yes   no      512
@@ -886,11 +888,16 @@ class CommonNLPTaskConfigurations:
     QA_ONLY = NLPTaskConfiguration([NLPTaskType.QUESTION_ANSWERING])
     GENERATION_ONLY = NLPTaskConfiguration([NLPTaskType.TEXT_GENERATION])
 
-    # Token-level combinations
+    # Token-level combinations.
+    # DECISION plan-2026-10-14T062616-81938e81/D-073: a preset names only
+    # task types NLP_HEAD_DISPATCH routes to a head. Do NOT put
+    # DEPENDENCY_PARSING back here, nor RELATION_EXTRACTION/EVENT_EXTRACTION
+    # in a new INFORMATION_EXTRACTION preset (deleted: without them it was
+    # NER_ONLY): none has a head, so no multi-task head built from the
+    # preset. See decisions.md D-073.
     TOKEN_TASKS = NLPTaskConfiguration([
         NLPTaskType.NAMED_ENTITY_RECOGNITION,
         NLPTaskType.PART_OF_SPEECH_TAGGING,
-        NLPTaskType.DEPENDENCY_PARSING,
     ])
 
     # Classification combinations
@@ -898,13 +905,6 @@ class CommonNLPTaskConfigurations:
         NLPTaskType.TEXT_CLASSIFICATION,
         NLPTaskType.SENTIMENT_ANALYSIS,
         NLPTaskType.EMOTION_DETECTION,
-    ])
-
-    # Information extraction
-    INFORMATION_EXTRACTION = NLPTaskConfiguration([
-        NLPTaskType.NAMED_ENTITY_RECOGNITION,
-        NLPTaskType.RELATION_EXTRACTION,
-        NLPTaskType.EVENT_EXTRACTION,
     ])
 
     # Question answering and comprehension

@@ -101,8 +101,7 @@ _SUBJECTS: Tuple[Tuple[str, Callable[[], keras.layers.Layer], Any], ...] = (
     ("depth_progressive", lambda: DepthEstimationHead(
         hidden_dim=HIDDEN_DIM), SPATIAL),
     ("depth_dpt", lambda: DepthEstimationHead(
-        hidden_dim=HIDDEN_DIM, decoder_style="dpt", dpt_dims=[16, 8],
-        dpt_upsample_factor=4), SPATIAL),
+        decoder_style="dpt", dpt_dims=[16, 8], dpt_upsample_factor=4), SPATIAL),
     ("enhancement", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM), SPATIAL),
     ("surface_normals", lambda: SurfaceNormalsHead(hidden_dim=HIDDEN_DIM), SPATIAL),
     ("optical_flow", lambda: OpticalFlowHead(hidden_dim=HIDDEN_DIM), SPATIAL),

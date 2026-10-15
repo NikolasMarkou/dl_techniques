@@ -80,8 +80,9 @@ Different tasks require different specialized architectures. The factory selects
 `NLPTaskType` members have a head and the other 13 raise `ValueError`. `NLPTaskType.get_output_types(task)`
 names exactly the keys that head returns, and raises for a task type with no head.
 
-Every head that pools honours the `'attention_mask'` in its input dict. A mask for an input that is
-already pooled is refused (there is nothing to mask).
+Every head that pools honours the `'attention_mask'` in its input dict, and so does the task
+attention of the token and QA heads. A mask for an input that is already pooled is refused (there
+is nothing to mask).
 
 ### 3.1. Sequence Classification
 *   **Task Types**: `TEXT_CLASSIFICATION`, `SENTIMENT_ANALYSIS`, `EMOTION_DETECTION`, `INTENT_CLASSIFICATION`, `TOPIC_CLASSIFICATION`, `SPAM_DETECTION`, `NATURAL_LANGUAGE_INFERENCE`, and the regression types `TEXT_REGRESSION`, `READABILITY_SCORING`, `QUALITY_SCORING` (set `num_classes=1` and read `logits`; `probabilities` of one class is constantly 1).
@@ -224,7 +225,7 @@ Foundation models output sequences. For tasks requiring a single prediction per 
 ### 5.2. Task-Specific Attention
 Sometimes the foundation model's universal representations aren't quite perfectly aligned with a niche task.
 
-Enabling `use_task_attention=True` inserts a self-attention layer *inside the head*, after the intermediate block. This allows the head to re-contextualize the generic hidden states specifically for its task before making a prediction. Only the two heads that keep the sequence axis run it, the token-classification and question-answering heads; the other four refuse the flag. It attends over every position, padding included: the head passes it no mask.
+Enabling `use_task_attention=True` inserts a self-attention layer *inside the head*, after the intermediate block. This allows the head to re-contextualize the generic hidden states specifically for its task before making a prediction. Only the two heads that keep the sequence axis run it, the token-classification and question-answering heads; the other four refuse the flag. A dict input's `'attention_mask'` reaches it, so a real token never attends over padding (since 2026-10-15, D-072; it used to attend over every position). Without a mask the call is unchanged. An `attention_type` whose layer takes no `attention_mask` (`'performer'`; `'linear'` accepts `mask=` and discards it) refuses a mask with `ValueError` rather than attending over padding.
 
 ### 5.3. Multi-Task Heads
 The `MultiTaskNLPHead` manages multiple sub-heads. It's a single layer that can route inputs to all its sub-heads simultaneously or just one.

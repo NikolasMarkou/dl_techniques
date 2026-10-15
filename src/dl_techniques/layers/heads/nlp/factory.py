@@ -44,6 +44,8 @@ Example
 ['logits', 'probabilities']
 """
 
+import inspect
+
 import keras
 from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 
@@ -208,6 +210,11 @@ class BaseNLPHead(keras.layers.Layer):
     block and ``input_dim`` without it; the FFN emits ``hidden_size``. The
     output layer of every subclass is built at the width ``call`` feeds it,
     :meth:`_output_width`.
+
+    **Padding (D-063, D-072):** a dict input's ``'attention_mask'`` reaches
+    every stage that mixes positions: the pooling and the task attention
+    (:meth:`_apply_task_attention`, which refuses a mask for an attention
+    type that takes none). The per-token stages need none.
 
     **Pooling (D-002):**
 
@@ -622,6 +629,55 @@ class BaseNLPHead(keras.layers.Layer):
                 dropout_rate=self.task_config.dropout_rate,
                 name=f"{self.name}_ffn"
             )
+
+    def _apply_task_attention(
+            self,
+            hidden_states: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor],
+            training: Optional[bool]
+    ) -> keras.KerasTensor:
+        """
+        Run ``task_attention`` over the real tokens only.
+
+        Interface contract, shared by the heads that apply task attention
+        (:class:`TokenClassificationHead`, :class:`QuestionAnsweringHead`):
+        ``hidden_states`` is ``(batch, seq, stage_width)`` and
+        ``attention_mask`` a ``(batch, seq)`` keep mask (1 = real) or
+        ``None``. With no mask the layer is called exactly as before the mask
+        existed; with one it reaches the layer's ``attention_mask``.
+
+        :param hidden_states: The per-token features.
+        :type hidden_states: keras.KerasTensor
+        :param attention_mask: Keep mask, or ``None``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Keras training flag.
+        :type training: Optional[bool]
+        :return: The attended features, the same shape.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If a mask is given and the attention type's
+            ``call`` takes no ``attention_mask``.
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-072: the padding mask
+        # reaches the task attention, so a real token never attends over
+        # padding. Do NOT call the layer without it when a mask was given
+        # (every real position mixed in the padded ones), and do NOT drop a
+        # mask in silence for a type that cannot take one ('performer';
+        # 'linear' accepts mask= and discards it): refuse instead. No mask
+        # keeps the old call, so mask-free outputs are bit-identical. See
+        # decisions.md D-072.
+        if attention_mask is None:
+            return self.task_attention(hidden_states, training=training)
+        takes_mask = 'attention_mask' in inspect.signature(
+            self.task_attention.call).parameters
+        if not takes_mask:
+            raise ValueError(
+                f"{type(self).__name__}: attention_type={self.attention_type!r} "
+                f"takes no attention_mask, so its task attention would attend "
+                f"over padding; drop the mask or choose a type that takes one "
+                f"(e.g. 'multi_head')."
+            )
+        return self.task_attention(
+            hidden_states, attention_mask=attention_mask, training=training)
 
     def _pool_sequence(
             self,
@@ -1158,20 +1214,19 @@ class TokenClassificationHead(BaseNLPHead):
         """
         Run the common stage per token, then label every position.
 
-        :param inputs: A sequence tensor, or a dict with ``'hidden_states'``.
-            Any ``'attention_mask'`` in the dict is ignored by this head.
+        :param inputs: A sequence tensor, or a dict with ``'hidden_states'``
+            and an optional ``'attention_mask'``, which reaches the task
+            attention only (every other stage is per token).
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :param training: Whether the call is a training step.
         :type training: Optional[bool]
         :return: ``{'logits'}``, plus ``'predictions'`` when ``use_crf`` is
             false.
+        :raises ValueError: If a mask is given to a task attention type that
+            takes none.
         :rtype: Dict[str, keras.KerasTensor]
         """
-        # Handle different input formats
-        if isinstance(inputs, dict):
-            sequence_output = inputs['hidden_states']
-        else:
-            sequence_output = inputs
+        sequence_output, attention_mask = _split_inputs(inputs)
 
         # Apply processing to each token
         hidden_states = self.norm(sequence_output)
@@ -1182,7 +1237,8 @@ class TokenClassificationHead(BaseNLPHead):
             hidden_states = _apply_per_row(self.intermediate, hidden_states, training)
 
         if self.use_task_attention:
-            hidden_states = self.task_attention(hidden_states, training=training)
+            hidden_states = self._apply_task_attention(
+                hidden_states, attention_mask, training)
 
         if self.use_ffn:
             hidden_states = self.ffn(hidden_states, training=training)
@@ -1366,7 +1422,8 @@ class QuestionAnsweringHead(BaseNLPHead):
         """
         Run the common stage, then score every position twice.
 
-        When an ``'attention_mask'`` is given, masked positions are replaced
+        When an ``'attention_mask'`` is given, the task attention (if on)
+        attends over real tokens only, and masked positions are replaced
         by ``utils.dtype_policy.mask_sentinel`` in both score vectors so an
         argmax cannot land on padding. Selection, not an additive bias: the
         additive form NaNs every KEPT position under ``mixed_float16``.
@@ -1390,7 +1447,8 @@ class QuestionAnsweringHead(BaseNLPHead):
             hidden_states = _apply_per_row(self.intermediate, hidden_states, training)
 
         if self.use_task_attention:
-            hidden_states = self.task_attention(hidden_states, training=training)
+            hidden_states = self._apply_task_attention(
+                hidden_states, attention_mask, training)
 
         # Predict start and end positions
         start_logits = keras.ops.squeeze(self.start_classifier(hidden_states), axis=-1)

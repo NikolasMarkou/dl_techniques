@@ -134,6 +134,7 @@ there it defaults to 0.0 and a positive rate is refused unless attention or the 
   attention; their means and max also go through `SequencePooling`. See `vlm/README.md` § 2.
 - **NLP padding masks.** Every NLP head that pools reads `'attention_mask'` from its input
   dict: classification, both forms of `TextSimilarityHead` (each side of a pair carries its
-  own) and `MultipleChoiceHead` (a `(batch, num_choices, seq)` mask). See `nlp/README.md` § 3.
+  own) and `MultipleChoiceHead` (a `(batch, num_choices, seq)` mask). The token and QA heads
+  hand it to their task attention. See `nlp/README.md` § 3 and § 5.
 - **`VisionTaskType` has no alias.** Vision's task enum was renamed from a generic name to
   `VisionTaskType`; the old name is gone, so import `VisionTaskType`.

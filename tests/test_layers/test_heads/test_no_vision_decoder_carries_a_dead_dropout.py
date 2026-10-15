@@ -31,9 +31,11 @@ HIDDEN_DIM = 16
 #: Each dense-regression head, built through the public entry point.
 _DECODERS = {
     "depth_progressive": lambda **kw: DepthEstimationHead(hidden_dim=HIDDEN_DIM, **kw),
+    # The DPT stages are sized by dpt_dims: hidden_dim is given only when a
+    # stage that reads it (the FFN here) is on, and refused otherwise.
     "depth_dpt": lambda **kw: DepthEstimationHead(
-        hidden_dim=HIDDEN_DIM, decoder_style="dpt", dpt_dims=[8, 8],
-        dpt_upsample_factor=4, **kw),
+        decoder_style="dpt", dpt_dims=[8, 8], dpt_upsample_factor=4,
+        **({"hidden_dim": HIDDEN_DIM} if kw.get("use_ffn") else {}), **kw),
     "surface_normals": lambda **kw: create_vision_head(
         "surface_normals", hidden_dim=HIDDEN_DIM, **kw),
     "optical_flow": lambda **kw: create_vision_head(

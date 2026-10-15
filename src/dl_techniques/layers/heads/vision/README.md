@@ -58,11 +58,11 @@ is descriptive only — the factory never reads it.
 
 | Head | Arguments |
 |---|---|
-| `DetectionHead` | `num_classes` (required), `num_anchors=9`, `bbox_dims=4`, `input_format='spatial'` (`'sequence'` takes `(B, N, D)` patch tokens), `patch_grid_size=None` (the `(h, w)` token grid, required for `'sequence'`), `use_regression=True` (`False` builds no regression branch and returns only `'classifications'`) |
-| `SegmentationHead` | `num_classes` (required), `upsampling_factor=4` (output over input resolution, a power of two, else `ValueError`; until 2026-10-15 it built `int(sqrt(f))` doublings, so 8 gave 4x), `use_skip_connections=True`, `skip_channel_mode='auto'`, `explicit_skip_channels=None` (required for `skip_channel_mode='explicit'`), `input_format='spatial'`, `patch_grid_size=None` (as for `DetectionHead`) |
+| `DetectionHead` | `num_classes` (required), `num_anchors=9`, `bbox_dims=None` (4 with regression; with `use_regression=False` no layer reads it, so a value is refused and `None` is stored), `input_format='spatial'` (`'sequence'` takes `(B, N, D)` patch tokens), `patch_grid_size=None` (the `(h, w)` token grid, required for `'sequence'`), `use_regression=True` (`False` builds no regression branch and returns only `'classifications'`) |
+| `SegmentationHead` | `num_classes` (required), `upsampling_factor=4` (output over input resolution, a power of two, else `ValueError`; until 2026-10-15 it built `int(sqrt(f))` doublings, so 8 gave 4x), `use_skip_connections=True`, `skip_channel_mode='auto'`, `explicit_skip_channels=None` (required for `skip_channel_mode='explicit'`, which sizes the refine blocks and the upsample convs from it, so `hidden_dim` is read only by the attention/FFN stages and is refused, then stored as `None`, when both are off; until 2026-10-15 the upsample convs were created at a `hidden_dim // 8` placeholder, which refused `hidden_dim < 8`), `input_format='spatial'`, `patch_grid_size=None` (as for `DetectionHead`) |
 | `InstanceSegmentationHead` | `num_classes` (required), `num_instances=100`, `mask_size=(28, 28)` |
 | `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'`, `block_dims=None` (hidden `DenseBlock` widths; `None` is `(hidden_dim, hidden_dim // 2)`, `()` is none), `pooled_normalization_type=None` (a norm on the pooled vector), `normalization_kwargs=None` (to every head norm), `classifier_dropout_rate=0.0` (a dropout on the classifier input), `block_use_bias=True` (the hidden blocks' Dense bias; `False` before a `batch_norm`), `kernel_initializer='glorot_uniform'`, `bias_initializer='zeros'`, `kernel_regularizer=None`, `bias_regularizer=None` (the last four reach every `Dense`, the classifier included) |
-| `DepthEstimationHead` | `output_channels=1`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract). Progressive only: `min_depth` (0.1), `max_depth` (100.0), `use_log_depth` (`True`). DPT only: `dpt_dims` (`[256, 128, 64, 32]`), `dpt_use_bias` (`False`), `dpt_activation` (`'relu'`), `dpt_output_activation` (`'linear'`), `dpt_upsample_factor` (16; a power of 2, at most `2 ** len(dpt_dims)`), `dpt_kernel_initializer` (`'he_normal'`, cloned per conv), `dpt_kernel_regularizer` (none). Each mode-specific argument defaults to `None`, meaning the value in parentheses in its own mode; the other mode refuses it with `ValueError` and stores `None`. The DPT mode also refuses `normalization_type` and `activation_type` (only the progressive `ConvBlock`s read them) |
+| `DepthEstimationHead` | `output_channels=1`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract). Progressive only: `min_depth` (0.1), `max_depth` (100.0), `use_log_depth` (`True`). DPT only: `dpt_dims` (`[256, 128, 64, 32]`), `dpt_use_bias` (`False`), `dpt_activation` (`'relu'`), `dpt_output_activation` (`'linear'`), `dpt_upsample_factor` (16; a power of 2, at most `2 ** len(dpt_dims)`), `dpt_kernel_initializer` (`'he_normal'`, cloned per conv), `dpt_kernel_regularizer` (none). Each mode-specific argument defaults to `None`, meaning the value in parentheses in its own mode; the other mode refuses it with `ValueError` and stores `None`. The DPT mode also refuses `normalization_type` and `activation_type` (only the progressive `ConvBlock`s read them), and `hidden_dim` unless `use_attention` or `use_ffn` is on (its stages are sized by `dpt_dims`); each refused base argument is stored as `None` |
 | `SurfaceNormalsHead`, `OpticalFlowHead` | none of their own: the `BaseVisionHead` options only. No `output_channels` (3 and 2 by definition; passing it raises `ValueError`). The decoder is the progressive depth decoder (`hidden_dim >= 8`), named `normals_*` / `flow_*` |
 | `EnhancementHead` | `output_channels=3`, `scale_factor=1`, `block_dims=None` (refinement `ConvBlock` widths; `None` is three at `hidden_dim`, `()` is none, so the head is ONE 3x3 conv: the tail conv SCUNet and DarkIR use, with the model applying any skip or residual), `output_use_bias=True` (the output conv's bias; SCUNet's tail has none) |
 | `MultiTaskHead` | `task_configs` (required dict; stored as a copy by Keras' attribute tracking, nested dicts included), `shared_backbone_dim=256`, `use_task_specific_attention=True` |
@@ -83,7 +83,7 @@ Every head also takes the shared `BaseVisionHead` options:
 | `normalization_type` | `'layer_norm'` | Any `norms/` factory key. |
 | `activation_type` | `'gelu'` | Any `activations/` factory key. |
 | `dropout_rate` | `0.1` | Reaches the class-score blocks and the attention/FFN. `0.0` and refused above 0 in `EnhancementHead`, which applies no dropout. `0.0` in the depth, normals and flow heads, whose decoders take none (as in DPT, RAFT, PWC-Net), and refused above 0 there unless `use_attention` or `use_ffn` is on. The instance-mask branch takes none either (Mask R-CNN); there it reaches the detection branch. |
-| `use_attention` | `False` | See the gotchas — the default `attention_type` needs 3D input. |
+| `use_attention` | `False` | The stage runs in the layout its type takes, whatever the head holds (see the gotchas). |
 | `attention_type` | `'multi_head'` | Any `ATTENTION_REGISTRY` key. |
 | `use_ffn` | `True` | `False` and refused in `ClassificationHead` and `EnhancementHead`. |
 | `ffn_type` | `'mlp'` | Any `FFN_REGISTRY` key. |
@@ -190,15 +190,21 @@ cheap_det = create_vision_head('detection', **cfg)
 - **`ClassificationHead(use_ffn=True)` and `EnhancementHead(use_attention=True, use_ffn=True or
   dropout_rate > 0)` raise `ValueError`.** Their `call` never runs those layers, so the arguments
   default to off there and any other value is refused rather than stored and ignored.
-- **`use_attention=True` fails on a 4D feature map with the default `attention_type='multi_head'`**,
-  which requires `(batch, seq_len, dim)`. For a feature map choose a 4D attention type
-  (`cbam`, `channel`, `spatial`, `tripse*`, `non_local`).
+- **The attention stage runs in the layout its type takes** (since 2026-10-15, D-071). Every type a
+  head can build takes one layout: `area`, `cbam`, `mobile_mqa`, `spatial` and `tripse1`-`4` a
+  `(B, H, W, C)` map, the rest (`multi_head` included) a `(B, N, C)` sequence. A head holding a map
+  flattens it to `H * W` tokens for a sequence type and restores it; a sequence-format detection or
+  segmentation head places its tokens on `patch_grid_size` for a spatial type. Before, the default
+  `multi_head` raised on every 4D map and `cbam` on the sequence-format `DetectionHead` (FFTNet
+  detection). A `ClassificationHead` given a `(B, N, C)` sequence has no grid, so a spatial type
+  raises `ValueError` there.
 - **`cbam` / `channel` attention require the input channel count to equal `hidden_dim`** (default
   256). Pass `hidden_dim=<your backbone's channels>` or you get
   `ValueError: Expected input channels (64) to match layer channels (256)`.
-- **`MultiTaskHead` defaults to `use_task_specific_attention=True`, which builds `multi_head`
-  attention** and therefore fails on a 4D input. Pass `use_task_specific_attention=False` for
-  feature maps.
+- **`MultiTaskHead` defaults to `use_task_specific_attention=True`**, which forces each task head's
+  attention on; with the layout rule above that runs on a 4D map too (it failed there before
+  2026-10-15). An `EnhancementHead` task still refuses attention, so pass
+  `use_task_specific_attention=False` when the tasks include denoising or super-resolution.
 - **`create_multi_task_head`'s list and `TaskConfiguration` forms take each task's options as a
   keyword dict named after the task's value**, e.g.
   `create_multi_task_head([VisionTaskType.DETECTION, 'classification'], detection={'num_classes': 80},

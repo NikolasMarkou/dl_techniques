@@ -65,10 +65,9 @@ _SUBJECTS = (
         num_classes=5, hidden_dim=HIDDEN_DIM, input_format="sequence",
         patch_grid_size=(3, 4)), SEQUENCE),
     ("depth_progressive", lambda: DepthEstimationHead(hidden_dim=HIDDEN_DIM), SPATIAL),
-    ("depth_dpt_defaults", lambda: DepthEstimationHead(
-        hidden_dim=HIDDEN_DIM, decoder_style="dpt"), SPATIAL),
+    ("depth_dpt_defaults", lambda: DepthEstimationHead(decoder_style="dpt"), SPATIAL),
     ("depth_dpt_narrow", lambda: DepthEstimationHead(
-        hidden_dim=HIDDEN_DIM, decoder_style="dpt", dpt_dims=[16, 8],
+        decoder_style="dpt", dpt_dims=[16, 8],
         dpt_upsample_factor=4, output_channels=2), SPATIAL),
     ("enhancement", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM), SPATIAL),
     ("enhancement_x2", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM, scale_factor=2), SPATIAL),
@@ -107,8 +106,8 @@ def test_compute_output_shape_matches_the_eager_call(label, builder, shape) -> N
 
 def test_the_dpt_confidence_is_the_last_decoder_stage() -> None:
     """Pin WHAT 'confidence' is in DPT mode, not only that the shapes agree."""
-    head = DepthEstimationHead(hidden_dim=HIDDEN_DIM, decoder_style="dpt",
-                               dpt_dims=[16, 8], dpt_upsample_factor=4)
+    head = DepthEstimationHead(decoder_style="dpt", dpt_dims=[16, 8],
+                               dpt_upsample_factor=4)
     out = head(np.random.default_rng(6).normal(size=SPATIAL).astype("float32"))
     assert tuple(out["confidence"].shape) == (2, 24, 40, 8)
     assert tuple(out["depth"].shape) == (2, 24, 40, 1)

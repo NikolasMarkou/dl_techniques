@@ -81,7 +81,7 @@ is ``softmax(out['logits'])``. Compile a model that returns the logits with
 
 import keras
 from typing import (
-    Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union)
+    Any, Dict, FrozenSet, List, Literal, Optional, Sequence, Tuple, Union)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -194,6 +194,23 @@ def _validated_block_dims(
             f"block_dims must hold positive integers, got {block_dims}"
         )
     return block_dims
+
+
+#: Values per box of a :class:`DetectionHead` regression branch when the
+#: caller gives none: the usual corner or centre form.
+_DEFAULT_BBOX_DIMS = 4
+
+#: The registered attention types whose layer takes only a rank-4
+#: ``(batch, height, width, channels)`` map. Every other type a vision head
+#: can construct takes only a ``(batch, tokens, channels)`` sequence (measured
+#: at both ranks over the whole registry, 2026-10-15; types the head cannot
+#: construct from ``dim`` alone are not listed). ``BaseVisionHead`` reads it to
+#: run its attention stage in the layout the type takes;
+#: ``test_a_vision_head_runs_attention_in_its_own_layout.py`` re-measures it.
+_SPATIAL_ATTENTION_TYPES: FrozenSet[str] = frozenset({
+    'area', 'cbam', 'mobile_mqa', 'spatial',
+    'tripse1', 'tripse2', 'tripse3', 'tripse4',
+})
 
 
 def _require_hidden_dim_at_least(
@@ -498,6 +515,12 @@ class BaseVisionHead(keras.layers.Layer):
     :vartype ffn: keras.layers.Layer
     """
 
+    #: The ``(H, W)`` grid a sequence-format head places its tokens on. Only
+    #: :class:`DetectionHead` and :class:`SegmentationHead` take a
+    #: ``patch_grid_size`` argument; every other head holds no grid, so a
+    #: spatial attention type cannot run on a sequence it is given.
+    patch_grid_size: Optional[Tuple[int, int]] = None
+
     def __init__(
             self,
             hidden_dim: int = 256,
@@ -666,26 +689,171 @@ class BaseVisionHead(keras.layers.Layer):
         """
         shape = tuple(input_shape)
         if self.use_attention:
-            shape = tuple(self.attention.compute_output_shape(shape))
+            shape = self._attention_output_shape(shape)
         if self.use_ffn:
             shape = tuple(self.ffn.compute_output_shape(shape))
         return shape
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-071: the attention stage runs
+    # in the layout its TYPE takes, whatever layout the head holds: a sequence
+    # type sees a map flattened to H*W tokens and restored, a spatial type
+    # (_SPATIAL_ATTENTION_TYPES) sees a sequence head's tokens on the patch
+    # grid and flattened back. Do NOT hand the layer the head's own layout
+    # again: the default 'multi_head' raised on every spatial head, and 'cbam'
+    # on the sequence-format detection head (FFTNet). Do NOT move a sequence
+    # head's attention after its reshape instead: 'multi_head' then fails
+    # there. See decisions.md D-071.
+    def _attention_takes_spatial(self, rank: int) -> bool:
+        """
+        Whether the attention layer takes a rank-4 map, for a head input of
+        ``rank``; ``ValueError`` when a spatial type meets a grid-less
+        sequence.
+
+        :param rank: Rank of the tensor the head holds (3 or 4).
+        :type rank: int
+        :return: ``True`` for a type in ``_SPATIAL_ATTENTION_TYPES``.
+        :rtype: bool
+        :raises ValueError: If a spatial type meets a rank-3 input and the
+            head has no ``patch_grid_size`` to place the tokens on.
+        """
+        spatial = self.attention_type in _SPATIAL_ATTENTION_TYPES
+        if spatial and rank == 3 and self.patch_grid_size is None:
+            raise ValueError(
+                f"{type(self).__name__}: attention_type={self.attention_type!r} "
+                f"takes a (batch, height, width, channels) map, but this head "
+                f"holds a (batch, tokens, channels) sequence and no "
+                f"patch_grid_size to place the tokens on."
+            )
+        return spatial
+
+    def _attention_input_shape(
+            self,
+            shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        The shape the attention layer sees when the head holds ``shape``.
+
+        :param shape: A rank-4 map shape or a rank-3 sequence shape.
+        :type shape: Tuple[Optional[int], ...]
+        :return: The shape in the layout the attention type takes.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        shape = tuple(shape)
+        spatial = self._attention_takes_spatial(len(shape))
+        if len(shape) == 4 and not spatial:
+            tokens = (None if shape[1] is None or shape[2] is None
+                      else shape[1] * shape[2])
+            return (shape[0], tokens, shape[3])
+        if len(shape) == 3 and spatial:
+            return (shape[0], *self.patch_grid_size, shape[2])
+        return shape
+
+    def _attention_output_shape(
+            self,
+            shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        The shape :meth:`_apply_attention` returns for an input of ``shape``,
+        in the head's own layout.
+
+        :param shape: A rank-4 map shape or a rank-3 sequence shape.
+        :type shape: Tuple[Optional[int], ...]
+        :return: ``shape`` with the attention output width.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        shape = tuple(shape)
+        inner = tuple(self.attention.compute_output_shape(
+            self._attention_input_shape(shape)))
+        return shape[:-1] + (inner[-1],)
+
+    def _apply_attention(
+            self,
+            x: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Run ``attention`` in the layout its type takes; return the head's
+        layout.
+
+        Interface contract, shared by every head ``call`` that applies the
+        common attention: ``x`` is the rank-4 map or rank-3 sequence the
+        head holds; the result has the same rank and leading dimensions,
+        with the attention output width. Where the layouts already agree the
+        layer is called on ``x`` itself, so nothing changes for a
+        configuration that ran before. Row-major reshapes, so token ``i``
+        is grid position ``(i // W, i % W)`` both ways.
+
+        :param x: The head's features.
+        :type x: keras.KerasTensor
+        :param training: Keras training flag, forwarded to the layer.
+        :type training: Optional[bool]
+        :return: The attended features, in ``x``'s layout.
+        :rtype: keras.KerasTensor
+        :raises ValueError: See :meth:`_attention_takes_spatial`.
+        """
+        rank = len(x.shape)
+        spatial = self._attention_takes_spatial(rank)
+        batch = keras.ops.shape(x)[0]
+        if rank == 4 and not spatial:
+            height = x.shape[1] if x.shape[1] is not None else keras.ops.shape(x)[1]
+            width = x.shape[2] if x.shape[2] is not None else keras.ops.shape(x)[2]
+            tokens = keras.ops.reshape(x, (batch, -1, x.shape[-1]))
+            y = self.attention(tokens, training=training)
+            return keras.ops.reshape(y, (batch, height, width, -1))
+        if rank == 3 and spatial:
+            grid_h, grid_w = self.patch_grid_size
+            grid = keras.ops.reshape(x, (batch, grid_h, grid_w, x.shape[-1]))
+            y = self.attention(grid, training=training)
+            return keras.ops.reshape(y, (batch, grid_h * grid_w, -1))
+        return self.attention(x, training=training)
+
+    def _drop_unread_hidden_dim(self, given_hidden_dim: Any, reason: str) -> None:
+        """
+        Refuse, and store ``None`` for, a ``hidden_dim`` no layer reads.
+
+        Interface contract, shared by the head modes whose task layers are
+        sized by other arguments (:class:`DepthEstimationHead` in DPT mode,
+        :class:`SegmentationHead` in explicit mode): call it after
+        ``BaseVisionHead.__init__`` with the caller's ``hidden_dim`` (``None``
+        when not given; pop a ``None`` from ``kwargs`` before ``__init__`` so
+        the base validates its default). With the attention or FFN stage on,
+        ``hidden_dim`` is their width and is kept. Otherwise a given value
+        raises ``ValueError`` and ``self.hidden_dim`` becomes ``None``, which
+        ``get_config`` writes and ``from_config`` reads back.
+
+        :param given_hidden_dim: The caller's ``hidden_dim``, or ``None``.
+        :type given_hidden_dim: Any
+        :param reason: What sizes the task layers instead, for the message.
+        :type reason: str
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a ``hidden_dim`` was given and no stage reads it.
+        """
+        if self.use_attention or self.use_ffn:
+            return
+        if given_hidden_dim is not None:
+            raise ValueError(
+                f"{type(self).__name__}: {reason}, and neither the attention "
+                f"nor the FFN stage is on, so no layer reads hidden_dim; got "
+                f"hidden_dim={given_hidden_dim!r}."
+            )
+        self.hidden_dim = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the common layers that exist.
 
-        Each is built on the raw input shape, because each stage is
-        shape-preserving in the width the head runs at.
+        The FFN is built on the raw input shape and the attention on the same
+        shape in the layout its type takes; each stage is shape-preserving in
+        the width the head runs at.
 
         :param input_shape: Input feature-map shape.
         :type input_shape: Tuple[Optional[int], ...]
         :return: None.
         :rtype: None
         """
-        # The common layers each consume the raw input feature map.
         if self.use_attention:
-            self.attention.build(input_shape)
+            self.attention.build(self._attention_input_shape(input_shape))
         if self.use_ffn:
             self.ffn.build(input_shape)
 
@@ -797,8 +965,11 @@ class DetectionHead(BaseVisionHead):
     :type num_classes: int
     :param num_anchors: Number of anchor boxes per location.
     :type num_anchors: int
-    :param bbox_dims: Values per box. 4 for the usual corner or centre form.
-    :type bbox_dims: int
+    :param bbox_dims: Values per box, read by the regression branch only.
+        ``None`` (default) means 4, the usual corner or centre form, with
+        ``use_regression=True``; with ``use_regression=False`` it must stay
+        ``None`` and is stored as ``None``.
+    :type bbox_dims: Optional[int]
     :param input_format: Input format, ``"spatial"`` for (B,H,W,C) or
         ``"sequence"`` for (B,N,D) ViT patch tokens. Defaults to ``"spatial"``.
     :type input_format: Literal["spatial", "sequence"]
@@ -821,7 +992,7 @@ class DetectionHead(BaseVisionHead):
             self,
             num_classes: int,
             num_anchors: int = 9,
-            bbox_dims: int = 4,
+            bbox_dims: Optional[int] = None,
             input_format: Literal["spatial", "sequence"] = "spatial",
             patch_grid_size: Optional[Tuple[int, int]] = None,
             use_regression: bool = True,
@@ -834,8 +1005,8 @@ class DetectionHead(BaseVisionHead):
         :type num_classes: int
         :param num_anchors: Number of anchor boxes per location.
         :type num_anchors: int
-        :param bbox_dims: Values per box.
-        :type bbox_dims: int
+        :param bbox_dims: Values per box (regression only; ``None`` means 4).
+        :type bbox_dims: Optional[int]
         :param input_format: Input format, ``"spatial"`` or ``"sequence"``.
         :type input_format: Literal["spatial", "sequence"]
         :param patch_grid_size: Patch grid (H, W) for sequence input format.
@@ -848,14 +1019,32 @@ class DetectionHead(BaseVisionHead):
         :return: None.
         :rtype: None
         :raises ValueError: If ``num_classes``, ``num_anchors`` or
-            ``bbox_dims`` is not a positive integer.
+            ``bbox_dims`` is not a positive integer, or ``bbox_dims`` is given
+            with ``use_regression=False``.
         """
         super().__init__(**kwargs)
 
         owner = type(self).__name__
         self.num_classes = positive_int(num_classes, 'num_classes', owner)
         self.num_anchors = positive_int(num_anchors, 'num_anchors', owner)
-        self.bbox_dims = positive_int(bbox_dims, 'bbox_dims', owner)
+        # DECISION plan-2026-10-14T062616-81938e81/D-074: D-030's rule, a value
+        # no layer reads is refused and stored as None. Do NOT default
+        # bbox_dims to 4 again for a head without a regression branch: it was
+        # stored, written to the config and never read, and any value passed
+        # in silence (SuperPoint passed 4 "not used"). The same rule covers
+        # hidden_dim in the DPT and explicit-segmentation modes
+        # (_drop_unread_hidden_dim). See decisions.md D-074.
+        if use_regression:
+            self.bbox_dims = positive_int(
+                _DEFAULT_BBOX_DIMS if bbox_dims is None else bbox_dims,
+                'bbox_dims', owner)
+        elif bbox_dims is not None:
+            raise ValueError(
+                f"{owner}(use_regression=False) builds no regression branch, "
+                f"so no layer reads bbox_dims; got bbox_dims={bbox_dims!r}."
+            )
+        else:
+            self.bbox_dims = None
         self.input_format = input_format
         self.patch_grid_size = patch_grid_size
         self.use_regression = use_regression
@@ -919,9 +1108,10 @@ class DetectionHead(BaseVisionHead):
         """
         Build both branches on the common-processed shape.
 
-        For sequence input, attention and ffn are applied on the sequence
-        (before reshaping), so they are built on the sequence shape.
-        The conv branches are built on the spatial shape after reshaping.
+        The FFN is built on the input shape and the attention on the layout
+        its type takes (:meth:`_attention_input_shape`); for sequence input
+        both run before the reshape, and the conv branches are built on the
+        patch grid after it.
 
         :param input_shape: Input feature-map shape (spatial) or sequence shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -930,28 +1120,17 @@ class DetectionHead(BaseVisionHead):
         """
         # For sequence input, build attention/ffn on sequence shape,
         # and conv branches on spatial shape
+        if self.use_attention:
+            self.attention.build(self._attention_input_shape(input_shape))
+        if self.use_ffn:
+            self.ffn.build(input_shape)
+        feature_shape = self._common_processed_shape(input_shape)
         if self.input_format == "sequence":
             if self.patch_grid_size is None:
                 raise ValueError("patch_grid_size must be set for sequence input format")
-            batch, seq_len, dim = input_shape
+            # The conv branches run on the patch grid, after the reshape.
             h, w = self.patch_grid_size
-            spatial_shape = (batch, h, w, dim)
-            
-            # Build common layers (attention, ffn) on sequence shape
-            if self.use_attention:
-                self.attention.build(input_shape)
-            if self.use_ffn:
-                self.ffn.build(input_shape)
-            
-            # Build conv branches on spatial shape
-            feature_shape = self._common_processed_shape(spatial_shape)
-        else:
-            # Build common layers on spatial shape
-            if self.use_attention:
-                self.attention.build(input_shape)
-            if self.use_ffn:
-                self.ffn.build(input_shape)
-            feature_shape = self._common_processed_shape(input_shape)
+            feature_shape = (feature_shape[0], h, w, feature_shape[-1])
 
         self.cls_conv.build(feature_shape)
         self.cls_head.build(self.cls_conv.compute_output_shape(feature_shape))
@@ -984,28 +1163,19 @@ class DetectionHead(BaseVisionHead):
 
         x = inputs
 
-        # For sequence input, apply common processing (attention, ffn) on the
-        # sequence BEFORE reshaping to spatial, since attention layers expect
-        # 3D input (batch, seq_len, dim).
+        # The common stages run on the layout the head holds (the attention
+        # on the layout its type takes, _apply_attention); a sequence is
+        # reshaped onto the patch grid only for the conv branches.
+        if self.use_attention:
+            x = self._apply_attention(x, training=training)
+        if self.use_ffn:
+            x = self.ffn(x, training=training)
         if self.input_format == "sequence":
-            # Apply common processing on sequence
-            if self.use_attention:
-                x = self.attention(x, training=training)
-            if self.use_ffn:
-                x = self.ffn(x, training=training)
-
-            # Now reshape to spatial for conv branches
             if self.patch_grid_size is None:
                 raise ValueError("patch_grid_size must be set for sequence input format")
             batch_size = keras.ops.shape(x)[0]
             h, w = self.patch_grid_size
             x = keras.ops.reshape(x, (batch_size, h, w, -1))
-        else:
-            # Spatial input: apply common processing on spatial features
-            if self.use_attention:
-                x = self.attention(x, training=training)
-            if self.use_ffn:
-                x = self.ffn(x, training=training)
 
         # Classification branch
         cls_features = self.cls_conv(x, training=training)
@@ -1105,7 +1275,10 @@ class SegmentationHead(BaseVisionHead):
     - ``"explicit"``: caller provides ``explicit_skip_channels`` list
       matching the encoder feature channels (e.g., ``[32, 64, 128, 256]``
       for AccUNet). Refine block output channels are derived from the
-      corresponding skip channels.
+      corresponding skip channels, and the upsample convs keep the width the
+      refine stack ends at. ``hidden_dim`` is then read only by the
+      attention and FFN stages: with both off it is refused, and stored as
+      ``None``.
 
     This is the only head in the module that returns a bare tensor. Every
     other one returns a dict.
@@ -1146,9 +1319,10 @@ class SegmentationHead(BaseVisionHead):
                          ▼
         (B, H*s, W*s, num_classes), s = 2 ** the count above
 
-    The refine blocks halve their channel count as they go: ``hidden_dim``,
-    then ``hidden_dim // 2``, then ``hidden_dim // 4``. Every upsample layer
-    uses ``hidden_dim // 8``, one halving further still. Concatenating a skip
+    In auto mode the refine blocks halve their channel count as they go:
+    ``hidden_dim``, then ``hidden_dim // 2``, then ``hidden_dim // 4``. Every
+    upsample layer uses ``hidden_dim // 8``, one halving further still.
+    Concatenating a skip
     widens the tensor again, so the built shapes follow ``call`` rather than
     the block widths alone.
 
@@ -1223,7 +1397,12 @@ class SegmentationHead(BaseVisionHead):
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: In explicit mode, if ``hidden_dim`` is given while
+            neither the attention nor the FFN stage is on (no layer reads it).
         """
+        given_hidden_dim = kwargs.get('hidden_dim')
+        if given_hidden_dim is None:
+            kwargs.pop('hidden_dim', None)
         super().__init__(**kwargs)
 
         self.num_classes = positive_int(
@@ -1256,14 +1435,20 @@ class SegmentationHead(BaseVisionHead):
             )
         self._num_upsamples = upsampling_factor.bit_length() - 1
 
-        # Every upsample conv is created at hidden_dim // 8 channels (explicit
-        # mode resizes it in build), and in auto mode the refine blocks take
-        # hidden_dim, // 2 and // 4.
-        if self._num_upsamples:
+        # Auto mode: every upsample conv takes hidden_dim // 8 channels and
+        # the refine blocks hidden_dim, // 2 and // 4. Explicit mode sizes
+        # both from explicit_skip_channels, so hidden_dim is read only by the
+        # attention and FFN stages.
+        if self.skip_channel_mode == "explicit":
+            self._drop_unread_hidden_dim(
+                given_hidden_dim,
+                "skip_channel_mode='explicit' sizes the refine blocks and the "
+                "upsample convs from explicit_skip_channels")
+        elif self._num_upsamples:
             _require_hidden_dim_at_least(
                 self.hidden_dim, 8, type(self).__name__,
                 "its upsample convs are created at hidden_dim // 8 channels")
-        elif self.skip_channel_mode != "explicit":
+        else:
             _require_hidden_dim_at_least(
                 self.hidden_dim, 4, type(self).__name__,
                 "its third refine block takes hidden_dim // 4 channels")
@@ -1289,10 +1474,7 @@ class SegmentationHead(BaseVisionHead):
             # Explicit mode: refine blocks output channels to match skip channels
             # We have 3 refine blocks, explicit_skip_channels has 4 entries (L0-L3)
             # Refine block i output should match skip_channels[-(i+2)] for concatenation
-            skip_ch = self.explicit_skip_channels
-            for i in range(3):
-                # Output channels = skip_channels[-(i+2)] // 2 (half before concat)
-                out_channels = skip_ch[-(i+2)] // 2
+            for i, out_channels in enumerate(self._explicit_refine_widths()):
                 self.refine_blocks.append(
                     ConvBlock(
                         filters=out_channels,
@@ -1319,25 +1501,18 @@ class SegmentationHead(BaseVisionHead):
                 )
                 channels = channels // 2
 
-        # Upsampling layers
+        # Upsampling layers. Each keeps the width it is fed: in auto mode the
+        # third halving of hidden_dim; in explicit mode the last refine width
+        # plus the skip concatenated after it (_explicit_upsample_width).
+        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
+            filters = self._explicit_upsample_width()
+        else:
+            filters = self.hidden_dim // 8
         self.upsample_layers = []
         for i in range(self._num_upsamples):
-            # Determine filter count for upsample layer
-            if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
-                # After 3 refine blocks, channels = skip_ch[-3] // 2 = skip_ch[0] // 2
-                # Actually let's compute it properly: after 3 refinements in explicit mode
-                # refine_0 out = skip_ch[1]//2, after concat with skip_ch[0] -> skip_ch[1]//2 + skip_ch[0]
-                # refine_1 out = skip_ch[2]//2, after concat with skip_ch[1] -> skip_ch[2]//2 + skip_ch[1]
-                # refine_2 out = skip_ch[3]//2, after concat with skip_ch[2] -> skip_ch[3]//2 + skip_ch[2]
-                # This is complex, so we'll let build() handle the shapes
-                filters = None  # Will be determined in build
-            else:
-                # Auto mode: after 3 halvings from hidden_dim
-                filters = self.hidden_dim // 8
-            
             self.upsample_layers.append(
                 keras.layers.Conv2DTranspose(
-                    filters=filters if filters else self.hidden_dim // 8,
+                    filters=filters,
                     kernel_size=3,
                     strides=2,
                     padding='same',
@@ -1359,6 +1534,35 @@ class SegmentationHead(BaseVisionHead):
             padding='same',
             name='seg_head'
         )
+
+    def _explicit_refine_widths(self) -> List[int]:
+        """
+        Output widths of the three refine blocks in explicit mode.
+
+        Block ``i`` emits half the channels of the skip two levels up,
+        ``explicit_skip_channels[-(i + 2)] // 2``.
+
+        :return: The three widths, in block order.
+        :rtype: List[int]
+        """
+        skip_ch = self.explicit_skip_channels
+        return [skip_ch[-(i + 2)] // 2 for i in range(3)]
+
+    def _explicit_upsample_width(self) -> int:
+        """
+        Width the explicit-mode upsample convs are fed and keep.
+
+        The same arithmetic ``build`` and ``call`` follow: the last refine
+        width, plus the skip concatenated after the last refine block when
+        there is one (skip ``i`` follows block ``i``, for ``i < 3``).
+
+        :return: The channel count after the refine stack.
+        :rtype: int
+        """
+        width = self._explicit_refine_widths()[-1]
+        if self.use_skip_connections and len(self.explicit_skip_channels) > 2:
+            width += self.explicit_skip_channels[2]
+        return width
 
     def build(
             self,
@@ -1397,12 +1601,12 @@ class SegmentationHead(BaseVisionHead):
             if shape_list:
                 spatial_shapes = []
                 for shape in input_shape:
-                    batch, seq_len, dim = shape
+                    batch, _, dim = shape
                     h, w = self.patch_grid_size
                     spatial_shapes.append((batch, h, w, dim))
                 input_shape = spatial_shapes
             else:
-                batch, seq_len, dim = input_shape
+                batch, _, dim = input_shape
                 h, w = self.patch_grid_size
                 input_shape = (batch, h, w, dim)
 
@@ -1441,18 +1645,9 @@ class SegmentationHead(BaseVisionHead):
                 )
                 shape = shape[:-1] + (merged,)
 
-        # Rebuild upsample layers with correct filters if needed
-        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
-            # After all refine blocks, shape[-1] is the channel count
-            final_channels = shape[-1]
-            for i, upsample_layer in enumerate(self.upsample_layers):
-                upsample_layer.filters = final_channels
-                upsample_layer.build(shape)
-                shape = tuple(upsample_layer.compute_output_shape(shape))
-        else:
-            for upsample_layer in self.upsample_layers:
-                upsample_layer.build(shape)
-                shape = tuple(upsample_layer.compute_output_shape(shape))
+        for upsample_layer in self.upsample_layers:
+            upsample_layer.build(shape)
+            shape = tuple(upsample_layer.compute_output_shape(shape))
 
         self.seg_head.build(shape)
 
@@ -1502,7 +1697,7 @@ class SegmentationHead(BaseVisionHead):
 
         # Apply common processing
         if self.use_attention:
-            x_main = self.attention(x_main, training=training)
+            x_main = self._apply_attention(x_main, training=training)
         if self.use_ffn:
             x_main = self.ffn(x_main, training=training)
 
@@ -1736,7 +1931,9 @@ class DepthEstimationHead(BaseVisionHead):
     documented default in its own mode; a value given to the mode that never
     reads it raises ``ValueError``, and that mode stores ``None`` for it. The
     DPT mode also refuses the base ``normalization_type`` and
-    ``activation_type``, which only the progressive ``ConvBlock`` s read.
+    ``activation_type``, which only the progressive ``ConvBlock`` s read, and
+    ``hidden_dim`` unless the attention or FFN stage is on (its stages are
+    sized by ``dpt_dims``); a refused base argument is stored as ``None``.
 
     Input shape:
         ``(batch, height, width, channels)``.
@@ -1879,6 +2076,9 @@ class DepthEstimationHead(BaseVisionHead):
         kwargs.setdefault('use_attention', False)
         kwargs.setdefault('use_ffn', False)
         _refuse_dropout_no_layer_applies(kwargs, type(self).__name__)
+        given_hidden_dim = kwargs.get('hidden_dim')
+        if given_hidden_dim is None:
+            kwargs.pop('hidden_dim', None)
         super().__init__(**kwargs)
         self.output_channels = positive_int(
             output_channels, 'output_channels', type(self).__name__)
@@ -1886,6 +2086,11 @@ class DepthEstimationHead(BaseVisionHead):
         if decoder_style == "dpt":
             for key in _PROGRESSIVE_ONLY_BASE_KNOBS:
                 setattr(self, key, None)
+            # The DPT stages are sized by dpt_dims; hidden_dim is read only
+            # by the attention and FFN stages.
+            self._drop_unread_hidden_dim(
+                given_hidden_dim,
+                "decoder_style='dpt' sizes its stages from dpt_dims")
 
         for key, default in own.items():
             value = default if given[key] is None else given[key]
@@ -2071,7 +2276,7 @@ class DepthEstimationHead(BaseVisionHead):
 
         # Apply common processing
         if self.use_attention:
-            x = self.attention(x, training=training)
+            x = self._apply_attention(x, training=training)
         if self.use_ffn:
             x = self.ffn(x, training=training)
 
@@ -2567,7 +2772,7 @@ class ClassificationHead(BaseVisionHead):
         shape = tuple(input_shape)
         # Classification call() applies attention only (no FFN) before pooling.
         if self.use_attention:
-            shape = tuple(self.attention.compute_output_shape(shape))
+            shape = self._attention_output_shape(shape)
 
         if self.use_global_pooling and self.pooling_type in ('avg', 'max'):
             self.pooling.build(shape)
@@ -2623,7 +2828,7 @@ class ClassificationHead(BaseVisionHead):
 
         # Apply attention if enabled
         if self.use_attention:
-            x = self.attention(x, training=training)
+            x = self._apply_attention(x, training=training)
 
         # Global pooling
         if self.use_global_pooling:
@@ -2952,7 +3157,7 @@ class InstanceSegmentationHead(BaseVisionHead):
 
         # Apply common processing
         if self.use_attention:
-            x = self.attention(x, training=training)
+            x = self._apply_attention(x, training=training)
         if self.use_ffn:
             x = self.ffn(x, training=training)
 
@@ -3422,7 +3627,7 @@ class _DenseVectorHeadBase(BaseVisionHead):
         """
         x = inputs
         if self.use_attention:
-            x = self.attention(x, training=training)
+            x = self._apply_attention(x, training=training)
         if self.use_ffn:
             x = self.ffn(x, training=training)
         x = _run_progressive_decoder(

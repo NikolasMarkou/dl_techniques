@@ -231,7 +231,6 @@ class SuperPoint(keras.Model):
             VisionTaskType.KEYPOINT_DETECTION,
             num_classes=self.DETECTOR_CHANNELS,
             num_anchors=1,
-            bbox_dims=4,  # not used when use_regression=False
             input_format="spatial",
             hidden_dim=self.descriptor_dim,
             use_attention=False,

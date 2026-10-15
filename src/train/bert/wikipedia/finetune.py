@@ -13,8 +13,7 @@ import keras
 import argparse
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -179,7 +178,7 @@ def main(argv: Optional[list] = None):
     # TFDS handles downloading the GLUE benchmark automatically
     # NOTE: no `as_supervised=True` -- GLUE has no supervised structure and TFDS
     # raises on it. `preprocess_glue` consumes the dict elements instead.
-    data, info = tfds.load(f'glue/{config.task_name}', with_info=True)
+    data, _ = tfds.load(f'glue/{config.task_name}', with_info=True)
 
     tokenizer = create_tokenizer(config)
     train_ds = preprocess_glue(data['train'], tokenizer, config)
