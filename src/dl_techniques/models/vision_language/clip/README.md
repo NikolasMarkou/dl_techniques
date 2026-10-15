@@ -241,7 +241,7 @@ model = create_clip("ViT-B/16")
 - **Batch size is the main lever.** Contrastive learning scales with negatives per positive; the original CLIP trained above 32,000. On one GPU, gradient accumulation is how you approximate it.
 - **Padding**: right-pad with id `0`. Pooling silently reads the wrong position otherwise (§4.2).
 - **Temperature**: watch `exp(logit_scale)`. There is no clamp here.
-- **Trainer**: `python -m train.clip.train_clip` builds `create_clip(--variant)` (size flags such as `--vision-layers` override the row) and trains it with `CLIPContrastiveLoss`. It needs exactly one data source: `--synthetic` (random pairs generated in memory) or `--image-dir` with `--captions-file`, whose word vocabulary is built from the captions with pad id 0. It writes `config.json`, `training_log.csv`, `training_history.json` and `final_model.keras` to `--output-dir` (default `results/clip_<variant>_<timestamp>`).
+- **Trainer**: `python -m train.clip.train_clip` builds `create_clip(--variant)` (size flags such as `--vision-layers` override the row) and trains it with stock `compile`/`fit` and `CLIPContrastiveLoss`, through a wrapper that stacks the two logit matrices into one output (`compile_for_contrastive_training`; the saved model is the CLIP, not the wrapper). It needs exactly one data source: `--synthetic` (random pairs generated in memory) or `--image-dir` with `--captions-file`, whose word vocabulary is built from the captions with pad id 0. It writes `config.json`, `training_log.csv` (with the learning rate as `lr`), `training_history.json` and `final_model.keras` (rewritten after every epoch) to `--output-dir` (default `results/clip_<variant>_<timestamp>`).
 
 ---
 

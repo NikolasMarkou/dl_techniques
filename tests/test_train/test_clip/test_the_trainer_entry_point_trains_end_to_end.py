@@ -2,8 +2,9 @@
 
 Rationale
 ---------
-`test_the_trainer_steps_do_not_raise.py` drives `CLIPTrainer.train_step` on a
-hand-built model and passed for months while `main()` could not start:
+The step-level tests of the old hand-written `CLIPTrainer` drove its
+`train_step` on a hand-built model and passed for months while `main()` could
+not start:
 
     ValueError: You tried to call `count_params` on layer 'clip', but the
     layer isn't built.
@@ -14,7 +15,7 @@ defects the step-level tests could not see:
 
 * `metric.update_state(outputs)` bound the output dict to `y_true`, so every
   step with a metric raised `ValueError: y_pred cannot be None` (the step
-  tests build `CLIPTrainer` without metrics);
+  tests built the trainer without metrics);
 * the only data path without files was a demo vocabulary of
   ``"word_0".."word_999"``, so every real caption tokenized to the same
   ``<unk>`` run and the text tower saw ONE input for the whole dataset.
@@ -22,9 +23,15 @@ defects the step-level tests could not see:
 This file drives `main(argv)` itself, on a tiny configuration, with every
 output under `tmp_path`. The autouse guard in `tests/conftest.py` fails the
 test if anything lands in the repo-root `results/`.
+
+Since plan-2026-10-14T062616-81938e81 D-036 the trainer has no loop of its
+own: `main` compiles CLIP through `compile_for_contrastive_training` and
+trains with stock `keras.Model.fit`. The synthetic run asserts that, by
+spying on `keras.Model.fit` and counting the batches its callbacks see.
 """
 
 import csv
+import json
 import math
 
 import keras
@@ -34,6 +41,7 @@ from PIL import Image
 
 from train.clip.train_clip import (
     CLIPDataLoader,
+    StackedCLIPLogits,
     build_caption_vocabulary,
     main,
 )
@@ -56,13 +64,48 @@ def _losses(run_dir):
     return [float(row["loss"]) for row in rows], rows
 
 
-def test_synthetic_run_trains_two_steps_and_saves_a_loadable_model(tmp_path):
+class _BatchCounter(keras.callbacks.Callback):
+    def __init__(self):
+        super().__init__()
+        self.batches = 0
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.batches += 1
+
+
+def _spy_on_fit(monkeypatch):
+    """Record every `keras.Model.fit` call and count the batches it trains."""
+    calls = []
+    stock_fit = keras.Model.fit
+
+    def spy(self, *args, **kwargs):
+        counter = _BatchCounter()
+        kwargs["callbacks"] = [*(kwargs.get("callbacks") or []), counter]
+        history = stock_fit(self, *args, **kwargs)
+        calls.append((self, counter, history))
+        return history
+
+    monkeypatch.setattr(keras.Model, "fit", spy)
+    return calls
+
+
+def test_synthetic_run_trains_two_steps_and_saves_a_loadable_model(tmp_path, monkeypatch):
     """Two single-step epochs on 8 fixed pairs, read back from the CSV."""
+    fit_calls = _spy_on_fit(monkeypatch)
     run_dir = main([
         *_TINY, "--synthetic", "--synthetic-samples", str(_BATCH),
         "--batch-size", str(_BATCH), "--epochs", "2", "--steps-per-epoch", "1",
         "--output-dir", str(tmp_path / "run"),
     ])
+
+    # Training went through stock `keras.Model.fit`, once, on the bridge
+    # wrapper, and every one of the 2 steps was a fit batch.
+    assert len(fit_calls) == 1, fit_calls
+    trained, counter, history = fit_calls[0]
+    assert isinstance(trained, StackedCLIPLogits)
+    assert counter.batches == 2
+    with open(run_dir / "training_history.json") as handle:
+        assert json.load(handle) == pytest.approx(history.history)
 
     assert run_dir == tmp_path / "run"
     for name in ("config.json", "training_log.csv", "training_history.json",
@@ -75,12 +118,39 @@ def test_synthetic_run_trains_two_steps_and_saves_a_loadable_model(tmp_path):
     # Exact inequality: the same 8 pairs both epochs, so an optimizer that
     # applied nothing would log the same train-mode loss twice.
     assert losses[0] != losses[1], losses
+    assert losses == pytest.approx(history.history["loss"])
     # The metrics ran (they raised before the update_state fix).
     assert all(0.0 <= float(row["clip_i2t_accuracy"]) <= 1.0 for row in rows)
+    # The schedule's rate, read at each epoch start (warmup 0: the peak).
+    assert all(math.isfinite(float(row["lr"])) for row in rows), rows
 
     restored = keras.models.load_model(run_dir / "final_model.keras")
+    assert type(restored).__name__ == "CLIP"
     assert restored.image_size == 64 and restored.embed_dim == 16
     assert restored.vision_layers == 1 and restored.vocab_size == 64
+    # The learnable temperature trained: the saved log-scale left its init.
+    # Compared in float32: the Python float 2.6592 is not a float32 value, so a
+    # float64 comparison would pass for an untrained model too.
+    assert restored.logit_scale.numpy() != np.float32(restored.logit_scale_init)
+
+
+def test_every_epoch_trains_its_steps_per_epoch_batches(tmp_path, monkeypatch):
+    """3 batches per pass at 2 steps per epoch: each epoch still trains 2.
+
+    Stock `fit` keeps one iterator across epochs and resets it only when it
+    runs dry, so without a repeated dataset the second epoch would train the
+    one batch left in the first pass (measured: [2, 1, 2] over 3 epochs).
+    """
+    fit_calls = _spy_on_fit(monkeypatch)
+    run_dir = main([
+        *_TINY, "--synthetic", "--synthetic-samples", str(3 * _BATCH),
+        "--batch-size", str(_BATCH), "--epochs", "2", "--steps-per-epoch", "2",
+        "--output-dir", str(tmp_path / "run"),
+    ])
+    (_, counter, _), = fit_calls
+    assert counter.batches == 4
+    losses, rows = _losses(run_dir)
+    assert len(losses) == 2 and all(math.isfinite(v) for v in losses), rows
 
 
 def test_file_run_tokenizes_each_caption_from_the_captions_vocabulary(tmp_path):

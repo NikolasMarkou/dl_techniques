@@ -1,5 +1,5 @@
 """
-CLIP Training & Inference - custom training loop with GradientTape.
+CLIP Training & Inference - stock ``compile``/``fit``.
 
 Implements contrastive language-image pre-training with CLIP-specific metrics
 (accuracy, recall@k) and zero-shot retrieval inference.
@@ -7,9 +7,11 @@ Implements contrastive language-image pre-training with CLIP-specific metrics
 Entry point: ``python -m train.clip.train_clip`` with either ``--synthetic``
 (random image/token pairs generated in memory) or ``--image-dir`` plus
 ``--captions-file``. A run writes ``config.json``, ``training_log.csv``,
-``training_history.json`` and ``final_model.keras`` to ``--output-dir``
-(default ``results/clip_<variant>_<timestamp>``). The model is
-``create_clip(--variant)`` with the size flags as overrides.
+``training_history.json`` and ``final_model.keras`` (the CLIP, rewritten after
+every epoch) to ``--output-dir`` (default
+``results/clip_<variant>_<timestamp>``). The model is ``create_clip(--variant)``
+with the size flags as overrides, trained by stock ``keras.Model.fit`` through
+`compile_for_contrastive_training`.
 
 Reference: Radford et al. (2021) "Learning Transferable Visual Models from
 Natural Language Supervision" https://arxiv.org/abs/2103.00020
@@ -17,13 +19,11 @@ Natural Language Supervision" https://arxiv.org/abs/2103.00020
 
 import argparse
 import collections
-import json
 import os
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 
 from train.common import (
@@ -35,7 +35,7 @@ from train.common import (
     IMAGENET_MEAN,
     IMAGENET_STD,
 )
-from train.common.callbacks import read_current_lr
+from train.common.callbacks import EpochLogLine, LearningRateLogger
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -44,6 +44,7 @@ from dl_techniques.optimization import (
 from dl_techniques.models.vision_language.clip.model import CLIP, create_clip
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
 from dl_techniques.metrics.clip_accuracy import CLIPAccuracy, CLIPRecallAtK
+from dl_techniques.utils.clip_utils import compute_clip_logits
 
 
 # ---------------------------------------------------------------------
@@ -213,260 +214,197 @@ class CLIPDataLoader:
         dataset = dataset.prefetch(prefetch_size)
         return dataset
 
-
 # ---------------------------------------------------------------------
-# Training Class
+# Training: CLIP's output dict to stock compile/fit
 # ---------------------------------------------------------------------
+#
+# DECISION plan-2026-10-14T062616-81938e81/D-036: train through stock
+# `compile`/`fit` on a stacking wrapper. Do NOT bring back a GradientTape loop
+# or a `train_step` override (the old `CLIPTrainer`; the step-override census
+# in test_package_api_contract.py no longer lists this file). Do NOT compile
+# the CLIP itself: Keras' `CompileLoss` and `CompileMetrics` hand ONE leaf of
+# a structured output to each loss or metric, and the contrastive loss needs
+# BOTH logit matrices. MEASURED on a tiny CLIP (Keras 3.8): one loss object
+# over the dict raises; a per-key loss dict on `logits_per_image` trains, but
+# a per-key metric dict is dropped without a word
+# (`CompileMetrics._flat_metrics == [None]`, no metric column). Do NOT save
+# the wrapper: `main` saves the CLIP it wraps. `StackedCLIPLogits` stacks the
+# two matrices into one `(N, 2, N)` tensor; the loss and the metrics unstack
+# it and call the unmodified `CLIPContrastiveLoss` and CLIP metrics. See
+# decisions.md D-036.
 
-class CLIPTrainer:
-    """Custom training loop for CLIP using GradientTape.
 
-    Supports multiple metrics, validation, LR scheduling, checkpointing,
-    mixed precision, and gradient clipping.
+def unstack_clip_logits(stacked: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
+    """Split the ``(N, 2, N)`` output of `StackedCLIPLogits`.
+
+    Interface contract (callers: `StackedCLIPContrastiveLoss`,
+    `StackedCLIPAccuracy`, `StackedCLIPRecallAtK`, tests):
 
     Args:
-        model: CLIP model instance.
-        loss_fn: Loss function (CLIPContrastiveLoss).
-        optimizer: Optimizer instance.
-        metrics: List of metric instances to track.
-        gradient_clip_norm: Optional gradient clipping value.
-        mixed_precision: Whether to use mixed precision training.
+        stacked: ``(N, 2, N)``; index 0 of axis 1 is ``logits_per_image``,
+            index 1 is ``logits_per_text``.
+
+    Returns:
+        ``{'logits_per_image': (N, N), 'logits_per_text': (N, N)}``, the dict
+        `CLIPContrastiveLoss` and the CLIP metrics read.
+    """
+    return {
+        'logits_per_image': stacked[:, 0],
+        'logits_per_text': stacked[:, 1],
+    }
+
+
+# NOT @register_dl_technique: never saved. The run saves the CLIP it wraps
+# (`final_model.keras`), the reusable artefact; the wrapper is training
+# scaffold (the SuperPoint/LightGlue trainers record the same ruling).
+class StackedCLIPLogits(keras.Model):
+    """Training view of a CLIP-family model: one ``(N, 2, N)`` logits tensor.
+
+    Interface contract (callers: `compile_for_contrastive_training`, the
+    MobileCLIP ``fit`` proofs): ``call`` returns
+    ``stack([logits_per_image, logits_per_text], axis=1)``. A model whose
+    output has no logits (MobileCLIP v1 emits ``image_features``,
+    ``text_features`` and ``logit_scale``) gets them from
+    `compute_clip_logits`, the helper CLIP and MobileCLIP v2 call in their own
+    ``call``. Every weight is the wrapped model's, so a step trains exactly
+    the wrapped model, ``logit_scale`` included.
+
+    Args:
+        clip_model: The model to train; called with ``{'image', 'text'}``.
     """
 
-    def __init__(
-        self,
-        model: Any,
-        loss_fn: keras.losses.Loss,
-        optimizer: keras.optimizers.Optimizer,
-        metrics: Optional[List[keras.metrics.Metric]] = None,
-        gradient_clip_norm: Optional[float] = None,
-        mixed_precision: bool = False
-    ) -> None:
-        self.model = model
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
-        self.metrics = metrics or []
-        self.gradient_clip_norm = gradient_clip_norm
-        self.mixed_precision = mixed_precision
+    def __init__(self, clip_model: keras.Model, **kwargs: Any) -> None:
+        # An explicit name: the default is derived from the class name, and a
+        # leading-underscore class name gives a scope name TensorFlow rejects
+        # when `fit` traces the step.
+        kwargs.setdefault('name', 'stacked_clip_logits')
+        super().__init__(**kwargs)
+        self.clip_model = clip_model
 
-        self.current_epoch = 0
-        self.global_step = 0
-        self.training_history = {'loss': [], 'val_loss': [], 'learning_rate': []}
-        for metric in self.metrics:
-            self.training_history[metric.name] = []
-            self.training_history[f'val_{metric.name}'] = []
-
-        if mixed_precision:
-            keras.mixed_precision.set_global_policy(
-                keras.mixed_precision.Policy('mixed_float16')
+    def call(self, inputs: Dict[str, keras.KerasTensor],
+             training: Optional[bool] = None) -> keras.KerasTensor:
+        outputs = self.clip_model(inputs, training=training)
+        if 'logits_per_image' not in outputs:
+            outputs['logits_per_image'], outputs['logits_per_text'] = (
+                compute_clip_logits(
+                    outputs['image_features'], outputs['text_features'],
+                    outputs['logit_scale'],
+                )
             )
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
-            # The optimizer is wrapped HERE because this trainer never calls
-            # `Model.compile`, which is the only place Keras wraps it for you.
-            # Without the wrap `scale_loss` is a no-op and no gradient division
-            # happens either -- self-consistent, but the fp16 underflow this
-            # flag exists to avoid is not avoided. Do NOT drop the isinstance
-            # check: double-wrapping squares the loss scale.
-            if not isinstance(optimizer,
-                              keras.mixed_precision.LossScaleOptimizer):
-                self.optimizer = keras.mixed_precision.LossScaleOptimizer(
-                    optimizer)
-            logger.info("Mixed precision training enabled")
+        return keras.ops.stack(
+            [outputs['logits_per_image'], outputs['logits_per_text']], axis=1)
 
-        logger.info(
-            f"CLIPTrainer: {len(self.metrics)} metrics, "
-            f"gradient_clip={gradient_clip_norm}, mixed_precision={mixed_precision}"
+
+class StackedCLIPContrastiveLoss(keras.losses.Loss):
+    """`CLIPContrastiveLoss` on the stacked logits of `StackedCLIPLogits`.
+
+    ``y_true`` is ignored: the targets of a contrastive batch are its own
+    diagonal. ``call`` returns the per-sample vector of the inner loss's
+    ``call`` (not its ``__call__``, which converts a ``None`` label and raises,
+    decisions.md D-030 of plan-2026-08-19T163559-499b6f0e), so the reduction
+    is applied once, by this loss's own ``__call__``. The inner loss keeps
+    ``apply_temperature=False``: the model already multiplies by its learnable
+    ``exp(logit_scale)``, and a second temperature would compound it.
+    """
+
+    def __init__(self, name: str = 'clip_contrastive_loss', **kwargs: Any) -> None:
+        super().__init__(name=name, **kwargs)
+        self.inner = CLIPContrastiveLoss()
+
+    def call(self, y_true: Any, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        return self.inner.call(None, unstack_clip_logits(y_pred))
+
+
+class StackedCLIPAccuracy(CLIPAccuracy):
+    """`CLIPAccuracy` on the stacked logits; ``y_true`` is ignored."""
+
+    def update_state(self, y_true: Any = None, y_pred: Any = None,
+                     sample_weight: Any = None) -> None:
+        super().update_state(y_pred=unstack_clip_logits(y_pred))
+
+
+class StackedCLIPRecallAtK(CLIPRecallAtK):
+    """`CLIPRecallAtK` on the stacked logits; ``y_true`` is ignored."""
+
+    def update_state(self, y_true: Any = None, y_pred: Any = None,
+                     sample_weight: Any = None) -> None:
+        super().update_state(y_pred=unstack_clip_logits(y_pred))
+
+
+def build_clip_optimizer(learning_rate: float, warmup_steps: int) -> keras.optimizers.Optimizer:
+    """AdamW on the trainer's linear-warmup cosine schedule, global clip 1.0.
+
+    The clip is the optimizer's own ``global_clipnorm``. Under a
+    ``mixed_float16`` policy `keras.Model.compile` wraps the optimizer in a
+    ``LossScaleOptimizer``, whose ``apply`` unscales the gradients before the
+    inner optimizer clips them, so the bound applies to the true gradient norm.
+    """
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay", "warmup_steps": warmup_steps,
+        "warmup_start_lr": 1e-8, "learning_rate": learning_rate,
+        "decay_steps": 50000, "alpha": 0.0001
+    })
+    return optimizer_builder({
+        "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
+        "gradient_clipping_by_norm": 1.0
+    }, lr_schedule)
+
+
+def compile_for_contrastive_training(
+    clip_model: keras.Model,
+    optimizer: keras.optimizers.Optimizer,
+) -> StackedCLIPLogits:
+    """Wrap ``clip_model`` and compile it for stock ``fit``.
+
+    Interface contract (callers: `main`, tests): returns a compiled
+    `StackedCLIPLogits` with loss `StackedCLIPContrastiveLoss` and metrics
+    ``clip_i2t_accuracy`` and ``clip_i2t_recall@5``. Feed its ``fit`` the
+    batches of `as_contrastive_fit_batches`. ``clip_model`` itself is not
+    compiled; save it, not the wrapper.
+    """
+    wrapper = StackedCLIPLogits(clip_model)
+    wrapper.compile(
+        optimizer=optimizer,
+        loss=StackedCLIPContrastiveLoss(),
+        metrics=[StackedCLIPAccuracy(), StackedCLIPRecallAtK(k=5)],
+    )
+    return wrapper
+
+
+def as_contrastive_fit_batches(dataset: tf.data.Dataset) -> tf.data.Dataset:
+    """``(images, tokens)`` batches to ``({'image', 'text'}, zeros(N))``.
+
+    The zeros are the ``y`` that ``fit`` needs to call a loss at all (a
+    ``None`` label raises inside `keras.losses.Loss.__call__`); the loss and
+    the metrics ignore it.
+    """
+    def to_fit_inputs(images, tokens):
+        dummy = tf.zeros(tf.shape(tokens)[:1], dtype=tf.float32)
+        return {'image': images, 'text': tokens}, dummy
+
+    return dataset.map(to_fit_inputs)
+
+
+def refuse_an_empty_dataset(dataset: tf.data.Dataset) -> None:
+    """Raise if ``dataset`` yields no batch.
+
+    With ``drop_remainder`` a dataset smaller than one batch is empty, and the
+    old loop logged a loss of exactly 0.0 for it. The cardinality decides when
+    tf.data knows it; otherwise one batch is drawn.
+
+    Raises:
+        ValueError: If the dataset is empty.
+    """
+    cardinality = int(dataset.cardinality())
+    if cardinality == int(tf.data.UNKNOWN_CARDINALITY):
+        empty = next(iter(dataset.take(1)), None) is None
+    else:
+        empty = cardinality == 0
+    if empty:
+        raise ValueError(
+            "the training dataset yields no batch; with drop_remainder a "
+            "dataset smaller than one batch is empty"
         )
-
-    @tf.function
-    def train_step(self, batch: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Execute single training step."""
-        images, texts = batch
-        inputs = {'image': images, 'text': texts}
-
-        with tf.GradientTape() as tape:
-            outputs = self.model(inputs, training=True)
-            # `self.loss_fn(None, outputs)` RAISES -- see
-            # CLIPContrastiveLoss.reduced_loss and decisions.md D-030.
-            loss = self.loss_fn.reduced_loss(outputs)
-            if self.model.losses:
-                loss += tf.add_n(self.model.losses)
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
-            # `optimizer.scale_loss`, NOT `get_scaled_loss`/
-            # `get_unscaled_gradients`. Those two are the Keras 2 / tf.keras
-            # spelling and DO NOT EXIST on Keras 3.8's `LossScaleOptimizer` --
-            # MEASURED, `hasattr` is False for both and True for `scale_loss`,
-            # and this trainer raised
-            # `AttributeError: 'Adam' object has no attribute 'get_scaled_loss'`
-            # at this line for every `mixed_precision=True` run. In Keras 3 the
-            # UNSCALING is the optimizer's job inside `apply`, so there is no
-            # unscale call here and adding one would divide twice.
-            scaled_loss = self.optimizer.scale_loss(loss)
-
-        gradients = tape.gradient(scaled_loss, self.model.trainable_variables)
-
-        if self.gradient_clip_norm is not None:
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
-            # `gradients` are in the SCALED domain and `apply` divides them
-            # afterwards, so the clip bound must be scaled too. Do NOT write a
-            # bare `self.gradient_clip_norm` here: with a loss scale of 2**15
-            # that clips the TRUE global norm at `clip / 32768` and the whole
-            # update collapses -- the same trap measured in `models/vision/vae` under
-            # D-089. `scale_loss(x)` returns `x` unchanged without a loss
-            # scale, so the float32 path is byte-identical.
-            gradients, _ = tf.clip_by_global_norm(
-                gradients, self.optimizer.scale_loss(self.gradient_clip_norm)
-            )
-
-        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
-
-        for metric in self.metrics:
-            # Keyword, not positional: `update_state(outputs)` binds the dict
-            # to `y_true` and the metric raises "y_pred cannot be None".
-            metric.update_state(y_pred=outputs)
-
-        return {'loss': loss}
-
-    @tf.function
-    def val_step(self, batch: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Execute single validation step."""
-        images, texts = batch
-        inputs = {'image': images, 'text': texts}
-        outputs = self.model(inputs, training=False)
-        # `self.loss_fn(None, outputs)` RAISES -- see
-        # CLIPContrastiveLoss.reduced_loss and decisions.md D-030.
-        loss = self.loss_fn.reduced_loss(outputs)
-
-        for metric in self.metrics:
-            metric.update_state(y_pred=outputs)
-
-        return {'val_loss': loss}
-
-    def fit(
-        self,
-        train_dataset: tf.data.Dataset,
-        validation_dataset: Optional[tf.data.Dataset] = None,
-        epochs: int = 10,
-        steps_per_epoch: Optional[int] = None,
-        validation_steps: Optional[int] = None,
-        callbacks: Optional[List[keras.callbacks.Callback]] = None,
-        verbose: int = 1,
-        initial_epoch: int = 0
-    ) -> Dict[str, List[float]]:
-        """Train the CLIP model."""
-        logger.info(f"Starting training for {epochs} epochs")
-        callbacks = callbacks or []
-
-        for callback in callbacks:
-            callback.set_model(self)
-            if hasattr(callback, 'on_train_begin'):
-                callback.on_train_begin()
-
-        try:
-            for epoch in range(initial_epoch, epochs):
-                self.current_epoch = epoch
-                if verbose >= 1:
-                    logger.info(f"\nEpoch {epoch + 1}/{epochs}")
-
-                for callback in callbacks:
-                    if hasattr(callback, 'on_epoch_begin'):
-                        callback.on_epoch_begin(epoch)
-
-                train_metrics = self._train_epoch(train_dataset, steps_per_epoch, verbose)
-
-                val_metrics = {}
-                if validation_dataset is not None:
-                    val_metrics = self._validate_epoch(validation_dataset, validation_steps, verbose)
-
-                epoch_logs = {
-                    **train_metrics, **val_metrics,
-                    'learning_rate': read_current_lr(self),
-                }
-                for key, value in epoch_logs.items():
-                    if key in self.training_history:
-                        self.training_history[key].append(float(value))
-
-                if verbose >= 1:
-                    log_str = f"Epoch {epoch + 1}/{epochs} - "
-                    log_str += " - ".join(f"{k}: {v:.4f}" for k, v in epoch_logs.items())
-                    logger.info(log_str)
-
-                for callback in callbacks:
-                    if hasattr(callback, 'on_epoch_end'):
-                        callback.on_epoch_end(epoch, epoch_logs)
-
-        except KeyboardInterrupt:
-            logger.warning("Training interrupted by user")
-        finally:
-            for callback in callbacks:
-                if hasattr(callback, 'on_train_end'):
-                    callback.on_train_end()
-
-        logger.info("Training completed!")
-        return self.training_history
-
-    def _train_epoch(
-        self, dataset: tf.data.Dataset, steps_per_epoch: Optional[int], verbose: int
-    ) -> Dict[str, float]:
-        """Execute one training epoch."""
-        for metric in self.metrics:
-            metric.reset_state()
-
-        loss_sum = 0.0
-        num_batches = 0
-
-        for batch_idx, batch in enumerate(dataset):
-            if steps_per_epoch and batch_idx >= steps_per_epoch:
-                break
-
-            step_results = self.train_step(batch)
-            loss_sum += float(step_results['loss'])
-            num_batches += 1
-            self.global_step += 1
-
-            if verbose >= 2 and batch_idx % 100 == 0:
-                logger.info(f"  Batch {batch_idx}: loss={float(step_results['loss']):.4f}")
-
-        if num_batches == 0:
-            raise ValueError(
-                "the training dataset yielded no batch; with drop_remainder a "
-                "dataset smaller than one batch is empty"
-            )
-        metrics_dict = {'loss': loss_sum / num_batches}
-        for metric in self.metrics:
-            metrics_dict[metric.name] = float(metric.result())
-        return metrics_dict
-
-    def _validate_epoch(
-        self, dataset: tf.data.Dataset, validation_steps: Optional[int], verbose: int
-    ) -> Dict[str, float]:
-        """Execute one validation epoch."""
-        for metric in self.metrics:
-            metric.reset_state()
-
-        loss_sum = 0.0
-        num_batches = 0
-
-        for batch_idx, batch in enumerate(dataset):
-            if validation_steps and batch_idx >= validation_steps:
-                break
-            step_results = self.val_step(batch)
-            loss_sum += float(step_results['val_loss'])
-            num_batches += 1
-
-        metrics_dict = {'val_loss': loss_sum / max(num_batches, 1)}
-        for metric in self.metrics:
-            metrics_dict[f'val_{metric.name}'] = float(metric.result())
-        return metrics_dict
-
-    def save_model(self, filepath: str) -> None:
-        self.model.save(filepath)
-        logger.info(f"Model saved to {filepath}")
-
-    def save_history(self, filepath: str) -> None:
-        with open(filepath, 'w') as f:
-            json.dump(self.training_history, f, indent=2)
-        logger.info(f"Training history saved to {filepath}")
 
 
 # ---------------------------------------------------------------------
@@ -508,9 +446,9 @@ class CLIPInference:
                         np.zeros((self.data_loader.image_size, self.data_loader.image_size, 3))
                     )
 
-            batch_tensor = ops.convert_to_tensor(np.array(batch_images))
+            batch_tensor = keras.ops.convert_to_tensor(np.array(batch_images))
             batch_embeddings = self.model.encode_image(batch_tensor, training=False)
-            embeddings_list.append(ops.convert_to_numpy(batch_embeddings))
+            embeddings_list.append(keras.ops.convert_to_numpy(batch_embeddings))
 
             if show_progress and (i // self.batch_size) % 10 == 0:
                 logger.info(f"  Processed {i + len(batch_paths)}/{num_images} images")
@@ -537,9 +475,9 @@ class CLIPInference:
                     logger.error(f"Error tokenizing text '{text[:50]}...': {e}")
                     batch_tokens.append(np.zeros(self.data_loader.context_length, dtype=np.int32))
 
-            batch_tensor = ops.convert_to_tensor(np.array(batch_tokens))
+            batch_tensor = keras.ops.convert_to_tensor(np.array(batch_tokens))
             batch_embeddings = self.model.encode_text(batch_tensor, training=False)
-            embeddings_list.append(ops.convert_to_numpy(batch_embeddings))
+            embeddings_list.append(keras.ops.convert_to_numpy(batch_embeddings))
 
             if show_progress and (i // self.batch_size) % 10 == 0:
                 logger.info(f"  Processed {i + len(batch_texts)}/{num_texts} texts")
@@ -708,24 +646,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
     })
     logger.info(f"Created CLIP {args.variant} model: {model.count_params():,} parameters")
 
-    # Create training components
-    loss_fn = CLIPContrastiveLoss()
-    lr_schedule = learning_rate_schedule_builder({
-        "type": "cosine_decay", "warmup_steps": args.warmup_steps,
-        "warmup_start_lr": 1e-8, "learning_rate": args.learning_rate,
-        "decay_steps": 50000, "alpha": 0.0001
-    })
-    optimizer = optimizer_builder({
-        "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
-        "gradient_clipping_by_norm": 1.0
-    }, lr_schedule)
-
-    metrics = [CLIPAccuracy(), CLIPRecallAtK(k=5)]
-
-    trainer = CLIPTrainer(
-        model=model, loss_fn=loss_fn, optimizer=optimizer,
-        metrics=metrics, gradient_clip_norm=1.0
-    )
+    wrapper = compile_for_contrastive_training(
+        model, build_clip_optimizer(args.learning_rate, args.warmup_steps))
 
     if args.synthetic:
         images, tokens = make_synthetic_pairs(
@@ -755,14 +677,35 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
             image_paths, captions, batch_size=args.batch_size,
         )
 
+    refuse_an_empty_dataset(train_dataset)
+    train_dataset = as_contrastive_fit_batches(train_dataset)
+    if args.steps_per_epoch:
+        # `fit` with steps_per_epoch keeps ONE iterator across epochs and resets
+        # it only once it runs dry, so an epoch that starts mid-pass ends short
+        # (MEASURED, Keras 3.8: 3 batches at 2 steps per epoch train [2, 1, 2]
+        # with a "ran out of data" warning). Repeated, every epoch has its steps.
+        train_dataset = train_dataset.repeat()
+
+    final_model_path = str(run_dir / "final_model.keras")
+    callbacks = [
+        # First: `lr` must be in `logs` before CSVLogger writes the row; read
+        # at the epoch start, so it is the rate the epoch trained at.
+        LearningRateLogger(at_epoch_start=True),
+        keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+        # The CLIP, not the training wrapper, after every epoch: the file is
+        # the last completed epoch even if the run dies later.
+        keras.callbacks.LambdaCallback(
+            on_epoch_end=lambda epoch, logs: model.save(final_model_path)),
+        EpochLogLine(("loss", "clip_i2t_accuracy", "clip_i2t_recall@5")),
+    ]
+
     logger.info(f"Starting CLIP training: {args.epochs} epochs, batch_size={args.batch_size}")
-    trainer.fit(
+    history = wrapper.fit(
         train_dataset, epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
-        callbacks=[keras.callbacks.CSVLogger(str(run_dir / "training_log.csv"))],
+        callbacks=callbacks,
     )
 
-    save_training_history_json(trainer.training_history, run_dir)
-    trainer.save_model(str(run_dir / "final_model.keras"))
+    save_training_history_json(history, run_dir)
     logger.info(f"Run directory: {run_dir}")
     return run_dir
 

@@ -340,7 +340,7 @@ class MobileClipModel(keras.Model):
     def summary(self, **kwargs):
         """Print model summary with additional information."""
         super().summary(**kwargs)
-        logger.info(f"Mobile CLIP configuration:")
+        logger.info("Mobile CLIP configuration:")
         logger.info(f"  - Embed dimension: {self.embed_dim}")
         logger.info(f"  - Image backbone: {self.image_config.get('backbone_name', 'Unknown')}")
         logger.info(f"  - Image size: {self.image_config.get('image_size', 'Unknown')}")

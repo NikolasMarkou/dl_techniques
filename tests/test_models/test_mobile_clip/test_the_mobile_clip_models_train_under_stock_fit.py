@@ -9,11 +9,12 @@ EVERY trainable variable of BOTH towers, plus ``logit_scale``, changed value.
 A tower that is built but bypassed, or cut off by a ``stop_gradient``, keeps
 its init and is named in the failure.
 
-The loss bridge (``_StackedLogitsModel`` / ``_StackedClipLoss``) is the one in
-``test_mobile_clip_v2_end_to_end.py``: the model's dict output is stacked into
-one ``(N, 2, N)`` tensor, because Keras' ``CompileLoss`` broadcasts one loss
-over every leaf of a structured output. For v1, which emits features but no
-logits, the bridge forms them with ``compute_clip_logits``.
+The loss bridge is the CLIP trainer's own (``StackedCLIPLogits`` /
+``StackedCLIPContrastiveLoss`` from ``train.clip.train_clip``): the model's
+dict output is stacked into one ``(N, 2, N)`` tensor, because Keras'
+``CompileLoss`` broadcasts one loss over every leaf of a structured output.
+For v1, which emits features but no logits, the bridge forms them with
+``compute_clip_logits``.
 
 Fixture rules (GUIDE section 8 and the Step 7.1 record): batch 4, because a
 BatchNormalization at batch 1 zeroes its gradients; per-sample distinct
@@ -29,12 +30,12 @@ import tensorflow as tf
 from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v1 import (
     MobileClipModel,
 )
+from train.clip.train_clip import StackedCLIPContrastiveLoss, StackedCLIPLogits
 
 from .test_mobile_clip_v2 import _IMG as _V2_IMG
 from .test_mobile_clip_v2 import _SEQ as _V2_SEQ
 from .test_mobile_clip_v2 import _VOCAB as _V2_VOCAB
 from .test_mobile_clip_v2 import _tiny_model as _tiny_v2
-from .test_mobile_clip_v2_end_to_end import _StackedClipLoss, _StackedLogitsModel
 
 _BATCH = 4
 _STEPS = 2
@@ -104,10 +105,10 @@ def test_two_stock_fit_steps_move_every_variable_of_both_towers(subject):
     assert [v.name for v in rest] == ["logit_scale"], [v.path for v in rest]
     before = {id(v): np.array(v.numpy(), copy=True) for v in tracked}
 
-    wrapper = _StackedLogitsModel(clip_model)
+    wrapper = StackedCLIPLogits(clip_model)
     wrapper.compile(
         optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-        loss=_StackedClipLoss(),
+        loss=StackedCLIPContrastiveLoss(),
     )
     dummy = np.zeros((_BATCH,), dtype="float32")
     dataset = tf.data.Dataset.from_tensors((inputs, dummy)).repeat(_STEPS)

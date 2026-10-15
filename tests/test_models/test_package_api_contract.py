@@ -5865,7 +5865,9 @@ def _sweep_step_overrides(roots=None, src_root=None):
 #: (34 at 2026-08-20; two keys dropped with their deleted packages -- see D-003).
 #: 34 keys since 2026-10-13: ``PTRMTrainer.train_step`` (in the tree since commit
 #: 46567264f, never frozen) was added beside its HRM/TRM siblings, see
-#: plan-2026-10-13T035756-5dd4d94d D-018.
+#: plan-2026-10-13T035756-5dd4d94d D-018. 33 keys since 2026-10-15:
+#: ``CLIPTrainer.train_step`` deleted, the CLIP trainer trains through stock
+#: ``fit`` (plan-2026-10-14T062616-81938e81 D-036).
 #:
 #: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
 #: growth predicate -- but they fail the liveness test below, which is
@@ -5910,7 +5912,6 @@ _FROZEN_STEP_OVERRIDES = {
     ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "train_step"),
     ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "test_step"),
     ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "train_step"),
-    ("src/train/clip/train_clip.py", "CLIPTrainer", "train_step"),
     ("src/train/hrm/train_hrm.py", "HRMTrainer", "train_step"),
     # DECISION plan-2026-10-13T035756-5dd4d94d/D-018
     # WHAT NOT TO DO: do not convert this step to stock fit() as a drive-by. The
@@ -6045,20 +6046,20 @@ class TestCustomStepOverridePopulationIsFrozen:
         )
 
     def test_the_frozen_population_is_the_measured_one(self):
-        """Anti-vacuity: the frozen set is exactly the 34 keys measured.
+        """Anti-vacuity: the frozen set is exactly the 33 keys measured.
 
         No 0.8 floor here -- a freeze is an equality, and a floor would let the
         set decay to 27 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 34
+        assert len(_FROZEN_STEP_OVERRIDES) == 33
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
-            21,
+            20,
             12,
             1,
         ), (
-            "the step-override mix moved off the measured 21/12/1; reconcile "
+            "the step-override mix moved off the measured 20/12/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 

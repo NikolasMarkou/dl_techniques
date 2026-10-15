@@ -14,8 +14,7 @@ teacher centering            a ``keras.Variable`` assigned inside ``DINOLoss.cal
 teacher-temperature warmup   a stock ``LambdaCallback`` -> ``set_teacher_temp``
 ===========================  ==================================================
 
-**No custom ``train_step``. No bespoke training loop.** (`src/train/clip/train_clip.py`'s
-hand-rolled ``fit()`` is undocumented drift, not a template.)
+**No custom ``train_step``. No bespoke training loop.**
 
 This docstring is the OPERATING MANUAL: what to run, what never to pass, which shipped
 defaults silently change what you measure. It does NOT carry the evidence -- the per-flag

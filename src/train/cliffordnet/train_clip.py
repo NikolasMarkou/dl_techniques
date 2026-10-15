@@ -128,12 +128,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import gc
-import glob
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -288,13 +286,13 @@ class ContrastiveCliffordCLIP(keras.Model):
         # 'reduced_loss'`. Adding `reduced_loss` to SigLIP would fix that one
         # instance and leave the trap armed for the next `--loss` entry; this
         # removes the class of bug. `ops.mean(call(None, ...))` is byte-for-byte
-        # what `CLIPContrastiveLoss.reduced_loss` does internally
-        # (`clip_contrastive_loss.py:549`), so the CLIP path's scalar is
-        # unchanged (pinned at atol=1e-6 by the guard below). Do NOT call
-        # `self.loss_fn(None, ...)` either -- the base `Loss.__call__` converts
-        # `y_true` to a tensor and RAISES on None (decisions.md D-030), which is
-        # why `call` is invoked directly. `CLIPContrastiveLoss.reduced_loss`
-        # stays: `src/train/clip/train_clip.py:300,345` still use it.
+        # what `CLIPContrastiveLoss.reduced_loss` did internally, so the CLIP
+        # path's scalar is unchanged (pinned at atol=1e-6 by the guard below).
+        # `reduced_loss` itself is gone (plan-2026-10-14T062616-81938e81 D-036:
+        # its last caller, the src/train/clip loop, moved to stock fit). Do NOT
+        # call `self.loss_fn(None, ...)` either -- the base `Loss.__call__`
+        # converts `y_true` to a tensor and RAISES on None (decisions.md D-030),
+        # which is why `call` is invoked directly.
         # Guard: tests/test_train/test_cliffordnet/
         # test_the_siglip_loss_path_runs_a_step.py. See decisions.md D-001.
         return keras.ops.mean(

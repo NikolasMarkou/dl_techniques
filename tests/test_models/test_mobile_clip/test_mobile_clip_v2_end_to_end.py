@@ -17,10 +17,12 @@ Five things are exercised here that nothing else exercises:
     eager-only claim does not transfer to the regime training actually uses.
 3.  **The real `CLIPContrastiveLoss`**, unmodified. It expects a
     `{'logits_per_image', 'logits_per_text'}` dict (or a 2-tuple); our model's
-    `call` returns a 5-key dict. The bridge lives HERE (`_StackedLogitsModel` +
-    `_StackedClipLoss`) — neither the model's output contract nor the loss is
-    changed to suit the test. Training uses STOCK `fit()`; there is no custom
-    `train_step` anywhere in this file.
+    `call` returns a 5-key dict. The bridge is the CLIP trainer's own
+    (`StackedCLIPLogits` + `StackedCLIPContrastiveLoss` from
+    `train.clip.train_clip`), so this proves MobileCLIP2 trains through the
+    exact code the CLIP trainer runs — neither the model's output contract nor
+    the loss is changed to suit the test. Training uses STOCK `fit()`; there is
+    no custom `train_step` anywhere in this file or in the bridge.
 4.  **Gradients reaching every trainable weight of both towers** after that
     traced step, with every failing weight NAMED.
 5.  **The within-version eager-vs-graph delta**, MEASURED on the same unchanged
@@ -50,11 +52,9 @@ import tempfile
 import keras
 import numpy as np
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
-from dl_techniques.utils.clip_utils import compute_clip_logits
 from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import MobileClipV2Model
+from train.clip.train_clip import StackedCLIPContrastiveLoss, StackedCLIPLogits
 
 # ---------------------------------------------------------------------
 # Reduced-but-representative configurations.
@@ -160,76 +160,7 @@ def _inputs(batch: int = _BATCH) -> dict:
 
 
 def _finite(x) -> bool:
-    return bool(np.all(np.isfinite(ops.convert_to_numpy(x))))
-
-
-# ---------------------------------------------------------------------
-# The loss bridge.
-#
-# `CLIPContrastiveLoss` wants {'logits_per_image', 'logits_per_text'}; the model
-# emits five keys, and Keras' `CompileLoss` broadcasts a single `Loss` object
-# across every element of a structured output (so handing it the raw dict would
-# call the loss once per key, on a single [N, N] tensor it cannot parse).
-#
-# The bridge is two thin pieces, both LOCAL TO THIS TEST:
-#   * `_StackedLogitsModel` — a plain `keras.Model` whose `call` stacks the two
-#     logit matrices into one (N, 2, N) tensor, i.e. ONE output. It has no
-#     custom `train_step`; `fit()` below is stock.
-#   * `_StackedClipLoss` — unstacks and delegates to the REAL
-#     `CLIPContrastiveLoss.call`. `.call` (not `__call__`) is used so the
-#     per-sample vector is returned and the outer `Loss` applies the reduction
-#     exactly once.
-# ---------------------------------------------------------------------
-
-
-class _StackedLogitsModel(keras.Model):
-    """Adapts a CLIP-family output down to the single tensor `fit()` wants.
-
-    v1 (`MobileClipModel`) emits features and `logit_scale` but no logits
-    matrices; for it the logits are formed here with `compute_clip_logits`,
-    the helper v2 and `CLIP` call inside their own `call`. Shared with
-    `test_the_mobile_clip_models_train_under_stock_fit.py`.
-    """
-
-    def __init__(self, clip_model: MobileClipV2Model, **kwargs):
-        # An EXPLICIT name is load-bearing: Keras derives the default name from
-        # the class name, and the leading underscore of `_StackedLogitsModel`
-        # produces `'__stacked_logits_model'`, which TensorFlow rejects as a
-        # root scope name the moment `fit()` traces the step
-        # ("is not a valid root scope name").
-        kwargs.setdefault('name', 'stacked_logits_model')
-        super().__init__(**kwargs)
-        self.clip_model = clip_model
-
-    def call(self, inputs, training=None):
-        out = self.clip_model(inputs, training=training)
-        if 'logits_per_image' not in out:
-            out['logits_per_image'], out['logits_per_text'] = (
-                compute_clip_logits(
-                    out['image_features'], out['text_features'],
-                    out['logit_scale'],
-                )
-            )
-        return ops.stack(
-            [out['logits_per_image'], out['logits_per_text']], axis=1
-        )
-
-
-class _StackedClipLoss(keras.losses.Loss):
-    """Unstacks `(N, 2, N)` and delegates to the unmodified CLIP loss."""
-
-    def __init__(self, name='stacked_clip_loss', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.inner = CLIPContrastiveLoss()
-
-    def call(self, y_true, y_pred):
-        return self.inner.call(
-            None,
-            {
-                'logits_per_image': y_pred[:, 0],
-                'logits_per_text': y_pred[:, 1],
-            },
-        )
+    return bool(np.all(np.isfinite(keras.ops.convert_to_numpy(x))))
 
 
 # ---------------------------------------------------------------------
@@ -250,11 +181,11 @@ class TestEndToEndForward:
         out = model(_inputs(), training=False)
 
         assert set(out) == _OUTPUT_KEYS, sorted(out)
-        assert ops.shape(out['image_features']) == (_BATCH, _EMBED)
-        assert ops.shape(out['text_features']) == (_BATCH, _EMBED)
-        assert ops.shape(out['logits_per_image']) == (_BATCH, _BATCH)
-        assert ops.shape(out['logits_per_text']) == (_BATCH, _BATCH)
-        assert ops.shape(out['logit_scale']) == ()
+        assert keras.ops.shape(out['image_features']) == (_BATCH, _EMBED)
+        assert keras.ops.shape(out['text_features']) == (_BATCH, _EMBED)
+        assert keras.ops.shape(out['logits_per_image']) == (_BATCH, _BATCH)
+        assert keras.ops.shape(out['logits_per_text']) == (_BATCH, _BATCH)
+        assert keras.ops.shape(out['logit_scale']) == ()
         for key, value in out.items():
             assert _finite(value), f"{key} contains non-finite values"
 
@@ -277,9 +208,9 @@ class TestEndToEndForward:
         out = model(_inputs(), training=False)
 
         assert set(out) == _OUTPUT_KEYS, sorted(out)
-        assert ops.shape(out['image_features']) == (_BATCH, _EMBED)
-        assert ops.shape(out['text_features']) == (_BATCH, _EMBED)
-        assert ops.shape(out['logits_per_image']) == (_BATCH, _BATCH)
+        assert keras.ops.shape(out['image_features']) == (_BATCH, _EMBED)
+        assert keras.ops.shape(out['text_features']) == (_BATCH, _EMBED)
+        assert keras.ops.shape(out['logits_per_image']) == (_BATCH, _BATCH)
         for key, value in out.items():
             assert _finite(value), f"{key} contains non-finite values"
 
@@ -304,13 +235,13 @@ class TestEndToEndForward:
             model(_inputs(batch=1), training=False)
             encoder = model.image_encoder
 
-            x = ops.convert_to_tensor(_images(batch=1))
+            x = keras.ops.convert_to_tensor(_images(batch=1))
             for block in encoder.stem:
                 x = block(x, training=False)
-            sizes = [int(ops.shape(x)[1])]
+            sizes = [int(keras.ops.shape(x)[1])]
             for stage in encoder.stages:
                 x = stage(x, training=False)
-                sizes.append(int(ops.shape(x)[1]))
+                sizes.append(int(keras.ops.shape(x)[1]))
 
             assert tuple(sizes) == expected, (
                 f"{variant}: per-stage spatial sizes {tuple(sizes)} != the "
@@ -334,8 +265,8 @@ class TestEndToEndSerialization:
 
         for key in ('image_features', 'text_features'):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(before[key]),
-                ops.convert_to_numpy(after[key]),
+                keras.ops.convert_to_numpy(before[key]),
+                keras.ops.convert_to_numpy(after[key]),
                 atol=1e-6,
                 rtol=0,
                 err_msg=(
@@ -345,8 +276,8 @@ class TestEndToEndSerialization:
                 ),
             )
         np.testing.assert_allclose(
-            ops.convert_to_numpy(before['logits_per_image']),
-            ops.convert_to_numpy(after['logits_per_image']),
+            keras.ops.convert_to_numpy(before['logits_per_image']),
+            keras.ops.convert_to_numpy(after['logits_per_image']),
             atol=1e-6,
             rtol=0,
         )
@@ -392,19 +323,19 @@ class TestEndToEndTraining:
             move UP while the train-mode number moves DOWN. Both are printed.
         """
         clip_model = _model('mobileclip2_s0', 4)
-        wrapper = _StackedLogitsModel(clip_model)
+        wrapper = StackedCLIPLogits(clip_model)
         wrapper.compile(
             optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-            loss=_StackedClipLoss(),
+            loss=StackedCLIPContrastiveLoss(),
         )
 
         images, tokens = _images(), _tokens()
-        eval_loss_fn = _StackedClipLoss()
+        eval_loss_fn = StackedCLIPContrastiveLoss()
         dummy = np.zeros((_BATCH,), dtype='float32')
 
         def _eval_loss() -> float:
             return float(
-                ops.convert_to_numpy(
+                keras.ops.convert_to_numpy(
                     eval_loss_fn(
                         dummy,
                         wrapper(
@@ -445,10 +376,10 @@ class TestEndToEndTraining:
         `stop_gradient` slipping into either path. Failures are NAMED.
         """
         clip_model = _model('mobileclip2_s0', 4)
-        wrapper = _StackedLogitsModel(clip_model)
+        wrapper = StackedCLIPLogits(clip_model)
         wrapper.compile(
             optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-            loss=_StackedClipLoss(),
+            loss=StackedCLIPContrastiveLoss(),
         )
         images, tokens = _images(), _tokens()
         wrapper.fit(
@@ -458,8 +389,8 @@ class TestEndToEndTraining:
             verbose=0,
         )
 
-        loss_fn = _StackedClipLoss()
-        dummy = ops.zeros((_BATCH,))
+        loss_fn = StackedCLIPContrastiveLoss()
+        dummy = keras.ops.zeros((_BATCH,))
         with tf.GradientTape() as tape:
             stacked = wrapper(
                 {'image': images, 'text': tokens}, training=True
@@ -476,7 +407,7 @@ class TestEndToEndTraining:
         )
         zero = [
             w.path for w, g in zip(weights, grads)
-            if float(np.max(np.abs(ops.convert_to_numpy(g)))) == 0.0
+            if float(np.max(np.abs(keras.ops.convert_to_numpy(g)))) == 0.0
         ]
         assert not zero, (
             f"{len(zero)} of {len(weights)} trainable weights got an all-zero "
@@ -515,8 +446,8 @@ class TestGraphVsEagerControl:
         deltas = {}
         relative = {}
         for key in sorted(_OUTPUT_KEYS):
-            a = ops.convert_to_numpy(eager[key])
-            b = ops.convert_to_numpy(graph[key])
+            a = keras.ops.convert_to_numpy(eager[key])
+            b = keras.ops.convert_to_numpy(graph[key])
             deltas[key] = float(np.max(np.abs(a - b)))
             scale = float(np.max(np.abs(a)))
             relative[key] = deltas[key] / scale if scale > 0.0 else deltas[key]

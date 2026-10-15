@@ -126,17 +126,15 @@ These losses are self-supervised and expect predictions as a dictionary or tuple
 ```python
 from dl_techniques.losses import CLIPContrastiveLoss
 
-# In model definition...
-image_logits = ... # (batch, batch) similarities
-text_logits = ... # (batch, batch) similarities
-# The model must output a dictionary or a tuple
+# Called directly, on the two (batch, batch) similarity matrices:
 outputs = {'logits_per_image': image_logits, 'logits_per_text': text_logits}
-model = keras.Model(inputs=[img_input, txt_input], outputs=outputs)
-
-# In compilation...
-# y_true is ignored, so we can pass dummy data or None
-model.compile(optimizer='adam', loss=CLIPContrastiveLoss(temperature=0.07))
+per_sample = CLIPContrastiveLoss().call(None, outputs)  # y_true is ignored
 ```
+
+Do not pass it to `model.compile` for a model whose output is that dict: Keras
+hands each loss one leaf of the output. For stock `compile`/`fit`, use
+`compile_for_contrastive_training` and `as_contrastive_fit_batches` from
+`src/train/clip/train_clip.py` (one stacked `(N, 2, N)` output, a dummy `y`).
 
 ### DINO Loss
 `DINOLoss` (and `iBOTPatchLoss`) maintain their centering EMA **inside
@@ -150,8 +148,9 @@ on Keras 3.8. Measured: `CompileLoss.build` broadcasts one `Loss` object across
 every leaf of a nested `y_pred` and then raises
 `KeyError: "The path: ('student_logits',) in the 'loss' argument, can't be found
 in either the model's output ('y_pred') or in the labels ('y_true')."`
-(`CLIPContrastiveLoss` is not a counterexample: it has only ever run under
-`src/train/clip/train_clip.py`'s hand-rolled loop, never under stock `fit()`.)
+(`CLIPContrastiveLoss` is not a counterexample: under stock `fit()` it gets a
+single tensor too. `src/train/clip/train_clip.py` stacks the two logit matrices
+into one `(N, 2, N)` output and its `StackedCLIPContrastiveLoss` unstacks them.)
 
 Under stock `fit()` the model must return a **single rank-2 tensor** in the
 **packed** layout — last dimension `2 * out_dim`, holding

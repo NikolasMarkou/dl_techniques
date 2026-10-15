@@ -205,16 +205,3 @@ def test_the_clip_path_scalar_is_unchanged_by_the_polymorphic_call_site(
         f"CLIP path moved: {value!r} vs pre-fix {expected!r} "
         f"(label_smoothing={label_smoothing})"
     )
-
-
-def test_the_clip_loss_class_still_owns_reduced_loss():
-    """``CLIPContrastiveLoss.reduced_loss`` has other callers; it stays.
-
-    ``src/train/clip/train_clip.py:300`` and ``:345`` call it, and
-    ``tests/test_train/test_clip/test_the_trainer_steps_do_not_raise.py:64``
-    asserts on it. The fix makes the CLIFFORD call site stop REQUIRING it; it
-    does not delete it.
-    """
-    from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
-
-    assert hasattr(CLIPContrastiveLoss, "reduced_loss")

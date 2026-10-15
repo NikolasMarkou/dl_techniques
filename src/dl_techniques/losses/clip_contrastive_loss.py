@@ -253,16 +253,19 @@ class CLIPContrastiveLoss(keras.losses.Loss):
         )
         ```
 
-        **In Model Training**:
+        **In Model Training** (stock ``compile``/``fit``):
         ```python
-        # Compile model with CLIP loss
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-            loss=CLIPContrastiveLoss(temperature=0.07, apply_temperature=True)
-        )
+        # Not `model.compile(loss=CLIPContrastiveLoss())` on a dict-output CLIP:
+        # Keras hands each loss ONE leaf of the output, and this loss needs both
+        # logit matrices. The CLIP trainer stacks them into one (N, 2, N) tensor
+        # and unstacks them for this loss. The model applies its own learnable
+        # temperature, so apply_temperature stays False.
+        from train.clip.train_clip import (
+            as_contrastive_fit_batches, compile_for_contrastive_training)
 
-        # Train model
-        model.fit(train_dataset, epochs=10)
+        wrapper = compile_for_contrastive_training(
+            clip_model, keras.optimizers.AdamW(learning_rate=1e-4))
+        wrapper.fit(as_contrastive_fit_batches(image_token_batches), epochs=10)
         ```
 
         **Dynamic Temperature Updates**:
@@ -514,39 +517,6 @@ class CLIPContrastiveLoss(keras.losses.Loss):
         )  # Shape: [batch_size]
 
         return total_loss_per_sample
-
-    def reduced_loss(
-        self,
-        y_pred: Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor], list]
-    ) -> keras.KerasTensor:
-        """Scalar contrastive loss for a dict-output CLIP model.
-
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-030
-        THE ENTRY POINT EVERY CLIP TRAINER MUST USE. Do NOT call
-        ``loss_fn(None, outputs)`` -- the ``keras.losses.Loss.__call__`` wrapper
-        converts ``y_true`` to a tensor before dispatching, so a ``None`` label
-        raises ``ValueError: Attempt to convert a value (None) with an
-        unsupported type (<class 'NoneType'>) to a Tensor`` (in graph mode the
-        same defect reads ``ValueError: None values not supported``). This is
-        device- and data-INDEPENDENT: it raises on the first step, always.
-        MEASURED green control on the same inputs:
-        ``loss_fn.call(None, outputs)`` returns ``[0.6931472 0.6931472]``.
-        There is no dummy ``y_true`` worth synthesising -- the ground truth of a
-        contrastive batch is its own diagonal. See decisions.md D-030.
-
-        Interface contract (this method has 2+ callers by design):
-            :param y_pred: The model's own output, in any format `call` accepts
-                -- a dict with ``logits_per_image`` / ``logits_per_text``, or a
-                2-tuple / 2-list of those tensors in that order.
-            :returns: A SCALAR tensor, the mean of the per-sample losses. Note
-                `call` returns a per-sample vector of shape ``[batch_size]``;
-                the reduction is applied here, not by the base class, because
-                the base class is bypassed.
-            :raises ValueError: Propagated from `call` when `y_pred` does not
-                carry both logit matrices, or when they are not square and
-                compatible.
-        """
-        return ops.mean(self.call(None, y_pred))
 
     def _parse_predictions(
         self,
