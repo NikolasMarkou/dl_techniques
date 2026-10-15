@@ -1,55 +1,59 @@
 # NanoVLM
 
-A small vision-language model: a ViT vision tower, a text tower (causal decoder or bidirectional encoder) and a `MultiModalFusion` layer, under one vocabulary head. Its output is unnormalized **logits** over the vocabulary at every position of the fused sequence. No pretrained weights are distributed.
+A small vision-language model in the nanoVLM layout: a ViT vision tower, a `ModalityProjection` into the text width, and ONE causal `TextDecoder` run over `[projected image tokens; text token embeddings]`, under a vocabulary head tied to the word embeddings. Its output is unnormalized **logits** over the vocabulary at every position of the joint sequence. No pretrained weights are distributed.
 
-`research/nanoVLM_research.md` is an unimplemented design proposal, not a description of this package.
+`research/nanoVLM_research.md` is a design proposal, not a description of this package; its status block says where the two differ.
 
 ---
 
 ## 1. Architecture
 
 ```
-images [B,H,W,C]             text_tokens [B,T]
-      │                            │
-      ▼                            ▼
-VisionEncoder               TextDecoder (causal) or TextEncoder
-output_mode='none'          (optional attention_mask)
-      │ [B,Sv,D]                   │ [B,T,D]
-      └─────────────┬──────────────┘
-                    ▼
-            MultiModalFusion          8 strategies, default 'cross_attention'
-                    │
-   'cross_attention': concat(vision, text) on the sequence axis -> [B, Sv+T, D]
-   six equal-length strategies: one fused tensor              -> [B, T, D] (Sv == T)
-   'attention_pooling': pooled                                -> [B, D]
-                    │
-                    ▼
-     dropout, then the vocabulary projection
-     tied:   features @ word_embeddings.T   (no output Dense is built)
-     untied: output_projection, a bias-free Dense(vocab_size)
-                    │
-                    ▼
-     logits [B, Sv+T, vocab] / [B, T, vocab] / [B, vocab]
+images [B,H,W,C]                         text_tokens [B,T]
+      │                                         │
+      ▼                                         ▼
+VisionEncoder (output_mode='none')       TextDecoder.embed_tokens
+      │ [B, 1+P, Dv]                     (word table only)
+      ▼                                         │
+ModalityProjection: pixel shuffle s,            │
+then Dense to the text width Dt                 │
+      │ [B, Sv, Dt]                             │ [B, T, Dt]
+      └──────────────────┬──────────────────────┘
+                         ▼
+          concat on the sequence axis [B, Sv+T, Dt]
+                         ▼
+          TextDecoder.decode_embeddings: positions 0..Sv+T-1,
+          ONE causal mask over vision and text, blocks, final norm
+                         ▼
+          dropout, then the vocabulary projection
+          tied:   hidden @ word_embeddings.T   (no output Dense is built)
+          untied: output_projection, a bias-free Dense(vocab_size)
+                         ▼
+          logits [B, Sv+T, vocab]
 ```
 
-- `Sv` is `(img_size / patch_size)^2 + 1` (the CLS token): 197 at 224px, 577 at 384px.
-- Only `'cross_attention'` and `'attention_pooling'` fuse streams of different length. The other six raise a `ValueError` naming the requirement unless `T == Sv`.
-- `compute_output_shape` asks the fusion layer for the fused length, so it agrees with the eager call and with `model(keras.Input(...))` for all eight strategies (`tests/test_models/test_nano_vlm/test_fusion_contract.py`).
-- **Tying.** `use_shared_embedding=True` (the default) with a decoder ties the output to the word embedding table at call time and builds no output `Dense`. An encoder model is always untied. A decoder with `embedding_type='factorized'` has no full table to tie to and refuses `use_shared_embedding=True`.
-- `generate()` accepts only `'cross_attention'`. It is a plain top-k sampling loop with no key-value cache, meant for evaluating a trained model.
+- `Sv` is `NanoVLM.num_vision_tokens`: `(grid / s)^2 + 1` for a `grid x grid` patch grid, pixel-shuffle factor `s` (default 2) and the CLS token. It is 50 at 224px and 145 at 384px, with 16px patches.
+- **Causal everywhere.** Every position attends to itself and earlier positions only, vision tokens included. This is the reference nanoVLM's behaviour: its language model is a causal decoder over the concatenation, not a prefix-LM with a bidirectional image block. A text position therefore reads the whole image and the text before it, and nothing after it (`test_the_text_logits_are_causal.py`, at 3 blocks and on the `mini` row).
+- The text logits are the trailing `T` positions. An optional `attention_mask` `(B, T)` covers the text; the vision prefix is always attended.
+- `text_config['max_seq_len']` is the **text** length limit. The decoder is built with `num_vision_tokens + max_seq_len` positions, so the vision prefix never uses up text positions. A longer static text length is refused at build.
+- The vision and text widths may differ; the projection maps one to the other. `projection_config` passes `scale_factor`, `use_gelu`, `use_layer_norm` and the initializers/regularizers to `ModalityProjection`. Its defaults are a 2x2 pixel shuffle, GELU and layer norm, the projector of the research doc's design.
+- **Tying.** `use_shared_embedding=True` (the default) ties the output to the word embedding table at call time and builds no output `Dense`. A decoder with `embedding_type='factorized'` has no full table to tie to and refuses `use_shared_embedding=True`.
+- `generate()` encodes the image once and re-runs the decoder over `[vision; text so far]` for each new token. It is a plain top-k sampling loop with no key-value cache, meant for evaluating a trained model. A prompt plus `max_length` beyond `max_seq_len` is refused.
+
+Until 2026-10-15 a separate text tower fed a `MultiModalFusion` layer (8 strategies, default `'cross_attention'`). That design was removed, with no alias, for two measured defects. First, the symmetric cross-attention let a later text token change earlier text logits from the second fusion block on. Second, the last fusion block's vision side never trained. The removed surface: `fusion_config`, `fusion_strategy`, `text_component_type` (and the bidirectional encoder mode) and the trainer flags `--fusion-strategy` and `--num-fusion-layers`. Archives saved before 2026-10-15 do not load.
 
 ## 2. Variants and factory
 
-`NanoVLM.MODEL_VARIANTS` holds the four rows. `vocab_size` is a caller argument; every row's `fusion_strategy` default is `'cross_attention'`.
+`NanoVLM.MODEL_VARIANTS` holds the four rows. `vocab_size` is a caller argument.
 
-| Variant | Image | Width | Depth (vision / text) | Heads | Fusion blocks | Tied | Parameters |
+| Variant | Image | Vision tokens | Width | Depth (vision / decoder) | Heads | Tied | Parameters |
 |---|---|---|---|---|---|---|---|
-| `mini` | 224 | 384 | 6 / 6 | 6 | 3 | yes | 44,793,216 |
-| `base` | 224 | 768 | 12 / 12 | 12 | 6 | yes | 280,859,904 |
-| `large` | 384 | 1024 | 24 / 24 | 16 | 8 | yes | 841,325,568 |
-| `modern` | 224 | 768 | 12 / 12 | 12 | 1 | no | 232,551,436 |
+| `mini` | 224 | 50 | 384 | 6 / 6 | 6 | yes | 34,761,216 |
+| `base` | 224 | 50 | 768 | 12 / 12 | 12 | yes | 198,223,872 |
+| `large` | 384 | 145 | 1024 | 24 / 24 | 16 | yes | 644,164,608 |
+| `modern` | 224 | 50 | 768 | 12 / 12 | 12 | no | 216,855,820 |
 
-Parameters at `vocab_size=32000`, measured with `create_nanovlm(v).build(...)` then `count_params()` on 2026-10-15. `modern` uses differential attention, RMSNorm, SwiGLU and pre-normalization in the vision tower; RoPE, factorized word embeddings, RMSNorm and SwiGLU in the text tower; SwiGLU and RMSNorm in the fusion layer. Its factorized table cannot be tied, so it builds `output_projection`.
+Parameters at `vocab_size=32000` and 512 text tokens, measured with `create_nanovlm(v).build(...)` then `count_params()` on 2026-10-15. `modern` uses differential attention, RMSNorm, SwiGLU and pre-normalization in the vision tower. Its decoder uses factorized word embeddings, RMSNorm, SwiGLU, pre-normalization and learned positions. The row's former `positional_type='rope'` built no positional encoding at all and is now refused by `TextDecoder`. Its factorized table cannot be tied, so it builds `output_projection`.
 
 ```python
 from dl_techniques.models.vision_language.nano_vlm import NanoVLM, create_nanovlm
@@ -57,13 +61,12 @@ from dl_techniques.models.vision_language.nano_vlm import NanoVLM, create_nanovl
 model = create_nanovlm("base", vocab_size=32000)          # delegates to from_variant
 model = NanoVLM.from_variant("mini", vocab_size=1000)
 
-# The three config dicts merge ONE level deep into the row; other keywords
-# replace the row's value or go to the constructor.
+# vision_config / text_config / projection_config merge ONE level deep into
+# the row; other keywords replace the row's value or go to the constructor.
 small = NanoVLM.from_variant(
     "modern", vocab_size=64,
     vision_config={"embed_dim": 64, "num_heads": 1},
     text_config={"embed_dim": 64, "num_heads": 1},
-    fusion_config={"attention_config": {"num_heads": 1}},
 )
 ```
 
@@ -73,7 +76,7 @@ small = NanoVLM.from_variant(
 
 ## 3. Training
 
-The output is logits, so a loss takes `from_logits=True`. `dl_techniques.losses.NanoVLMLoss` is the next-token cross-entropy for this model: it scores the trailing `T` positions of the logits (the text positions; under `'cross_attention'` the vision prefix is dropped), shifts by one and ignores padding id 0. It works under a stock `compile`:
+The output is logits, so a loss takes `from_logits=True`. `dl_techniques.losses.NanoVLMLoss` is the next-token cross-entropy for this model: it scores the trailing `T` positions of the logits (the text positions; the vision prefix is dropped), shifts by one and ignores padding id 0. It works under a stock `compile`, and every trainable variable receives a gradient under it (`test_every_weight_trains_in_one_fit_step.py`):
 
 ```python
 from dl_techniques.losses import NanoVLMLoss
@@ -89,13 +92,14 @@ MPLBACKEND=Agg .venv/bin/python -m train.nano_vlm.train_nano_vlm \
     --synthetic --variant mini --epochs 1 --steps-per-epoch 10 --output-dir /tmp/nanovlm
 ```
 
-## 4. Known limitations
+## 4. Tests
 
-Both are measured and pinned by strict `xfail` tests, so a fix shows up as an XPASS:
+`tests/test_models/test_nano_vlm/` covers:
 
-- **The default fusion is not causal beyond one block.** `'cross_attention'` lets every modality attend to every other one in every block. From the second block on, a text position attends to vision tokens that already attended to the whole text sequence, so a later token changes earlier text logits (`test_the_text_logits_are_causal.py`). Every row except `modern` uses 3 to 8 blocks. Next-token training on such a model can copy the answer instead of predicting it.
-- **Under `NanoVLMLoss` the last fusion block's vision side does not train.** Its cross-attention, norm and FFN feed only the vision positions the loss drops, so their gradient is identically zero (`test_every_weight_trains_in_one_fit_step.py`).
+- the model and the factory;
+- the vision-prefix layout and shape contract;
+- causality;
+- gradient flow and one-step training;
+- sampling.
 
-## 5. Tests
-
-`tests/test_models/test_nano_vlm/` (model, factory, fusion contract, gradient flow, sampling) and `tests/test_train/test_nano_vlm/` (`main(argv)` end to end on synthetic data and on image files).
+`tests/test_train/test_nano_vlm/` runs `main(argv)` end to end on synthetic data and on image files. `tests/test_layers/test_transformers/test_the_decoder_runs_on_precomputed_embeddings.py` pins the `TextDecoder` split the model runs on.

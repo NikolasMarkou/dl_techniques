@@ -27,14 +27,13 @@ Architectural Design:
     target token at `t+1`, forcing the model to predict one step into the
     future.
 
-    NanoVLM's logits cover more positions than its labels: under the
-    default ``'cross_attention'`` fusion the model concatenates the fused
-    vision tokens BEFORE the text tokens, so its output is
-    ``[batch, vision_len + text_len, vocab]`` against ``[batch, text_len]``
-    labels. The text positions are always the trailing ``text_len`` ones
-    (the six equal-length strategies return exactly ``text_len`` positions),
-    so the loss scores that suffix and ignores the vision prefix
-    (:func:`text_position_logits`).
+    NanoVLM's logits cover more positions than its labels: the model puts
+    its projected vision tokens BEFORE the text tokens and runs one causal
+    decoder over both, so its output is ``[batch, vision_len + text_len,
+    vocab]`` against ``[batch, text_len]`` labels. The text positions are
+    the trailing ``text_len`` ones, so the loss scores that suffix and
+    ignores the vision prefix (:func:`text_position_logits`). The logit at
+    text position ``t`` has seen the image and text ``0..t`` only.
 
     A key architectural component is the handling of padding. Since sequences
     in a batch are padded to a uniform length, an `ignore_index` is used to
@@ -90,9 +89,9 @@ def text_position_logits(
 
     Interface contract (callers: ``NanoVLMLoss.call``): ``y_true`` is
     ``[batch, seq_len]``, ``y_pred`` is ``[batch, pred_len, vocab]`` with
-    ``pred_len >= seq_len``. NanoVLM puts any non-text positions (the fused
-    vision tokens) BEFORE the text, so the text logits are the last
-    ``seq_len`` positions. Equal static lengths return ``y_pred`` unchanged.
+    ``pred_len >= seq_len``. NanoVLM puts its non-text positions (the
+    projected vision tokens) BEFORE the text, so the text logits are the
+    last ``seq_len`` positions. Equal static lengths return ``y_pred`` unchanged.
     ``pred_len`` may be unknown at trace time (NanoVLM's sequence axis is
     dynamic under ``fit`` when the batch size is unknown); the suffix slice
     needs only ``seq_len``, and the length check runs when both are static.

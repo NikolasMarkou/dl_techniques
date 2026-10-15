@@ -2,7 +2,7 @@
 Test suite for NanoVLM (vision-language model).
 
 call() consumes a dict {'images': (B,224,224,3), 'text_tokens': (B,T)} and
-returns LM logits (B, combined_seq, vocab_size). Covers construction via the
+returns LM logits (B, num_vision_tokens + T, vocab_size). Covers construction via the
 create_nanovlm factory, a forward pass, and the M2 full .keras
 save -> load -> identical-output round-trip.
 """
@@ -91,9 +91,11 @@ def test_smoke_build_and_forward():
     else:
         _assert_finite(out)
 
-    # mini: vision seq (224/16)^2=196 + 1 (cls?) ... + text t=16 -> combined 213; vocab 256.
+    # mini: a 14x14 patch grid, pixel-shuffled 2x2 to 7x7 = 49 tokens, plus
+    # CLS = 50 vision positions, then t = 16 text positions; vocab 256.
     logits = np.asarray(out)
-    assert logits.shape == (b, 213, 256), f"unexpected logits shape {logits.shape}"
+    assert model.num_vision_tokens == 50
+    assert logits.shape == (b, 66, 256), f"unexpected logits shape {logits.shape}"
 
 
 def test_shared_embedding_is_really_tied():
@@ -101,7 +103,7 @@ def test_shared_embedding_is_really_tied():
 
     The tied path produces logits via matmul(x, transpose(word_embeddings.embeddings)).
 
-    1. Positive: model logits == matmul(combined_features, transpose(emb)).
+    1. Positive: model logits == matmul(decoder_hidden_states, transpose(emb)).
     2. Negative: a tied model builds NO output Dense at all -- the
        `shared_output_projection` it used to build was created, saved and
        counted (24,576,000 params on 'base') and never called
@@ -111,11 +113,10 @@ def test_shared_embedding_is_really_tied():
     """
     model = create_nanovlm(variant="mini", vocab_size=256)
 
-    # Guard must hold for this variant (decoder + shared embedding + has word_embeddings).
+    # Guard must hold for this variant (shared embedding + has word_embeddings).
     assert model.use_shared_embedding is True
-    assert model.text_component_type == "decoder"
     assert model.ties_output_to_embeddings is True
-    assert hasattr(model.text_component, "word_embeddings")
+    assert hasattr(model.text_decoder, "word_embeddings")
 
     b, t = 2, 16
     inputs = {
@@ -126,26 +127,27 @@ def test_shared_embedding_is_really_tied():
     logits = np.asarray(model(inputs, training=False))
 
     # Positive proof: reconstruct logits from the tied embedding weight directly.
-    # Reproduce the call() pipeline up to combined_features (no output projection).
-    vision_features = model.vision_encoder(inputs["images"], training=False)
-    text_features = model.text_component(inputs["text_tokens"], training=False)
-    fused = model.fusion_layer([vision_features, text_features], training=False)
-    if isinstance(fused, tuple):
-        vision_fused, text_fused = fused
-        combined = keras.ops.concatenate([vision_fused, text_fused], axis=1)
-    else:
-        combined = fused
-    emb = model.text_component.word_embeddings.embeddings
-    manual = np.asarray(keras.ops.matmul(combined, keras.ops.transpose(emb)))
+    # Reproduce the call() pipeline up to the decoder's hidden states (no
+    # output projection): vision tokens projected, prefixed to the text's
+    # word embeddings, one decoder over both.
+    vision_tokens = model.modality_projection(
+        model.vision_encoder(inputs["images"], training=False), training=False)
+    text_embeddings = model.text_decoder.embed_tokens(inputs["text_tokens"])
+    joint = keras.ops.concatenate([vision_tokens, text_embeddings], axis=1)
+    hidden = model.text_decoder.decode_embeddings(joint, training=False)
+    emb = model.text_decoder.word_embeddings.embeddings
+    manual = np.asarray(keras.ops.matmul(hidden, keras.ops.transpose(emb)))
     assert np.allclose(logits, manual, atol=1e-4), (
         "shared-path logits do not equal matmul(x, transpose(embeddings)) -> tie not wired"
     )
 
     # Negative proof: no second vocabulary matrix exists.
     assert model.output_projection is None
-    projection_paths = [w.path for w in model.weights if "projection" in w.path
-                        and "multimodal_fusion" not in w.path]
-    assert projection_paths == [], projection_paths
+    output_paths = [w.path for w in model.weights if "output_projection" in w.path]
+    assert output_paths == [], output_paths
+    # The only (vocab, ...) or (..., vocab) variable is the word table itself.
+    vocab_shaped = [w.path for w in model.weights if 256 in tuple(w.shape)]
+    assert vocab_shaped == [model.text_decoder.word_embeddings.embeddings.path], vocab_shaped
 
 
 def test_an_untied_model_projects_through_its_own_dense():
@@ -174,7 +176,6 @@ def test_tied_logits_are_float32_under_mixed_float16():
         keras.mixed_precision.set_global_policy("mixed_float16")
         model = create_nanovlm(variant="mini", vocab_size=256)
         assert model.use_shared_embedding is True
-        assert model.text_component_type == "decoder"
 
         b, t = 2, 16
         inputs = {

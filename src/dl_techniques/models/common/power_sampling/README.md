@@ -210,7 +210,7 @@ VLMForwardAdapter(
 # .as_batch_logits_fn()  -> batched closure bound to the fixed image
 ```
 
-`text_slice_start` (== vision sequence length) is supplied by the caller; repo VLMs such as `nano_vlm` do not expose it as a property, and auto-deriving it is out of scope. A wrong value gathers logits from *inside* the vision prefix and produces garbage.
+`text_slice_start` (== vision sequence length) is supplied by the caller and is not auto-derived. For `nano_vlm` it is `NanoVLM.num_vision_tokens` (an attribute since 2026-10-15); other repo VLMs do not expose it. A wrong value gathers logits from *inside* the vision prefix and produces garbage.
 
 ### 6.4 `TokenizerProtocol`
 

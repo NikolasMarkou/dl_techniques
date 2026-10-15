@@ -1,7 +1,7 @@
 """`NanoVLMLoss` scores the trailing label-length positions of its logits.
 
-NanoVLM's default `'cross_attention'` output is `[batch, vision_len +
-text_len, vocab]`: the fused vision tokens come FIRST, then the text. The
+NanoVLM's output is `[batch, vision_len + text_len, vocab]`: the projected
+vision tokens come FIRST, then the text, through one causal decoder. The
 loss used to refuse any length mismatch, so it could never be applied to its
 own model's output (the old hand-written trainer caught that `ValueError` per
 step and trained nothing). Since plan-2026-10-14T062616-81938e81 step 9 it

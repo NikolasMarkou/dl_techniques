@@ -1,19 +1,20 @@
-"""A NanoVLM text position's logits must not depend on LATER text tokens.
+"""A NanoVLM position's logits must not depend on LATER text tokens.
 
 NanoVLM trains as a causal language model: `NanoVLMLoss` scores text position
-`t` against token `t + 1`. The text decoder is causal, but the default
-`'cross_attention'` fusion lets every modality attend to every other one, in
-every block. From the second block on, a text position attends to vision
-tokens that, one block earlier, attended to the WHOLE text sequence, so the
-future leaks into the past and next-token training can copy instead of
-predict.
+`t` against token `t + 1`. Until plan-2026-10-14T062616-81938e81 step 9.1
+(D-040) the text tower fed a symmetric `MultiModalFusion('cross_attention')`
+in which vision tokens attended to the whole text, and from the second fusion
+block on a text position read those vision tokens back, so a later token
+moved earlier text logits (MEASURED 8.4e-3 at 2 blocks; the rows used 3 to
+8). That was pinned here as a strict xfail.
 
-MEASURED 2026-10-15 (plan-2026-10-14T062616-81938e81 step 9), eval mode,
-dropout 0: changing text token 6 moves the logits at text positions 0..5 by
-up to 8.4e-3 with 2 fusion blocks, and by exactly 0.0 with 1 block. Every
-`MODEL_VARIANTS` row uses 3 to 8 blocks. Pinned as a strict xfail: the fix is
-a fusion design change (vision must not attend to text in a causal model),
-which step 9 reports and does not make.
+The model is now the reference nanoVLM layout: projected vision tokens are a
+prefix of ONE causal decoder over `[vision; text]`. Both directions are
+asserted (GUIDE.md section 5): a later token moves nothing before it, by
+exactly 0.0, at every changed position; and it does move its own and later
+positions, and the image moves every text logit, so the probe cannot pass
+by being blind. The tiny model has 3 decoder blocks (the leak needed 2), and
+the 'mini' row is checked at its own depth (6) and 224px.
 """
 
 import numpy as np
@@ -23,46 +24,84 @@ from dl_techniques.models.vision_language.nano_vlm import NanoVLM
 
 VOCAB = 32
 TEXT_LEN = 8
-CHANGED = 6
+
+#: 32px images in 8px patches: a 4x4 grid, pixel-shuffled 2x2 to 2x2 = 4
+#: tokens, plus the CLS token.
+TINY = dict(
+    vision_config={"img_size": 32, "patch_size": 8, "embed_dim": 16, "depth": 1,
+                   "num_heads": 2},
+    text_config={"embed_dim": 16, "depth": 3, "num_heads": 2, "max_seq_len": 16},
+)
 
 
-def _model(num_fusion_layers: int) -> NanoVLM:
-    return NanoVLM.from_variant(
-        "mini", vocab_size=VOCAB, output_dropout_rate=0.0,
-        vision_config={"img_size": 32, "embed_dim": 16, "depth": 1, "num_heads": 2},
-        text_config={"embed_dim": 16, "depth": 1, "num_heads": 2, "max_seq_len": 16},
-        fusion_config={"attention_config": {"num_heads": 2},
-                       "num_fusion_layers": num_fusion_layers},
-    )
+def _tiny() -> NanoVLM:
+    return NanoVLM.from_variant("mini", vocab_size=VOCAB, **TINY)
 
 
-def _earlier_positions_moved(num_fusion_layers: int) -> float:
-    model = _model(num_fusion_layers)
-    rng = np.random.default_rng(0)
-    image = rng.uniform(-1.0, 1.0, (1, 32, 32, 3)).astype("float32")
+def _mini() -> NanoVLM:
+    return NanoVLM.from_variant("mini", vocab_size=VOCAB)
+
+
+def _inputs(img_size: int, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    image = rng.uniform(-1.0, 1.0, (1, img_size, img_size, 3)).astype("float32")
     tokens = rng.integers(1, VOCAB, (1, TEXT_LEN)).astype("int32")
-    changed = tokens.copy()
-    changed[0, CHANGED] = tokens[0, CHANGED] % (VOCAB - 1) + 1
-    assert changed[0, CHANGED] != tokens[0, CHANGED]
-
-    a = np.asarray(model({"images": image, "text_tokens": tokens}, training=False))
-    b = np.asarray(model({"images": image, "text_tokens": changed}, training=False))
-    vision_len = a.shape[1] - TEXT_LEN
-    text_a = a[:, vision_len:vision_len + CHANGED]
-    text_b = b[:, vision_len:vision_len + CHANGED]
-    # The changed position itself must move, or the probe proves nothing.
-    assert np.any(a[:, vision_len + CHANGED] != b[:, vision_len + CHANGED])
-    return float(np.max(np.abs(text_a - text_b)))
+    return image, tokens
 
 
-def test_one_fusion_block_is_causal():
-    """The control: with one block no text position sees a later token."""
-    assert _earlier_positions_moved(num_fusion_layers=1) == 0.0
+def _logits(model, image, tokens):
+    return np.asarray(model({"images": image, "text_tokens": tokens}, training=False))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MEASURED 2026-10-15: with 2 cross_attention fusion blocks a later text "
-    "token moves earlier text positions' logits (8.4e-3) through the vision "
-    "stream; open fusion design defect, reported in step 9"))
-def test_two_fusion_blocks_are_causal():
-    assert _earlier_positions_moved(num_fusion_layers=2) == 0.0
+def _assert_causal_at_every_position(model, img_size):
+    image, tokens = _inputs(img_size)
+    sv = model.num_vision_tokens
+    base = _logits(model, image, tokens)
+    assert base.shape == (1, sv + TEXT_LEN, VOCAB)
+
+    for changed in range(TEXT_LEN):
+        edited = tokens.copy()
+        edited[0, changed] = tokens[0, changed] % (VOCAB - 1) + 1
+        assert edited[0, changed] != tokens[0, changed]
+        moved = _logits(model, image, edited)
+
+        before = np.max(np.abs(moved[:, :sv + changed] - base[:, :sv + changed]),
+                        initial=0.0)
+        assert before == 0.0, (
+            f"changing text token {changed} moved an earlier position's logits "
+            f"by {before}")
+        # The positive arm: the changed position itself, and every later one.
+        after = np.max(np.abs(moved[:, sv + changed:] - base[:, sv + changed:]), axis=-1)
+        assert np.all(after > 0.0), (changed, after)
+
+
+def _assert_the_image_reaches_every_text_position(model, img_size):
+    image, tokens = _inputs(img_size)
+    other_image, _ = _inputs(img_size, seed=1)
+    sv = model.num_vision_tokens
+    a = _logits(model, image, tokens)[:, sv:]
+    b = _logits(model, other_image, tokens)[:, sv:]
+    assert np.all(np.max(np.abs(a - b), axis=-1) > 0.0)
+
+
+def test_a_three_block_model_is_causal_at_every_text_position():
+    model = _tiny()
+    assert len(model.text_decoder.decoder_layers) == 3
+    assert model.num_vision_tokens == 5
+    _assert_causal_at_every_position(model, img_size=32)
+
+
+def test_the_image_reaches_every_text_position():
+    _assert_the_image_reaches_every_text_position(_tiny(), img_size=32)
+
+
+@pytest.mark.parametrize("probe", ["causal", "image_reaches_text"])
+def test_the_mini_row_is_causal_at_its_own_depth(probe):
+    """The row itself, 224px and 6 decoder blocks; only the vocabulary is small."""
+    model = _mini()
+    assert len(model.text_decoder.decoder_layers) == 6
+    assert model.num_vision_tokens == 50
+    if probe == "causal":
+        _assert_causal_at_every_position(model, img_size=224)
+    else:
+        _assert_the_image_reaches_every_text_position(model, img_size=224)

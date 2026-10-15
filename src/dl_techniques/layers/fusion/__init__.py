@@ -16,9 +16,12 @@ so ``from dl_techniques.layers.fusion import MultiModalFusion`` raises
         FusionStrategy,
     )
 
-Both consumers in this repo already do that:
-``src/dl_techniques/layers/heads/vlm/factory.py`` and
-``src/dl_techniques/models/vision_language/nano_vlm/model.py``.
+The one consumer in this repo already does that:
+``src/dl_techniques/layers/heads/vlm/factory.py``. NanoVLM used it until
+2026-10-15 and now runs one causal decoder over its projected image tokens
+and the text instead: the symmetric ``'cross_attention'`` strategy lets
+every modality attend to the other, which leaks future text into earlier
+positions of a causal language model.
 
 **Architecture Overview:**
 

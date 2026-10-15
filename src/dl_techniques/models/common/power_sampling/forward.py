@@ -275,8 +275,9 @@ class VLMForwardAdapter:
     text-generation suffix while the image prefix stays fixed.
 
     NOTE: ``text_slice_start`` (== vision sequence length) is the caller's
-    responsibility; repo VLMs (e.g. nano_vlm) do not expose it as a property.
-    (user decision 2 / plan Failure Modes "VLM adapter".)
+    responsibility and is not auto-derived; for nano_vlm pass
+    ``NanoVLM.num_vision_tokens``. (user decision 2 / plan Failure Modes
+    "VLM adapter".)
     """
 
     def __init__(

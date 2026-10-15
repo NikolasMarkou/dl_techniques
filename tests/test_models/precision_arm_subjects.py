@@ -709,20 +709,13 @@ def _b_nano_vlm():
                        "depth": 1, "num_heads": 2, "output_mode": "none"},
         text_config={"vocab_size": 64, "embed_dim": 32, "depth": 1,
                      "num_heads": 2, "max_seq_len": 16},
-        # ``cross_attention``: the vision and text streams have DIFFERENT
-        # sequence lengths (5 patches vs 16 tokens) and ``concatenation``
-        # rejects that by design.
-        fusion_config={"fusion_strategy": "cross_attention", "dim": 32,
-                       "attention_config": {"num_heads": 2},
-                       "num_fusion_layers": 1},
         vocab_size=64,
     )
 
 
 # ``expected_compute_dtype="float32"``: MEASURED -- this subject's config
-# (`text_component_type` defaults to `'decoder'`, `use_shared_embedding`
-# defaults to `True`) reaches the tied branch in `NanoVLM.call()`
-# unconditionally, which as of the D-005 completion-fix goes through
+# (`use_shared_embedding` defaults to `True`) reaches the tied branch in
+# `NanoVLM.call()` unconditionally, which as of the D-005 completion-fix goes through
 # `dl_techniques.utils.tied_embeddings.tied_embedding_logits` -- the same
 # float32 floor documented for ``gpt2``/``wave_field`` above. See
 # `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.

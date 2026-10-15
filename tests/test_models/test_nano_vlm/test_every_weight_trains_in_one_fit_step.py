@@ -1,4 +1,4 @@
-"""After one optimizer step, no NanoVLM trainable variable has a `None` gradient.
+"""After one optimizer step, every NanoVLM trainable variable has trained.
 
 Until plan-2026-10-14T062616-81938e81 (D-037) a tied NanoVLM built a
 `shared_output_projection` Dense (768 x 32000 = 24,576,000 parameters on
@@ -11,9 +11,15 @@ Two objectives, because they answer different questions:
 * every position of the output (`full_length_loss`): every weight is on the
   model's backward graph and moves in one stock `fit` step;
 * the trainer's objective, `NanoVLMLoss`, which scores only the TEXT
-  positions: no `None` gradient, tied and untied. That this objective leaves
-  the last fusion block's vision-side sub-layers at an identically-zero
-  gradient is a measured, open defect pinned by a strict xfail below.
+  positions: no `None` gradient, tied and untied, and every variable moves in
+  one stock `fit` step. Until step 9.1 (D-040) this was a strict xfail: the
+  last `MultiModalFusion` block's vision-side sub-layers (12 variables) fed
+  only the vision positions the loss drops, so their gradient was identically
+  zero. The vision tokens are now a prefix of one causal decoder that every
+  text position reads, and the fusion layer is gone.
+
+The decoder has 3 blocks: the dead layers were in the LAST of a multi-block
+stack, so a one-block model could not show them.
 """
 
 import keras
@@ -29,19 +35,19 @@ from ..test_sam.dead_component_oracle import fit_one_step_moved_variables
 VOCAB = 32
 TEXT_LEN = 8
 BATCH = 2
-#: (32 // 16) ** 2 patches + CLS.
+#: 32px images in 8px patches: (4 // 2) ** 2 pixel-shuffled tokens + CLS.
 VISION_LEN = 5
 
 
-def _model(tied: bool, num_fusion_layers: int = 2) -> NanoVLM:
+def _model(tied: bool) -> NanoVLM:
     model = NanoVLM.from_variant(
         "mini", vocab_size=VOCAB, use_shared_embedding=tied, output_dropout_rate=0.0,
-        vision_config={"img_size": 32, "embed_dim": 16, "depth": 1, "num_heads": 2},
-        text_config={"embed_dim": 16, "depth": 1, "num_heads": 2, "max_seq_len": 16},
-        fusion_config={"attention_config": {"num_heads": 2},
-                       "num_fusion_layers": num_fusion_layers},
+        vision_config={"img_size": 32, "patch_size": 8, "embed_dim": 16, "depth": 1,
+                       "num_heads": 2},
+        text_config={"embed_dim": 16, "depth": 3, "num_heads": 2, "max_seq_len": 16},
     )
     model.build({"images": (None, 32, 32, 3), "text_tokens": (None, TEXT_LEN)})
+    assert model.num_vision_tokens == VISION_LEN
     return model
 
 
@@ -91,17 +97,14 @@ def test_one_fit_step_on_every_position_moves_every_trainable_variable(tied):
     assert np.isfinite(report.final_loss)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MEASURED 2026-10-15 (plan-2026-10-14T062616-81938e81 step 9): under "
-    "NanoVLMLoss, which scores only the text positions, the LAST fusion "
-    "block's vision-side sub-layers (cross_attn_<L-1>_0_to_1, norm_<L-1>_0, "
-    "ffn_<L-1>_0: 12 variables) feed only the vision positions the loss drops, "
-    "so their gradient is identically zero and they never train. The fix is "
-    "a fusion design change (text attends to vision, vision does not attend "
-    "to text), reported, not made, in step 9."))
-def test_one_fit_step_under_the_training_loss_moves_every_trainable_variable():
-    model = _model(tied=True)
+@pytest.mark.parametrize("tied", [True, False])
+def test_one_fit_step_under_the_training_loss_moves_every_trainable_variable(tied):
+    model = _model(tied)
     model.compile(optimizer=keras.optimizers.Adam(1e-3), loss=NanoVLMLoss())
     x, tokens = _batch()
     report = fit_one_step_moved_variables(model, x, tokens, batch_size=BATCH)
     assert report.unmoved == (), report.summary()
+    assert report.total == len(model.trainable_variables)
+    # The vision side is in the population this asserts on.
+    assert any("modality_projection" in path for path in report.moved), report.summary()
+    assert any("vision_encoder" in path for path in report.moved), report.summary()

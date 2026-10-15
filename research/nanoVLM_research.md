@@ -4,12 +4,12 @@
 > model does not match it.** Read it as a design document, not as a description
 > of `src/dl_techniques/models/vision_language/nano_vlm/`.
 >
-> - `create_nanovlm_222m()` (proposed at line 728, used in the examples at 1098,
->   1235 and 1425) **does not exist anywhere in `src/`**. The implemented factory
+> - `create_nanovlm_222m()` (proposed at line 744, used in the examples at 1114,
+>   1251 and 1441) **does not exist anywhere in `src/`**. The implemented factory
 >   is `create_nanovlm(variant="base", ...)`, and it is what
 >   `src/train/nano_vlm/train_nano_vlm.py` calls.
-> - The `"nanovlm_222m"` variant-table entry (line 1516) with
->   `"total_params": "222M"` (line 1538) is likewise unimplemented.
+> - The `"nanovlm_222m"` variant-table entry (line 1532) with
+>   `"total_params": "222M"` (line 1554) is likewise unimplemented.
 > - **222M is a design target the shipped model missed by 1.38x.** Measured
 >   2026-08-22 on CPU: `create_nanovlm()` built at `(224, 224, 3)` images and
 >   512 text tokens has **305,435,904** parameters. Every "222M" below is that
@@ -21,9 +21,25 @@
 >
 > **2026-10-15:** the 24,576,000-parameter `shared_output_projection`, built
 > but never called by a tied model, was deleted, so the same build now has
-> **280,859,904** parameters. `load_cauldron_sample()` (used at line 1250
+> **280,859,904** parameters. `load_cauldron_sample()` (used at line 1266
 > below) was deleted too: it returned placeholder rows whose images did not
 > exist. Plan `plan-2026-10-14T062616-81938e81`, D-037 and D-038.
+>
+> **2026-10-15, later the same day:** the shipped model now follows this
+> document's architecture (lines 52 and 614-615): vision encoder, then
+> `ModalityProjection` (pixel shuffle 2, GELU, layer norm), then the
+> projected image tokens concatenated BEFORE the text embeddings, then ONE
+> causal `TextDecoder` over the joint sequence and the tied head. The
+> separate text tower and the `MultiModalFusion` layer it used before were
+> removed: the symmetric `'cross_attention'` fusion leaked later text into
+> earlier text logits, and its last block's vision side got no gradient.
+> Every position is causal, image tokens included, as in the reference
+> nanoVLM. The proposal intends that mask but never applies it: line 567
+> passes `use_causal_mask=True` to the `MultiHeadAttention` constructor,
+> which takes it only as a call argument, and the call at line 624 passes
+> none. The shipped decoder applies it in every block. The
+> 224px / 512-token `create_nanovlm()` build now has **198,223,872**
+> parameters. Plan `plan-2026-10-14T062616-81938e81`, D-040.
 
 ## Overview
 

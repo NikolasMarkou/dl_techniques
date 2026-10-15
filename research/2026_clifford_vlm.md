@@ -163,7 +163,7 @@ The codebase already has production-ready depth estimation components:
 ### 2.6 Existing VLM Infrastructure
 
 The codebase already has:
-- **NanoVLM** (`models/vision_language/nano_vlm/model.py`): VisionEncoder + TextDecoder + MultiModalFusion -- configurable fusion strategies
+- **NanoVLM** (`models/vision_language/nano_vlm/model.py`): VisionEncoder + ModalityProjection, the projected image tokens prefixed to the text in ONE causal TextDecoder (the reference nanoVLM layout; its MultiModalFusion strategies were removed on 2026-10-15)
 - **CLIP** (`models/vision_language/clip/model.py`): Standard ViT [[Dosovitskiy 2021]](#13-references)-based dual encoder [[Radford 2021]](#13-references)
 - **MultiModalFusion** (`layers/fusion/multimodal_fusion.py`): 8 fusion strategies (cross_attention, concatenation, gated, bilinear, tensor_fusion, etc.)
 - **VLM task heads** (`layers/heads/vlm/factory.py`): Captioning, VQA, grounding, matching heads

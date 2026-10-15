@@ -3,7 +3,8 @@
 The model is a ``NanoVLM.MODEL_VARIANTS`` row, built by ``create_nanovlm``
 with optional size overrides, and compiled with ``NanoVLMLoss``: next-token
 cross-entropy over the text positions of the model's ``[vision; text]``
-logits, padding (id 0) ignored. There is no custom training step.
+logits (one causal decoder over the projected image tokens and the text),
+padding (id 0) ignored. There is no custom training step.
 
 Exactly one data source:
 
@@ -205,30 +206,26 @@ def sequence_as_dataset(
 
 
 def size_overrides(args: argparse.Namespace) -> Dict[str, Any]:
-    """The ``vision_config``/``text_config``/``fusion_config`` keys the size
-    flags set, in the one-level merge form ``NanoVLM.from_variant`` takes.
-    Flags left at ``None`` keep the row's value."""
+    """The ``vision_config``/``text_config`` keys the size flags set, in the
+    one-level merge form ``NanoVLM.from_variant`` takes. Flags left at
+    ``None`` keep the row's value."""
     vision: Dict[str, Any] = {}
     text: Dict[str, Any] = {}
-    fusion: Dict[str, Any] = {}
     if args.image_size is not None:
         vision['img_size'] = args.image_size
     if args.patch_size is not None:
         vision['patch_size'] = args.patch_size
     if args.embed_dim is not None:
-        vision['embed_dim'] = text['embed_dim'] = fusion['dim'] = args.embed_dim
+        vision['embed_dim'] = text['embed_dim'] = args.embed_dim
     if args.num_heads is not None:
         vision['num_heads'] = text['num_heads'] = args.num_heads
-        fusion['attention_config'] = {'num_heads': args.num_heads}
     if args.vision_depth is not None:
         vision['depth'] = args.vision_depth
     if args.text_depth is not None:
         text['depth'] = args.text_depth
-    if args.num_fusion_layers is not None:
-        fusion['num_fusion_layers'] = args.num_fusion_layers
     if args.max_text_length is not None:
         text['max_seq_len'] = args.max_text_length
-    return {'vision_config': vision, 'text_config': text, 'fusion_config': fusion}
+    return {'vision_config': vision, 'text_config': text}
 
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -242,17 +239,15 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         choices=sorted(NanoVLM.MODEL_VARIANTS),
                         help="NanoVLM.MODEL_VARIANTS row passed to create_nanovlm")
     parser.add_argument("--vocab-size", type=int, default=32000)
-    parser.add_argument("--fusion-strategy", type=str, default=None,
-                        help="override the row's fusion_strategy")
     parser.add_argument("--image-size", type=int, default=None, help="override img_size")
     parser.add_argument("--patch-size", type=int, default=None, help="override patch_size")
     parser.add_argument("--embed-dim", type=int, default=None,
-                        help="override both towers' embed_dim and the fusion dim")
+                        help="override the vision encoder's and the decoder's embed_dim")
     parser.add_argument("--num-heads", type=int, default=None,
-                        help="override the heads of both towers and the fusion attention")
+                        help="override the vision encoder's and the decoder's heads")
     parser.add_argument("--vision-depth", type=int, default=None)
-    parser.add_argument("--text-depth", type=int, default=None)
-    parser.add_argument("--num-fusion-layers", type=int, default=None)
+    parser.add_argument("--text-depth", type=int, default=None,
+                        help="decoder blocks (they run over the vision prefix and the text)")
     parser.add_argument("--max-text-length", type=int, default=None,
                         help="text sequence length (default: the row's max_seq_len)")
     parser.add_argument("--epochs", type=int, default=10)
@@ -297,8 +292,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
     save_config_json(vars(args), str(run_dir))
 
     model = create_nanovlm(
-        args.variant, vocab_size=args.vocab_size,
-        fusion_strategy=args.fusion_strategy, **size_overrides(args),
+        args.variant, vocab_size=args.vocab_size, **size_overrides(args),
     )
     image_size = model.vision_config['img_size']
     seq_len = model.text_config['max_seq_len']

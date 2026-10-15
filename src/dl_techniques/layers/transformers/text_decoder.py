@@ -103,7 +103,8 @@ class TextDecoder(keras.layers.Layer):
         input/output embedding) is REJECTED: this layer has no output
         projection to tie to -- do the tying in the model that owns one.
     :type embedding_type: EmbeddingType
-    :param positional_type: Positional encoding strategy. Default: ``'learned'``.
+    :param positional_type: Positional encoding strategy, ``'learned'`` or
+        ``'sincos'``. Default: ``'learned'``. Any other value raises.
     :type positional_type: PositionalType
     :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
     :type attention_type: AttentionType
@@ -141,8 +142,14 @@ class TextDecoder(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
 
-    :raises ValueError: If dimension parameters are invalid, or if
-        ``embedding_type`` is not one of ``'learned'`` / ``'factorized'``.
+    :raises ValueError: If dimension parameters are invalid, if
+        ``embedding_type`` is not one of ``'learned'`` / ``'factorized'``, or
+        if ``positional_type`` is not one of ``'learned'`` / ``'sincos'``.
+
+    A caller that has embeddings of its own (a vision-language model putting
+    image tokens before the text) uses the two halves of :meth:`call`:
+    :meth:`embed_tokens` for the text and :meth:`decode_embeddings` for the
+    joint sequence.
     """
 
     # Set only by a model's `RecordedBuildShapeMixin.build_from_config` (utils/
@@ -203,6 +210,14 @@ class TextDecoder(keras.layers.Layer):
             raise ValueError(
                 f"embedding_type must be one of 'learned', 'factorized', "
                 f"got {embedding_type!r}"
+            )
+
+        # A value outside PositionalType used to build NO positional encoding
+        # and run without one ('rope' did, in NanoVLM's 'modern' row).
+        if positional_type not in ('learned', 'sincos'):
+            raise ValueError(
+                f"positional_type must be one of 'learned', 'sincos', "
+                f"got {positional_type!r}"
             )
 
         # --- Store Configuration ---
@@ -413,6 +428,8 @@ class TextDecoder(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the text decoder.
 
+        Exactly :meth:`embed_tokens` followed by :meth:`decode_embeddings`.
+
         :param input_ids: Token IDs ``(B, seq_len)``.
         :type input_ids: keras.KerasTensor
         :param attention_mask: Optional padding mask ``(B, seq_len)``.
@@ -422,17 +439,65 @@ class TextDecoder(keras.layers.Layer):
         :return: Contextualized representations ``(B, seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        seq_len = keras.ops.shape(input_ids)[1]
-        batch_size = keras.ops.shape(input_ids)[0]
+        return self.decode_embeddings(
+            self.embed_tokens(input_ids),
+            attention_mask=attention_mask,
+            training=training,
+        )
 
-        # 1. Word Embeddings
+    def embed_tokens(self, input_ids: keras.KerasTensor) -> keras.KerasTensor:
+        """Look up the word embeddings of ``input_ids``, nothing else.
+
+        Interface contract (callers: :meth:`call`, ``NanoVLM``): returns
+        ``(B, seq_len, embed_dim)`` in the compute dtype, from the learned
+        table or the factorized table plus its projection. No positional
+        encoding, norm or dropout is applied here; :meth:`decode_embeddings`
+        applies them to whatever sequence it receives. The layer must be
+        built.
+
+        :param input_ids: Token IDs ``(B, seq_len)``.
+        :type input_ids: keras.KerasTensor
+        :return: Word embeddings ``(B, seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
+        """
         if self.embedding_type == 'factorized':
             x = self.factorized_embed_layer(input_ids)
-            x = self.embed_projection_layer(x)
-        else:
-            x = self.word_embeddings(input_ids)
+            return self.embed_projection_layer(x)
+        return self.word_embeddings(input_ids)
 
-        # 2. Positional Embeddings
+    def decode_embeddings(
+            self,
+            embeddings: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Run the decoder on an already-embedded sequence.
+
+        Interface contract (callers: :meth:`call`, ``NanoVLM``): takes
+        ``(B, S, embed_dim)`` vectors, for example word embeddings from
+        :meth:`embed_tokens` with other ``embed_dim`` vectors concatenated
+        before them, and returns ``(B, S, embed_dim)``. Positions ``0..S-1``
+        get this layer's positional encoding, then the embedding norm,
+        dropout, the causal (plus optional padding) mask, every block and the
+        final norm. ``S`` must not exceed ``max_seq_len``; a static ``S`` is
+        refused in :meth:`build`, a dynamic one is the caller's to bound.
+        The layer must be built.
+
+        :param embeddings: Embedded sequence ``(B, S, embed_dim)``.
+        :type embeddings: keras.KerasTensor
+        :param attention_mask: Optional padding mask ``(B, S)``, 1 for a
+            real position and 0 for padding.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Contextualized representations ``(B, S, embed_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        x = embeddings
+        seq_len = keras.ops.shape(x)[1]
+        batch_size = keras.ops.shape(x)[0]
+
+        # 1. Positional Embeddings
         positions = keras.ops.arange(start=0, stop=seq_len)
         if self.positional_type == 'learned':
             pos_embed = self.positional_embeddings(positions)
@@ -448,18 +513,18 @@ class TextDecoder(keras.layers.Layer):
             pos_embed = self.positional_embeddings(pos_coords)
             x = keras.ops.add(x, pos_embed)
 
-        # 3. Embedding normalization and dropout
+        # 2. Embedding normalization and dropout
         x = self.embed_norm(x, training=training)
         x = self.embed_dropout_layer(x, training=training)
 
-        # 4. Attention mask: causal, OR'd with an optional padding mask.
+        # 3. Attention mask: causal, OR'd with an optional padding mask.
         attend_mask = create_causal_attend_mask(x, attention_mask)
 
-        # 5. Apply Transformer Layers
+        # 4. Apply Transformer Layers
         for layer in self.decoder_layers:
             x = layer(x, attention_mask=attend_mask, training=training)
 
-        # 6. Final Normalization
+        # 5. Final Normalization
         x = self.final_norm(x, training=training)
         return x
 

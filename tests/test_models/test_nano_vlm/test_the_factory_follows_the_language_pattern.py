@@ -24,7 +24,6 @@ from dl_techniques.models.vision_language.nano_vlm import NanoVLM, create_nanovl
 _SMALL = dict(
     vision_config={"img_size": 32, "embed_dim": 16, "depth": 1, "num_heads": 2},
     text_config={"embed_dim": 16, "depth": 1, "num_heads": 2, "max_seq_len": 16},
-    fusion_config={"attention_config": {"num_heads": 2}, "num_fusion_layers": 1},
 )
 
 
@@ -70,10 +69,36 @@ def test_an_unknown_keyword_is_refused(entry):
             create_nanovlm("mini", vocab_size=32, bogus_kw=1)
 
 
-def test_an_unknown_text_component_type_is_refused():
-    """It used to fall through to the encoder branch silently."""
-    with pytest.raises(ValueError, match="text_component_type"):
-        NanoVLM.from_variant("mini", vocab_size=32, text_component_type="enc", **_SMALL)
+@pytest.mark.parametrize("removed", [
+    {"fusion_strategy": "cross_attention"},
+    {"fusion_config": {"fusion_strategy": "cross_attention"}},
+    {"text_component_type": "decoder"},
+])
+def test_the_removed_fusion_surface_is_refused_by_name(removed):
+    """Step 9.1 (D-040) deleted the fusion layer, its 8 strategies and the
+    bidirectional text encoder. No alias: passing one raises, naming it."""
+    (name,) = removed
+    with pytest.raises(ValueError, match=name):
+        NanoVLM.from_variant("mini", vocab_size=32, **removed, **copy.deepcopy(_SMALL))
+
+
+@pytest.mark.parametrize("variant", ["mini", "base", "large", "modern"])
+def test_every_row_is_the_prefix_decoder_layout(variant):
+    """No row carries a fusion config, and every row builds the projector and
+    the one decoder, never a fusion layer."""
+    row = NanoVLM.MODEL_VARIANTS[variant]
+    assert set(row) <= {"vision_config", "text_config", "use_shared_embedding"}, row
+    model = NanoVLM.from_variant(variant, vocab_size=32, **copy.deepcopy(_SMALL))
+    assert not hasattr(model, "fusion_layer")
+    assert model.modality_projection.output_dim == model.text_config["embed_dim"]
+    assert model.text_decoder.name == "text_decoder"
+
+
+@pytest.mark.parametrize("key", ["input_dim", "output_dim"])
+def test_the_projection_widths_are_not_a_caller_choice(key):
+    with pytest.raises(ValueError, match=key):
+        NanoVLM.from_variant("mini", vocab_size=32, projection_config={key: 8},
+                             **copy.deepcopy(_SMALL))
 
 
 def test_the_config_dicts_merge_one_level_and_nothing_shared_is_mutated():
@@ -86,24 +111,22 @@ def test_the_config_dicts_merge_one_level_and_nothing_shared_is_mutated():
     # The passed keys replace the row's ...
     assert model.vision_config["img_size"] == 32
     assert model.text_config["depth"] == 1
-    assert model.fusion_config["num_fusion_layers"] == 1
     # ... and every other key of the row stays.
     assert model.vision_config["attention_type"] == "differential"
     assert model.text_config["embedding_type"] == "factorized"
-    assert model.fusion_config["num_tensor_projections"] == 8
+    assert model.text_config["ffn_type"] == "swiglu"
     assert model.vocab_size == 64 and model.text_config["vocab_size"] == 64
     # Neither the class table nor the caller's dicts were written into.
     assert NanoVLM.MODEL_VARIANTS == table_before
     assert overrides == overrides_before
 
 
-@pytest.mark.parametrize("variant", ["mini", "base", "large", "modern"])
-def test_every_row_defaults_to_cross_attention_and_the_caller_can_override(variant):
-    default = NanoVLM.from_variant(variant, vocab_size=32, **_SMALL)
-    assert default.fusion_config["fusion_strategy"] == "cross_attention"
-    pooled = NanoVLM.from_variant(variant, vocab_size=32,
-                                  fusion_strategy="attention_pooling", **_SMALL)
-    assert pooled.fusion_config["fusion_strategy"] == "attention_pooling"
+def test_a_projection_config_merges_into_a_row_that_has_none():
+    model = NanoVLM.from_variant("mini", vocab_size=32, projection_config={"scale_factor": 1},
+                                 **copy.deepcopy(_SMALL))
+    assert model.projection_config == {"scale_factor": 1}
+    assert model.num_vision_tokens == (32 // 16) ** 2 + 1
+    assert "projection_config" not in NanoVLM.MODEL_VARIANTS["mini"]
 
 
 def test_create_nanovlm_builds_what_from_variant_builds():

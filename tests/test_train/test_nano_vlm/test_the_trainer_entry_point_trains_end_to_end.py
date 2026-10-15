@@ -33,12 +33,12 @@ from PIL import Image
 from dl_techniques.models.vision_language.nano_vlm import NanoVLM
 from train.nano_vlm.train_nano_vlm import main, make_synthetic_samples
 
-#: The 'mini' row shrunk to seconds: 32px images in 4 patches, one block per
-#: tower, one fusion block, 12 text positions.
+#: The 'mini' row shrunk to seconds: 32px images in 4 patches, one vision
+#: block, two decoder blocks, 12 text positions.
 _TINY = (
     "--variant", "mini", "--vocab-size", "64", "--image-size", "32",
     "--embed-dim", "32", "--num-heads", "2", "--vision-depth", "1",
-    "--text-depth", "1", "--num-fusion-layers", "1", "--max-text-length", "12",
+    "--text-depth", "2", "--max-text-length", "12",
     "--warmup-steps", "0", "--learning-rate", "1e-3", "--seed", "3",
     "--no-mixed-precision",
 )
@@ -205,3 +205,13 @@ def test_synthetic_samples_have_the_processor_layout():
         np.testing.assert_array_equal(mask, (row != 0).astype(np.int32))
     # Not one sequence repeated.
     assert len({row.tobytes() for row in tokens}) == 8
+
+
+@pytest.mark.parametrize("flag,value", [("--fusion-strategy", "cross_attention"),
+                                        ("--num-fusion-layers", "1")])
+def test_the_fusion_flags_are_gone(tmp_path, capsys, flag, value):
+    """NanoVLM has no fusion layer since plan-2026-10-14T062616-81938e81 step
+    9.1 (D-040); its flags were removed with it, no alias."""
+    with pytest.raises(SystemExit):
+        main([*_TINY, "--synthetic", flag, value, "--output-dir", str(tmp_path / "run")])
+    assert f"unrecognized arguments: {flag}" in capsys.readouterr().err

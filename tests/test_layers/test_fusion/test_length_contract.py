@@ -125,9 +125,10 @@ class TestUnequalLengthsAreRefusedByName:
 
 class TestComputeOutputShapeMatchesTheForwardPass:
     """`MultiModalFusion.compute_output_shape` is the single source of truth for
-    the fused length — `nano_vlm` now calls through it instead of re-deriving a
-    vision+text sum. That only helps if the claim is true, so it is pinned here
-    against the actual forward output for every registered strategy."""
+    the fused length — `nano_vlm` called through it (until 2026-10-15, when it
+    dropped the fusion layer) instead of re-deriving a vision+text sum. That
+    only helps if the claim is true, so it is pinned here against the actual
+    forward output for every registered strategy."""
 
     @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
     def test_claimed_shape_equals_actual_shape(self, strategy):
@@ -144,7 +145,8 @@ class TestComputeOutputShapeMatchesTheForwardPass:
             assert tuple(claimed) == tuple(output.shape)
 
     def test_only_cross_attention_returns_a_per_modality_shape(self):
-        """The distinction nano_vlm's own compute_output_shape branches on."""
+        """The distinction a caller's own compute_output_shape must branch on
+        (nano_vlm's did, until it dropped the fusion layer on 2026-10-15)."""
         for strategy in ALL_STRATEGIES:
             layer = _layer(strategy)
             claimed = layer.compute_output_shape([

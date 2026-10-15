@@ -19,7 +19,6 @@ def _sampler_model() -> NanoVLM:
         "mini", vocab_size=8,
         vision_config={"img_size": 32, "embed_dim": 16, "depth": 1, "num_heads": 2},
         text_config={"embed_dim": 16, "depth": 1, "num_heads": 2, "max_seq_len": 16},
-        fusion_config={"attention_config": {"num_heads": 2}, "num_fusion_layers": 1},
     )
 
 
