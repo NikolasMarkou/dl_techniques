@@ -60,67 +60,71 @@ must not set them (`nano_vlm/model.py:373` raises). Default `scale_factor=1`
 `Sv = H'*W'+1` (s=1) or `1+(H'/s)*(W'/s)` (s=2). `num_vision_tokens` stays derived
 (`nano_vlm/model.py:310`).
 
-### 2.2 Operating point (LOCKED: 320px COCO)
+### 2.2 Operating point (LOCKED: 320px COCO, mixed attention, ctx 512)
 
 `320px / p4 / 4-stage`: post-stem 80 → stage strides 4/8/16/32 → `H'=10` →
-**s=2 legal → Sv=1+5²=26**; decoder positions `26+128 = 154`. `Dt=384, depth=6,
-heads=6 (head_dim 64)`, tied (`learned` table, `V×384 ≈ 12.3M @32k`),
-`max_seq_len=128` text. Vision `cli_mode=full, ctx_mode=diff`,
-`LayerScale 1e-5`, `vision_use_global_context=False`, external residual
-mandatory (GUIDE §5: `x=block(x)` collapses ~1e-5/block).
+**s=2 legal → Sv=1+5²=26**; decoder positions `26+512 = 538`. `Dt=384, depth=6`,
+GQA 6Q/2KV on all layers, mixed 5:1 (`5×sliding(w=32) + 1×full`, global last),
+GeGLU, sandwich norm (all via `Gemma3TransformerBlock`, §2.3), tied `learned`
+word table (`V×384 ≈ 12.3M @32k`), `max_seq_len=512` text. Vision
+`cli_mode=full, ctx_mode=diff`, `LayerScale 1e-5`,
+`vision_use_global_context=False`, external residual mandatory (GUIDE §5:
+`x=block(x)` collapses ~1e-5/block).
 Trade accepted: ~4× cheaper pixels and faster iteration than 640px vs a lower
 small-object ceiling; resolution is a rebuild flag, so 640px stays a later knob.
 
-### 2.3 Decoder config — GQA (LOCKED), with one code prerequisite
+### 2.3 Decoder — mixed local/global via `Gemma3TransformerBlock` (LOCKED)
 
-SOTA in-tree: CLIP `group_query+RMSNorm(pre)+SwiGLU+RoPE` (`clip/model.py:101`);
-`NanoVLM modern` `differential+RMSNorm+SwiGLU+pre`, decoder
-`factorized+RMSNorm+SwiGLU+pre+learned`, untied (`nano_vlm/README.md:56`).
-`TextDecoder` defaults are legacy GPT-2 (`multi_head/layer_norm/post/mlp/gelu`,
-`text_decoder.py:160`).
+No `TextDecoder` (its defaults are legacy GPT-2: `multi_head/layer_norm/post/mlp/gelu`,
+`text_decoder.py:160` — and it is single-`attention_type` only with no
+`attention_args/n_kv_head/ffn_args` passthrough, verified by execution 2026-10-15).
+The new package owns a small causal decoder stacking the in-tree mixed-attention
+block, exposing the same `embed_tokens/decode_embeddings` two-half interface
+`NanoVLM` uses, so `call`/`generate`/`NanoVLMLoss` work unchanged.
+
+Mechanism (`layers/transformers/gemma3_transformer.py`): per-block
+`attention_type: sliding_window | full_attention`; the block builds its own
+**causal + (when windowed) banded mask internally, OR-ed** (`:11,115`,
+triangles drawn in the docstring), rank-3 so it is never misread as padding
+(`:123`). Attention + FFN come from the **`group_query` and `geglu` factories**
+(`:14`) — real KV-head control, no surgery. QK-norm skipped, `rope_theta` at
+default (differs from published raised-base globals — not blocking at N≈538;
+GQA registry `max_seq_len=2048` covers 538 with headroom).
 
 ```python
-text_config = dict(vocab_size=V, embed_dim=384, depth=6, num_heads=6,
-    max_seq_len=128, embedding_type='learned', positional_type='learned',
-    attention_type='group_query', normalization_type='rms_norm',
-    normalization_position='pre', ffn_type='swiglu',
-    dropout_rate=0.1, attention_dropout_rate=0.1, layer_norm_eps=1e-6,
-    n_kv_head=2, attention_args=dict(num_kv_heads=2, rope_percentage=0.0,
-        qk_norm_type='rms_norm', dropout_rate=0.1),
-    ffn_args=dict(ffn_expansion_factor=4, ffn_multiple_of=64))
+decoder = dict(depth=6, embed_dim=384, num_heads=6, num_key_value_heads=2,
+    max_seq_len=512, sliding_window_size=32,
+    layer_types=["sliding_window"]*5 + ["full_attention"])  # global last, Gemma-270m convention
 ```
 
-Prerequisite (verified by execution 2026-10-15): `TextDecoder.__init__` has
-**no** `attention_args/n_kv_head/ffn_args` (all `False`), while
-`TransformerLayer` accepts all three (`transformer.py:458`); GQA registry
-defaults are `max_seq_len=2048, rope%=1.0` with `num_kv_heads` required
-(`attention/factory.py:508`). So `attention_type='group_query'` via
-`text_config` today degrades to MHA-width KV **and** double-counts position
-(learned table + GQA RoPE). The ~10-line `TextDecoder` passthrough extension
-(`rope_percentage=0.0` load-bearing) is required for true 6Q/2KV; fallback
-without it is `multi_head` + same norm/FFN (mini-parity, zero code change).
+SOTA context: CLIP `group_query+RMSNorm(pre)+SwiGLU+RoPE` (`clip/model.py:101`);
+`NanoVLM modern` `differential+RMSNorm+SwiGLU+pre` + factorized untied decoder
+(`nano_vlm/README.md:56`). The mixed stack supersedes the earlier RMSNorm+SwiGLU
+pin, which applied only to the `TextDecoder` route (same gated-GLU family).
 
-### 2.4 Local + global attention — 5:1, deferred (user-confirmed 4–5:1 band)
+### 2.4 Local + global attention — 5:1, SHIPPED (user-locked 4–5:1 band)
 
 Precedents: Gemma3 `layer_types` 5×sliding+1×full ×3, window 512
 (`gemma3.py:224`; small 2:1; README: locals extract, globals route every 4–6);
 ModernBERT `window_band` local + global every `interval=3`
 (`modern_bert/model.py:22,236`; local band is dense N×N+mask — bias, not FLOPs,
 `model.py:243`; locals inherit position via global RoPE residual).
-`TextDecoder` is single-type only — mixture needs a Gemma-style custom stack.
-**At N≈154 global GQA is ~24k scores/layer: run all-global.** Adopt 5:1
-(`5×sliding(w=256)+1×full`, ×2 at depth 12, full at 6,12; 4:1 equivalent) only
-with the 1024-context upgrade (§2.5).
+Ship pattern at depth 6: `5×sliding(w=32) + 1×full`, global last (Gemma-270m
+convention); at depth 12 it becomes `(5×S+1×G)×2` with globals at 6,12.
+Window 32 at N≈538 is genuinely local (~6% of context). At ship scale the win
+is the local-extractor/global-router bias, not FLOPs (consistent with the
+ModernBERT measurement).
 
 ### 2.5 Context lengths
 
-* **128 text (joint 154 @320px) — SHIP.** Table `(Sv+T)×384` ≈ 59k params.
+* **512 text (joint 538 @320px) — SHIP.** Position from RoPE inside GQA
+  (registry `max_seq_len=2048` covers 538; no learned table to resize).
+  Requires multi-turn LLaVA/Cauldron packing (§4 Stage 2) to actually fill 512 —
+  caption batches leave late positions untrained.
   (Agreed: COCO/CC3M stay CLIP-only for contrastive; VLM data is §4.)
-* 256 — multi-turn instruction; still all-global.
-* **1024 (joint 1050) — needs:** depth-12 mixed 5:1 custom stack (depth-6 gives a
+* **1024 (joint 1050) — needs:** depth-12 mixed 5:1 stack (depth-6 gives a
   single global router — too few); `max_seq_len=1024` upfront
-  (`SequenceLengthError` guard); packed long-form data (tail positions train
-  only on long samples; `sincos` extrapolates better than learned);
+  (`SequenceLengthError` guard); packed long-form data;
   batch 8–16 + accumulation + bf16. Attention ~1.1M scores/layer (~45× ship).
 
 ### 2.6 Text generation — confirmed available, unchanged
@@ -130,9 +134,9 @@ Clifford adapter, GQA choice, or detection head: image encoded once via
 `_vision_tokens`, then the decoder loops over `[vision; text-so-far]`, reading
 last-position logits through the same `_vocab_logits` as `call` (tied or
 untied), sampling `temperature/top_k` until `eos_token_id` or `max_length`.
-`prompt + max_length ≤ max_seq_len` refused upfront (128 text tokens at ship).
-Limits (inherited): no KV-cache — O(T²) full re-runs per token, fine at 128,
-painful at 1024; greedy/top-k only, no beam search. Captioning, VQA answers,
+`prompt + max_length ≤ max_seq_len` refused upfront (512 text tokens at ship).
+Limits (inherited): no KV-cache — O(T²) full re-runs per token, fine at 512,
+painful past 1k; greedy/top-k only, no beam search. Captioning, VQA answers,
 and short puzzle solutions all fit the envelope.
 
 ---
@@ -266,9 +270,11 @@ Proposal: 20k validity / 10k single-cell / 5k full-solve equivalents per family
 
 * `models/vision_language/clifford_nanovlm/{__init__.py,model.py,README.md}`:
   `CliffordNanoVLM` = Clifford staged vision + CLS + `ModalityProjection` +
-  stock/extended `TextDecoder` (+ `generate()` inherited, §2.6);
+  package-owned mixed decoder (`Gemma3TransformerBlock` per `layer_types`,
+  `embed_tokens/decode_embeddings` interface, `generate()` inherited, §2.6);
   `create_clifford_nanovlm(variant,vocab_size,image_size,context_length)`;
   registration `dl_techniques.models.clifford_nanovlm.model` (family stripped).
+  `TextDecoder` stays untouched by design.
 * Structured detection head (same or sibling package — recommend sibling
   `clifford_detseg/` sharing the vision-body module, or one dict-output joint
   model if training jointly from day one): `return_stages` surgery +
@@ -276,25 +282,26 @@ Proposal: 20k validity / 10k single-cell / 5k full-solve equivalents per family
   `SegmentationHead` + no anchors, no NMS, no neck.
 
 1. Adapter + shape tests (Sv=26 @320/s=2, `H'%s` refusal, CLS handling).
-2. Forward/generate parity vs `NanoVLM` tiny on CPU; causality probe
-   (`test_the_text_logits_are_causal.py` template).
+2. Mixed-decoder parity vs `NanoVLM` tiny on CPU; causality probes on a sliding
+   layer AND the 5:1 stack, both directions (`test_the_text_logits_are_causal.py`
+   template); window-ablation 32→538 must move local-layer outputs (proves the
+   band binds).
 3. `get_config` round-trip (value-compare, target `0.0` like §1);
    `tests/test_models/test_clifford_nanovlm/`; tree-wide `--collect-only`.
 4. Stage-map return + structured-head smoke (queries move in one optimizer step;
    Hungarian permutation-invariance, Q-overflow, empty-image probes).
 5. Seg head + per-task probes (mAP/mIoU + retrieval + NTP loss split).
 6. Fix §1 trainer staleness (rename or delete `_VisionClassifier` path).
-7. `TextDecoder` GQA passthrough extension (or accept MHA fallback).
-8. Trainers: P1 dense COCO warmup (320px) → P2 joint (contrastive bridge +
-   `NanoVLMLoss`, packed long-form only when 1024).
+7. Trainers: P1 dense COCO warmup (320px) → P2 joint (contrastive bridge +
+   `NanoVLMLoss`, LLaVA/Cauldron packing mandatory to fill 512).
 
 ## 7. Locked decisions / remaining
 
 * Locked: 320px COCO res · post-residual taps · closed-80 · NO YOLO (structured
-  DETR-style head, S3+S4 keys, Q=100) · generic seg head · GQA · all-global
-  @ship · 128 ship ctx · generate() intact · COCO/CC3M CLIP-only · maze
-  3-topology + montage pairs · Keras-native loss weights + calibration +
-  2-phase curriculum.
+  DETR-style head, S3+S4 keys, Q=100) · generic seg head · GQA 6Q/2KV ·
+  mixed 5:1 local/global @ship (w=32, global last) · 512 ship ctx · generate()
+  intact · COCO/CC3M CLIP-only · maze 3-topology + montage pairs ·
+  Keras-native loss weights + calibration + 2-phase curriculum ·
+  package-owned mixed decoder (`TextDecoder` untouched).
 * Remaining: puzzle sample counts (§5 proposal) · sibling-vs-single joint model ·
-  Docmatix promotion timing · 640px re-escalation trigger (small-object AP gap) ·
-  MHA fallback vs `TextDecoder` extension if build capacity is tight.
+  Docmatix promotion timing · 640px re-escalation trigger (small-object AP gap).
