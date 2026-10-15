@@ -77,6 +77,24 @@ class TestMMDiTJointAttention:
         )
         assert layer.to_add_out is None
 
+    def test_context_pre_only_builds_no_text_query(self, sample):
+        """The final block's text stream gives keys and values only (D-043)."""
+        img, txt = sample
+        layer = MMDiTJointAttention(
+            dim=self.DIM, num_heads=self.NUM_HEADS, context_pre_only=True
+        )
+        layer([img, txt])
+        assert layer.add_q_proj is None
+        assert layer.norm_added_q is None
+        names = sorted(w.path.split("/", 1)[1] for w in layer.weights)
+        assert names == sorted([
+            "to_q/kernel", "to_q/bias", "to_k/kernel", "to_k/bias",
+            "to_v/kernel", "to_v/bias", "to_out/kernel", "to_out/bias",
+            "add_k_proj/kernel", "add_k_proj/bias",
+            "add_v_proj/kernel", "add_v_proj/bias",
+            "norm_q/scale", "norm_k/scale", "norm_added_k/scale",
+        ])
+
     def test_qk_norm_disabled(self):
         layer = MMDiTJointAttention(
             dim=self.DIM, num_heads=self.NUM_HEADS, qk_norm=False
@@ -190,6 +208,26 @@ class TestMMDiTJointAttention:
         assert all(g is not None for g in grads)
         for g in grads:
             assert np.all(np.isfinite(keras.ops.convert_to_numpy(g)))
+
+    def test_context_pre_only_every_weight_gets_a_gradient(self, sample):
+        """No built weight of the final-block layout is dead (GF-04, D-043).
+
+        Before step 10.1 the text query was built, applied and discarded with
+        the text rows, so ``add_q_proj`` and ``norm_added_q`` got no gradient.
+        """
+        img, txt = sample
+        layer = MMDiTJointAttention(
+            dim=self.DIM, num_heads=self.NUM_HEADS, context_pre_only=True
+        )
+        layer([img, txt])
+        with tf.GradientTape() as tape:
+            loss = keras.ops.mean(keras.ops.square(layer([img, txt])))
+        grads = tape.gradient(loss, layer.trainable_variables)
+        dead = [
+            v.path for v, g in zip(layer.trainable_variables, grads)
+            if g is None or float(np.abs(keras.ops.convert_to_numpy(g)).max()) == 0.0
+        ]
+        assert dead == []
 
     # ------------------------------------------------------------------
     # Serialization

@@ -11,9 +11,13 @@ difference from a single-stream DiT.
 
 The layer owns the projections, the norms, and the SDPA math; AdaLN
 modulation lives in the surrounding block. When ``context_pre_only`` is
-True (the final MMDiT block), ``to_add_out`` is not created and
-:meth:`call` returns the image stream alone rather than a two-element
-list.
+True (the final MMDiT block), :meth:`call` returns the image stream alone
+rather than a two-element list, and the text stream only supplies keys and
+values: ``add_q_proj``, ``norm_added_q`` and ``to_add_out`` are not created.
+Each softmax row depends only on its own query, so dropping the text query
+rows leaves the image output unchanged. The diffusers
+``JointTransformerBlock`` still computes that query in its last block and
+discards it; this layer does not build it.
 """
 
 import keras
@@ -96,9 +100,11 @@ class MMDiTJointAttention(keras.layers.Layer):
                     ▼                           ▼
           image_out [B, N_img, dim]    text_out [B, N_txt, dim]
 
-        With context_pre_only=True, to_add_out is never created and
-        call() returns the image stream alone, not a two-element list.
-        The right branch above stops at the split.
+        With context_pre_only=True, add_q_proj, norm_added_q and
+        to_add_out are never created. Only the image stream supplies
+        queries, so Q is [B, H, N_img, hd] while K and V still cover
+        all N tokens, and call() returns image_out alone, not a
+        two-element list.
 
         This layer accepts no attention mask.
 
@@ -113,9 +119,11 @@ class MMDiTJointAttention(keras.layers.Layer):
     :param use_bias: Whether the Q/K/V/output ``Dense`` projections use a bias.
         Defaults to True.
     :type use_bias: bool
-    :param context_pre_only: If True, the text/context output projection
-        (``to_add_out``) is not created and :meth:`call` returns only the image
-        stream (the final MMDiT block discards the text path). Defaults to False.
+    :param context_pre_only: If True, the text stream supplies keys and values
+        only: the text query (``add_q_proj``, ``norm_added_q``) and the text
+        output projection (``to_add_out``) are not created, and :meth:`call`
+        returns only the image stream (the final MMDiT block has no text
+        output). Defaults to False.
     :type context_pre_only: bool
     :param eps: Epsilon for the per-head RMS QK-norm. Defaults to ``1e-6``.
     :type eps: float
@@ -156,11 +164,13 @@ class MMDiTJointAttention(keras.layers.Layer):
         :type dim: int
         :param num_heads: Number of attention heads.
         :type num_heads: int
-        :param qk_norm: Whether to build the four per-head RMS QK-norms.
+        :param qk_norm: Whether to build the per-head RMS QK-norms (four, or
+            three when ``context_pre_only``).
         :type qk_norm: bool
         :param use_bias: Whether the Dense projections carry a bias.
         :type use_bias: bool
-        :param context_pre_only: If True, ``to_add_out`` is not created.
+        :param context_pre_only: If True, ``add_q_proj``, ``norm_added_q``
+            and ``to_add_out`` are not created.
         :type context_pre_only: bool
         :param eps: Epsilon for the QK-norms.
         :type eps: float
@@ -207,8 +217,15 @@ class MMDiTJointAttention(keras.layers.Layer):
             dim, use_bias=self.use_bias, name="to_out"
         )
 
-        self.add_q_proj = keras.layers.Dense(
-            dim, use_bias=self.use_bias, name="add_q_proj"
+        # DECISION plan-2026-10-14T062616-81938e81/D-044: with context_pre_only the
+        # text stream gives keys and values only. Do NOT build add_q_proj / norm_added_q for diffusers
+        # parity: nothing reads the text query rows, so they never get a gradient. See decisions.md.
+        self.add_q_proj = (
+            None
+            if self.context_pre_only
+            else keras.layers.Dense(
+                dim, use_bias=self.use_bias, name="add_q_proj"
+            )
         )
         self.add_k_proj = keras.layers.Dense(
             dim, use_bias=self.use_bias, name="add_k_proj"
@@ -229,8 +246,10 @@ class MMDiTJointAttention(keras.layers.Layer):
         if self.qk_norm:
             self.norm_q = RMSNorm(axis=-1, epsilon=self.eps, name="norm_q")
             self.norm_k = RMSNorm(axis=-1, epsilon=self.eps, name="norm_k")
-            self.norm_added_q = RMSNorm(
-                axis=-1, epsilon=self.eps, name="norm_added_q"
+            self.norm_added_q = (
+                None
+                if self.context_pre_only
+                else RMSNorm(axis=-1, epsilon=self.eps, name="norm_added_q")
             )
             self.norm_added_k = RMSNorm(
                 axis=-1, epsilon=self.eps, name="norm_added_k"
@@ -253,7 +272,7 @@ class MMDiTJointAttention(keras.layers.Layer):
     ) -> None:
         """Build the per-stream Q/K/V, QK-norm and output projections.
 
-        The four QK-norms are built at a shape whose last axis is ``head_dim``,
+        The QK-norms are built at a shape whose last axis is ``head_dim``,
         so each scale parameter comes out ``(head_dim,)``.
 
         :param input_shape: List ``[img_shape, txt_shape]`` where
@@ -290,8 +309,10 @@ class MMDiTJointAttention(keras.layers.Layer):
         # Image output projection consumes (B, N_img, dim).
         self.to_out.build(img_shape)
 
-        # Text-stream Q/K/V consume (B, N_txt, dim).
-        self.add_q_proj.build(txt_shape)
+        # Text-stream Q/K/V consume (B, N_txt, dim). No text query when
+        # context_pre_only.
+        if self.add_q_proj is not None:
+            self.add_q_proj.build(txt_shape)
         self.add_k_proj.build(txt_shape)
         self.add_v_proj.build(txt_shape)
         if self.to_add_out is not None:
@@ -303,7 +324,8 @@ class MMDiTJointAttention(keras.layers.Layer):
             qk_norm_shape = (None, self.num_heads, None, self.head_dim)
             self.norm_q.build(qk_norm_shape)
             self.norm_k.build(qk_norm_shape)
-            self.norm_added_q.build(qk_norm_shape)
+            if self.norm_added_q is not None:
+                self.norm_added_q.build(qk_norm_shape)
             self.norm_added_k.build(qk_norm_shape)
 
         super().build(input_shape)
@@ -353,26 +375,33 @@ class MMDiTJointAttention(keras.layers.Layer):
         img_k = self._to_heads(self.to_k(hidden_states))
         img_v = self._to_heads(self.to_v(hidden_states))
 
-        txt_q = self._to_heads(self.add_q_proj(encoder_hidden_states))
         txt_k = self._to_heads(self.add_k_proj(encoder_hidden_states))
         txt_v = self._to_heads(self.add_v_proj(encoder_hidden_states))
 
         if self.qk_norm:
             img_q = self.norm_q(img_q, training=training)
             img_k = self.norm_k(img_k, training=training)
-            txt_q = self.norm_added_q(txt_q, training=training)
             txt_k = self.norm_added_k(txt_k, training=training)
 
         # This concatenation is the "joint" in joint attention: one attention
         # problem instead of two, so each stream attends to the other.
         # Shape: (B, H, N_img, hd) + (B, H, N_txt, hd) -> (B, H, N_img+N_txt, hd)
-        q = keras.ops.concatenate([img_q, txt_q], axis=2)
+        # With context_pre_only only the image rows query: Q stays
+        # (B, H, N_img, hd) while K and V cover all N tokens.
+        if self.context_pre_only:
+            q = img_q
+        else:
+            txt_q = self._to_heads(self.add_q_proj(encoder_hidden_states))
+            if self.qk_norm:
+                txt_q = self.norm_added_q(txt_q, training=training)
+            q = keras.ops.concatenate([img_q, txt_q], axis=2)
         k = keras.ops.concatenate([img_k, txt_k], axis=2)
         v = keras.ops.concatenate([img_v, txt_v], axis=2)
 
         # DECISION plan_2026-06-12_dfce0712/D-004: no KV cache here -- the PyTorch
         # source's paging is an inference-time device the joint-attention math does not need. SDPA is written out by hand in keras.ops, matching ideogram4_attention. See decisions.md.
-        # Shape: (B, H, N, hd) @ (B, H, hd, N) -> (B, H, N, N),  N = N_img + N_txt
+        # Shape: (B, H, Nq, hd) @ (B, H, hd, N) -> (B, H, Nq, N),
+        # N = N_img + N_txt, Nq = N_img if context_pre_only else N
         scores = keras.ops.matmul(
             q, keras.ops.transpose(k, (0, 1, 3, 2))
         )
@@ -383,25 +412,23 @@ class MMDiTJointAttention(keras.layers.Layer):
             keras.ops.cast(scores, "float32"), axis=-1
         )
         attn = keras.ops.cast(attn, v.dtype)
-        # Shape: (B, H, N, N) @ (B, H, N, hd) -> (B, H, N, hd)
+        # Shape: (B, H, Nq, N) @ (B, H, N, hd) -> (B, H, Nq, hd)
         out = keras.ops.matmul(attn, v)
 
         out_shape = keras.ops.shape(out)
         batch, total_len = out_shape[0], out_shape[2]
-        # Shape: (B, H, N, hd) -> (B, N, H, hd) -> (B, N, dim)
+        # Shape: (B, H, Nq, hd) -> (B, Nq, H, hd) -> (B, Nq, dim)
         out = keras.ops.transpose(out, (0, 2, 1, 3))
         out = keras.ops.reshape(out, (batch, total_len, self.dim))
 
-        # Split index is the image length captured before the concat.
-        image_out = out[:, :n_img, :]
-        text_out = out[:, n_img:, :]
-
-        image_out = self.to_out(image_out)
+        # Split index is the image length captured before the concat. With
+        # context_pre_only the slice keeps every row (Nq == N_img).
+        image_out = self.to_out(out[:, :n_img, :])
 
         if self.context_pre_only:
             return image_out
 
-        text_out = self.to_add_out(text_out)
+        text_out = self.to_add_out(out[:, n_img:, :])
         return [image_out, text_out]
 
     def compute_output_shape(

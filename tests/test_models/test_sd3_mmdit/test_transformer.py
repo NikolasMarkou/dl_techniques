@@ -158,8 +158,18 @@ class TestSD3MMDiT:
 # `pooled_proj_*` or `context_embedder` either. Two optimizer steps clear all of
 # it, because the modulation Denses themselves are live from step 0.
 #
-# The 3 that do NOT clear are PRODUCT FINDING GF-04. See
-# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+# The 3 that did NOT clear were PRODUCT FINDING GF-04 (see
+# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md):
+# the final, context_pre_only block built and applied a text query
+# (`add_q_proj`, `norm_added_q`), attended with it and discarded the text rows.
+# Fixed 2026-10-15 (plan-2026-10-14-81938e81 step 10.1, D-043): that block now
+# builds no text query, its image output is unchanged (pinned by value in
+# test_blocks.py and against a numpy reference in
+# tests/test_layers/test_attention/test_the_mmdit_attention_is_actually_joint.py),
+# and the model has 143 trainable weights, none dead after the warm-up.
+#
+# RE-MEASURED 2026-10-15 after the fix: at init 143 weights, 129 dead;
+# after 2 steps 0 dead.
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
@@ -169,15 +179,9 @@ from ..gradient_flow_oracle import (
 #: Warm-up steps needed to get past the documented AdaLN-zero identity.
 GF_WARMUP_STEPS = 2
 
-#: PRODUCT FINDING GF-04 -- permanently dead, in EVERY state after warm-up.
-#: The final block is built with `context_pre_only=True`, so its text-stream
-#: output is discarded (`mmdit_joint_attention.py`: "context_pre_only=True:
-#: to_add_out is never created and call() returns image_out alone"). But
-#: `add_q_proj` and `norm_added_q` ARE still created and still applied in
-#: `call()` -- the text QUERY is computed, concatenated, attended, and then
-#: thrown away with the text rows. Nothing consumes it, so these three tensors
-#: can never receive a gradient in any state of training.
-GF04_PERMANENTLY_DEAD = (
+#: The three tensors GF-04 found permanently dead. The final block no longer
+#: builds them; they must not come back.
+GF04_FORMERLY_DEAD = (
     "block_3/attn/add_q_proj/kernel",
     "block_3/attn/add_q_proj/bias",
     "block_3/attn/norm_added_q/scale",
@@ -213,57 +217,44 @@ def _gf_warm_transformer():
 class TestSD3MMDiTGradientFlow:
     """Gradient flow through the MMDiT trunk, after the AdaLN-zero transient."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "PRODUCT FINDING GF-04: the final block is context_pre_only, so its "
-            "text-stream output is discarded, but add_q_proj / norm_added_q are "
-            "still created, still trainable=True and still applied in call() -- "
-            "the text query is computed and thrown away. 3 of 146 weights can "
-            "never receive a gradient. Not fixed here: this is an adoption step. "
-            "See GF-04 in plans/plan-2026-08-19T070627-a616f581/findings/"
-            "gradient-flow-adoption-findings.md"
-        ),
-    )
     def test_gradients_reach_every_trainable_weight(self):
         model = _gf_warm_transformer()
         inputs = _make_batch()
         assert_gradients_reach_every_trainable_weight(model, inputs)
 
-    def test_the_dead_set_is_exactly_the_three_context_query_tensors(self):
-        """The complement of the xfail above, and the reason it is not vacuous.
+    def test_no_weight_is_dead_and_the_gf04_query_is_not_built(self):
+        """Every trainable weight is live, and GF-04's dead tensors are gone.
 
-        An `xfail(strict=True)` is satisfied by ANY failure, including a
-        totally dead model. This pins BOTH halves by name: exactly 3 weights are
-        dead and they are exactly the final block's discarded context query;
-        the other 143 are live. If a future change kills a fourth weight, this
-        test -- not the xfail -- is what reports it.
+        The guard above uses the oracle's assertion; this one reads the report
+        directly, so a failure names every dead weight, and it checks that the
+        report covers every trainable weight. It also pins WHY the final block
+        has no dead weights: the text query GF-04 found is not built, rather
+        than built and somehow reached.
         """
         model = _gf_warm_transformer()
         inputs = _make_batch()
         report = gradient_report(model, inputs)
 
         dead = sorted(p for p, v in report.items() if v is None or v == 0.0)
-        live = [p for p, v in report.items() if v is not None and v > 0.0]
 
         assert len(report) == len(model.trainable_weights)
-        assert len(dead) == len(GF04_PERMANENTLY_DEAD), (
-            f"expected exactly {len(GF04_PERMANENTLY_DEAD)} dead weights after "
-            f"{GF_WARMUP_STEPS} training steps, measured {len(dead)}:\n  "
-            + "\n  ".join(dead)
+        assert dead == [], (
+            f"{len(dead)} dead weights after {GF_WARMUP_STEPS} training "
+            f"steps:\n  " + "\n  ".join(dead)
         )
-        for suffix in GF04_PERMANENTLY_DEAD:
-            assert any(p.endswith(suffix) for p in dead), (
-                f"{suffix} is no longer dead -- if GF-04 was fixed, delete the "
-                f"xfail above (it is strict and will fail on an unexpected pass)"
+        paths = [w.path for w in model.weights]
+        for suffix in GF04_FORMERLY_DEAD:
+            assert not any(p.endswith(suffix) for p in paths), (
+                f"{suffix} is built again; the final block's text query is "
+                f"discarded with the text rows and can never train (GF-04)"
             )
-        assert len(live) == len(report) - len(GF04_PERMANENTLY_DEAD)
 
     def test_the_adaln_zero_identity_is_an_init_transient_not_a_dead_component(self):
-        """132 dead at init, 3 dead after warm-up: the two states, compared.
+        """129 dead at init, 0 dead after warm-up: the two states, compared.
 
         Without this the warm-up in the tests above looks like a way to dodge a
-        result. It is the opposite -- it is what SEPARATES the 129 documented
+        result. It is the opposite -- it is what showed the AdaLN-zero dead set
+        to be a transient. Before GF-04 was fixed it also separated the 129
         transients from the 3 permanent ones, which a 132-entry `expect_zero`
         would have buried.
         """
@@ -286,5 +277,5 @@ class TestSD3MMDiTGradientFlow:
             f"identity documented in layers/transformers/sd3_adaln.py may have "
             f"changed, which would make the warm-up above unnecessary"
         )
-        assert n_dead_warm == len(GF04_PERMANENTLY_DEAD), n_dead_warm
+        assert n_dead_warm == 0, n_dead_warm
         assert n_dead_cold - n_dead_warm >= 100

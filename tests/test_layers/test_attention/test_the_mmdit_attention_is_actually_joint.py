@@ -18,6 +18,12 @@ Both guards below use oracles derived WITHOUT the implementation: a perturbation
 probe for the first, a hand-computed softmax with every projection forced to the
 identity for the second.
 
+A third guard (plan-2026-10-14-81938e81 step 10.1, D-043) covers the final-block
+layout. With ``context_pre_only=True`` the layer no longer builds a text query;
+a numpy reference that still computes one, attends over all ``N`` query rows and
+keeps the image rows (the layout before 10.1, and the diffusers one) must agree
+with it on the image output.
+
 TF32
 ----
 The hand-computed oracle compares a GPU matmul against a numpy one at
@@ -142,4 +148,81 @@ def test_the_prescale_matches_a_hand_computed_oracle():
     weights = weights / weights.sum(axis=-1, keepdims=True)
     expected = weights @ tokens
 
+    np.testing.assert_allclose(actual, expected, atol=1e-5, rtol=0)
+
+
+def _rms(x, scale, eps):
+    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps) * scale
+
+
+def test_the_final_block_image_output_matches_the_full_joint_reference():
+    """``context_pre_only`` drops the text query rows, not the image output.
+
+    The reference is the OLD final-block computation written out in numpy:
+    queries for ALL ``N_img + N_txt`` tokens, the text ones through their own
+    projection and QK-norm (``ref_add_q`` / ``ref_norm_added_q``, which the new
+    layer does not have), one joint softmax over all keys, then the image rows
+    sliced out and projected. Every weight the two layouts share is copied
+    into the layer.
+
+    Why this can fail: an image query that stopped seeing the text keys and
+    values, a wrong slice, or a lost QK-norm each move the image output by far
+    more than ``1e-5``.
+    """
+    dim, heads, eps = 16, 2, 1e-6
+    head_dim = dim // heads
+    n_img, n_txt, batch = 5, 3, 2
+    rs = np.random.RandomState(21)
+    image = rs.randn(batch, n_img, dim).astype("float32")
+    text = rs.randn(batch, n_txt, dim).astype("float32")
+
+    layer = MMDiTJointAttention(dim=dim, num_heads=heads, context_pre_only=True)
+    layer([image, text])  # build
+    assert layer.add_q_proj is None and layer.norm_added_q is None
+
+    def dense_weights():
+        return [
+            (0.3 * rs.randn(dim, dim)).astype("float32"),
+            (0.3 * rs.randn(dim)).astype("float32"),
+        ]
+
+    def norm_scale():
+        return (1.0 + 0.3 * rs.randn(head_dim)).astype("float32")
+
+    w = {name: dense_weights() for name in (
+        "to_q", "to_k", "to_v", "to_out", "add_k_proj", "add_v_proj",
+        "ref_add_q",
+    )}
+    s = {name: norm_scale() for name in (
+        "norm_q", "norm_k", "norm_added_k", "ref_norm_added_q",
+    )}
+    for name in ("to_q", "to_k", "to_v", "to_out", "add_k_proj", "add_v_proj"):
+        getattr(layer, name).set_weights(w[name])
+    for name in ("norm_q", "norm_k", "norm_added_k"):
+        getattr(layer, name).scale.assign(s[name])
+
+    def proj(x, name):
+        kernel, bias = w[name]
+        y = x.astype("float64") @ kernel + bias
+        return y.reshape(batch, -1, heads, head_dim).transpose(0, 2, 1, 3)
+
+    q = np.concatenate([
+        _rms(proj(image, "to_q"), s["norm_q"], eps),
+        _rms(proj(text, "ref_add_q"), s["ref_norm_added_q"], eps),
+    ], axis=2)
+    k = np.concatenate([
+        _rms(proj(image, "to_k"), s["norm_k"], eps),
+        _rms(proj(text, "add_k_proj"), s["norm_added_k"], eps),
+    ], axis=2)
+    v = np.concatenate([proj(image, "to_v"), proj(text, "add_v_proj")], axis=2)
+
+    logits = (q @ k.transpose(0, 1, 3, 2)) * head_dim ** -0.5
+    logits = logits - logits.max(axis=-1, keepdims=True)
+    attn = np.exp(logits)
+    attn = attn / attn.sum(axis=-1, keepdims=True)
+    joint = (attn @ v).transpose(0, 2, 1, 3).reshape(batch, n_img + n_txt, dim)
+    kernel, bias = w["to_out"]
+    expected = joint[:, :n_img, :] @ kernel + bias
+
+    actual = np.asarray(layer([image, text]))
     np.testing.assert_allclose(actual, expected, atol=1e-5, rtol=0)

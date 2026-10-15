@@ -11,7 +11,9 @@ the SD3 AdaLN modulation layers, and :class:`~dl_techniques.layers.ffn.gelu_mlp_
 Two constructor flags change the block's shape: ``use_dual_attention`` gives
 the image stream a second self-attention path, and ``context_pre_only``
 marks the final block in a stack, which drops the text output path
-entirely.
+entirely. In that block the text tokens still supply keys and values to the
+image queries, but no text query is built (diffusers builds one there and
+discards it; see ``PORT_NOTES.md`` section 4.9).
 
 When ``context_pre_only`` is ``False`` the block returns
 ``(hidden_states, encoder_hidden_states)``, both ``(B, N, dim)``. When it is
@@ -120,8 +122,9 @@ class MMDiTBlock(keras.layers.Layer):
     :type mlp_ratio: float
     :param context_pre_only: If True this is the final block: the text stream is
         normalized with :class:`AdaLayerNormContinuous` (no gates), the joint
-        attention drops its text output projection, and :meth:`call` returns the
-        single image tensor (the text path is not propagated). Defaults to False.
+        attention builds no text query and no text output projection (text
+        supplies keys and values only), and :meth:`call` returns the single
+        image tensor (the text path is not propagated). Defaults to False.
     :type context_pre_only: bool
     :param use_dual_attention: If True the image stream gets a second (self)
         attention path and the image AdaLN becomes the 9-way

@@ -164,6 +164,29 @@ Substantiated from the findings / reused-layer behavior (not invented):
 *(Only bugs substantiable from the findings are listed; no additional source-bug
 claims are made beyond these.)*
 
+### 4.9 The final block builds no text query — layout differs from diffusers
+In diffusers, the last `JointTransformerBlock` (`context_pre_only=True`) still
+builds `attn.add_q_proj` and `attn.norm_added_q`, computes the text query, runs
+it through the joint attention, and then discards the text rows. Until
+2026-10-15 this port did the same, so those 3 tensors (`add_q_proj` kernel and
+bias, `norm_added_q` scale) never received a gradient (GF-04, 3 of 146 tiny
+weights). The port's final block now builds no text query: the image queries
+attend over the joint `[image; text]` keys and values, and the text stream
+supplies only `add_k_proj`/`add_v_proj` (and `norm_added_k`). Each softmax row
+depends only on its own query, so the image output is unchanged; this is pinned
+by value against the old layout
+(`tests/test_models/test_sd3_mmdit/test_blocks.py`) and against a numpy
+reference that still computes the text query
+(`tests/test_layers/test_attention/test_the_mmdit_attention_is_actually_joint.py`).
+
+The cost is one layout difference from diffusers checkpoints: the last block has
+no `add_q_proj`/`norm_added_q`, so a future `.pth` port must drop those two
+entries for that block (§6 item 3). Parameter counts, re-derived by building
+each preset (`SD3MMDiT.count_params()`, which includes the non-trainable
+positional table): **tiny** 5,664,864 → 5,627,776 (−37,088 = 192² + 192 + 32);
+**full** 2,301,759,808 → 2,299,398,912 (−2,360,896 = 1536² + 1536 + 64).
+Trainable weight tensors: tiny 146 → 143, full 882 → 879.
+
 ---
 
 ## 5. Reuse vs Build Summary
@@ -188,7 +211,9 @@ claims are made beyond these.)*
 2. **FID / generation metrics.** Build an InceptionV3 feature extractor +
    Frechet-distance computation for eval (none exists in the repo).
 3. **Pretrained-weight conversion.** A `.pth`→Keras weight port (SD3.5 / CLIP /
-   OpenCLIP / T5 / VAE) if released-weight inference is ever desired.
+   OpenCLIP / T5 / VAE) if released-weight inference is ever desired. It must
+   skip the last block's `attn.add_q_proj` / `attn.norm_added_q`, which this
+   port does not build (§4.9).
 4. **Full-preset training.** Only the **tiny** preset was smoke-trained (pinned
    to GPU1, 12 GB). The **full** preset (`dim=1536, heads=24, depth=24`) is
    *defined but untrained* and will need multi-GPU.

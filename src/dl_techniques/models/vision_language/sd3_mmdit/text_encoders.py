@@ -46,7 +46,6 @@ References:
 """
 
 import keras
-from keras import ops
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,7 +70,7 @@ def _quick_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: Activated tensor (same shape).
     :rtype: keras.KerasTensor
     """
-    return x * ops.sigmoid(1.702 * x)
+    return x * keras.ops.sigmoid(1.702 * x)
 
 
 def _resolve_act(act_fn: str):
@@ -265,23 +264,24 @@ class CLIPTextEncoder(keras.Model):
         :return: ``(B, L, L)`` boolean attention mask.
         :rtype: keras.KerasTensor
         """
-        L = ops.shape(token_ids)[1]
+        L = keras.ops.shape(token_ids)[1]
         # Lower-triangular causal mask (L, L): query i may attend to key j <= i.
-        # Built from an arange index comparison rather than ops.tril (or ops.triu,
-        # which shares its implementation and its trap): tril routes
+        # Built from an arange index comparison rather than keras.ops.tril
+        # (or keras.ops.triu, which shares its implementation and its trap):
+        # tril routes
         # through a tf cond that rejects the Python-bool dtype on a dynamic-L
         # symbolic tensor during the .keras save/load trace. The index form is
         # fully graph-safe (no cond, no Python bool).
-        rows = ops.arange(0, L, dtype="int32")[:, None]  # (L, 1) query index
-        cols = ops.arange(0, L, dtype="int32")[None, :]  # (1, L) key index
-        causal = ops.greater_equal(rows, cols)  # (L, L) bool, True where j <= i
-        causal = ops.expand_dims(causal, axis=0)  # (1, L, L)
+        rows = keras.ops.arange(0, L, dtype="int32")[:, None]  # (L, 1) query index
+        cols = keras.ops.arange(0, L, dtype="int32")[None, :]  # (1, L) key index
+        causal = keras.ops.greater_equal(rows, cols)  # (L, L) bool, True where j <= i
+        causal = keras.ops.expand_dims(causal, axis=0)  # (1, L, L)
 
         if attention_mask is not None:
             # Key padding: a key position j is visible to every query i.
-            key_mask = ops.cast(attention_mask, "bool")  # (B, L)
-            key_mask = ops.expand_dims(key_mask, axis=1)  # (B, 1, L)
-            return ops.logical_and(causal, key_mask)  # (B, L, L)
+            key_mask = keras.ops.cast(attention_mask, "bool")  # (B, L)
+            key_mask = keras.ops.expand_dims(key_mask, axis=1)  # (B, 1, L)
+            return keras.ops.logical_and(causal, key_mask)  # (B, L, L)
         return causal
 
     def call(
@@ -301,14 +301,14 @@ class CLIPTextEncoder(keras.Model):
         :return: ``{"pooled", "last_hidden", "penultimate"}`` (see class doc).
         :rtype: Dict[str, keras.KerasTensor]
         """
-        token_ids = ops.cast(token_ids, "int32")
-        L = ops.shape(token_ids)[1]
+        token_ids = keras.ops.cast(token_ids, "int32")
+        L = keras.ops.shape(token_ids)[1]
 
         # --- token + learned absolute positional embedding -------------
         x = self.token_embedding(token_ids)  # (B, L, D)
-        positions = ops.arange(0, L, dtype="int32")
+        positions = keras.ops.arange(0, L, dtype="int32")
         pos = self.position_embedding(positions)  # (L, D)
-        x = x + ops.expand_dims(pos, axis=0)  # broadcast over batch
+        x = x + keras.ops.expand_dims(pos, axis=0)  # broadcast over batch
 
         attn_mask = self._build_attention_mask(token_ids, attention_mask)
 
@@ -344,16 +344,16 @@ class CLIPTextEncoder(keras.Model):
         # --- pooled EOS projection -------------------------------------
         # EOS token = the position of the largest token id per row (OpenAI CLIP
         # convention: the EOS id is the max id in the vocabulary).
-        eos_idx = ops.argmax(token_ids, axis=-1)  # (B,)
-        B = ops.shape(token_ids)[0]
-        batch_idx = ops.arange(0, B, dtype=eos_idx.dtype)
-        gather_idx = ops.stack([batch_idx, eos_idx], axis=-1)  # (B, 2)
-        eos_hidden = ops.take_along_axis(
+        eos_idx = keras.ops.argmax(token_ids, axis=-1)  # (B,)
+        B = keras.ops.shape(token_ids)[0]
+        batch_idx = keras.ops.arange(0, B, dtype=eos_idx.dtype)
+        gather_idx = keras.ops.stack([batch_idx, eos_idx], axis=-1)  # (B, 2)
+        eos_hidden = keras.ops.take_along_axis(
             last_hidden,
-            ops.reshape(eos_idx, (-1, 1, 1)),
+            keras.ops.reshape(eos_idx, (-1, 1, 1)),
             axis=1,
         )  # (B, 1, D)
-        eos_hidden = ops.squeeze(eos_hidden, axis=1)  # (B, D)
+        eos_hidden = keras.ops.squeeze(eos_hidden, axis=1)  # (B, D)
         pooled = self.text_projection(eos_hidden, training=training)  # (B, D)
 
         return {
@@ -492,7 +492,7 @@ class T5Encoder(keras.Model):
     this is an encoder: half the buckets cover future positions, half the
     past, with large distances log-scaled. See
     :meth:`_relative_position_bucket`. The bias is built for the dynamic
-    ``L`` from ``ops.shape`` at call time (see D-009), so it handles
+    ``L`` from ``keras.ops.shape`` at call time (see D-009), so it handles
     variable sequence length without a fixed ``max_seq_len``.
 
     :param vocab_size: Token vocabulary size.
@@ -635,28 +635,28 @@ class T5Encoder(keras.Model):
         relative_buckets = 0
         num_buckets = num_buckets // 2
         # Bidirectional: positive (key after query) goes to the upper half.
-        relative_buckets = relative_buckets + ops.cast(
-            ops.greater(relative_position, 0), "int32"
+        relative_buckets = relative_buckets + keras.ops.cast(
+            keras.ops.greater(relative_position, 0), "int32"
         ) * num_buckets
-        relative_position = ops.abs(relative_position)
+        relative_position = keras.ops.abs(relative_position)
 
         max_exact = num_buckets // 2
-        is_small = ops.less(relative_position, max_exact)
+        is_small = keras.ops.less(relative_position, max_exact)
 
         # Log-scaled bucket for large distances.
-        rp_f = ops.cast(relative_position, "float32")
-        relative_position_if_large = max_exact + ops.cast(
-            ops.log(rp_f / float(max_exact))
+        rp_f = keras.ops.cast(relative_position, "float32")
+        relative_position_if_large = max_exact + keras.ops.cast(
+            keras.ops.log(rp_f / float(max_exact))
             / np.log(max_distance / max_exact)
             * (num_buckets - max_exact),
             "int32",
         )
-        relative_position_if_large = ops.minimum(
+        relative_position_if_large = keras.ops.minimum(
             relative_position_if_large,
-            ops.full_like(relative_position_if_large, num_buckets - 1),
+            keras.ops.full_like(relative_position_if_large, num_buckets - 1),
         )
 
-        relative_buckets = relative_buckets + ops.where(
+        relative_buckets = relative_buckets + keras.ops.where(
             is_small, relative_position, relative_position_if_large
         )
         return relative_buckets
@@ -664,13 +664,13 @@ class T5Encoder(keras.Model):
     def _compute_bias(self, L: keras.KerasTensor) -> keras.KerasTensor:
         """Compute the ``(1, num_heads, L, L)`` relative-position attention bias.
 
-        :param L: Dynamic sequence length (scalar tensor from ``ops.shape``).
+        :param L: Dynamic sequence length (scalar tensor from ``keras.ops.shape``).
         :type L: keras.KerasTensor
         :return: ``(1, num_heads, L, L)`` additive bias.
         :rtype: keras.KerasTensor
         """
-        context_position = ops.arange(0, L, dtype="int32")[:, None]  # (L, 1)
-        memory_position = ops.arange(0, L, dtype="int32")[None, :]  # (1, L)
+        context_position = keras.ops.arange(0, L, dtype="int32")[:, None]  # (L, 1)
+        memory_position = keras.ops.arange(0, L, dtype="int32")[None, :]  # (1, L)
         relative_position = memory_position - context_position  # (L, L)
         rp_bucket = self._relative_position_bucket(
             relative_position,
@@ -679,7 +679,7 @@ class T5Encoder(keras.Model):
         )  # (L, L)
         values = self.relative_attention_bias(rp_bucket)  # (L, L, heads)
         # (1, heads, L, L)
-        values = ops.expand_dims(ops.transpose(values, (2, 0, 1)), axis=0)
+        values = keras.ops.expand_dims(keras.ops.transpose(values, (2, 0, 1)), axis=0)
         return values
 
     def call(
@@ -699,8 +699,8 @@ class T5Encoder(keras.Model):
         :return: Sequence ``(B, L, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        token_ids = ops.cast(token_ids, "int32")
-        L = ops.shape(token_ids)[1]
+        token_ids = keras.ops.cast(token_ids, "int32")
+        L = keras.ops.shape(token_ids)[1]
         H = self.num_heads
         head_dim = self.inner_dim // H
 
@@ -711,19 +711,19 @@ class T5Encoder(keras.Model):
         if attention_mask is not None:
             # DECISION plan-2026-08-19T163559-499b6f0e/D-033: mask with
             # ops.where, never the additive `bias + (1-mask)*min_val` form -- under mixed_float16 that form NaNs the kept positions on an all-masked row. See decisions.md.
-            keep = ops.cast(attention_mask, "bool")[:, None, None, :]  # (B,1,1,L)
+            keep = keras.ops.cast(attention_mask, "bool")[:, None, None, :]  # (B,1,1,L)
             # The sentinel is the bias dtype's own minimum, so it is always
             # representable: -3.40e+38 in float32, -65504.0 in float16.
             bias_dtype = getattr(position_bias.dtype, "name", position_bias.dtype)
-            masked_value = ops.cast(
+            masked_value = keras.ops.cast(
                 float(np.finfo(bias_dtype).min), position_bias.dtype)
-            position_bias = ops.where(
+            position_bias = keras.ops.where(
                 keep, position_bias, masked_value)  # (B, H, L, L)
 
         def split_heads(t: keras.KerasTensor) -> keras.KerasTensor:
-            B = ops.shape(t)[0]
-            t = ops.reshape(t, (B, L, H, head_dim))
-            return ops.transpose(t, (0, 2, 1, 3))  # (B, H, L, hd)
+            B = keras.ops.shape(t)[0]
+            t = keras.ops.reshape(t, (B, L, H, head_dim))
+            return keras.ops.transpose(t, (0, 2, 1, 3))  # (B, H, L, hd)
 
         for i in range(self.num_layers):
             # --- self-attention, no 1/sqrt(d) scaling -------------------
@@ -734,13 +734,15 @@ class T5Encoder(keras.Model):
             v = split_heads(self.v[i](n, training=training))
             # DECISION plan_2026-06-12_dfce0712/D-009: T5 omits the 1/sqrt(d)
             # attention scaling -- it is folded into the initializer scale, so adding it here breaks faithfulness with T5. See decisions.md.
-            scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))  # (B,H,L,L)
-            scores = scores + ops.cast(position_bias, scores.dtype)
-            weights = ops.softmax(scores, axis=-1)
-            attn = ops.matmul(weights, v)  # (B, H, L, hd)
-            attn = ops.transpose(attn, (0, 2, 1, 3))  # (B, L, H, hd)
-            B = ops.shape(attn)[0]
-            attn = ops.reshape(attn, (B, L, self.inner_dim))
+            scores = keras.ops.matmul(
+                q, keras.ops.transpose(k, (0, 1, 3, 2))
+            )  # (B,H,L,L)
+            scores = scores + keras.ops.cast(position_bias, scores.dtype)
+            weights = keras.ops.softmax(scores, axis=-1)
+            attn = keras.ops.matmul(weights, v)  # (B, H, L, hd)
+            attn = keras.ops.transpose(attn, (0, 2, 1, 3))  # (B, L, H, hd)
+            B = keras.ops.shape(attn)[0]
+            attn = keras.ops.reshape(attn, (B, L, self.inner_dim))
             attn = self.o[i](attn, training=training)
             x = residual + attn
 

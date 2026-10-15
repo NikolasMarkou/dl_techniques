@@ -13,6 +13,7 @@ variable batch + variable N_img/N_txt.
 
 import os
 import tempfile
+import zlib
 
 import keras
 import numpy as np
@@ -206,6 +207,108 @@ class TestMMDiTBlockContextPreOnly:
         blk2 = MMDiTBlock.from_config(blk.get_config())
         assert blk2.context_pre_only is True
         assert blk2.ff_context is None
+
+    def test_the_final_block_builds_no_text_query(self, img, txt, cond):
+        """The text stream gives keys and values only (D-043, GF-04)."""
+        blk = MMDiTBlock(
+            dim=DIM, num_heads=NUM_HEADS, context_pre_only=True
+        )
+        blk([img, txt, cond])
+        assert blk.attn.add_q_proj is None
+        assert blk.attn.norm_added_q is None
+        paths = [w.path for w in blk.weights]
+        assert not [p for p in paths if "add_q_proj" in p or "norm_added_q" in p]
+        # The text keys/values are still built: the image queries read them.
+        assert any("add_k_proj" in p for p in paths)
+        assert any("add_v_proj" in p for p in paths)
+        assert any("norm_added_k" in p for p in paths)
+
+
+# ---------------------------------------------------------------------
+# Final-block value pin (plan-2026-10-14-81938e81 step 10.1, D-043)
+# ---------------------------------------------------------------------
+#
+# Until 2044e6987 the final (context_pre_only) block also built and applied a
+# text query (`attn/add_q_proj`, `attn/norm_added_q`), attended with it and then
+# discarded the text rows. Step 10.1 stopped building it. Each softmax row
+# depends only on its own query, so the image output must not move.
+#
+# PINNED_FINAL_BLOCK_OUTPUT was computed by the code at 2044e6987 (the OLD
+# layout, text query included) with exactly the fixture below, on CPU. Every
+# weight is drawn from a RandomState seeded by the CRC32 of its path below the
+# block, so the weights the two layouts share get identical values in both, and
+# the old layout's three extra tensors got values of their own.
+
+_PIN_DIM = 8
+_PIN_HEADS = 2
+_PIN_N_IMG = 3
+_PIN_N_TXT = 2
+
+PINNED_FINAL_BLOCK_OUTPUT = np.array(
+    [
+        2.016202449798584, 0.6109495162963867, -0.678856611251831,
+        1.888751745223999, 2.173214912414551, -2.4482152462005615,
+        1.0240740776062012, -0.35184246301651, -0.2795543670654297,
+        0.5899345278739929, -1.1868754625320435, 1.037825107574463,
+        0.8017204999923706, -0.5679530501365662, 0.4800978899002075,
+        0.1414850652217865, 2.098407030105591, 0.17965167760849,
+        -0.877736508846283, -1.4193127155303955, -2.893477201461792,
+        -0.463049054145813, 1.9851731061935425, -0.8964107036590576,
+    ],
+    dtype="float32",
+).reshape(1, _PIN_N_IMG, _PIN_DIM)
+
+
+def _pin_inputs():
+    rs = np.random.RandomState(0)
+    img_ = rs.standard_normal((1, _PIN_N_IMG, _PIN_DIM)).astype("float32")
+    txt_ = rs.standard_normal((1, _PIN_N_TXT, _PIN_DIM)).astype("float32")
+    cond_ = rs.standard_normal((1, _PIN_DIM)).astype("float32")
+    return img_, txt_, cond_
+
+
+def _seed_weights_by_path(block):
+    """Give every weight values drawn from a seed derived from its path."""
+    for w in block.weights:
+        rel = w.path.split("/", 1)[1]
+        rng = np.random.RandomState(zlib.crc32(rel.encode()))
+        w.assign((0.3 * rng.standard_normal(tuple(w.shape))).astype("float32"))
+
+
+def _pinned_fixture_block_output(img_, txt_, cond_):
+    blk = MMDiTBlock(
+        dim=_PIN_DIM, num_heads=_PIN_HEADS, context_pre_only=True,
+        name="final_block",
+    )
+    blk([img_, txt_, cond_])
+    _seed_weights_by_path(blk)
+    return keras.ops.convert_to_numpy(blk([img_, txt_, cond_]))
+
+
+def test_the_final_block_image_output_matches_the_old_layout(
+    golden_reference_device,
+):
+    """Dropping the text query leaves the image output where it was.
+
+    Tolerance: the old layout ran the score matmul over N_img + N_txt query
+    rows and the new one over N_img, so CPU float32 blocking may differ in
+    the last ulps (measured at most 5.7e-6 at output scale 17 on a larger
+    probe). 1e-5 absolute is below any real change: perturbing one text
+    token moves this output by far more (asserted below), and a final block
+    whose image queries stop reading the text keys and values misses the pin.
+    """
+    img_, txt_, cond_ = _pin_inputs()
+    with keras.device(golden_reference_device):
+        out = _pinned_fixture_block_output(img_, txt_, cond_)
+        moved_txt = txt_.copy()
+        # Not a constant shift: the text AdaLN's LayerNorm removes the
+        # per-token mean, so `+= 1.0` leaves the block output unchanged.
+        moved_txt[0, 0, :] += np.linspace(-2.0, 2.0, _PIN_DIM, dtype="float32")
+        moved = _pinned_fixture_block_output(img_, moved_txt, cond_)
+
+    np.testing.assert_allclose(out, PINNED_FINAL_BLOCK_OUTPUT, atol=1e-5, rtol=0)
+    # The pin is not blind to the text path: text keys/values reach the image.
+    assert np.abs(moved - PINNED_FINAL_BLOCK_OUTPUT).max() > 1e-2
 
 
 # =====================================================================

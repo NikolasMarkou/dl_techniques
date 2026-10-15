@@ -21,7 +21,8 @@ zero-initialized gate makes a fresh block an identity.
 
 The final block is built with ``context_pre_only=True``, since nothing
 downstream reads the text stream again, and returns a single tensor instead
-of a pair. Positional information is absolute and fixed: a non-trainable
+of a pair; its text tokens supply keys and values to the image queries, and
+it builds no text query. Positional information is absolute and fixed: a non-trainable
 sin-cos grid is center-cropped to the active patch grid at call time, so one
 checkpoint can run at several latent sizes. The joint attention accepts no
 attention mask, so padded caption tokens must already be neutral before they
@@ -369,7 +370,8 @@ class SD3MMDiT(keras.Model):
             if i < self.depth - 1:
                 hidden, enc = blk([hidden, enc, cond], training=training)
             else:
-                # Final block is context_pre_only: returns the image stream only.
+                # Final block is context_pre_only: returns the image stream only
+                # (its text tokens are keys/values, never queries).
                 hidden = blk([hidden, enc, cond], training=training)
 
         # --- final velocity head ---------------------------------------
