@@ -1,4 +1,4 @@
-# Clifford full-system review: CLIP audit + small VLM + structured detection (single document)
+# Clifford full-system plan: CLIP audit + small VLM + structured detection (single document)
 
 Date: 2026-10-15. All executable claims verified CPU-only (`CUDA_VISIBLE_DEVICES=""`).
 Repo: `dl_techniques` (Keras 3 / TF 2.18).
@@ -36,7 +36,7 @@ the wrapper before use.
 
 ---
 
-## 2. Small VLM (b): B1 — Clifford vision + stock `TextDecoder`
+## 2. Small VLM (b): B1 — Clifford vision + package-owned mixed decoder
 
 Reuse `NanoVLM` shell (`nano_vlm/model.py:267,490`); swap only `_vision_tokens`.
 Reference layout: `VisionEncoder(none) [B,1+P,Dv] → ModalityProjection → [B,Sv,Dt]`
@@ -292,7 +292,7 @@ Proposal: 20k validity / 10k single-cell / 5k full-solve equivalents per family
 * `models/vision_language/clifford_nanovlm/{__init__.py,model.py,README.md}`:
   `CliffordNanoVLM` = Clifford staged vision + CLS + `ModalityProjection` +
   package-owned mixed decoder (`Gemma3TransformerBlock` per `layer_types`,
-  `embed_tokens/decode_embeddings` interface, `generate()` inherited, §2.6);
+  `embed_tokens/decode_embeddings` interface, `generate()` inherited, §2.8);
   `create_clifford_nanovlm(variant,vocab_size,image_size,context_length)`;
   registration `dl_techniques.models.clifford_nanovlm.model` (family stripped).
   `TextDecoder` stays untouched by design.
