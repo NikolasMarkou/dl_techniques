@@ -14,9 +14,6 @@ three functions live here.
 ``vision/factory.py`` reads these objects and picks the head class to build.
 Only 10 of the 37 task names have a head; the other 27 raise ``ValueError``.
 The table in :class:`VisionTaskType` lists both groups.
-
-``TaskType`` is a module-level alias for :class:`VisionTaskType`, kept so
-older callers keep working. It is the same object, not a copy.
 """
 
 from enum import Enum, unique
@@ -1147,7 +1144,7 @@ class CommonTaskConfigurations:
 
 # ---------------------------------------------------------------------
 
-# Utility functions for backward compatibility and convenience
+# Utility functions
 def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfiguration:
     """
     Normalize any accepted task spelling into a TaskConfiguration.
@@ -1232,14 +1229,5 @@ def validate_task_combination(tasks: List[VisionTaskType]) -> tuple[bool, Option
     except ValueError as e:
         return False, str(e)
 
-
-# ---------------------------------------------------------------------
-
-# DECISION plan_2026-06-08_8b32ca51/D-003: `TaskType` is a backward-compat alias
-# for the renamed `VisionTaskType`. Do NOT delete it as "dead code": an
-# out-of-tree caller may still import `TaskType` from here (the 4 in-tree callers
-# were migrated). It is the SAME object, so `isinstance` and `is` checks hold
-# across both names. The owning plan is gone; this comment is the only record.
-TaskType = VisionTaskType
 
 # ---------------------------------------------------------------------

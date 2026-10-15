@@ -41,8 +41,9 @@ from dl_techniques.layers.ffn.factory import (
 from dl_techniques.layers.heads.vlm import factory as vlm_factory
 from dl_techniques.layers.heads.vlm.factory import (
     _accepted_constructor_kwargs,
-    _is_single_shape,
 )
+from dl_techniques.utils.tensors import is_single_shape
+from tests.numerics import reassociation_atol
 from dl_techniques.layers.heads.vlm import (
     VLMTaskType,
     VLMTaskConfig,
@@ -941,6 +942,152 @@ class TestVisualGroundingForwardPass:
         # And the head must report the ranking it was given.
         np.testing.assert_allclose(
             ops.convert_to_numpy(out["confidence"]), scores, rtol=1e-6, atol=1e-6
+        )
+
+
+# ---------------------------------------------------------------------
+# Grounding 'confidence' and matching 'match_score' are logits
+# (plan-2026-10-14T062616-81938e81 step 7, decision D-003)
+#
+# Both scorers were `Dense(1, activation="sigmoid")`, so the two keys held
+# probabilities while every other class-like output of layers/heads holds
+# logits. They are linear now. The oracle is the scorer's own linear map,
+# recomputed in float64 from the tensor the head fed it (spied, not
+# re-derived), so an activation applied anywhere between the Dense and the
+# returned key fails, not only one on the Dense. The bound is derived from
+# the reduction length with `tests.numerics.reassociation_atol`.
+# ---------------------------------------------------------------------
+
+_LOGIT_BATCH = 8
+
+
+def _logit_payload():
+    rng = np.random.default_rng(29)
+    return {
+        "vision_features": rng.normal(
+            size=(_LOGIT_BATCH, _FAMILY_SEQ, _FAMILY_DIM)).astype("float32"),
+        "text_features": rng.normal(
+            size=(_LOGIT_BATCH, _FAMILY_SEQ, _FAMILY_DIM)).astype("float32"),
+    }
+
+
+def _linear_map_float64(features: np.ndarray, dense: keras.layers.Dense) -> np.ndarray:
+    kernel = keras.ops.convert_to_numpy(dense.kernel).astype(np.float64)
+    bias = keras.ops.convert_to_numpy(dense.bias).astype(np.float64)
+    return features.astype(np.float64) @ kernel + bias
+
+
+def _linear_map_atol(features: np.ndarray, dense: keras.layers.Dense) -> float:
+    kernel = keras.ops.convert_to_numpy(dense.kernel).astype(np.float64)
+    scale = float(np.abs(features).max() * np.abs(kernel).sum(axis=0).max())
+    return reassociation_atol([features.shape[-1]], 1, scale)
+
+
+class TestTheVLMScoresAreLogits:
+
+    def test_both_scorers_are_linear(self) -> None:
+        grounding = _make_single(VLMTaskType.VISUAL_GROUNDING, "grd")
+        matching = _make_single(VLMTaskType.IMAGE_TEXT_MATCHING, "itm")
+        assert grounding.confidence_scorer.activation is keras.activations.linear
+        assert matching.similarity_head.activation is keras.activations.linear
+
+    def test_grounding_confidence_is_the_scorer_logit_and_picks_its_argmax(self) -> None:
+        """The REAL scorer runs; the pick must be the argmax of its logits.
+
+        Removing the sigmoid cannot move the pick (sigmoid is monotonic), so
+        the region is checked against the logits the head returned, and the
+        same region is what `argmax(sigmoid(.))` picks.
+        """
+        keras.utils.set_random_seed(13)
+        payload = _logit_payload()
+        head = _make_single(VLMTaskType.VISUAL_GROUNDING, "grd")
+        head.build(_shapes_of(payload))
+
+        captured = {}
+        real_fusion = head.fusion
+
+        def fusion_spy(tensors, training=None):
+            out = real_fusion(tensors, training=training)
+            captured["fused"] = keras.ops.convert_to_numpy(out)
+            return out
+
+        head.fusion = fusion_spy
+        try:
+            out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
+        finally:
+            del head.fusion
+
+        fused = captured["fused"]
+        confidence = keras.ops.convert_to_numpy(out["confidence"]).astype(np.float64)
+        expected = _linear_map_float64(fused, head.confidence_scorer)[..., 0]
+        np.testing.assert_allclose(
+            confidence, expected, rtol=0,
+            atol=_linear_map_atol(fused, head.confidence_scorer),
+            err_msg="'confidence' is not the scorer's linear output",
+        )
+        assert np.any((confidence < 0.0) | (confidence > 1.0)), (
+            f"'confidence' spans [{confidence.min()}, {confidence.max()}], inside "
+            f"[0, 1]: it looks sigmoid'ed"
+        )
+
+        picked = confidence.argmax(axis=1)
+        top_two = np.sort(confidence, axis=1)[:, -2:]
+        assert np.all(top_two[:, 1] - top_two[:, 0] > 1e-3), (
+            "near-tied top regions make the pick fixture-sensitive"
+        )
+        np.testing.assert_array_equal(picked, (1.0 / (1.0 + np.exp(-confidence))).argmax(axis=1))
+        assert len(set(picked.tolist())) > 1, "degenerate probe: every row picks one region"
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(out["grounded_features"]),
+            fused[np.arange(_LOGIT_BATCH), picked],
+            err_msg="grounded_features are not the fused features of the argmax region",
+        )
+
+    def test_grounding_bbox_keeps_its_sigmoid_range_map(self) -> None:
+        """The documented exception: the box is a range map, squashed to (0, 1)."""
+        keras.utils.set_random_seed(13)
+        payload = _logit_payload()
+        head = _make_single(VLMTaskType.VISUAL_GROUNDING, "grd")
+        out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
+        grounded = keras.ops.convert_to_numpy(out["grounded_features"])
+        bbox = keras.ops.convert_to_numpy(out["bbox"]).astype(np.float64)
+        raw = _linear_map_float64(grounded, head.bbox_regressor)
+        np.testing.assert_allclose(
+            bbox, 1.0 / (1.0 + np.exp(-raw)), rtol=0,
+            atol=_linear_map_atol(grounded, head.bbox_regressor),
+        )
+        assert bbox.min() > 0.0 and bbox.max() < 1.0
+
+    def test_match_score_is_the_similarity_head_logit(self) -> None:
+        keras.utils.set_random_seed(13)
+        payload = _logit_payload()
+        head = _make_single(VLMTaskType.IMAGE_TEXT_MATCHING, "itm")
+        head.build(_shapes_of(payload))
+
+        captured = {}
+        real_scorer = head.similarity_head
+
+        def scorer_spy(features, *args, **kwargs):
+            captured["processed"] = keras.ops.convert_to_numpy(features)
+            return real_scorer(features, *args, **kwargs)
+
+        head.similarity_head = scorer_spy
+        try:
+            out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
+        finally:
+            head.similarity_head = real_scorer
+
+        processed = captured["processed"]
+        match_score = keras.ops.convert_to_numpy(out["match_score"]).astype(np.float64)
+        expected = _linear_map_float64(processed, real_scorer)[..., 0]
+        np.testing.assert_allclose(
+            match_score, expected, rtol=0,
+            atol=_linear_map_atol(processed, real_scorer),
+            err_msg="'match_score' is not the similarity head's linear output",
+        )
+        assert np.any((match_score < 0.0) | (match_score > 1.0)), (
+            f"'match_score' spans [{match_score.min()}, {match_score.max()}], "
+            f"inside [0, 1]: it looks sigmoid'ed"
         )
 
 
@@ -2008,23 +2155,23 @@ class TestFusionStrategyOutputContract:
         separates them. A dynamic axis is `None`, which must not be mistaken for
         a nested sequence.
         """
-        assert _is_single_shape((2, 5, 96))
-        assert _is_single_shape((None, 5, 96))
-        assert _is_single_shape([None, 96])
-        assert not _is_single_shape([(2, 5, 96), (2, 5, 96)])
-        assert not _is_single_shape(((None, 96), (None, 96)))
-        assert not _is_single_shape("not a shape")
+        assert is_single_shape((2, 5, 96))
+        assert is_single_shape((None, 5, 96))
+        assert is_single_shape([None, 96])
+        assert not is_single_shape([(2, 5, 96), (2, 5, 96)])
+        assert not is_single_shape(((None, 96), (None, 96)))
+        assert not is_single_shape("not a shape")
 
         # NOTE-5 (review-iter-1): a backend shape object is a sequence of ints
         # but NOT a list/tuple, so an isinstance-only predicate misclassifies it
         # in BOTH directions. Latent today (`MultiModalFusion` returns plain
         # tuples) and pinned so it stays fixed.
         import tensorflow as _tf
-        assert _is_single_shape(_tf.TensorShape([2, 5, 96])), (
+        assert is_single_shape(_tf.TensorShape([2, 5, 96])), (
             "a TensorShape is ONE shape; an isinstance-only check calls it a "
             "collection and the contract guard then rejects a valid fusion layer"
         )
-        assert not _is_single_shape(
+        assert not is_single_shape(
             [_tf.TensorShape([2, 5, 96]), _tf.TensorShape([2, 5, 96])]
         ), "a list OF TensorShapes is a collection, not one shape"
 

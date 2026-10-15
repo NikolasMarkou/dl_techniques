@@ -1247,7 +1247,10 @@ def create_fftnet_with_head(
             raise ValueError("num_classes must be provided for segmentation tasks")
 
         # Segmentation head from vision heads factory
-        # upsampling_factor=16 means 4x2x transposed convs (2^4=16x), from 14x14 patches to 224x224
+        # upsampling_factor=patch_size: log2(patch_size) stride-2 transposed
+        # convs take the patch grid back to image size (16 -> 4 convs, 14x14
+        # patches to 224x224). The head refuses a patch_size that is not a
+        # power of two.
         seg_head = create_vision_head(
             VisionTaskType.SEGMENTATION,
             num_classes=num_classes,

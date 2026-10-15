@@ -15,20 +15,21 @@ Classes
 * :class:`SegmentationHead` -- one map of per-pixel class logits, upsampled
   towards input size. The only head here that returns a bare tensor.
 * :class:`DepthEstimationHead` -- one depth map, plus the tensor it was
-  scaled from.
+  scaled from (progressive decoder) or the last decoder features (DPT).
 * :class:`ClassificationHead` -- one label for the whole image. Returns
   pre-softmax ``'logits'`` and their softmax under ``'probabilities'``.
 * :class:`InstanceSegmentationHead` -- detection outputs plus per-instance
   mask logits.
 * :class:`EnhancementHead` -- a restored or upscaled image.
+* :class:`MultiTaskHead` -- several heads behind one layer. It does not
+  inherit from :class:`BaseVisionHead`.
 
 No head applies an activation to a class score. The class map, the instance
 masks and the detection scores are logits; compile with ``from_logits=True``
 or apply ``softmax``/``sigmoid`` yourself. The one output squashed inside a
-head is :class:`DepthEstimationHead`'s sigmoid, a range map that the depth is
-scaled from, not a class score.
-* :class:`MultiTaskHead` -- several heads behind one layer. It does not
-  inherit from :class:`BaseVisionHead`.
+head is the progressive :class:`DepthEstimationHead`'s sigmoid, a range map
+that the depth is scaled from, not a class score. Its DPT decoder applies
+``dpt_output_activation`` instead (``'linear'`` by default).
 
 Helpers
 -------
@@ -81,6 +82,7 @@ from ...attention.factory import (
 )
 from ...norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
 from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -896,7 +898,7 @@ class SegmentationHead(BaseVisionHead):
         │ upsample_layers                 │
         │ Conv2DTranspose stride 2        │
         └────────────────┬────────────────┘
-                         ▼ int(sqrt(upsampling_factor)) of them
+                         ▼ log2(upsampling_factor) of them
         ┌─────────────────────────────────┐
         │ seg_head: Conv2D 1x1     linear │
         └────────────────┬────────────────┘
@@ -909,10 +911,10 @@ class SegmentationHead(BaseVisionHead):
     widens the tensor again, so the built shapes follow ``call`` rather than
     the block widths alone.
 
-    The output resolution is ``2 ** int(upsampling_factor ** 0.5)`` times the
-    input. With the default ``upsampling_factor=4`` that is 2 layers, so 4x.
-    The value is a count of doublings once square-rooted, not the factor
-    itself.
+    The output resolution is ``upsampling_factor`` times the input: one
+    stride-2 transposed conv per doubling, ``log2(upsampling_factor)`` of
+    them. With the default ``upsampling_factor=4`` that is 2 layers. A factor
+    that is not a power of two raises ``ValueError``.
 
     Input shape:
         ``(batch, height, width, channels)``, or a list of such shapes.
@@ -922,8 +924,8 @@ class SegmentationHead(BaseVisionHead):
 
     :param num_classes: Number of segmentation classes.
     :type num_classes: int
-    :param upsampling_factor: Its integer square root is the number of
-        stride-2 transposed convs to build.
+    :param upsampling_factor: Output resolution over input resolution, a
+        power of two. ``log2`` of it stride-2 transposed convs are built.
     :type upsampling_factor: int
     :param use_skip_connections: Concatenate list inputs as skips. Ignored
         when the input is a single tensor.
@@ -962,8 +964,8 @@ class SegmentationHead(BaseVisionHead):
 
         :param num_classes: Number of segmentation classes.
         :type num_classes: int
-        :param upsampling_factor: Its integer square root is the number of
-            stride-2 transposed convs to build.
+        :param upsampling_factor: Output over input resolution, a power of
+            two.
         :type upsampling_factor: int
         :param use_skip_connections: Concatenate list inputs as skips.
         :type use_skip_connections: bool
@@ -996,6 +998,21 @@ class SegmentationHead(BaseVisionHead):
 
         if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is None:
             raise ValueError("explicit_skip_channels is required when skip_channel_mode='explicit'")
+
+        # DECISION plan-2026-10-14T062616-81938e81/D-028
+        # One stride-2 transposed conv per doubling: log2(factor) of them. Do
+        # NOT go back to int(sqrt(factor)): it equals log2 only at 2, 4, 16
+        # and 32, so factor 8 gave 4x and 64 gave 256x, and FFTNet (factor =
+        # patch_size) returned a map that was not image-sized for patch 8.
+        # See decisions.md D-028.
+        if (isinstance(upsampling_factor, bool)
+                or not isinstance(upsampling_factor, int)
+                or not is_power_of_two(upsampling_factor)):
+            raise ValueError(
+                f"upsampling_factor must be a power of two (1, 2, 4, 8, ...), "
+                f"got {upsampling_factor!r}"
+            )
+        self._num_upsamples = upsampling_factor.bit_length() - 1
 
         self._create_segmentation_layers()
 
@@ -1050,7 +1067,7 @@ class SegmentationHead(BaseVisionHead):
 
         # Upsampling layers
         self.upsample_layers = []
-        for i in range(int(self.upsampling_factor ** 0.5)):
+        for i in range(self._num_upsamples):
             # Determine filter count for upsample layer
             if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
                 # After 3 refine blocks, channels = skip_ch[-3] // 2 = skip_ch[0] // 2
@@ -1111,11 +1128,19 @@ class SegmentationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         """
+        # DECISION plan-2026-10-14T062616-81938e81/D-027
+        # Decide "list of shapes" by the ELEMENT type (is_single_shape), NOT
+        # by isinstance(input_shape, list): load_model rebuilds this layer
+        # from a JSON build_config, where ONE shape arrives as a list of ints,
+        # and the list test then read it as several one-int shapes, so every
+        # saved model holding this head failed to load. See decisions.md D-027.
+        shape_list = not is_single_shape(input_shape)
+
         # For sequence input, compute the spatial shape after reshaping
         if self.input_format == "sequence":
             if self.patch_grid_size is None:
                 raise ValueError("patch_grid_size must be set for sequence input format")
-            if isinstance(input_shape, list):
+            if shape_list:
                 spatial_shapes = []
                 for shape in input_shape:
                     batch, seq_len, dim = shape
@@ -1127,11 +1152,11 @@ class SegmentationHead(BaseVisionHead):
                 h, w = self.patch_grid_size
                 input_shape = (batch, h, w, dim)
 
-        if isinstance(input_shape, list) and self.use_skip_connections:
+        if shape_list and self.use_skip_connections:
             base_shape = input_shape[-1]
             skip_shapes = input_shape[:-1][::-1]
         else:
-            base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
+            base_shape = input_shape[-1] if shape_list else input_shape
             skip_shapes = []
 
         # In explicit mode, validate skip channels
@@ -1254,8 +1279,8 @@ class SegmentationHead(BaseVisionHead):
         """
         Report the output shape.
 
-        Each of the ``int(upsampling_factor ** 0.5)`` transposed convs
-        doubles height and width. The output conv emits ``num_classes``
+        Each of the ``log2(upsampling_factor)`` transposed convs doubles
+        height and width. The output conv emits ``num_classes``
         channels. A list input is measured by its last entry.
 
         For sequence input format, the input shape (B, N, D) is reshaped
@@ -1266,7 +1291,9 @@ class SegmentationHead(BaseVisionHead):
         :return: Shape ``(batch, out_height, out_width, num_classes)``.
         :rtype: Tuple[Optional[int], ...]
         """
-        base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
+        base_shape = (
+            input_shape if is_single_shape(input_shape) else input_shape[-1]
+        )
         batch = base_shape[0]
 
         # Handle sequence input format
@@ -1278,7 +1305,7 @@ class SegmentationHead(BaseVisionHead):
         else:
             height, width = base_shape[1], base_shape[2]
 
-        scale = 2 ** int(self.upsampling_factor ** 0.5)
+        scale = self.upsampling_factor
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
         return (batch, out_height, out_width, self.num_classes)
@@ -1313,11 +1340,13 @@ class SegmentationHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DepthEstimationHead(BaseVisionHead):
     """
-    A depth map, at eight times the input resolution.
+    A depth map, at eight times the input resolution by default.
 
-    Three stages each refine the features and then double height and width,
-    so the output is ``8H`` by ``8W``. A sigmoid conv produces a normalized
-    map, which is then scaled into ``[min_depth, max_depth]``.
+    With the default ``decoder_style='progressive'``, three stages each
+    refine the features and then double height and width, so the output is
+    ``8H`` by ``8W``. A sigmoid conv produces a normalized map, which is then
+    scaled into ``[min_depth, max_depth]``. The diagram below is this mode.
+    ``decoder_style='dpt'`` is a different decoder, described after it.
 
     **Architecture Overview:**
 
@@ -1335,8 +1364,8 @@ class DepthEstimationHead(BaseVisionHead):
         └────────────────┬────────────────┘
                          ▼
         ┌─────────────────────────────────┐
-        │ depth_blocks: 3 x (ConvBlock    │
-        │ then Conv2DTranspose stride 2)  │
+        │ 3 x (depth_conv_blocks[i], then │
+        │ depth_upsamples[i] stride 2)    │
         └────────────────┬────────────────┘
                          ▼ 8x spatial, channels halved 3x
         ┌─────────────────────────────────┐
@@ -1370,12 +1399,25 @@ class DepthEstimationHead(BaseVisionHead):
     ``output_channels=2``. Neither changes the scaling, so a flow vector
     comes out squeezed into the depth range.
 
+    ``decoder_style='dpt'`` (the DepthAnything decoder) runs one
+    ``Conv2D -> BatchNormalization -> activation`` stage per ``dpt_dims``
+    entry, with a 2x bilinear upsample after each of the first
+    ``log2(dpt_upsample_factor)`` stages, then ``dpt_output_conv``. Its
+    ``'depth'`` is that conv's output under ``dpt_output_activation``
+    (``'linear'`` by default, so no sigmoid), and ``min_depth``,
+    ``max_depth`` and ``use_log_depth`` are stored but NOT applied.
+    ``'confidence'`` is the last stage's features, ``dpt_dims[-1]`` channels
+    wide, not a map shaped like ``'depth'``.
+
     Input shape:
         ``(batch, height, width, channels)``.
 
     Output shape:
-        ``{'depth': (batch, 8 * height, 8 * width, output_channels),
-        'confidence': the same shape}``.
+        Progressive: ``{'depth': (batch, 8 * height, 8 * width,
+        output_channels), 'confidence': the same shape}``. DPT, with
+        ``s = dpt_upsample_factor``: ``{'depth': (batch, s * height,
+        s * width, output_channels), 'confidence': (batch, s * height,
+        s * width, dpt_dims[-1])}``.
 
     :param output_channels: Channel count of the output map. 1 for depth.
     :type output_channels: int
@@ -1387,8 +1429,12 @@ class DepthEstimationHead(BaseVisionHead):
     :type use_log_depth: bool
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
-    :ivar depth_blocks: Three ``[ConvBlock, Conv2DTranspose]`` pairs.
-    :vartype depth_blocks: List[List[keras.layers.Layer]]
+    :ivar depth_conv_blocks: The three refinement ``ConvBlock`` s
+        (progressive decoder).
+    :vartype depth_conv_blocks: List[ConvBlock]
+    :ivar depth_upsamples: The three stride-2 ``Conv2DTranspose`` layers,
+        each applied after the ``ConvBlock`` of the same index.
+    :vartype depth_upsamples: List[keras.layers.Conv2DTranspose]
     :ivar depth_head: Output ``Conv2D(output_channels)`` with sigmoid.
     :vartype depth_head: keras.layers.Conv2D
     """
@@ -1470,19 +1516,30 @@ class DepthEstimationHead(BaseVisionHead):
         """
 
         if self.decoder_style == "progressive":
-            # Progressive upsampling with refinement (original behavior)
-            self.depth_blocks = []
+            # Progressive upsampling with refinement (original behavior).
+            #
+            # DECISION plan-2026-10-14T062616-81938e81/D-027
+            # Two FLAT lists, paired by index. Do NOT nest them back into a
+            # list of [conv, upsample] pairs: Keras does not track a layer
+            # inside a nested list for saving, so a .keras round trip
+            # silently restored none of these six kernels (measured: the
+            # reloaded depth differed by up to 17.3 with no warning). See
+            # decisions.md D-027.
+            self.depth_conv_blocks = []
+            self.depth_upsamples = []
             channels = self.hidden_dim
 
             for i in range(3):
-                self.depth_blocks.append([
+                self.depth_conv_blocks.append(
                     ConvBlock(
                         filters=channels,
                         kernel_size=3,
                         normalization_type=self.normalization_type,
                         activation_type=self.activation_type,
                         name=f'depth_conv_{i}'
-                    ),
+                    )
+                )
+                self.depth_upsamples.append(
                     layers.Conv2DTranspose(
                         filters=channels // 2,
                         kernel_size=3,
@@ -1490,7 +1547,7 @@ class DepthEstimationHead(BaseVisionHead):
                         padding='same',
                         name=f'depth_upsample_{i}'
                     )
-                ])
+                )
                 channels = channels // 2
 
             # Depth prediction layer
@@ -1596,7 +1653,8 @@ class DepthEstimationHead(BaseVisionHead):
         if self.decoder_style == "progressive":
             shape = self._common_processed_shape(input_shape)
 
-            for conv_block, upsample in self.depth_blocks:
+            for conv_block, upsample in zip(self.depth_conv_blocks,
+                                            self.depth_upsamples):
                 conv_block.build(shape)
                 shape = tuple(conv_block.compute_output_shape(shape))
                 upsample.build(shape)
@@ -1652,7 +1710,8 @@ class DepthEstimationHead(BaseVisionHead):
 
         if self.decoder_style == "progressive":
             # Progressive refinement and upsampling
-            for conv_block, upsample in self.depth_blocks:
+            for conv_block, upsample in zip(self.depth_conv_blocks,
+                                            self.depth_upsamples):
                 x = conv_block(x, training=training)
                 x = upsample(x)
 
@@ -1721,7 +1780,14 @@ class DepthEstimationHead(BaseVisionHead):
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
         shape = (batch, out_height, out_width, self.output_channels)
-        return {'depth': shape, 'confidence': shape}
+        if self.decoder_style == "progressive":
+            return {'depth': shape, 'confidence': shape}
+        # DPT's 'confidence' is the last decoder stage's features, so it has
+        # that stage's width, not output_channels.
+        return {
+            'depth': shape,
+            'confidence': (batch, out_height, out_width, self.dpt_dims[-1]),
+        }
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -2868,7 +2934,10 @@ class MultiTaskHead(keras.layers.Layer):
         Dict mapping each task name to that head's output shapes.
 
     :param task_configs: Dict mapping a task name to that head's config. Each
-        config carries a ``'task_type'`` key naming one of the five classes.
+        config carries a ``'task_type'`` key naming one of the five classes,
+        as a :class:`VisionTaskType` member or its string value.
+        ``get_config`` stores the string value, so the head survives a
+        ``.keras`` round trip.
     :type task_configs: Dict[str, Dict[str, Any]]
     :param shared_backbone_dim: Default ``hidden_dim`` for any task config
         that does not set one.
@@ -2878,7 +2947,8 @@ class MultiTaskHead(keras.layers.Layer):
     :type use_task_specific_attention: bool
     :param kwargs: Additional arguments for the base Layer class.
 
-    :ivar task_heads: Dict mapping each task name to its head instance.
+    :ivar task_heads: Dict mapping each task name to its head instance. Each
+        head is named ``'<task name>_head'`` unless its config sets ``name``.
     :vartype task_heads: Dict[str, keras.layers.Layer]
 
     :raises ValueError: From ``_create_task_heads``, when a config names a
@@ -2942,10 +3012,17 @@ class MultiTaskHead(keras.layers.Layer):
             # round-trips and repeated construction. See decisions.md / SC6.
             config = dict(config)
             task_type = config.pop('task_type')
+            if isinstance(task_type, str):
+                task_type = VisionTaskType.from_string(task_type)
 
             # Add shared configuration
             config['hidden_dim'] = config.get('hidden_dim', self.shared_backbone_dim)
             config['use_attention'] = self.use_task_specific_attention
+            # Named after the task, unless the caller names it: an unnamed
+            # head takes a process-global Keras suffix ('detection_head_2'),
+            # which a .keras reload re-enters, so every weight path under it
+            # moved across a round trip.
+            config.setdefault('name', f'{task_name}_head')
 
             # Create appropriate head
             if task_type == VisionTaskType.DETECTION:
@@ -3050,16 +3127,30 @@ class MultiTaskHead(keras.layers.Layer):
         """
         Return the constructor arguments for serialization.
 
-        ``task_configs`` is stored as the caller passed it. Nothing here
-        mutates it, so a round trip rebuilds the same heads.
+        ``task_configs`` is stored as the caller passed it, except that a
+        :class:`VisionTaskType` ``task_type`` becomes its string value.
+        Nothing here mutates the caller's dicts, so a round trip rebuilds the
+        same heads.
 
         :return: Config dict carrying ``task_configs``,
             ``shared_backbone_dim`` and ``use_task_specific_attention``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
+        # DECISION plan-2026-10-14T062616-81938e81/D-027
+        # Store each task_type as its string value. Do NOT store the caller's
+        # VisionTaskType member: an Enum is not JSON-serializable, so saving
+        # any model holding this head raised TypeError. _create_task_heads
+        # parses the string back. See decisions.md D-027.
+        task_configs = {}
+        for task_name, task_config in self.task_configs.items():
+            task_config = dict(task_config)
+            task_type = task_config['task_type']
+            if isinstance(task_type, VisionTaskType):
+                task_config['task_type'] = task_type.value
+            task_configs[task_name] = task_config
         config.update({
-            'task_configs': self.task_configs,
+            'task_configs': task_configs,
             'shared_backbone_dim': self.shared_backbone_dim,
             'use_task_specific_attention': self.use_task_specific_attention
         })
@@ -3200,17 +3291,19 @@ def create_multi_task_head(
     A :class:`TaskConfiguration` contributes its enabled tasks. A list
     contributes its entries, parsing any string through
     ``VisionTaskType.from_string``. A dict is used as the task-config mapping
-    unchanged. In the first two cases each task name is looked up in
-    ``kwargs`` for its own extra options.
+    unchanged. In the first two cases each task's own options are taken from
+    the ``kwargs`` entry named after the task's value (``detection={'num_classes':
+    80}``), and that entry is removed from ``kwargs``.
 
-    ``kwargs`` is also forwarded whole to :class:`MultiTaskHead`.
+    The remaining ``kwargs`` go to :class:`MultiTaskHead`.
 
     :param task_configuration: A :class:`TaskConfiguration`, a list of
         :class:`VisionTaskType` members or strings, or a dict mapping task
         names to config dicts.
     :type task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]]
-    :param kwargs: Per-task option dicts, keyed by task name, plus any
-        argument for :class:`MultiTaskHead`.
+    :param kwargs: Per-task option dicts, keyed by task value (list and
+        :class:`TaskConfiguration` forms only), plus any argument for
+        :class:`MultiTaskHead`.
     :return: Configured multi-task head.
     :rtype: MultiTaskHead
     :raises ValueError: If ``task_configuration`` is none of the three
@@ -3223,7 +3316,7 @@ def create_multi_task_head(
         for task in task_configuration.get_enabled_tasks():
             task_configs[task.value] = {
                 'task_type': task,
-                **kwargs.get(task.value, {})
+                **kwargs.pop(task.value, {})
             }
 
     elif isinstance(task_configuration, list):
@@ -3232,9 +3325,12 @@ def create_multi_task_head(
         for task in task_configuration:
             if isinstance(task, str):
                 task = VisionTaskType.from_string(task)
+            # pop, not get: a per-task dict left in kwargs would also reach
+            # MultiTaskHead(**kwargs), which refuses it as an unknown
+            # keyword, so this form could never take a per-task option.
             task_configs[task.value] = {
                 'task_type': task,
-                **kwargs.get(task.value, {})
+                **kwargs.pop(task.value, {})
             }
 
     elif isinstance(task_configuration, dict):

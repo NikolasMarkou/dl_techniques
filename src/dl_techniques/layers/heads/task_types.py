@@ -12,11 +12,8 @@ There is nothing here but imports and ``__all__``. Each name keeps the
 behaviour it has in its own sub-package.
 
 The three domain enums have distinct names (``NLPTaskType``,
-``VisionTaskType``, ``VLMTaskType``), so no name collides. ``TaskType`` is a
-back-compat alias for the vision enum: ``TaskType is VisionTaskType`` is
-``True``. There is no matching alias for the NLP or VLM enum. The anchor that
-records the alias is D-003 in
-``dl_techniques/layers/heads/vision/task_types.py``.
+``VisionTaskType``, ``VLMTaskType``), so no name collides. None of them has an
+alias.
 """
 
 from .nlp.task_types import (
@@ -25,7 +22,6 @@ from .nlp.task_types import (
 )
 from .vision.task_types import (
     VisionTaskType,
-    TaskType,
     TaskConfiguration,
     CommonTaskConfigurations,
     parse_task_list,
@@ -42,9 +38,6 @@ __all__ = [
     "NLPTaskConfig",
     # --- Vision ---
     "VisionTaskType",
-    # Back-compat alias: TaskType is VisionTaskType. The anchor is D-003 in
-    # vision/task_types.py.
-    "TaskType",
     "TaskConfiguration",
     "CommonTaskConfigurations",
     "parse_task_list",

@@ -39,7 +39,9 @@ head_inputs = {
     # Shape: [Batch, Dim] or [Batch, Seq_Len, Dim]
     'text_features': text_tensor,
 
-    # Alias for VQA for clarity
+    # VQAHead reads this key INSTEAD of 'text_features'; the other three
+    # heads read 'text_features'. A MultiTaskVLMHead mixing VQA with another
+    # task therefore needs both keys.
     'question_features': text_tensor
 }
 ```
@@ -52,7 +54,17 @@ Heads always return a dictionary containing task-specific tensors.
 | **Image Captioning** | `{'logits': [B, Seq, Vocab], 'hidden_states': [B, Seq, Dim]}` |
 | **VQA** | `{'answer_logits': [B, Num_Answers]}` |
 | **Visual Grounding** | `{'bbox': [B, 4], 'confidence': [B, Regions], 'grounded_features': [B, Dim]}` |
-| **Matching** | `{'logits': [B, B], 'match_score': [B], 'vision_embeddings': [B, ProjDim], ...}` |
+| **Matching** | `{'similarity_matrix': [B, B], 'logits': [B, B], 'match_score': [B], 'vision_embeddings': [B, ProjDim], 'text_embeddings': [B, ProjDim]}` |
+
+**No head squashes a class-like score.** Every score above is a pre-activation logit, including the
+two whose key names read like probabilities: grounding's `'confidence'` (one logit per region, from a
+linear `Dense(1)`) and matching's `'match_score'` (one logit per pair, from a linear `Dense(1)`).
+Neither is confined to `[0, 1]`. Train them with `from_logits=True`, or apply `keras.ops.sigmoid`
+yourself. The grounding region pick is `argmax` over the logits, which is the same region `argmax`
+over their sigmoid would pick. The one squashed output is grounding's `'bbox'`: a range map, passed
+through `ops.sigmoid` so the box lies in `(0, 1)`. Archives saved before 2026-10-15, when both
+scorers were `Dense(1, activation='sigmoid')`, rebuild with linear scorers; their saved weights load,
+but the outputs are then logits, not the sigmoid values they were trained to emit.
 
 ---
 
@@ -87,7 +99,7 @@ head = create_vlm_head(config, vision_dim=768, text_dim=768, pooling_strategy="a
 ### 3.3. Visual Grounding
 *   **Task Type**: `VISUAL_GROUNDING`
 *   **Head Class**: `VisualGroundingHead` (Fusion-Based)
-*   **Description**: Fuses a text query with each visual region feature, scores each region for relevance, and regresses a bounding box from the top-scoring region's fused features.
+*   **Description**: Fuses a text query with each visual region feature, scores each region for relevance (one logit per region under `'confidence'`), and regresses a bounding box from the top-scoring region's fused features (sigmoid range map under `'bbox'`).
 *   **Inputs**: `vision_features` (unpooled regions) `[B, Regions, Dim]`, `text_features` `[B, Seq, Dim]`.
 *   **Key Config**: Configured with `fusion_strategy` and `fusion_config`. Defaults to `'gated'` fusion.
 
@@ -99,8 +111,8 @@ head = create_vlm_head(config, vision_dim=768, text_dim=768, fusion_strategy='ga
 ### 3.4. Image-Text Matching
 *   **Task Type**: `IMAGE_TEXT_MATCHING`
 *   **Head Class**: `ImageTextMatchingHead` (Fusion-Based)
-*   **Description**: A dual-purpose head. It projects features for CLIP-style contrastive alignment and separately fuses features to produce a fine-grained matching score for a single image-text pair.
-*   **Inputs**: `vision_features` `[B, Dim]`, `text_features` `[B, Dim]` (expects pooled features).
+*   **Description**: A dual-purpose head. It projects features for CLIP-style contrastive alignment and separately fuses features to produce a fine-grained matching logit (`'match_score'`) for a single image-text pair.
+*   **Inputs**: `vision_features` and `text_features`, each `[B, Dim]` (used as given) or `[B, Seq, Dim]` (mean-pooled over axis 1 first). Both must be `hidden_size` wide for the fusion.
 *   **Key Config**: Configured with `projection_dim`, `temperature`, and `fusion_strategy`.
 
 ```python
@@ -129,11 +141,11 @@ These options, passed to `create_vlm_head`, configure the `MultiModalFusion` lay
 |:---|:---|:---|:---|
 | `vision_dim` | `int` | `768` | Dimension of the input vision features. |
 | `text_dim` | `int` | `768` | Dimension of the input text features. |
-| `fusion_strategy` | `FusionStrategy`| `'cross_attention'` | The core fusion mechanism. Options include:<br>`'cross_attention'`, `'concatenation'`, `'addition'`, `'multiplication'`, `'gated'`, `'bilinear'`, `'tensor_fusion'`. |
+| `fusion_strategy` | `FusionStrategy`| `'gated'` (grounding), `'concatenation'` (matching) | The core fusion mechanism. Six strategies work: `'concatenation'`, `'addition'`, `'multiplication'`, `'gated'`, `'bilinear'`, `'tensor_fusion'`. `'cross_attention'` (one output per modality) and `'attention_pooling'` (rank-2 output) raise `ValueError` at build: the heads need one rank-preserving tensor. The `BaseVLMHead` signature default `'cross_attention'` is therefore never usable; both subclasses override it. |
 | `fusion_config` | `Dict` | `{}` | A dictionary of fine-grained parameters for the chosen `fusion_strategy`. |
-| `normalization_type`| `NormalizationType`| `'layer_norm'`| Normalization after fusion. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, etc. |
-| `activation_type` | `ActivationType`| `'gelu'` | Activation for post-fusion layers. Options include:<br>`'gelu'`, `'relu'`, `'silu'`, `'swish'`, `'mish'`, etc. |
-| `use_post_fusion_ffn`| `bool` | `True` | Adds a Transformer-style FFN block after fusion. |
+| `normalization_type`| `NormalizationType`| `'layer_norm'`| Normalization after fusion, applied by `ImageTextMatchingHead` only. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, etc. |
+| `activation_type` | `ActivationType`| `'gelu'` | Stored and serialized; **no layer reads it**. |
+| `use_post_fusion_ffn`| `bool` | `True` | Adds a Transformer-style FFN block after fusion. Only `ImageTextMatchingHead` runs it; `VisualGroundingHead` goes from the fusion straight to its scorer and builds no FFN whatever this says. |
 | `ffn_type` | `FFNType` | `'mlp'` | Type of post-fusion FFN. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, etc. |
 | `ffn_expansion_factor`| `int`| `4`| Hidden dimension expansion factor for the post-fusion FFN. |
 
@@ -143,7 +155,7 @@ These options, passed to `create_vlm_head`, configure the `MultiModalFusion` lay
 
 The choice of `fusion_strategy` for fusion-based heads is critical and task-dependent.
 
-*   **`'cross_attention'`**: The most powerful and expressive strategy. One modality (e.g., text) queries the other (e.g., vision), allowing for deep, token-by-token reasoning. Ideal for tasks requiring fine-grained alignment and understanding.
+*   **`'cross_attention'`**: One modality (e.g., text) queries the other (e.g., vision), token by token. **Not usable by the two fusion-based heads**: it returns one tensor per modality, and both heads raise `ValueError` at build (so does `'attention_pooling'`, which returns a rank-2 tensor). `ImageCaptioningHead` and `VQAHead` do not inherit from `BaseVLMHead` and take no `fusion_strategy`.
 *   **`'concatenation'`**: Simple, fast, and effective. It concatenates the pooled vision and text vectors. Excellent for matching and retrieval tasks where the subsequent MLP can learn the interactions.
 *   **`'gated'`**: Learns a dynamic "gate" to weigh the importance of each modality before combining them. Useful when one modality might be more informative than the other depending on the sample (e.g., visual grounding).
 *   **`'bilinear'`**: Models second-order interactions between features via an explicit outer product of the two modality vectors, flattened and projected. This is the only strategy here that forms a genuine cross-modal product, and it is the **most expensive**: the projection weight is `dim^2 x dim`, i.e. cubic in `dim` (262,336 params at `dim=64`, vs 8,384 for `'concatenation'`).
@@ -195,9 +207,9 @@ Each VLM task requires a specific loss function.
 
 *   **Captioning**: `SparseCategoricalCrossentropy` on token logits, often with label smoothing.
 *   **VQA**: `SparseCategoricalCrossentropy` on answer logits for classification over a fixed answer set.
-*   **Grounding**: A combination of a bounding box regression loss (e.g., GIoU loss) and a classification/scoring loss (e.g., `BinaryCrossentropy` on confidences).
+*   **Grounding**: A combination of a bounding box regression loss (e.g., GIoU loss) on `'bbox'`, which is already in `(0, 1)`, and a scoring loss on the region logits, e.g. `BinaryCrossentropy(from_logits=True)` on `'confidence'`.
 *   **Matching (Contrastive)**: InfoNCE loss applied to the `logits` (temperature-scaled similarity matrix).
-*   **Matching (Fine-grained)**: `BinaryCrossentropy` on the `match_score` for binary classification.
+*   **Matching (Fine-grained)**: `BinaryCrossentropy(from_logits=True)` on `'match_score'`, which is a logit.
 
 ### Best Practices
 1.  **Start with Pretrained Encoders**: Always initialize your vision and text encoders with pretrained weights (e.g., from CLIP, ViT, BERT) for faster convergence and better performance.

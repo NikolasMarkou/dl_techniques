@@ -4,8 +4,11 @@ Task-head layers for `dl_techniques`, organized by domain. Single merged
 package consolidating the formerly-separate `nlp_heads/`, `vision_heads/`, and
 `vlm_heads/` packages into `nlp/`, `vision/`, `vlm/` sub-packages, each keeping
 its own `factory.py` + `task_types.py` + `README.md`. Relocated via `git mv`;
-every layer-class name is preserved verbatim, so existing `.keras` checkpoints
-stay loadable.
+every layer-class name is preserved verbatim, so the registry keys in existing
+`.keras` archives still resolve. Whether such an archive LOADS is a separate
+question: the vision and VLM head layouts and output contracts changed on
+2026-10-14/15, and `README.md` / `vision/README.md` / `vlm/README.md` say what
+loads, what fails and what loads with changed semantics.
 
 **Registration (current).** These classes register through
 `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, from
@@ -29,8 +32,8 @@ directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
 **Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
 independent of `__module__`, so two same-named classes claim one slot and the last import
 silently wins. The helper additionally binds `Custom>ClassName` as a legacy alias to the same
-object — which is why checkpoints written before the registration migration (and before this package merge)
-still load.
+object — which is why the class keys of checkpoints written before the registration migration (and before
+this package merge) still resolve.
 
 ## Layers (22 classes, grouped by domain)
 
@@ -107,7 +110,7 @@ still load.
 - `vlm/factory.py` — `create_vlm_head(task_config, ...)`,
   `create_multi_task_vlm_head(...)`.
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
-  `TaskType` (alias), `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
+  `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
   `VLMTaskConfig`, `TaskConfiguration`, `parse_task_list`,
   `CommonTaskConfigurations`). Multi-task heads keep domain-specific
   `task_configs` shapes and are NOT routed through `create_head`.
@@ -137,9 +140,25 @@ still load.
   would change values AND break checkpoint serialization. This is the **partial
   delegation** (D-002); do NOT route the `attention` branch through
   `SequencePooling`.
-- **`VisionTaskType` / `TaskType` alias.** Vision's generically-named `TaskType`
-  was renamed to `VisionTaskType`; a module-level `TaskType = VisionTaskType`
-  alias is kept (and re-exported) as a back-compat safety net (D-003).
+- **`VisionTaskType` has no alias.** Vision's generically-named task enum was
+  renamed to `VisionTaskType`; the back-compat alias for the old name was
+  deleted on 2026-10-15 (no in-tree importer, no legacy names per the owner).
+  Do not re-add it; `tests/test_layers/test_heads/test_the_vision_task_enum_has_no_alias.py`
+  pins its absence.
+- **Logits out.** No head applies an activation to a class-like score: every
+  classification, detection, segmentation, instance-mask, VQA, captioning,
+  grounding `'confidence'` and matching `'match_score'` output is a
+  pre-activation logit. The only squashed outputs are range maps for
+  regression targets: the progressive `DepthEstimationHead` sigmoid and the
+  grounding `'bbox'` sigmoid. Do not add an activation to a class-like
+  output; the consumer's loss takes `from_logits=True`. `README.md` §
+  Output contract is the authoritative list.
+- **The vision and VLM heads round-trip by value.** `tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`
+  saves and reloads every vision head variant and compares every weight by
+  path; `test_vlm.py::TestVLMHeadFamilyExplicitBuild` does the same for the
+  VLM heads by output. Keep sub-layers in flat lists or named attributes (Keras does not save
+  a layer held only in a nested list), name every sub-head, and keep
+  `get_config` JSON-serializable (no `Enum` members).
 - **`EnhancementHead` is module-scope**, not a closure-local class inside
   `create_enhancement_head()`. Do NOT re-nest it. Its primary key is
   `dl_techniques.layers.heads.vision.factory>EnhancementHead`, and the legacy alias the helper

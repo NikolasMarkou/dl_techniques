@@ -103,6 +103,60 @@ def canonical_binary_input_shape(
 # ---------------------------------------------------------------------
 
 
+def is_single_shape(shape: Any) -> bool:
+    """Is this ONE shape, rather than a collection of shapes?
+
+    Interface contract, shared by every layer that accepts "one shape or a
+    list of shapes" (``layers/heads/vlm/factory.py`` checks a fusion output
+    with it; ``layers/heads/vision/factory.py``'s ``SegmentationHead`` checks
+    its ``build`` and ``compute_output_shape`` input with it):
+
+    * Returns ``True`` for one shape: a list, tuple or other sized iterable
+      (``tf.TensorShape``) whose entries are ints or ``None``.
+    * Returns ``False`` for a collection of shapes (entries that are
+      themselves sequences), for a string, and for anything that is not a
+      sized iterable.
+    * Never raises.
+
+    A shape and a list of shapes are both sequences, so
+    ``isinstance(shape, (list, tuple))`` cannot tell them apart. The
+    discriminator is the ELEMENT type. This matters most after
+    deserialization: Keras restores a layer's ``build_config`` input shape
+    from JSON as a LIST of ints, which a list-means-several-shapes test reads
+    as several one-int "shapes".
+
+    Moved here from ``layers/heads/vlm/factory.py`` (``_is_single_shape``),
+    where ``BaseVLMHead._build_fusion_stack`` used it to reject a per-modality
+    fusion output before Keras surfaced it as ``ValueError: Invalid dtype:
+    tuple``, when ``SegmentationHead`` needed the same rule.
+
+    :param shape: A shape, or a list/tuple of shapes.
+    :type shape: Any
+    :return: ``True`` for a single shape, ``False`` otherwise.
+    :rtype: bool
+    """
+    # `TensorShape` is a sequence of ints but not a list/tuple, so an
+    # isinstance check against (list, tuple) alone MISCLASSIFIES it as "not a
+    # single shape" -- and a list OF TensorShapes as "single".
+    # A string is iterable but is never a shape.
+    if isinstance(shape, (str, bytes)):
+        return False
+    if isinstance(shape, (list, tuple)):
+        entries = shape
+    # Any other sized iterable, such as a `tf.TensorShape`.
+    elif hasattr(shape, "__iter__") and hasattr(shape, "__len__"):
+        entries = list(shape)
+    else:
+        return False
+    return not any(
+        isinstance(entry, (list, tuple))
+        or (hasattr(entry, "__len__") and not isinstance(entry, (str, bytes, int)))
+        for entry in entries
+    )
+
+# ---------------------------------------------------------------------
+
+
 def reshape_to_2d(
         weights: tf.Tensor,
         name: Optional[str] = None) -> tf.Tensor:

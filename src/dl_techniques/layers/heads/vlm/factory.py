@@ -77,6 +77,7 @@ from ...norms import NormalizationType
 from ...norms.factory import create_normalization_layer
 from ....utils.logger import logger
 from ....utils.masking import MaskFactory
+from ....utils.tensors import is_single_shape
 from .task_types import VLMTaskConfig, VLMTaskType
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -132,45 +133,6 @@ def _accepted_constructor_kwargs(head_class: type) -> frozenset:
                 continue
             accepted.add(name)
     return frozenset(accepted)
-
-
-def _is_single_shape(shape: Any) -> bool:
-    """Is this ONE shape, rather than a collection of shapes?
-
-    ``compute_output_shape`` may legitimately return either, and both are
-    sequences, so ``isinstance(shape, (list, tuple))`` cannot tell them apart.
-    The discriminator is the ELEMENT type: a single shape holds ints (or
-    ``None`` for a dynamic axis), a collection holds sequences.
-
-    Used by :meth:`BaseVLMHead._build_fusion_stack` to reject a fusion strategy
-    whose output is per-modality before the shape reaches Keras and surfaces as
-    ``ValueError: Invalid dtype: tuple`` (D-011).
-
-    :param shape: A shape tuple, or a list/tuple of shape tuples.
-    :type shape: Any
-    :return: ``True`` for a single shape, ``False`` for a collection of them.
-    :rtype: bool
-    """
-    # `TensorShape` is a sequence of ints but not a list/tuple, so an
-    # isinstance check against (list, tuple) alone MISCLASSIFIES it as "not a
-    # single shape" -- and a list OF TensorShapes as "single". Not reachable from
-    # today's `MultiModalFusion`, which returns plain tuples, but a latent trap
-    # for any fusion layer that returns backend shape objects.
-    # A string is iterable but is never a shape.
-    if isinstance(shape, (str, bytes)):
-        return False
-    if isinstance(shape, (list, tuple)):
-        entries = shape
-    # Any other sized iterable, such as a `tf.TensorShape`.
-    elif hasattr(shape, "__iter__") and hasattr(shape, "__len__"):
-        entries = list(shape)
-    else:
-        return False
-    return not any(
-        isinstance(entry, (list, tuple))
-        or (hasattr(entry, "__len__") and not isinstance(entry, (str, bytes, int)))
-        for entry in entries
-    )
 
 
 def _ffn_width_kwargs(ffn_type: str, width: int) -> Dict[str, int]:
@@ -674,7 +636,7 @@ class BaseVLMHead(keras.layers.Layer):
         # (cross_attention). Once on one that drops rank (attention_pooling,
         # checked below and stated in this method's `:raises` field). 6 of the
         # 8 strategies pass both checks. See decisions.md D-011.
-        if not _is_single_shape(fused_shape):
+        if not is_single_shape(fused_shape):
             raise ValueError(
                 f"fusion_strategy={self.fusion_strategy!r} produces one output "
                 f"per modality (compute_output_shape returned "
@@ -1660,10 +1622,15 @@ class VisualGroundingHead(BaseVLMHead):
     ``ValueError: Modality 1 dimension 32 doesn't match expected dim 64`` from
     the fusion layer. Project both streams to one width before this head.
 
-    The two output activations differ, and the diagram says which is which.
-    ``confidence_scorer`` is a ``Dense(1, activation="sigmoid")``. The box
-    values are NOT squashed by their ``Dense``: ``bbox_regressor`` is linear,
-    and ``call`` applies ``ops.sigmoid`` to its output as a separate step.
+    The two outputs are treated differently, and the diagram says which is
+    which. ``confidence_scorer`` is a linear ``Dense(1)``, so ``'confidence'``
+    holds one pre-sigmoid LOGIT per region: it is not confined to ``[0, 1]``.
+    Train it with ``BinaryCrossentropy(from_logits=True)``, or apply
+    ``keras.ops.sigmoid`` yourself for a score. The region pick is
+    unaffected, because the sigmoid is monotonic and ``argmax`` of the
+    logits is ``argmax`` of their sigmoid. The box is a range map, not a
+    class score: ``bbox_regressor`` is linear, and ``call`` applies
+    ``ops.sigmoid`` to its output so ``'bbox'`` lies in ``(0, 1)``.
 
     **Architecture Overview:**
 
@@ -1688,13 +1655,14 @@ class VisualGroundingHead(BaseVLMHead):
                              ▼ (B, N_regions, hidden_dim)
                   ┌─────────────────────┐
                   │ confidence_scorer   │
-                  │ Dense 1, sigmoid    │
+                  │ Dense 1, linear     │
                   └──────────┬──────────┘
                              ▼ squeeze
                     ┌────────┴────────┐
                     ▼                 ▼
              'confidence'      argmax over regions
             (B, N_regions)     take_along_axis
+            region logits
                                   │
                                   ▼ (B, hidden_dim)
                           ┌───────┴─────────┐
@@ -1720,7 +1688,8 @@ class VisualGroundingHead(BaseVLMHead):
 
     Output shape:
         ``{'bbox': (batch, 4), 'confidence': (batch, num_regions),
-        'grounded_features': (batch, hidden_dim)}``.
+        'grounded_features': (batch, hidden_dim)}``. ``'bbox'`` is in
+        ``(0, 1)``; ``'confidence'`` is region logits.
 
     :param kwargs: Arguments for :class:`BaseVLMHead`. ``fusion_strategy``
         defaults to ``"gated"`` here rather than to the base class value.
@@ -1728,7 +1697,7 @@ class VisualGroundingHead(BaseVLMHead):
     :ivar bbox_regressor: Linear ``Dense`` producing the four box values;
         ``call`` applies the sigmoid.
     :vartype bbox_regressor: keras.layers.Dense
-    :ivar confidence_scorer: ``Dense`` producing one score per region.
+    :ivar confidence_scorer: Linear ``Dense`` producing one logit per region.
     :vartype confidence_scorer: keras.layers.Dense
     """
 
@@ -1746,8 +1715,15 @@ class VisualGroundingHead(BaseVLMHead):
         super().__init__(**kwargs)
 
         self.bbox_regressor = layers.Dense(4, name=f"{self.name}_bbox_regressor")
+        # DECISION plan-2026-10-14T062616-81938e81/D-003
+        # Linear: 'confidence' carries region logits under its old name. Do
+        # NOT put activation='sigmoid' back: the sigmoid belongs to the loss
+        # (from_logits=True) or the caller, as for every class-like output of
+        # layers/heads, and the argmax region pick is the same either way.
+        # The bbox sigmoid in call() is a range map and stays. See
+        # decisions.md D-003.
         self.confidence_scorer = layers.Dense(
-            1, activation="sigmoid", name=f"{self.name}_confidence"
+            1, name=f"{self.name}_confidence"
         )
 
     def build(self, input_shape: Union[Dict, Tuple, List]) -> None:
@@ -1803,7 +1779,8 @@ class VisualGroundingHead(BaseVLMHead):
         :type inputs: Dict[str, keras.KerasTensor]
         :param training: Keras training flag, forwarded to the fusion layer.
         :type training: Optional[bool]
-        :return: Dict with ``bbox``, ``confidence`` and ``grounded_features``.
+        :return: Dict with ``bbox`` (sigmoid range map), ``confidence``
+            (region logits) and ``grounded_features``.
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If ``vision_features`` is not rank 3.
         """
@@ -1828,7 +1805,7 @@ class VisualGroundingHead(BaseVLMHead):
         # Fuse each region with the text query. The output is [B, N_regions, D_fused].
         fused_per_region = self.fusion([vision_features, text_expanded], training=training)
 
-        # Score each aligned region's features.
+        # Score each aligned region's features: one logit per region.
         region_scores = self.confidence_scorer(fused_per_region)
         # Drop the trailing size-1 axis, leaving [B, N_regions].
         region_scores = ops.squeeze(region_scores, axis=-1)
@@ -1888,8 +1865,14 @@ class ImageTextMatchingHead(BaseVLMHead):
     contrastive branch projects both modalities into one L2-normalized space
     and returns a CLIP-style similarity matrix scaled by a learnable
     temperature. The fine-grained branch fuses the two pooled vectors and
-    returns one match score per pair. Both branches read the same pooled
+    returns one match logit per pair. Both branches read the same pooled
     tensors, and ``call`` returns five keys covering both.
+
+    No output is squashed. ``'logits'`` is the similarity matrix divided by
+    the temperature, and ``'match_score'`` comes from a linear ``Dense(1)``,
+    so it is a pre-sigmoid LOGIT, not confined to ``[0, 1]``. Train it with
+    ``BinaryCrossentropy(from_logits=True)``, or apply ``keras.ops.sigmoid``
+    yourself for a probability.
 
     It inherits from :class:`BaseVLMHead` and defaults ``fusion_strategy`` to
     ``"concatenation"``. It is the only head in this module that runs the
@@ -1918,6 +1901,7 @@ class ImageTextMatchingHead(BaseVLMHead):
         │ scale by temperature│ │ post_fusion_ffn     │
         │                     │ │ (optional)          │
         │                     │ │ similarity_head     │
+        │                     │ │ Dense 1, linear     │
         └──────────┬──────────┘ └──────────┬──────────┘
                    ▼                       ▼
          'similarity_matrix' (B, B)  'match_score' (B,)
@@ -1941,6 +1925,7 @@ class ImageTextMatchingHead(BaseVLMHead):
         ``{'similarity_matrix': (batch, batch), 'logits': (batch, batch),
         'match_score': (batch,), 'vision_embeddings': (batch,
         projection_dim), 'text_embeddings': (batch, projection_dim)}``.
+        ``'match_score'`` is one logit per pair.
 
     :param task_config: Configuration object for the task.
     :type task_config: VLMTaskConfig
@@ -1964,7 +1949,8 @@ class ImageTextMatchingHead(BaseVLMHead):
     :vartype vision_proj: keras.layers.Dense
     :ivar text_proj: ``Dense`` into the contrastive space.
     :vartype text_proj: keras.layers.Dense
-    :ivar similarity_head: ``Dense`` producing the fine-grained match score.
+    :ivar similarity_head: Linear ``Dense`` producing the fine-grained match
+        logit.
     :vartype similarity_head: keras.layers.Dense
     :ivar temperature: Learnable scalar weight. It is a weight, not a config
         entry, so a ``.keras`` round-trip restores it with the other weights.
@@ -2005,8 +1991,13 @@ class ImageTextMatchingHead(BaseVLMHead):
         self.projection_dim = projection_dim
         self.vision_proj = layers.Dense(projection_dim, name=f"{self.name}_vision_proj")
         self.text_proj = layers.Dense(projection_dim, name=f"{self.name}_text_proj")
+        # DECISION plan-2026-10-14T062616-81938e81/D-003
+        # Linear: 'match_score' carries a match logit under its old name. Do
+        # NOT put activation='sigmoid' back: a from_logits=True loss would
+        # squash it twice, as for every class-like output of layers/heads.
+        # See decisions.md D-003.
         self.similarity_head = layers.Dense(
-            1, activation="sigmoid", name=f"{self.name}_similarity"
+            1, name=f"{self.name}_similarity"
         )
         self.temperature = self.add_weight(
             name=f"{self.name}_temperature",
@@ -2070,8 +2061,9 @@ class ImageTextMatchingHead(BaseVLMHead):
         :param training: Keras training flag, forwarded to the fusion, norm
             and FFN layers.
         :type training: Optional[bool]
-        :return: Dict with ``similarity_matrix``, ``logits``, ``match_score``,
-            ``vision_embeddings`` and ``text_embeddings``.
+        :return: Dict with ``similarity_matrix``, ``logits``, ``match_score``
+            (one match logit per pair), ``vision_embeddings`` and
+            ``text_embeddings``.
         :rtype: Dict[str, keras.KerasTensor]
         """
         vision_features = inputs["vision_features"]
@@ -2096,7 +2088,7 @@ class ImageTextMatchingHead(BaseVLMHead):
         similarity_matrix = ops.matmul(vision_norm, ops.transpose(text_norm))
         logits = similarity_matrix / self.temperature
 
-        # 2. Fine-grained matching score.
+        # 2. Fine-grained matching logit.
         # MultiModalFusion with the concatenation strategy needs rank-3
         # (B, S, D) inputs, and the pooled features are rank-2 (B, D). Expand
         # to (B, 1, D) for the fusion, then squeeze the (B, 1, F) result back

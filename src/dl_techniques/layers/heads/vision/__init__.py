@@ -1,19 +1,17 @@
 """Public API of the vision heads sub-package.
 
-Seventeen names are exported, from two modules. ``vision/factory.py``
+Sixteen names are exported, from two modules. ``vision/factory.py``
 provides the eight head layers, three factory functions
 (``create_vision_head``, ``create_multi_task_head``,
 ``create_enhancement_head``) and ``HeadConfiguration``.
-``vision/task_types.py`` provides ``VisionTaskType``, its ``TaskType``
-back-compat alias, ``TaskConfiguration``, ``CommonTaskConfigurations`` and
-``parse_task_list``.
+``vision/task_types.py`` provides ``VisionTaskType``,
+``TaskConfiguration``, ``CommonTaskConfigurations`` and ``parse_task_list``.
 
 ``BaseVisionHead`` is exported but is not a usable head. It defines no
-``call``. It builds four sub-layers: ``norm``, ``dropout``, ``attention`` and
-``ffn``. Only ``attention`` and ``ffn`` are ever applied by a subclass
-``call``. ``norm`` and ``dropout`` are built, and ``norm`` carries weights,
-but no forward pass reaches either. Each head normalizes and drops inside its
-own ``ConvBlock`` or ``DenseBlock``. Use one of the seven task heads instead.
+``call``. It builds ``attention`` when ``use_attention`` is set and ``ffn``
+when ``use_ffn`` is set, and nothing else. Each head normalizes and drops
+inside its own ``ConvBlock`` or ``DenseBlock``. Use one of the seven task
+heads instead.
 ``get_task_suggestions`` and ``validate_task_combination`` are NOT exported;
 import them from ``.task_types`` when you need them.
 
@@ -45,7 +43,6 @@ from .factory import (
 )
 from .task_types import (
     VisionTaskType,
-    TaskType,
     TaskConfiguration,
     CommonTaskConfigurations,
     parse_task_list,
@@ -65,7 +62,6 @@ __all__ = [
     "create_enhancement_head",
     "HeadConfiguration",
     "VisionTaskType",
-    "TaskType",
     "TaskConfiguration",
     "CommonTaskConfigurations",
     "parse_task_list",

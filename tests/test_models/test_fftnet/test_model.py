@@ -175,3 +175,34 @@ class TestTheTaskModelsEmitLogits:
         assert (out < 0).any(), "no negative value: the map looks softmaxed"
         assert np.abs(out.sum(axis=-1) - 1.0).max() > reassociation_atol([4], 1, 1.0), (
             "every pixel's channels sum to 1: the map is normalized")
+
+    def test_the_segmenter_round_trips(self, tmp_path, golden_reference_device):
+        """Step 7 (D-027): ``load_model`` rebuilt the ``SegmentationHead`` from a
+        JSON shape LIST that ``build`` read as several shapes, so a saved
+        segmenter never loaded (``cannot unpack non-iterable NoneType object``,
+        measured at ``84438bee6``). Compared exactly on the golden-reference
+        device: the head's ``Conv2DTranspose`` runs a GPU backward-data kernel
+        whose autotuned algorithm can be non-deterministic on a warm GPU."""
+        x = _images(2)
+        with keras.device(golden_reference_device):
+            keras.utils.set_random_seed(0)
+            model = create_fftnet_with_head("tiny", task_type="segmentation",
+                                            num_classes=4, image_size=32,
+                                            patch_size=16)
+            out = np.asarray(model(x, training=False))
+            path = os.path.join(tmp_path, "fftnet_segmenter.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+            reloaded = np.asarray(loaded(x, training=False))
+        np.testing.assert_array_equal(reloaded, out)
+
+    def test_the_segmenter_map_is_image_sized_for_every_power_of_two_patch(self):
+        """Step 7 (D-028): the head built ``int(sqrt(patch_size))`` doublings,
+        so a patch-8 segmenter returned a 16x16 map for a 32x32 image."""
+        for patch_size in (8, 16):
+            keras.utils.set_random_seed(0)
+            model = create_fftnet_with_head("tiny", task_type="segmentation",
+                                            num_classes=4, image_size=32,
+                                            patch_size=patch_size)
+            out = model(_images(1), training=False)
+            assert tuple(out.shape) == (1, 32, 32, 4), (patch_size, tuple(out.shape))

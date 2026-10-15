@@ -70,9 +70,6 @@ from .vision import (
     create_enhancement_head,
     HeadConfiguration,
     VisionTaskType,
-    # Back-compat alias: TaskType is VisionTaskType. The anchor is D-003 in
-    # vision/task_types.py.
-    TaskType,
     TaskConfiguration,
     CommonTaskConfigurations,
     parse_task_list,
@@ -127,7 +124,6 @@ __all__ = [
     "create_enhancement_head",
     "HeadConfiguration",
     "VisionTaskType",
-    "TaskType",
     "TaskConfiguration",
     "CommonTaskConfigurations",
     "parse_task_list",

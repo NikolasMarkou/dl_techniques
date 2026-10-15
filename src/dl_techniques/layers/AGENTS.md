@@ -154,15 +154,15 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 
 ### `__init__.py` policy varies by subpackage — check before assuming
 
-The `layers/__init__.py` root **is** empty. The subpackages split almost evenly — 17 curate a
+The `layers/__init__.py` root **is** empty. The subpackages split evenly — 18 curate a
 public surface, 18 export nothing — so neither shape is the default and you have to look.
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (17) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (35) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (18) | `activations` (35 names), `adapters` (13), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (39), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (35) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
-All 35 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
+All 36 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
 `fusion` is the only "exports nothing" entry whose `__init__.py` is not a zero-byte file — it is
 docstring-only and deliberately binds no name, and its docstring says so. Re-derive both rows and
 every `__all__` length with:

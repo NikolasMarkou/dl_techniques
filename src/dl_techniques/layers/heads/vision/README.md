@@ -1,10 +1,9 @@
 # `dl_techniques.layers.heads.vision`
 
 Task heads that sit on top of a vision backbone: they take the backbone's feature map and produce
-detections, masks, depth, class logits or an enhanced image. Two modules, seventeen exported names —
+detections, masks, depth, class logits or an enhanced image. Two modules, sixteen exported names —
 eight head classes, three factory functions, `HeadConfiguration`, and the task-type vocabulary
-(`VisionTaskType`, its `TaskType` alias, `TaskConfiguration`, `CommonTaskConfigurations`,
-`parse_task_list`).
+(`VisionTaskType`, `TaskConfiguration`, `CommonTaskConfigurations`, `parse_task_list`).
 
 ```python
 from dl_techniques.layers.heads.vision import create_vision_head
@@ -13,7 +12,9 @@ head = create_vision_head('detection', num_classes=80, num_anchors=9)
 
 The wider facade `dl_techniques.layers.heads.create_head('vision', ...)` calls `create_vision_head`
 for you. `get_task_suggestions` and `validate_task_combination` are **not** exported from the
-package; import them from `.task_types`.
+package; import them from `.task_types`. Nor is `merge_head_config_overrides`, the helper a model
+uses to merge its `head_config_overrides` into its head config (it refuses `name`, `num_classes` and
+`task_type`, which the model owns); import it from `.factory`.
 
 ## Head dispatch: 10 of 37 task types reach a head
 
@@ -47,11 +48,11 @@ is descriptive only — the factory never reads it.
 
 | Head | Arguments |
 |---|---|
-| `DetectionHead` | `num_classes` (required), `num_anchors=9`, `bbox_dims=4` |
-| `SegmentationHead` | `num_classes` (required), `upsampling_factor=4`, `use_skip_connections=True` |
+| `DetectionHead` | `num_classes` (required), `num_anchors=9`, `bbox_dims=4`, `input_format='spatial'` (`'sequence'` takes `(B, N, D)` patch tokens), `patch_grid_size=None` (the `(h, w)` token grid, required for `'sequence'`), `use_regression=True` (`False` builds no regression branch and returns only `'classifications'`) |
+| `SegmentationHead` | `num_classes` (required), `upsampling_factor=4` (output over input resolution, a power of two, else `ValueError`; until 2026-10-15 it built `int(sqrt(f))` doublings, so 8 gave 4x), `use_skip_connections=True`, `skip_channel_mode='auto'`, `explicit_skip_channels=None` (required for `skip_channel_mode='explicit'`), `input_format='spatial'`, `patch_grid_size=None` (as for `DetectionHead`) |
 | `InstanceSegmentationHead` | `num_classes` (required), `num_instances=100`, `mask_size=(28, 28)` |
 | `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'`, `block_dims=None` (hidden `DenseBlock` widths; `None` is `(hidden_dim, hidden_dim // 2)`, `()` is none), `pooled_normalization_type=None` (a norm on the pooled vector), `normalization_kwargs=None` (to every head norm), `classifier_dropout_rate=0.0` (a dropout on the classifier input), `block_use_bias=True` (the hidden blocks' Dense bias; `False` before a `batch_norm`), `kernel_initializer='glorot_uniform'`, `bias_initializer='zeros'`, `kernel_regularizer=None`, `bias_regularizer=None` (the last four reach every `Dense`, the classifier included) |
-| `DepthEstimationHead` | `output_channels=1`, `min_depth=0.1`, `max_depth=100.0`, `use_log_depth=True` |
+| `DepthEstimationHead` | `output_channels=1`, `min_depth=0.1`, `max_depth=100.0`, `use_log_depth=True`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract), `dpt_dims=None` (`[256, 128, 64, 32]`), `dpt_use_bias=False`, `dpt_activation='relu'`, `dpt_output_activation='linear'`, `dpt_upsample_factor=16` (a power of 2, at most `2 ** len(dpt_dims)`) |
 | `EnhancementHead` | `output_channels=3`, `scale_factor=1`, `block_dims=None` (refinement `ConvBlock` widths; `None` is three at `hidden_dim`, `()` is none, so the head is ONE 3x3 conv: the tail conv SCUNet and DarkIR use, with the model applying any skip or residual), `output_use_bias=True` (the output conv's bias; SCUNet's tail has none) |
 | `MultiTaskHead` | `task_configs` (required dict), `shared_backbone_dim=256`, `use_task_specific_attention=True` |
 
@@ -83,18 +84,40 @@ No head applies an activation to a class score. `ClassificationHead`'s `'logits'
 `SegmentationHead` map, `DetectionHead`'s `'classifications'` and `InstanceSegmentationHead`'s
 `'instance_masks'` are pre-activation: compile with `from_logits=True`, or apply
 `keras.ops.softmax` (classes) / `keras.ops.sigmoid` (masks) yourself. `ClassificationHead` also
-returns `'probabilities' = softmax('logits')`. The one squashed output is
-`DepthEstimationHead`'s sigmoid, a range map the depth is scaled from. Archives saved before
-2026-10-14 with a softmax `seg_head`, a sigmoid `mask_head` or the common `norm` weights do not load
-and are not supported.
+returns `'probabilities' = keras.ops.softmax('logits')`, computed in the compute dtype (a float16
+softmax under `mixed_float16`, as in the NLP `TextClassificationHead`).
+
+The one squashed output is the progressive `DepthEstimationHead`'s sigmoid, a range map the depth is
+scaled from; its `'confidence'` is that sigmoid output. The DPT decoder (`decoder_style='dpt'`) is
+different: `'depth'` is `dpt_output_conv` under `dpt_output_activation` (`'linear'` by default, and
+DepthAnything passes `'linear'`), `min_depth`, `max_depth` and `use_log_depth` are stored but not
+applied, and `'confidence'` is the last decoder stage's features, `dpt_dims[-1]` channels wide.
+
+Archives saved before 2026-10-15 are not supported. Measured on archives written at `def68694a`:
+`ClassificationHead` and `EnhancementHead` archives fail to load (their stored `use_ffn=True` is now
+refused); `InstanceSegmentationHead` archives (sub-layer paths moved) and progressive
+`DepthEstimationHead` archives (they never held the refinement kernels, see below) fail to load; a
+`SegmentationHead` archive loads and returns class logits where it returned probabilities; a
+`DetectionHead` archive loads.
+
+Three save/load defects were fixed on 2026-10-15. Before then a model holding a `SegmentationHead`
+could be saved but never loaded (`load_model` rebuilt the head from a JSON shape list it misread as
+several shapes); a progressive `DepthEstimationHead` kept its three `ConvBlock`s and three
+`Conv2DTranspose` layers in a nested list, which Keras does not save, so a reloaded head silently
+ran with fresh kernels there; and a model holding a `MultiTaskHead` could not be saved at all (its
+config held `VisionTaskType` members). Every head now round-trips by value
+(`tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`).
 
 ## Input contract
 
-Heads consume a **4D feature map** `(B, H, W, C)`. The exception is `ClassificationHead` with
-`use_global_pooling=False`, which accepts a ViT-style token sequence `(B, N, C)`.
+Heads consume a **4D feature map** `(B, H, W, C)`. The exceptions take a ViT-style token sequence
+`(B, N, C)`: `ClassificationHead` with `pooling_type='cls_token'` (classifies token 0) or with
+`use_global_pooling=False` (flattens every token), and `DetectionHead` / `SegmentationHead` with
+`input_format='sequence'` and `patch_grid_size=(h, w)`, which lay the tokens out on that grid.
 `SegmentationHead` with `use_skip_connections=True` also accepts a list `[*skips, features]` — the
-highest-level map goes last, and the skips are consumed deepest-first, so each skip's spatial size
-must match the head's intermediate resolution at that step.
+highest-level map goes last, and the skips are concatenated deepest-first, one after each refinement
+block. The refinement blocks keep the resolution and the upsampling runs only after them, so every
+skip must have the feature map's own height and width.
 
 ```python
 import keras
@@ -148,14 +171,20 @@ cheap_det = create_vision_head('detection', **cfg)
 - **`MultiTaskHead` defaults to `use_task_specific_attention=True`, which builds `multi_head`
   attention** and therefore fails on a 4D input. Pass `use_task_specific_attention=False` for
   feature maps.
-- **`create_multi_task_head`'s per-task option dicts do not work with a list or `TaskConfiguration`
-  argument.** `kwargs` is read for per-task options *and* forwarded whole to `MultiTaskHead`, so
-  `create_multi_task_head([...], detection={'num_classes': 80})` raises
-  `ValueError: Unrecognized keyword arguments passed to MultiTaskHead`. Pass the dict form shown
-  above, where each entry carries its own `task_type` key.
+- **`create_multi_task_head`'s list and `TaskConfiguration` forms take each task's options as a
+  keyword dict named after the task's value**, e.g.
+  `create_multi_task_head([VisionTaskType.DETECTION, 'classification'], detection={'num_classes': 80},
+  classification={'num_classes': 10}, use_task_specific_attention=False)`. Each such dict is
+  consumed; the remaining keywords go to `MultiTaskHead`. A detection, segmentation or
+  classification task given no `num_classes` raises `TypeError`. (Until 2026-10-15 the per-task
+  dicts were also forwarded to `MultiTaskHead`, which refused them, so these forms built only
+  depth tasks.)
+- **`MultiTaskHead` accepts `task_type` as a `VisionTaskType` member or its string value**, and
+  `get_config` stores the string, so a model holding it survives a `.keras` round trip.
 - **Detection outputs are per-cell, not per-anchor-row.** `classifications` is
   `(B, H, W, num_anchors * num_classes)` and `regressions` is `(B, H, W, num_anchors * bbox_dims)`;
   reshaping to `(B, num_anchors, num_classes)` is the caller's job.
 - **`SegmentationHead` returns a bare tensor**, not a dict, unlike every other head here.
-- **Depth-family heads upsample by 8x** — a `(2, 16, 16, 64)` input gives `(2, 128, 128, C)`. Size
-  your backbone stride accordingly.
+- **Depth-family heads upsample by 8x** with the default progressive decoder — a `(2, 16, 16, 64)`
+  input gives `(2, 128, 128, C)` — and by `dpt_upsample_factor` (16 by default) with the DPT
+  decoder. Size your backbone stride accordingly.
