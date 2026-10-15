@@ -82,6 +82,10 @@ from ...attention.factory import (
 )
 from ...norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.utils.activation_serialization import (
+    deserialize_activation,
+    serialize_activation,
+)
 from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
 from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -1337,6 +1341,34 @@ class SegmentationHead(BaseVisionHead):
 # Depth Estimation Head
 # ---------------------------------------------------------------------
 
+#: Defaults of the knobs only the progressive depth decoder reads. A
+#: ``DepthEstimationHead`` argument left at ``None`` takes this value in
+#: progressive mode; the DPT mode refuses any value for these keys.
+_PROGRESSIVE_DECODER_DEFAULTS: Dict[str, Any] = {
+    'min_depth': 0.1,
+    'max_depth': 100.0,
+    'use_log_depth': True,
+}
+
+#: The two ``BaseVisionHead`` arguments only the progressive depth decoder
+#: reads (its ``ConvBlock`` s take them); the DPT mode refuses a value for
+#: either and stores ``None``. Their defaults stay in ``BaseVisionHead``.
+_PROGRESSIVE_ONLY_BASE_KNOBS: Tuple[str, ...] = (
+    'normalization_type', 'activation_type')
+
+#: Defaults of the knobs only the DPT depth decoder reads, under the same
+#: rule mirrored: progressive mode refuses any value for these keys.
+_DPT_DECODER_DEFAULTS: Dict[str, Any] = {
+    'dpt_dims': (256, 128, 64, 32),
+    'dpt_use_bias': False,
+    'dpt_activation': 'relu',
+    'dpt_output_activation': 'linear',
+    'dpt_upsample_factor': 16,
+    'dpt_kernel_initializer': 'he_normal',
+    'dpt_kernel_regularizer': None,
+}
+
+
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DepthEstimationHead(BaseVisionHead):
     """
@@ -1404,10 +1436,17 @@ class DepthEstimationHead(BaseVisionHead):
     entry, with a 2x bilinear upsample after each of the first
     ``log2(dpt_upsample_factor)`` stages, then ``dpt_output_conv``. Its
     ``'depth'`` is that conv's output under ``dpt_output_activation``
-    (``'linear'`` by default, so no sigmoid), and ``min_depth``,
-    ``max_depth`` and ``use_log_depth`` are stored but NOT applied.
+    (``'linear'`` by default, so no sigmoid and no range scaling).
     ``'confidence'`` is the last stage's features, ``dpt_dims[-1]`` channels
     wide, not a map shaped like ``'depth'``.
+
+    The two decoders share no decoder knob. ``min_depth``, ``max_depth`` and
+    ``use_log_depth`` belong to the progressive decoder, and every ``dpt_*``
+    argument to the DPT decoder. Each defaults to ``None``, which means its
+    documented default in its own mode; a value given to the mode that never
+    reads it raises ``ValueError``, and that mode stores ``None`` for it. The
+    DPT mode also refuses the base ``normalization_type`` and
+    ``activation_type``, which only the progressive ``ConvBlock`` s read.
 
     Input shape:
         ``(batch, height, width, channels)``.
@@ -1421,13 +1460,17 @@ class DepthEstimationHead(BaseVisionHead):
 
     :param output_channels: Channel count of the output map. 1 for depth.
     :type output_channels: int
-    :param min_depth: Lower end of the output range.
-    :type min_depth: float
-    :param max_depth: Upper end of the output range.
-    :type max_depth: float
+    :param min_depth: Lower end of the output range. Progressive only;
+        ``None`` means 0.1.
+    :type min_depth: Optional[float]
+    :param max_depth: Upper end of the output range. Progressive only;
+        ``None`` means 100.0.
+    :type max_depth: Optional[float]
     :param use_log_depth: Scale in log space instead of linearly.
-    :type use_log_depth: bool
-    :param kwargs: Arguments for :class:`BaseVisionHead`.
+        Progressive only; ``None`` means ``True``.
+    :type use_log_depth: Optional[bool]
+    :param kwargs: Arguments for :class:`BaseVisionHead`, and the ``dpt_*``
+        arguments listed on ``__init__``.
 
     :ivar depth_conv_blocks: The three refinement ``ConvBlock`` s
         (progressive decoder).
@@ -1442,64 +1485,132 @@ class DepthEstimationHead(BaseVisionHead):
     def __init__(
             self,
             output_channels: int = 1,
-            min_depth: float = 0.1,
-            max_depth: float = 100.0,
-            use_log_depth: bool = True,
+            min_depth: Optional[float] = None,
+            max_depth: Optional[float] = None,
+            use_log_depth: Optional[bool] = None,
             decoder_style: Literal["progressive", "dpt"] = "progressive",
             dpt_dims: Optional[List[int]] = None,
-            dpt_use_bias: bool = False,
-            dpt_activation: Union[str, callable] = "relu",
-            dpt_output_activation: Union[str, callable] = "linear",
-            dpt_upsample_factor: int = 16,
+            dpt_use_bias: Optional[bool] = None,
+            dpt_activation: Optional[Union[str, callable]] = None,
+            dpt_output_activation: Optional[Union[str, callable]] = None,
+            dpt_upsample_factor: Optional[int] = None,
+            dpt_kernel_initializer: Optional[
+                Union[str, keras.initializers.Initializer]] = None,
+            dpt_kernel_regularizer: Optional[
+                Union[str, keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
         """
         Store the configuration, then build the depth layers.
 
+        Every mode-specific argument defaults to ``None``, which resolves to
+        the default in ``_PROGRESSIVE_DECODER_DEFAULTS`` or
+        ``_DPT_DECODER_DEFAULTS`` for the mode that reads it.
+
         :param output_channels: Channel count of the output map.
         :type output_channels: int
-        :param min_depth: Lower end of the output range.
-        :type min_depth: float
-        :param max_depth: Upper end of the output range.
-        :type max_depth: float
-        :param use_log_depth: Scale in log space instead of linearly.
-        :type use_log_depth: bool
+        :param min_depth: Lower end of the output range (progressive).
+        :type min_depth: Optional[float]
+        :param max_depth: Upper end of the output range (progressive).
+        :type max_depth: Optional[float]
+        :param use_log_depth: Scale in log space instead of linearly
+            (progressive).
+        :type use_log_depth: Optional[bool]
         :param decoder_style: ``"progressive"`` (default, 3x ConvBlock+Conv2DTranspose)
             or ``"dpt"`` (DPTDecoder-compatible: Conv2D+BN+UpSampling2D).
         :type decoder_style: Literal["progressive", "dpt"]
         :param dpt_dims: Channel dimensions per DPT decoder stage.
             Defaults to ``[256, 128, 64, 32]``.
         :type dpt_dims: Optional[List[int]]
-        :param dpt_use_bias: Whether Conv2D layers use bias in DPT mode.
-        :type dpt_use_bias: bool
-        :param dpt_activation: Activation for DPT decoder stages.
-        :type dpt_activation: Union[str, callable]
-        :param dpt_output_activation: Activation for final DPT output conv.
-        :type dpt_output_activation: Union[str, callable]
-        :param dpt_upsample_factor: Total upsampling factor for DPT mode (power of 2).
-        :type dpt_upsample_factor: int
+        :param dpt_use_bias: Whether the stage convs use a bias (DPT;
+            default ``False``).
+        :type dpt_use_bias: Optional[bool]
+        :param dpt_activation: Activation for the DPT stages (default
+            ``'relu'``).
+        :type dpt_activation: Optional[Union[str, callable]]
+        :param dpt_output_activation: Activation of ``dpt_output_conv``
+            (default ``'linear'``).
+        :type dpt_output_activation: Optional[Union[str, callable]]
+        :param dpt_upsample_factor: Total upsampling factor of the DPT
+            decoder, a power of 2 (default 16).
+        :type dpt_upsample_factor: Optional[int]
+        :param dpt_kernel_initializer: Initializer for every DPT conv kernel,
+            each conv taking its own ``clone_initializer`` copy (default
+            ``'he_normal'``).
+        :type dpt_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
+        :param dpt_kernel_regularizer: Regularizer for every DPT conv kernel
+            (default none).
+        :type dpt_kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
         :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :raises ValueError: If ``decoder_style`` is unknown, or a
+            mode-specific argument is given to the mode that never reads it.
         :return: None.
         :rtype: None
         """
+        if decoder_style not in ("progressive", "dpt"):
+            raise ValueError(f"decoder_style must be 'progressive' or 'dpt', got {decoder_style}")
+
+        # DECISION plan-2026-10-14T062616-81938e81/D-030
+        # Each decoder reads only its own knobs, so a knob given to the other
+        # mode is refused and stored as None. Do NOT go back to concrete
+        # defaults that both modes store: the DPT decoder kept min_depth,
+        # max_depth and use_log_depth and never applied them (DepthAnything
+        # passed all three for nothing), and the progressive decoder ignored
+        # every dpt_* value the same way. See decisions.md D-030.
+        given = {
+            'min_depth': min_depth, 'max_depth': max_depth,
+            'use_log_depth': use_log_depth, 'dpt_dims': dpt_dims,
+            'dpt_use_bias': dpt_use_bias, 'dpt_activation': dpt_activation,
+            'dpt_output_activation': dpt_output_activation,
+            'dpt_upsample_factor': dpt_upsample_factor,
+            'dpt_kernel_initializer': dpt_kernel_initializer,
+            'dpt_kernel_regularizer': dpt_kernel_regularizer,
+        }
+        own, other = (
+            (_PROGRESSIVE_DECODER_DEFAULTS, _DPT_DECODER_DEFAULTS)
+            if decoder_style == "progressive"
+            else (_DPT_DECODER_DEFAULTS, _PROGRESSIVE_DECODER_DEFAULTS)
+        )
+        refused = sorted(key for key in other if given[key] is not None)
+        # The DPT stages use BatchNormalization and dpt_activation, so the
+        # base normalization_type and activation_type (read by the
+        # progressive ConvBlocks) are never read in DPT mode either.
+        if decoder_style == "dpt":
+            refused += sorted(
+                key for key in _PROGRESSIVE_ONLY_BASE_KNOBS
+                if kwargs.get(key) is not None)
+        if refused:
+            raise ValueError(
+                f"DepthEstimationHead(decoder_style={decoder_style!r}) never "
+                f"reads {refused}; they belong to the other decoder_style."
+            )
+
         # Set defaults for DepthEstimationHead before calling parent constructor
         kwargs.setdefault('use_attention', False)
         kwargs.setdefault('use_ffn', False)
         super().__init__(**kwargs)
-
         self.output_channels = output_channels
-        self.min_depth = min_depth
-        self.max_depth = max_depth
-        self.use_log_depth = use_log_depth
         self.decoder_style = decoder_style
-        self.dpt_dims = dpt_dims
-        self.dpt_use_bias = dpt_use_bias
-        self.dpt_activation = dpt_activation
-        self.dpt_output_activation = dpt_output_activation
-        self.dpt_upsample_factor = dpt_upsample_factor
+        if decoder_style == "dpt":
+            for key in _PROGRESSIVE_ONLY_BASE_KNOBS:
+                setattr(self, key, None)
 
-        if self.decoder_style not in ("progressive", "dpt"):
-            raise ValueError(f"decoder_style must be 'progressive' or 'dpt', got {decoder_style}")
+        for key, default in own.items():
+            value = default if given[key] is None else given[key]
+            setattr(self, key, list(value) if key == 'dpt_dims' else value)
+        for key in other:
+            setattr(self, key, None)
+        if decoder_style == "dpt":
+            # A string stays a string: clone_initializer turns it into one
+            # fresh initializer per conv, which draws exactly as the
+            # Conv2D(kernel_initializer='he_normal') calls did before this
+            # argument existed, so the default init is unchanged at a fixed
+            # seed. A config dict is deserialized once here.
+            if not isinstance(self.dpt_kernel_initializer, str):
+                self.dpt_kernel_initializer = keras.initializers.get(
+                    self.dpt_kernel_initializer)
+            self.dpt_kernel_regularizer = keras.regularizers.get(
+                self.dpt_kernel_regularizer)
 
         self._create_depth_layers()
 
@@ -1562,9 +1673,6 @@ class DepthEstimationHead(BaseVisionHead):
             )
         else:
             # DPTDecoder-compatible architecture
-            from dl_techniques.utils.activation_serialization import deserialize_activation
-
-            self.dpt_dims = self.dpt_dims if self.dpt_dims is not None else [256, 128, 64, 32]
             self.dpt_activation = deserialize_activation(self.dpt_activation)
             self.dpt_output_activation = deserialize_activation(self.dpt_output_activation)
 
@@ -1599,8 +1707,9 @@ class DepthEstimationHead(BaseVisionHead):
                     filters=dim,
                     kernel_size=3,
                     padding='same',
-                    kernel_initializer=self.kernel_initializer if hasattr(self, 'kernel_initializer') else 'he_normal',
-                    kernel_regularizer=self.kernel_regularizer if hasattr(self, 'kernel_regularizer') else None,
+                    kernel_initializer=clone_initializer(
+                        self.dpt_kernel_initializer),
+                    kernel_regularizer=self.dpt_kernel_regularizer,
                     use_bias=self.dpt_use_bias,
                     name=f'dpt_conv_{i}'
                 )
@@ -1634,8 +1743,9 @@ class DepthEstimationHead(BaseVisionHead):
                 filters=self.output_channels,
                 kernel_size=3,
                 padding='same',
-                kernel_initializer=self.kernel_initializer if hasattr(self, 'kernel_initializer') else 'he_normal',
-                kernel_regularizer=self.kernel_regularizer if hasattr(self, 'kernel_regularizer') else None,
+                kernel_initializer=clone_initializer(
+                    self.dpt_kernel_initializer),
+                kernel_regularizer=self.dpt_kernel_regularizer,
                 activation=self.dpt_output_activation,
                 use_bias=True,
                 name='dpt_output_conv'
@@ -1793,11 +1903,9 @@ class DepthEstimationHead(BaseVisionHead):
         """
         Return the constructor arguments for serialization.
 
-        :return: Config dict carrying ``output_channels``, ``min_depth``,
-            ``max_depth``, ``use_log_depth``, ``decoder_style``,
-            ``dpt_dims``, ``dpt_use_bias``, ``dpt_activation``,
-            ``dpt_output_activation``, and ``dpt_upsample_factor``,
-            on top of the base configuration.
+        :return: Config dict carrying ``output_channels``,
+            ``decoder_style`` and every mode-specific argument, on top of the
+            base configuration. The other mode's arguments are ``None``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -1809,9 +1917,22 @@ class DepthEstimationHead(BaseVisionHead):
             'decoder_style': self.decoder_style,
             'dpt_dims': self.dpt_dims,
             'dpt_use_bias': self.dpt_use_bias,
-            'dpt_activation': self.dpt_activation,
-            'dpt_output_activation': self.dpt_output_activation,
-            'dpt_upsample_factor': self.dpt_upsample_factor
+            # The DPT mode holds deserialized activations; a raw callable
+            # in the config would fail at load for an unregistered one.
+            'dpt_activation': serialize_activation(self.dpt_activation),
+            'dpt_output_activation': serialize_activation(
+                self.dpt_output_activation),
+            'dpt_upsample_factor': self.dpt_upsample_factor,
+            'dpt_kernel_initializer': (
+                self.dpt_kernel_initializer
+                if self.dpt_kernel_initializer is None
+                or isinstance(self.dpt_kernel_initializer, str)
+                else keras.initializers.serialize(self.dpt_kernel_initializer)
+            ),
+            'dpt_kernel_regularizer': (
+                None if self.dpt_kernel_regularizer is None
+                else keras.regularizers.serialize(self.dpt_kernel_regularizer)
+            ),
         })
         return config
 

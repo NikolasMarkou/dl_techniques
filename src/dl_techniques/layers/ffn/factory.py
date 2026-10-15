@@ -739,7 +739,7 @@ def assemble_ffn_config(
 
     Used by 4 call sites: ``TransformerLayer._get_ffn_config``,
     ``TransformerDecoderLayer._get_ffn_config``,
-    ``BaseVLMHead._build_common_layers`` and
+    ``ImageTextMatchingHead._create_post_fusion_layers`` and
     ``ImageCaptioningHead.__init__``'s per-layer FFN loop.
 
     ``wrapper_config`` holds the wrapper's own generic conveniences

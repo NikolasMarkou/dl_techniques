@@ -52,7 +52,7 @@ is descriptive only — the factory never reads it.
 | `SegmentationHead` | `num_classes` (required), `upsampling_factor=4` (output over input resolution, a power of two, else `ValueError`; until 2026-10-15 it built `int(sqrt(f))` doublings, so 8 gave 4x), `use_skip_connections=True`, `skip_channel_mode='auto'`, `explicit_skip_channels=None` (required for `skip_channel_mode='explicit'`), `input_format='spatial'`, `patch_grid_size=None` (as for `DetectionHead`) |
 | `InstanceSegmentationHead` | `num_classes` (required), `num_instances=100`, `mask_size=(28, 28)` |
 | `ClassificationHead` | `num_classes` (required), `use_global_pooling=True`, `pooling_type='avg'`, `block_dims=None` (hidden `DenseBlock` widths; `None` is `(hidden_dim, hidden_dim // 2)`, `()` is none), `pooled_normalization_type=None` (a norm on the pooled vector), `normalization_kwargs=None` (to every head norm), `classifier_dropout_rate=0.0` (a dropout on the classifier input), `block_use_bias=True` (the hidden blocks' Dense bias; `False` before a `batch_norm`), `kernel_initializer='glorot_uniform'`, `bias_initializer='zeros'`, `kernel_regularizer=None`, `bias_regularizer=None` (the last four reach every `Dense`, the classifier included) |
-| `DepthEstimationHead` | `output_channels=1`, `min_depth=0.1`, `max_depth=100.0`, `use_log_depth=True`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract), `dpt_dims=None` (`[256, 128, 64, 32]`), `dpt_use_bias=False`, `dpt_activation='relu'`, `dpt_output_activation='linear'`, `dpt_upsample_factor=16` (a power of 2, at most `2 ** len(dpt_dims)`) |
+| `DepthEstimationHead` | `output_channels=1`, `decoder_style='progressive'` (`'dpt'` is DepthAnything's decoder, see the output contract). Progressive only: `min_depth` (0.1), `max_depth` (100.0), `use_log_depth` (`True`). DPT only: `dpt_dims` (`[256, 128, 64, 32]`), `dpt_use_bias` (`False`), `dpt_activation` (`'relu'`), `dpt_output_activation` (`'linear'`), `dpt_upsample_factor` (16; a power of 2, at most `2 ** len(dpt_dims)`), `dpt_kernel_initializer` (`'he_normal'`, cloned per conv), `dpt_kernel_regularizer` (none). Each mode-specific argument defaults to `None`, meaning the value in parentheses in its own mode; the other mode refuses it with `ValueError` and stores `None`. The DPT mode also refuses `normalization_type` and `activation_type` (only the progressive `ConvBlock`s read them) |
 | `EnhancementHead` | `output_channels=3`, `scale_factor=1`, `block_dims=None` (refinement `ConvBlock` widths; `None` is three at `hidden_dim`, `()` is none, so the head is ONE 3x3 conv: the tail conv SCUNet and DarkIR use, with the model applying any skip or residual), `output_use_bias=True` (the output conv's bias; SCUNet's tail has none) |
 | `MultiTaskHead` | `task_configs` (required dict), `shared_backbone_dim=256`, `use_task_specific_attention=True` |
 
@@ -89,9 +89,12 @@ softmax under `mixed_float16`, as in the NLP `TextClassificationHead`).
 
 The one squashed output is the progressive `DepthEstimationHead`'s sigmoid, a range map the depth is
 scaled from; its `'confidence'` is that sigmoid output. The DPT decoder (`decoder_style='dpt'`) is
-different: `'depth'` is `dpt_output_conv` under `dpt_output_activation` (`'linear'` by default, and
-DepthAnything passes `'linear'`), `min_depth`, `max_depth` and `use_log_depth` are stored but not
-applied, and `'confidence'` is the last decoder stage's features, `dpt_dims[-1]` channels wide.
+different: `'depth'` is `dpt_output_conv` under `dpt_output_activation` (`'linear'` by default;
+DepthAnything passes `'relu'`, the reference Depth Anything head's final ReLU), there is no range
+scaling, and `'confidence'` is the last decoder stage's features, `dpt_dims[-1]` channels wide.
+`min_depth`, `max_depth` and `use_log_depth` used to be accepted, stored and ignored in DPT mode, as
+every `dpt_*` argument was in progressive mode; since 2026-10-15 each mode refuses the other's
+arguments, so a DPT-mode archive whose config carries the three range values no longer loads.
 
 Archives saved before 2026-10-15 are not supported. Measured on archives written at `def68694a`:
 `ClassificationHead` and `EnhancementHead` archives fail to load (their stored `use_ffn=True` is now

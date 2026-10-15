@@ -81,7 +81,7 @@ The factory function `create_vlm_head` automatically selects the correct head cl
 
 ```python
 config = VLMTaskConfig(name="coco_caption", task_type=VLMTaskType.IMAGE_CAPTIONING, vocab_size=50257)
-head = create_vlm_head(config, vision_dim=768, text_dim=768, num_layers=6, num_heads=12)
+head = create_vlm_head(config, num_layers=6, num_heads=12)
 ```
 
 ### 3.2. Visual Question Answering (VQA)
@@ -93,7 +93,7 @@ head = create_vlm_head(config, vision_dim=768, text_dim=768, num_layers=6, num_h
 
 ```python
 config = VLMTaskConfig(name="vqa_v2", task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING, num_classes=3129)
-head = create_vlm_head(config, vision_dim=768, text_dim=768, pooling_strategy="attention", hidden_dims=[512, 256])
+head = create_vlm_head(config, pooling_strategy="attention", hidden_dims=[512, 256])
 ```
 
 ### 3.3. Visual Grounding
@@ -101,11 +101,11 @@ head = create_vlm_head(config, vision_dim=768, text_dim=768, pooling_strategy="a
 *   **Head Class**: `VisualGroundingHead` (Fusion-Based)
 *   **Description**: Fuses a text query with each visual region feature, scores each region for relevance (one logit per region under `'confidence'`), and regresses a bounding box from the top-scoring region's fused features (sigmoid range map under `'bbox'`).
 *   **Inputs**: `vision_features` (unpooled regions) `[B, Regions, Dim]`, `text_features` `[B, Seq, Dim]`.
-*   **Key Config**: Configured with `fusion_strategy` and `fusion_config`. Defaults to `'gated'` fusion.
+*   **Key Config**: Configured with `fusion_strategy` and `fusion_config`. Defaults to `'gated'` fusion. It runs no post-fusion stack, so it takes none of the post-fusion options in §4.2 (each raises `ValueError` as an unrecognized keyword).
 
 ```python
 config = VLMTaskConfig(name="refcoco", task_type=VLMTaskType.VISUAL_GROUNDING)
-head = create_vlm_head(config, vision_dim=768, text_dim=768, fusion_strategy='gated')
+head = create_vlm_head(config, fusion_strategy='gated')
 ```
 
 ### 3.4. Image-Text Matching
@@ -113,11 +113,11 @@ head = create_vlm_head(config, vision_dim=768, text_dim=768, fusion_strategy='ga
 *   **Head Class**: `ImageTextMatchingHead` (Fusion-Based)
 *   **Description**: A dual-purpose head. It projects features for CLIP-style contrastive alignment and separately fuses features to produce a fine-grained matching logit (`'match_score'`) for a single image-text pair.
 *   **Inputs**: `vision_features` and `text_features`, each `[B, Dim]` (used as given) or `[B, Seq, Dim]` (mean-pooled over axis 1 first). Both must be `hidden_size` wide for the fusion.
-*   **Key Config**: Configured with `projection_dim`, `temperature`, and `fusion_strategy`.
+*   **Key Config**: Configured with `projection_dim`, `temperature`, `fusion_strategy`, and the post-fusion options in §4.2.
 
 ```python
 config = VLMTaskConfig(name="retrieval", task_type=VLMTaskType.IMAGE_TEXT_MATCHING)
-head = create_vlm_head(config, vision_dim=768, text_dim=768, projection_dim=256, fusion_strategy='concatenation')
+head = create_vlm_head(config, projection_dim=256, fusion_strategy='concatenation')
 ```
 ---
 
@@ -134,20 +134,19 @@ These heads have unique parameters for their specialized architectures.
 | `VQAHead` | `pooling_strategy`| `Literal[str]`| `'attention'`| How to pool vision/text sequences. Options: `'mean'`, `'max'`, `'attention'`. |
 | | `hidden_dims` | `List[int]` | `[512, 256]`| A list of hidden layer sizes for the final classifier MLP. |
 
-### 4.2. Fusion-Based Head Configurations (`BaseVLMHead`)
-These options, passed to `create_vlm_head`, configure the `MultiModalFusion` layer and post-fusion blocks used by heads like `VisualGroundingHead` and `ImageTextMatchingHead`.
+### 4.2. Fusion-Based Head Configurations (`BaseVLMHead`, `ImageTextMatchingHead`)
+`BaseVLMHead` owns the `MultiModalFusion` layer and nothing else, and takes `fusion_strategy` and `fusion_config`; both fusion-based heads accept them. The post-fusion options (`normalization_type`, `use_post_fusion_ffn`, `ffn_type`, `ffn_expansion_factor`) belong to `ImageTextMatchingHead` alone, the one head whose `call` runs a post-fusion norm and FFN. No head takes a declared feature width: every width comes from the input shapes at `build`, and `hidden_size` from the `VLMTaskConfig`.
 
 | Option | Type | Default | Description |
 |:---|:---|:---|:---|
-| `vision_dim` | `int` | `768` | Dimension of the input vision features. |
-| `text_dim` | `int` | `768` | Dimension of the input text features. |
 | `fusion_strategy` | `FusionStrategy`| `'gated'` (grounding), `'concatenation'` (matching) | The core fusion mechanism. Six strategies work: `'concatenation'`, `'addition'`, `'multiplication'`, `'gated'`, `'bilinear'`, `'tensor_fusion'`. `'cross_attention'` (one output per modality) and `'attention_pooling'` (rank-2 output) raise `ValueError` at build: the heads need one rank-preserving tensor. The `BaseVLMHead` signature default `'cross_attention'` is therefore never usable; both subclasses override it. |
 | `fusion_config` | `Dict` | `{}` | A dictionary of fine-grained parameters for the chosen `fusion_strategy`. |
-| `normalization_type`| `NormalizationType`| `'layer_norm'`| Normalization after fusion, applied by `ImageTextMatchingHead` only. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, etc. |
-| `activation_type` | `ActivationType`| `'gelu'` | Stored and serialized; **no layer reads it**. |
-| `use_post_fusion_ffn`| `bool` | `True` | Adds a Transformer-style FFN block after fusion. Only `ImageTextMatchingHead` runs it; `VisualGroundingHead` goes from the fusion straight to its scorer and builds no FFN whatever this says. |
-| `ffn_type` | `FFNType` | `'mlp'` | Type of post-fusion FFN. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, etc. |
-| `ffn_expansion_factor`| `int`| `4`| Hidden dimension expansion factor for the post-fusion FFN. |
+| `normalization_type`| `NormalizationType`| `'layer_norm'`| `ImageTextMatchingHead` only. Normalization after the fusion. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, etc. |
+| `use_post_fusion_ffn`| `bool` | `True` | `ImageTextMatchingHead` only. Runs a Transformer-style FFN after the post-fusion norm; `False` creates none. |
+| `ffn_type` | `FFNType` | `'mlp'` | `ImageTextMatchingHead` only. Type of post-fusion FFN. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, etc. |
+| `ffn_expansion_factor`| `int`| `4`| `ImageTextMatchingHead` only. Hidden dimension expansion factor for the post-fusion FFN. |
+
+Removed on 2026-10-15, with no replacement and no compatibility path: `vision_dim` and `text_dim` (on every head) and `MultiTaskVLMHead`'s `shared_vision_dim`/`shared_text_dim` (stored and serialized, read by nothing), `activation_type` (read by nothing), and the post-fusion `Dropout` (created on both fusion-based heads, applied by neither `call`). Passing any of these arguments now raises `ValueError`, and an archive whose config carries one no longer loads. Because `VisualGroundingHead` no longer creates the post-fusion norm, Dropout and FFN it never ran, and `ImageTextMatchingHead` no longer creates the Dropout, both heads' fixed-seed initialization differs from before; for the same weights the outputs are unchanged (measured bit-identical, weights copied by path).
 
 ---
 
@@ -180,9 +179,7 @@ task_configs = {
 # Step 2: Create multi-task head with task-specific overrides
 multi_head = create_multi_task_vlm_head(
     task_configs=task_configs,
-    # Shared kwargs for all heads
-    shared_vision_dim=768,
-    shared_text_dim=768,
+    # Any other keyword is shared, routed to every head that accepts it.
     # Pass parameters for specific head types via this dictionary
     task_specific_kwargs={
         'caption': {'num_layers': 4, 'num_heads': 8}, # Config for ImageCaptioningHead

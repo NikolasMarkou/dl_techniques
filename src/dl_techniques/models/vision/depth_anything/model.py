@@ -1,7 +1,14 @@
 """`DepthAnything`, a monocular depth model built from a ViT encoder, a
-`DPTDecoder` head, and an optional Mean-Teacher branch for semi-supervised
-training. Implements the Depth Anything V1 recipe, not V2: no synthetic
-training data and no distillation through a large teacher.
+DPT-style decoder head, and an optional Mean-Teacher branch for
+semi-supervised training. Implements the Depth Anything V1 recipe, not V2: no
+synthetic training data and no distillation through a large teacher.
+
+The decoder is the shared `DepthEstimationHead` in its `decoder_style='dpt'`
+mode (`layers/heads/vision`), the same stage structure as this package's
+`DPTDecoder`, which OmniPoint uses. Its output ends in a ReLU, as both official
+relative-depth heads do (V1 `depth_anything/dpt.py`, V2
+`depth_anything_v2/dpt.py`), so every prediction is non-negative and has no
+upper bound.
 
 Depth from a single image is scale-ambiguous, so the model targets depth up
 to an unknown affine transform rather than metric depth. The semi-supervised
@@ -109,11 +116,12 @@ class DepthAnything(keras.Model):
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │ decoder: DPTDecoder          │
-        │ upsample_factor = stride     │
+        │ decoder: DepthEstimationHead │
+        │ dpt mode, upsample = stride, │
+        │ ReLU output                  │
         └──────────────┬───────────────┘
                        ▼
-        Output [B, H, W, output_channels]  (unconstrained, linear)
+        Output [B, H, W, output_channels]  (non-negative)
 
     Training (semi-supervised, `enable_semi_supervised=True`):
 
@@ -133,9 +141,11 @@ class DepthAnything(keras.Model):
     :type decoder_dims: Optional[List[int]]
     :param output_channels: Number of channels in the predicted depth map.
     :type output_channels: int
-    :param kernel_initializer: Initializer for convolutional kernels.
+    :param kernel_initializer: Initializer for the encoder's and the
+        decoder's kernels.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for convolutional kernels.
+    :param kernel_regularizer: Optional regularizer for the encoder's and the
+        decoder's kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param loss_weights: Weight per loss term, keys ``"labeled"``,
         ``"unlabeled"``, ``"feature"``.
@@ -166,7 +176,8 @@ class DepthAnything(keras.Model):
         tensors for semi-supervised training with labeled and unlabeled data.
 
     Output shape:
-        4D tensor ``(batch_size, height, width, output_channels)``.
+        4D tensor ``(batch_size, height, width, output_channels)``, every
+        value non-negative (the ReLU output).
 
     Example:
         .. code-block:: python
@@ -207,19 +218,10 @@ class DepthAnything(keras.Model):
         enable_semi_supervised: bool = False,
         encoder: Optional[keras.Model] = None,
         input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
-        input_shape: Optional[Tuple[int, int, int]] = None,
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-
-        # Back-compat alias: legacy `input_shape=` kwarg maps to `image_shape`.
-        if input_shape is not None:
-            logger.info(
-                "DepthAnything: 'input_shape' kwarg is deprecated; use 'image_shape'. "
-                "Forwarding the value."
-            )
-            image_shape = input_shape
 
         # Validate encoder type
         self.supported_encoders = list(self.MODEL_VARIANTS)
@@ -236,8 +238,6 @@ class DepthAnything(keras.Model):
         # Store configuration parameters
         self.encoder_type = encoder_type
         self.image_shape = tuple(image_shape)
-        # Keep legacy attribute name for any external code reading it.
-        self.input_shape_param = self.image_shape
         self.decoder_dims = decoder_dims if decoder_dims is not None else [256, 128, 64, 32]
         self.output_channels = output_channels
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -329,21 +329,31 @@ class DepthAnything(keras.Model):
         # For real ViT (stride=16) with len(decoder_dims)>=4, upsample_factor=16 is
         # representable as 4 stages of 2x. For placeholder (stride=16 here) ditto.
         upsample_factor = self.encoder_stride
-        self.decoder = create_vision_head(
-            VisionTaskType.DEPTH_ESTIMATION,
-            output_channels=self.output_channels,
-            min_depth=0.1,
-            max_depth=100.0,
-            use_log_depth=True,
-            decoder_style="dpt",
-            dpt_dims=self.decoder_dims,
-            dpt_use_bias=False,
-            dpt_activation="relu",
-            dpt_output_activation="linear",
-            dpt_upsample_factor=upsample_factor,
-            hidden_dim=self.decoder_dims[0],
-            name='depth_estimation_head'
-        )
+        # DECISION plan-2026-10-14T062616-81938e81/D-031
+        # The output is ReLU'd, as in the reference: both official relative
+        # heads (Depth-Anything depth_anything/dpt.py, Depth-Anything-V2
+        # depth_anything_v2/dpt.py) end the head in nn.ReLU and apply F.relu
+        # after the resize, so a prediction is never negative. Do NOT pass
+        # min_depth/max_depth/use_log_depth: no reference maps this output
+        # into a [min, max] or log range (only V2's metric head does
+        # sigmoid * max_depth, which this relative-depth model does not
+        # claim), and the DPT decoder refuses them. See decisions.md D-031.
+        # Without the head, call() returns before the decoder, so none is
+        # created: an unrun, unbuilt decoder is a sub-layer with no weights.
+        if self.include_top:
+            self.decoder = create_vision_head(
+                VisionTaskType.DEPTH_ESTIMATION,
+                output_channels=self.output_channels,
+                decoder_style="dpt",
+                dpt_dims=self.decoder_dims,
+                dpt_use_bias=False,
+                dpt_activation="relu",
+                dpt_output_activation="relu",
+                dpt_upsample_factor=upsample_factor,
+                dpt_kernel_initializer=self.kernel_initializer,
+                dpt_kernel_regularizer=self.kernel_regularizer,
+                name='depth_estimation_head'
+            )
 
         # Build order: ensure the student encoder is built, clone its topology and
         # force-build the clone, then copy weights student -> teacher and freeze.
@@ -910,9 +920,6 @@ class DepthAnything(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> 'DepthAnything':
         """Create model from configuration.
 
-        Accepts both ``image_shape`` (current key) and ``input_shape``
-        (legacy key from pre-bd098beb saved configs) for back-compat.
-
         :param config: Dictionary containing model configuration.
         :type config: Dict[str, Any]
         :return: DepthAnything model instance.
@@ -977,7 +984,6 @@ def create_depth_anything(
     encoder_kind: str = 'real',
     enable_semi_supervised: bool = False,
     input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
-    input_shape: Optional[Tuple[int, int, int]] = None,
     include_top: bool = True,
 ) -> DepthAnything:
     """Create and build Depth Anything model instance.
@@ -1027,8 +1033,6 @@ def create_depth_anything(
     :param input_value_range: Declared value range of the input images (see
         the input contract above).
     :type input_value_range: Optional[Tuple[float, float]]
-    :param input_shape: Deprecated alias for `image_shape`.
-    :type input_shape: Optional[Tuple[int, int, int]]
     :param include_top: Whether to include the depth estimation head.
         When False, returns encoder features for custom heads. Defaults to True.
     :type include_top: bool
@@ -1050,10 +1054,6 @@ def create_depth_anything(
             )
     """
     logger.info(f"Creating DepthAnything model with encoder: {encoder_type}")
-
-    # Resolve image_shape (legacy 'input_shape' alias).
-    if input_shape is not None:
-        image_shape = input_shape
 
     # Create model with specified configuration
     model = DepthAnything(

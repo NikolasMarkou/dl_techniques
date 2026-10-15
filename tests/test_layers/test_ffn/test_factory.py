@@ -1775,8 +1775,6 @@ def _b_heads_vlm_factory():
             name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
             hidden_size=16,
         ),
-        vision_dim=16,
-        text_dim=16,
         use_post_fusion_ffn=True,
     )
     # `hidden_dim` comes from `task_config.hidden_size`, and `MultiModalFusion`

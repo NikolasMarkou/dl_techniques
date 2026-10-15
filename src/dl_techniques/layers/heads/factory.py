@@ -22,7 +22,7 @@ it as a near-single-use abstraction. It charged the facade 1/2 of that plan's
 complexity budget. It stays thin. The three domain factories keep different
 calling conventions. ``nlp`` takes ``task_config`` and ``input_dim``.
 ``vision`` takes a ``task_type`` plus head kwargs. ``vlm`` takes
-``task_config`` plus ``vision_dim`` and ``text_dim``. They stay independent.
+``task_config`` plus head kwargs. They stay independent.
 Do not add a unified parameter set here, and do not merge the three
 ``Base*Head`` classes. That plan's directory has been deleted, so this
 paragraph and the anchor above :func:`create_head` are the only surviving
@@ -35,8 +35,8 @@ Example
 >>> nlp = create_head('nlp', task_config=cfg, input_dim=768)
 >>> # vision: task_type (+ head kwargs)
 >>> vis = create_head('vision', 'classification', num_classes=10)
->>> # vlm: task_config (+ vision_dim/text_dim/...)
->>> vlm = create_head('vlm', task_config=vlm_cfg, vision_dim=768, text_dim=768)
+>>> # vlm: task_config (+ head kwargs)
+>>> vlm = create_head('vlm', task_config=vlm_cfg, num_layers=2)
 """
 
 from typing import Any, Literal
@@ -109,7 +109,7 @@ def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
 
     - ``vlm``   -> :func:`~dl_techniques.layers.heads.vlm.create_vlm_head`::
 
-          create_head('vlm', task_config=vlm_cfg, vision_dim=768, text_dim=768)
+          create_head('vlm', task_config=vlm_cfg, num_layers=2)
 
     .. note::
        Multi-task heads are not dispatched here. Build them by calling

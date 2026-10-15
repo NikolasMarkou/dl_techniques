@@ -49,8 +49,6 @@ class TestCreateHeadDispatch:
                 task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
                 hidden_size=32,
             ),
-            vision_dim=32,
-            text_dim=32,
         )
         assert isinstance(head, ImageTextMatchingHead)
         assert isinstance(head, keras.layers.Layer)

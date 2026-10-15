@@ -5,19 +5,18 @@ MegaDepth.  Structurally a Pattern-5 trainer (it was derived 1:1 from the
 now-deleted ``train.cliffordnet.train_depth_estimation``, which is why the two
 read alike in the git history), swapping in ``create_depth_anything`` as the model factory and
 using a locally-defined ``DepthEstimationLoss`` (masked L1 + multi-scale
-gradient matching) that is compatible with the model's ``sigmoid``-clamped
-output.
+gradient matching). The model's output is ReLU'd, as in the reference Depth
+Anything head, so every prediction is non-negative and unbounded above; the
+loss takes it as it is.
 
-> **Important — read** ``src/dl_techniques/models/vision/depth_anything/README.md``
-> **before running this script.** The DepthAnything implementation has known
-> gaps (placeholder encoder, unimplemented semi-supervised pipeline, sigmoid
-> output that conflicts with AffineInvariantLoss).  This script is a thin
-> Pattern-5 scaffold; the model itself still needs work for production-grade
-> depth quality.  See "Known Issues" in the model README for the full list.
+> **Read** ``src/train/depth_anything/README.md`` ("Known Issues — depth
+> quality") **before running this script.** The encoder is the in-tree ViT,
+> not DINOv2, and no pretrained weights ship, so this is a scaffold that runs
+> end to end, not a route to the paper's numbers.
 
 Usage::
 
-    # Smoke run (does not actually train to convergence — model is a placeholder):
+    # Smoke run (does not train to convergence):
     MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
         --encoder-type vit_s \\
         --epochs 2 --batch-size 4 --patch-size 256 \\
@@ -32,7 +31,6 @@ Usage::
 """
 
 import gc
-import random
 import time
 import keras
 import argparse
@@ -41,7 +39,7 @@ import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Tuple, List, Optional, Any
+from typing import Tuple, List, Optional
 
 from train.common import (
     setup_gpu,
@@ -79,7 +77,10 @@ from dl_techniques.metrics.depth_metrics import (
     RMSEMetric,
     SqRelMetric,
 )
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.weight_transfer import (
+    TransferReport,
+    load_weights_from_checkpoint,
+)
 from dl_techniques.callbacks.depth_visualization import (
     DepthPredictionGridCallback,
     DepthMetricsCurveCallback,
@@ -177,8 +178,8 @@ class DepthEstimationLoss(keras.losses.Loss):
 
     ``L = L1_masked + gradient_weight * L_grad``
 
-    Compatible with any output range (so it works with DepthAnything's default
-    ``sigmoid``-clamped output — see Known Issue #6 in the model README).
+    Places no constraint on the prediction's range; DepthAnything's is
+    non-negative (a final ReLU, as in the reference head).
     """
 
     def __init__(
@@ -394,6 +395,39 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
     )
 
 
+def init_from_checkpoint(model: DepthAnything, ckpt_path: str) -> TransferReport:
+    """Load every layer of a saved DepthAnything except its decoder.
+
+    The decoder is skipped by the name of ``model.decoder``, so it trains
+    from a fresh init while the encoder (and the teacher, if both models
+    have one) starts from the checkpoint.
+
+    :param model: A built DepthAnything with its head (``include_top=True``).
+    :type model: DepthAnything
+    :param ckpt_path: Path to a ``.keras`` DepthAnything checkpoint.
+    :type ckpt_path: str
+    :return: The transfer report; ``skipped_by_prefix`` names the decoder.
+    :rtype: TransferReport
+    :raises RuntimeError: If no layer was loaded.
+    """
+    logger.info(f"Initializing from pretrained checkpoint: {ckpt_path}")
+    # The prefix is read off the model. It used to be the literal
+    # "dpt_decoder", a name no DepthAnything layer has carried since the
+    # decoder became the 'depth_estimation_head' vision head, so the decoder
+    # was transferred too, contrary to --init-from's help text.
+    report = load_weights_from_checkpoint(
+        target=model,
+        ckpt_path=ckpt_path,
+        skip_prefixes=(model.decoder.name,),
+    )
+    if report.num_loaded == 0:
+        raise RuntimeError(
+            f"Pretrained init loaded 0 layers from {ckpt_path} — "
+            f"likely a checkpoint / architecture mismatch."
+        )
+    return report
+
+
 # ---------------------------------------------------------------------
 # TRAINING
 # ---------------------------------------------------------------------
@@ -471,17 +505,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     model.summary(print_fn=logger.info)
 
     if config.init_from is not None:
-        logger.info(f"Initializing from pretrained checkpoint: {config.init_from}")
-        report = load_weights_from_checkpoint(
-            target=model,
-            ckpt_path=config.init_from,
-            skip_prefixes=("dpt_decoder",),
-        )
-        if report.num_loaded == 0:
-            raise RuntimeError(
-                f"Pretrained init loaded 0 layers from {config.init_from} — "
-                f"likely a checkpoint / architecture mismatch."
-            )
+        init_from_checkpoint(model, config.init_from)
 
     # Pretrained encoder-only weights: loaded into model.encoder via the
     # DepthAnything hook, which also re-syncs the EMA teacher.

@@ -4,7 +4,7 @@ Pattern-5 (depth-estimation) training scaffold for
 `dl_techniques.models.vision.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
 > The default encoder is the in-tree `dl_techniques.models.vision.vit.ViT`
-> (`--encoder-kind real`). The DPT decoder default is `linear`. `train_step`
+> (`--encoder-kind real`). The decoder ends in a ReLU, as the reference head does. `train_step`
 > dispatches to a clean labeled path or a semi-sup path that adds FAL +
 > stop-gradient pseudo-label L1 consistency. Semi-supervised data feed
 > is wired end-to-end via `--unlabeled-image-glob`, which builds an
@@ -57,8 +57,9 @@ on this machine.
 - Loads MegaDepth RGB+depth pairs via `train.common.megadepth.MegaDepthDataset`.
 - Builds a `DepthAnything` model via `create_depth_anything(...)`.
 - Compiles with a **masked L1 + multi-scale gradient-matching loss**
-  (locally-defined `DepthEstimationLoss`). The model's final projection is
-  linear and unclamped, so the loss sees raw depth predictions.
+  (locally-defined `DepthEstimationLoss`). The model's final projection ends in a
+  ReLU, as in the reference Depth Anything head, so every prediction the loss sees
+  is non-negative (no upper bound).
 - Wraps the five depth metrics from `dl_techniques.metrics.depth_metrics`
   with a small `_DepthOnlyMetricWrapper` so they ignore the mask channel
   produced by `MegaDepthDataset`.
@@ -69,8 +70,10 @@ on this machine.
 - Optimizer: `AdamW` via `dl_techniques.optimization.optimizer_builder` with
   cosine-decay LR schedule + warmup. **Does not** combine `kernel_regularizer=L2`
   with `AdamW.weight_decay` (avoids double weight decay).
-- Optional pretrained backbone init via `--init-from <ckpt.keras>` (skips
-  layers prefixed with `dpt_decoder` so the head is freshly initialized).
+- Optional pretrained backbone init via `--init-from <ckpt.keras>`
+  (`init_from_checkpoint`): every layer of the checkpoint except the decoder, which is
+  skipped by the name of `model.decoder` (`depth_estimation_head`) and so starts
+  freshly initialized.
 
 ## CLI flags
 
@@ -153,8 +156,9 @@ Anything numbers**:
 
 1. **Encoder is in-tree `ViT`, not DINOv2.** No external pretrained weights
    are loaded by default. Use `--pretrained-encoder-weights <ckpt.keras>`
-   (encoder-only) or `--init-from <ckpt.keras>` (full model) if you have a
-   compatible checkpoint; otherwise initialization is random.
+   (encoder-only) or `--init-from <ckpt.keras>` (a full DepthAnything checkpoint,
+   decoder skipped) if you have a compatible checkpoint; otherwise initialization
+   is random.
 2. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
    correctly trained Depth Anything model will produce dense depth maps
    that look *qualitatively* good but disagree with sparse SfM ground
@@ -175,4 +179,6 @@ comes from the former CliffordNet depth trainer, from which it differs in:
   `DeepSupervisionWeightScheduler`.
 - Metrics are wrapped with `_DepthOnlyMetricWrapper` because MegaDepth's
   `y_true = concat([depth, mask], -1)` shape is two-channel.
-- `init_from` skips layers prefixed `dpt_decoder` (vs `head_` for CliffordNet).
+- `init_from` skips the decoder by `model.decoder.name` (`depth_estimation_head`), not by the
+  `head_` prefix CliffordNet used. It skipped the literal `dpt_decoder` until 2026-10-15, a name
+  no layer carried, so the decoder was transferred as well.

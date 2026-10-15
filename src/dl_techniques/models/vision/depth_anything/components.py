@@ -12,13 +12,15 @@ stages; the remaining stages keep the resolution. A final `3x3 Conv2D`
 projects to `output_channels`.
 
 The final layer's activation defaults to `linear`, not a bounded activation.
-`DepthAnything` needs that: affine-invariant and scale-shift depth losses
-require an unconstrained output so the network can pick its own scale (see
-`model.py`'s module docstring). A pipeline whose target genuinely lives in
-`[0, 1]` should pass `sigmoid`; multi-class segmentation should pass
-`softmax`. `upsample_factor=1`, the default, assumes the input features
-already carry the output resolution; `model.py` instead passes the encoder
-stride (16), so an `H/16 x W/16` feature map is restored to full resolution.
+A pipeline whose target genuinely lives in `[0, 1]` should pass `sigmoid`;
+multi-class segmentation should pass `softmax`; the reference Depth Anything
+relative-depth head ends in a ReLU. `upsample_factor=1`, the default, assumes
+the input features already carry the output resolution; a caller decoding
+stride-`s` features passes `upsample_factor=s`.
+
+`DepthAnything` (`model.py`) does not use this layer. Its decoder is the
+shared `DepthEstimationHead` in `decoder_style='dpt'` mode, which has the same
+stage structure. OmniPoint's dense heads use this one.
 """
 
 import keras

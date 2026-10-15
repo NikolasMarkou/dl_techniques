@@ -10,13 +10,13 @@ The three forward-pass-fixed heads are locked here:
 
   * ``ImageTextMatchingHead`` — Bug 1 (``ops.l2_normalize`` -> ``ops.normalize``)
     + the fine-grained-fusion 3-D blocker (D-001). Its fusion path requires
-    ``vision_dim == text_dim == hidden_size``, so the tests feed ``DIM`` features
+    both feature widths to equal ``hidden_size``, so the tests feed ``DIM`` features
     with ``hidden_size=DIM``.
   * ``ImageCaptioningHead`` — Bug 2 (causal mask shape/polarity) + the
     cross-attention type/kwarg blocker. Returns ``logits`` of ``(B, S, vocab)``.
   * ``VQAHead`` — Bug 4 (shared cross-attention type/kwarg). Its DEFAULT
     ``pooling_strategy="attention"`` reuses one cross-attention layer in both
-    directions, so the tests use ``vision_dim == text_dim``.
+    directions, so the tests use equal vision and text widths.
 """
 
 import json
@@ -102,7 +102,7 @@ class TestVLMFactoryConstruction:
             hidden_size=DIM,
         )
         head = create_vlm_head(
-            cfg, vision_dim=DIM, text_dim=DIM, num_layers=1, num_heads=NUM_HEADS
+            cfg, num_layers=1, num_heads=NUM_HEADS
         )
         assert isinstance(head, ImageCaptioningHead)
         assert isinstance(head, keras.layers.Layer)
@@ -115,7 +115,7 @@ class TestVLMFactoryConstruction:
             task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
             hidden_size=DIM,
         )
-        head = create_vlm_head(cfg, vision_dim=DIM, text_dim=DIM)
+        head = create_vlm_head(cfg)
         assert isinstance(head, ImageTextMatchingHead)
         assert isinstance(head, keras.layers.Layer)
 
@@ -126,8 +126,6 @@ class TestVLMFactoryConstruction:
                 "task_type": VLMTaskType.IMAGE_TEXT_MATCHING,
                 "hidden_size": DIM,
             },
-            vision_dim=DIM,
-            text_dim=DIM,
         )
         assert isinstance(head, ImageTextMatchingHead)
 
@@ -144,7 +142,7 @@ def _captioning_head() -> ImageCaptioningHead:
         hidden_size=DIM,
     )
     return create_vlm_head(
-        cfg, vision_dim=DIM, text_dim=DIM, num_layers=1, num_heads=NUM_HEADS
+        cfg, num_layers=1, num_heads=NUM_HEADS
     )
 
 
@@ -156,7 +154,7 @@ def _vqa_head() -> VQAHead:
         num_classes=NUM_CLASSES,
     )
     # DEFAULT pooling_strategy="attention"; equal dims for the shared cross-attn.
-    return create_vlm_head(cfg, vision_dim=DIM, text_dim=DIM)
+    return create_vlm_head(cfg)
 
 
 def _itm_head() -> ImageTextMatchingHead:
@@ -165,7 +163,7 @@ def _itm_head() -> ImageTextMatchingHead:
         task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
         hidden_size=DIM,  # D == hidden_size required by the fusion path.
     )
-    return create_vlm_head(cfg, vision_dim=DIM, text_dim=DIM)
+    return create_vlm_head(cfg)
 
 
 @pytest.fixture
@@ -358,13 +356,11 @@ class TestVLMConfigRoundtrip:
             "grounding": create_vlm_head(
                 VLMTaskConfig(name="grd", task_type=VLMTaskType.VISUAL_GROUNDING,
                               hidden_size=DIM),
-                vision_dim=DIM, text_dim=DIM,
             ),
             "base": BaseVLMHead(
                 task_config=VLMTaskConfig(name="base",
                                           task_type=VLMTaskType.VISUAL_DIALOGUE,
                                           hidden_size=DIM),
-                vision_dim=DIM, text_dim=DIM,
             ),
         }
 
@@ -382,7 +378,6 @@ class TestVLMConfigRoundtrip:
         mt = create_multi_task_vlm_head(
             [VLMTaskConfig(name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
                            hidden_size=DIM)],
-            shared_vision_dim=DIM, shared_text_dim=DIM,
         )
         config = mt.get_config()
         json.dumps(config)
@@ -712,8 +707,6 @@ _SINGLE_HEADS = [
 def _make_single(task_type: VLMTaskType, name: str):
     return create_vlm_head(
         _family_config(name, task_type),
-        vision_dim=_FAMILY_DIM,
-        text_dim=_FAMILY_DIM,
     )
 
 
@@ -824,7 +817,7 @@ class TestVLMHeadFamilyExplicitBuild:
             "itm": _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
         }
         mk = lambda: create_multi_task_vlm_head(
-            cfgs, shared_vision_dim=_FAMILY_DIM, shared_text_dim=_FAMILY_DIM
+            cfgs
         )
 
         head = mk()
@@ -1137,7 +1130,7 @@ def _tsk_payload(dim: int = _TSK_DIM):
 
 def _make_multi(dim: int = _TSK_DIM, **extra):
     return create_multi_task_vlm_head(
-        _tsk_configs(dim), shared_vision_dim=dim, shared_text_dim=dim, **extra
+        _tsk_configs(dim), **extra
     )
 
 
@@ -1233,8 +1226,8 @@ class TestMultiTaskTaskSpecificKwargs:
             ffn_type="swiglu",
         )
         # `ffn_type` is one of the few kwargs EVERY head class here accepts
-        # (ImageCaptioningHead declares it directly; ImageTextMatchingHead
-        # inherits it from BaseVLMHead). See the note in
+        # (ImageCaptioningHead and ImageTextMatchingHead each declare it
+        # directly). See the note in
         # `MultiTaskVLMHead.__init__`: a shared kwarg must be accepted by every
         # head class, and `fusion_strategy` for instance would raise on
         # ImageCaptioningHead, which is not a BaseVLMHead subclass.
@@ -1274,7 +1267,7 @@ def _ffn_head(ffn_type: str, **extra) -> ImageCaptioningHead:
         vocab_size=VOCAB, hidden_size=DIM,
     )
     return ImageCaptioningHead(
-        task_config=cfg, vision_dim=DIM, text_dim=DIM,
+        task_config=cfg,
         num_layers=1, num_heads=NUM_HEADS, ffn_type=ffn_type, **extra
     )
 
@@ -1417,11 +1410,9 @@ _CLOSED_BY_MISSING_HYPERPARAM = {
 
 
 def _itm_width_head(ffn_type: str) -> ImageTextMatchingHead:
-    """Site 1: `BaseVLMHead._build_common_layers` -> post-fusion FFN (rank-2)."""
+    """Site 1: `ImageTextMatchingHead._create_post_fusion_layers` -> post-fusion FFN (rank-2)."""
     return ImageTextMatchingHead(
         task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
-        vision_dim=_FAMILY_DIM,
-        text_dim=_FAMILY_DIM,
         use_post_fusion_ffn=True,
         ffn_type=ffn_type,
     )
@@ -1431,8 +1422,6 @@ def _cap_width_head(ffn_type: str) -> ImageCaptioningHead:
     """Site 2: `ImageCaptioningHead.__init__`'s per-layer FFN loop (rank-3)."""
     return ImageCaptioningHead(
         task_config=_family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
-        vision_dim=_FAMILY_DIM,
-        text_dim=_FAMILY_DIM,
         num_layers=1,
         num_heads=NUM_HEADS,
         ffn_type=ffn_type,
@@ -1499,7 +1488,7 @@ class TestFFNOutputWidthParamRouting:
 
     @pytest.mark.parametrize("ffn_type", _NEWLY_REACHABLE_FFN_TYPES)
     def test_site1_matching_head_forward_and_round_trip(self, ffn_type) -> None:
-        """Site 1 (`BaseVLMHead._build_common_layers`), rank-2 post-fusion."""
+        """Site 1 (`ImageTextMatchingHead._create_post_fusion_layers`), rank-2 post-fusion."""
         _forward_and_round_trip(_itm_width_head(ffn_type))
 
     @pytest.mark.parametrize("ffn_type", _NEWLY_REACHABLE_FFN_TYPES)
@@ -1786,8 +1775,8 @@ class TestSwiGLUComputeOutputShapeHonesty:
 # deliberately best-effort, so it is fenced by three guards, each pinned below:
 #   - a shared kwarg accepted by NO head raises (typo guard)
 #   - task_specific_kwargs is STRICT, because it names one head explicitly
-#   - wrapper-owned args (task_config/vision_dim/text_dim) raise a clear error
-#     instead of an opaque duplicate-argument TypeError
+#   - the wrapper-owned arg (task_config) raises a clear error instead of an
+#     opaque duplicate-argument TypeError
 # plus a logger.info record of every partial application, so routing is
 # discoverable rather than silent.
 # ---------------------------------------------------------------------
@@ -1815,8 +1804,6 @@ def _hetero_configs():
 def _hetero_multi(**kwargs):
     return create_multi_task_vlm_head(
         _hetero_configs(),
-        shared_vision_dim=_HETERO_DIM,
-        shared_text_dim=_HETERO_DIM,
         **kwargs,
     )
 
@@ -1852,15 +1839,14 @@ class TestMultiTaskHeterogeneousSignatures:
                 task_specific_kwargs={"cap": {"fusion_strategy": "concatenation"}}
             )
 
-    @pytest.mark.parametrize("reserved", ["task_config", "vision_dim", "text_dim"])
-    def test_wrapper_owned_arguments_are_rejected(self, reserved) -> None:
-        """These are supplied by the wrapper; passing them collided opaquely."""
+    def test_wrapper_owned_arguments_are_rejected(self) -> None:
+        """Supplied by the wrapper; passing it collided opaquely."""
         with pytest.raises(ValueError, match="supplies these to every head"):
-            _hetero_multi(**{reserved: _HETERO_DIM})
+            _hetero_multi(task_config=_HETERO_DIM)
 
     def test_wrapper_owned_arguments_rejected_in_task_specific_kwargs_too(self) -> None:
         with pytest.raises(ValueError, match="supplies these to every head"):
-            _hetero_multi(task_specific_kwargs={"cap": {"vision_dim": _HETERO_DIM}})
+            _hetero_multi(task_specific_kwargs={"cap": {"task_config": _HETERO_DIM}})
 
     def test_universally_accepted_kwarg_still_reaches_every_taker(self) -> None:
         """Control: routing must not become "give it to nobody"."""
@@ -1918,13 +1904,17 @@ class TestMultiTaskHeterogeneousSignatures:
         """A BaseVLMHead subclass declaring only `**kwargs` still inherits."""
         accepted = _accepted_constructor_kwargs(VisualGroundingHead)
         assert "fusion_strategy" in accepted, "inherited BaseVLMHead args missed"
-        assert "normalization_type" in accepted
+        assert "task_config" in accepted
+        # The post-fusion arguments belong to the matching head alone, so the
+        # wrapper routes none of them to a grounding head.
+        assert "normalization_type" not in accepted
 
 
 # ---------------------------------------------------------------------
 # The post-fusion `hidden_dim` rule (one rule, both sites).
 #
-# `BaseVLMHead._build_common_layers` used to pass `hidden_dim` to
+# The post-fusion FFN site (then `BaseVLMHead._build_common_layers`, now
+# `ImageTextMatchingHead._create_post_fusion_layers`) used to pass `hidden_dim` to
 # `create_ffn_layer` UNCONDITIONALLY while `ImageCaptioningHead` passed it only
 # to types whose registry entry requires it. Two contradictory rules for the
 # same question in one file, and the unconditional one silently overrode the
@@ -1939,8 +1929,6 @@ class TestPostFusionFFNHiddenDimRule:
     def _itm(ffn_type: str, expansion: int):
         head = ImageTextMatchingHead(
             task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
-            vision_dim=_FAMILY_DIM,
-            text_dim=_FAMILY_DIM,
             use_post_fusion_ffn=True,
             ffn_type=ffn_type,
             ffn_expansion_factor=expansion,
@@ -2022,14 +2010,13 @@ class TestPostFusionFFNHiddenDimRule:
     def test_both_ffn_sites_use_the_same_predicate(self) -> None:
         """Guards the seam itself, not just one side of it.
 
-        `ImageCaptioningHead` and `BaseVLMHead` must agree. If either site
+        `ImageCaptioningHead` and `ImageTextMatchingHead` must agree. If either site
         reverts to an unconditional kwarg, the two heads disagree about swiglu's
         width inside a single wrapper -- the originally measured symptom was
         captioning FFN hidden_dim=256 vs matching hidden_dim=192.
         """
         cap = ImageCaptioningHead(
             task_config=_family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
-            vision_dim=_FAMILY_DIM, text_dim=_FAMILY_DIM,
             ffn_type="swiglu", ffn_expansion_factor=4, num_layers=1,
         )
         payload = _family_payload()
@@ -2072,7 +2059,6 @@ _BASE_SUBCLASSES = [
 def _fusion_head(cls, name, task_type, strategy):
     return cls(
         task_config=_family_config(name, task_type),
-        vision_dim=_FAMILY_DIM, text_dim=_FAMILY_DIM,
         fusion_strategy=strategy,
     )
 
@@ -2198,8 +2184,7 @@ class TestMultiTaskConfigPreservesKerasBaseKwargs:
 
     def _head(self, **kw):
         return create_multi_task_vlm_head(
-            self._cfgs(), shared_vision_dim=_FAMILY_DIM,
-            shared_text_dim=_FAMILY_DIM, **kw
+            self._cfgs(), **kw
         )
 
     def test_from_config_preserves_name_and_trainable(self) -> None:
@@ -2410,11 +2395,9 @@ def _vlm_strictness_break(fn):
 
 
 def _build_site1(ffn_type: str):
-    """SITE 1: `BaseVLMHead._build_common_layers`'s post-fusion FFN."""
+    """SITE 1: `ImageTextMatchingHead._create_post_fusion_layers`'s post-fusion FFN."""
     head = ImageTextMatchingHead(
         task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
-        vision_dim=_FAMILY_DIM,
-        text_dim=_FAMILY_DIM,
         use_post_fusion_ffn=True,
         ffn_type=ffn_type,
     )
@@ -2493,3 +2476,141 @@ class TestVLMFFNTypeGrid:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Every VLM head owns exactly what its call() runs, and takes no knob it
+# never reads (plan-2026-10-14T062616-81938e81, step 7.1, decision D-032).
+#
+# MEASURED at c39e444a3 (a counter wrapped around every direct sub-layer's
+# `call`, one training-mode forward): `VisualGroundingHead` owned
+# `post_fusion_norm`, `post_fusion_dropout` and `post_fusion_ffn` and ran none
+# of them (two never built, so they carried no weight and no weight-based
+# check could see them); `ImageTextMatchingHead` owned `post_fusion_dropout`
+# and never ran it. `BaseVLMHead.activation_type` and every head's
+# `vision_dim`/`text_dim` were stored and serialized and read by nothing, and
+# `VisualGroundingHead(use_post_fusion_ffn=...)` was silently ignored. The
+# post-fusion stack now lives on the matching head alone; the dead arguments
+# are gone, so passing one raises.
+# ---------------------------------------------------------------------
+
+_OWNED_SUBJECTS = {
+    "captioning": lambda: ImageCaptioningHead(
+        _family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
+        num_layers=2, num_heads=NUM_HEADS),
+    "vqa_attention": lambda: VQAHead(
+        _family_config("vqa", VLMTaskType.VISUAL_QUESTION_ANSWERING)),
+    "vqa_mean": lambda: VQAHead(
+        _family_config("vqa", VLMTaskType.VISUAL_QUESTION_ANSWERING),
+        pooling_strategy="mean"),
+    "grounding": lambda: VisualGroundingHead(
+        task_config=_family_config("grd", VLMTaskType.VISUAL_GROUNDING)),
+    "matching": lambda: ImageTextMatchingHead(
+        _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING)),
+    "matching_no_ffn": lambda: ImageTextMatchingHead(
+        _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+        use_post_fusion_ffn=False),
+}
+
+
+def _owned_sublayer_calls(head, payload) -> dict:
+    """Run one training-mode forward and count the calls of every direct
+    sub-layer the head tracks. A sub-layer created and never called shows 0
+    whether or not it was built, which a weight-based check cannot see."""
+    counts = {}
+    for sub in head._layers:
+        counts[sub.name] = 0
+        original = sub.call
+
+        def counted(*args, _original=original, _name=sub.name, **kwargs):
+            counts[_name] += 1
+            return _original(*args, **kwargs)
+        sub.call = counted
+    head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()},
+         training=True)
+    return counts
+
+
+class TestEveryVLMHeadOwnsOnlyWhatItRuns:
+
+    @pytest.mark.parametrize("name", sorted(_OWNED_SUBJECTS))
+    def test_every_owned_sublayer_runs_in_call(self, name) -> None:
+        keras.utils.set_random_seed(3)
+        payload = _family_payload()
+        payload["question_features"] = payload["text_features"]
+        counts = _owned_sublayer_calls(_OWNED_SUBJECTS[name](), payload)
+        never = sorted(n for n, c in counts.items() if c == 0)
+        assert counts and not never, (
+            f"{name} owns sub-layers its call() never runs: {never}")
+
+    def test_the_post_fusion_stack_is_the_matching_heads_alone(self) -> None:
+        grounding = _OWNED_SUBJECTS["grounding"]()
+        for attr in ("post_fusion_norm", "post_fusion_dropout",
+                     "post_fusion_ffn"):
+            assert not hasattr(grounding, attr), attr
+        matching = _OWNED_SUBJECTS["matching"]()
+        assert not hasattr(matching, "post_fusion_dropout")
+        assert hasattr(matching, "post_fusion_ffn")
+        assert not hasattr(_OWNED_SUBJECTS["matching_no_ffn"](),
+                           "post_fusion_ffn")
+
+    @pytest.mark.parametrize("key,value", [
+        ("use_post_fusion_ffn", True), ("use_post_fusion_ffn", False),
+        ("normalization_type", "rms_norm"), ("ffn_type", "swiglu"),
+        ("ffn_expansion_factor", 2),
+    ])
+    def test_the_grounding_head_refuses_the_post_fusion_arguments(
+            self, key, value) -> None:
+        with pytest.raises(ValueError, match=key):
+            VisualGroundingHead(
+                task_config=_family_config("grd", VLMTaskType.VISUAL_GROUNDING),
+                **{key: value})
+
+    @pytest.mark.parametrize("key", ["vision_dim", "text_dim", "activation_type"])
+    @pytest.mark.parametrize("label,task_type,text_key", _SINGLE_HEADS)
+    def test_no_head_takes_a_declared_width_or_an_unread_activation(
+            self, key, label, task_type, text_key) -> None:
+        value = "gelu" if key == "activation_type" else _FAMILY_DIM
+        with pytest.raises(ValueError, match=key):
+            create_vlm_head(_family_config(label, task_type), **{key: value})
+
+    @pytest.mark.parametrize(
+        "key", ["vision_dim", "text_dim", "shared_vision_dim", "shared_text_dim"])
+    def test_the_wrapper_takes_no_declared_width(self, key) -> None:
+        cfgs = {"itm": _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING)}
+        with pytest.raises(ValueError, match="not accepted by ANY head"):
+            create_multi_task_vlm_head(cfgs, **{key: _FAMILY_DIM})
+
+    def test_the_wrapper_never_hands_a_head_an_argument_it_refuses(self) -> None:
+        cfgs = {
+            "grd": _family_config("grd", VLMTaskType.VISUAL_GROUNDING),
+            "itm": _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+        }
+        head = create_multi_task_vlm_head(cfgs, use_post_fusion_ffn=False)
+        assert head.task_heads["itm"].use_post_fusion_ffn is False
+        assert not hasattr(head.task_heads["itm"], "post_fusion_ffn")
+        assert not hasattr(head.task_heads["grd"], "use_post_fusion_ffn")
+        # A grounding-only wrapper has no taker for it at all.
+        with pytest.raises(ValueError, match="not accepted by ANY head"):
+            create_multi_task_vlm_head(
+                {"grd": cfgs["grd"]}, use_post_fusion_ffn=False)
+        # Naming the grounding head explicitly is a caller error.
+        with pytest.raises(ValueError, match="does not accept"):
+            create_multi_task_vlm_head(
+                cfgs, task_specific_kwargs={"grd": {"use_post_fusion_ffn": True}})
+
+    def test_the_matching_heads_post_fusion_arguments_round_trip(self) -> None:
+        head = ImageTextMatchingHead(
+            _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+            normalization_type="rms_norm", use_post_fusion_ffn=False,
+            ffn_type="swiglu", ffn_expansion_factor=2)
+        config = head.get_config()
+        for key, value in (("normalization_type", "rms_norm"),
+                           ("use_post_fusion_ffn", False),
+                           ("ffn_type", "swiglu"),
+                           ("ffn_expansion_factor", 2)):
+            assert config[key] == value, key
+        for key in ("vision_dim", "text_dim", "activation_type"):
+            assert key not in config, key
+        rebuilt = ImageTextMatchingHead.from_config(json.loads(json.dumps(config)))
+        assert rebuilt.get_config() == config

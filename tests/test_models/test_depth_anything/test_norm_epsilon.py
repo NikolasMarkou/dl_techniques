@@ -69,7 +69,7 @@ class TestPlaceholderEncoderAgreesWithTheHead:
         from dl_techniques.models.vision.depth_anything.model import DepthAnything
 
         model = DepthAnything(
-            input_shape=(64, 64, 3),
+            image_shape=(64, 64, 3),
             encoder_kind="placeholder",
             decoder_dims=[8, 16, 16, 16],
         )

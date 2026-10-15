@@ -6,13 +6,14 @@ estimation architecture (`encoder + DPT-style decoder`). Source files:
 ```
 src/dl_techniques/models/vision/depth_anything/
 ├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTDecoder
-├── components.py      # DPTDecoder layer (linear default + upsample_factor)
+├── components.py      # DPTDecoder layer (exported; used by OmniPoint, not by DepthAnything)
 ├── model.py           # DepthAnything keras.Model + create_depth_anything factory
 └── teacher_ema.py     # TeacherEMACallback, cosine_ema_schedule, linear_ema_schedule
 ```
 
 The encoder is the in-tree `dl_techniques.models.vision.vit.ViT` (`encoder_kind='real'`,
-the default); the DPT decoder defaults to a `linear` output. `train_step` dispatches to a
+the default); the decoder is the shared `DepthEstimationHead(decoder_style='dpt')` and ends in a
+ReLU, as the reference heads do (see "Output range" below). `train_step` dispatches to a
 clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
 an L1 pseudo-label consistency term on student-vs-teacher depth over `x_unlab`. On-step EMA
 decay is provided by `TeacherEMACallback` with cosine/linear schedules, and
@@ -31,15 +32,43 @@ and produces a single-channel depth map at the same spatial resolution:
 
 ```
 input  : (B, H, W, 3)   float32 RGB
-output : (B, H, W, 1)   float32 depth (linear by default)
+output : (B, H, W, 1)   float32 relative depth, non-negative (final ReLU)
 ```
+
+### Output range
+
+The output is the ReLU of the decoder's last conv, so it is non-negative with no upper bound and no
+range parameters. This is what the reference does, re-derived from the paper and the official code
+(fetched 2026-10-15):
+
+* The Depth Anything paper (arXiv 2401.10891) trains relative depth: depth is turned into disparity
+  `d = 1/t`, normalized per map, and supervised with an affine-invariant loss. There is no metric
+  range in the model.
+* V1 `depth_anything/dpt.py` (LiheYoung/Depth-Anything): the head's `output_conv2` ends
+  `Conv2d(32, 1, 1) -> nn.ReLU(True) -> nn.Identity()`, and `DPT_DINOv2.forward` applies `F.relu`
+  again after the bilinear resize.
+* V2 `depth_anything_v2/dpt.py` (DepthAnything/Depth-Anything-V2): the same ReLU tail and `F.relu`
+  after the resize.
+* The only range maps are in the metric variants, which this package does not implement: V2's
+  `metric_depth/depth_anything_v2/dpt.py` ends in `nn.Sigmoid()` and multiplies by `max_depth`
+  (20 indoor, 80 outdoor), and V1's metric models are ZoeDepth with metric bins.
+
+The decoder used to be linear and received `min_depth=0.1`, `max_depth=100.0` and
+`use_log_depth=True`, which the DPT decoder stored and never applied; the decoder now refuses them.
+A `.keras` archive saved before 2026-10-15 still loads, with every weight restored, and its output
+is then the ReLU of what it returned before (measured: max difference 0.0 against the old output
+clamped at zero). Nothing marks such an archive, so the change is silent.
+
+This port supervises depth (MegaDepth) rather than the paper's disparity, and its decoder is a plain
+conv stack rather than the reference's fusion blocks; the ReLU is the one part of the reference's
+output contract that carries over unchanged.
 
 It is composed of three sub-networks:
 
 | Sub-network        | Type                          | Where built       | Trainable |
 |--------------------|-------------------------------|-------------------|-----------|
 | `encoder`          | `keras.Model` (`ViT` or Conv) | `__init__`/`build()` | yes |
-| `decoder`          | `DPTDecoder`                  | `build()`         | yes |
+| `decoder`          | `DepthEstimationHead` (`decoder_style='dpt'`), named `depth_estimation_head` | `build()`, only when `include_top=True` | yes |
 | `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
 | `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
@@ -96,14 +125,13 @@ DepthAnything(
     encoder_kind:           str   = 'real',           # 'real' | 'placeholder'
     enable_semi_supervised: bool  = False,
     encoder:                Optional[keras.Model] = None,   # for from_config
-    input_shape:            Optional[Tuple[int,int,int]] = None,  # legacy alias
+    include_top:            bool  = True,
     **kwargs,
 )
 ```
 
-> **`input_shape` → `image_shape` rename.** `image_shape` is the canonical
-> kwarg. `input_shape` is accepted as a deprecated alias for one cycle so
-> previously-saved configs continue to load.
+`input_shape`, a deprecated alias for `image_shape`, was removed on 2026-10-15 with no replacement:
+pass `image_shape`. A saved config that still carries `input_shape` no longer loads.
 
 **Save/load.** `DepthAnything` overrides Keras 3's `load_own_variables` to
 force-build the nested sub-Models with a dummy forward before the framework
@@ -145,24 +173,24 @@ when returned.
 `keras.layers.Layer` registered as
 `dl_techniques.models.depth_anything.components>DPTDecoder` via
 `@register_dl_technique(...)`. Convolutional decoder head with optional bilinear
-upsampling.
+upsampling. `DepthAnything` does not use it (its decoder is the shared
+`DepthEstimationHead` in `'dpt'` mode, the same stage structure); OmniPoint's dense heads do.
 
 **Architecture**:
 
 ```
 features (B, h, w, C_in)
    │
-   ├── for dim in dims[:-1]:
-   │       Conv3x3(dim) → BN → ReLU → [UpSample2D(2x bilinear) if upsample_factor>1]
+   ├── for i, dim in enumerate(dims):
+   │       Conv3x3(dim) → BN → activation → [UpSample2D(2x bilinear) if i < log2(upsample_factor)]
    │
    ├── Conv3x3(output_channels) with output_activation        # default 'linear'
    │
-   └── depth (B, h*upsample_factor, w*upsample_factor, output_channels)
+   └── output (B, h*upsample_factor, w*upsample_factor, output_channels)
 ```
 
-`output_activation` defaults to `'linear'`. `upsample_factor` defaults to
-`1`; `DepthAnything` passes `upsample_factor=encoder_stride` so the decoder
-lifts features back to input resolution.
+`output_activation` defaults to `'linear'`. `upsample_factor` defaults to `1` and must be a power of
+two at most `2 ** len(dims)`.
 
 ### `StrongAugmentation` (in `dl_techniques.layers.signal_processing.strong_augmentation`)
 
@@ -281,11 +309,11 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 |--------------------------|----------------------------|----------------------------------------|-------|
 | `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`. Picks ViT scale. |
 | `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds in-tree `ViT`; `'placeholder'` builds the legacy Conv-BN-ReLU. |
-| `image_shape`            | `Tuple[int,int,int]`       | `(384, 384, 3)`                        | Canonical kwarg. `input_shape` accepted as deprecated alias. |
+| `image_shape`            | `Tuple[int,int,int]`       | `(384, 384, 3)`                        | Input image shape. |
 | `decoder_dims`           | `List[int]`                | `[256, 128, 64, 32]`                   | Stage widths; last entry is the penultimate decoder width. |
 | `output_channels`        | `int`                      | `1`                                    | Final depth-map channel count. |
-| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | |
-| `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Do **not** combine with `AdamW(weight_decay=...)`. |
+| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches the encoder and every decoder conv (one clone per conv). |
+| `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches the encoder and every decoder conv. Do **not** combine with `AdamW(weight_decay=...)`. |
 | `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
 | `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`. |
 | `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`. |
@@ -293,16 +321,21 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 | `use_feature_alignment`  | `bool`                     | `True`                                 | Adds the FAL term in the semi-supervised step. Also builds `frozen_encoder` — but so does `enable_semi_supervised`, which needs a teacher for its consistency term. Setting this True with `enable_semi_supervised=False` builds a teacher nothing reads, and warns. |
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
-`DPTDecoder` (used internally):
+The decoder, `DepthEstimationHead(decoder_style='dpt')`, built in `build()` when `include_top=True`:
 
-| Argument            | Default       | Notes |
-|---------------------|---------------|-------|
-| `dims`              | required      | Forwarded from `DepthAnything.decoder_dims`. |
-| `output_channels`   | `1`           | Forwarded. |
-| `output_activation` | `'linear'`    | Linear is the canonical depth-estimation output. |
-| `upsample_factor`   | `1`           | Forwarded as `encoder_stride` (16 for both real and placeholder). Power of 2 only. |
-| `kernel_initializer`| `'he_normal'` | |
-| `kernel_regularizer`| `None`        | |
+| Argument                 | Value DepthAnything passes | Notes |
+|--------------------------|----------------------------|-------|
+| `dpt_dims`               | `decoder_dims`             | One `Conv3x3 → BN → ReLU` stage per entry. |
+| `output_channels`        | `output_channels`          | |
+| `dpt_use_bias`           | `False`                    | Stage convs; the output conv has a bias. |
+| `dpt_activation`         | `'relu'`                   | Stage activation. |
+| `dpt_output_activation`  | `'relu'`                   | The reference's final ReLU; see "Output range". |
+| `dpt_upsample_factor`    | `encoder_stride` (16)      | Same for the real and the placeholder encoder. Power of 2 only. |
+| `dpt_kernel_initializer` | `kernel_initializer`       | Cloned per conv. |
+| `dpt_kernel_regularizer` | `kernel_regularizer`       | |
+
+`min_depth`, `max_depth` and `use_log_depth` are not passed: they configure the head's progressive
+decoder, and the DPT mode refuses them.
 
 ---
 

@@ -46,13 +46,13 @@ nlp = create_head(
 # Vision: task_type (+ head kwargs)
 vis = create_head("vision", VisionTaskType.CLASSIFICATION, num_classes=1000)
 
-# VLM: task_config (+ vision_dim/text_dim/...)
+# VLM: task_config (+ head kwargs; every feature width comes from the inputs)
 vlm = create_head(
     "vlm",
     task_config=VLMTaskConfig(name="caption",
                               task_type=VLMTaskType.IMAGE_CAPTIONING,
                               vocab_size=50000),
-    vision_dim=768, text_dim=768,
+    num_layers=2,
 )
 ```
 
@@ -90,7 +90,16 @@ Where a head also returns `'probabilities'` (NLP and vision classification, NLP 
 is `softmax('logits')`, computed in the head's compute dtype. Two outputs are squashed by design,
 because they are range maps for regression targets, not class scores: the progressive
 `DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid (the DPT depth decoder applies
-its `dpt_output_activation`, `'linear'` by default). The per-domain READMEs give each head's keys.
+its `dpt_output_activation`, `'linear'` by default; DepthAnything passes `'relu'`, the reference
+head's final ReLU). The per-domain READMEs give each head's keys.
+
+Every vision and VLM head owns only the sub-layers its `call` runs. Arguments that a head's `call`
+can never read are refused with `ValueError`: the VLM heads take no `vision_dim`/`text_dim` (widths
+come from the inputs) and no `activation_type`, the post-fusion options belong to
+`ImageTextMatchingHead` alone, and `DepthEstimationHead`'s two decoders each refuse the other's
+arguments. The vision heads' attention and FFN settings (`attention_type`, `ffn_type`,
+`dropout_rate`, ...) are still accepted when `use_attention`/`use_ffn` is off, and are read only
+when it is on.
 
 ## Notes
 

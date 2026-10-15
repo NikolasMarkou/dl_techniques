@@ -153,6 +153,20 @@ this package merge) still resolve.
   grounding `'bbox'` sigmoid. Do not add an activation to a class-like
   output; the consumer's loss takes `from_logits=True`. `README.md` §
   Output contract is the authoritative list.
+- **A head owns what its `call` runs, and nothing else.** A sub-layer that
+  `call` never reaches is not created, and an argument `call` can never read
+  is refused with `ValueError`: the vision heads (D-020: no common
+  norm/Dropout, `ClassificationHead` refuses `use_ffn`, `EnhancementHead`
+  refuses attention/FFN/dropout), `DepthEstimationHead`'s two decoders, each of
+  which refuses the other's arguments (D-030), and the VLM heads (D-032:
+  `BaseVLMHead` owns only `fusion`; the post-fusion norm and FFN and their four
+  arguments live on `ImageTextMatchingHead`; no
+  `vision_dim`/`text_dim`/`activation_type`). The `BaseVisionHead`
+  attention/FFN settings are the one flag-gated exception: accepted with
+  `use_attention`/`use_ffn` off, read only when on. Check it by calling: count each
+  sub-layer's `call` over one forward
+  (`test_vlm.py::TestEveryVLMHeadOwnsOnlyWhatItRuns`). Do not check it by
+  weights: a sub-layer created and never called is never built and holds none.
 - **The vision and VLM heads round-trip by value.** `tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`
   saves and reloads every vision head variant and compares every weight by
   path; `test_vlm.py::TestVLMHeadFamilyExplicitBuild` does the same for the
