@@ -1,331 +1,401 @@
-"""Training script for nanoVLM model with multi-optimizer support."""
+"""Train NanoVLM on image/text batches through stock ``compile``/``fit``.
 
-import os
+The model is a ``NanoVLM.MODEL_VARIANTS`` row, built by ``create_nanovlm``
+with optional size overrides, and compiled with ``NanoVLMLoss``: next-token
+cross-entropy over the text positions of the model's ``[vision; text]``
+logits, padding (id 0) ignored. There is no custom training step.
+
+Exactly one data source:
+
+* ``--synthetic``: random images and token sequences generated in memory
+  (``BOS``, random content, ``EOS``, right padding), for smoke runs and for
+  a memorization check;
+* ``--data-json``: a Cauldron-format JSON list of
+  ``{'image_path', 'question', 'answer'}`` rows, read by
+  ``dl_techniques.datasets.vqa_dataset``.
+
+A run directory (``--output-dir``, default ``results/nanovlm_<variant>_<ts>``)
+receives ``config.json``, ``training_log.csv``, ``training_history.json`` and
+``final_model.keras`` (rewritten after every epoch).
+
+Example::
+
+    MPLBACKEND=Agg .venv/bin/python -m train.nano_vlm.train_nano_vlm \\
+        --synthetic --variant mini --epochs 1 --steps-per-epoch 10
+"""
+
 import argparse
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence, Tuple
+
 import keras
+import numpy as np
 import tensorflow as tf
-from keras import ops
-from datetime import datetime
-from typing import Dict, List, Tuple, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from train.common import setup_gpu
+from train.common import (
+    setup_gpu,
+    setup_mixed_precision,
+    set_seeds,
+    default_experiment_name,
+    save_config_json,
+    save_training_history_json,
+)
+from train.common.callbacks import EpochLogLine, LearningRateLogger
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
-from dl_techniques.models.vision_language.nano_vlm.model import create_nanovlm
-from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample, create_vqa_dataset
+from dl_techniques.models.vision_language.nano_vlm.model import NanoVLM, create_nanovlm
+from dl_techniques.datasets.vqa_dataset import (
+    VQADataSequence,
+    VQADataProcessor,
+    create_vqa_dataset,
+    load_cauldron_from_json,
+)
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 
-
 # ---------------------------------------------------------------------
 
-def create_training_setup() -> Dict[str, Any]:
-    """Create training configuration (optimizer, LR schedule, loss)."""
-    lr_schedule = learning_rate_schedule_builder({
-        "type": "cosine_decay", "warmup_steps": 1000, "warmup_start_lr": 1e-8,
-        "learning_rate": 1e-4, "decay_steps": 50000, "alpha": 0.0001
-    })
+#: Token ids shared with ``VQADataProcessor``'s defaults: padding (ignored
+#: by the loss), beginning and end of sequence.
+PAD_ID, BOS_ID, EOS_ID = 0, 1, 2
 
-    optimizer = optimizer_builder({
+
+def build_nanovlm_optimizer(
+        learning_rate: float,
+        warmup_steps: int,
+        decay_steps: int,
+        clipnorm: float,
+) -> keras.optimizers.Optimizer:
+    """AdamW on a linear-warmup cosine schedule with a global-norm clip.
+
+    Under a ``mixed_float16`` policy `keras.Model.compile` wraps the optimizer
+    in a ``LossScaleOptimizer``, which unscales the gradients before this
+    optimizer clips them, so ``clipnorm`` bounds the true gradient norm.
+    """
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay", "warmup_steps": warmup_steps,
+        "warmup_start_lr": 1e-9, "learning_rate": learning_rate,
+        "decay_steps": decay_steps, "alpha": 0.0001
+    })
+    return optimizer_builder({
         "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
-        "gradient_clipping_by_norm": 1.0
+        "gradient_clipping_by_norm": clipnorm
     }, lr_schedule)
 
-    return {
-        "optimizer": optimizer,
-        "lr_schedule": lr_schedule,
-        "loss_fn": NanoVLMLoss(ignore_index=0, label_smoothing=0.1)
-    }
 
+def compile_nanovlm(
+        model: NanoVLM,
+        optimizer: keras.optimizers.Optimizer,
+        label_smoothing: float,
+) -> NanoVLM:
+    """Compile ``model`` for stock ``fit`` with the next-token loss.
 
-# ---------------------------------------------------------------------
-
-def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
-    """Setup different learning rates for vision, language, and projection components."""
-    vision_params: List[keras.Variable] = []
-    language_params: List[keras.Variable] = []
-    projection_params: List[keras.Variable] = []
-
-    for layer in model.layers:
-        layer_name = layer.name.lower()
-        if 'vision_heads' in layer_name or 'encoder' in layer_name:
-            vision_params.extend(layer.trainable_variables)
-        elif 'projection' in layer_name or 'connector' in layer_name:
-            projection_params.extend(layer.trainable_variables)
-        else:
-            language_params.extend(layer.trainable_variables)
-
-    def _build_optimizer(lr: float, decay_steps: int, warmup: int, clip: float):
-        lr_schedule = learning_rate_schedule_builder({
-            "type": "cosine_decay", "warmup_steps": warmup, "warmup_start_lr": 1e-9,
-            "learning_rate": lr, "decay_steps": decay_steps, "alpha": 0.0001
-        })
-        return optimizer_builder({
-            "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
-            "gradient_clipping_by_norm": clip
-        }, lr_schedule)
-
-    return {
-        "vision_optimizer": _build_optimizer(1e-5, 25000, 500, 0.5),
-        "language_optimizer": _build_optimizer(1e-5, 25000, 500, 0.5),
-        "projection_optimizer": _build_optimizer(1e-4, 50000, 1000, 1.0),
-        "vision_params": vision_params,
-        "language_params": language_params,
-        "projection_params": projection_params
-    }
-
-
-# ---------------------------------------------------------------------
-
-class NanoVLMTrainer:
-    """Custom trainer for nanoVLM with multi-optimizer support.
-
-    Implements differential learning rates for vision encoder,
-    language model, and projection layers.
+    Interface contract (callers: `main`, tests): returns ``model`` itself,
+    compiled with ``NanoVLMLoss(ignore_index=PAD_ID, from_logits=True)``. Feed
+    its ``fit`` ``(inputs, labels)`` batches where ``inputs`` holds
+    ``'images'``, ``'text_tokens'`` and ``'attention_mask'`` and ``labels``
+    are the text tokens themselves (the loss shifts them by one).
     """
-
-    def __init__(self, model: keras.Model, loss_fn: keras.losses.Loss,
-                 use_multi_optimizer: bool = True) -> None:
-        self.model = model
-        self.loss_fn = loss_fn
-        self.use_multi_optimizer = use_multi_optimizer
-
-        if use_multi_optimizer:
-            self.optimizers = setup_different_learning_rates(model)
-        else:
-            self.single_optimizer = create_training_setup()["optimizer"]
-
-        self.train_loss = keras.metrics.Mean(name='train_loss')
-        self.train_accuracy = keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
-
-    def _apply_multi_optimizer_gradients(
-        self, gradients: List[keras.Variable], variables: List[keras.Variable]
-    ) -> None:
-        """Apply gradients using component-specific optimizers."""
-        component_map = {
-            'vision': ([], [], self.optimizers['vision_optimizer'], self.optimizers['vision_params']),
-            'language': ([], [], self.optimizers['language_optimizer'], self.optimizers['language_params']),
-            'projection': ([], [], self.optimizers['projection_optimizer'], self.optimizers['projection_params']),
-        }
-
-        for grad, var in zip(gradients, variables):
-            if grad is None:
-                continue
-            if var in self.optimizers['vision_params']:
-                component_map['vision'][0].append(grad)
-                component_map['vision'][1].append(var)
-            elif var in self.optimizers['projection_params']:
-                component_map['projection'][0].append(grad)
-                component_map['projection'][1].append(var)
-            elif var in self.optimizers['language_params']:
-                component_map['language'][0].append(grad)
-                component_map['language'][1].append(var)
-
-        for _, (grads, vars, opt, _) in component_map.items():
-            if grads and vars:
-                opt.apply_gradients(zip(grads, vars))
-
-    def train_step(self, batch_data: Tuple[Any, Any]) -> Dict[str, keras.Variable]:
-        inputs, labels = batch_data
-
-        with tf.GradientTape() as tape:
-            predictions = self.model(inputs, training=True)
-            loss = self.loss_fn(labels, predictions)
-
-            if isinstance(self.model.dtype_policy, keras.mixed_precision.Policy):
-                if self.model.dtype_policy.name == 'mixed_float16':
-                    loss = ops.cast(loss, dtype='float32')
-
-        trainable_vars = self.model.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-
-        if self.use_multi_optimizer:
-            self._apply_multi_optimizer_gradients(gradients, trainable_vars)
-        else:
-            filtered = [(g, v) for g, v in zip(gradients, trainable_vars) if g is not None]
-            if filtered:
-                self.single_optimizer.apply_gradients(filtered)
-
-        self.train_loss.update_state(loss)
-        self.train_accuracy.update_state(labels, predictions)
-
-        return {'loss': self.train_loss.result(), 'accuracy': self.train_accuracy.result()}
-
-    def reset_metrics(self) -> None:
-        self.train_loss.reset_state()
-        self.train_accuracy.reset_state()
+    model.compile(
+        optimizer=optimizer,
+        loss=NanoVLMLoss(ignore_index=PAD_ID, label_smoothing=label_smoothing,
+                         from_logits=True),
+    )
+    return model
 
 
-# ---------------------------------------------------------------------
+def make_synthetic_samples(
+        num_samples: int,
+        image_size: int,
+        seq_len: int,
+        vocab_size: int,
+        seed: int,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """Random image/token-sequence samples, generated in memory.
 
-def configure_mixed_precision() -> None:
-    """Configure mixed precision training."""
-    try:
-        keras.mixed_precision.set_global_policy(keras.mixed_precision.Policy('mixed_float16'))
-        logger.info("Mixed precision enabled (float16)")
-    except Exception as e:
-        logger.warning(f"Mixed precision not available: {e}. Using float32.")
-        keras.mixed_precision.set_global_policy(keras.mixed_precision.Policy('float32'))
+    Each sequence is ``BOS``, a random-length run of content ids in
+    ``[3, vocab_size)``, ``EOS``, then ``PAD`` to ``seq_len``, the layout
+    ``VQADataProcessor`` produces. No two samples share a sequence, so the
+    task is not degenerate.
 
+    Args:
+        num_samples: Number of samples.
+        image_size: Square image edge; pixels are uniform in ``[-1, 1)``, the
+            range of the processor's default ``'siglip'`` normalization.
+        seq_len: Token sequence length, at least 3.
+        vocab_size: The model's vocabulary size, at least 4.
+        seed: Seed of the generator.
 
-# ---------------------------------------------------------------------
+    Returns:
+        ``(inputs, labels)``: ``inputs`` holds float32 ``images``
+        ``(N, S, S, 3)`` and int32 ``text_tokens`` / ``attention_mask``
+        ``(N, L)``; ``labels`` is ``text_tokens``.
 
-def train_nanovlm(
-    epochs: int = 10, batch_size: int = 8, use_multi_optimizer: bool = True,
-    checkpoint_frequency: int = 5, log_frequency: int = 10,
-    gpu_index: int = None,
-) -> None:
-    """Main training function for nanoVLM."""
-    logger.info("Starting nanoVLM training")
-    setup_gpu(gpu_id=gpu_index)
-    configure_mixed_precision()
-
-    data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
-    sample_data = load_cauldron_sample()
-    train_dataset = create_vqa_dataset(sample_data, data_processor, batch_size=batch_size, shuffle=True)
-    steps_per_epoch = len(train_dataset)
-
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
-    # REFUSE `steps_per_epoch == 0`. `VQADataSequence.__len__` is
-    # `len(samples) // batch_size`, and `load_cauldron_sample()` returns exactly
-    # 3 placeholder samples, so at the shipped default `batch_size=8` this is
-    # `3 // 8 == 0`. `for step in range(0)` then runs ZERO steps, every epoch
-    # logs `Loss=0.0000` from an untouched `Mean` metric, and the run "completes"
-    # and saves an UNTRAINED model with no error anywhere. Do NOT "fix" this by
-    # rounding `__len__` up (the last partial batch is not what is missing here)
-    # and do NOT lower the default `batch_size` silently -- the sample loader is
-    # a 3-row placeholder, and the caller must be told. See decisions.md D-134.
-    if steps_per_epoch == 0:
+    Raises:
+        ValueError: If ``seq_len < 3`` or ``vocab_size < 4``.
+    """
+    if seq_len < 3 or vocab_size < 4:
         raise ValueError(
-            f"steps_per_epoch == 0: len(samples)={len(sample_data)} // batch_size={batch_size} == 0. "
-            f"Every epoch would run zero training steps and an untrained model would be saved. "
-            f"Use batch_size <= {len(sample_data)}, or supply more samples."
+            f"need seq_len >= 3 and vocab_size >= 4 for BOS, content, EOS; "
+            f"got seq_len={seq_len}, vocab_size={vocab_size}"
+        )
+    rng = np.random.default_rng(seed)
+    images = rng.uniform(-1.0, 1.0, (num_samples, image_size, image_size, 3)).astype(np.float32)
+    tokens = np.full((num_samples, seq_len), PAD_ID, dtype=np.int32)
+    # 1 .. seq_len - 2 content tokens, so BOS and EOS always fit.
+    content_lengths = rng.integers(1, seq_len - 1, size=num_samples)
+    for i, length in enumerate(content_lengths):
+        tokens[i, 0] = BOS_ID
+        tokens[i, 1:length + 1] = rng.integers(3, vocab_size, size=length)
+        tokens[i, length + 1] = EOS_ID
+    inputs = {
+        'images': images,
+        'text_tokens': tokens,
+        'attention_mask': (tokens != PAD_ID).astype(np.int32),
+    }
+    return inputs, tokens
+
+
+def sequence_as_dataset(
+        sequence: VQADataSequence,
+        image_size: int,
+        seq_len: int,
+) -> tf.data.Dataset:
+    """One pass over ``sequence``'s batches as a ``tf.data`` pipeline.
+
+    ``fit`` resets a finite ``PyDataset`` only once it runs dry, exactly as it
+    does a finite ``tf.data`` dataset (MEASURED, Keras 3.8: 3 batches at 2
+    steps per epoch train ``[2, 1, 2]`` with a "ran out of data" warning), so
+    the file path goes through ``tf.data`` too and can be repeated like the
+    synthetic one. The batches stay lazy: images are read per batch.
+    """
+    def batches():
+        # DECISION plan-2026-08-18T140459-7991552f/D-009
+        # Index by `range(steps_per_epoch)`. Do NOT write
+        # `for step, batch in enumerate(train_dataset)`. `create_vqa_dataset`
+        # returns a `VQADataSequence(keras.utils.Sequence)`, and in Keras 3
+        # `keras.utils.Sequence` IS `PyDataset`, which defines
+        # `__getitem__`/`__len__` and no `__iter__`. `enumerate` therefore
+        # fell back to Python's legacy `__getitem__` protocol, which walks
+        # 0, 1, 2, ... until `IndexError` and IGNORES `__len__` entirely.
+        # `VQADataSequence.__getitem__` serves any index and never raises
+        # `IndexError`, so epoch 0 never ended: a hang with no failure text.
+        # Same mechanism, same repair as the D-034 anchor in
+        # `src/train/hrm/train_hrm.py`'s `train_epoch`.
+        for index in range(len(sequence)):
+            yield sequence[index]
+        sequence.on_epoch_end()
+
+    text_spec = tf.TensorSpec((None, seq_len), tf.int32)
+    signature = (
+        {
+            'images': tf.TensorSpec((None, image_size, image_size, 3), tf.float32),
+            'text_tokens': text_spec,
+            'attention_mask': text_spec,
+        },
+        text_spec,
+    )
+    # A generator's cardinality is unknown, and `fit` then warns "ran out of
+    # data" at the end of every pass; the sequence knows its length.
+    return tf.data.Dataset.from_generator(batches, output_signature=signature).apply(
+        tf.data.experimental.assert_cardinality(len(sequence)))
+
+
+def size_overrides(args: argparse.Namespace) -> Dict[str, Any]:
+    """The ``vision_config``/``text_config``/``fusion_config`` keys the size
+    flags set, in the one-level merge form ``NanoVLM.from_variant`` takes.
+    Flags left at ``None`` keep the row's value."""
+    vision: Dict[str, Any] = {}
+    text: Dict[str, Any] = {}
+    fusion: Dict[str, Any] = {}
+    if args.image_size is not None:
+        vision['img_size'] = args.image_size
+    if args.patch_size is not None:
+        vision['patch_size'] = args.patch_size
+    if args.embed_dim is not None:
+        vision['embed_dim'] = text['embed_dim'] = fusion['dim'] = args.embed_dim
+    if args.num_heads is not None:
+        vision['num_heads'] = text['num_heads'] = args.num_heads
+        fusion['attention_config'] = {'num_heads': args.num_heads}
+    if args.vision_depth is not None:
+        vision['depth'] = args.vision_depth
+    if args.text_depth is not None:
+        text['depth'] = args.text_depth
+    if args.num_fusion_layers is not None:
+        fusion['num_fusion_layers'] = args.num_fusion_layers
+    if args.max_text_length is not None:
+        text['max_seq_len'] = args.max_text_length
+    return {'vision_config': vision, 'text_config': text, 'fusion_config': fusion}
+
+
+def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse the NanoVLM trainer's command line.
+
+    Exactly one data source: ``--synthetic`` or ``--data-json``.
+    """
+    parser = argparse.ArgumentParser(description="Train NanoVLM")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument("--variant", type=str, default="base",
+                        choices=sorted(NanoVLM.MODEL_VARIANTS),
+                        help="NanoVLM.MODEL_VARIANTS row passed to create_nanovlm")
+    parser.add_argument("--vocab-size", type=int, default=32000)
+    parser.add_argument("--fusion-strategy", type=str, default=None,
+                        help="override the row's fusion_strategy")
+    parser.add_argument("--image-size", type=int, default=None, help="override img_size")
+    parser.add_argument("--patch-size", type=int, default=None, help="override patch_size")
+    parser.add_argument("--embed-dim", type=int, default=None,
+                        help="override both towers' embed_dim and the fusion dim")
+    parser.add_argument("--num-heads", type=int, default=None,
+                        help="override the heads of both towers and the fusion attention")
+    parser.add_argument("--vision-depth", type=int, default=None)
+    parser.add_argument("--text-depth", type=int, default=None)
+    parser.add_argument("--num-fusion-layers", type=int, default=None)
+    parser.add_argument("--max-text-length", type=int, default=None,
+                        help="text sequence length (default: the row's max_seq_len)")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="cap on training steps per epoch (default: one full pass)")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--learning-rate", type=float, default=1e-5,
+                        help="peak of the warmup-cosine schedule")
+    parser.add_argument("--warmup-steps", type=int, default=500)
+    parser.add_argument("--decay-steps", type=int, default=25000)
+    parser.add_argument("--clipnorm", type=float, default=0.5,
+                        help="global gradient-norm clip")
+    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--mixed-precision", action=argparse.BooleanOptionalAction,
+                        default=True, help="mixed_float16 global policy")
+    parser.add_argument("--seed", type=int, default=42)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--synthetic", action="store_true",
+                        help="train on random image/text samples generated in memory")
+    source.add_argument("--data-json", type=str, default=None,
+                        help="Cauldron-format JSON list of image_path/question/answer rows")
+    parser.add_argument("--synthetic-samples", type=int, default=64,
+                        help="number of samples generated by --synthetic")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="run directory (default: results/nanovlm_<variant>_<timestamp>)")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> Path:
+    """Train NanoVLM end to end; returns the run directory."""
+    args = parse_arguments(argv)
+
+    setup_gpu(gpu_id=args.gpu)
+    setup_mixed_precision(args.mixed_precision)
+    set_seeds(args.seed)
+
+    run_dir = (
+        Path(args.output_dir) if args.output_dir
+        else Path("results") / default_experiment_name("nanovlm", args.variant)
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_config_json(vars(args), str(run_dir))
+
+    model = create_nanovlm(
+        args.variant, vocab_size=args.vocab_size,
+        fusion_strategy=args.fusion_strategy, **size_overrides(args),
+    )
+    image_size = model.vision_config['img_size']
+    seq_len = model.text_config['max_seq_len']
+
+    if args.synthetic:
+        num_samples = args.synthetic_samples
+    else:
+        samples = load_cauldron_from_json(args.data_json)
+        num_samples = len(samples)
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-038: refuse a run with no
+    # batch BEFORE building anything. Every batch here is a full one (tf.data
+    # with drop_remainder, `VQADataSequence.__len__` floors), so fewer samples
+    # than one batch would train ZERO steps and save an untrained model with
+    # no error. Do not round the batch count up or shrink the batch silently;
+    # the caller chose both numbers and is told. See decisions.md D-038.
+    batches_per_pass = num_samples // args.batch_size
+    if batches_per_pass == 0:
+        raise ValueError(
+            f"no full batch: {num_samples} samples // batch_size="
+            f"{args.batch_size} == 0, so every epoch would train zero steps. "
+            f"Use batch_size <= {num_samples}, or supply more samples."
         )
 
-    model = create_nanovlm()
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
-    # BUILD EAGERLY, HERE, BEFORE the `count_params` log AND before
-    # `NanoVLMTrainer` partitions the variables. Same defect as the D-031 anchor
-    # in `src/train/hrm/train_hrm.py`: `count_params()` on an unbuilt subclassed
-    # model raises `ValueError: ... the layer isn't built`, so `train_nanovlm`
-    # died on its own second statement and never reached the data at all.
-    # Building here also makes `setup_different_learning_rates(model)` see real
-    # variables -- on an unbuilt model it partitions three EMPTY lists.
-    model.build({'images': (None, data_processor.image_size, data_processor.image_size, 3),
-                 'text_tokens': (None, data_processor.max_text_length)})
+    # DECISION plan-2026-10-14T062616-81938e81/D-038: build through the
+    # model's own build() BEFORE count_params (which raises on an unbuilt
+    # subclassed model) and with the data's own shapes. See decisions.md D-038.
+    model.build({'images': (None, image_size, image_size, 3),
+                 'text_tokens': (None, seq_len)})
     # DECISION plan-2026-08-22T035419-a11304c8/D-008
     # The label is DERIVED, never written down. This line read
-    # "Created nanoVLM-222M" while printing the real count beside it: the model
-    # `create_nanovlm()` actually builds measures 305,435,904 parameters at the
-    # default `variant="base"` and this trainer's own build shapes -- 1.38x the
-    # "222M" design target carried over from `research/nanoVLM_research.md`,
-    # which proposes a `create_nanovlm_222m()` that exists nowhere in `src/`.
-    # Do not replace this with a hardcoded "305M": a second literal is the same
-    # defect one refactor later, and the count moves with `variant` and with the
-    # image/text shapes built above.
+    # "Created nanoVLM-222M" while printing the real count beside it; the
+    # model `create_nanovlm()` builds measured 305,435,904 parameters at the
+    # default `variant="base"` and this trainer's 224px / 512-token build on
+    # 2026-08-22, and 280,859,904 once the dead `shared_output_projection`
+    # went on 2026-10-15 -- never the "222M" design target carried over from
+    # `research/nanoVLM_research.md`. Do not replace this with a hardcoded
+    # count: a second literal is the same defect one refactor later, and the
+    # count moves with `variant` and the size flags.
     n_params = model.count_params()
     logger.info(f"Created nanoVLM-{n_params / 1e6:.0f}M: {n_params:,} parameters")
 
-    training_setup = create_training_setup()
-    trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)
-    logger.info(f"Using {'multi-optimizer' if use_multi_optimizer else 'single optimizer'} training")
-
-    logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"nanovlm_{timestamp}")
-    os.makedirs(results_dir, exist_ok=True)
-
-    try:
-        for epoch in range(epochs):
-            trainer.reset_metrics()
-
-            # DECISION plan-2026-08-18T140459-7991552f/D-009
-            # Index by `range(steps_per_epoch)`. Do NOT write
-            # `for step, batch in enumerate(train_dataset)`. `create_vqa_dataset`
-            # returns a `VQADataSequence(keras.utils.Sequence)`, and in Keras 3
-            # `keras.utils.Sequence` IS `PyDataset`, which defines
-            # `__getitem__`/`__len__` and no `__iter__`. `enumerate` therefore
-            # fell back to Python's legacy `__getitem__` protocol, which walks
-            # 0, 1, 2, ... until `IndexError` and IGNORES `__len__` entirely.
-            # `VQADataSequence.__getitem__` serves any index and never raises
-            # `IndexError`, so epoch 0 never ended: a hang with no failure text.
-            # Same mechanism, same repair as the D-034 anchor in
-            # `src/train/hrm/train_hrm.py`'s `train_epoch`.
-            for step in range(steps_per_epoch):
-                batch = train_dataset[step]
-                try:
-                    metrics = trainer.train_step(batch)
-                    if step % log_frequency == 0:
-                        logger.info(
-                            f"Epoch {epoch + 1}/{epochs}, Step {step}/{steps_per_epoch}: "
-                            f"Loss={float(metrics['loss']):.4f}, Acc={float(metrics['accuracy']):.4f}"
-                        )
-                # DECISION plan-2026-08-18T140459-7991552f/D-010
-                # Do NOT widen this back to `except Exception`. This handler
-                # exists to survive one bad SAMPLE, not a broken training
-                # mechanism. As `except Exception: continue` it swallowed an
-                # `AttributeError` on EVERY step of EVERY epoch (there was no
-                # `keras.GradientTape`), so the run "completed" all ten epochs
-                # and saved an untrained model, reporting only a per-step
-                # `logger.error` line. An `AttributeError`/`TypeError` is a
-                # programming defect and must propagate.
-                except (tf.errors.InvalidArgumentError, ValueError) as e:
-                    logger.error(f"Error in step {step}: {e}")
-                    continue
-
-            logger.info(
-                f"Epoch {epoch + 1} done: Loss={float(trainer.train_loss.result()):.4f}, "
-                f"Acc={float(trainer.train_accuracy.result()):.4f}"
-            )
-
-            if checkpoint_frequency > 0 and (epoch + 1) % checkpoint_frequency == 0:
-                try:
-                    path = os.path.join(results_dir, f"checkpoint_epoch_{epoch + 1}.keras")
-                    model.save(path)
-                    logger.info(f"Saved checkpoint: {path}")
-                except Exception as e:
-                    logger.error(f"Failed to save checkpoint: {e}")
-
-        final_path = os.path.join(results_dir, "final_model.keras")
-        model.save(final_path)
-        logger.info(f"Training completed. Final model saved: {final_path}")
-
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-        try:
-            model.save(os.path.join(results_dir, "emergency_checkpoint.keras"))
-            logger.info("Emergency checkpoint saved")
-        except Exception as e:
-            logger.error(f"Failed to save emergency checkpoint: {e}")
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        raise
-
-
-# ---------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser(description="Train nanoVLM")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--multi-optimizer", action="store_true", default=True)
-    parser.add_argument("--no-multi-optimizer", dest="multi_optimizer", action="store_false")
-    parser.add_argument("--checkpoint-frequency", type=int, default=5)
-    parser.add_argument("--log-frequency", type=int, default=10)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    args = parser.parse_args()
-
-    train_nanovlm(
-        epochs=args.epochs, batch_size=args.batch_size,
-        use_multi_optimizer=args.multi_optimizer,
-        checkpoint_frequency=args.checkpoint_frequency,
-        log_frequency=args.log_frequency,
-        gpu_index=args.gpu,
+    compile_nanovlm(
+        model,
+        build_nanovlm_optimizer(args.learning_rate, args.warmup_steps,
+                                args.decay_steps, args.clipnorm),
+        args.label_smoothing,
     )
+
+    if args.synthetic:
+        inputs, labels = make_synthetic_samples(
+            num_samples, image_size, seq_len, model.vocab_size, args.seed)
+        logger.info(f"Synthetic data: {num_samples} image/text samples")
+        train_dataset = (
+            tf.data.Dataset.from_tensor_slices((inputs, labels))
+            .shuffle(num_samples, seed=args.seed)
+            .batch(args.batch_size, drop_remainder=True)
+        )
+    else:
+        processor = VQADataProcessor(
+            image_size=image_size, max_text_length=seq_len,
+            vocab_size=model.vocab_size, pad_token_id=PAD_ID,
+            bos_token_id=BOS_ID, eos_token_id=EOS_ID,
+        )
+        sequence = create_vqa_dataset(samples, processor,
+                                      batch_size=args.batch_size, shuffle=True)
+        train_dataset = sequence_as_dataset(sequence, image_size, seq_len)
+    if args.steps_per_epoch:
+        # `fit` with steps_per_epoch keeps ONE iterator across epochs and resets
+        # it only once it runs dry, so an epoch that starts mid-pass ends short.
+        # Repeated, every epoch has its steps.
+        train_dataset = train_dataset.repeat()
+    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+
+    callbacks = [
+        # First: `lr` must be in `logs` before CSVLogger writes the row; read
+        # at the epoch start, so it is the rate the epoch trained at.
+        LearningRateLogger(at_epoch_start=True),
+        keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+        # After every epoch, so the file is the last completed epoch even if
+        # the run dies later.
+        keras.callbacks.ModelCheckpoint(str(run_dir / "final_model.keras")),
+        EpochLogLine(("loss",)),
+    ]
+
+    logger.info(
+        f"Starting NanoVLM training: {args.epochs} epochs, batch_size={args.batch_size}, "
+        f"steps/epoch={args.steps_per_epoch or batches_per_pass}"
+    )
+    history = model.fit(
+        train_dataset, epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+        callbacks=callbacks,
+    )
+
+    save_training_history_json(history, run_dir)
+    logger.info(f"Run directory: {run_dir}")
+    return run_dir
 
 
 if __name__ == "__main__":

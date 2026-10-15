@@ -27,6 +27,15 @@ Architectural Design:
     target token at `t+1`, forcing the model to predict one step into the
     future.
 
+    NanoVLM's logits cover more positions than its labels: under the
+    default ``'cross_attention'`` fusion the model concatenates the fused
+    vision tokens BEFORE the text tokens, so its output is
+    ``[batch, vision_len + text_len, vocab]`` against ``[batch, text_len]``
+    labels. The text positions are always the trailing ``text_len`` ones
+    (the six equal-length strategies return exactly ``text_len`` positions),
+    so the loss scores that suffix and ignores the vision prefix
+    (:func:`text_position_logits`).
+
     A key architectural component is the handling of padding. Since sequences
     in a batch are padded to a uniform length, an `ignore_index` is used to
     create a mask. This mask ensures that the loss is only computed for
@@ -62,7 +71,6 @@ References:
 """
 
 import keras
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -70,6 +78,54 @@ from keras import ops
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
+
+
+def text_position_logits(
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor
+) -> keras.KerasTensor:
+    """Return the logits at the label positions: the trailing ``seq_len``.
+
+    Interface contract (callers: ``NanoVLMLoss.call``): ``y_true`` is
+    ``[batch, seq_len]``, ``y_pred`` is ``[batch, pred_len, vocab]`` with
+    ``pred_len >= seq_len``. NanoVLM puts any non-text positions (the fused
+    vision tokens) BEFORE the text, so the text logits are the last
+    ``seq_len`` positions. Equal static lengths return ``y_pred`` unchanged.
+    ``pred_len`` may be unknown at trace time (NanoVLM's sequence axis is
+    dynamic under ``fit`` when the batch size is unknown); the suffix slice
+    needs only ``seq_len``, and the length check runs when both are static.
+
+    Args:
+        y_true: Target token IDs, ``[batch, seq_len]``.
+        y_pred: Logits, ``[batch, pred_len, vocab_size]``.
+
+    Returns:
+        The last ``seq_len`` positions of ``y_pred``.
+
+    Raises:
+        ValueError: If ``y_true`` is not rank 2, ``y_pred`` is not rank 3, or
+            a static ``pred_len`` is smaller than a static ``seq_len``.
+    """
+    y_true_shape = keras.ops.shape(y_true)
+    y_pred_shape = keras.ops.shape(y_pred)
+    if len(y_true_shape) != 2 or len(y_pred_shape) != 3:
+        raise ValueError(
+            f"Expected y_true shape [batch, seq_len] and y_pred shape "
+            f"[batch, pred_len, vocab_size], got {y_true_shape} and {y_pred_shape}"
+        )
+    seq_len_true = y_true_shape[1]
+    seq_len_pred = y_pred_shape[1]
+    if isinstance(seq_len_true, int) and isinstance(seq_len_pred, int):
+        if seq_len_pred < seq_len_true:
+            raise ValueError(
+                f"Sequence length mismatch: y_pred has {seq_len_pred} positions, "
+                f"fewer than the {seq_len_true} labels in y_true"
+            )
+        if seq_len_pred == seq_len_true:
+            return y_pred
+    return y_pred[:, -seq_len_true:, :]
 
 # ---------------------------------------------------------------------
 
@@ -161,33 +217,20 @@ class NanoVLMLoss(keras.losses.Loss):
             y_true: Target token IDs of shape [batch_size, seq_len].
                 Should contain integer token indices.
             y_pred: Predicted logits or probabilities of shape
-                [batch_size, seq_len, vocab_size].
+                [batch_size, pred_len, vocab_size], ``pred_len >= seq_len``;
+                only the trailing ``seq_len`` positions are scored.
 
         Returns:
             Scalar loss value averaged over non-masked tokens.
 
         Raises:
-            ValueError: If input shapes are incompatible.
+            ValueError: If a rank is wrong or ``y_pred`` has fewer positions
+                than ``y_true``.
         """
-        # Validate input shapes
-        y_true_shape = ops.shape(y_true)
-        y_pred_shape = ops.shape(y_pred)
-
-        # Check that sequence lengths match
-        if len(y_true_shape) != 2 or len(y_pred_shape) != 3:
-            raise ValueError(
-                f"Expected y_true shape [batch, seq_len] and y_pred shape "
-                f"[batch, seq_len, vocab_size], got {y_true_shape} and {y_pred_shape}"
-            )
-
-        seq_len_true = y_true_shape[1]
-        seq_len_pred = y_pred_shape[1]
-
-        if seq_len_true != seq_len_pred:
-            raise ValueError(
-                f"Sequence length mismatch: y_true has {seq_len_true}, "
-                f"y_pred has {seq_len_pred}"
-            )
+        # Score only the label positions (NanoVLM's vision prefix is dropped)
+        y_pred = text_position_logits(y_true, y_pred)
+        y_pred_shape = keras.ops.shape(y_pred)
+        seq_len_true = keras.ops.shape(y_true)[1]
 
         # Ensure minimum sequence length for autoregressive training
         if seq_len_true < 2:
@@ -195,7 +238,7 @@ class NanoVLMLoss(keras.losses.Loss):
                 f"Sequence length is {seq_len_true}, which is too short for "
                 "autoregressive training. Consider using longer sequences."
             )
-            return ops.zeros([], dtype=y_pred.dtype)
+            return keras.ops.zeros([], dtype=y_pred.dtype)
 
         # Shift sequences for autoregressive prediction
         # Predict next token given previous tokens
@@ -207,11 +250,11 @@ class NanoVLMLoss(keras.losses.Loss):
         vocab_size = y_pred_shape[2]
         seq_len_shifted = seq_len_true - 1
 
-        y_pred_flat = ops.reshape(
+        y_pred_flat = keras.ops.reshape(
             y_pred_shifted,
             [batch_size * seq_len_shifted, vocab_size]
         )
-        y_true_flat = ops.reshape(
+        y_true_flat = keras.ops.reshape(
             y_true_shifted,
             [batch_size * seq_len_shifted]
         )
@@ -222,20 +265,20 @@ class NanoVLMLoss(keras.losses.Loss):
         # Apply label smoothing manually if configured
         if self.label_smoothing > 0.0:
             if self.from_logits:
-                log_probs = y_pred_flat - ops.logsumexp(
+                log_probs = y_pred_flat - keras.ops.logsumexp(
                     y_pred_flat, axis=-1, keepdims=True
                 )
             else:
-                log_probs = ops.log(y_pred_flat + 1e-8)
-            smooth_loss = -ops.mean(log_probs, axis=-1)
+                log_probs = keras.ops.log(y_pred_flat + 1e-8)
+            smooth_loss = -keras.ops.mean(log_probs, axis=-1)
             loss_per_token = (
                 (1.0 - self.label_smoothing) * loss_per_token
                 + self.label_smoothing * smooth_loss
             )
 
         # Create mask to ignore specified tokens (e.g., padding)
-        mask = ops.cast(
-            ops.not_equal(y_true_flat, self.ignore_index),
+        mask = keras.ops.cast(
+            keras.ops.not_equal(y_true_flat, self.ignore_index),
             dtype=loss_per_token.dtype
         )
 
@@ -243,14 +286,14 @@ class NanoVLMLoss(keras.losses.Loss):
         masked_loss = loss_per_token * mask
 
         # Compute final loss based on reduction type
-        total_loss = ops.sum(masked_loss)
-        total_valid_tokens = ops.sum(mask)
+        total_loss = keras.ops.sum(masked_loss)
+        total_valid_tokens = keras.ops.sum(mask)
 
         # Avoid division by zero
-        mean_loss = ops.where(
-            ops.greater(total_valid_tokens, 0),
-            total_loss / ops.maximum(total_valid_tokens, 1.0),
-            ops.zeros_like(total_loss)
+        mean_loss = keras.ops.where(
+            keras.ops.greater(total_valid_tokens, 0),
+            total_loss / keras.ops.maximum(total_valid_tokens, 1.0),
+            keras.ops.zeros_like(total_loss)
         )
 
         # Handle different reduction types
@@ -258,7 +301,7 @@ class NanoVLMLoss(keras.losses.Loss):
             return total_loss
         elif self.reduction == "none":
             # Return per-sample loss (reshape back to [batch_size, seq_len-1])
-            return ops.reshape(masked_loss, [batch_size, seq_len_shifted])
+            return keras.ops.reshape(masked_loss, [batch_size, seq_len_shifted])
         else:  # sum_over_batch_size
             return mean_loss
 

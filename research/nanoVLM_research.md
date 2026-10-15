@@ -4,12 +4,12 @@
 > model does not match it.** Read it as a design document, not as a description
 > of `src/dl_techniques/models/vision_language/nano_vlm/`.
 >
-> - `create_nanovlm_222m()` (proposed at line 703, used in the examples at 1073,
->   1210 and 1400) **does not exist anywhere in `src/`**. The implemented factory
+> - `create_nanovlm_222m()` (proposed at line 728, used in the examples at 1098,
+>   1235 and 1425) **does not exist anywhere in `src/`**. The implemented factory
 >   is `create_nanovlm(variant="base", ...)`, and it is what
 >   `src/train/nano_vlm/train_nano_vlm.py` calls.
-> - The `"nanovlm_222m"` variant-table entry (line 1491) with
->   `"total_params": "222M"` (line 1513) is likewise unimplemented.
+> - The `"nanovlm_222m"` variant-table entry (line 1516) with
+>   `"total_params": "222M"` (line 1538) is likewise unimplemented.
 > - **222M is a design target the shipped model missed by 1.38x.** Measured
 >   2026-08-22 on CPU: `create_nanovlm()` built at `(224, 224, 3)` images and
 >   512 text tokens has **305,435,904** parameters. Every "222M" below is that
@@ -18,6 +18,12 @@
 > The trainer used to log the literal string `nanoVLM-222M` next to the real
 > count; it now derives the label from `count_params()`. Ruling: D-008 of
 > `plan-2026-08-22-a11304c8`.
+>
+> **2026-10-15:** the 24,576,000-parameter `shared_output_projection`, built
+> but never called by a tied model, was deleted, so the same build now has
+> **280,859,904** parameters. `load_cauldron_sample()` (used at line 1250
+> below) was deleted too: it returned placeholder rows whose images did not
+> exist. Plan `plan-2026-10-14T062616-81938e81`, D-037 and D-038.
 
 ## Overview
 

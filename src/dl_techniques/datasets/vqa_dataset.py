@@ -383,6 +383,7 @@ class VQADataSequence(keras.utils.Sequence):
             shuffle: bool = True,
             conversation_format: str = 'simple'
     ) -> None:
+        super().__init__()
         if not samples:
             raise ValueError("samples cannot be empty")
         if batch_size <= 0:
@@ -429,6 +430,7 @@ class VQADataSequence(keras.utils.Sequence):
         batch_input_ids = []
         batch_attention_masks = []
         batch_labels = []
+        first_failure = None
 
         for sample_idx in batch_indices:
             try:
@@ -454,6 +456,8 @@ class VQADataSequence(keras.utils.Sequence):
 
             except Exception as e:
                 logger.warning(f"Failed to process sample {sample_idx}: {e}")
+                if first_failure is None:
+                    first_failure = f"sample {sample_idx}: {type(e).__name__}: {e}"
                 # Skip this sample by duplicating the last valid one
                 if batch_images:
                     batch_images.append(batch_images[-1])
@@ -461,16 +465,21 @@ class VQADataSequence(keras.utils.Sequence):
                     batch_attention_masks.append(batch_attention_masks[-1])
                     batch_labels.append(batch_labels[-1])
 
-        # Convert to numpy arrays
-        try:
-            batch_images_array = np.stack(batch_images, axis=0)
-            batch_input_ids_array = np.stack(batch_input_ids, axis=0)
-            batch_attention_masks_array = np.stack(batch_attention_masks, axis=0)
-            batch_labels_array = np.stack(batch_labels, axis=0)
+        # Every sample failed: there is nothing to train on, and np.stack
+        # would only say "need at least one array to stack".
+        if not batch_images:
+            raise ValueError(
+                f"Batch {idx}: none of its {len(batch_indices)} samples could "
+                f"be loaded, so the batch is empty. First failure: "
+                f"{first_failure}. Check that every 'image_path' exists and "
+                f"is a readable image."
+            )
 
-        except Exception as e:
-            logger.error(f"Failed to stack batch arrays: {e}")
-            raise
+        # Convert to numpy arrays
+        batch_images_array = np.stack(batch_images, axis=0)
+        batch_input_ids_array = np.stack(batch_input_ids, axis=0)
+        batch_attention_masks_array = np.stack(batch_attention_masks, axis=0)
+        batch_labels_array = np.stack(batch_labels, axis=0)
 
         # Prepare inputs and targets
         inputs = {
@@ -518,44 +527,6 @@ def create_vqa_dataset(
         shuffle=shuffle,
         conversation_format=conversation_format
     )
-
-# ---------------------------------------------------------------------
-
-def load_cauldron_sample() -> List[Dict[str, Any]]:
-    """Load sample data in Cauldron format for testing.
-
-    This is a placeholder function that returns mock data.
-    In practice, this would load from HuggingFace datasets or local files.
-
-    Returns:
-        List of sample data dictionaries with required keys:
-            - 'image_path': Path to image file
-            - 'question': Question text
-            - 'answer': Answer text
-
-    Note:
-        Replace this with actual data loading logic for production use.
-    """
-    sample_data = [
-        {
-            'image_path': 'path/to/image1.jpg',
-            'question': 'What is shown in this image?',
-            'answer': 'A cat sitting on a chair.'
-        },
-        {
-            'image_path': 'path/to/image2.jpg',
-            'question': 'What color is the car?',
-            'answer': 'The car is red.'
-        },
-        {
-            'image_path': 'path/to/image3.jpg',
-            'question': 'How many people are in the photo?',
-            'answer': 'There are three people in the photo.'
-        }
-    ]
-
-    logger.info(f"Loaded {len(sample_data)} sample data points")
-    return sample_data
 
 # ---------------------------------------------------------------------
 

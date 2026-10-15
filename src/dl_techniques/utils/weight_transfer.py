@@ -729,7 +729,8 @@ def refuse_pretrained(pretrained: Any, model_label: str) -> None:
     """Refuse every truthy ``pretrained`` for a model with no backbone/head split.
 
     Interface contract (callers: ``CLIP.from_variant``,
-    ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``). The
+    ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``,
+    ``NanoVLM.from_variant``). The
     sibling of :func:`pretrained_path_or_raise` for the models whose output IS
     the model, such as a contrastive dual encoder: with no task head there is
     no partial (backbone-only) load to offer, and a whole-archive load is what

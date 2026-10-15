@@ -15,9 +15,12 @@ raises a clear error naming the strategy instead of failing inside a
 concatenation op.
 
 The vision encoder is always forced to ``output_mode='none'`` so it returns
-a sequence rather than a pooled vector. Input/output embedding tying happens
-at call time via a matrix multiply against the transposed embedding table,
-not by reassigning a layer's weight, which Keras 3 forbids after build.
+a sequence rather than a pooled vector. The output is unnormalized logits over
+the vocabulary at every position of the fused sequence; no softmax is applied,
+so a loss takes ``from_logits=True``. Input/output embedding tying happens at
+call time via a matrix multiply against the transposed embedding table, not by
+reassigning a layer's weight, which Keras 3 forbids after build; a tied model
+builds no output ``Dense`` at all.
 ``generate()`` only supports the ``'cross_attention'`` fusion strategy — the
 other seven either lose the per-token axis or cannot keep the vision and
 text streams at matching lengths once generation starts appending tokens.
@@ -39,7 +42,7 @@ References:
 
 import copy
 import keras
-from keras import ops, layers, initializers, regularizers
+
 from typing import Dict, Optional, Tuple, Union, Any, Literal
 
 # ---------------------------------------------------------------------
@@ -53,6 +56,7 @@ from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, Fusi
 from dl_techniques.layers.transformers.vision_encoder import VisionEncoder, create_vision_encoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -118,25 +122,26 @@ class NanoVLM(keras.Model):
     :param text_component_type: ``'decoder'`` for causal generation or
         ``'encoder'`` for bidirectional encoding. Defaults to ``'decoder'``.
     :type text_component_type: TextComponentType
-    :param use_shared_embedding: Tie input and output embeddings. Only
-        applies when ``text_component_type='decoder'``. Defaults to ``True``.
+    :param use_shared_embedding: Tie the output to the decoder's word
+        embedding table: the logits are ``features @ embeddings.T`` and no
+        output ``Dense`` is built. Only applies when
+        ``text_component_type='decoder'``; an encoder model is always untied.
+        A decoder with ``embedding_type='factorized'`` has no full table to
+        tie to and refuses ``True``. Defaults to ``True``.
     :type use_shared_embedding: bool
-    :param output_dropout_rate: Dropout before the output projection, in
+    :param output_dropout_rate: Dropout before the vocabulary projection, in
         ``[0, 1]``. Defaults to ``0.1``.
     :type output_dropout_rate: float
-    :param initializer_range: Standard deviation for weight initialization.
-        Must be positive. Defaults to ``0.02``.
+    :param initializer_range: Standard deviation of the truncated-normal
+        initializer of the untied ``output_projection``; the towers and the
+        fusion layer use their own initializers. Must be positive. Defaults
+        to ``0.02``.
     :type initializer_range: float
-    :param kernel_initializer: Kernel weight initializer. Defaults to
-        ``'glorot_uniform'``.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Bias weight initializer. Defaults to ``'zeros'``.
-    :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :param kernel_regularizer: Optional regularizer for the untied
+        ``output_projection`` kernel. A tied model has no such kernel.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param bias_regularizer: Optional regularizer for bias weights.
-    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Forwarded to ``keras.Model``.
+    :param kwargs: Forwarded to ``keras.Model``; an unknown keyword raises
+        ``ValueError``.
 
     Input shape:
         Dict with:
@@ -152,8 +157,10 @@ class NanoVLM(keras.Model):
     :ivar vision_encoder: Vision encoder producing patch-token sequences.
     :ivar text_component: TextDecoder or TextEncoder producing text features.
     :ivar fusion_layer: MultiModalFusion instance joining both streams.
-    :ivar output_projection: Dense layer for vocabulary prediction.
-    :ivar final_dropout: Dropout applied before the output projection.
+    :ivar output_projection: Bias-free ``Dense(vocab_size)`` for an untied
+        model, ``None`` for a tied one (the logits then come from the word
+        embedding table, and no second vocabulary matrix is built).
+    :ivar final_dropout: Dropout applied before the vocabulary projection.
 
     Example:
 
@@ -170,13 +177,13 @@ class NanoVLM(keras.Model):
             },
             fusion_config={
                 'fusion_strategy': 'cross_attention',
-                'num_fusion_layers': 6, 'num_heads': 12
+                'num_fusion_layers': 6, 'attention_config': {'num_heads': 12}
             },
             vocab_size=32000
         )
         inputs = {
-            'images': keras.ops.random.normal((2, 224, 224, 3)),
-            'text_tokens': keras.ops.random.randint(0, 32000, (2, 128))
+            'images': keras.random.normal((2, 224, 224, 3)),
+            'text_tokens': keras.random.randint((2, 128), 0, 32000)
         }
         logits = model(inputs, training=True)
 
@@ -185,10 +192,17 @@ class NanoVLM(keras.Model):
         numeric parameter is out of range.
     """
 
-    #: Public-name registry of the three named nanoVLM sizes.
-    #: ``vocab_size`` and ``fusion_strategy`` are caller arguments, not
-    #: variant properties, so they are absent here; ``create_nanovlm``
-    #: injects both into a deep copy of the selected entry.
+    #: Public-name registry of the four named NanoVLM configurations, read by
+    #: :meth:`from_variant`. ``vocab_size`` is a caller argument, not a variant
+    #: property, so it is absent here; ``from_variant`` writes it into a deep
+    #: copy of the selected entry. ``fusion_strategy`` is each row's default,
+    #: which a caller may override.
+    #:
+    #: ``'modern'`` is the former ``create_modern_nanovlm`` configuration:
+    #: RMSNorm, SwiGLU, differential attention in the vision tower, RoPE and
+    #: factorized word embeddings in the text tower. A factorized table cannot
+    #: be tied to the output (it is ``vocab x 128`` followed by a projection),
+    #: so the row is untied and builds its own ``output_projection``.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         'mini': {
             'vision_config': {
@@ -200,7 +214,7 @@ class NanoVLM(keras.Model):
                 'num_heads': 6, 'max_seq_len': 512
             },
             'fusion_config': {
-                'dim': 384,
+                'fusion_strategy': 'cross_attention', 'dim': 384,
                 'attention_config': {'num_heads': 6}, 'num_fusion_layers': 3
             }
         },
@@ -214,7 +228,7 @@ class NanoVLM(keras.Model):
                 'num_heads': 12, 'max_seq_len': 512
             },
             'fusion_config': {
-                'dim': 768,
+                'fusion_strategy': 'cross_attention', 'dim': 768,
                 'attention_config': {'num_heads': 12}, 'num_fusion_layers': 6
             }
         },
@@ -228,9 +242,40 @@ class NanoVLM(keras.Model):
                 'num_heads': 16, 'max_seq_len': 1024
             },
             'fusion_config': {
-                'dim': 1024,
+                'fusion_strategy': 'cross_attention', 'dim': 1024,
                 'attention_config': {'num_heads': 16}, 'num_fusion_layers': 8
             }
+        },
+        'modern': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
+                'depth': 12, 'num_heads': 12,
+                'attention_type': 'differential',
+                'normalization_type': 'rms_norm',
+                'normalization_position': 'pre',
+                'ffn_type': 'swiglu',
+                'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 768, 'depth': 12,
+                'num_heads': 12, 'max_seq_len': 1024,
+                'embedding_type': 'factorized',
+                'positional_type': 'rope',
+                'normalization_type': 'rms_norm',
+                'normalization_position': 'pre',
+                'ffn_type': 'swiglu'
+            },
+            'fusion_config': {
+                # DECISION plan-2026-08-14T183218-f4c612aa/D-007: default stays
+                # 'cross_attention', not 'tensor_fusion' -- this factory's fixed 197-token vision stream violates tensor_fusion's equal-length need on every call. See decisions.md.
+                'fusion_strategy': 'cross_attention',
+                'dim': 768,
+                'attention_config': {'num_heads': 12},
+                'num_tensor_projections': 8,
+                'ffn_type': 'swiglu',
+                'norm_type': 'rms_norm'
+            },
+            'use_shared_embedding': False
         }
     }
 
@@ -244,10 +289,7 @@ class NanoVLM(keras.Model):
             use_shared_embedding: bool = True,
             output_dropout_rate: float = 0.1,
             initializer_range: float = 0.02,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -255,49 +297,68 @@ class NanoVLM(keras.Model):
         # Validate basic parameters
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        if text_component_type not in ('decoder', 'encoder'):
+            raise ValueError(
+                f"text_component_type must be 'decoder' or 'encoder', got "
+                f"{text_component_type!r}"
+            )
         if not (0.0 <= output_dropout_rate <= 1.0):
             raise ValueError(f"output_dropout_rate must be between 0.0 and 1.0, got {output_dropout_rate}")
         if initializer_range <= 0.0:
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
 
         # Store ALL configuration parameters for serialization (CRITICAL for Keras 3)
-        self.vision_config = vision_config.copy()
-        self.text_config = text_config.copy()
-        self.fusion_config = fusion_config.copy()
+        self.vision_config = copy.deepcopy(vision_config)
+        self.text_config = copy.deepcopy(text_config)
+        self.fusion_config = copy.deepcopy(fusion_config)
         self.vocab_size = vocab_size
         self.text_component_type = text_component_type
         self.use_shared_embedding = use_shared_embedding
         self.output_dropout_rate = output_dropout_rate
         self.initializer_range = initializer_range
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Validate and enhance configurations
         self._validate_and_prepare_configs()
 
+        # The ONE place that decides where the logits come from; build(),
+        # call() and generate() all read it.
+        self.ties_output_to_embeddings = (
+            use_shared_embedding and text_component_type == 'decoder'
+        )
+
         # CREATE all sub-layers in __init__ (Modern Keras 3 Pattern)
-        logger.info("Creating NanoVLM components using existing dl-techniques layers...")
-
-        # 1. Create VisionEncoder using existing component
         self.vision_encoder = self._create_vision_encoder()
-
-        # 2. Create text component (decoder or encoder)
         self.text_component = self._create_text_component()
-
-        # 3. Create MultiModalFusion using existing component
         self.fusion_layer = self._create_fusion_layer()
 
-        # 4. Create output layers
-        self.final_dropout = layers.Dropout(
+        if self.ties_output_to_embeddings and not hasattr(self.text_component, 'word_embeddings'):
+            raise ValueError(
+                "use_shared_embedding=True ties the output to the decoder's "
+                "word embedding table, but text_config embedding_type="
+                f"{self.text_config.get('embedding_type')!r} builds no such "
+                "table. Pass use_shared_embedding=False for a factorized "
+                "embedding."
+            )
+
+        self.final_dropout = keras.layers.Dropout(
             rate=output_dropout_rate,
             name='final_dropout'
         ) if output_dropout_rate > 0.0 else None
 
-        self.output_projection = self._create_output_projection()
-
-        logger.info("NanoVLM components created successfully using modern Keras 3 patterns.")
+        # DECISION plan-2026-10-14T062616-81938e81/D-037: a tied model builds NO
+        # output Dense. Do not bring back a `shared_output_projection` "for
+        # serialization" or "for the untied path": it was created, built, saved
+        # and counted (24,576,000 params on 'base') and never called, the one
+        # trainable variable with a None gradient. The untied path builds its
+        # own `output_projection` below. See decisions.md D-037.
+        self.output_projection = None if self.ties_output_to_embeddings else keras.layers.Dense(
+            self.vocab_size,
+            use_bias=False,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=self.initializer_range),
+            kernel_regularizer=self.kernel_regularizer,
+            name='output_projection'
+        )
 
     def _validate_and_prepare_configs(self) -> None:
         """Validate and enhance configuration dictionaries with cross-component consistency."""
@@ -351,20 +412,14 @@ class NanoVLM(keras.Model):
                 attention_config['num_heads'] = self.vision_config['num_heads']
 
     def _create_vision_encoder(self) -> VisionEncoder:
-        """Create VisionEncoder using existing component."""
-        try:
-            return create_vision_encoder(**self.vision_config)
-        except Exception as e:
-            logger.error(f"Failed to create VisionEncoder: {e}")
-            # Fallback to direct instantiation
-            return VisionEncoder(**self.vision_config, name='vision_encoder')
+        """Create the vision tower, named so its weight paths are stable."""
+        return create_vision_encoder(**self.vision_config, name='vision_encoder')
 
     def _create_text_component(self) -> Union[TextDecoder, TextEncoder]:
         """Create text processing component based on type."""
         if self.text_component_type == 'decoder':
             return TextDecoder(**self.text_config, name='text_decoder')
-        else:  # encoder
-            return TextEncoder(**self.text_config, name='text_encoder')
+        return TextEncoder(**self.text_config, name='text_encoder')
 
     def _create_fusion_layer(self) -> MultiModalFusion:
         """Create MultiModalFusion using existing component."""
@@ -372,31 +427,6 @@ class NanoVLM(keras.Model):
         # `attention_config={'num_heads': N}`, not `embed_dim`/`num_heads`.
         # A stale key is forwarded by the **splat and raises. See decisions.md.
         return MultiModalFusion(**self.fusion_config, name='multimodal_fusion')
-
-    def _create_output_projection(self) -> layers.Layer:
-        """Create output projection layer with optional weight sharing."""
-        if (self.use_shared_embedding and
-            self.text_component_type == 'decoder' and
-            hasattr(self.text_component, 'word_embeddings')):
-
-            # Create shared embedding projection (tie weights)
-            return layers.Dense(
-                self.vocab_size,
-                use_bias=False,
-                kernel_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
-                kernel_regularizer=self.kernel_regularizer,
-                name='shared_output_projection'
-            )
-        else:
-            # Standard output projection
-            return layers.Dense(
-                self.vocab_size,
-                use_bias=False,
-                kernel_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name='output_projection'
-            )
 
     def build(self, input_shape: Union[Dict[str, Tuple], Tuple]) -> None:
         """
@@ -460,13 +490,8 @@ class NanoVLM(keras.Model):
         if self.final_dropout is not None:
             self.final_dropout.build(combined_shape)
 
-        self.output_projection.build(combined_shape)
-        logger.debug(f"Built output projection with shape: {combined_shape}")
-
-        # Keras 3 forbids reassigning a built layer's kernel, and the embedding
-        # matrix's (vocab, dim) shape is the transpose of the Dense kernel's
-        # (dim, vocab) shape anyway, so output_projection keeps its own kernel.
-        logger.info("NanoVLM build completed successfully")
+        if self.output_projection is not None:
+            self.output_projection.build(combined_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -523,15 +548,28 @@ class NanoVLM(keras.Model):
         if isinstance(fused_features, tuple):
             # Cross-attention returns separate outputs - concatenate them
             vision_fused, text_fused = fused_features
-            combined_features = ops.concatenate([vision_fused, text_fused], axis=1)
+            combined_features = keras.ops.concatenate([vision_fused, text_fused], axis=1)
         else:
             # Single tensor output from other strategies
             combined_features = fused_features
 
-        # 5. Apply final dropout and output projection
+        # 5. Apply final dropout and the vocabulary projection
         if self.final_dropout is not None:
             combined_features = self.final_dropout(combined_features, training=training)
+        return self._vocab_logits(combined_features)
 
+    def _vocab_logits(self, features: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Project features to vocabulary logits, tied or untied.
+
+        Shared by :meth:`call` and :meth:`generate`, so the two cannot disagree
+        about where the logits come from.
+
+        :param features: ``(batch, seq, embed_dim)``.
+        :type features: keras.KerasTensor
+        :return: Unnormalized logits ``(batch, seq, vocab_size)``; no softmax.
+        :rtype: keras.KerasTensor
+        """
         # DECISION plan_2026-06-15_2a23a001/D-001: tie embeddings at call time via
         # matmul against the transposed embedding table, never by reassigning a built layer's weight. See decisions.md.
         # DECISION plan-2026-09-12T123331-28fd855f/D-005: the matmul/transpose
@@ -540,16 +578,12 @@ class NanoVLM(keras.Model):
         # D-001 anchor above -- the tie is still resolved at call time via a
         # matmul against the transposed table, never by reassigning a built
         # layer's weight. See decisions.md D-005.
-        if (self.use_shared_embedding and
-                self.text_component_type == 'decoder' and
-                hasattr(self.text_component, 'word_embeddings')):
-            logits = tied_embedding_logits(
-                combined_features,
+        if self.ties_output_to_embeddings:
+            return tied_embedding_logits(
+                features,
                 self.text_component.word_embeddings.embeddings,
             )
-        else:
-            logits = self.output_projection(combined_features)
-        return logits
+        return self.output_projection(features)
 
     def generate(
             self,
@@ -605,7 +639,6 @@ class NanoVLM(keras.Model):
 
         # Initialize with prompt
         current_tokens = prompt_tokens
-        batch_size = ops.shape(current_tokens)[0]
 
         for step in range(max_length):
             # Get current text features
@@ -622,23 +655,13 @@ class NanoVLM(keras.Model):
             vision_fused, text_fused = self.fusion_layer(
                 [vision_features, text_features], training=False
             )
-            combined = ops.concatenate([vision_fused, text_fused], axis=1)
+            combined = keras.ops.concatenate([vision_fused, text_fused], axis=1)
 
             # Get logits and sample next token
-            # Shared-embedding tie at call time (mirrors call(); see D-001 and
-            # D-005 anchors above).
-            if (self.use_shared_embedding and
-                    self.text_component_type == 'decoder' and
-                    hasattr(self.text_component, 'word_embeddings')):
-                logits = tied_embedding_logits(
-                    combined,
-                    self.text_component.word_embeddings.embeddings,
-                )
-            else:
-                logits = self.output_projection(combined)
+            logits = self._vocab_logits(combined)
 
             # Extract text logits (skip the vision prefix)
-            vision_seq_len = ops.shape(vision_features)[1]
+            vision_seq_len = keras.ops.shape(vision_features)[1]
             text_logits = logits[:, vision_seq_len:, :]
             next_token_logits = text_logits[:, -1, :]  # Last text position
 
@@ -648,8 +671,8 @@ class NanoVLM(keras.Model):
             )
 
             # Append to sequences
-            next_tokens = ops.expand_dims(next_tokens, axis=1)
-            current_tokens = ops.concatenate([current_tokens, next_tokens], axis=1)
+            next_tokens = keras.ops.expand_dims(next_tokens, axis=1)
+            current_tokens = keras.ops.concatenate([current_tokens, next_tokens], axis=1)
 
             # Check for EOS (simplified - could be enhanced for per-sequence)
             if eos_token_id in next_tokens:
@@ -669,17 +692,18 @@ class NanoVLM(keras.Model):
 
         if top_k > 0:
             # Top-k sampling
-            top_k_logits, top_k_indices = ops.top_k(logits, k=top_k)
-            probs = ops.softmax(top_k_logits)
-            sampled_indices = keras.random.categorical(probs, num_samples=1)[:, 0]
+            top_k_logits, top_k_indices = keras.ops.top_k(logits, k=top_k)
+            # `categorical` takes LOGITS. Feeding it softmax probabilities
+            # samples from softmax(softmax(z)), a flattened distribution.
+            sampled_indices = keras.random.categorical(top_k_logits, num_samples=1)[:, 0]
 
             # Map back to original vocabulary
-            next_tokens = ops.take_along_axis(
-                top_k_indices, ops.expand_dims(sampled_indices, axis=1), axis=1
+            next_tokens = keras.ops.take_along_axis(
+                top_k_indices, keras.ops.expand_dims(sampled_indices, axis=1), axis=1
             )[:, 0]
         else:
             # Greedy sampling
-            next_tokens = ops.argmax(logits, axis=-1)
+            next_tokens = keras.ops.argmax(logits, axis=-1)
 
         return next_tokens
 
@@ -729,6 +753,94 @@ class NanoVLM(keras.Model):
 
         return (batch_size, combined_seq_len, self.vocab_size)
 
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            vocab_size: int = 32000,
+            fusion_strategy: Optional[FusionStrategy] = None,
+            text_component_type: TextComponentType = 'decoder',
+            pretrained: Union[bool, str] = False,
+            **kwargs: Any
+    ) -> "NanoVLM":
+        """
+        Build a NanoVLM from a row of :attr:`MODEL_VARIANTS`.
+
+        Only ``'cross_attention'`` and ``'attention_pooling'`` can fuse streams
+        of different sequence length. The other six strategies combine on the
+        feature axis or broadcast element-wise on the sequence axis, so they
+        need matching vision and text lengths. Every variant fixes the vision
+        length from ``img_size``/``patch_size`` (197 tokens for ``'mini'``,
+        ``'base'`` and ``'modern'``, 577 for ``'large'``), so those six raise a
+        ``ValueError`` on the first call unless the caller's text length
+        happens to match; the text length is not known until a batch arrives,
+        so this cannot be checked at construction. All eight strategies can be
+        trained at matched lengths, but ``generate()`` accepts only
+        ``'cross_attention'``.
+
+        :param variant: One of ``'mini'``, ``'base'``, ``'large'``, ``'modern'``.
+        :type variant: str
+        :param vocab_size: Vocabulary size, written into the text config.
+        :type vocab_size: int
+        :param fusion_strategy: Overrides the row's ``fusion_strategy``
+            (``'cross_attention'`` in every row). ``None`` keeps the row's.
+        :type fusion_strategy: Optional[FusionStrategy]
+        :param text_component_type: ``'decoder'`` or ``'encoder'``.
+        :type text_component_type: TextComponentType
+        :param pretrained: Must be falsy. No NanoVLM weights are distributed,
+            and the model has no backbone/head split to load partially: its
+            output is the vocabulary logits of the whole model, tied to the
+            word embedding table. ``True`` or a path raises
+            ``NotImplementedError`` before anything is built; load a local
+            archive with ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
+        :param kwargs: Laid over the row. ``vision_config``, ``text_config``
+            and ``fusion_config`` are MERGED one level deep into the row's
+            dicts (a key you pass replaces that key; the others stay); every
+            other keyword replaces the row's value or goes to the constructor.
+            An unknown keyword raises ``ValueError``.
+        :type kwargs: Any
+        :return: A configured, unbuilt model.
+        :rtype: NanoVLM
+        :raises ValueError: If ``variant`` is not a known row.
+        :raises NotImplementedError: If ``pretrained`` is truthy.
+
+        Example:
+
+        .. code-block:: python
+
+            model = NanoVLM.from_variant('mini', vocab_size=1000)
+            small = NanoVLM.from_variant(
+                'modern', vocab_size=64,
+                vision_config={'embed_dim': 64, 'num_heads': 1},
+                text_config={'embed_dim': 64, 'num_heads': 1},
+                fusion_config={'attention_config': {'num_heads': 1}},
+            )
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. "
+                f"Available: {list(cls.MODEL_VARIANTS.keys())}"
+            )
+        refuse_pretrained(pretrained, "NanoVLM")
+
+        # Deep-copied: the caller's values are written into the copy, and
+        # writing them into the class table itself would make every later call
+        # inherit this call's values.
+        config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
+        for key in ('vision_config', 'text_config', 'fusion_config'):
+            config[key].update(copy.deepcopy(kwargs.pop(key, {})))
+        config.update(kwargs)
+        config['text_config']['vocab_size'] = vocab_size
+        if fusion_strategy is not None:
+            config['fusion_config']['fusion_strategy'] = fusion_strategy
+
+        return cls(
+            vocab_size=vocab_size,
+            text_component_type=text_component_type,
+            **config
+        )
+
     def get_config(self) -> Dict[str, Any]:
         """
         Get the model configuration for serialization.
@@ -746,142 +858,39 @@ class NanoVLM(keras.Model):
             'use_shared_embedding': self.use_shared_embedding,
             'output_dropout_rate': self.output_dropout_rate,
             'initializer_range': self.initializer_range,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
 
 # ---------------------------------------------------------------------
-# Factory Functions for Convenient Model Creation
+# Factory
 # ---------------------------------------------------------------------
 
 def create_nanovlm(
         variant: str = "base",
-        vocab_size: int = 32000,
-        fusion_strategy: FusionStrategy = 'cross_attention',
-        text_component_type: TextComponentType = 'decoder',
-        **kwargs
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any
 ) -> NanoVLM:
     """
-    Build a NanoVLM from a named size preset.
+    Build a NanoVLM from a named variant; delegates to :meth:`NanoVLM.from_variant`.
 
-    Only ``'cross_attention'`` and ``'attention_pooling'`` can fuse streams of
-    different sequence length. The other six strategies combine on the
-    feature axis or broadcast element-wise on the sequence axis, so they need
-    matching vision and text lengths. Every variant here fixes the vision
-    length from ``img_size``/``patch_size`` (197 tokens for ``'mini'``/
-    ``'base'``, 577 for ``'large'``), so those six raise a ``ValueError`` on
-    the first call unless the caller's text length happens to match; the
-    text length is not known until a batch arrives, so this cannot be
-    checked at construction. All eight strategies can be trained at matched
-    lengths, but ``generate()`` accepts only ``'cross_attention'``.
-
-    :param variant: Model size, one of ``'mini'``, ``'base'``, ``'large'``.
+    :param variant: One of ``'mini'``, ``'base'``, ``'large'``, ``'modern'``.
     :type variant: str
-    :param vocab_size: Vocabulary size for text processing.
-    :type vocab_size: int
-    :param fusion_strategy: Strategy for multi-modal fusion.
-    :type fusion_strategy: FusionStrategy
-    :param text_component_type: ``'decoder'`` or ``'encoder'``.
-    :type text_component_type: TextComponentType
-    :param kwargs: Forwarded to :class:`NanoVLM`.
+    :param pretrained: Must be falsy; see :meth:`NanoVLM.from_variant`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Forwarded to :meth:`NanoVLM.from_variant`.
     :return: A configured model.
     :rtype: NanoVLM
     :raises ValueError: If ``variant`` is not a known preset.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
 
     Example:
 
     .. code-block:: python
 
-        model = create_nanovlm('base', fusion_strategy='cross_attention')
+        model = create_nanovlm('base', vocab_size=32000)
     """
-    if variant not in NanoVLM.MODEL_VARIANTS:
-        raise ValueError(
-            f"Unknown variant '{variant}'. "
-            f"Available: {list(NanoVLM.MODEL_VARIANTS.keys())}"
-        )
-
-    # Deep-copied: `vocab_size` and `fusion_strategy` are caller arguments, and
-    # writing them into the class table itself would make every later call
-    # inherit this call's values.
-    config = copy.deepcopy(NanoVLM.MODEL_VARIANTS[variant])
-    config['text_config']['vocab_size'] = vocab_size
-    config['fusion_config']['fusion_strategy'] = fusion_strategy
-
-    return NanoVLM(
-        vision_config=config['vision_config'],
-        text_config=config['text_config'],
-        fusion_config=config['fusion_config'],
-        vocab_size=vocab_size,
-        text_component_type=text_component_type,
-        **kwargs
-    )
-
-
-def create_modern_nanovlm(
-        vocab_size: int = 32000,
-        embed_dim: int = 768,
-        **kwargs
-) -> NanoVLM:
-    """
-    Build a NanoVLM using modern components: RMSNorm, SwiGLU, differential
-    attention, RoPE.
-
-    The fusion default is ``'cross_attention'``. ``'tensor_fusion'`` needs
-    equal vision and text sequence lengths, but this factory's vision stream
-    is fixed at 197 tokens (``img_size=224``, ``patch_size=16``) against a
-    caller-chosen text length, so passing ``fusion_strategy='tensor_fusion'``
-    explicitly raises a ``ValueError`` naming the requirement.
-
-    :param vocab_size: Vocabulary size.
-    :type vocab_size: int
-    :param embed_dim: Shared embedding width for both towers.
-    :type embed_dim: int
-    :param kwargs: Forwarded to :class:`NanoVLM`; ``fusion_strategy`` may
-        override the ``'cross_attention'`` default.
-    :return: A configured model.
-    :rtype: NanoVLM
-
-    Example:
-
-    .. code-block:: python
-
-        model = create_modern_nanovlm(vocab_size=50000, embed_dim=1024)
-    """
-    return NanoVLM(
-        vision_config={
-            'img_size': 224, 'patch_size': 16, 'embed_dim': embed_dim,
-            'depth': 12, 'num_heads': embed_dim // 64,
-            'attention_type': 'differential',
-            'normalization_type': 'rms_norm',
-            'normalization_position': 'pre',
-            'ffn_type': 'swiglu',
-            'output_mode': 'none'
-        },
-        text_config={
-            'vocab_size': vocab_size, 'embed_dim': embed_dim, 'depth': 12,
-            'num_heads': embed_dim // 64, 'max_seq_len': 1024,
-            'embedding_type': 'factorized',
-            'positional_type': 'rope',
-            'normalization_type': 'rms_norm',
-            'normalization_position': 'pre',
-            'ffn_type': 'swiglu'
-        },
-        fusion_config={
-            # DECISION plan-2026-08-14T183218-f4c612aa/D-007: default stays
-            # 'cross_attention', not 'tensor_fusion' -- this factory's fixed 197-token vision stream violates tensor_fusion's equal-length need on every call. See decisions.md.
-            'fusion_strategy': kwargs.get('fusion_strategy', 'cross_attention'),
-            'dim': embed_dim,
-            'attention_config': {'num_heads': embed_dim // 64},
-            'num_tensor_projections': 8,
-            'ffn_type': 'swiglu',
-            'norm_type': 'rms_norm'
-        },
-        vocab_size=vocab_size,
-        **{k: v for k, v in kwargs.items() if k != 'fusion_strategy'}
-    )
+    return NanoVLM.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

@@ -126,6 +126,29 @@ class TestComputeOutputShapeAgreesWithTheForwardPass:
             f"compute_output_shape disagrees with call() for '{strategy}'"
         )
 
+    @pytest.mark.parametrize("strategy", SEQUENCE_STRATEGIES + ["attention_pooling"])
+    def test_a_symbolic_call_agrees_with_the_eager_call_and_the_claim(self, strategy):
+        """Three routes to one shape: the eager forward, `compute_output_shape`
+        and a functional `model(keras.Input(...))`. `'attention_pooling'` is
+        the one pooled strategy, the rank-2 `(batch, vocab)` row the claim was
+        once only SUSPECTED to get right (F-2)."""
+        model = _model(strategy)
+        images, text = _batch(text_len=VISION_LEN)
+        eager = tuple(model({"images": images, "text_tokens": text}, training=False).shape)
+
+        claimed = tuple(model.compute_output_shape({
+            "images": (BATCH, IMG, IMG, 3),
+            "text_tokens": (BATCH, VISION_LEN),
+        }))
+        symbolic = tuple(model({
+            "images": keras.Input((IMG, IMG, 3), batch_size=BATCH),
+            "text_tokens": keras.Input((VISION_LEN,), batch_size=BATCH, dtype="int32"),
+        }).shape)
+
+        assert eager == claimed == symbolic, (strategy, eager, claimed, symbolic)
+        if strategy == "attention_pooling":
+            assert eager == (BATCH, VOCAB)
+
     def test_only_cross_attention_sums_the_two_lengths(self):
         """The specific arithmetic that was applied to all eight strategies."""
         cross = _model("cross_attention").compute_output_shape({

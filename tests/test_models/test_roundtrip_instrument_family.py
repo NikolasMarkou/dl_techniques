@@ -75,7 +75,6 @@ RELOAD_PATH_DRIFT = {
     "darkir": 24,
     "fractalnet": 42,
     "latent_gmm_registration": 20,
-    "nano_vlm": 16,
     "tabm": 5,
 }
 
@@ -93,7 +92,6 @@ AUTONAME_STEMS = {
     "fractalnet": ("conv_block",),
     "latent_gmm_registration": ("dense",),
     "masked_language_model": ("bert",),
-    "nano_vlm": ("vision_encoder",),
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
 }
 

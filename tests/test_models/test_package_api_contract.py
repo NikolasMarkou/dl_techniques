@@ -1975,7 +1975,7 @@ class TestModelVariantsArePresent:
              ["large", "medium", "micro", "small", "xlarge"]),
             ("dl_techniques.models.neural_computer.ntm.model", "NTMModel", ["base", "large", "tiny"]),
             ("dl_techniques.models.vision_language.nano_vlm.model", "NanoVLM",
-             ["base", "large", "mini"]),
+             ["base", "large", "mini", "modern"]),
             # "repo_medium", not "large": the row was renamed on 2026-08-23 (D-463)
             # when `base` was corrected from 60 channels to the paper's 240, which
             # left an 80-channel variant sitting BETWEEN the two published sizes.
@@ -4226,7 +4226,7 @@ _CREATE_DELEGATION_WAIVERS = {
 }
 
 
-#: The 16 ``create_*(variant=...)`` functions whose module defines no
+#: The 15 ``create_*(variant=...)`` functions whose module defines no
 #: ``from_variant`` -- excluded from R-051 BY SCOPE, since the rule is about
 #: delegating to a method that does not exist here. §5.6's functional-builder
 #: exemption class. Pinned by name so the exclusion cannot grow silently: a NEW
@@ -4237,6 +4237,9 @@ _CREATE_DELEGATION_WAIVERS = {
 #: 16. ``models/language/ptrm/factory.py::create_ptrm_from_variant`` had landed
 #: in the exclusion unpinned (its module has no ``from_variant``); it was folded
 #: into ``ptrm/model.py::create_ptrm``, which now delegates and is judged.
+#: 15 since 2026-10-15 (plan-2026-10-14T062616-81938e81 step 9):
+#: ``nano_vlm/model.py::create_nanovlm`` left, ``NanoVLM.from_variant`` exists
+#: and the factory delegates to it, so it is judged.
 _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/vision/bias_free_denoisers/bfcnn.py", "create_bfcnn_variant"),
     ("models/vision/bias_free_denoisers/bfconvunext.py", "create_convunext_variant"),
@@ -4248,7 +4251,6 @@ _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/vision/energy_transformer/model.py", "create_energy_transformer_mim"),
     ("models/vision_language/ideogram4/transformer.py", "create_ideogram4_transformer"),
     ("models/vision_language/ideogram4/vae.py", "create_ideogram4_autoencoder"),
-    ("models/vision_language/nano_vlm/model.py", "create_nanovlm"),
     ("models/vision/super_resolution/pft_sr/model.py", "create_pft_sr"),
     ("models/vision_language/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
     ("models/vision_language/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
@@ -5867,7 +5869,9 @@ def _sweep_step_overrides(roots=None, src_root=None):
 #: 46567264f, never frozen) was added beside its HRM/TRM siblings, see
 #: plan-2026-10-13T035756-5dd4d94d D-018. 33 keys since 2026-10-15:
 #: ``CLIPTrainer.train_step`` deleted, the CLIP trainer trains through stock
-#: ``fit`` (plan-2026-10-14T062616-81938e81 D-036).
+#: ``fit`` (plan-2026-10-14T062616-81938e81 D-036). 32 keys since 2026-10-15:
+#: ``NanoVLMTrainer.train_step`` deleted, the NanoVLM trainer trains through
+#: stock ``fit`` (plan-2026-10-14T062616-81938e81 D-038).
 #:
 #: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
 #: growth predicate -- but they fail the liveness test below, which is
@@ -5923,7 +5927,6 @@ _FROZEN_STEP_OVERRIDES = {
     # tests/test_train/test_ptrm/test_the_train_step_runs.py. See decisions.md
     # D-018.
     ("src/train/ptrm/train_ptrm.py", "PTRMTrainer", "train_step"),
-    ("src/train/nano_vlm/train_nano_vlm.py", "NanoVLMTrainer", "train_step"),
     ("src/train/sd3_mmdit/train_sd3_mmdit.py", "SD3FlowTrainer", "train_step"),
     ("src/train/superpoint/train_superpoint.py", "SuperPointJointModel", "train_step"),
     # DECISION 2026-10-05/superpoint-test-step: the evaluate path needs the
@@ -6046,20 +6049,20 @@ class TestCustomStepOverridePopulationIsFrozen:
         )
 
     def test_the_frozen_population_is_the_measured_one(self):
-        """Anti-vacuity: the frozen set is exactly the 33 keys measured.
+        """Anti-vacuity: the frozen set is exactly the 32 keys measured.
 
         No 0.8 floor here -- a freeze is an equality, and a floor would let the
         set decay to 27 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 33
+        assert len(_FROZEN_STEP_OVERRIDES) == 32
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
-            20,
+            19,
             12,
             1,
         ), (
-            "the step-override mix moved off the measured 20/12/1; reconcile "
+            "the step-override mix moved off the measured 19/12/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 

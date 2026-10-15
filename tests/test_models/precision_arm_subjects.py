@@ -728,10 +728,10 @@ def _b_nano_vlm():
 # `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
 _sub("nano_vlm", _b_nano_vlm,
      lambda: {"images": _f32(1, 32, 32, 3), "text_tokens": _ids(64, 1, 16)},
-     # ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- the same
-     # single variable, ``shared_output_projection/kernel``, is ``None`` in
-     # BOTH arms (fp16 normsum 2.867185e-01, float32 2.706649e-01).
-     allowed_none_grads=1,
+     # No ``allowed_none_grads``: the one variable that was ``None`` in both
+     # arms, ``shared_output_projection/kernel``, was a Dense a tied model
+     # built and never called; it is deleted (plan-2026-10-14T062616-81938e81
+     # D-037).
      expected_compute_dtype="float32")
 
 
