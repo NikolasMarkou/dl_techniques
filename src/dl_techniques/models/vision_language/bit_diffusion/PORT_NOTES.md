@@ -285,8 +285,11 @@ The honest limitations, stated plainly:
 - **No FID, no CLIPScore, no CIDEr.** None of the three exists anywhere in `src/`; the paper's
   evaluation cannot be reproduced.
 - **No pretrained weights, and no `.pth`→Keras converter.** The port is architecture-faithful,
-  not weight-compatible. There is no `pretrained=` path; `from_variant(..., pretrained=True)`
-  raises `NotImplementedError` by design.
+  not weight-compatible. `from_variant(..., pretrained=True)` raises `NotImplementedError` by
+  design. `pretrained=<path>` takes a local `.keras` checkpoint of a `DiTXA` (one this port
+  saved): the model is built, then every layer loads by name or the call raises (2026-10-15;
+  before that it called `load_weights` on an unbuilt model and raised for every checkpoint).
+  `create_shared_token_decoder(..., pretrained=True)` raises `NotImplementedError` as well.
 - **Nothing here is trained.** The largest thing ever run was a 3-epoch CPU smoke on `tiny`
   (287,952 parameters). S/B/L/XL are **defined and construct**, and their parameter counts are
   measured, but none has been trained for a single step.

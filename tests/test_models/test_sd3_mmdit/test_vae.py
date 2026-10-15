@@ -61,6 +61,20 @@ def test_create_sd3_vae_explicit_params_overrides_variant():
     assert vae.z_channels == _Z_CHANNELS
 
 
+@pytest.mark.parametrize("pretrained", [True, "sd3_vae.keras"])
+def test_create_sd3_vae_refuses_pretrained_weights(pretrained):
+    """No weights ship: a truthy ``pretrained``, a path included, raises."""
+    with pytest.raises(NotImplementedError, match="SD3 VAE"):
+        create_sd3_vae("tiny", pretrained=pretrained)
+
+
+@pytest.mark.parametrize("pretrained", [True, "sd3_vae.keras"])
+def test_sd3vae_from_variant_refuses_pretrained_weights(pretrained):
+    """The bundle's ``from_variant`` builds through the same refusal."""
+    with pytest.raises(NotImplementedError, match="SD3 VAE"):
+        SD3VAE.from_variant("tiny", pretrained=pretrained)
+
+
 # ---------------------------------------------------------------------
 # (2) encode -> 16-channel latent with 2x spatial downsample
 # ---------------------------------------------------------------------

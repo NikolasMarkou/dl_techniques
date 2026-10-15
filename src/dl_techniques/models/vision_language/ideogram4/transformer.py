@@ -67,6 +67,7 @@ from dl_techniques.models.vision_language.ideogram4.constants import (
 )
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 
@@ -325,6 +326,7 @@ class Ideogram4Transformer(keras.Model):
 
 def create_ideogram4_transformer(
     variant: str = "tiny",
+    pretrained: bool = False,
     **overrides: Any,
 ) -> Ideogram4Transformer:
     """Build an :class:`Ideogram4Transformer` from a named preset.
@@ -337,12 +339,20 @@ def create_ideogram4_transformer(
 
     :param variant: One of the config presets (``"tiny"`` or ``"full"``).
     :type variant: str
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed, and a saved transformer is restored whole with
+        ``keras.models.load_model(path)``.
+    :type pretrained: bool
     :param overrides: Field overrides applied to the preset ``Ideogram4Config``
-        (e.g. ``num_layers=4``). Re-validated on construction.
+        (e.g. ``num_layers=4``). Re-validated on construction; an unknown
+        field raises ``TypeError``.
     :type overrides: Any
     :return: The constructed (un-built) transformer model.
     :rtype: Ideogram4Transformer
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
+    refuse_pretrained(pretrained, "Ideogram4Transformer")
     config, _ = get_ideogram4_config(variant)
     if overrides:
         merged = {**config.to_dict(), **overrides}

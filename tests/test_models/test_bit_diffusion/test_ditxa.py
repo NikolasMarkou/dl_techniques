@@ -180,7 +180,7 @@ class TestTheVariantTable:
 
     def test_pretrained_true_raises_before_allocating_anything(self):
         """A caller who asked for trained weights never gets a random model."""
-        with pytest.raises(NotImplementedError, match="No pretrained DiTXA weights"):
+        with pytest.raises(NotImplementedError, match="Pretrained DiTXA weights"):
             DiTXA.from_variant("tiny", pretrained=True)
 
     def test_the_factory_is_a_thin_delegate(self):

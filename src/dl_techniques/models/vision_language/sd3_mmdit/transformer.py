@@ -63,6 +63,7 @@ from dl_techniques.models.vision_language.sd3_mmdit.config import (
     get_sd3_config,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 # ---------------------------------------------------------------------
 # 2D sin-cos positional embedding helpers (numpy; computed once at build)
@@ -431,6 +432,7 @@ class SD3MMDiT(keras.Model):
 
 def create_sd3_mmdit(
     variant: str = "tiny",
+    pretrained: bool = False,
     **overrides: Any,
 ) -> SD3MMDiT:
     """Build an :class:`SD3MMDiT` from a named preset.
@@ -443,14 +445,22 @@ def create_sd3_mmdit(
 
     :param variant: One of the config presets (``"tiny"`` or ``"full"``).
     :type variant: str
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed, and a saved transformer is restored whole with
+        ``keras.models.load_model(path)``.
+    :type pretrained: bool
     :param overrides: Field overrides applied to the preset ``SD3MMDiTConfig``
-        (e.g. ``depth=2``). Re-validated on construction.
+        (e.g. ``depth=2``). Re-validated on construction; an unknown field
+        raises ``TypeError``.
     :type overrides: Any
     :return: The constructed (un-built) transformer model.
     :rtype: SD3MMDiT
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
     import dataclasses
 
+    refuse_pretrained(pretrained, "SD3MMDiT")
     config, _ = get_sd3_config(variant)
     if overrides:
         config = dataclasses.replace(config, **overrides)

@@ -75,6 +75,12 @@ model = create_ideogram4_transformer("tiny")          # or "full"
 model = create_ideogram4_transformer("tiny", num_layers=4)   # field overrides
 ```
 
+No weights are distributed (see `AGENTS.md`, "Published weights are NOT loadable").
+`create_ideogram4_transformer` and `create_ideogram4_autoencoder` take
+`pretrained=False` and raise `NotImplementedError` for any truthy value, a path
+included; a model saved with `model.save(path)` is restored whole with
+`keras.models.load_model(path)`. An unknown override field raises `TypeError`.
+
 ### Layers (live under `layers/`, separately tested)
 
 | layer | file | role |

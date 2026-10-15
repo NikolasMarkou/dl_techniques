@@ -9,7 +9,6 @@ suite; marked ``integration`` because it touches every SD3 component at once.
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
 from dl_techniques.models.vision_language.sd3_mmdit.pipeline import (
@@ -56,6 +55,13 @@ class TestPipelineBuild:
             tiny_pipeline.clip.embed_dim + tiny_pipeline.openclip.embed_dim
             == config.pooled_projection_dim
         )
+
+    @pytest.mark.parametrize("pretrained", [True, "sd3_pipeline.keras"])
+    def test_create_refuses_pretrained_weights(self, pretrained) -> None:
+        """No weights ship: a truthy ``pretrained``, a path included, raises
+        before any of the five components is built."""
+        with pytest.raises(NotImplementedError, match="SD3 pipeline"):
+            create_sd3_pipeline("tiny", pretrained=pretrained)
 
     def test_dim_mismatch_raises(self) -> None:
         """A T5 whose embed_dim != joint_attention_dim must fail loud."""
@@ -128,16 +134,16 @@ class TestAssemblePromptFeatures:
         clip_dim, openclip_dim, t5_dim = 128, 128, 512
 
         clip_out = {
-            "pooled": ops.zeros((B, clip_dim)),
-            "last_hidden": ops.zeros((B, L_clip, clip_dim)),
-            "penultimate": ops.ones((B, L_clip, clip_dim)),
+            "pooled": keras.ops.zeros((B, clip_dim)),
+            "last_hidden": keras.ops.zeros((B, L_clip, clip_dim)),
+            "penultimate": keras.ops.ones((B, L_clip, clip_dim)),
         }
         openclip_out = {
-            "pooled": ops.zeros((B, openclip_dim)),
-            "last_hidden": ops.zeros((B, L_clip, openclip_dim)),
-            "penultimate": ops.ones((B, L_clip, openclip_dim)),
+            "pooled": keras.ops.zeros((B, openclip_dim)),
+            "last_hidden": keras.ops.zeros((B, L_clip, openclip_dim)),
+            "penultimate": keras.ops.ones((B, L_clip, openclip_dim)),
         }
-        t5_out = ops.ones((B, L_t5, t5_dim))
+        t5_out = keras.ops.ones((B, L_t5, t5_dim))
 
         ehs, pooled = assemble_prompt_features(clip_out, openclip_out, t5_out)
 
@@ -153,16 +159,16 @@ class TestAssemblePromptFeatures:
         B, L_clip, L_t5 = 1, 3, 4
         clip_dim, openclip_dim, t5_dim = 128, 128, 512
         clip_out = {
-            "pooled": ops.zeros((B, clip_dim)),
-            "last_hidden": ops.zeros((B, L_clip, clip_dim)),
-            "penultimate": ops.ones((B, L_clip, clip_dim)),
+            "pooled": keras.ops.zeros((B, clip_dim)),
+            "last_hidden": keras.ops.zeros((B, L_clip, clip_dim)),
+            "penultimate": keras.ops.ones((B, L_clip, clip_dim)),
         }
         openclip_out = {
-            "pooled": ops.zeros((B, openclip_dim)),
-            "last_hidden": ops.zeros((B, L_clip, openclip_dim)),
-            "penultimate": ops.ones((B, L_clip, openclip_dim)),
+            "pooled": keras.ops.zeros((B, openclip_dim)),
+            "last_hidden": keras.ops.zeros((B, L_clip, openclip_dim)),
+            "penultimate": keras.ops.ones((B, L_clip, openclip_dim)),
         }
-        t5_out = ops.zeros((B, L_t5, t5_dim))
+        t5_out = keras.ops.zeros((B, L_t5, t5_dim))
         ehs, _ = assemble_prompt_features(clip_out, openclip_out, t5_out)
         arr = keras.ops.convert_to_numpy(ehs)
         # First L_clip rows: first 256 feats are ones (CLIP+OpenCLIP), rest pad 0.
@@ -173,16 +179,16 @@ class TestAssemblePromptFeatures:
         """CLIP+OpenCLIP wider than T5 must fail loud."""
         B, L_clip, L_t5 = 1, 2, 2
         clip_out = {
-            "pooled": ops.zeros((B, 400)),
-            "last_hidden": ops.zeros((B, L_clip, 400)),
-            "penultimate": ops.ones((B, L_clip, 400)),
+            "pooled": keras.ops.zeros((B, 400)),
+            "last_hidden": keras.ops.zeros((B, L_clip, 400)),
+            "penultimate": keras.ops.ones((B, L_clip, 400)),
         }
         openclip_out = {
-            "pooled": ops.zeros((B, 400)),
-            "last_hidden": ops.zeros((B, L_clip, 400)),
-            "penultimate": ops.ones((B, L_clip, 400)),
+            "pooled": keras.ops.zeros((B, 400)),
+            "last_hidden": keras.ops.zeros((B, L_clip, 400)),
+            "penultimate": keras.ops.ones((B, L_clip, 400)),
         }
-        t5_out = ops.ones((B, L_t5, 512))  # 400+400=800 > 512
+        t5_out = keras.ops.ones((B, L_t5, 512))  # 400+400=800 > 512
         with pytest.raises(ValueError, match="must be <="):
             assemble_prompt_features(clip_out, openclip_out, t5_out)
 

@@ -12,11 +12,12 @@ and scheduler internals stay behind their submodules, e.g.::
 from .pipeline import create_sd3_pipeline
 from .text_encoders import CLIPTextEncoder, T5Encoder
 from .transformer import SD3MMDiT, create_sd3_mmdit
-from .vae import create_sd3_vae
+from .vae import SD3VAE, create_sd3_vae
 
 __all__ = [
     "CLIPTextEncoder",
     "SD3MMDiT",
+    "SD3VAE",
     "T5Encoder",
     "create_sd3_mmdit",
     "create_sd3_pipeline",

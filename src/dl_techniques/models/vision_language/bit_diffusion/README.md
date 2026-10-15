@@ -93,6 +93,15 @@ Note the two shapes a reader of the PyTorch original will not expect: `direction
 **per-sample tensor**, not a Python `bool` (`PORT_NOTES.md` §4.6), and `simulate` takes the score
 network as an argument rather than owning it.
 
+No weights are distributed. `create_ditxa(variant, pretrained=True)` raises
+`NotImplementedError`. `create_ditxa(variant, pretrained="ditxa.keras")` restores a local
+checkpoint of a `DiTXA`: the model is built from its own `input_size`/`in_channels`, then every
+layer is copied by name, and a checkpoint of another width or depth raises before any weight is
+copied. Overrides such as `dropout_rate` apply to the loaded model. Pinned by
+`tests/test_models/test_bit_diffusion/test_a_ditxa_path_loads_every_weight.py`.
+`create_shared_token_decoder(..., pretrained=True)` raises `NotImplementedError`; restore a saved
+decoder with `keras.models.load_model(path)`.
+
 Block internals stay behind their submodule and are not exported:
 
 ```python

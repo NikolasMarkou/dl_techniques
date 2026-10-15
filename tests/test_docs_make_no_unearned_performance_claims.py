@@ -290,7 +290,17 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
         # not by this pin; this one only tracks WHO is in the conversation.
         "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
-        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "dit",
+        "bert", "bias_free_denoisers",
+        # bit_diffusion: README "Usage" names `pretrained=True` only to say
+        # `create_ditxa` and `create_shared_token_decoder` raise (added at
+        # plan-2026-10-14T062616-81938e81 step 10); both really raise
+        # `NotImplementedError`, verified by EXECUTING them
+        # (tests/test_models/test_bit_diffusion/
+        # test_a_ditxa_path_loads_every_weight.py and
+        # test_the_token_decoder.py) and by the behavioural arm of
+        # test_package_api_contract.py. Both halves checked.
+        "bit_diffusion",
+        "colbert", "dino", "distilbert", "dit",
         # doc_res: README:215 says `pretrained=True` raises; model.py:707
         # really does `raise NotImplementedError`. Both halves checked.
         "doc_res",

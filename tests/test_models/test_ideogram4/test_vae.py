@@ -270,6 +270,12 @@ class TestAutoEncoder:
         assert tuple(recon.shape) == (BATCH, SPATIAL, SPATIAL, 3)
         assert ae_model.sampling_seed == 7
 
+    @pytest.mark.parametrize("pretrained", [True, "autoencoder.keras"])
+    def test_factory_refuses_pretrained_weights(self, pretrained):
+        """No weights ship: a truthy ``pretrained``, a path included, raises."""
+        with pytest.raises(NotImplementedError, match="Ideogram4 AutoEncoder"):
+            create_ideogram4_autoencoder("tiny", pretrained=pretrained)
+
 
 class TestGroupNormGuard:
     def test_bad_ch_fails_at_build(self):

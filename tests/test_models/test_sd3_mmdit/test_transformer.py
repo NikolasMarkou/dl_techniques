@@ -67,6 +67,12 @@ class TestSD3MMDiT:
         assert model.config.embedding_size == 192
         assert model.config.depth == 4
 
+    @pytest.mark.parametrize("pretrained", [True, "sd3_mmdit.keras"])
+    def test_factory_refuses_pretrained_weights(self, pretrained):
+        """No weights ship: a truthy ``pretrained``, a path included, raises."""
+        with pytest.raises(NotImplementedError, match="SD3MMDiT"):
+            create_sd3_mmdit("tiny", pretrained=pretrained)
+
     def test_forward_shape(self):
         model = create_sd3_mmdit("tiny")
         batch = _make_batch(batch=2, txt_len=7)

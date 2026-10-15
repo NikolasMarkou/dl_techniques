@@ -43,6 +43,7 @@ from dl_techniques.models.vision_language.ideogram4.config import (
 )
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 
 _GN_GROUPS: int = 32
@@ -929,6 +930,7 @@ class AutoEncoder(keras.Model):
 def create_ideogram4_autoencoder(
     variant: str = "tiny",
     sampling_seed: Optional[int] = None,
+    pretrained: bool = False,
     **overrides: Any,
 ) -> AutoEncoder:
     """Build a Flux2 :class:`AutoEncoder` from a named preset.
@@ -940,10 +942,17 @@ def create_ideogram4_autoencoder(
 
     :param variant: One of the config presets (``"tiny"`` or ``"full"``).
     :param sampling_seed: Optional seed for the KL :class:`Sampling` layer.
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed, and a saved autoencoder is restored whole with
+        ``keras.models.load_model(path)``.
     :param overrides: Field overrides applied to the preset
-        :class:`AutoEncoderParams` (e.g. ``ch=64``).
+        :class:`AutoEncoderParams` (e.g. ``ch=64``). An unknown field raises
+        ``TypeError``.
     :return: The constructed (un-built) autoencoder model.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
+    refuse_pretrained(pretrained, "Ideogram4 AutoEncoder")
     _, ae = get_ideogram4_config(variant)
     if overrides:
         merged = {**ae.to_dict(), **overrides}

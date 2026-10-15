@@ -29,6 +29,7 @@ from typing import Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 from dl_techniques.models.vision_language.ideogram4.vae import AutoEncoder
 from dl_techniques.models.vision_language.ideogram4.config import AutoEncoderParams
@@ -79,6 +80,7 @@ def create_sd3_vae(
     params: Optional[AutoEncoderParams | str] = None,
     variant: str = "tiny",
     sampling_seed: Optional[int] = None,
+    pretrained: bool = False,
 ) -> AutoEncoder:
     """Build the SD3 16-channel KL-VAE as a reused ideogram4 ``AutoEncoder``.
 
@@ -94,8 +96,14 @@ def create_sd3_vae(
     :param variant: Preset name used when no explicit ``AutoEncoderParams`` is
         given (``"tiny"`` or ``"full"``).
     :param sampling_seed: Optional seed forwarded to the KL ``Sampling`` layer.
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed, and a saved autoencoder is restored whole with
+        ``keras.models.load_model(path)``.
     :return: The constructed (un-built) ``AutoEncoder`` (``z_channels=16``).
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
+    refuse_pretrained(pretrained, "SD3 VAE")
     # A first positional string is treated as the variant name.
     if isinstance(params, str):
         variant = params
@@ -140,9 +148,25 @@ class SD3VAE:
         cls,
         variant: str = "tiny",
         sampling_seed: Optional[int] = None,
+        pretrained: bool = False,
     ) -> "SD3VAE":
-        """Build from a preset name via :func:`create_sd3_vae`."""
-        return cls(create_sd3_vae(variant=variant, sampling_seed=sampling_seed))
+        """Build from a preset name via :func:`create_sd3_vae`.
+
+        :param variant: Preset name (``"tiny"`` or ``"full"``).
+        :param sampling_seed: Optional seed forwarded to the KL ``Sampling``
+            layer.
+        :param pretrained: ``False`` (default). Any truthy value raises
+            ``NotImplementedError`` inside :func:`create_sd3_vae`.
+        :return: The bundle around a freshly built ``AutoEncoder``.
+        :raises NotImplementedError: If ``pretrained`` is truthy.
+        """
+        return cls(
+            create_sd3_vae(
+                variant=variant,
+                sampling_seed=sampling_seed,
+                pretrained=pretrained,
+            )
+        )
 
     def encode_to_latent(
         self,

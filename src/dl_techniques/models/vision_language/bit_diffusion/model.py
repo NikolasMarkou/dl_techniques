@@ -35,6 +35,10 @@ from dl_techniques.layers.transformers.sd3_adaln import modulate
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    pretrained_path_or_raise,
+)
 
 from .blocks import DiTXABlock, DiTXATimestepEmbedder, get_2d_sincos_pos_embed
 from .config import PROMPT_NUM_CLASSES
@@ -986,24 +990,6 @@ class DiTXA(keras.Model):
         return cls(**config)
 
     @classmethod
-    def _download_weights(cls, variant: str) -> str:
-        """Pretrained-weights stub. Always raises.
-
-        :param variant: The requested variant name.
-        :type variant: str
-        :return: Never returns.
-        :rtype: str
-        :raises NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            f"No pretrained DiTXA weights ship with dl_techniques (variant "
-            f"'{variant}'). This is an architecture-faithful port, not a "
-            f"weight-compatible one. Use "
-            f"DiTXA.from_variant('{variant}', pretrained=False) and then "
-            f"model.load_weights('/path/to/weights.keras')."
-        )
-
-    @classmethod
     def from_variant(
         cls,
         variant: str,
@@ -1014,26 +1000,35 @@ class DiTXA(keras.Model):
 
         :param variant: One of ``"tiny"``, ``"S"``, ``"B"``, ``"L"``, ``"XL"``.
         :type variant: str
-        :param pretrained: ``False`` (default) for random init. A string is
-            treated as a local ``.keras`` weights path and loaded after the
-            model is built. ``True`` raises ``NotImplementedError``.
+        :param pretrained: ``False`` (default) or any other falsy value: random
+            initialization. A ``str``: the path of a local ``.keras``
+            checkpoint of a ``DiTXA``. The model is built from its own
+            ``input_size`` and ``in_channels``, then every layer is copied from
+            the checkpoint by name; a layer that does not load (another width or
+            depth), or a checkpoint layer with no home here, raises before any
+            weight is copied. The fixed positional table is not a layer and is
+            not copied: it is a function of ``hidden_size`` and the patch grid,
+            which the model computes itself. ``True`` raises
+            ``NotImplementedError``: no weights are distributed with this
+            package.
         :type pretrained: Union[bool, str]
         :param kwargs: Overrides applied on top of the variant's entry.
         :type kwargs: Any
-        :return: The configured model.
+        :return: The configured model; built when ``pretrained`` is a path.
         :rtype: DiTXA
-        :raises ValueError: If ``variant`` is not a known key.
+        :raises ValueError: If ``variant`` is not a known key, or a
+            ``pretrained`` checkpoint does not fit the model.
         :raises NotImplementedError: If ``pretrained`` is ``True``.
+        :raises FileNotFoundError: If a ``pretrained`` path does not exist.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
-        if pretrained is True:
-            # Raised before anything is allocated, so a caller who asked for
-            # trained weights never receives a randomly initialized model.
-            cls._download_weights(variant)
+        # Raised before anything is allocated, so a caller who asked for
+        # trained weights never receives a randomly initialized model.
+        weights_path = pretrained_path_or_raise(pretrained, "DiTXA")
 
         config = dict(cls.MODEL_VARIANTS[variant])
         description = config.pop("description", "")
@@ -1042,9 +1037,29 @@ class DiTXA(keras.Model):
         logger.info("Creating DiTXA-%s: %s", variant, description)
         model = cls(**config)
 
-        if isinstance(pretrained, str):
-            model.load_weights(pretrained)
-            logger.info("Loaded DiTXA weights from %s", pretrained)
+        if weights_path is not None:
+            # DECISION plan-2026-10-14T062616-81938e81/D-042: build from the config's shapes,
+            # then the complete-or-raise by-name copy; do NOT call model.load_weights here --
+            # into the unbuilt model it always raised, and after a build it restores nothing
+            # on a name or shape mismatch and still returns. See decisions.md.
+            side, channels = model.input_size, model.in_channels
+            model.build(
+                {
+                    "x_t": (None, side, side, channels),
+                    "t": (None,),
+                    "y": (None,),
+                    "x_cond": (None, side, side, channels),
+                    "direction": (None,),
+                }
+            )
+            load_weights_from_checkpoint(
+                model,
+                weights_path,
+                skip_prefixes=(),
+                strict=True,
+                allow_unloaded=(),
+            )
+            logger.info("Loaded DiTXA weights from %s", weights_path)
         return model
 
 
@@ -1057,15 +1072,19 @@ def create_ditxa(
 
     :param variant: One of ``"tiny"``, ``"S"``, ``"B"``, ``"L"``, ``"XL"``.
     :type variant: str
-    :param pretrained: ``False`` for random init, a local ``.keras`` path to
-        load, or ``True`` to raise ``NotImplementedError``.
+    :param pretrained: ``False`` for random init, the path of a local
+        ``.keras`` ``DiTXA`` checkpoint to load into the built model (every
+        layer loads or the call raises), or ``True`` to raise
+        ``NotImplementedError``. See :meth:`DiTXA.from_variant`.
     :type pretrained: Union[bool, str]
     :param kwargs: Overrides forwarded to the constructor.
     :type kwargs: Any
     :return: The configured model.
     :rtype: DiTXA
-    :raises ValueError: If ``variant`` is not a known key.
+    :raises ValueError: If ``variant`` is not a known key, or a
+        ``pretrained`` checkpoint does not fit the model.
     :raises NotImplementedError: If ``pretrained`` is ``True``.
+    :raises FileNotFoundError: If a ``pretrained`` path does not exist.
 
     Example:
         >>> model = create_ditxa("tiny")

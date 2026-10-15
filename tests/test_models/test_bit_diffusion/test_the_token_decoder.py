@@ -412,6 +412,18 @@ class TestShapeAndConstruction:
         assert isinstance(decoder, SharedTokenDecoder)
         assert decoder.token_flat_dim == PRESET.token_flat_dim
 
+    @pytest.mark.parametrize("pretrained", [True, "decoder.keras"])
+    def test_the_factory_refuses_pretrained_weights(self, pretrained):
+        """No weights ship: a truthy ``pretrained``, a path included, raises.
+
+        Before the refusal, ``pretrained`` reached the ``keras.Model``
+        constructor and was rejected only incidentally, as an unknown keyword.
+        """
+        with pytest.raises(NotImplementedError, match="SharedTokenDecoder"):
+            create_shared_token_decoder(
+                vocab_size=VOCAB_SIZE, pretrained=pretrained
+            )
+
     def test_a_fresh_decoder_is_not_degenerate(self):
         """The step-7 hazard, checked rather than assumed.
 

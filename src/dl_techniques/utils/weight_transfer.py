@@ -696,10 +696,11 @@ def load_backbone_from_checkpoint(
 
 
 def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]:
-    """Resolve a language model factory's ``pretrained`` argument to a path.
+    """Resolve a model factory's ``pretrained`` argument to a path.
 
     Interface contract (shared by ``from_variant`` of Qwen3, Qwen3Next, Gemma3,
-    Zamba2 and HNet, which follow what ``GPT2.from_variant`` does with it):
+    Zamba2, HNet, HRM and PTRM, which follow what ``GPT2.from_variant`` does
+    with it, and by ``FastVLM.from_variant`` and ``DiTXA.from_variant``):
 
     :param pretrained: The ``from_variant`` argument. Falsy (``False``, ``None``,
         ``""``) means random initialization. A ``str`` is the path of a local
@@ -730,7 +731,10 @@ def refuse_pretrained(pretrained: Any, model_label: str) -> None:
 
     Interface contract (callers: ``CLIP.from_variant``,
     ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``,
-    ``NanoVLM.from_variant``). The
+    ``NanoVLM.from_variant``, and the variant-table-free factories
+    ``create_shared_token_decoder``, ``create_ideogram4_transformer``,
+    ``create_ideogram4_autoencoder``, ``create_sd3_mmdit``, ``create_sd3_vae``
+    and ``create_sd3_pipeline``). The
     sibling of :func:`pretrained_path_or_raise` for the models whose output IS
     the model, such as a contrastive dual encoder: with no task head there is
     no partial (backbone-only) load to offer, and a whole-archive load is what

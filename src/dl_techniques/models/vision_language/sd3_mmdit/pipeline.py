@@ -25,9 +25,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 import keras
-from keras import ops
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 from dl_techniques.models.vision_language.sd3_mmdit.config import SD3MMDiTConfig, get_sd3_config
 from dl_techniques.models.vision_language.sd3_mmdit.scheduler import FlowMatchEulerScheduler
 from dl_techniques.models.vision_language.sd3_mmdit.vae import denormalize_latent, create_sd3_vae
@@ -99,24 +99,24 @@ def assemble_prompt_features(
         )
 
     # 1. concat CLIP + OpenCLIP penultimate along the feature axis.
-    clip_context = ops.concatenate(
+    clip_context = keras.ops.concatenate(
         [clip_penult, openclip_penult], axis=-1
     )  # (B, L_clip, combined_clip_dim)
 
     # 2. zero-pad on the feature axis up to the T5 width.
     pad = t5_dim - combined_clip_dim
     if pad > 0:
-        clip_context = ops.pad(
+        clip_context = keras.ops.pad(
             clip_context, [[0, 0], [0, 0], [0, pad]]
         )  # (B, L_clip, t5_dim)
 
     # 3. concat with the T5 sequence along the sequence axis.
-    encoder_hidden_states = ops.concatenate(
+    encoder_hidden_states = keras.ops.concatenate(
         [clip_context, t5_out], axis=1
     )  # (B, L_clip + L_t5, t5_dim)
 
     # 4. pooled = concat CLIP pooled + OpenCLIP pooled along the feature axis.
-    pooled_projections = ops.concatenate(
+    pooled_projections = keras.ops.concatenate(
         [clip_pooled, openclip_pooled], axis=-1
     )  # (B, clip_dim + openclip_dim)
 
@@ -266,7 +266,7 @@ class SD3Pipeline:
         # Batch size from the token ids (static where known, else dynamic).
         batch = clip_token_ids.shape[0]
         if batch is None:
-            batch = int(ops.shape(clip_token_ids)[0])
+            batch = int(keras.ops.shape(clip_token_ids)[0])
 
         # --- 2. sample initial latent z ~ N(0, 1) ----------------------
         latent_shape = (batch, cfg.sample_size, cfg.sample_size, cfg.in_channels)
@@ -292,7 +292,7 @@ class SD3Pipeline:
             t_next = float(ts[i + 1])
             # Transformer expects timestep in [0, 1000] (ScalarSinusoidalEmbedding
             # input_range=(0, 1000)); the scheduler t is in [0, 1]. Scale here.
-            timestep = ops.full((batch,), t * TIMESTEP_SCALE, dtype="float32")
+            timestep = keras.ops.full((batch,), t * TIMESTEP_SCALE, dtype="float32")
             v = self.transformer(
                 {
                     "latent": z,
@@ -318,6 +318,7 @@ class SD3Pipeline:
 def create_sd3_pipeline(
     variant: str = "tiny",
     seed: Optional[int] = None,
+    pretrained: bool = False,
 ) -> SD3Pipeline:
     """Build a full :class:`SD3Pipeline` from matching presets (no weights).
 
@@ -338,9 +339,16 @@ def create_sd3_pipeline(
 
     :param variant: Config preset (``"tiny"`` or ``"full"``).
     :param seed: Optional seed forwarded to the VAE ``Sampling`` layer.
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed. Each component is a ``keras.Model``, so saved components
+        are restored with ``keras.models.load_model(path)`` and passed to
+        :class:`SD3Pipeline` directly.
     :return: A constructed :class:`SD3Pipeline`.
     :raises ValueError: If ``variant`` has no matching encoder-dim recipe.
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
+    refuse_pretrained(pretrained, "SD3 pipeline")
     config, _ = get_sd3_config(variant)
 
     transformer = create_sd3_mmdit(variant)

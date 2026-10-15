@@ -52,6 +52,7 @@ import numpy as np
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 #: ``torch.nn.functional.normalize``'s default lower bound on the norm, the
 #: only thing standing between an all-zero (padding) token row and a 0/0.
@@ -312,6 +313,7 @@ def create_shared_token_decoder(
     hidden_dim: int = 128,
     token_seq_len: int = 64,
     token_emb_dim: int = 64,
+    pretrained: bool = False,
     **kwargs: Any,
 ) -> SharedTokenDecoder:
     """Build a :class:`SharedTokenDecoder`.
@@ -330,14 +332,21 @@ def create_shared_token_decoder(
     :type token_seq_len: int
     :param token_emb_dim: Width of one token embedding.
     :type token_emb_dim: int
+    :param pretrained: ``False`` (default) for random init. Any truthy value,
+        a path included, raises ``NotImplementedError``: no weights are
+        distributed, and a saved decoder is restored whole with
+        ``keras.models.load_model(path)``.
+    :type pretrained: bool
     :param kwargs: Forwarded to the constructor.
     :type kwargs: Any
     :return: The configured decoder.
     :rtype: SharedTokenDecoder
+    :raises NotImplementedError: If ``pretrained`` is truthy.
 
     Example:
         >>> decoder = create_shared_token_decoder(vocab_size=32000)
     """
+    refuse_pretrained(pretrained, "SharedTokenDecoder")
     return SharedTokenDecoder(
         vocab_size=vocab_size,
         hidden_dim=hidden_dim,

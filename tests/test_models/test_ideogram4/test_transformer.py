@@ -200,6 +200,12 @@ class TestFactory:
         assert model.config.num_layers == 1
         assert len(model.blocks) == 1
 
+    @pytest.mark.parametrize("pretrained", [True, "transformer.keras"])
+    def test_factory_refuses_pretrained_weights(self, pretrained):
+        """No weights ship: a truthy ``pretrained``, a path included, raises."""
+        with pytest.raises(NotImplementedError, match="Ideogram4Transformer"):
+            create_ideogram4_transformer("tiny", pretrained=pretrained)
+
     def test_factory_full_constructs(self):
         """The full model must CONSTRUCT and report the expected config (34
         layers). Do NOT forward it -- construction only."""

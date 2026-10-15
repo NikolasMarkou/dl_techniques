@@ -17,8 +17,9 @@ graph, forward shapes, and serialization contract, but it carries **NO
 pretrained weights**. The PyTorch repo is organized around weight loaders
 (`load_dit` / `load_clip` / `load_t5` / `load_vae` reading `.pth`
 checkpoints); `dl_techniques` has **no weight-loading convention**, so there is
-no equivalent here and every `from_variant(..., pretrained=True)`-style path is
-absent by design. The package passes **177 unit tests** (scoped to the new
+no equivalent here. Every factory takes `pretrained=False` and raises
+`NotImplementedError` for any truthy value (2026-10-15; before that the argument
+was rejected only incidentally, as an unknown field, with a `TypeError`). The package passes **177 unit tests** (scoped to the new
 modules) and the tiny preset **smoke-trains cleanly** (synthetic data, loss
 `2.255 → 1.568`, ~-30.5%, zero NaN over the run). Every new class carries
 `@register_dl_technique(...)` (from `dl_techniques.utils.keras_registration`), builds

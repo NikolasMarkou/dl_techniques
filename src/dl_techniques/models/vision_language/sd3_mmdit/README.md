@@ -13,15 +13,18 @@ sequence.
 
 **Architecture-faithful, train-from-scratch, and carrying NO pretrained weights.**
 The PyTorch original is organized around weight loaders reading `.pth` checkpoints;
-there is no equivalent here and no `pretrained=` path anywhere in the package —
-by design, not by omission.
+there is no equivalent here, by design, not by omission. Every factory
+(`create_sd3_mmdit`, `create_sd3_vae`, `SD3VAE.from_variant`, `create_sd3_pipeline`)
+takes `pretrained=False` and raises `NotImplementedError` for any truthy value, a
+path included. A model saved with `model.save(path)` is restored whole with
+`keras.models.load_model(path)`.
 
 ## Public API
 
 ```python
 from dl_techniques.models.vision_language.sd3_mmdit import (
     SD3MMDiT, create_sd3_mmdit,      # the diffusion transformer
-    create_sd3_vae,                  # 16-channel VAE wrapper
+    create_sd3_vae, SD3VAE,          # 16-channel VAE + latent-norm bundle
     CLIPTextEncoder, T5Encoder,      # from-scratch text towers
     create_sd3_pipeline,             # all five components, dims pre-matched
 )
