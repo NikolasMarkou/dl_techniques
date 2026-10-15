@@ -50,6 +50,7 @@ from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -170,7 +171,7 @@ class MobileNetV2(keras.Model):
         first_channels = self._make_divisible(32 * self.width_multiplier)
         self.initial_conv = layers.Conv2D(
             first_channels, 3, strides=2, padding='same', use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer, name='conv1'
         )
         self.initial_bn = layers.BatchNormalization(
@@ -199,7 +200,7 @@ class MobileNetV2(keras.Model):
                     # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; see mobilenet_v1.py for the measured impact. See decisions.md.
                     normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                     use_bias=False,
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name=f'block_{block_id}'
                 ))
@@ -212,7 +213,7 @@ class MobileNetV2(keras.Model):
             last_channels = 1280
         self.last_conv = layers.Conv2D(
             last_channels, 1, padding='same', use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer, name='conv_last'
         )
         self.last_bn = layers.BatchNormalization(
@@ -249,7 +250,7 @@ class MobileNetV2(keras.Model):
                 'classifier_dropout_rate': self.dropout_rate,
                 # No hidden block, so no block dropout either.
                 'dropout_rate': 0.0,
-                'kernel_initializer': self.kernel_initializer,
+                'kernel_initializer': clone_initializer(self.kernel_initializer),
                 'kernel_regularizer': self.kernel_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the

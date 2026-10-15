@@ -30,6 +30,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -232,20 +233,6 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.depthwise_regularizer = regularizers.get(depthwise_regularizer)
 
-        # Common configuration for layers
-        self.conv_config = {
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": self.kernel_regularizer,
-            "padding": self.padding,
-            "use_bias": self.use_bias
-        }
-
-        self.depth_conv_config = {
-            "depthwise_initializer": self.depthwise_initializer,
-            "depthwise_regularizer": self.depthwise_regularizer,
-            "padding": self.padding,
-            "use_bias": self.use_bias
-        }
 
         # DECISION plan-2026-08-14T183218-f4c612aa/D-010: stride belongs to the block, applied
         # to the first spatial op that exists (start_dw, dw1, dw2, project_conv), never fixed to one. See decisions.md.
@@ -265,7 +252,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 kernel_size=self.start_dw_kernel_size,
                 strides=self.stride if self._stride_owner == 'start_dw' else 1,
                 name='start_dw',
-                **self.depth_conv_config
+                **self._depthwise_kwargs()
             )
             self.start_dw_norm = self._create_normalization_layer('start_dw_norm')
             self.start_dw_activation = self._create_activation_layer(
@@ -281,7 +268,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             filters=1,  # Placeholder, will be set in build()
             kernel_size=1,
             name='expand_conv',
-            **self.conv_config
+            **self._conv_kwargs()
         )
 
         self.expand_norm = self._create_normalization_layer('expand_norm')
@@ -293,7 +280,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 kernel_size=self.kernel_size,
                 strides=self.stride if self._stride_owner == 'dw1' else 1,
                 name='dw1',
-                **self.depth_conv_config
+                **self._depthwise_kwargs()
             )
             self.dw1_norm = self._create_normalization_layer('dw1_norm')
             self.dw1_activation = self._create_activation_layer('dw1_activation')
@@ -315,7 +302,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 kernel_size=self.kernel_size,
                 strides=self.stride if self._stride_owner == 'dw2' else 1,
                 name='dw2',
-                **self.depth_conv_config
+                **self._depthwise_kwargs()
             )
             self.dw2_norm = self._create_normalization_layer('dw2_norm')
             self.dw2_activation = self._create_activation_layer('dw2_activation')
@@ -364,9 +351,41 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             kernel_size=1,
             strides=self.stride if self._stride_owner == 'project_conv' else 1,
             name='project_conv',
-            **self.conv_config
+            **self._conv_kwargs()
         )
         self.project_norm = self._create_normalization_layer('project_norm')
+
+    def _conv_kwargs(self) -> Dict[str, Any]:
+        """Return fresh keyword arguments for one ``Conv2D`` sublayer.
+
+        :return: ``kernel_initializer`` (a new clone per call),
+            ``kernel_regularizer``, ``padding`` and ``use_bias``.
+        :rtype: dict
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-076: a fresh clone per
+        # sublayer, never one shared dict. Do NOT restore a shared
+        # ``conv_config``: its single seedless instance replayed one draw into
+        # expand_conv, project_conv and the SE convs. See decisions.md D-076.
+        return {
+            "kernel_initializer": clone_initializer(self.kernel_initializer),
+            "kernel_regularizer": self.kernel_regularizer,
+            "padding": self.padding,
+            "use_bias": self.use_bias,
+        }
+
+    def _depthwise_kwargs(self) -> Dict[str, Any]:
+        """Return fresh keyword arguments for one ``DepthwiseConv2D`` sublayer.
+
+        :return: ``depthwise_initializer`` (a new clone per call),
+            ``depthwise_regularizer``, ``padding`` and ``use_bias``.
+        :rtype: dict
+        """
+        return {
+            "depthwise_initializer": clone_initializer(self.depthwise_initializer),
+            "depthwise_regularizer": self.depthwise_regularizer,
+            "padding": self.padding,
+            "use_bias": self.use_bias,
+        }
 
     def _create_activation_layer(self, name: str) -> keras.layers.Layer:
         """Create activation layer using the factory."""
@@ -453,7 +472,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 kernel_size=1,
                 activation=None,
                 name='se_reduce',
-                **self.conv_config
+                **self._conv_kwargs()
             )
 
             self.se_expand = layers.Conv2D(
@@ -461,7 +480,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 kernel_size=1,
                 activation=None,
                 name='se_expand',
-                **self.conv_config
+                **self._conv_kwargs()
             )
 
             # Build SE layers

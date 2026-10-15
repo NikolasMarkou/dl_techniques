@@ -52,7 +52,7 @@ pre-ReLU is negative in every channel and every batch row, the ReLU output is
 EXACTLY zero, and both SE kernels report an identically-zero gradient.
 Unseeded, this file measured ``1 failed / 18 passed`` in **2 of 5** consecutive
 runs. Every build here is therefore seeded (:data:`BUILD_SEED`), and
-``TestTheSqueezeExciteReLUCanDieOnADraw`` pins both sides -- dead at seed 6 with
+``TestTheSqueezeExciteReLUCanDieOnADraw`` pins both sides -- dead at seed 0 with
 the ReLU output measured all-zero, live at the build seed -- so the reading is a
 draw rather than a disconnected module, and a later reader cannot re-file it.
 
@@ -172,8 +172,11 @@ def _v4(**o) -> MobileNetV4:
 #: of this file. An unseeded gradient report on this package reports the DRAW,
 #: not the model -- exactly the hazard that made a BeiT arm in batch A flaky 1
 #: in 4. ``BUILD_SEED`` is a seed at which the SE path is live;
-#: ``TestTheSqueezeExciteReLUCanDieOnADraw`` pins the other side at ``6``.
-BUILD_SEED = 0
+#: ``TestTheSqueezeExciteReLUCanDieOnADraw`` pins the other side at ``0``.
+#: Re-derived 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): cloning each
+#: conv's initializer moved every draw, and seed 0 became a dead draw (seeds
+#: 0..15: dead at 0 and 10, live elsewhere), so the build seed moved to 1.
+BUILD_SEED = 1
 
 
 def _built(build_fn, shape=SMALL, seed: int = BUILD_SEED):
@@ -292,8 +295,10 @@ class TestTheSqueezeExciteReLUCanDieOnADraw:
     """
 
     #: A seed at which the SE ReLU is fully dead. Measured 2026-08-21: of seeds
-    #: 0..7 exactly this one, matching the 2-in-5 unseeded failure rate.
-    DEAD_SEED = 6
+    #: 0..7 exactly seed 6, matching the 2-in-5 unseeded failure rate.
+    #: Re-measured 2026-10-16 after D-076 (per-conv initializer clones): of
+    #: seeds 0..15 exactly 0 and 10, the same one-in-eight rate.
+    DEAD_SEED = 0
 
     @staticmethod
     def _se_block(model):

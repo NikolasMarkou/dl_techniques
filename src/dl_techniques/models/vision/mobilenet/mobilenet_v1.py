@@ -44,6 +44,7 @@ from dl_techniques.models.vision.mobilenet.common import (
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -177,7 +178,7 @@ class MobileNetV1(keras.Model):
             strides=2,
             padding='same',
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='conv1'
         )
@@ -201,7 +202,7 @@ class MobileNetV1(keras.Model):
                 # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; create_normalization_layer defaults to 1e-6, not the reference's 1e-3.
                 # Dropping this kwarg silently ran 183 of 189 BatchNorm layers in this family at the wrong epsilon. See decisions.md.
                 normalization_kwargs={'epsilon': REFERENCE_BN_EPSILON},
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'block_{block_id}'
             )
@@ -235,7 +236,7 @@ class MobileNetV1(keras.Model):
                 'classifier_dropout_rate': self.dropout_rate,
                 # No hidden block, so no block dropout either.
                 'dropout_rate': 0.0,
-                'kernel_initializer': self.kernel_initializer,
+                'kernel_initializer': clone_initializer(self.kernel_initializer),
                 'kernel_regularizer': self.kernel_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the

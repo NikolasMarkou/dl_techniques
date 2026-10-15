@@ -28,6 +28,7 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from ..norms import create_normalization_layer
 from ..activations import create_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -141,7 +142,11 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             strides=stride,
             padding='same',
             use_bias=False,
-            depthwise_initializer=self.kernel_initializer,
+            # DECISION plan-2026-10-14T062616-81938e81/D-076: one clone per
+            # sublayer. Do NOT hand the stored instance to both convs: a
+            # seedless instance replays its draw, so the pointwise kernel came
+            # out as the depthwise draw's prefix. See decisions.md D-076.
+            depthwise_initializer=clone_initializer(self.kernel_initializer),
             depthwise_regularizer=self.kernel_regularizer,
             name=f'conv_dw_{block_id}'
         )
@@ -164,7 +169,7 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             strides=1,
             padding='same',
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name=f'conv_pw_{block_id}'
         )

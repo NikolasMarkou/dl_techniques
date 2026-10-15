@@ -93,7 +93,10 @@ lists, so a two-stage variant such as `cifar10` is a legal configuration.
 
 A single `Conv2D` with kernel size and stride both equal to `strides` (default 4) and padding
 `"valid"` (`"same"` when `strides == 1`), followed by `LayerNormalization`. It splits the image into
-non-overlapping patches and embeds them, reducing resolution 4x (224 -> 56).
+non-overlapping patches and embeds them, reducing resolution 4x (224 -> 56). The stem conv and every
+inter-stage downsample conv draw from `TruncatedNormal(stddev=0.02)` (`STEM_INITIALIZER`), the
+reference's `trunc_normal_(std=.02)` for every `Conv2d`. Keras' bare `"truncated_normal"` would draw
+at stddev 0.05.
 
 ### 4.2 `ConvNextV1Block`
 

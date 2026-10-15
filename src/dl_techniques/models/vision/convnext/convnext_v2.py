@@ -263,7 +263,16 @@ class ConvNeXtV2(keras.Model):
 
     # Architecture constants
     LAYERNORM_EPSILON = 1e-6
-    STEM_INITIALIZER = "truncated_normal"
+    # DECISION plan-2026-10-14T062616-81938e81/D-076
+    # The reference's _init_weights draws every Conv2d, the stem and the
+    # downsample convs included, from trunc_normal_(std=.02). Do NOT go back to
+    # the "truncated_normal" string: Keras' default stddev is 0.05, 2.5x the
+    # reference. A config dict, so each conv resolves its own instance.
+    # See decisions.md D-076.
+    STEM_INITIALIZER: Dict[str, Any] = {
+        "class_name": "TruncatedNormal",
+        "config": {"mean": 0.0, "stddev": 0.02},
+    }
     # DECISION plan-2026-10-14T062616-81938e81/D-013
     # The reference initializes the head Linear with trunc_normal_(std=.02).
     # Do NOT revert to the "truncated_normal" string: Keras' default stddev is

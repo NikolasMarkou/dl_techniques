@@ -87,7 +87,9 @@ SRC_ROOT = os.path.join(
 #: under this instrument, nor under either of the two instruments D-144 already
 #: tried, nor under the 178/565/102 variant recorded in
 #: ``findings/initializer-and-norm-census.md``. Do not re-quote 378/118.
-_COLLISION_GROUP_CEILING = 151
+#: Ratcheted 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): 137 at
+#: fb905f29b, 133 after MobileNet's conv blocks and models cloned per site.
+_COLLISION_GROUP_CEILING = 133
 
 #: Ceiling on the *defect-shaped* subset: a collision group in which 2+ of the
 #: colliding calls have the SAME callee AND the SAME size expression (so their
@@ -102,7 +104,9 @@ _COLLISION_GROUP_CEILING = 151
 #: precisely the blind spot the runtime guard and ``_LOOP_CARRIED_SITE_CEILING``
 #: below exist to cover. Re-measured after step 10 and still exactly 57.
 #: Every new entry needs a per-site role probe before it is called benign.
-_ROLE_SUSPECT_CEILING = 57
+#: Ratcheted 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): 42 at
+#: fb905f29b and after D-076 (no MobileNet group was a role suspect).
+_ROLE_SUSPECT_CEILING = 42
 
 #: Sites fixed by step 19.1 with ``clone_initializer``, each one *measured*
 #: bit-identical before and *measured* non-identical after. Named so a
@@ -301,7 +305,9 @@ def _loop_carried_sites() -> List[Tuple[str, int, str, str, str]]:
 #: ``'beit'`` attention branch of ``TransformerLayer`` does not forward
 #: ``kernel_initializer`` at all). Both are still counted here, because the
 #: census must not encode a per-site verdict it cannot re-derive.
-_LOOP_CARRIED_SITE_CEILING = 119
+#: Ratcheted 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): 99 at
+#: fb905f29b, 96 after MobileNet's conv blocks and models cloned per site.
+_LOOP_CARRIED_SITE_CEILING = 96
 
 
 @pytest.fixture(scope="module")

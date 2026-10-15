@@ -52,6 +52,7 @@ from dl_techniques.models.vision.mobilenet.common import (
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 # MobileNetV3 Model
@@ -222,7 +223,7 @@ class MobileNetV3(keras.Model):
             strides=2,
             padding='same',
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
@@ -256,7 +257,7 @@ class MobileNetV3(keras.Model):
                 use_dw2=False,
                 se_ratio=0.25,
                 se_activation='relu',
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"block_{i}"
             )
@@ -270,7 +271,7 @@ class MobileNetV3(keras.Model):
             strides=1,
             padding='same',
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="last_conv"
         )
@@ -311,7 +312,7 @@ class MobileNetV3(keras.Model):
                 'normalization_type': None,
                 'activation_type': 'hard_swish',
                 'dropout_rate': self.dropout_rate,
-                'kernel_initializer': self.kernel_initializer,
+                'kernel_initializer': clone_initializer(self.kernel_initializer),
                 'kernel_regularizer': self.kernel_regularizer,
                 # Deterministic layer name: an unnamed head takes Keras'
                 # auto suffix in process-creation order, which breaks the
