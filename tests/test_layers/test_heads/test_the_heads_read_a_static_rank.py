@@ -18,8 +18,12 @@ validation gap with the same text). The review called
 So the heads read the rank through one helper,
 ``layers/heads/validation.static_rank``, which uses ``keras.ops.ndim`` and
 refuses an unknown rank by head and input name. The source scan below keeps
-the old spelling out of the VLM and vision factories; the NLP factory joins
-the scan when its sites move (plan step 11.3).
+the old spelling out of all three factories. The NLP factory joined it in plan
+step 11.3: its five ``len(ops.shape(...))`` sites (``TextClassificationHead``
+twice, ``TextSimilarityHead`` twice, ``MultipleChoiceHead`` once, re-derived at
+``846589b7f``) read through ``static_rank`` now, and one of them, the task
+attention test in ``TextClassificationHead.call``, is gone with the branch it
+guarded (D-062).
 """
 
 import pathlib
@@ -30,6 +34,11 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    NLPTaskType,
+    create_nlp_head,
+)
 from dl_techniques.layers.heads.vlm import (
     ImageTextMatchingHead,
     VLMTaskConfig,
@@ -38,9 +47,8 @@ from dl_techniques.layers.heads.vlm import (
 
 HEADS = pathlib.Path(__file__).resolve().parents[3] / "src/dl_techniques/layers/heads"
 
-#: The factories whose rank reads go through ``static_rank``. Add ``nlp`` when
-#: its five ``len(ops.shape(...))`` sites move.
-SCANNED = ("vlm", "vision")
+#: The factories whose rank reads go through ``static_rank``: all three.
+SCANNED = ("nlp", "vlm", "vision")
 
 _OLD_SPELLING = re.compile(r"len\(\s*(?:keras\.)?ops\.shape\(")
 
@@ -82,3 +90,26 @@ def test_a_known_rank_still_takes_both_branches() -> None:
     b = head({"vision_features": pooled, "text_features": pooled})["match_score"]
     np.testing.assert_allclose(keras.ops.convert_to_numpy(a),
                                keras.ops.convert_to_numpy(b), rtol=0, atol=1e-5)
+
+
+_NLP_HEADS = {
+    "TextClassificationHead": (
+        dict(task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3), (2, 5, 16)),
+    "TextSimilarityHead": (dict(task_type=NLPTaskType.TEXT_SIMILARITY), (2, 5, 16)),
+    "MultipleChoiceHead": (dict(task_type=NLPTaskType.MULTIPLE_CHOICE), (2, 3, 5, 16)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_NLP_HEADS))
+def test_an_unknown_rank_is_refused_by_the_nlp_heads(name) -> None:
+    kwargs, shape = _NLP_HEADS[name]
+    head = create_nlp_head(NLPTaskConfig(name="t", **kwargs), input_dim=16)
+    x = np.zeros(shape, "float32")
+    head(x)
+
+    @tf.function(input_signature=[tf.TensorSpec(None, tf.float32)])
+    def run(v):
+        return head.call(v)
+
+    with pytest.raises(ValueError, match=rf"{name}.*hidden_states.*rank"):
+        run(tf.constant(x))

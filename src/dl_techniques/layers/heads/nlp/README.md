@@ -75,13 +75,20 @@ model = keras.Model(inputs=inputs, outputs=task_outputs)
 
 ## 3. Catalog of Task Heads
 
-Different tasks require different specialized architectures. The factory automatically selects the correct class based on the `NLPTaskType`.
+Different tasks require different specialized architectures. The factory selects the class from
+`NLP_HEAD_DISPATCH` (`nlp/task_types.py`), the one table from task type to head: 24 of the 37
+`NLPTaskType` members have a head and the other 13 raise `ValueError`. `NLPTaskType.get_output_types(task)`
+names exactly the keys that head returns, and raises for a task type with no head.
+
+Every head that pools honours the `'attention_mask'` in its input dict. A mask for an input that is
+already pooled is refused (there is nothing to mask).
 
 ### 3.1. Sequence Classification
-*   **Task Types**: `TEXT_CLASSIFICATION`, `SENTIMENT_ANALYSIS`, `INTENT_CLASSIFICATION`, etc.
-*   **Supported Inputs**: `[B, Seq, Dim]` (will be pooled) or `[B, Dim]` (already pooled).
+*   **Task Types**: `TEXT_CLASSIFICATION`, `SENTIMENT_ANALYSIS`, `EMOTION_DETECTION`, `INTENT_CLASSIFICATION`, `TOPIC_CLASSIFICATION`, `SPAM_DETECTION`, `NATURAL_LANGUAGE_INFERENCE`, and the regression types `TEXT_REGRESSION`, `READABILITY_SCORING`, `QUALITY_SCORING` (set `num_classes=1` and read `logits`; `probabilities` of one class is constantly 1).
+*   **Supported Inputs**: `[B, Seq, Dim]` (will be pooled) or `[B, Dim]` (already pooled). With `use_pooling=False` only the pooled form is accepted.
 *   **Outputs**: `logits` `[B, NumClasses]`, `probabilities` `[B, NumClasses]`.
-*   **Key Config**: Requires `num_classes` in `NLPTaskConfig`.
+*   **Key Config**: Requires `num_classes` in `NLPTaskConfig` (every task type above; the config refuses one without it).
+*   **No task attention**: the features are pooled to rank 2 before any stage runs, so `use_task_attention=True` raises `ValueError`.
 
 ```python
 config = NLPTaskConfig(name="sentiment", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=3)
@@ -89,10 +96,10 @@ head = create_nlp_head(config, input_dim=768, pooling_type='cls') # Standard BER
 ```
 
 ### 3.2. Token Classification
-*   **Task Types**: `NAMED_ENTITY_RECOGNITION`, `PART_OF_SPEECH_TAGGING`, `TOKEN_CLASSIFICATION`.
+*   **Task Types**: `NAMED_ENTITY_RECOGNITION`, `PART_OF_SPEECH_TAGGING`, `TOKEN_CLASSIFICATION`, `SEQUENCE_LABELING`.
 *   **Supported Inputs**: Must be full sequence `[B, Seq, Dim]`.
-*   **Outputs**: `logits` `[B, Seq, NumClasses]`, `predictions` `[B, Seq]` (argmax indices).
-*   **Key Config**: Requires `num_classes`.
+*   **Outputs**: `logits` `[B, Seq, NumClasses]`, `predictions` `[B, Seq]` (int32 argmax indices; omitted when `use_crf=True`, which builds no CRF layer and leaves decoding to the caller).
+*   **Key Config**: Requires `num_classes`. The head never pools: `use_pooling=True` raises.
 
 ```python
 config = NLPTaskConfig(name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION, num_classes=9)
@@ -102,8 +109,9 @@ head = create_nlp_head(config, input_dim=768)
 
 ### 3.3. Question Answering (Extractive)
 *   **Task Types**: `QUESTION_ANSWERING`, `SPAN_EXTRACTION`.
-*   **Supported Inputs**: Full sequence `[B, Seq, Dim]`.
+*   **Supported Inputs**: Full sequence `[B, Seq, Dim]`; a masked position gets the dtype's mask sentinel so an argmax cannot land on padding.
 *   **Outputs**: `start_logits` `[B, Seq]`, `end_logits` `[B, Seq]`.
+*   **No FFN stage**: `use_ffn=True` raises. The head never pools.
 
 ```python
 config = NLPTaskConfig(name="squad", task_type=NLPTaskType.QUESTION_ANSWERING)
@@ -111,12 +119,12 @@ head = create_nlp_head(config, input_dim=768)
 ```
 
 ### 3.4. Text Similarity & Embeddings
-*   **Task Types**: `TEXT_SIMILARITY`, `PARAPHRASE_DETECTION`.
+*   **Task Types**: `TEXT_SIMILARITY`, `PARAPHRASE_DETECTION`, `DUPLICATE_DETECTION`.
 *   **Supported Inputs**:
-    *   *Single Input* `[B, Seq, Dim]`: Returns embeddings.
-    *   *Pair Tuple* `([B, Seq, Dim], [B, Seq, Dim])`: Returns similarity score between pairs.
-*   **Outputs**: `embeddings` `[B, Dim]`, `similarity_score` `[B]` (if pair input).
-*   **Key Config**: `similarity_function` ('cosine', 'dot', 'learned').
+    *   *Single Input* `[B, Seq, Dim]` or `[B, Dim]`, or a dict with `attention_mask`: Returns embeddings.
+    *   *Pair* (a tuple or a list, which is what a functional model passes) of two such inputs: Returns the similarity score. Each side is pooled under its own mask.
+*   **Outputs**: `embeddings` `[B, hidden_size]`; for a pair `similarity_score` `[B]`, plus `embeddings_1` and `embeddings_2` with `output_embeddings=True`.
+*   **Key Config**: `similarity_function` ('cosine', 'dot', 'learned'; anything else raises). No task attention.
 
 ```python
 config = NLPTaskConfig(name="sts", task_type=NLPTaskType.TEXT_SIMILARITY)
@@ -125,15 +133,16 @@ head = create_nlp_head(config, input_dim=768, similarity_function='cosine')
 # Usage 1: Get Embeddings
 embeds = head({'hidden_states': seq1})['embeddings']
 
-# Usage 2: Get Similarity
-score = head((seq1, seq2))['similarity_score']
+# Usage 2: Get Similarity, each side under its own padding mask
+score = head(({'hidden_states': seq1, 'attention_mask': mask1},
+              {'hidden_states': seq2, 'attention_mask': mask2}))['similarity_score']
 ```
 
 ### 3.5. Text Generation (Language Modeling)
-*   **Task Types**: `TEXT_GENERATION`, `MASKED_LANGUAGE_MODELING`.
+*   **Task Types**: `TEXT_GENERATION`, `MASKED_LANGUAGE_MODELING`, `TEXT_SUMMARIZATION`, `TEXT_COMPLETION`.
 *   **Supported Inputs**: Full sequence `[B, Seq, Dim]`.
 *   **Outputs**: `logits` `[B, Seq, VocabSize]`.
-*   **Key Config**: Requires `vocabulary_size` in `NLPTaskConfig`.
+*   **Key Config**: `vocabulary_size` in `NLPTaskConfig` (32000 when unset). No task attention; the head never pools.
 
 ```python
 config = NLPTaskConfig(name="mlm", task_type=NLPTaskType.MASKED_LANGUAGE_MODELING, vocabulary_size=30522)
@@ -142,13 +151,15 @@ head = create_nlp_head(config, input_dim=768)
 
 ### 3.6. Multiple Choice
 *   **Task Types**: `MULTIPLE_CHOICE`.
-*   **Supported Inputs**: 4D Tensor `[B, NumChoices, Seq, Dim]`.
+*   **Supported Inputs**: 4D Tensor `[B, NumChoices, Seq, Dim]`, with an optional `attention_mask` `[B, NumChoices, Seq]`, or pooled choices `[B, NumChoices, Dim]` (no mask).
 *   **Outputs**: `logits` `[B, NumChoices]`, `probabilities` `[B, NumChoices]`.
+*   **No task attention and no FFN stage**: both flags raise.
 
 ```python
 config = NLPTaskConfig(name="swag", task_type=NLPTaskType.MULTIPLE_CHOICE)
-# Head automatically handles reshaping the 4D input to pool each choice independently
+# The choice axis is folded into the batch, so each choice is pooled under its own mask row
 head = create_nlp_head(config, input_dim=768, pooling_type='cls')
+out = head({'hidden_states': choices, 'attention_mask': choice_mask})
 ```
 
 ---
@@ -165,27 +176,37 @@ These options apply to almost all head types.
 | `input_dim` | `int` | **Required** | The hidden dimension size of the foundation model's output. |
 | `normalization_type`| `Literal[str]`| `'layer_norm'`| Normalization layer. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, `'band_rms'`, `'logit_norm'`, etc. |
 | `activation_type` | `Literal[str]`| `'gelu'` | Activation function for intermediate layers. Options include:<br>`'gelu'`, `'relu'`, `'silu'`, `'swish'`, `'mish'`, etc. |
-| `use_pooling` | `bool`| varies | Whether to pool the sequence into a single vector. |
-| `pooling_type` | `Literal[str]` | `'cls'` | Strategy if pooling is enabled. Options:<br>`'cls'`, `'mean'`, `'max'`, `'attention'`. |
-| `use_intermediate`| `bool`| `True` | Adds a Dense block before the final task projection. |
-| `intermediate_size` | `int` | `input_dim` | Size of the intermediate dense block. |
-| `use_task_attention`| `bool`| `False` | Adds a self-attention layer specific to this task. |
+| `use_pooling` | `bool`| `True` (`False` for token, QA, generation) | Whether to pool the sequence into a single vector. The three heads that never pool refuse `True`. |
+| `pooling_type` | `Literal[str]` | `'cls'` | Strategy if pooling is enabled. Options:<br>`'cls'`, `'mean'`, `'max'`, `'last'` (the last unmasked position; the choice for a causal backbone), `'attention'`. Anything else raises at construction, for every head. |
+| `use_intermediate`| `bool`| `True` | Adds a Dense block (to `hidden_size`) before the final task projection. |
+| `intermediate_size` | `int` | `input_dim` | Size of the intermediate dense block when `task_config.hidden_size` is unset. |
+| `use_task_attention`| `bool`| `False` | Adds a self-attention layer specific to this task. Only the token and QA heads run one; the other four raise. |
 | `attention_type` | `Literal[str]` | `'multi_head'`| Type of task attention. Options include:<br>`'multi_head'`, `'cbam'`, `'differential'`, `'group_query'`, `'perceiver'`, `'window'`, etc. |
-| `use_ffn` | `bool`| `False` | Adds a Transformer-style FFN block to the head. |
+| `use_ffn` | `bool`| `False` | Adds a Transformer-style FFN block to the head (emits `hidden_size`). The QA and multiple-choice heads run none and raise. |
 | `ffn_type` | `Literal[str]` | `'mlp'` | Type of FFN. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, `'swin_mlp'`, etc. |
-| `dropout_rate` | `float`| `0.1` | Dropout applied within the head components. |
+
+**Widths.** Task attention and the FFN run at the width the features have when they arrive:
+`hidden_size` after the intermediate block, `input_dim` without it. The output layer is built at the
+width `call` feeds it (`hidden_size` after the intermediate block or the FFN, else `input_dim`), so
+every accepted combination of the flags builds and runs. The dropout rate lives in `NLPTaskConfig`.
 
 ### 4.2. Task Configuration (`NLPTaskConfig`)
 Used to define the high-level properties of the task itself.
 
+These seven fields are all of them; each is read by some head. `__post_init__` parses a string
+`task_type`, validates every value, and applies the one requirement of the head its task type is
+routed to. Unknown fields (the deleted `num_labels`, `max_length`, `loss_weight`,
+`label_smoothing`, `use_attention_pooling`, `beam_size`, `temperature`) raise `TypeError`.
+
 | Field | Description |
 | :--- | :--- |
-| `name` | Unique identifier for the task (e.g., "ner_v2"). |
-| `task_type` | Enum from `NLPTaskType` determining the head architecture. |
-| `num_classes` | Required for all classification tasks; a positive integer (0, -1, a bool or a float raise `ValueError`). |
+| `name` | Unique identifier for the task (e.g., "ner_v2"); a non-empty string. |
+| `task_type` | `NLPTaskType` member, or its string value (`"sentiment_analysis"`), on every path including a dict passed to `create_nlp_head`. |
+| `num_classes` | Required for every task type routed to `TextClassificationHead` or `TokenClassificationHead`; a positive integer wherever set (0, -1, a bool or a float raise `ValueError`). |
+| `hidden_size` | Working width of the head; unset means `intermediate_size`, else `input_dim`. |
+| `use_crf` | Token head only: emit `logits` alone, for a CRF the caller adds. |
 | `vocabulary_size`| Required for generation/MLM tasks. Defaults to 32000 when unset. On a language model that owns the head (`include_top=True`) it must equal the model's `vocab_size`, else `ValueError`; a dict `task_config` that leaves it out gets the model's. Migration: a `.keras` archive saved before 2026-10-11 whose stored generation `task_config` kept 32000 on a model of another vocabulary no longer loads; set the stored value to the model's `vocab_size` (or delete the key) in its `config.json`, or rebuild and re-save. |
-| `dropout_rate` | Task-specific dropout override. |
-| `loss_weight` | Useful for multi-task training loops (weight of this task's loss). |
+| `dropout_rate` | Dropout inside the head, in `[0, 1)`. |
 
 ---
 
@@ -195,14 +216,15 @@ Used to define the high-level properties of the task itself.
 Foundation models output sequences. For tasks requiring a single prediction per sequence (like sentiment analysis), you must "pool" this sequence.
 
 *   **`'cls'`**: Uses the first token's vector. Standard for BERT-family models trained with a special `[CLS]` token.
-*   **`'mean'`**: Averages all token vectors. Often better for sentence similarity as it captures diffuse information. respects `attention_mask` if provided.
+*   **`'mean'`**: Averages the unmasked token vectors. Often better for sentence similarity as it captures diffuse information.
+*   **`'last'`**: Uses the last unmasked position. The right choice for a causal backbone, where position 0 has seen only itself.
 *   **`'max'`**: Takes the maximum value across the sequence. Good for detecting sparse features (e.g., is a specific keyword present?).
 *   **`'attention'`**: Uses a lightweight, learnable attention mechanism to weight tokens before summing. Best performance but slightly more parameters.
 
 ### 5.2. Task-Specific Attention
 Sometimes the foundation model's universal representations aren't quite perfectly aligned with a niche task.
 
-Enabling `use_task_attention=True` inserts a full Transformer self-attention layer *inside the head*. This allows the head to re-contextualize the generic hidden states specifically for its task before making a prediction, often improving performance on complex tasks like Question Answering.
+Enabling `use_task_attention=True` inserts a self-attention layer *inside the head*, after the intermediate block. This allows the head to re-contextualize the generic hidden states specifically for its task before making a prediction. Only the two heads that keep the sequence axis run it, the token-classification and question-answering heads; the other four refuse the flag. It attends over every position, padding included: the head passes it no mask.
 
 ### 5.3. Multi-Task Heads
 The `MultiTaskNLPHead` manages multiple sub-heads. It's a single layer that can route inputs to all its sub-heads simultaneously or just one.
@@ -218,4 +240,16 @@ outputs = multi_head(inputs) # Runs ALL tasks, returns dict of dicts: {'ner': {.
 outputs = multi_head(inputs, task_name='ner') # Runs ONLY 'ner' task, returns dict: {...}
 ```
 
+`task_name` is keyword-only (the second positional slot is `training`), and the symbolic call and
+`compute_output_shape(..., task_name=...)` follow it. An empty task set is refused, and so is a
+list with two configs of one name. The wrapper and its heads keep their own copies of the task
+configs, and `get_config` holds every field of each.
+
 It also supports `use_task_specific_projections=True`, which adds a dedicated Dense layer for each task *before* the main head logic, allowing standard-sized foundation models to adapt to tasks requiring different feature dimensions.
+
+### 5.4. Serialization
+Every head saves every constructor argument in `get_config`, with `task_config` as a plain dict of
+all its fields, and is rebuilt by Keras' own `from_config` (the heads accept that dict). Every head
+variant round-trips through `.keras` by value
+(`tests/test_layers/test_heads/test_every_nlp_head_survives_a_keras_round_trip.py`). Editing an
+`NLPTaskConfig` after building a head changes neither the head nor its config: heads copy it.

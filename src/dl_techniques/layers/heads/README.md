@@ -61,7 +61,10 @@ native calling convention and the remaining args are forwarded verbatim (no
 signature unification). It covers the single-head factories only — build
 multi-task heads via the domain functions directly
 (`create_multi_task_nlp_head`, `create_multi_task_head`,
-`create_multi_task_vlm_head`).
+`create_multi_task_vlm_head`). No model calls it: the language models build
+their heads with `nlp.model_head.build_model_task_head` and the vision models
+with `vision.factory.build_model_vision_head`. It stays as the library entry
+point for code outside this repository's models.
 
 You can also import per domain:
 
@@ -99,11 +102,12 @@ its `dpt_output_activation`, `'linear'` by default; DepthAnything passes `'relu'
 head's final ReLU). Surface normals are L2-normalized to unit length and optical flow is linear and
 signed. The per-domain READMEs give each head's keys.
 
-Every vision and VLM head owns only the sub-layers its `call` runs. Arguments that a head's `call`
+Every head owns only the sub-layers its `call` runs. Arguments that a head's `call`
 can never read are refused with `ValueError`: the VLM heads take no `vision_dim`/`text_dim` (widths
 come from the inputs) and no `activation_type`, the post-fusion options belong to
-`ImageTextMatchingHead` alone, and `DepthEstimationHead`'s two decoders each refuse the other's
-arguments. The vision heads' attention and FFN settings (`attention_type`, `ffn_type`, ...) are
+`ImageTextMatchingHead` alone, `DepthEstimationHead`'s two decoders each refuse the other's
+arguments, and an NLP head refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage
+its `call` never runs (`nlp/README.md` § 4.1 has the table). The vision heads' attention and FFN settings (`attention_type`, `ffn_type`, ...) are
 still accepted when `use_attention`/`use_ffn` is off, and are read only when it is on. The
 exception is `dropout_rate` on the depth, normals and flow heads, whose decoders take no dropout:
 there it defaults to 0.0 and a positive rate is refused unless attention or the FFN is on.
@@ -128,5 +132,8 @@ there it defaults to 0.0 and a positive rate is refused unless attention or the 
 - **VLM padding masks.** The VLM heads take optional `vision_mask` / `text_mask` /
   `question_mask` keep masks in their input dict and honour them in every pooling and
   attention; their means and max also go through `SequencePooling`. See `vlm/README.md` § 2.
+- **NLP padding masks.** Every NLP head that pools reads `'attention_mask'` from its input
+  dict: classification, both forms of `TextSimilarityHead` (each side of a pair carries its
+  own) and `MultipleChoiceHead` (a `(batch, num_choices, seq)` mask). See `nlp/README.md` § 3.
 - **`VisionTaskType` has no alias.** Vision's task enum was renamed from a generic name to
   `VisionTaskType`; the old name is gone, so import `VisionTaskType`.

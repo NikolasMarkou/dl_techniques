@@ -19,9 +19,10 @@ from train.common.nlp import (
     load_text_dataset,
     preprocess_classification_dataset,
     create_nlp_callbacks,
-    build_sentiment_model_from_encoder,
+    build_headed_model_from_encoder,
     run_finetune_post_training_analysis,
     sentiment_final_model_filename,
+    sentiment_task_config,
     set_backbone_trainable,
 )
 
@@ -84,11 +85,12 @@ def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
 
     The architecture is read from the encoder checkpoint itself; the backbone
     loads completely or this raises, and the ``task_head`` starts fresh
-    (see ``train.common.nlp.build_sentiment_model_from_encoder``).
+    (see ``train.common.nlp.build_headed_model_from_encoder``).
     """
     logger.info("Creating Sentiment Analysis Model")
-    model = build_sentiment_model_from_encoder(
-        FNet, config.pretrained_encoder_path, config.num_classes, dropout_rate=0.1,
+    model = build_headed_model_from_encoder(
+        FNet, config.pretrained_encoder_path,
+        sentiment_task_config(config.num_classes, dropout_rate=0.1),
     )
     logger.info(f"Model created: {model.count_params():,} parameters")
     return model

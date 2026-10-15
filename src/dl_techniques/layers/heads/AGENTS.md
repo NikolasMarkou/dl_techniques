@@ -47,8 +47,9 @@ this package merge) still resolve.
 >   src/dl_techniques/layers/heads/{nlp,vision,vlm}/factory.py | sort -u | wc -l
 > ```
 >
-> The `\b` matters: without it the pattern also matches `NLPHead` inside
-> `NLPHeadConfiguration`, which is a config dataclass, not a layer, and yields 23.
+> The `\b` keeps a class whose name only contains `Head` out of the count: it
+> excluded `NLPHeadConfiguration`, a lookup helper rather than a layer, until
+> that helper was deleted on 2026-10-15 (D-064).
 > Breakdown: 8 NLP + 10 vision + 6 VLM. The private `_DenseVectorHeadBase`
 > (the shared body of the normals and flow heads) does not match the pattern.
 
@@ -68,9 +69,17 @@ this package merge) still resolve.
 - `factory.py` — `create_head(domain, *args, **kwargs)`: thin dispatch facade
   over the three single-head factories (`'nlp'|'vision'|'vlm'`); raises
   `ValueError` on an unknown domain. No signature unification — each domain
-  keeps its native calling convention, forwarded verbatim (D-004).
+  keeps its native calling convention, forwarded verbatim (D-004). It has no
+  production caller: models build their heads through
+  `nlp/model_head.build_model_task_head` and `vision/factory.build_model_vision_head`.
+  It is kept as the documented library entry point, with tests
+  (plan-2026-10-14T062616-81938e81 D-067).
+- `nlp/task_types.py` — `NLP_HEAD_DISPATCH`, the one task-type to head-class
+  table (24 rows, head classes by name because `factory.py` imports this
+  module); `get_head_class`, `NLPTaskConfig`'s checks, `get_output_types` and
+  `model_head`'s generation set read it (D-064).
 - `nlp/factory.py` — `create_nlp_head(task_config, input_dim, ...)`,
-  `create_multi_task_nlp_head(...)`, `NLPHeadConfiguration`.
+  `create_multi_task_nlp_head(...)`, `get_head_class(...)`.
 - `nlp/model_head.py` — helpers for a language model that owns its task head
   (`include_top=True`): `validate_task_head_knobs(include_top, task_config,
   head_config_overrides)` (the two knob `ValueError`s, one source),
@@ -121,11 +130,12 @@ this package merge) still resolve.
   (`vlm/README.md` § 1 has the grep).
 - `validation.py` — the two checks the domains share: `positive_int(value,
   name, owner)` (every vision count, `VQAHead.num_heads`, the
-  `VLMTaskConfig` counts) and `static_rank(x, name, owner)` (a head that
-  branches on rank reads it once, through `keras.ops.ndim`, and refuses an
-  unknown rank by name; the VLM heads use it, the NLP heads' five
-  `len(ops.shape(...))` sites are listed for it in
-  `test_the_heads_read_a_static_rank.py`).
+  `VLMTaskConfig` and `NLPTaskConfig` counts, the NLP heads' `input_dim` and
+  `intermediate_size`) and `static_rank(x, name, owner)` (a head that
+  branches on rank reads it once, from the input's static shape, and refuses
+  an unknown rank by name; the VLM and NLP heads use it, and
+  `test_the_heads_read_a_static_rank.py` keeps `len(ops.shape(...))` out of
+  all three factories).
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
   `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
   `VLMTaskConfig`, `TaskConfiguration`, `parse_task_list`,
@@ -159,6 +169,16 @@ this package merge) still resolve.
 - **`VLMTaskConfig` holds only read fields.** Six fields; a head refuses a set `vocab_size`
   (captioning only) or `num_classes` (VQA only) it does not read, and `__post_init__` fills in
   nothing (D-058). Pinned by `test_the_vlm_task_config_holds_only_live_fields.py`.
+- **`NLPTaskConfig` holds only read fields** (D-064). Seven fields; `num_labels`, `max_length`,
+  `loss_weight`, `label_smoothing`, `use_attention_pooling`, `beam_size` and `temperature` are
+  deleted. `__post_init__` parses a string `task_type`, validates every value, requires
+  `num_classes` for each task type `NLP_HEAD_DISPATCH` routes to a classification or token head,
+  and fills `vocabulary_size=32000` only for one routed to `TextGenerationHead`. Pinned by
+  `test_the_nlp_task_config_holds_only_live_fields.py`.
+- **NLP padding masks** (D-063). `TextSimilarityHead` (both input forms; each side of a pair is a
+  dict with its own `attention_mask`, as a tuple or a list) and `MultipleChoiceHead` (a
+  `(batch, num_choices, seq)` mask, folded with the choices) pool under the caller's mask; a mask
+  for an already pooled input is refused. Pinned by `test_the_nlp_heads_honour_padding_masks.py`.
 - **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for the four strategies
   in `_DELEGATED_POOLING_STRATEGIES` -- `cls`/`mean`/`max`/`last` -- delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
   layer (built in `__init__`/`build`, Golden Rule). The `attention` strategy
@@ -188,16 +208,25 @@ this package merge) still resolve.
   which refuses the other's arguments (D-030), and the VLM heads (D-032:
   `BaseVLMHead` owns only `fusion`; the post-fusion norm and FFN and their four
   arguments live on `ImageTextMatchingHead`; no
-  `vision_dim`/`text_dim`/`activation_type`). The `BaseVisionHead`
-  attention/FFN settings are the one flag-gated exception: accepted with
-  `use_attention`/`use_ffn` off, read only when on. Check it by calling: count each
+  `vision_dim`/`text_dim`/`activation_type`), and the NLP heads (D-062: a head
+  refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage its
+  `call` never runs, e.g. `TextClassificationHead` pools to rank 2 first, so it
+  refuses task attention; each stage is built at the width `call` feeds it).
+  The `BaseVisionHead` attention/FFN settings and the NLP `pooling_type` of a
+  head that never pools (validated, not read; a language model passes its
+  default pooling to every head) are the flag-gated exceptions: accepted,
+  read only when the stage runs. Check it by calling: count each
   sub-layer's `call` over one forward
   (`test_vlm.py::TestEveryVLMHeadOwnsOnlyWhatItRuns`). Do not check it by
   weights: a sub-layer created and never called is never built and holds none.
-- **The vision and VLM heads round-trip by value.** `tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`
+- **Every head round-trips by value.** `tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`
   saves and reloads every vision head variant and compares every weight by
   path; `test_vlm.py::TestVLMHeadFamilyExplicitBuild` does the same for the
-  VLM heads by output. Keep sub-layers in flat lists or named attributes (Keras does not save
+  VLM heads by output, and `test_every_nlp_head_survives_a_keras_round_trip.py`
+  for the NLP heads by both (D-065: every constructor field in `get_config`, no
+  `from_config` override, so a caller's config dict is never modified; the
+  `task_heads`/`task_projections` dicts and the `similarity_layers` list were
+  measured to round-trip). Keep sub-layers in flat lists or named attributes (Keras does not save
   a layer held only in a nested list), name every sub-head, and keep
   `get_config` JSON-serializable (no `Enum` members).
 - **`EnhancementHead` is module-scope**, not a closure-local class inside
@@ -206,9 +235,11 @@ this package merge) still resolve.
   mints is keyed on the bare class NAME — `keras.saving.get_registered_object("Custom>EnhancementHead")`
   returns this class. Renaming it would drop that alias and break every pre-existing archive, so
   the name stays EXACTLY `EnhancementHead`.
-- **No caller-dict mutation.** `MultiTaskHead._create_task_heads()` copies each
+- **No caller-dict mutation, no shared config objects.** `MultiTaskHead._create_task_heads()` copies each
   per-task config dict before `pop('task_type')` (it used to mutate the caller's
-  dict and break round-trips).
+  dict and break round-trips). The NLP heads copy every `NLPTaskConfig` they are
+  given (`NLPTaskConfig.coerce`), so editing a config after construction changes
+  neither a head nor its `get_config` (D-065).
 - **Serialization-stable class names.** Every decorator here is
   `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, so each class carries a
   package-qualified key plus the legacy `Custom>ClassName` alias. The class names must stay

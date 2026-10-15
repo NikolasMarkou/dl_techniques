@@ -1,25 +1,30 @@
 """Task types and configuration objects for the NLP heads.
 
-This module says what an NLP task is. It builds no layer. Four objects live
+This module says what an NLP task is. It builds no layer. Five objects live
 here:
 
 * :class:`NLPTaskType` -- an enum of 37 task names, with lookup helpers for
   categories, compatible tasks, output shapes and input requirements.
+* :data:`NLP_HEAD_DISPATCH` -- the one table from task type to the name of
+  the head class that serves it (24 rows; the other 13 task types have none).
 * :class:`NLPTaskConfig` -- a dataclass holding the hyperparameters of one
-  task head.
+  task head, validated against the head its task type is routed to.
 * :class:`NLPTaskConfiguration` -- a validated set of tasks, plus queries for
   the capabilities that set needs.
 * :class:`CommonNLPTaskConfigurations` -- eleven ready-made task sets.
 
-``nlp/factory.py`` reads these objects and picks the head class to construct.
+``nlp/factory.py`` reads these objects and builds the head the table names.
 The types name tasks, not models, so heads on BERT, GPT and T5 all take the
 same config.
 """
 
+import dataclasses
 import numbers
 from enum import Enum, unique
 from dataclasses import dataclass
-from typing import List, Set, Dict, Optional, Any
+from typing import Any, Dict, List, Optional, Set, Union
+
+from ..validation import positive_int
 
 # ---------------------------------------------------------------------
 
@@ -39,62 +44,17 @@ class NLPTaskType(Enum):
 
     **Head Routing:**
 
-    ``nlp/factory.py``'s ``get_head_class`` decides that, and the table below
-    is its mapping. Thirteen members have no head: asking for one raises
-    ``ValueError`` rather than falling back to a default.
-
-    .. code-block:: text
-
-        Task member                 Head class
-        --------------------------  ------------------------
-        TOKEN_CLASSIFICATION        TokenClassificationHead
-        NAMED_ENTITY_RECOGNITION    TokenClassificationHead
-        PART_OF_SPEECH_TAGGING      TokenClassificationHead
-        DEPENDENCY_PARSING          none -- raises ValueError
-        SEMANTIC_ROLE_LABELING      none -- raises ValueError
-        WORD_SENSE_DISAMBIGUATION   none -- raises ValueError
-        TEXT_CLASSIFICATION         TextClassificationHead
-        SENTIMENT_ANALYSIS          TextClassificationHead
-        EMOTION_DETECTION           TextClassificationHead
-        INTENT_CLASSIFICATION       TextClassificationHead
-        TOPIC_CLASSIFICATION        TextClassificationHead
-        SPAM_DETECTION              TextClassificationHead
-        QUESTION_ANSWERING          QuestionAnsweringHead
-        SPAN_EXTRACTION             QuestionAnsweringHead
-        COREFERENCE_RESOLUTION      none -- raises ValueError
-        EVENT_EXTRACTION            none -- raises ValueError
-        RELATION_EXTRACTION         none -- raises ValueError
-        TEXT_SIMILARITY             TextSimilarityHead
-        NATURAL_LANGUAGE_INFERENCE  TextClassificationHead
-        PARAPHRASE_DETECTION        TextSimilarityHead
-        DUPLICATE_DETECTION         TextSimilarityHead
-        TEXT_GENERATION             TextGenerationHead
-        MASKED_LANGUAGE_MODELING    TextGenerationHead
-        TEXT_SUMMARIZATION          TextGenerationHead
-        MACHINE_TRANSLATION         none -- raises ValueError
-        TEXT_COMPLETION             TextGenerationHead
-        DIALOGUE_GENERATION         none -- raises ValueError
-        TEXT_REGRESSION             TextClassificationHead
-        READABILITY_SCORING         TextClassificationHead
-        QUALITY_SCORING             TextClassificationHead
-        MULTIPLE_CHOICE             MultipleChoiceHead
-        RANKING                     none -- raises ValueError
-        SEQUENCE_LABELING           TokenClassificationHead
-        TEXT_MATCHING               none -- raises ValueError
-        KEY_PHRASE_EXTRACTION       none -- raises ValueError
-        FACT_EXTRACTION             none -- raises ValueError
-        OPINION_EXTRACTION          none -- raises ValueError
-
-    Note:
-        The table restates a mapping that lives in ``get_head_class``. That
-        function is the arbiter. If the two disagree, the function is right.
+    :data:`NLP_HEAD_DISPATCH`, below this class, decides that: 24 members are
+    served by one of six head classes and the other 13 have no head, so
+    asking for one raises ``ValueError`` rather than falling back to a
+    default. The table is not restated here.
 
     Example:
         >>> task = NLPTaskType.from_string("sentiment_analysis")
         >>> str(task)
         'sentiment_analysis'
         >>> NLPTaskType.get_output_types(task)
-        {'output': 'float32[...]'}
+        {'logits': 'float32[B, C]', 'probabilities': 'float32[B, C]'}
     """
 
     # Token-Level Tasks
@@ -288,65 +248,31 @@ class NLPTaskType(Enum):
     @classmethod
     def get_output_types(cls, task: "NLPTaskType") -> Dict[str, str]:
         """
-        Describe the tensors a task's head is expected to emit.
+        Name the tensors the head serving ``task`` returns.
 
-        Shapes are written as strings, with ``B`` batch, ``L`` sequence
-        length, ``C`` classes, ``D`` embedding width, ``V`` vocabulary and
-        ``N`` choices. Ten tasks have an entry.
+        The keys are exactly the keys of that head's output dict for one
+        sequence input, at its defaults; shapes are strings, with ``B`` batch,
+        ``L`` sequence length, ``C`` classes, ``H`` the head's ``hidden_size``,
+        ``V`` vocabulary and ``N`` choices. Two heads have a second form,
+        named in the docstring of each: ``TextSimilarityHead`` given a pair
+        returns ``'similarity_score'`` ``[B]``, plus ``'embeddings_1'`` and
+        ``'embeddings_2'`` with ``output_embeddings``; a
+        ``TokenClassificationHead`` with ``use_crf`` returns ``'logits'``
+        only.
 
         :param task: The task to look up.
         :type task: NLPTaskType
-        :return: Output name mapped to its shape string. Tasks with no entry
-            get ``{"output": "float32[...]"}``.
+        :return: Output name mapped to its shape string (a new dict).
         :rtype: Dict[str, str]
+        :raises ValueError: If no head serves ``task`` (13 task types).
         """
-        output_types = {
-            cls.TOKEN_CLASSIFICATION: {
-                "logits": "float32[B, L, C]",
-                "labels": "int32[B, L]",
-            },
-            cls.TEXT_CLASSIFICATION: {
-                "logits": "float32[B, C]",
-                "probabilities": "float32[B, C]",
-            },
-            cls.QUESTION_ANSWERING: {
-                "start_logits": "float32[B, L]",
-                "end_logits": "float32[B, L]",
-                "answer_spans": "int32[B, 2]",
-            },
-            cls.TEXT_SIMILARITY: {
-                "similarity_score": "float32[B]",
-                "embeddings": "float32[B, D]",
-            },
-            cls.TEXT_GENERATION: {
-                "logits": "float32[B, L, V]",
-                "generated_ids": "int32[B, L]",
-            },
-            cls.NATURAL_LANGUAGE_INFERENCE: {
-                # The 3 classes are entailment, neutral, contradiction.
-                "logits": "float32[B, 3]",
-                "probabilities": "float32[B, 3]",
-            },
-            cls.SPAN_EXTRACTION: {
-                "start_logits": "float32[B, L]",
-                "end_logits": "float32[B, L]",
-                "span_labels": "float32[B, L, L]",
-            },
-            cls.TEXT_REGRESSION: {
-                "value": "float32[B]",
-                "confidence": "float32[B]",
-            },
-            cls.MULTIPLE_CHOICE: {
-                "logits": "float32[B, N]",
-                "probabilities": "float32[B, N]",
-            },
-            cls.RANKING: {
-                "scores": "float32[B, N]",
-                "rankings": "int32[B, N]",
-            },
-        }
-
-        return output_types.get(task, {"output": "float32[...]"})
+        head = NLP_HEAD_DISPATCH.get(task)
+        if head is None:
+            raise ValueError(
+                f"No NLP head serves {task.value!r}, so it has no output types. "
+                f"Served task types: {sorted(t.value for t in NLP_HEAD_DISPATCH)}."
+            )
+        return dict(_OUTPUT_TYPES[head])
 
     @classmethod
     def get_input_requirements(cls, task: "NLPTaskType") -> Dict[str, Any]:
@@ -447,15 +373,87 @@ class NLPTaskType(Enum):
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-10-14T062616-81938e81/D-064
+# The one table from task type to NLP head. get_head_class, NLPTaskConfig's
+# checks, get_output_types and model_head's generation set all read it. It
+# names head classes instead of holding them because nlp/factory.py imports
+# this module. Do NOT restate any part of it elsewhere, and do NOT add a row
+# for a task type no head serves (13 have none; they raise). See decisions.md
+# D-064 (and D-052, D-059, the vision and VLM tables).
+NLP_HEAD_DISPATCH: Dict[NLPTaskType, str] = {
+    NLPTaskType.TEXT_CLASSIFICATION: "TextClassificationHead",
+    NLPTaskType.SENTIMENT_ANALYSIS: "TextClassificationHead",
+    NLPTaskType.EMOTION_DETECTION: "TextClassificationHead",
+    NLPTaskType.INTENT_CLASSIFICATION: "TextClassificationHead",
+    NLPTaskType.TOPIC_CLASSIFICATION: "TextClassificationHead",
+    NLPTaskType.SPAM_DETECTION: "TextClassificationHead",
+    NLPTaskType.NATURAL_LANGUAGE_INFERENCE: "TextClassificationHead",
+    # Regression: a classification head with num_classes=1; read 'logits'.
+    NLPTaskType.TEXT_REGRESSION: "TextClassificationHead",
+    NLPTaskType.READABILITY_SCORING: "TextClassificationHead",
+    NLPTaskType.QUALITY_SCORING: "TextClassificationHead",
+    NLPTaskType.TOKEN_CLASSIFICATION: "TokenClassificationHead",
+    NLPTaskType.NAMED_ENTITY_RECOGNITION: "TokenClassificationHead",
+    NLPTaskType.PART_OF_SPEECH_TAGGING: "TokenClassificationHead",
+    NLPTaskType.SEQUENCE_LABELING: "TokenClassificationHead",
+    NLPTaskType.QUESTION_ANSWERING: "QuestionAnsweringHead",
+    NLPTaskType.SPAN_EXTRACTION: "QuestionAnsweringHead",
+    NLPTaskType.TEXT_SIMILARITY: "TextSimilarityHead",
+    NLPTaskType.PARAPHRASE_DETECTION: "TextSimilarityHead",
+    NLPTaskType.DUPLICATE_DETECTION: "TextSimilarityHead",
+    NLPTaskType.TEXT_GENERATION: "TextGenerationHead",
+    NLPTaskType.MASKED_LANGUAGE_MODELING: "TextGenerationHead",
+    NLPTaskType.TEXT_SUMMARIZATION: "TextGenerationHead",
+    NLPTaskType.TEXT_COMPLETION: "TextGenerationHead",
+    NLPTaskType.MULTIPLE_CHOICE: "MultipleChoiceHead",
+}
+
+#: The heads that cannot be built without ``num_classes``.
+_HEADS_NEEDING_NUM_CLASSES = frozenset({"TextClassificationHead", "TokenClassificationHead"})
+
+#: The vocabulary a generation task config gets when it states none.
+DEFAULT_VOCABULARY_SIZE = 32000
+
+#: The keys each head returns, with shape strings: ``B`` batch, ``L``
+#: sequence length, ``C`` classes, ``H`` the head's ``hidden_size``, ``V``
+#: vocabulary, ``N`` choices.
+_OUTPUT_TYPES: Dict[str, Dict[str, str]] = {
+    "TextClassificationHead": {
+        "logits": "float32[B, C]",
+        "probabilities": "float32[B, C]",
+    },
+    "TokenClassificationHead": {
+        "logits": "float32[B, L, C]",
+        "predictions": "int32[B, L]",
+    },
+    "QuestionAnsweringHead": {
+        "start_logits": "float32[B, L]",
+        "end_logits": "float32[B, L]",
+    },
+    "TextSimilarityHead": {
+        "embeddings": "float32[B, H]",
+    },
+    "TextGenerationHead": {
+        "logits": "float32[B, L, V]",
+    },
+    "MultipleChoiceHead": {
+        "logits": "float32[B, N]",
+        "probabilities": "float32[B, N]",
+    },
+}
+
+
 @dataclass
 class NLPTaskConfig:
     """
     Hyperparameters for one NLP task head.
 
     One instance describes one task. ``nlp/factory.py`` reads it to build the
-    head. Fields that do not apply to the task type are ignored by the head.
+    head that :data:`NLP_HEAD_DISPATCH` names for ``task_type``. Every field is
+    read by some head; a field that has no reader does not exist here.
 
-    :meth:`__post_init__` runs three fixups after construction, shown below.
+    :meth:`__post_init__` parses and validates every field, then applies the
+    one requirement of the head the task type is routed to, shown below.
 
     **Architecture Overview:**
 
@@ -464,136 +462,156 @@ class NLPTaskConfig:
         NLPTaskConfig(name, task_type, ...)
                     │
                     ▼
-        ┌──────────────────────────────┐
-        │ mirror num_labels/num_classes│
-        └──────────────┬───────────────┘
+        ┌──────────────────────────────┐        ┌────────────────────┐
+        │ name, task_type (a string is │─ bad ─►│ ValueError or      │
+        │ parsed), counts, dropout,    │        │ TypeError, naming  │
+        │ use_crf valid?               │        │ the field          │
+        └──────────────┬───────────────┘        └────────────────────┘
+                       │ yes
                        ▼
-        ┌──────────────────────────────┐        ┌────────────┐
-        │ classification task without  │─ yes ─►│ ValueError │
-        │ a positive int num_classes?  │        └────────────┘
-        └──────────────┬───────────────┘
-                       │ no
-                       ▼
-        ┌──────────────────────────────┐
-        │ generation task and          │
-        │ vocabulary_size is None?     │─ yes ─► set it to 32000
-        └──────────────┬───────────────┘
-                       │ no
-                       ▼
-                  ready to use
+        NLP_HEAD_DISPATCH[task_type]
+                       │
+          ┌────────────┼──────────────────┬──────────────┐
+          ▼            ▼                  ▼              ▼
+        Text/Token   TextGeneration    any other      no head
+        Classif.     Head              head           (13 types)
+          │            │                  │              │
+          ▼            ▼                  ▼              ▼
+        num_classes  vocabulary_size   nothing        nothing
+        required,    None -> 32000     required       filled
+        else
+        ValueError
 
-    :param name: Unique identifier for the task.
+    :param name: Unique identifier for the task. A non-empty string.
     :type name: str
-    :param task_type: Type of NLP task.
+    :param task_type: Type of NLP task, as a member or its string value.
     :type task_type: NLPTaskType
-    :param num_classes: Number of output classes (for classification tasks).
+    :param num_classes: Number of output classes. Required by the task types
+        routed to ``TextClassificationHead`` or ``TokenClassificationHead``; a
+        positive integer wherever it is set.
     :type num_classes: Optional[int]
-    :param num_labels: Alternative to num_classes for compatibility.
-    :type num_labels: Optional[int]
-    :param max_length: Maximum sequence length.
-    :type max_length: int
-    :param dropout_rate: Dropout rate for task-specific head.
+    :param dropout_rate: Dropout rate inside the head, in ``[0, 1)``.
     :type dropout_rate: float
-    :param hidden_size: Hidden dimension for task head.
+    :param hidden_size: Working width of the head. ``None`` means the head's
+        ``intermediate_size``, else its ``input_dim``.
     :type hidden_size: Optional[int]
-    :param loss_weight: Weight for this task's loss in multi-task training.
-    :type loss_weight: float
-    :param label_smoothing: Label smoothing parameter.
-    :type label_smoothing: float
-    :param use_crf: Whether to use CRF for sequence labeling.
+    :param use_crf: Read by ``TokenClassificationHead``: when set the head
+        emits ``'logits'`` only, for a CRF the caller adds. No CRF layer is
+        built in the head.
     :type use_crf: bool
-    :param use_attention_pooling: Use attention-based pooling.
-    :type use_attention_pooling: bool
-    :param vocabulary_size: Size of vocabulary (for generation tasks).
+    :param vocabulary_size: Size of the vocabulary a generation head scores.
+        Filled with 32000 for a generation task type when unset.
     :type vocabulary_size: Optional[int]
-    :param beam_size: Beam size for generation tasks.
-    :type beam_size: int
-    :param temperature: Temperature for generation sampling.
-    :type temperature: float
     """
     name: str
     task_type: NLPTaskType
     num_classes: Optional[int] = None
-    # Alternative spelling of num_classes; __post_init__ keeps the two equal.
-    num_labels: Optional[int] = None
-    max_length: int = 512
     dropout_rate: float = 0.1
     hidden_size: Optional[int] = None
-    loss_weight: float = 1.0
-    label_smoothing: float = 0.0
     use_crf: bool = False
-    use_attention_pooling: bool = False
     vocabulary_size: Optional[int] = None
-    beam_size: int = 1
-    temperature: float = 1.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """
-        Reconcile the label fields, then validate and fill defaults.
+        Parse and validate every field, then apply the routed head's needs.
 
-        ``num_classes`` and ``num_labels`` end up equal when either was given.
-        Classification tasks must carry a class count that is a positive
-        integer (numpy integers count; a bool does not). Generation tasks get a
-        default vocabulary size when none was supplied.
-
-        :return: Nothing. The instance is modified in place.
+        :return: Nothing. The instance is normalized in place: a string
+            ``task_type`` becomes its member, a numpy count a plain ``int``.
         :rtype: None
-        :raises ValueError: If the task type is a classification task and
-            ``num_classes`` is still None after the label fields are
-            reconciled, or is not a positive integer.
+        :raises TypeError: If ``task_type`` is neither an :class:`NLPTaskType`
+            nor a string.
+        :raises ValueError: If ``name`` is not a non-empty string, a string
+            ``task_type`` names no task, a set count is not a positive integer,
+            ``dropout_rate`` is outside ``[0, 1)``, ``use_crf`` is not a bool,
+            or the routed head needs ``num_classes`` and it is unset.
         """
-        # Handle num_classes/num_labels ambiguity
-        if self.num_labels is not None and self.num_classes is None:
-            self.num_classes = self.num_labels
-        elif self.num_classes is not None:
-            self.num_labels = self.num_classes
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError(
+                f"NLPTaskConfig: name must be a non-empty string, got {self.name!r}."
+            )
+        if isinstance(self.task_type, str):
+            self.task_type = NLPTaskType.from_string(self.task_type)
+        elif not isinstance(self.task_type, NLPTaskType):
+            raise TypeError(
+                "NLPTaskConfig: task_type must be an NLPTaskType or its string "
+                f"value, got {type(self.task_type).__name__} {self.task_type!r}."
+            )
+        for field_name in ("num_classes", "hidden_size", "vocabulary_size"):
+            value = getattr(self, field_name)
+            if value is not None:
+                setattr(self, field_name,
+                        positive_int(value, field_name, "NLPTaskConfig"))
+        if (isinstance(self.dropout_rate, bool)
+                or not isinstance(self.dropout_rate, numbers.Real)
+                or not 0.0 <= self.dropout_rate < 1.0):
+            raise ValueError(
+                "NLPTaskConfig: dropout_rate must be a number in [0, 1), got "
+                f"{self.dropout_rate!r}."
+            )
+        self.dropout_rate = float(self.dropout_rate)
+        if not isinstance(self.use_crf, bool):
+            raise ValueError(
+                f"NLPTaskConfig: use_crf must be a bool, got {self.use_crf!r}."
+            )
 
-        # Validate required fields for classification tasks
-        classification_tasks = [
-            NLPTaskType.TEXT_CLASSIFICATION,
-            NLPTaskType.TOKEN_CLASSIFICATION,
-            NLPTaskType.SENTIMENT_ANALYSIS,
-            NLPTaskType.NAMED_ENTITY_RECOGNITION,
-            NLPTaskType.PART_OF_SPEECH_TAGGING,
-        ]
+        # DECISION plan-2026-10-14T062616-81938e81/D-064
+        # The class-count requirement and the vocabulary default come from
+        # NLP_HEAD_DISPATCH. Do NOT keep a list of task types here: two hand-kept
+        # lists (5 classification, 5 generation) let nine routed task types
+        # build a config their head refused, and gave MACHINE_TRANSLATION, which
+        # has no head, a vocabulary. Supersedes the generation list of
+        # plan-2026-08-23T203721-009b7ccf/D-022. See decisions.md D-064.
+        head = NLP_HEAD_DISPATCH.get(self.task_type)
+        if head in _HEADS_NEEDING_NUM_CLASSES and self.num_classes is None:
+            raise ValueError(
+                f"NLPTaskConfig: {self.task_type.value!r} is served by {head}, "
+                "which requires num_classes (a positive integer); got None."
+            )
+        if head == "TextGenerationHead" and self.vocabulary_size is None:
+            self.vocabulary_size = DEFAULT_VOCABULARY_SIZE
 
-        if self.task_type in classification_tasks:
-            if self.num_classes is None:
-                raise ValueError(f"{self.task_type} requires num_classes to be specified")
-            # bool is an int subclass, so True would pass as one class; numpy
-            # integers are numbers.Integral and pass. 0 used to build an
-            # (N, 0) head silently and -1 failed only on the first call.
-            if (
-                    isinstance(self.num_classes, bool)
-                    or not isinstance(self.num_classes, numbers.Integral)
-                    or self.num_classes < 1
-            ):
-                raise ValueError(
-                    f"{self.task_type} requires num_classes (or num_labels) "
-                    f"to be a positive integer, got {self.num_classes!r}."
-                )
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Return every field as plain JSON data.
 
-        # Set vocabulary size for generation tasks.
-        #
-        # DECISION plan-2026-08-23T203721-009b7ccf/D-022
-        # TEXT_COMPLETION is listed here: without it `create_bert_with_head`
-        # died with `ValueError: vocabulary_size must be specified for
-        # generation tasks`. Do NOT drop MACHINE_TRANSLATION to match
-        # `get_head_class`: callers skipping it need it. See decisions.md D-022.
-        # Superseded 2026-10-11 (plan-2026-10-11T004932-b83935e1): the named
-        # factory was deleted; the same failure now hits
-        # `BERT(include_top=True, task_config=...)` and every model built
-        # through `heads/nlp/model_head.py::build_model_task_head`.
-        generation_tasks = [
-            NLPTaskType.TEXT_GENERATION,
-            NLPTaskType.MASKED_LANGUAGE_MODELING,
-            NLPTaskType.TEXT_SUMMARIZATION,
-            NLPTaskType.TEXT_COMPLETION,
-            NLPTaskType.MACHINE_TRANSLATION,
-        ]
+        Interface contract, shared by every NLP head's ``get_config``,
+        ``MultiTaskNLPHead.get_config`` and ``model_head.task_config_to_dict``:
+        a new dict holding each dataclass field, with ``task_type`` as its
+        string value. ``NLPTaskConfig(**config.to_dict()) == config``.
 
-        if self.task_type in generation_tasks and self.vocabulary_size is None:
-            self.vocabulary_size = 32000
+        :return: The fields, JSON-serializable.
+        :rtype: Dict[str, Any]
+        """
+        fields = dataclasses.asdict(self)
+        fields["task_type"] = self.task_type.value
+        return fields
+
+    @classmethod
+    def coerce(cls, value: Union["NLPTaskConfig", Dict[str, Any]]) -> "NLPTaskConfig":
+        """
+        Return a new config built from an instance or a dict of its fields.
+
+        Interface contract, shared by the NLP heads' constructors and the two
+        factory functions: an instance is copied (the caller's object is never
+        held, so editing it later cannot change a built head or its
+        ``get_config``), and a dict is passed to the constructor, which parses
+        a string ``task_type``. The dict is not modified.
+
+        :param value: A config, or a dict of its fields.
+        :type value: Union[NLPTaskConfig, Dict[str, Any]]
+        :return: A new instance.
+        :rtype: NLPTaskConfig
+        :raises TypeError: If ``value`` is neither, or the dict holds a field
+            the dataclass does not have.
+        """
+        if isinstance(value, cls):
+            return dataclasses.replace(value)
+        if isinstance(value, dict):
+            return cls(**value)
+        raise TypeError(
+            "task_config must be an NLPTaskConfig or a dict of its fields, "
+            f"got {type(value).__name__}."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -677,8 +695,6 @@ class NLPTaskConfiguration:
         :rtype: None
         :raises ValueError: If both members of a rejected pair are enabled.
         """
-        task_list = list(self._tasks)
-
         # Check for incompatible combinations
         incompatible_pairs = [
             # Generation tasks generally don't mix well with classification

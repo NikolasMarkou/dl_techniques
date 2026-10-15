@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple
 # Local Imports
 # ---------------------------------------------------------------------
 
-from train.common.nlp import build_sentiment_model_from_encoder
+from train.common.nlp import build_headed_model_from_encoder, sentiment_task_config
 
 from dl_techniques.models.language.bert import BERT
 from dl_techniques.utils.logger import logger
@@ -122,11 +122,11 @@ def create_sst2_model(config: FinetuneConfig) -> keras.Model:
     completely or this RAISES. There is deliberately no fallback to a random
     encoder: a pretrained-encoder fine-tune that quietly starts from scratch
     reports a number that means nothing. See
-    ``train.common.nlp.build_sentiment_model_from_encoder``.
+    ``train.common.nlp.build_headed_model_from_encoder``.
     """
     logger.info(f"Loading Pretrained Encoder from {config.pretrained_encoder_path}...")
-    return build_sentiment_model_from_encoder(
-        BERT, config.pretrained_encoder_path, config.num_classes,
+    return build_headed_model_from_encoder(
+        BERT, config.pretrained_encoder_path, sentiment_task_config(config.num_classes),
     )
 
 

@@ -28,6 +28,17 @@ Do not add a unified parameter set here, and do not merge the three
 paragraph and the anchor above :func:`create_head` are the only surviving
 record of the decision.
 
+Consumers
+---------
+No model calls :func:`create_head`. The language models build their heads
+with ``nlp.model_head.build_model_task_head`` and the vision models with
+``vision.factory.build_model_vision_head``; each adds a domain rule this
+facade cannot know (a model's vocabulary, a preset merge). The facade is kept
+as the library's one documented entry point for code outside this
+repository's models, and ``tests/test_layers/test_heads/test_factory.py``
+pins that it forwards every argument (plan-2026-10-14T062616-81938e81 D-067,
+which weighed deleting it).
+
 Example
 -------
 >>> from dl_techniques.layers.heads import create_head
@@ -58,6 +69,10 @@ _VALID_DOMAINS = ('nlp', 'vision', 'vlm')
 # merge here. The three domain factories keep divergent calling conventions and
 # stay independent. The owning plan directory no longer exists, so the module
 # docstring above carries the rest; there is no decisions.md left to consult.
+# DECISION plan-2026-10-14T062616-81938e81/D-067: kept, with no production
+# caller, as the documented library entry point. Do NOT route a model's head
+# through it (models need build_model_task_head / build_model_vision_head), and
+# do NOT delete it without the docs that name it. See decisions.md D-067.
 def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
     """Create a task head by domain, forwarding to the per-domain factory.
 

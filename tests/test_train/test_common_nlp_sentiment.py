@@ -1,7 +1,9 @@
 """The shared sentiment fine-tuning helpers of ``train.common.nlp``.
 
-``build_sentiment_model_from_encoder`` rebuilds a language encoder with its own
-``task_head`` (``include_top=True``) from a headless encoder checkpoint, and
+``build_headed_model_from_encoder`` rebuilds a language encoder with its own
+``task_head`` (``include_top=True``) from a headless encoder checkpoint (here
+with the scripts' ``sentiment_task_config``; plan
+plan-2026-10-14T062616-81938e81 D-066 made the task the caller's), and
 ``set_backbone_trainable`` is the two-stage recipe's freeze (plan
 plan-2026-10-11T170958-dc4d2202, D-010). Both are used by the bert, fnet,
 tree_transformer and bert/wikipedia fine-tuning scripts; this file tests them
@@ -44,7 +46,17 @@ from dl_techniques.models.language.bert import BERT
 from dl_techniques.models.language.distilbert import DistilBERT
 from dl_techniques.models.language.fnet import FNet
 from dl_techniques.models.language.tree_transformer import TreeTransformer
-from train.common.nlp import build_sentiment_model_from_encoder, set_backbone_trainable
+from train.common.nlp import (
+    build_headed_model_from_encoder,
+    sentiment_task_config,
+    set_backbone_trainable,
+)
+
+
+def build_sentiment_model_from_encoder(cls, path, num_classes, dropout_rate=0.1):
+    """What the four sentiment scripts call: the generic builder, sentiment task."""
+    return build_headed_model_from_encoder(
+        cls, path, sentiment_task_config(num_classes, dropout_rate=dropout_rate))
 
 # Odd on purpose: no variant default and no trainer default is 97 or 12.
 VOCAB = 97

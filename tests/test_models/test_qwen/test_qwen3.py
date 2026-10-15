@@ -819,7 +819,6 @@ class TestQwen3ModelErrorHandling:
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):
             create_qwen3("tiny", include_top=True)
 
-        batch = {"input_ids": np.ones((1, 8), dtype="int32")}
         tiny = dict(vocab_size=64, hidden_size=32, num_layers=1,
                     num_attention_heads=4, num_key_value_heads=2,
                     max_seq_len=16, moe_layers=[])
@@ -835,11 +834,11 @@ class TestQwen3ModelErrorHandling:
                     "name": "clf", "task_type": "text_classification",
                     "num_classes": count})
 
-        # An unknown pooling type is refused by the head
-        model = create_qwen3("tiny", **tiny, include_top=True, task_config=_CLF,
-                             head_config_overrides={"pooling_type": "bogus"})
-        with pytest.raises(ValueError, match="Unknown pooling type"):
-            model(batch)
+        # An unknown pooling type is refused by the head, at construction
+        # (plan-2026-10-14T062616-81938e81 D-062; it used to wait for the call)
+        with pytest.raises(ValueError, match="pooling_type must be one of"):
+            create_qwen3("tiny", **tiny, include_top=True, task_config=_CLF,
+                         head_config_overrides={"pooling_type": "bogus"})
 
 
 class TestQwen3ModelPerformance:

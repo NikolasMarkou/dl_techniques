@@ -250,11 +250,12 @@ cannot use the tiktoken pipeline — use `dl_techniques.datasets.byte_lm`.
 
 Fine-tuning a headless encoder checkpoint under a sentiment head (`src/train/{bert,
 fnet,tree_transformer}/finetune.py`, `src/train/bert/wikipedia/finetune.py`) goes
-through `train.common.nlp.build_sentiment_model_from_encoder(model_cls,
-encoder_path, num_classes)`: it reads the archive's own config, rebuilds the class
+through `train.common.nlp.build_headed_model_from_encoder(model_cls,
+encoder_path, sentiment_task_config(num_classes))`; any other task config works the
+same way. It reads the archive's own config, rebuilds the class
 with `include_top=True` and restores the backbone through the shared load rule, so
 a missing, unreadable or incompatible checkpoint RAISES (there is no random-weights
-fallback). `set_backbone_trainable(model, False)` leaves only `task_head` trainable
+fallback). `set_backbone_trainable(model, False)` leaves only the layer named `task_head` trainable
 (stage 1); `set_backbone_trainable(model, True)` unfreezes every layer (stage 2),
 by loop, because `model.trainable = True` after a per-layer freeze is a no-op. The
 saved artifact is the model class itself with a head named `task_head`.

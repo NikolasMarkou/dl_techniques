@@ -5,7 +5,7 @@ Until plan-2026-10-11T170958-dc4d2202 (D-010) ``main()`` wrapped the encoder loa
 incompatible checkpoint), logged a warning and trained a RANDOM ``BERT.from_variant("base")``
 instead: a "pretrained-encoder fine-tune" that silently starts from scratch and reports
 a number that means nothing. The model is now built by ``create_sst2_model`` through
-``train.common.nlp.build_sentiment_model_from_encoder`` (``include_top=True``), and a
+``train.common.nlp.build_headed_model_from_encoder`` (``include_top=True``), and a
 failed load raises.
 
 ``test_a_missing_encoder_raises_out_of_main``

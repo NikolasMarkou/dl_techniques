@@ -16,9 +16,9 @@ Covers:
 * ``head_attention_mask`` returns the caller's mask when given, else
   ``input_ids != pad_token_id``, else (no pad id either) all ones, in the
   requested dtype.
-* ``NLPTaskConfig`` refuses a classification class count that is not a
-  positive integer (0, -1, a bool, a float), on the config and through a
-  model's ``task_config`` dict; numpy integers are accepted.
+* ``NLPTaskConfig`` refuses a class count that is not a positive integer
+  (0, -1, a bool, a float), on the config and through a model's
+  ``task_config`` dict; numpy integers are accepted and stored as ``int``.
 """
 
 import json
@@ -53,7 +53,6 @@ def _classification_config() -> NLPTaskConfig:
         task_type=NLPTaskType.TEXT_CLASSIFICATION,
         num_classes=3,
         dropout_rate=0.2,
-        max_length=128,
     )
 
 
@@ -91,7 +90,6 @@ class TestTaskConfigForms:
             "task_type": NLPTaskType.TEXT_CLASSIFICATION,
             "num_classes": 3,
             "dropout_rate": 0.2,
-            "max_length": 128,
         }
         configs = [
             build_model_task_head(form, input_dim=D).get_config()
@@ -382,12 +380,11 @@ class TestClassificationClassCount:
     factories refused both; the config now refuses them for every model."""
 
     @pytest.mark.parametrize("count", _BAD_CLASS_COUNTS, ids=_BAD_IDS)
-    @pytest.mark.parametrize("field", ["num_classes", "num_labels"])
-    def test_the_config_refuses_it(self, count, field) -> None:
+    def test_the_config_refuses_it(self, count) -> None:
         with pytest.raises(ValueError, match="positive integer"):
             NLPTaskConfig(
                 name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
-                **{field: count})
+                num_classes=count)
 
     @pytest.mark.parametrize("count", [0, -1], ids=["zero", "minus_one"])
     def test_a_model_refuses_it_at_construction(self, count) -> None:
@@ -405,12 +402,13 @@ class TestClassificationClassCount:
         cfg = NLPTaskConfig(
             name="clf", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
             num_classes=count)
-        assert cfg.num_classes == cfg.num_labels == count
+        assert cfg.num_classes == count and type(cfg.num_classes) is int
 
-    def test_a_task_that_is_not_classification_is_not_checked(self) -> None:
-        cfg = NLPTaskConfig(
-            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=0)
-        assert cfg.num_classes == 0
+    def test_a_set_count_is_checked_for_every_task_type(self) -> None:
+        """A QA head reads no class count, but 0 is still not a count (D-064)."""
+        with pytest.raises(ValueError, match="positive integer"):
+            NLPTaskConfig(
+                name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=0)
 
 
 # ---------------------------------------------------------------------

@@ -38,7 +38,6 @@ Example
 >>> logits = finalize_head_outputs(head({"hidden_states": h, "attention_mask": m}))
 """
 
-import dataclasses
 from typing import Any, Dict, Optional, Union
 
 import keras
@@ -48,7 +47,7 @@ import keras
 # ---------------------------------------------------------------------
 
 from .factory import BaseNLPHead, create_nlp_head
-from .task_types import NLPTaskConfig, NLPTaskType
+from .task_types import NLP_HEAD_DISPATCH, NLPTaskConfig, NLPTaskType
 
 # ---------------------------------------------------------------------
 
@@ -65,12 +64,10 @@ TASK_HEAD_NAME = "task_head"
 
 #: The task types whose head is a ``TextGenerationHead``: logits over a
 #: vocabulary, whose size the task config carries as ``vocabulary_size``.
-_GENERATION_HEAD_TASKS = frozenset({
-    NLPTaskType.TEXT_GENERATION,
-    NLPTaskType.MASKED_LANGUAGE_MODELING,
-    NLPTaskType.TEXT_COMPLETION,
-    NLPTaskType.TEXT_SUMMARIZATION,
-})
+#: Read from ``NLP_HEAD_DISPATCH``, never listed by hand (D-064).
+_GENERATION_HEAD_TASKS = frozenset(
+    task for task, head in NLP_HEAD_DISPATCH.items() if head == "TextGenerationHead"
+)
 
 
 def _as_task_config(
@@ -179,9 +176,7 @@ def task_config_to_dict(
     :raises TypeError: As :func:`_as_task_config`.
     :raises ValueError: As :func:`_as_task_config`.
     """
-    fields = dataclasses.asdict(_as_task_config(task_config, vocab_size))
-    fields["task_type"] = fields["task_type"].value
-    return fields
+    return _as_task_config(task_config, vocab_size).to_dict()
 
 
 def build_model_task_head(

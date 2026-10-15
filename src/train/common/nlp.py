@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tiktoken
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from train.common import create_callbacks as create_common_callbacks
 from train.common.callbacks import best_checkpoint_path
@@ -644,8 +644,24 @@ def evaluate_mlm_model(
 
 
 # ---------------------------------------------------------------------
-# Sentiment fine-tuning: the headed model and its two-stage freeze
+# Fine-tuning: the headed model and its two-stage freeze
 # ---------------------------------------------------------------------
+
+
+def sentiment_task_config(num_classes: int, dropout_rate: float = 0.1) -> NLPTaskConfig:
+    """The task config of the four sentiment fine-tuning scripts.
+
+    :param num_classes: Width of the sentiment head.
+    :param dropout_rate: Dropout of the head.
+    :returns: ``NLPTaskConfig(name="sentiment_analysis",
+        task_type=SENTIMENT_ANALYSIS, ...)``.
+    """
+    return NLPTaskConfig(
+        name="sentiment_analysis",
+        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+        num_classes=num_classes,
+        dropout_rate=dropout_rate,
+    )
 
 
 # DECISION plan-2026-10-11T170958-dc4d2202/D-010: the finetune trainers rebuild the
@@ -654,15 +670,18 @@ def evaluate_mlm_model(
 # plus a hand-wired Functional head (a second head implementation, and a third source of
 # the head's name), and do NOT catch a failed load and carry on with a random encoder
 # (that trains from scratch and reports success). See decisions.md.
-def build_sentiment_model_from_encoder(
+# DECISION plan-2026-10-14T062616-81938e81/D-066: the task is the caller's
+# (`task_config`), not a hard-coded SENTIMENT_ANALYSIS; do NOT build a task config in
+# here. See decisions.md D-066.
+def build_headed_model_from_encoder(
     model_cls: type,
     encoder_path: str,
-    num_classes: int,
-    dropout_rate: float = 0.1,
+    task_config: Union[NLPTaskConfig, Dict[str, Any]],
 ) -> keras.Model:
-    """Rebuild a language encoder with a sentiment head from its headless checkpoint.
+    """Rebuild a language encoder with a task head from its checkpoint.
 
-    Interface contract (shared by the four sentiment fine-tuning scripts):
+    Interface contract (shared by the four sentiment fine-tuning scripts, which
+    pass :func:`sentiment_task_config`, and by any other fine-tune):
 
     :param model_cls: The language model class that wrote the checkpoint
         (``BERT``, ``FNet``, ``TreeTransformer``): a class with ``from_config``,
@@ -671,15 +690,17 @@ def build_sentiment_model_from_encoder(
     :param encoder_path: Path of a ``.keras`` archive of that class (a headless
         encoder, or a model trained under any other head: the head is never
         copied).
-    :param num_classes: Width of the new sentiment head.
-    :param dropout_rate: Dropout of the new head.
+    :param task_config: The new head's task, an ``NLPTaskConfig`` or a dict of
+        its fields; any task type a headed model of ``model_cls`` accepts.
     :returns: A ``model_cls`` instance with ``include_top=True``, the architecture
         exactly as the archive records it (nothing restated by the caller), the
-        backbone loaded and a fresh ``task_head`` (CLS pooling, bare logits).
+        backbone loaded and a fresh ``task_head`` (the head's default pooling,
+        the model's finalized output).
     :raises FileNotFoundError: *encoder_path* does not exist.
-    :raises ValueError: the file is not a readable archive of *model_cls*, or the
-        backbone does not load completely (``load_pretrained_weights`` raises; a
-        failed load is never turned into a random-initialized model).
+    :raises ValueError: the file is not a readable archive of *model_cls*, the
+        task config is invalid, or the backbone does not load completely
+        (``load_pretrained_weights`` raises; a failed load is never turned into
+        a random-initialized model).
     """
     if not os.path.exists(encoder_path):
         raise FileNotFoundError(f"Pretrained encoder not found: {encoder_path}")
@@ -692,23 +713,18 @@ def build_sentiment_model_from_encoder(
             f"{encoder_path!r} is not a readable {model_cls.__name__} archive "
             f"(class_name={archive.get('class_name')!r})."
         )
-    task_config = NLPTaskConfig(
-        name="sentiment_analysis",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=num_classes,
-        dropout_rate=dropout_rate,
-    )
+    task_dict = task_config_to_dict(task_config)
     model = model_cls.from_config({
         **{key: value for key, value in config.items() if key != "name"},
         "include_top": True,
-        "task_config": task_config_to_dict(task_config),
+        "task_config": task_dict,
         # The archive's head overrides belong to its old head, not the new one.
         "head_config_overrides": None,
     })
     model.load_pretrained_weights(encoder_path)
     logger.info(
-        f"{model_cls.__name__} rebuilt with a sentiment head from {encoder_path}: "
-        f"{model.count_params():,} parameters"
+        f"{model_cls.__name__} rebuilt with a {task_dict['task_type']} head from "
+        f"{encoder_path}: {model.count_params():,} parameters"
     )
     return model
 
@@ -718,11 +734,13 @@ def set_backbone_trainable(model: keras.Model, trainable: bool) -> None:
 
     Interface contract (the two-stage fine-tuning recipe: head only, then all):
 
-    :param model: A language model built with ``include_top=True`` (it has a
-        ``task_head`` layer).
-    :param trainable: ``False`` leaves only the ``task_head`` trainable; ``True``
+    :param model: A language model built with ``include_top=True``: one of its
+        layers is named ``TASK_HEAD_NAME`` (``"task_head"``), the name
+        ``build_model_task_head`` gives every head. The head is found by that
+        LAYER name, not by an attribute of the model.
+    :param trainable: ``False`` leaves only the task head trainable; ``True``
         makes every layer trainable.
-    :raises ValueError: *model* has no ``task_head``.
+    :raises ValueError: *model* has no layer named ``task_head``.
 
     Why a loop and not ``model.trainable``: ``model.trainable = False`` followed
     by ``task_head.trainable = True`` leaves ZERO trainable weights (the parent's
@@ -731,12 +749,13 @@ def set_backbone_trainable(model: keras.Model, trainable: bool) -> None:
     leave the backbone frozen. The model's own flag is reset first, then every
     layer is set one by one.
     """
-    head = getattr(model, TASK_HEAD_NAME, None)
-    if head is None:
+    heads = [layer for layer in model.layers if layer.name == TASK_HEAD_NAME]
+    if not heads:
         raise ValueError(
-            f"{type(model).__name__} has no {TASK_HEAD_NAME!r} layer; "
+            f"{type(model).__name__} has no layer named {TASK_HEAD_NAME!r}; "
             "build it with include_top=True."
         )
+    head = heads[0]
     model.trainable = True
     for layer in model.layers:
         layer.trainable = True if layer is head else trainable
@@ -913,7 +932,8 @@ __all__ = [
     "prepare_dict_keyed_compile",
     "DEFAULT_MLM_PROBE_TEXTS",
     "evaluate_mlm_model",
-    "build_sentiment_model_from_encoder",
+    "build_headed_model_from_encoder",
+    "sentiment_task_config",
     "set_backbone_trainable",
     "sentiment_final_model_filename",
     "prepare_data_for_analyzer",

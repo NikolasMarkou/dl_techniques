@@ -56,3 +56,19 @@ class TestCreateHeadDispatch:
     def test_bogus_domain_raises_valueerror(self) -> None:
         with pytest.raises(ValueError, match="Unknown head domain"):
             create_head("bogus", num_classes=3)
+
+    def test_nlp_dispatch_forwards_a_dict_config_and_head_kwargs(self) -> None:
+        """Every argument reaches create_nlp_head unchanged (plan step 11.3, D-067)."""
+        head = create_head(
+            "nlp",
+            {"name": "s", "task_type": "sentiment_analysis", "num_classes": 2},
+            8,
+            pooling_type="mean",
+            use_intermediate=False,
+        )
+        assert isinstance(head, TextClassificationHead)
+        assert head.pooling_type == "mean" and head.use_intermediate is False
+        assert head.task_config.task_type is NLPTaskType.SENTIMENT_ANALYSIS
+        with pytest.raises(ValueError, match="pooling_type"):
+            create_head("nlp", {"name": "s", "task_type": "sentiment_analysis",
+                                "num_classes": 2}, 8, pooling_type="bogus")
