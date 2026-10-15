@@ -225,3 +225,20 @@ def test_mean_and_max_take_already_pooled_inputs(strategy) -> None:
     v, q = _x(2, DIM), _x(2, 8)
     out = head({"vision_features": v, "question_features": q})
     assert tuple(out["answer_logits"].shape) == (2, 3)
+
+
+@pytest.mark.parametrize("key,shape", [
+    ("vision_features", (2, DIM)),
+    ("text_features", (2, DIM)),
+])
+def test_a_captioning_input_that_is_not_a_sequence_is_refused_in_build(key, shape) -> None:
+    """Measured at ``dd19cf4d2``: a rank-2 ``vision_features`` built, then failed
+    inside ``MultiHeadCrossAttention.call`` with a backend ``Reshape`` error
+    naming neither the head nor the input."""
+    head = ImageCaptioningHead(
+        task_config=VLMTaskConfig(name="cap", task_type=VLMTaskType.IMAGE_CAPTIONING,
+                                  hidden_size=DIM, vocab_size=10),
+        num_layers=1, num_heads=4)
+    shapes = {"vision_features": (2, 5, DIM), "text_features": (2, 4, DIM), key: shape}
+    with pytest.raises(ValueError, match=rf"ImageCaptioningHead.*{key}.*rank 3"):
+        head.build(shapes)

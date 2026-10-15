@@ -104,7 +104,7 @@ The factory function `create_vlm_head` automatically selects the correct head cl
 *   **Head Class**: `ImageCaptioningHead` (Standalone Architecture)
 *   **Description**: A full, autoregressive Transformer decoder that generates a text sequence conditioned on vision features.
 *   **Inputs**: `vision_features` `[B, Patches, Dim]`, `text_features` (embedded partial caption) `[B, Seq, Dim]`.
-*   **Key Config**: Requires `vocab_size` in the `VLMTaskConfig`; `num_classes` must be unset. Configured with `num_layers`, `num_heads`. The text features must be `hidden_size` wide (refused in `build` otherwise); the vision width is free.
+*   **Key Config**: Requires `vocab_size` in the `VLMTaskConfig`; `num_classes` must be unset. Configured with `num_layers`, `num_heads`. Both inputs must be rank 3 and the text features `hidden_size` wide (each refused in `build` otherwise); the vision width is free.
 
 ```python
 config = VLMTaskConfig(name="coco_caption", task_type=VLMTaskType.IMAGE_CAPTIONING, vocab_size=50257)

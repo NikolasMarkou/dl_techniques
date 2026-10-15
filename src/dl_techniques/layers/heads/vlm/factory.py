@@ -801,15 +801,14 @@ class ImageCaptioningHead(keras.layers.Layer):
         of D-023. Every failing type died earlier inside ``validate_ffn_config``
         on a DIFFERENT required key.
 
-        Related, and also measured rather than assumed: four combinations once
-        built and then failed inside ``call()``. Three are now refused in
+        Related, and also measured rather than assumed: several combinations
+        once built and then failed inside ``call()``. Each is now refused in
         ``build()``, by name (D-011, D-056): ``VisualGroundingHead`` with
         ``fusion_strategy="attention_pooling"``, ``ImageCaptioningHead`` with a
-        text width other than ``hidden_dim``, and ``VQAHead`` attention pooling
-        with a width other than ``hidden_dim``. ``VQAHead`` ``"mean"``/``"max"``
-        now takes 2-D (already pooled) inputs. The fourth,
-        ``ImageCaptioningHead`` with 2-D vision features, still fails in the
-        cross-attention.
+        text width other than ``hidden_dim`` or a 2-D vision or text input,
+        and ``VQAHead`` attention pooling with a width other than
+        ``hidden_dim``. ``VQAHead`` ``"mean"``/``"max"`` on 2-D inputs, the
+        last of them, now works: a 2-D input is taken as already pooled.
     :type ffn_type: FFNType
     :param ffn_expansion_factor: Width multiplier for the decoder FFN's hidden
         layer. Defaults to 4.
@@ -993,6 +992,14 @@ class ImageCaptioningHead(keras.layers.Layer):
 
         text_shape = input_shape["text_features"]
         vision_shape = input_shape["vision_features"]
+        for key, shape in (("text_features", text_shape),
+                           ("vision_features", vision_shape)):
+            if len(shape) != 3:
+                raise ValueError(
+                    f"ImageCaptioningHead: {key} must be rank 3, (batch, "
+                    f"length, width), got shape {tuple(shape)}. The decoder "
+                    f"attends over both sequences; a pooled input has none."
+                )
         batch = text_shape[0]
         seq_len = text_shape[1]
 
