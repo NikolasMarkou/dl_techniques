@@ -323,7 +323,14 @@ class FreMLP(keras.layers.Layer):
         freq_real, freq_imag = keras.ops.fft2((x_t, keras.ops.zeros_like(x_t)))
 
         # 2. Magnitude (phase is retained implicitly via the unit phasor below).
-        mag = keras.ops.sqrt(keras.ops.square(freq_real) + keras.ops.square(freq_imag))  # (B, C, H, W)
+        # DECISION plan-2026-10-14T062616-81938e81/D-097
+        # Do NOT take sqrt of the raw power: at an exactly zero bin (every
+        # non-DC bin of a spatially constant channel) d sqrt is infinite, the
+        # chain rule multiplies it by 0, and the input gradient is NaN. The
+        # floor eps**2 moves only bins below eps and zeroes their gradient.
+        eps = keras.config.epsilon()
+        power = keras.ops.square(freq_real) + keras.ops.square(freq_imag)
+        mag = keras.ops.sqrt(keras.ops.maximum(power, eps * eps))  # (B, C, H, W)
 
         # 3. Process the magnitude spectrum through the 1x1-conv MLP, which
         # operates channels-last; transpose to NHWC and back.
@@ -338,10 +345,10 @@ class FreMLP(keras.layers.Layer):
         )                                              # (B, C, H, W)
 
         # 4. Reconstruct with the original phase: scale the unit phasor
-        # (freq / |freq|) by the processed magnitude. Guard the divide.
-        denom = keras.ops.maximum(mag, keras.config.epsilon())
-        out_real = mag_proc * (freq_real / denom)
-        out_imag = mag_proc * (freq_imag / denom)
+        # (freq / |freq|) by the processed magnitude. ``mag >= eps`` from
+        # step 2, so the divide is guarded.
+        out_real = mag_proc * (freq_real / mag)
+        out_imag = mag_proc * (freq_imag / mag)
 
         # 5. Inverse FFT back to the spatial domain. The processed spectrum
         # keeps the Hermitian symmetry of a real signal (the 1x1 conv acts
@@ -428,7 +435,7 @@ class DilatedBranch(keras.layers.Layer):
     :ivar dw_channels: ``channels * expansion``, also the group count.
     :vartype dw_channels: int
     :ivar conv: The dilated depthwise convolution.
-    :vartype conv: keras.layers.Conv2D
+    :vartype conv: keras.layers.DepthwiseConv2D
 
     Example:
         .. code-block:: python
@@ -473,13 +480,18 @@ class DilatedBranch(keras.layers.Layer):
         self.dilation = dilation
         self.dw_channels = int(channels * expansion)
 
-        # Create depthwise convolution in __init__
-        self.conv = keras.layers.Conv2D(
-            filters=self.dw_channels,
+        # DECISION plan-2026-10-14T062616-81938e81/D-096
+        # Do NOT write this as `Conv2D(groups=dw_channels, dilation_rate=d)`:
+        # for d > 1 the TF-to-XLA bridge folds that kernel into a compile-time
+        # constant, so a jit-compiled training step recompiles after every
+        # weight update (25 s per step for the medium model). The two are the
+        # same convolution; this one keeps the weight paths and the fixed-seed
+        # draw. See decisions.md.
+        self.conv = keras.layers.DepthwiseConv2D(
             kernel_size=3,
             padding="same",
             dilation_rate=self.dilation,
-            groups=self.dw_channels,  # Depthwise: each filter processes one channel
+            depth_multiplier=1,
             use_bias=True,
             name=f"dilated_conv_d{self.dilation}"
         )
