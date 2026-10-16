@@ -4,7 +4,9 @@ Two helpers, each with one rule that more than one head domain needs:
 
 * :func:`positive_int` -- a count argument (``num_classes``, ``num_heads``,
   ``hidden_size``, ...) must be a positive integer. The vision heads and the
-  VLM heads and their task config call it.
+  VLM heads and their task config call it. It is defined once, in
+  ``dl_techniques.utils.validation`` (shared with the adapters and the MoE
+  config), and bound here.
 * :func:`static_rank` -- a head that branches on an input's rank reads that
   rank once, statically, and refuses an input whose rank is unknown. The VLM
   and NLP heads call it.
@@ -19,43 +21,9 @@ from typing import Any
 
 import keras
 
-
-def positive_int(value: Any, name: str, owner: str) -> int:
-    """
-    Check that a count argument is a positive integer, and return it as one.
-
-    Interface contract, shared by the vision heads' count arguments
-    (``hidden_dim``, ``num_classes``, ``num_anchors``, ``bbox_dims``,
-    ``num_instances``, ``output_channels``, ``scale_factor``), ``VQAHead``'s
-    ``num_heads`` and ``VLMTaskConfig``'s ``hidden_size``, ``vocab_size`` and
-    ``num_classes``:
-
-    * An ``int`` above 0, or a numpy integer above 0 (a count read from an
-      array or a ``.npy`` config), is returned as a plain ``int``.
-    * Anything else raises ``ValueError`` naming ``owner`` and ``name``:
-      ``bool`` (an ``int`` subclass, so ``True`` would build a one-class
-      layer), a float such as ``2.5`` (``16.0`` included), a string, ``None``,
-      ``0`` and negatives.
-
-    Call it in ``__init__`` before any layer is created, so the refusal names
-    the argument instead of surfacing later as a ``Conv2D`` ``filters=0``.
-
-    :param value: The caller's value.
-    :type value: Any
-    :param name: Argument name, for the error message.
-    :type name: str
-    :param owner: Head or config class name, for the error message.
-    :type owner: str
-    :return: ``value`` as an ``int``.
-    :rtype: int
-    :raises ValueError: If ``value`` is not a positive integer.
-    """
-    if (isinstance(value, bool) or not isinstance(value, numbers.Integral)
-            or value <= 0):
-        raise ValueError(
-            f"{owner}: {name} must be a positive integer, got {value!r}"
-        )
-    return int(value)
+# The count rule has one home, shared with the adapters and the MoE config
+# (D-088); the head domains import it from here as before.
+from dl_techniques.utils.validation import positive_int  # noqa: F401
 
 
 def static_rank(x: Any, name: str, owner: str) -> int:

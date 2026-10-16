@@ -405,7 +405,7 @@ class TestMixtureOfExperts:
         # Test invalid num_experts. Since step 4 (B1) this is rejected by
         # ``MoEConfig.__post_init__`` itself, before ``MixtureOfExperts`` ever
         # sees it -- the config object can no longer be constructed at all.
-        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+        with pytest.raises(ValueError, match="num_experts must be a positive integer, got"):
             MoEConfig(num_experts=0)
 
         # ``MixtureOfExperts``'s own guard is retained as defence in depth and
@@ -1469,7 +1469,7 @@ class TestMoEConfigValidation:
     @pytest.mark.parametrize("bad", [0, -3])
     def test_num_experts_below_one_rejected_by_moe_config(self, bad):
         """``num_experts < 1`` must fail at ``MoEConfig`` construction."""
-        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+        with pytest.raises(ValueError, match="num_experts must be a positive integer, got"):
             MoEConfig(num_experts=bad)
 
     def test_negative_jitter_noise_rejected_by_moe_config(self):
@@ -1650,12 +1650,12 @@ class TestIntegerFieldsRejectBool:
     @pytest.mark.parametrize("value", [True, False])
     @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
     def test_gating_config_int_fields_reject_bool(self, field, value):
-        with pytest.raises(ValueError, match=f"{field} must be an int, got bool"):
+        with pytest.raises(ValueError, match=f"{field} must be a positive integer, got bool"):
             GatingConfig(**{field: value})
 
     @pytest.mark.parametrize("value", [True, False])
     def test_moe_config_num_experts_rejects_bool(self, value):
-        with pytest.raises(ValueError, match="num_experts must be an int, got bool"):
+        with pytest.raises(ValueError, match="num_experts must be a positive integer, got bool"):
             MoEConfig(num_experts=value)
 
     def test_yaml_true_is_the_live_path(self):
@@ -1663,12 +1663,12 @@ class TestIntegerFieldsRejectBool:
         yaml = pytest.importorskip("yaml")
         loaded = yaml.safe_load("top_k: true")["top_k"]
         assert loaded is True
-        with pytest.raises(ValueError, match="must be an int, got bool"):
+        with pytest.raises(ValueError, match="must be a positive integer, got bool"):
             GatingConfig(top_k=loaded)
 
     @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
     def test_non_int_types_are_rejected(self, field):
-        with pytest.raises(ValueError, match=f"{field} must be an int, got"):
+        with pytest.raises(ValueError, match=f"{field} must be a positive integer, got"):
             GatingConfig(**{field: 2.5})
 
     def test_real_ints_still_construct(self):
@@ -1680,9 +1680,9 @@ class TestIntegerFieldsRejectBool:
     @pytest.mark.parametrize(
         "field,message",
         [
-            ("top_k", "top_k must be >= 1, got 0"),
-            ("num_slots", "num_slots must be >= 1, got 0"),
-            ("embedding_dim", "embedding_dim must be >= 1, got 0"),
+            ("top_k", "top_k must be a positive integer, got 0"),
+            ("num_slots", "num_slots must be a positive integer, got 0"),
+            ("embedding_dim", "embedding_dim must be a positive integer, got 0"),
         ],
     )
     def test_range_messages_are_unchanged(self, field, message):

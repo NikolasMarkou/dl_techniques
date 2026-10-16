@@ -279,7 +279,7 @@ class TestExpertConfigValidation:
 
 
 class TestValidatePositiveIntAcceptanceTable:
-    """The full accept/reject table for ``_validate_positive_int``, per field.
+    """The full accept/reject table for ``positive_int`` (D-088), per field.
 
     Driven through the PUBLIC constructors, not the private helper, so the table
     pins what a caller actually experiences -- including the coercion, which the

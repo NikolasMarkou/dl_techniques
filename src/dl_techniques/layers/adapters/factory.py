@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence
 # ---------------------------------------------------------------------
 
 from ...utils.logger import logger
+from ...utils.validation import positive_int
 
 from .lora import LoRAAdapter
 
@@ -173,29 +174,6 @@ def _declared_params(adapter_type: str) -> set:
     )
 
 
-def _validate_positive_int(name: str, value: Any) -> None:
-    """Raise unless ``value`` is a genuine positive ``int``.
-
-    ``bool`` is rejected explicitly: it is an ``int`` subclass, so
-    ``rank=True`` would otherwise pass as ``rank=1``.
-
-    :param name: Parameter name, for the message.
-    :type name: str
-    :param value: The value to check.
-    :type value: Any
-    :raises ValueError: If ``value`` is not a positive Python/NumPy integer.
-    """
-    import numbers
-
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
-        raise ValueError(
-            f"{name} must be a positive integer, got {value!r} "
-            f"(type {type(value).__name__})"
-        )
-    if value <= 0:
-        raise ValueError(f"{name} must be positive, got {value}")
-
-
 def validate_adapter_config(adapter_type: str, **kwargs: Any) -> None:
     """Check a configuration without building anything.
 
@@ -248,9 +226,9 @@ def validate_adapter_config(adapter_type: str, **kwargs: Any) -> None:
     # Value checks. These live in the factory rather than relying on the target
     # class's own __init__ to reject them: guide §9.2 is explicit that "validate"
     # must not mean "let the constructor happen to notice".
-    _validate_positive_int('output_dim', kwargs['output_dim'])
-    _validate_positive_int('rank', kwargs['rank'])
-    _validate_positive_int('num_adapters', kwargs['num_adapters'])
+    positive_int(kwargs['output_dim'], 'output_dim', 'validate_adapter_config')
+    positive_int(kwargs['rank'], 'rank', 'validate_adapter_config')
+    positive_int(kwargs['num_adapters'], 'num_adapters', 'validate_adapter_config')
 
     alpha = kwargs['alpha']
     if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
