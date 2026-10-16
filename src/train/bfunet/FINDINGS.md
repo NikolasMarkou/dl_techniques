@@ -206,17 +206,17 @@ a per-seed trajectory plot into `results/<output-dir>/`.
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.variance_probe \
     --variant small --patch-size 128 --batch-size 8 --patches-per-image 4 \
     --seeds 5 --epochs 10 --steps-per-epoch 1000 --log-every 50 \
-    --max-train-files 2000 --sigma 0.1 --gpu 1 \
+    --max-train-files 2000 --sigma 0.1 \
     --laplacian-pyramid --trainable-gabor \
     --output-dir results/variance_probe_zeropad_small_laplacian_freegabor
 
 # Quick sanity check (tiny, ~1 min):
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.variance_probe \
-    --variant tiny --patch-size 64 --batch-size 4 --seeds 2 --steps 30 --gpu 1
+    --variant tiny --patch-size 64 --batch-size 4 --seeds 2 --steps 30
 
 # Highest-confidence, production scale (heavier, fewer seeds if GPU-bound):
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.variance_probe \
-    --variant base --patch-size 256 --batch-size 4 --seeds 3 --epochs 10 --gpu 1 \
+    --variant base --patch-size 256 --batch-size 4 --seeds 3 --epochs 10 \
     --laplacian-pyramid --trainable-gabor
 ```
 

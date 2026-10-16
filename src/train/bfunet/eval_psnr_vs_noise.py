@@ -30,7 +30,7 @@ Usage::
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.eval_psnr_vs_noise \\
         --model maxpool=results/convunext_denoiser_base_20260622_133223/best_model.keras \\
         --dataset div2k=/media/arxwn/data0_4tb/datasets/div2k/validation \\
-        --num-samples 100 --gpu 1
+        --num-samples 100
 
     # Overlay several models on one plot (each on identical patches+noise), custom sweep:
     ... --model maxpool=run_a/best_model.keras --model laplacian=run_b/best_model.keras \\

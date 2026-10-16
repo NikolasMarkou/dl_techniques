@@ -31,7 +31,7 @@ Run::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg \
         .venv/bin/python -m train.sd3_mmdit.train_sd3_mmdit \
-        --variant tiny --epochs 3 --steps-per-epoch 8 --batch-size 2 --gpu 1
+        --variant tiny --epochs 3 --steps-per-epoch 8 --batch-size 2
 """
 
 from __future__ import annotations

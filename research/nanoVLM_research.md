@@ -40,6 +40,12 @@
 > none. The shipped decoder applies it in every block. The
 > 224px / 512-token `create_nanovlm()` build now has **198,223,872**
 > parameters. Plan `plan-2026-10-14T062616-81938e81`, D-040.
+>
+> **Historical: the training-script sketch in section 5** (`train_nanovlm.py`,
+> with `NanoVLMTrainer`, `train_nanovlm`, `setup_different_learning_rates` and
+> `create_training_setup`) is this proposal's, not the shipped trainer.
+> `src/train/nano_vlm/train_nano_vlm.py` trains with stock `compile`/`fit` and
+> defines none of them (plan `plan-2026-10-14T062616-81938e81`, D-038).
 
 ## Overview
 

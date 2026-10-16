@@ -18,7 +18,7 @@ Optimization defaults follow the paper's Table 6: Adam, lr ``1e-3``, 100 epochs,
 
 Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.graph_energy_transformer.train_anomaly \\
-        --dataset amazon --epochs 100 --batch-size 32 --num-steps 2 --gpu 1
+        --dataset amazon --epochs 100 --batch-size 32 --num-steps 2
 
     # network-free smoke:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.graph_energy_transformer.train_anomaly \\

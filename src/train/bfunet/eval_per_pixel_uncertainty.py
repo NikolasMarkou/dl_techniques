@@ -40,7 +40,7 @@ migration: peak-to-peak width is 1.0 in both the old and the new domain (plan IN
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.eval_per_pixel_uncertainty \\
-        --checkpoint results/20260701_convunext_denoiser/best_model.keras --gpu 1
+        --checkpoint results/20260701_convunext_denoiser/best_model.keras
 
 GPU note: GPU0 is typically busy with live training, so with neither ``--gpu``
 nor an exported ``CUDA_VISIBLE_DEVICES`` this script selects physical GPU1. An

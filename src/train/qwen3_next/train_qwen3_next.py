@@ -17,7 +17,7 @@ Usage::
         --variant tiny --hidden-size 32 --num-layers 1 --num-attention-heads 4 \
         --num-key-value-heads 2 \
         --seq-length 32 --batch-size 2 --epochs 1 --steps-per-epoch 2 \
-        --max-train-samples 5 --max-val-samples 2 --shuffle-shards 1 --gpu 1
+        --max-train-samples 5 --max-val-samples 2 --shuffle-shards 1
 
 This module is an ENTRY POINT and nothing else. The config, the flag
 surface, the packed-CLM pipeline, the optimizer, the model construction, the

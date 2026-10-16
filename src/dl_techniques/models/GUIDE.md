@@ -228,8 +228,14 @@ That silence is the reason they are written down here.
   - stride-2 padding.
 
   A fully transposed relative-position bias in BEiT passed 219 tests.
-- **Classifier heads emit logits** (ConvNeXt V1/V2 and most others), so compile with
-  `from_logits=True`.
+- **Classifier heads emit logits; compile with `from_logits=True`.** This is exact for every
+  model built on the `layers/heads` `ClassificationHead` (ResNet, CBAM, AlexNet, ConvNeXt V1/V2,
+  MobileNet V1-V4, ViT, ViT-HMLP, CliffordNet, BEiT, Swin, FractalNet, FastVLM), for BEiT's own
+  mean-pooling head, for the NLP and VLM class-score heads, and for SqueezeNet V1/V2, which build
+  the paper's `conv10` head themselves (a ReLU sits before the pool, so their logits are never
+  negative). The exceptions are CoShNet and AccUNet (documented softmax or sigmoid outputs,
+  compile with `from_logits=False`), CapsNet (capsule lengths) and RBF-ProtoNet (a normalized RBF
+  output). None of the four uses `layers/heads`.
 - **Initializer instances:**
   - An unseeded Keras initializer instance seeds itself at construction and replays the same draw
     at the same shape. When filling N slices, call `clone_initializer` (`initializers/clone.py`)
@@ -351,3 +357,166 @@ back clean. Quality tracks test depth.
   inputs before using them.
 - **The fix round is the most dangerous commit.** Review a fix as new code: several CRITICALs in
   this repo were introduced by the round that fixed the previous ones.
+
+## 10. Defect patterns from the 2026-10 heads plan
+
+Plan `plans/plan-2026-10-14T062616-81938e81` moved every vision classifier to logits, gave the
+vision-language packages the § 1 factory shape, reviewed `layers/heads` and ran every touched
+trainer. Each pattern below gives the mechanism, how it was detected, the guard or rule that now
+prevents it, and the decision (D-NNN in that plan's `decisions.md`) holding an example. Test files
+named without a directory sit in the directory of the previous path in the same entry.
+
+### 10.1 Heads and outputs
+
+- **A shared head replaced the reference head.** `ClassificationHead` always added two normalized
+  hidden blocks (ResNet and CBAM stopped being GAP + Dense), and a later head replaced the SCUNet,
+  DarkIR and PFT-SR paper tails. *Detected:* counts against torchvision, the paper and hand sums of
+  the official modules. *Guard:* `tests/test_models/test_a_vision_classifier_emits_logits.py`,
+  `tests/test_models/test_darkir/test_the_default_output_is_the_paper_network.py`. *Example:*
+  D-013, D-021. Refines § 1.
+- **Logits and probabilities confused.** `'logits'` and `'probabilities'` held one softmax, so a
+  `from_logits=True` loss applied a second; NanoVLM's sampler fed probabilities to
+  `keras.random.categorical`, which takes logits. *Detected:* reading the head against the NLP
+  head; a sampling-frequency probe. *Guard:* `tests/test_layers/test_heads/test_the_vision_heads_emit_logits.py`,
+  `tests/test_models/test_nano_vlm/test_generate_samples_from_the_logits.py`. *Example:* D-001,
+  D-037. Refines § 5.
+- **Dict outputs break stock tools.** A single-loss `compile` on a dict raised `KeyError` at `fit`
+  (5 trainers), Keras 3.8 `summary()` raised `KeyError: 0` on a one-key dict, and a per-key metric
+  dict was dropped silently. *Detected:* running the trainers. *Guard:* the census above,
+  `tests/test_models/test_beit/test_the_classifier_summary_prints.py`,
+  `tests/test_train/test_clip/test_the_contrastive_bridge_trains_under_stock_fit.py`. *Example:*
+  D-002, D-036, D-099.
+- **A target the output activation cannot reach.** Depth Anything's ReLU head trained on targets in
+  `[-1, 1]`; on average 80% of the valid pixels were negative. *Detected:* the share of target pixels outside the head's range.
+  *Guard:* `tests/test_train/test_depth_anything/test_the_target_and_loss_match_the_reference.py`.
+  *Example:* D-108.
+- **Padding reached pooled outputs.** No VLM head read a mask, and NLP pooling and task attention
+  ran over padding. *Detected:* flooding padded positions and watching real outputs move. *Guard:*
+  `tests/test_layers/test_heads/test_the_vlm_heads_honour_padding_masks.py`,
+  `test_the_nlp_heads_honour_padding_masks.py`, `test_the_nlp_task_attention_ignores_padding.py`.
+  *Example:* D-055, D-063, D-072. Refines § 5.
+- **An attention type takes exactly one layout**, a map or a sequence, so the default
+  `multi_head` raised on every spatial head. *Detected:* a probe of all 35 types at ranks 3 and 4.
+  *Guard:* `tests/test_layers/test_heads/test_a_vision_head_runs_attention_in_its_own_layout.py`,
+  `test_a_vision_head_refuses_an_attention_it_cannot_run.py`. *Example:* D-071, D-089.
+
+### 10.2 Construction, initialization and serialization
+
+- **Built but never applied.** Heads created a norm, dropout or FFN that no `call` ran, some never
+  built (so no weight check saw them); SD3's last block computed a text query and discarded it, as
+  the reference does. *Detected:* a call counter on every sub-layer; a zero-gradient sweep.
+  *Rule:* build only what `call` runs, or refuse the flag. *Guard:*
+  `tests/test_layers/test_heads/test_the_vision_heads_emit_logits.py` (`use_ffn=True` refused),
+  `tests/test_models/test_sd3_mmdit/test_blocks.py`. *Example:* D-020, D-032, D-044. Refines § 2.
+- **Dead knobs, and knobs that never arrive.** Stored and serialized but read by nothing
+  (`head_config_preset`, `bbox_dims` without regression, DPT range knobs, 11 VLM config fields), or
+  never forwarded (model initializers to the head). A default-valued dead knob is still dead.
+  *Detected:* bit-identical outputs across knob values. *Guard:*
+  `tests/test_layers/test_heads/test_a_vision_head_stores_no_argument_it_never_reads.py`,
+  `test_the_vlm_task_config_holds_only_live_fields.py`. *Example:* D-030, D-058, D-074.
+- **Keras 3.8's functional `Model.__init__` drops unknown keywords**, so a deleted argument built
+  silently where a subclassed model raised. *Detected:* `bogus_kw=1` on every functional class.
+  *Guard:* `tests/test_models/test_a_model_refuses_unknown_kwargs.py`. *Example:* D-017, D-077.
+- **Shared initializer instances replay one draw.** One seedless instance across many convs gives
+  each kernel the same draw or its prefix (MobileNet V1-V3: 351 to 1128 pairs; every ConvNeXt
+  block). *Detected:* correlating every kernel pair; an equal-shape check misses prefixes. *Guard:*
+  `tests/test_models/initializer_replay_oracle.py`, used by both
+  `test_no_two_conv_kernels_replay_one_draw.py` files. *Example:* D-014, D-076, D-091. Refines § 5.
+- **Creating a layer shifts later fixed-seed draws.** A `Dropout`, or a weightless pooler that
+  resolved a glorot initializer, takes a Python RNG seed at construction. *Detected:* fixed-seed
+  weight census before and after. *Guard:*
+  `tests/test_layers/test_the_sequence_pooling_draws_a_seed_only_for_a_kernel.py`. *Example:*
+  D-020, D-087. Refines § 7.
+- **`pretrained` ignored, or loaded into an unbuilt model.** `pretrained=True` died on Keras'
+  unknown-keyword error; DiTXA's path route raised for every checkpoint. *Detected:* calling each
+  route. *Guard:* the `pretrained` arm of `tests/test_models/test_package_api_contract.py`,
+  `tests/test_models/test_bit_diffusion/test_a_ditxa_path_loads_every_weight.py`. *Example:*
+  D-033, D-042. Refines § 2.
+- **Serialization gaps.** A list of shapes read as a shape, layers in nested lists, auto-named
+  sub-layers whose paths drift, a config missing the starting temperature. *Detected:* save, load
+  and compare by value. *Guard:* `tests/test_layers/test_heads/test_every_vision_head_survives_a_keras_round_trip.py`,
+  `test_the_matching_temperature_round_trips.py`. *Example:* D-027, D-057, D-065. Refines § 2.
+
+### 10.3 Trainers and entry points
+
+- **Entry points and default paths no test runs.** Trainers died before step one: a tokenizer in
+  `tf.data.map`, `astype` on a symbolic tensor, a stale attribute on a default path the test
+  skipped. *Detected:* running each trainer. *Rule:* test the default path. *Guard:*
+  `tests/test_train/test_cliffordnet/test_the_trainer_entry_point_pretrains_both_towers.py`,
+  `tests/test_train/test_alexnet/test_the_cifar_pipeline_builds_a_batch.py`. *Example:* D-034,
+  D-069, D-098. Refines § 8.
+- **A failed run that exits 0.** A swallowed training error, save, history write, evaluation,
+  analysis, reload check or Ctrl-C ended with the code of a finished run. *Detected:* stubbing each
+  step to raise. *Guard:* `tests/test_train/test_a_failed_trainer_run_does_not_exit_zero.py`
+  (with a census of `except KeyboardInterrupt`),
+  `tests/test_callbacks/test_a_failed_epoch_analysis_fails_the_epoch.py`. *Example:* D-095,
+  D-102, D-111, D-117, D-118.
+- **`--output-dir` ignored, and tests writing into `results/`.** Callbacks went to a second
+  directory; a RED proof created a run under `results/`. *Detected:* the `results/` name set grew.
+  *Guard:* `tests/test_train/test_a_trainer_writes_under_its_output_dir.py`,
+  `tests/test_the_results_session_guard_fails_a_session_that_writes.py`. *Example:* D-048, D-094.
+- **`--gpu` overwrote `CUDA_VISIBLE_DEVICES`.** `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` ran on GPU 0,
+  launchers forwarded an index their child could not resolve, and a `--gpu 1` default cannot fit
+  a one-entry export. *Detected:* the Step 13.5 smokes ran on the RTX 4090. *Rule:*
+  `train/common/gpu.py` is the only writer; `--gpu` counts within an export. *Guard:*
+  `tests/test_train/test_common_setup_gpu_respects_visible_devices.py`,
+  `tests/test_train/test_launchers_select_their_gpu_by_the_d110_rule.py`. *Example:* D-110,
+  D-116, D-118.
+- **`steps_per_epoch` on a finite dataset.** Keras 3.8 keeps one iterator across epochs, so 3
+  batches at 2 steps train 2, 1, 2. *Detected:* counting steps per epoch. *Rule:* repeat the
+  dataset. *Guard:* `test_every_epoch_trains_its_steps_per_epoch_batches` in
+  `tests/test_train/test_clip/test_the_trainer_entry_point_trains_end_to_end.py`. *Example:* D-036.
+- **A measurement that measures nothing.** Depth metrics read 0.0 because a wrapper cut the mask
+  channel; validation crops changed every epoch. *Detected:* exact zeros in the CSV log. *Guard:*
+  `tests/test_train/test_depth_anything/test_the_compiled_depth_metrics_see_valid_pixels.py`.
+  *Example:* D-100, D-109.
+- **One fact in several places.** Three CIFAR-100 statistics pairs, three positive-int
+  validators that refused different values. *Detected:* re-deriving the values. *Guard:*
+  `tests/test_train/test_common_cifar100_statistics_have_one_home.py`,
+  `tests/test_utils/test_the_positive_int_rule_has_one_home.py`. *Example:* D-088, D-112.
+
+### 10.4 Tests and guards
+
+- **Pins that defend the bug.** A golden re-pinned from current code is a self-reference; pins
+  older than a deliberate migration go red for the wrong reason; a pin on a seed-dependent path
+  (SAM 2's occlusion embedding follows the sign of a logit) flips with any init change.
+  *Detected:* re-deriving each pin. *Rule:* pin an external reference or a pristine worktree.
+  *Guard:* `tests/test_models/test_resnet/test_stem_type.py`,
+  `tests/test_models/test_sam2/test_oracle_adoption.py`. *Example:* D-012, D-091. Refines § 8.
+- **BatchNorm at batch 1, and a bias before BatchNorm.** At batch 1 in training mode a head
+  BatchNorm zeroes every feature, so loss and gradients are exactly 0; a bias before BatchNorm
+  never trains. *Detected:* a loss of exactly 0.0; a zero-gradient weight. *Guard:* batch-2
+  subjects in `tests/test_models/precision_arm_subjects.py`,
+  `tests/test_models/test_mobilenet/test_oracle_adoption.py`. *Example:* D-012, D-015.
+- **Blind instruments.** A `-k` filter deselected a red family test, and unbuilt layers hold no
+  weights for a weight probe. *Detected:* an unfiltered run; a call counter. *Rule:* run family
+  files unfiltered and probe `call`. *Guard:* `tests/test_models/test_roundtrip_instrument_family.py`.
+  *Example:* D-025, D-032. Refines § 8.
+- **A review claim refuted.** The head-config aliasing claims were wrong: Keras stores a dict set
+  on a layer as a `TrackedDict` copy. *Detected:* mutating the caller's dict. *Guard:*
+  `tests/test_layers/test_heads/test_the_multi_task_head_builds_every_dispatched_task.py`.
+  *Example:* D-052, D-065. Refines § 9.
+- **Importing a module changed process state.** Two drivers hid every GPU at import, so a pytest
+  run that collected one ran later GPU tests on CPU. *Detected:* a device listing after the import.
+  *Rule:* process-wide changes belong in `main`. *Guard:* the launcher test above. *Example:*
+  D-118. Refines § 4.
+
+### 10.5 Framework and numerics traps
+
+- **cuDNN autotune picks a non-deterministic transposed-conv engine** once another transposed conv
+  has warmed it. *Detected:* bisecting test order, then the cuDNN log. *Guard:*
+  `tests/test_models/test_pft_sr/test_the_forward_is_deterministic_on_a_warm_gpu.py`. *Example:*
+  D-024, D-083. Refines § 3.
+- **XLA recompiles every step when a grouped, dilated `Conv2D` folds its kernel into a constant**
+  (25 s per step against 0.25 s). *Detected:* the entry parameters of the compiled HLO. *Guard:*
+  `tests/test_models/test_darkir/test_the_dilated_branch_compiles_once_under_xla.py`. *Example:*
+  D-096, D-107. Refines § 3.
+- **`sqrt` at an exact zero gives a NaN gradient** while the forward pass stays finite. *Detected:*
+  a NaN loss in a trainer run. *Guard:* `tests/test_models/test_darkir/test_the_fremlp_gradient_is_finite_at_a_zero_bin.py`.
+  *Example:* D-097. Refines § 4.
+- **TF32 breaks float32 homogeneity probes on the GPU.** *Detected:* red on GPU, green on CPU.
+  *Rule:* run the probe on the CPU (`max_homogeneity_relative_error` in
+  `tests/test_models/test_bias_free_denoisers/test_bfconvunext_gabor.py`). *Example:* D-093.
+- **Symmetric fusion in a causal model leaks the future.** *Detected:* a later token moved earlier
+  logits. *Guard:* `tests/test_models/test_nano_vlm/test_the_text_logits_are_causal.py`. *Example:*
+  D-039. Refines § 5.

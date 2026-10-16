@@ -249,17 +249,21 @@ The backbone config must match between the two runs, or the transfer is refused.
 
 Read these before trusting a number from this package.
 
-### 8.1 `--gpu` is INERT — use the shell instead
+### 8.1 `--gpu` counts within `CUDA_VISIBLE_DEVICES`
 
-The `--gpu N` flag on these trainers (and on **every** trainer in this repo) **does nothing**. `src/train/common/gpu.py`'s `setup_gpu()` runs *after* TensorFlow has already been imported and has already initialized the device, so both its `set_memory_growth` call and its `CUDA_VISIBLE_DEVICES` write arrive too late. Ops land on `GPU:0` regardless.
-
-**Use the shell-level environment variable:**
+The trainers call `setup_gpu(config.gpu)` (`src/train/common/gpu.py`) before anything lists a
+device, so `--gpu N` takes effect. When `CUDA_VISIBLE_DEVICES` is exported, `N` indexes into that
+list: `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on physical GPU 1, and `--gpu 1` there raises
+`ValueError`. When the variable is unset, `N` names a physical GPU. Without `--gpu` the environment
+is left alone. Exporting the variable alone remains the simplest way to pick a GPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.energy_transformer.train_masked_completion ...
 ```
 
-This is a **pre-existing, repo-wide defect**, not something introduced here, and it was left unfixed because `gpu.py` is a shared file outside this work's scope. Note also that the CLI-wiring test guards that a flag **reaches** `TrainingConfig` — it does not and cannot guard that the value has any **effect**.
+An earlier version of this section said the flag did nothing, because the variable was written
+after TensorFlow was imported; that was refuted (plan-2026-10-14T062616-81938e81 D-110, guard
+`tests/test_train/test_common_setup_gpu_respects_visible_devices.py`).
 
 ### 8.2 The warm-start is wired and bit-exact, but its BENEFIT is unproven
 

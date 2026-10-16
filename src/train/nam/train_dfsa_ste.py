@@ -29,7 +29,7 @@ Usage:
         --hidden-size 256 --num-tree-layers 3 --num-heads 8 \\
         --max-len 128 --act-steps 4 \\
         --steps 20000 --batch-size 64 --lr 1e-4 \\
-        --curriculum-cap 0.8 --gpu 1
+        --curriculum-cap 0.8
 """
 
 import argparse

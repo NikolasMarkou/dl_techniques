@@ -1294,7 +1294,7 @@ def create_fftnet_with_head(
 
 
 # ---------------------------------------------------------------------
-# Convenience Functions for Backward Compatibility
+# Factories
 # ---------------------------------------------------------------------
 
 def create_fftnet(

@@ -30,7 +30,7 @@ deviation from Table 9, not a silent one.
 
 Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.graph_energy_transformer.train_classification \\
-        --dataset mutag --epochs 300 --batch-size 32 --gpu 1
+        --dataset mutag --epochs 300 --batch-size 32
 
     # fast smoke on real MUTAG (tiny, network-cached):
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.graph_energy_transformer.train_classification \\

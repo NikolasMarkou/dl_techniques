@@ -27,7 +27,7 @@ weight-identical and the transfer complete.
 Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.beit.train_classification \\
         --dataset imagenette --variant tiny --image-size 224 --patch-size 16 \\
-        --epochs 100 --batch-size 32 --gpu 1 \\
+        --epochs 100 --batch-size 32 \\
         --pretrained-encoder results/beit_mim_imagenette_tiny_.../final_model.keras
 """
 

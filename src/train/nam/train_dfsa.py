@@ -16,7 +16,7 @@ Gradient flows end-to-end from the result back to token features.
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \\
-        --steps 5000 --batch-size 64 --lr 1e-4 --gpu 1
+        --steps 5000 --batch-size 64 --lr 1e-4
 
 """
 
@@ -339,7 +339,7 @@ class DifferentiableFSA(keras.Model):
 
     def call(self, token_ids, training=None):
         """
-        Single-step evaluation (backward compatible).
+        Single-step evaluation.
 
         For multi-step evaluation, use ``reduce_step`` in a loop
         with updated token_ids per step.

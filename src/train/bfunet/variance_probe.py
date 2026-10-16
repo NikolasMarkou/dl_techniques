@@ -52,11 +52,11 @@ the production model and data, only the step budget is bounded.
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.variance_probe \\
-        --variant small --patch-size 128 --seeds 5 --steps 1500 --sigma 0.1 --gpu 1
+        --variant small --patch-size 128 --seeds 5 --steps 1500 --sigma 0.1
 
     # Production scale (heavier):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.variance_probe \\
-        --variant base --patch-size 256 --batch-size 4 --seeds 3 --steps 3000 --gpu 1
+        --variant base --patch-size 256 --batch-size 4 --seeds 3 --steps 3000
 """
 
 import os

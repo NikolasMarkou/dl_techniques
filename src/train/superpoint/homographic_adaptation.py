@@ -45,7 +45,7 @@ Usage::
 
     # Fast smoke (seconds on GPU1, fresh model, synthetic images):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg \\
-        python -m train.superpoint.homographic_adaptation --smoke --gpu 1
+        python -m train.superpoint.homographic_adaptation --smoke
 """
 
 import json

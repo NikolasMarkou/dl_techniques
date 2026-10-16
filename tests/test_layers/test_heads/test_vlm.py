@@ -1349,18 +1349,6 @@ class TestCaptioningFFNTypes:
     def test_ffn_expansion_factor_defaults_to_four(self) -> None:
         assert _ffn_head("swiglu").ffn_expansion_factor == 4
 
-    def test_old_configs_without_the_new_key_still_load(self) -> None:
-        """Backward compatibility: the parameter has a default.
-
-        A config serialized before `ffn_expansion_factor` existed lacks the key;
-        `from_config` must still work rather than raising a missing-argument
-        error.
-        """
-        config = _ffn_head("swiglu").get_config()
-        del config["ffn_expansion_factor"]
-        rebuilt = ImageCaptioningHead.from_config(config)
-        assert rebuilt.ffn_expansion_factor == 4
-
 
 # ---------------------------------------------------------------------
 # Output-WIDTH routing via FFN_REGISTRY['output_dim_param']

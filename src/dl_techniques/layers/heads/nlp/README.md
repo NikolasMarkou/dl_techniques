@@ -87,7 +87,7 @@ is nothing to mask).
 ### 3.1. Sequence Classification
 *   **Task Types**: `TEXT_CLASSIFICATION`, `SENTIMENT_ANALYSIS`, `EMOTION_DETECTION`, `INTENT_CLASSIFICATION`, `TOPIC_CLASSIFICATION`, `SPAM_DETECTION`, `NATURAL_LANGUAGE_INFERENCE`, and the regression types `TEXT_REGRESSION`, `READABILITY_SCORING`, `QUALITY_SCORING` (set `num_classes=1` and read `logits`; `probabilities` of one class is constantly 1).
 *   **Supported Inputs**: `[B, Seq, Dim]` (will be pooled) or `[B, Dim]` (already pooled). With `use_pooling=False` only the pooled form is accepted.
-*   **Outputs**: `logits` `[B, NumClasses]`, `probabilities` `[B, NumClasses]`.
+*   **Outputs**: `logits` `[B, NumClasses]` (pre-softmax: compile a loss on them with `from_logits=True`), `probabilities` `[B, NumClasses]` (`softmax(logits)`).
 *   **Key Config**: Requires `num_classes` in `NLPTaskConfig` (every task type above; the config refuses one without it).
 *   **No task attention**: the features are pooled to rank 2 before any stage runs, so `use_task_attention=True` raises `ValueError`.
 
@@ -254,3 +254,6 @@ all its fields, and is rebuilt by Keras' own `from_config` (the heads accept tha
 variant round-trips through `.keras` by value
 (`tests/test_layers/test_heads/test_every_nlp_head_survives_a_keras_round_trip.py`). Editing an
 `NLPTaskConfig` after building a head changes neither the head nor its config: heads copy it.
+Archives of NLP heads saved before 2026-10-15 store `loss_weight`, `label_smoothing` and
+`use_attention_pooling` in their `task_config`, which this version refuses with `TypeError`; they
+do not load and are not supported.

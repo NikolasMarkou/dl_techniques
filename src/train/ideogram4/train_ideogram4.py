@@ -27,7 +27,7 @@ Run::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg \
         .venv/bin/python -m train.ideogram4.train_ideogram4 \
-        --variant tiny --epochs 3 --steps-per-epoch 8 --batch-size 4 --gpu 1
+        --variant tiny --epochs 3 --steps-per-epoch 8 --batch-size 4
 """
 
 from __future__ import annotations

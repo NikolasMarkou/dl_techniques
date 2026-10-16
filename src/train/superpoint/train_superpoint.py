@@ -64,7 +64,7 @@ Usage::
 
     # Fast smoke (seconds on GPU1):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg \\
-        python -m train.superpoint.train_superpoint --smoke --gpu 1
+        python -m train.superpoint.train_superpoint --smoke
 """
 
 import time

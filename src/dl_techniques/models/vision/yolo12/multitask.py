@@ -224,7 +224,7 @@ class YOLOv12MultiTask(keras.Model):
         self.num_classification_classes = num_classification_classes if num_classification_classes is not None else num_classes
 
         # Store configuration for serialization
-        self.num_classes = num_classes  # Keep for backward compatibility
+        self.num_classes = num_classes  # serialized: the default of the three counts above
         self.input_shape_config = input_shape
         self.scale = scale
         self.reg_max = reg_max

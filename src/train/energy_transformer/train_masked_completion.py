@@ -17,7 +17,7 @@ with ``loss_weight = 1{i in S} * (N / n_loss)``, so that a stock
 Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.energy_transformer.train_masked_completion \\
         --dataset imagenette --variant tiny --image-size 224 --patch-size 16 \\
-        --epochs 100 --batch-size 32 --gpu 1
+        --epochs 100 --batch-size 32
 """
 
 import gc

@@ -87,7 +87,7 @@ Caveats (read before comparing):
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser \\
-        --variant base --epochs 100 --batch-size 16 --patch-size 256 --gpu 1
+        --variant base --epochs 100 --batch-size 16 --patch-size 256
 
     # Quick mechanism check (tiny, 2 epochs):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser --smoke

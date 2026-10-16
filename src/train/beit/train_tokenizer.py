@@ -33,7 +33,7 @@ trainer uses stock ``compile()`` + ``fit()`` and monitors ``val_loss``.
 Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.beit.train_tokenizer \\
         --dataset imagenette --image-size 224 --downsample-factor 16 \\
-        --num-embeddings 8192 --epochs 50 --batch-size 32 --gpu 1
+        --num-embeddings 8192 --epochs 50 --batch-size 32
 """
 
 import gc

@@ -234,7 +234,7 @@ Both write `results/<experiment>/{config.json, best_model.keras, training_log.cs
 
 ## 9. Known limitations
 
-* **`--gpu N` is INERT — use the shell.** As with every trainer in this repo, `setup_gpu()` runs after TF has initialized the device, so the flag arrives too late. Always prefix `CUDA_VISIBLE_DEVICES=1`. The CLI-wiring test guards that a flag *reaches* `TrainingConfig`, not that it has an *effect*.
+* **`--gpu N` counts within `CUDA_VISIBLE_DEVICES`.** The trainers call `setup_gpu(config.gpu)` before anything lists a device, so the flag takes effect: with the variable exported, `N` indexes into it (`CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on physical GPU 1; `--gpu 1` there raises `ValueError`); unset, `N` names a physical GPU. Without `--gpu` the environment is left alone, so exporting `CUDA_VISIBLE_DEVICES=1` alone also works. An earlier note here said the flag did nothing; that was refuted (plan-2026-10-14T062616-81938e81 D-110, guard `tests/test_train/test_common_setup_gpu_respects_visible_devices.py`).
 * **eq.-25 weighted adjacency is opt-in, not benchmarked** — available via `use_weighted_adjacency=True` (§3.2, Branch A: gradient oracle-verified, default-off byte-identical). The default is still the binary C-lite path. Matching the paper's reported variant-C accuracy on the TUDatasets is a separate, un-run campaign.
 * **Variant B needs bounded subgraphs.** A full dense `N×N` over the whole Amazon (~12k) / YelpChi (~45k) graph is infeasible and would OOM; B always trains on size-capped k-hop subgraphs, never a single dense adjacency.
 * **Gradient centralization omitted** (§7) — the one Table-9 optimizer knob not reproduced.

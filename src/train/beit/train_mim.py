@@ -29,7 +29,7 @@ Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.beit.train_mim \\
         --dataset imagenette --variant tiny --image-size 224 --patch-size 16 \\
         --tokenizer-checkpoint results/beit_tokenizer_.../final_model.keras \\
-        --epochs 100 --batch-size 32 --gpu 1
+        --epochs 100 --batch-size 32
 """
 
 import gc

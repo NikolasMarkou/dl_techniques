@@ -19,6 +19,11 @@ takes `pretrained=False` and raises `NotImplementedError` for any truthy value, 
 path included. A model saved with `model.save(path)` is restored whole with
 `keras.models.load_model(path)`.
 
+**The final MMDiT block builds no text query.** Its text output is discarded, so its
+`add_q_proj` and `norm_added_q` are not built (diffusers builds and never trains them);
+the image output is unchanged (`PORT_NOTES.md` §4.9). An `SD3MMDiT` archive saved before
+2026-10-15 holds three weights this layout does not have and is not supported.
+
 ## Public API
 
 ```python
