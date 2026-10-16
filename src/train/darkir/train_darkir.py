@@ -355,6 +355,7 @@ def train_model(args: argparse.Namespace):
     callbacks, results_dir = create_callbacks(
         model_name=f"darkir_{args.variant}",
         results_dir_prefix="darkir",
+        output_root=args.output_dir,
         monitor=monitor,
         patience=args.patience,
         use_lr_schedule=True,
@@ -418,6 +419,8 @@ def main():
                              'the ground truth downsampled to bottleneck resolution.')
     parser.add_argument('--side-loss-weight', type=float, default=0.2,
                         help='Weight of the bottleneck side loss (only used with --side-loss)')
+    parser.add_argument('--output-dir', type=str, default='results',
+                        help='Directory under which the timestamped run directory is created')
 
     # Override base defaults for restoration task
     parser.set_defaults(
@@ -434,6 +437,7 @@ def main():
         logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":

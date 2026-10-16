@@ -30,7 +30,6 @@ from train.common import (
     setup_gpu,
     create_base_argument_parser,
     load_dataset,
-    get_class_names,
     create_callbacks,
     validate_model_loading,
     run_model_analysis,
@@ -509,6 +508,7 @@ def train_model(args) -> None:
     callbacks, results_dir = create_callbacks(
         model_name=f"{args.variant}_{args.dataset}",
         results_dir_prefix="cliffordnet",
+        output_root=args.output_dir,
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
@@ -662,6 +662,11 @@ def main() -> None:
 
     # Warmup
     parser.add_argument('--warmup-epochs', type=int, default=5, dest='warmup_epochs')
+
+    # Output
+    parser.add_argument('--output-dir', type=str, default='results', dest='output_dir',
+                        help='Directory under which the timestamped run directory '
+                             'is created (default: results).')
 
     # Override defaults from base parser to match the reference recipe
     parser.set_defaults(

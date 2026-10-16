@@ -540,15 +540,10 @@ def train_one_variant(
     )
 
     # ---- Callbacks ----
-    # Note: create_callbacks() unconditionally prepends "results/" to the
-    # prefix.  We pass a prefix relative to "results/" so all per-variant
-    # directories nest under the single per-run root we created earlier.
-    relative_prefix = os.path.relpath(
-        os.path.join(run_root, variant_name), start="results"
-    )
+    # Every per-variant directory nests under the single per-run root.
     callbacks, results_dir = create_callbacks(
         model_name="downsampling",
-        results_dir_prefix=relative_prefix,
+        run_dir=os.path.join(run_root, variant_name),
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
@@ -700,7 +695,7 @@ def train_all_variants(args: argparse.Namespace) -> None:
     # GPU setup is performed in main() before TF allocates devices.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root = os.path.join(
-        "results", f"cliffordnet_downsampling_{timestamp}"
+        args.output_dir, f"cliffordnet_downsampling_{timestamp}"
     )
     os.makedirs(run_root, exist_ok=True)
     logger.info(f"Run root: {run_root}")
@@ -721,6 +716,7 @@ def train_all_variants(args: argparse.Namespace) -> None:
         variant_names = [args.variant]
 
     rows: List[Dict[str, Any]] = []
+    failed: List[str] = []
     for variant_name in variant_names:
         try:
             row = train_one_variant(
@@ -734,11 +730,14 @@ def train_all_variants(args: argparse.Namespace) -> None:
             )
             if row is not None:
                 rows.append(row)
+            else:
+                failed.append(variant_name)
         except Exception as exc:
             logger.error(
                 f"Unhandled error in variant {variant_name}: {exc}",
                 exc_info=True,
             )
+            failed.append(variant_name)
             continue
 
         # Persist after every variant (so a mid-run crash still yields data)
@@ -755,6 +754,16 @@ def train_all_variants(args: argparse.Namespace) -> None:
                 f"params={r['parameters']:>9,d} "
                 f"wall={r['wall_seconds'] / 60:>5.1f} min"
             )
+    # DECISION plan-2026-10-14T062616-81938e81/D-095
+    # A failed variant is logged and the sweep goes on (do NOT re-raise
+    # inside the loop: the other variants still train and are written), but
+    # do NOT drop this raise either: without it a sweep whose every variant
+    # failed exits 0.
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(variant_names)} variant(s) failed: "
+            f"{', '.join(failed)} (see the log above)"
+        )
 
 
 # ---------------------------------------------------------------------
@@ -799,6 +808,10 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--skip-save", action="store_true",
                         dest="skip_save",
                         help="Skip model.save and round-trip check.")
+    parser.add_argument("--output-dir", type=str, default="results",
+                        dest="output_dir",
+                        help="Directory under which the timestamped run root "
+                             "is created (default: results).")
     return parser.parse_args(argv)
 
 

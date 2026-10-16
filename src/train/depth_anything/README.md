@@ -60,9 +60,12 @@ on this machine.
   (locally-defined `DepthEstimationLoss`). The model's final projection ends in a
   ReLU, as in the reference Depth Anything head, so every prediction the loss sees
   is non-negative (no upper bound).
-- Wraps the five depth metrics from `dl_techniques.metrics.depth_metrics`
-  with a small `_DepthOnlyMetricWrapper` so they ignore the mask channel
-  produced by `MegaDepthDataset`.
+- Compiles the five depth metrics from `dl_techniques.metrics.depth_metrics`
+  (`build_depth_metrics`). They take `MegaDepthDataset`'s two-channel
+  `y_true = concat([depth, mask], -1)` whole and mask invalid pixels themselves.
+  Until 2026-10-16 a `_DepthOnlyMetricWrapper` sliced the mask channel off
+  first, which left no valid pixel: every metric column of every run since the
+  trainer was added (b9dccdcea, 2026-05-10) reads 0.0.
 - Adds `DepthMetricsCurveCallback` and `DepthPredictionGridCallback` from
   `dl_techniques.callbacks.depth_visualization` for periodic visualization.
 - Uses `train.common.create_callbacks(...)` for EarlyStopping +
@@ -177,8 +180,8 @@ comes from the former CliffordNet depth trainer, from which it differs in:
 
 - Single-output model (no deep supervision), so no `_MultiScaleDataset` or
   `DeepSupervisionWeightScheduler`.
-- Metrics are wrapped with `_DepthOnlyMetricWrapper` because MegaDepth's
-  `y_true = concat([depth, mask], -1)` shape is two-channel.
+- Metrics take MegaDepth's two-channel `y_true = concat([depth, mask], -1)`
+  directly; the depth metrics read the mask channel themselves.
 - `init_from` skips the decoder by `model.decoder.name` (`depth_estimation_head`), not by the
   `head_` prefix CliffordNet used. It skipped the literal `dpt_decoder` until 2026-10-15, a name
   no layer carried, so the decoder was transferred as well.

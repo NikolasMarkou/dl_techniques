@@ -155,6 +155,7 @@ def train_model(args) -> None:
     callbacks, results_dir = create_callbacks(
         model_name=model_name,
         results_dir_prefix=f"mobilenet{version}",
+        output_root=args.output_dir,
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
@@ -206,6 +207,11 @@ def main():
     parser.add_argument(
         "--variant", type=str, default=None,
         help="Model variant (version-specific, default: version default)",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default="results",
+        help="Directory under which the timestamped run directory is created "
+             "(default: results)",
     )
 
     args = parser.parse_args()

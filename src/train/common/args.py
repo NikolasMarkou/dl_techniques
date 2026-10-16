@@ -344,6 +344,10 @@ def create_base_argument_parser(
                         help='GPU device index to use (default: all GPUs)')
 
     # Output
+    # DECISION plan-2026-10-14T062616-81938e81/D-094
+    # Do NOT add `--output-dir` here: several callers declare their own
+    # (argparse would raise a conflict) and others never read one (the flag
+    # would be accepted and ignored). Each trainer that reads it declares it.
     parser.add_argument('--show-plots', action='store_true', default=False,
                         help='Show plots interactively')
 

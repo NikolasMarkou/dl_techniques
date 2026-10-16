@@ -293,9 +293,14 @@ def create_callbacks(
     :raises ValueError: if the deep-supervision scheduler is requested without
         its loss-weight variables.
     """
+    # The run directory ``prepare_run_dir(config)`` created: the checkpoint,
+    # the CSV and the analyzer output land beside the config and the history
+    # instead of in a second, timestamped directory under ``results/``.
+    run_dir = Path(config.output_dir) / config.experiment_name
     callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name or config.model_variant,
         results_dir_prefix="resnet",
+        run_dir=str(run_dir),
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
@@ -305,7 +310,7 @@ def create_callbacks(
         callbacks.append(
             DeepSupervisionWeightScheduler(config, num_outputs, loss_weight_vars)
         )
-    viz_dir = Path(config.output_dir) / config.experiment_name / "training_metrics"
+    viz_dir = run_dir / "training_metrics"
     callbacks.append(EpochMetricsPlotCallback(
         str(viz_dir),
         PLOTTED_METRIC_NAMES,

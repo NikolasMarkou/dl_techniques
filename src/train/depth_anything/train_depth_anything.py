@@ -254,42 +254,31 @@ class DepthEstimationLoss(keras.losses.Loss):
 
 
 # ---------------------------------------------------------------------
-# DEPTH-ONLY METRIC WRAPPERS
+# DEPTH METRICS
 # ---------------------------------------------------------------------
-#
-# MegaDepthDataset yields ``y_true = concat([depth, mask], axis=-1)`` (last-axis
-# size 2) but ``dl_techniques.metrics.depth_metrics`` expect ``y_true`` to be a
-# single-channel depth tensor.  Wrap each metric so it slices off the mask
-# channel before calling the underlying ``update_state``.
 
 
-class _DepthOnlyMetricWrapper(keras.metrics.Metric):
-    """Slices ``y_true[..., :1]`` and forwards to a wrapped depth metric."""
+def build_depth_metrics() -> List[keras.metrics.Metric]:
+    """The five depth metrics the trainer compiles, under their history keys.
 
-    def __init__(self, inner: keras.metrics.Metric, name: Optional[str] = None, **kwargs):
-        super().__init__(name=name or inner.name, **kwargs)
-        self._inner = inner
+    Interface contract: returns fresh metric objects named ``abs_rel``,
+    ``sq_rel``, ``rmse``, ``rmse_log`` and ``delta_1.25``. Each takes the
+    two-channel ``y_true = concat([depth, mask], -1)`` that ``MegaDepthDataset``
+    yields and masks invalid pixels itself, so ``y_true`` is passed whole.
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        depth_true = y_true[..., :1]
-        mask = y_true[..., 1:]
-        # Mask invalid pixels into a sample_weight tensor for the inner metric.
-        if sample_weight is None:
-            sample_weight = mask
-        else:
-            sample_weight = sample_weight * mask
-        return self._inner.update_state(depth_true, y_pred, sample_weight)
-
-    def result(self):
-        return self._inner.result()
-
-    def reset_state(self):
-        self._inner.reset_state()
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"inner": keras.metrics.serialize(self._inner)})
-        return config
+    :return: The metric list for ``model.compile``.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-100
+    # Do NOT slice the mask channel off before these metrics (the old
+    # `_DepthOnlyMetricWrapper`): they read the mask from `y_true[..., 1:]`, so
+    # a depth-only `y_true` leaves no valid pixel and every metric reads 0.0.
+    return [
+        AbsRelMetric(name="abs_rel"),
+        SqRelMetric(name="sq_rel"),
+        RMSEMetric(name="rmse"),
+        RMSELogMetric(name="rmse_log"),
+        DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
+    ]
 
 
 # ---------------------------------------------------------------------
@@ -331,6 +320,7 @@ def create_callbacks(
     common_callbacks, results_dir = create_common_callbacks(
         model_name=config.encoder_type,
         results_dir_prefix="depth_anything",
+        run_dir=str(Path(config.output_dir) / config.experiment_name),
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
@@ -338,9 +328,6 @@ def create_callbacks(
         include_terminate_on_nan=True,
         include_analyzer=False,
     )
-
-    config.output_dir = str(Path(results_dir).parent)
-    config.experiment_name = Path(results_dir).name
 
     viz_dir = str(Path(results_dir) / "visualization_plots")
 
@@ -532,21 +519,10 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
         lr_schedule,
     )
 
-    metrics = [
-        _DepthOnlyMetricWrapper(AbsRelMetric(), name="abs_rel"),
-        _DepthOnlyMetricWrapper(SqRelMetric(),  name="sq_rel"),
-        _DepthOnlyMetricWrapper(RMSEMetric(),   name="rmse"),
-        _DepthOnlyMetricWrapper(RMSELogMetric(), name="rmse_log"),
-        _DepthOnlyMetricWrapper(
-            DeltaThresholdMetric(threshold=1.25),
-            name="delta_1.25",
-        ),
-    ]
-
     model.compile(
         optimizer=optimizer,
         loss=DepthEstimationLoss(gradient_weight=0.5, n_scales=4),
-        metrics=metrics,
+        metrics=build_depth_metrics(),
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
