@@ -24,6 +24,12 @@ training, a resize to 227 / 0.875 = 259 then centre crop for validation, and
 the ImageNet mean/std. CIFAR-10 and CIFAR-100 are each normalised with their own
 training-set statistics.
 
+One weights + spectral analysis of the trained model runs after training, into
+``model_analysis/`` (``train.common.run_summary.run_data_free_analysis``); a failed
+analysis fails the run. ``--epoch-analysis-every N`` adds the same analysis every N
+epochs; it is off by default because on this model each one costs about 300 s
+against an Imagenette epoch of about 8 s.
+
 Note the input size. AlexNet was defined at 227x227, and the port's default is
 227. CIFAR's native 32x32 is upsampled to ``--image-size``; at 32 the feature map
 would collapse (the model's minimum spatial extent is 55 and it refuses anything
@@ -56,6 +62,7 @@ import sys
 import argparse
 import tensorflow as tf
 import keras
+import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
@@ -77,6 +84,7 @@ from train.common.run_io import (
     prepare_run_dir,
     save_training_history_json,
 )
+from train.common.run_summary import run_data_free_analysis
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -138,6 +146,11 @@ class TrainingConfig:
 
     # Callbacks / logging
     monitor_every_n_epochs: int = 5
+    #: Run the weights + spectral analysis every N epochs during training; 0
+    #: (the default) never does. One analysis of the trained model always runs
+    #: at the end. Per epoch it cost 296 to 305 s against 7.5 s of training and
+    #: validation on Imagenette at 227 px (RTX 4070; D-114).
+    epoch_analysis_every: int = 0
     early_stopping_patience: int = 90  # the paper trains all 90; do not stop early
     output_dir: str = "results"
     experiment_name: Optional[str] = None
@@ -295,6 +308,12 @@ def create_callbacks(
         monitor="val_accuracy",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
+        # DECISION plan-2026-10-14T062616-81938e81/D-114
+        # Do NOT restore the shared default (include_analyzer=True, every
+        # epoch): on AlexNet it cost ~300 s per 7.5 s epoch. One analysis runs
+        # after fit (run_data_free_analysis); per-epoch is opt-in.
+        include_analyzer=config.epoch_analysis_every > 0,
+        analyzer_epoch_frequency=max(1, config.epoch_analysis_every),
     )
     callbacks.append(EpochMetricsPlotCallback(
         str(Path(results_dir) / "training_metrics"),
@@ -456,6 +475,18 @@ def train_alexnet(
 
     save_training_history_json(history, results_dir)
 
+    # One weights + spectral analysis of the trained model (the best epoch's
+    # weights, restored by EarlyStopping), in <run_dir>/model_analysis/. The
+    # helper never raises; a run whose analysis did not land fails here
+    # (D-102 / D-105 rule).
+    sample, labels = next(iter(val_ds))
+    analysis = run_data_free_analysis(
+        model, np.asarray(sample), np.asarray(labels), history,
+        config.experiment_name, Path(results_dir))
+    if analysis["status"] != "ok":
+        raise RuntimeError(
+            f"model analysis {analysis['status']}: {analysis['error']}")
+
     best_val_acc = float(max(history.history.get("val_accuracy", [0.0])))
     return {
         "model": model,
@@ -542,6 +573,10 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--monitor-every", type=int, default=5)
+    parser.add_argument("--epoch-analysis-every", type=int, default=0,
+                        help="Weights + spectral analysis every N epochs during "
+                             "training (0: never; one analysis always runs at "
+                             "the end, into model_analysis/)")
     parser.add_argument("--early-stopping-patience", type=int, default=90)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     parser.add_argument("--success-threshold", type=float, default=None,
@@ -586,6 +621,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
         momentum=args.momentum,
         monitor_every_n_epochs=args.monitor_every,
+        epoch_analysis_every=args.epoch_analysis_every,
         early_stopping_patience=args.early_stopping_patience,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,

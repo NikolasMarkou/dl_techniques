@@ -52,6 +52,17 @@ MPLBACKEND=Agg .venv/bin/python -m train.alexnet.train_alexnet \
 CIFAR-10 and CIFAR-100 are each normalised with their own training-set mean/std
 (`CIFAR10_MEAN`/`STD`, `CIFAR100_MEAN`/`STD` in `train/common/datasets.py`).
 
+## Model analysis
+
+After training, one weights + spectral analysis of the trained model (the best
+epoch's weights) is written to `model_analysis/` by the shared
+`train.common.run_summary.run_data_free_analysis`; if it does not land, the run
+fails. `--epoch-analysis-every N` also runs it every N epochs into
+`epoch_analysis/`; the default 0 never does. Measured on the RTX 4070 at 227 px
+with batch 128: an Imagenette epoch takes 9 to 10 s, the per-epoch analysis 296
+to 305 s, and the one end-of-run analysis 398 s (plan-2026-10-14T062616-81938e81
+D-114).
+
 ## The default recipe
 
 90 epochs, SGD momentum 0.9, LR 0.1 divided by 10 every 30 epochs, weight decay
