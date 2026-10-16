@@ -107,6 +107,11 @@ PoolingStrategy = Literal[
 
 AggregationMethod = Literal['concat', 'add', 'multiply', 'weighted_sum']
 
+#: The strategies whose sub-layer reads ``kernel_initializer``
+#: (``AttentionPooling``). ``'weighted'`` and the ``weighted_sum`` aggregation
+#: weights initialise at ``'ones'``; every other strategy owns no weight.
+_KERNEL_STRATEGIES = frozenset({'attention', 'multi_head_attention'})
+
 # ---------------------------------------------------------------------
 # Main Configurable Pooling Layer
 # ---------------------------------------------------------------------
@@ -234,7 +239,17 @@ class SequencePooling(keras.layers.Layer):
         self.top_k = top_k
         self.temperature = temperature
         self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # DECISION plan-2026-10-14T062616-81938e81/D-087: resolve the kernel
+        # initializer only when a strategy reads it. A seedless Keras random
+        # initializer takes a seed from the global Python RNG when it is
+        # created, so resolving the 'glorot_uniform' default for a weightless
+        # 'mean' pooler shifted every fixed-seed draw after it (the VLM heads
+        # passed kernel_initializer='zeros' to dodge it). Do not resolve it
+        # unconditionally again; get_config serializes either form.
+        if _KERNEL_STRATEGIES.intersection(self.strategy):
+            self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        else:
+            self.kernel_initializer = kernel_initializer
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
         self.bias_regularizer = keras.regularizers.get(bias_regularizer) if bias_regularizer else None
@@ -874,7 +889,10 @@ class SequencePooling(keras.layers.Layer):
             'top_k': self.top_k,
             'temperature': self.temperature,
             'use_bias': self.use_bias,
-            'kernel_initializer':keras.initializers.serialize(self.kernel_initializer),
+            'kernel_initializer':(
+                keras.initializers.serialize(self.kernel_initializer)
+                if isinstance(self.kernel_initializer, keras.initializers.Initializer)
+                else self.kernel_initializer),
             'bias_initializer':keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer':keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer':keras.regularizers.serialize(self.bias_regularizer),

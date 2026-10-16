@@ -306,6 +306,8 @@ def test_a_mask_pooler_draws_no_random_seed_and_owns_no_weight() -> None:
     initial weights of every VQA, grounding and matching head. The census in
     the step scratchpad compared every head's weights and outputs at a fixed
     seed against ``8b4182f9d``: bit-identical with ``kernel_initializer='zeros'``.
+    Since D-087 the layer itself skips the draw for a weightless strategy and
+    the helper passes no initializer; the census is bit-identical again.
     """
     import random
 

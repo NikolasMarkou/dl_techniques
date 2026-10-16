@@ -269,15 +269,11 @@ def _weightless_pooling(strategy: str, name: str) -> SequencePooling:
     sites): ``strategy`` is ``'mean'`` or ``'max'``, the layer owns no weight,
     and constructing it consumes no random draw.
 
-    # DECISION plan-2026-10-14T062616-81938e81/D-055
-    Pass ``kernel_initializer='zeros'``. Do NOT drop it as a no-op: the mean
-    and max strategies read no initializer, but ``SequencePooling.__init__``
-    resolves its ``'glorot_uniform'`` default, and a seedless Keras random
-    initializer takes a seed from the global Python RNG when it is created.
-    Measured: that one draw moved the fixed-seed initial weights of every VQA,
-    grounding and matching head (and every multi-task head after them).
-    ``'zeros'`` draws nothing, so a fixed seed builds the same weights as
-    before masks existed. See decisions.md D-055.
+    ``SequencePooling`` resolves ``kernel_initializer`` only for the
+    strategies that own a kernel (D-087), so a ``'mean'``/``'max'`` pooler
+    takes no seed from the global Python RNG and a fixed seed builds the same
+    weights as before masks existed (D-055). The ``kernel_initializer='zeros'``
+    this helper used to pass to dodge that draw is gone with the defect.
 
     :param strategy: ``'mean'`` or ``'max'``.
     :type strategy: str
@@ -286,7 +282,7 @@ def _weightless_pooling(strategy: str, name: str) -> SequencePooling:
     :return: The pooling layer.
     :rtype: SequencePooling
     """
-    return SequencePooling(strategy=strategy, kernel_initializer="zeros", name=name)
+    return SequencePooling(strategy=strategy, name=name)
 
 
 def _pool_sequence(

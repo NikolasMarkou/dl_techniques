@@ -163,8 +163,9 @@ this package merge) still resolve.
 - **VLM padding masks.** A VLM head reads optional `vision_mask` / `text_mask` /
   `question_mask` keys (`(batch, length)`, 1 = real) next to the features they describe, and
   every pooling and attention over a sequence honours them. The means and the max go through
-  `SequencePooling`, built with `kernel_initializer='zeros'` so it draws no random seed
-  (D-055); no mask means bit-identical outputs and fixed-seed weights to the pre-mask heads.
+  `SequencePooling`, which resolves a kernel initializer only for a strategy that owns a
+  kernel, so a mean/max pooler draws no random seed (D-055, D-087); no mask means
+  bit-identical outputs and fixed-seed weights to the pre-mask heads.
   Pinned by `test_the_vlm_heads_honour_padding_masks.py`.
 - **`VLMTaskConfig` holds only read fields.** Six fields; a head refuses a set `vocab_size`
   (captioning only) or `num_classes` (VQA only) it does not read, and `__post_init__` fills in
