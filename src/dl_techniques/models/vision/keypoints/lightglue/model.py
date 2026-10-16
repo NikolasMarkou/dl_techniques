@@ -83,8 +83,8 @@ def normalize_keypoints(keypoints: Any, image_size: Any, dtype: Optional[str] = 
         result.
     :return: ``(B, N, 2)`` in the work dtype (float32 or float64).
     """
-    names = [keras.backend.standardize_dtype(getattr(t, "dtype", "float32"))
-             for t in (keypoints, image_size)]
+    names = [getattr(d, "name", None) or str(d)
+             for d in (getattr(t, "dtype", "float32") for t in (keypoints, image_size))]
     names.append(dtype or "float32")
     work = "float64" if "float64" in names else "float32"
     kpts = keras.ops.cast(keypoints, work)

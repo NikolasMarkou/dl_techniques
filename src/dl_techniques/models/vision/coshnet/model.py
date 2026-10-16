@@ -80,6 +80,7 @@ from dl_techniques.layers.complex.complex_global_average_pooling2d import (
     ComplexGlobalAveragePooling2D,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 
@@ -424,6 +425,7 @@ class CoShNet(keras.Model):
         :raises ValueError: If any configuration value is invalid.
         """
 
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Set default input shape if not provided
         if input_shape is None:
             input_shape = (32, 32, 3)

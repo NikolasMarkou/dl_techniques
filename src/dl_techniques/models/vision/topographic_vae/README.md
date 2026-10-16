@@ -75,10 +75,16 @@ figure it draws.
 ## 3. Quick start
 
 ```python
+import keras
 import numpy as np
+from dl_techniques.losses.topographic_vae_loss import TopographicVAELoss
 from dl_techniques.models.vision.topographic_vae import create_topographic_vae
 
 model = create_topographic_vae("mnist", coherence_window=6, neighborhood_size=3)
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+    loss=TopographicVAELoss(kl_loss_weight=1.0),
+)
 
 sequences = np.random.random((8, 18, 28, 28, 3)).astype("float32")
 model.fit(sequences, sequences, epochs=10, batch_size=4)
@@ -91,11 +97,13 @@ outputs["t"].shape                   # (8, 18, 324) — 18 capsules of 18
 traversal = model.traverse_capsules(outputs["t"][:, 0], num_steps=18)
 ```
 
-Two construction surfaces, both binding `create_topographic_vae`:
+Two construction surfaces, one model: `create_topographic_vae(variant, pretrained=False, **kwargs)`
+delegates to `TopographicVAE.from_variant` and adds nothing. Both return an UNCOMPILED model; the
+caller compiles it with `TopographicVAELoss` and the optimizer of its choice.
 
 ```python
-model = TopographicVAE.from_variant("dsprites", coherence_window=5)   # uncompiled
-model = create_topographic_vae("dsprites")                             # compiled with the ELBO
+model = TopographicVAE.from_variant("dsprites", coherence_window=5)
+model = create_topographic_vae("dsprites", coherence_window=5)          # the same model
 ```
 
 `pretrained=True` raises `NotImplementedError` rather than returning random weights; there

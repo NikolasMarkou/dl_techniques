@@ -80,6 +80,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -578,6 +579,7 @@ class DINOv1(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs
     ):
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Validate inputs
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")

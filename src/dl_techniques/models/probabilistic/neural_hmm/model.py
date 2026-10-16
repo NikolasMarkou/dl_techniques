@@ -513,7 +513,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         obs = keras.ops.cast(inputs["obs"], "int32")
         in_range = keras.ops.logical_and(obs >= 0, obs < self.vocab_size)
         bad = keras.ops.logical_and(mask > 0, keras.ops.logical_not(in_range))
-        sentinel = keras.ops.full_like(mask, mask_sentinel(keras.backend.standardize_dtype(mask.dtype)))
+        sentinel = keras.ops.full_like(mask, mask_sentinel(mask.dtype))
         return keras.ops.sum(keras.ops.where(bad, sentinel, keras.ops.zeros_like(mask)), axis=1)
 
     def _sequence_log_likelihood(

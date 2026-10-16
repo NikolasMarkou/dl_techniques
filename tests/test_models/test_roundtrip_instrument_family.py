@@ -191,6 +191,12 @@ NO_HEAD_MARKERS = {
     "tree_transformer": "task_head/",
     "wave_field": "task_head/",
     "zamba2": "task_head/",
+    # plan-2026-10-14T062616-81938e81 step 12 Part C (D-079): AlexNet's
+    # fc6-fc8 stack is the shared ClassificationHead, DeepSORT's top is its
+    # cosine classifier, RADConvNet's is a ConvNeXt-style LayerNorm + Dense.
+    "alexnet": "classification_head/",
+    "deepsort": "cosine_head/",
+    "rad_convnet": "classifier/",
 }
 
 
@@ -336,7 +342,12 @@ def test_every_model_package_has_a_roundtrip_subject():
     # entry -- which is why that table's own count assertion above is
     # unchanged at 9. Both numbers are re-derived, never incremented from the
     # one written here.
-    assert len(on_disk) == 89, f"expected 89 packages, found {len(on_disk)}"
+    #
+    # 107 as of 2026-10-16 (plan-2026-10-14T062616-81938e81 step 12, D-079),
+    # re-derived with the command above. This test was red from at least
+    # c39e444a3 on its FIRST assertion (11 packages with no subject), so the
+    # count line below it was never reached and its 89 had gone stale.
+    assert len(on_disk) == 107, f"expected 107 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

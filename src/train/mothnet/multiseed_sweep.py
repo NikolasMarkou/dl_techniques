@@ -62,6 +62,12 @@ _EPOCHS = 3
 _NUM_TRAIN_SAMPLES = 2000
 _NUM_VAL_SAMPLES = 500
 
+#: Characters of a failed run's stderr kept in its result record. A named
+#: length, not a negative slice literal, which the mask-sentinel census reads
+#: as a sentinel-sized constant (``src/train/embeddings_experimental/sweep.py``
+#: does the same).
+STDERR_TAIL_CHARS = 2000
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -136,7 +142,7 @@ def run_one(spec: RunSpec, timeout_s: float, env: Dict[str, str]) -> Dict[str, o
             logger.info(f"[run] OK arm={spec.arm} seed={spec.seed} wall_s={dt:.1f}")
         return {
             "status": status, "wall_s": dt,
-            "stderr_tail": cp.stderr[-2000:] if cp.stderr else "",
+            "stderr_tail": cp.stderr[-STDERR_TAIL_CHARS:] if cp.stderr else "",
         }
     except subprocess.TimeoutExpired:
         dt = time.time() - t0

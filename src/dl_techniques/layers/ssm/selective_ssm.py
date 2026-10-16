@@ -329,7 +329,7 @@ class SelectiveSSMLayer(keras.layers.Layer):
         delta = keras.ops.softplus(dt)
         x_conv_transposed = keras.ops.transpose(x_conv, (0, 2, 1))
 
-        if keras.backend.backend() == "tensorflow":
+        if keras.config.backend() == "tensorflow":
             import tensorflow as tf
             scan_fn = tf.recompute_grad(self._selective_scan)
             scan_D = tf.convert_to_tensor(self.D)

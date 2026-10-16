@@ -114,6 +114,7 @@ from keras import ops
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation
+from dl_techniques.layers.activations.common import activation_spec
 from dl_techniques.layers.activations.common import serialize_activation
 from dl_techniques.layers.capsules import CapsuleRoll
 from dl_techniques.layers.generative.sampling import create_sampling_layer
@@ -391,8 +392,8 @@ class TopographicVAE(keras.Model):
             [648, 972] if decoder_hidden_dims is None else list(decoder_hidden_dims)
         )
         self.prior_mean = prior_mean
-        self.activation_name = activation
-        self.final_activation_name = final_activation
+        self.activation_name = activation_spec(activation)
+        self.final_activation_name = activation_spec(final_activation)
         # A STRING, deliberately, not a resolved initializer object.
         #
         # A `keras.initializers` instance carries a seed generator, and a seeded
@@ -799,8 +800,7 @@ class TopographicVAE(keras.Model):
         if compile_loss is None:
             raise ValueError(
                 "TopographicVAE.compute_loss needs a compiled loss. Call "
-                "model.compile(loss=TopographicVAELoss(...)) first, or use "
-                "create_topographic_vae(), which does it for you."
+                "model.compile(loss=TopographicVAELoss(...)) first."
             )
 
         user_loss = getattr(compile_loss, "_user_loss", None)
@@ -1320,8 +1320,8 @@ class TopographicVAE(keras.Model):
             "encoder_hidden_dims": list(self.encoder_hidden_dims),
             "decoder_hidden_dims": list(self.decoder_hidden_dims),
             "prior_mean": self.prior_mean,
-            "activation": self.activation_name,
-            "final_activation": self.final_activation_name,
+            "activation": serialize_activation(self.activation_name),
+            "final_activation": serialize_activation(self.final_activation_name),
             "kernel_initializer": keras.initializers.serialize(
                 self.kernel_initializer
             ),
@@ -1354,33 +1354,22 @@ class TopographicVAE(keras.Model):
 
 def create_topographic_vae(
     variant: str = "mnist",
-    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-    learning_rate: float = 1e-4,
-    kl_loss_weight: float = 1.0,
-    reconstruction_sum_reduction: bool = False,
     pretrained: bool = False,
     **kwargs: Any,
 ) -> TopographicVAE:
-    """Create and compile a TopographicVAE with its ELBO loss attached.
+    """Create a TopographicVAE. A thin wrapper over :meth:`TopographicVAE.from_variant`.
+
+    The model comes back UNCOMPILED. Compile it with its ELBO, for example
+    ``model.compile(optimizer=keras.optimizers.Adam(1e-4),
+    loss=TopographicVAELoss(kl_loss_weight=1.0))``.
 
     :param variant: One of ``"mnist"``, ``"dsprites"``.
     :type variant: str
-    :param optimizer: Optimizer name or instance.
-    :type optimizer: Union[str, keras.optimizers.Optimizer]
-    :param learning_rate: Learning rate applied to a named optimizer.
-    :type learning_rate: float
-    :param kl_loss_weight: Weight on the two KL terms; see
-        :class:`~dl_techniques.losses.topographic_vae_loss.TopographicVAELoss`.
-    :type kl_loss_weight: float
-    :param reconstruction_sum_reduction: Whether the ELBO's reconstruction is a
-        sum over pixels (making ``kl_loss_weight`` the paper's ``beta``) or a
-        mean. Defaults to ``False``.
-    :type reconstruction_sum_reduction: bool
     :param pretrained: Must be ``False``; see :meth:`TopographicVAE.from_variant`.
     :type pretrained: bool
     :param kwargs: Forwarded to :meth:`TopographicVAE.from_variant`.
     :type kwargs: Any
-    :return: A compiled model, ready for training.
+    :return: An uncompiled model.
     :rtype: TopographicVAE
 
     :Example:
@@ -1390,34 +1379,10 @@ def create_topographic_vae(
     ...     "dsprites", coherence_window=5, neighborhood_size=1
     ... )
     """
-    model = TopographicVAE.from_variant(
-        variant=variant, pretrained=pretrained, **kwargs
-    )
-
-    if isinstance(optimizer, str):
-        optimizer_instance = keras.optimizers.get(optimizer)
-        if hasattr(optimizer_instance, "learning_rate"):
-            optimizer_instance.learning_rate = learning_rate
-    else:
-        optimizer_instance = optimizer
-
-    loss = TopographicVAELoss(
-        kl_loss_weight=kl_loss_weight,
-        reconstruction_sum_reduction=reconstruction_sum_reduction,
-        name="topographic_elbo",
-    )
-    model.compile(optimizer=optimizer_instance, loss=loss)
-
-    # The sibling `vae` factory logs count_params() here. This model cannot:
-    # count_params() on an unbuilt layer RAISES, and this factory deliberately
-    # does not run a dummy forward pass to build it (same reasoning as the
-    # sibling's DECISION D-078). The parameter count is reported by `summary()`
-    # and by the trainer's run log, after the first batch has built the model.
-    logger.info(
-        f"Created compiled TopographicVAE-{variant} "
-        f"(latent_dim={model.latent_dim}, sequence_length={model.sequence_length}): "
-        f"kl_loss_weight={kl_loss_weight}"
-    )
-    return model
+    # DECISION plan-2026-10-14T062616-81938e81/D-078: no compile, no optimizer,
+    # no loss knobs here. Do NOT restore them: a factory that compiles hands
+    # back an optimizer the caller did not choose, and the caller's own
+    # compile() silently replaces it (GUIDE section 1). See decisions.md D-078.
+    return TopographicVAE.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

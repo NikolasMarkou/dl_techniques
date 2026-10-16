@@ -319,11 +319,11 @@ def _arrays(n: int = 40, size: int = 8):
     return x, y
 
 
-def _model(size: int = 8, dropout: float = 0.0) -> keras.Model:
+def _model(size: int = 8, dropout_rate: float = 0.0) -> keras.Model:
     inputs = keras.Input((size, size, 3))
     hidden = keras.layers.Conv2D(8, 1, activation="relu")(inputs)
-    if dropout:
-        hidden = keras.layers.Dropout(dropout)(hidden)
+    if dropout_rate:
+        hidden = keras.layers.Dropout(dropout_rate)(hidden)
     model = keras.Model(inputs, keras.layers.Conv2D(3, 1)(hidden))
     model.compile(
         optimizer="adam", loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -446,7 +446,7 @@ def test_predictions_are_made_with_training_false(tmp_path) -> None:
     """A dropout of 0.9 would make two training-mode passes disagree almost everywhere."""
     x, y = _arrays()
     cb = viz.SegmentationGridCallback(x, y, tmp_path, NAMES, 1, 4, 0)
-    model = _model(dropout=0.9)
+    model = _model(dropout_rate=0.9)
     first, second = cb.predict_classes(model), cb.predict_classes(model)
     np.testing.assert_array_equal(first, second)
     reference = np.argmax(keras.ops.convert_to_numpy(

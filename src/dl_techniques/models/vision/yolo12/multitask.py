@@ -55,6 +55,7 @@ from dl_techniques.layers.yolo12.yolo12_heads import (
 )
 from .feature_extractor import YOLOv12FeatureExtractor
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 
@@ -189,6 +190,7 @@ class YOLOv12MultiTask(keras.Model):
         :type name: Optional[str]
         :param kwargs: Extra keyword arguments passed to ``keras.Model``.
         """
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Resolve mutable-default head configs (never share a list across instances).
         if segmentation_filters is None:
             segmentation_filters = [128, 64, 32]

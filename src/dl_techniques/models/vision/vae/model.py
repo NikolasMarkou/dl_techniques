@@ -51,6 +51,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 # Supported VAE sampling modes
@@ -238,6 +239,7 @@ class VAE(keras.Model):
         name: Optional[str] = None,
         **kwargs: Any,
     ):
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Validate inputs
         if latent_dim <= 0:
             raise ValueError(f"latent_dim must be positive, got {latent_dim}")

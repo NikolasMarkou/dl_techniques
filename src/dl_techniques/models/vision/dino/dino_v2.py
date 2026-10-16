@@ -76,6 +76,7 @@ from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.models.vision.dino.common import reject_input_shape
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 # Module constants
@@ -535,6 +536,7 @@ class DINOv2VisionTransformer(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs
     ) -> None:
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Validate inputs
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")

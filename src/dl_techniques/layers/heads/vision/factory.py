@@ -3518,7 +3518,7 @@ def _unit_normalize(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: ``x / max(||x||, 1e-12)`` along the last axis, in ``x``'s dtype.
     :rtype: keras.KerasTensor
     """
-    dtype = keras.backend.standardize_dtype(x.dtype)
+    dtype = getattr(x.dtype, "name", None) or str(x.dtype)
     if dtype in ('float16', 'bfloat16'):
         normalized = keras.ops.normalize(
             keras.ops.cast(x, 'float32'), axis=-1, order=2, epsilon=1e-12)

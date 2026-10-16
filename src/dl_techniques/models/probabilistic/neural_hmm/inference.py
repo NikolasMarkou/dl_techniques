@@ -293,7 +293,7 @@ def path_log_score(
     # NaN). Padded steps are exempt: they may hold -1 or anything else.
     in_range = keras.ops.logical_and(states >= 0, states < n_states)
     bad = keras.ops.logical_and(valid, keras.ops.logical_not(in_range))
-    sentinel = keras.ops.full_like(emit, mask_sentinel(keras.backend.standardize_dtype(emit.dtype)))
+    sentinel = keras.ops.full_like(emit, mask_sentinel(emit.dtype))
     penalty = keras.ops.where(bad, sentinel, keras.ops.zeros_like(emit))
     return start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1) + keras.ops.sum(penalty, axis=1)
 

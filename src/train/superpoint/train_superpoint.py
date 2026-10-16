@@ -394,7 +394,10 @@ def _grid_labels_tf(
     oh = tf.one_hot(safe_id, n, dtype=tf.float32)  # (K, N)
     oh = oh * tf.cast(ok[:, None], tf.float32)
     big = tf.constant(1e30, dtype=tf.float32)
-    dmat = dist[:, None] * oh + (1.0 - oh) * big  # (K, N)
+    # Selection, not the additive ``dist * oh + (1 - oh) * big`` form: the same
+    # values (0 * big and 1 * dist are exact), and no sentinel is multiplied
+    # (tests/test_the_mask_sentinel_population_is_closed.py).
+    dmat = tf.where(oh > 0.0, tf.broadcast_to(dist[:, None], tf.shape(oh)), big)  # (K, N)
     best_pt = tf.math.argmin(dmat, axis=0, output_type=tf.int32)  # (N,)
     has = tf.reduce_max(oh, axis=0) > 0.0  # (N,)
     best_cls = tf.gather(cls, best_pt)  # (N,)

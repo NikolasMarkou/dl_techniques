@@ -58,6 +58,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 from dl_techniques.initializers.kan_initializer import create_kan_initializers, VALID_KAN_SCHEMES
 
 # ---------------------------------------------------------------------
@@ -251,6 +252,7 @@ class KAN(keras.Model):
         init_seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         if not isinstance(layer_configs, list) or not layer_configs:
             raise ValueError("layer_configs must be a non-empty list")
         if not isinstance(input_features, int) or input_features <= 0:

@@ -112,7 +112,8 @@ def unpack_matches(packed: Any, m: int) -> Tuple[Any, Any]:
     :param m: Number of image-0 keypoints.
     :return: ``(matches0 (B, M), matches1 (B, N))`` int32.
     """
-    if keras.backend.is_float_dtype(packed.dtype):
+    dtype_name = getattr(packed.dtype, "name", None) or str(packed.dtype)
+    if dtype_name.startswith(("float", "bfloat")):
         packed = keras.ops.round(packed)
     packed = keras.ops.cast(packed, "int32")
     return packed[:, :m], packed[:, m:]

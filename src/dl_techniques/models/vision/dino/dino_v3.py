@@ -57,6 +57,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
 
 # ---------------------------------------------------------------------
@@ -310,6 +311,7 @@ class DINOv3(keras.Model):
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
+        refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         # Both spellings are normalized before any subscript, since v1 and v2
         # also accept a bare int.
         image_size = (

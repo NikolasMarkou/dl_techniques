@@ -454,7 +454,7 @@ class HKANLayer(keras.layers.Layer):
             )
         # DECISION plan-2026-09-30T082355-4d999dbc/D-037: float16 compute is refused.
         # Under mixed_float16 the forward pass drifts from the fit at slope 50. See decisions.md.
-        compute_dtype = keras.backend.standardize_dtype(self.compute_dtype)
+        compute_dtype = getattr(self.compute_dtype, "name", None) or str(self.compute_dtype)
         if compute_dtype not in SUPPORTED_COMPUTE_DTYPES:
             raise ValueError(
                 f"HKANLayer {self.name!r} does not support the compute dtype "

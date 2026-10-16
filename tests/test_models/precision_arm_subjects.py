@@ -1547,6 +1547,148 @@ _extra("topographic_vae", _b_topographic_vae,
        lambda: _f32(2, 6, 16, 16, 1))
 
 
+# ---------------------------------------------------------------------------
+# The eleven packages that had no round-trip subject at fb905f29b
+# (plan-2026-10-14T062616-81938e81 step 12 Part C, D-079). Each is MEASURED
+# non-degenerate: batch 2, every output leaf with a non-zero spread (the one
+# exception is CliffordCLIP's scalar ``logit_scale``), and every weight
+# perturbed and compared except the BatchNorm moving statistics. Each passes
+# the family's value round trip at atol 0.0 with a self spread of exactly 0.0.
+# ---------------------------------------------------------------------------
+
+
+def _u01(*shape: int, seed: int = 0) -> np.ndarray:
+    return np.random.default_rng(seed).random(shape).astype("float32")
+
+
+def _b_alexnet():
+    # 67 x 67 clears the 55-pixel minimum extent `alexnet/spatial_guard.py`
+    # enforces. Dropout 0 so a training-mode forward sees one network.
+    from dl_techniques.models.vision.alexnet import create_alexnet
+    return create_alexnet(num_classes=4, input_shape=(67, 67, 3), dropout_rate=0.0)
+
+
+_extra("alexnet", _b_alexnet, lambda: _u01(2, 67, 67, 3))
+
+
+def _b_clifford_clip():
+    # image_size 64 at patch 4 leaves the hierarchical tower a 2 x 2 final map
+    # (the constructor refuses a smaller one: a 1 x 1 map makes the attention
+    # pool a zero-gradient no-op).
+    from dl_techniques.models.vision_language.clifford_clip import create_clifford_clip
+    return create_clifford_clip(
+        "nano", vocab_size=64, image_size=64, context_length=8,
+        vision_patch_size=4, dropout_rate=0.0,
+        vision_stochastic_depth_rate=0.0, text_stochastic_depth_rate=0.0)
+
+
+_extra("clifford_clip", _b_clifford_clip,
+       lambda: {"image": _u01(2, 64, 64, 3),
+                # Tokens in [1, 64): 0 is the pad id.
+                "text": _ids(63, 2, 8) + 1})
+
+
+def _b_dasiamrpn():
+    # 127 / 167: the released exemplar with the smallest search extent that
+    # keeps a 4 x 4 correlation kernel and a 6 x 6 score map.
+    from dl_techniques.models.vision.dasiamrpn import create_dasiamrpn
+    return create_dasiamrpn("otb", exemplar_size=127, search_size=167)
+
+
+_extra("dasiamrpn", _b_dasiamrpn,
+       lambda: (_u01(2, 127, 127, 3), _u01(2, 167, 167, 3, seed=1)))
+
+
+def _b_deepsort():
+    from dl_techniques.models.vision.deepsort import create_deepsort_embedding
+    return create_deepsort_embedding(include_top=True, num_classes=5,
+                                     dropout_rate=0.0)
+
+
+_extra("deepsort", _b_deepsort, lambda: _u01(2, 128, 64, 3))
+
+
+def _b_doc_scanner():
+    # The two-stage composite at the stand-in widths of
+    # `test_doc_scanner/test_composite.py` (pairwise distinct, D-024's
+    # non-degenerate segmenter pair), so both stages are on the path.
+    from dl_techniques.models.vision.image_restoration.doc_scanner.model import DocScanner
+    return DocScanner(
+        segmenter_config=dict(mid_channels=7, out_channels=13, output_channels=1),
+        rectifier_config=dict(
+            hidden_dim=8, context_dim=8, gru_input_dim=16, fnet_output_dim=16,
+            encoder_stem_channels=6, encoder_stage_channels=(6, 10, 12),
+            motion_output_dim=8, motion_corr_hidden=7, motion_corr_out=5,
+            motion_flow_hidden=9, motion_flow_out=4, flow_head_hidden=11,
+            mask_head_hidden=13, iters=2))
+
+
+_extra("doc_scanner", _b_doc_scanner, lambda: _u01(2, 32, 24, 3))
+
+
+def _b_lightglue():
+    from dl_techniques.models.vision.keypoints.lightglue import create_lightglue
+    return create_lightglue(input_dim=16, descriptor_dim=16, num_layers=2,
+                            num_heads=2)
+
+
+def _lightglue_inputs():
+    from .test_lightglue.weight_loading import random_inputs
+    return random_inputs(np.random.RandomState(0), 2, 12, 9, 16)
+
+
+_extra("lightglue", _b_lightglue, _lightglue_inputs)
+
+
+def _b_mambalct():
+    # `test_mambalct.py`'s tiny configuration.
+    from dl_techniques.models.vision.mambalct import MambaLCT
+    return MambaLCT(template_size=32, search_size=64, context_len=1,
+                    stage_dims=[64, 128, 512], stage_depths=[1, 1, 1],
+                    num_heads=[2, 4, 8], fusion_heads=8, head_hidden_dim=32)
+
+
+_extra("mambalct", _b_mambalct,
+       lambda: [_u01(2, 32, 32, 3), _u01(2, 2, 64, 64, 3, seed=1)])
+
+
+def _b_omnipoint():
+    from dl_techniques.models.vision.omnipoint import create_omnipoint
+    return create_omnipoint("omnipoint_base", image_shape=(56, 56, 3),
+                            vit_scale="pico")
+
+
+_extra("omnipoint", _b_omnipoint, lambda: _u01(2, 56, 56, 3))
+
+
+def _b_rad_convnet():
+    from dl_techniques.models.vision.rad_convnet import create_rad_convnet
+    return create_rad_convnet(variant="tiny", num_classes=4,
+                              input_shape=(32, 32, 3))
+
+
+_extra("rad_convnet", _b_rad_convnet, lambda: _u01(2, 32, 32, 3))
+
+
+def _b_rbf_protonet():
+    from dl_techniques.models.vision.rbf_protonet import create_rbf_protonet
+    return create_rbf_protonet(num_classes=4, input_shape=(32, 32, 3),
+                               stem_filters=8, filters_per_stage=[8, 16],
+                               feature_dim=16)
+
+
+_extra("rbf_protonet", _b_rbf_protonet, lambda: _u01(2, 32, 32, 3))
+
+
+def _b_siamfc():
+    from dl_techniques.models.vision.siamfc import create_siamfc
+    return create_siamfc(exemplar_size=87, search_size=103)
+
+
+_extra("siamfc", _b_siamfc,
+       lambda: (_u01(2, 87, 87, 3), _u01(2, 103, 103, 3, seed=1)))
+
+
 #: The one ``models/`` package with NO round-trip subject, and why. Its own
 #: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
 #: nothing for a model factory to build". ``PowerSampler`` is a sampling
@@ -1806,3 +1948,24 @@ def _b_darkir_no_head():
         enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2],
         include_top=False,
     )
+
+
+# Part C (D-079): the three new subjects whose class accepts ``include_top``.
+@_no_head("alexnet")
+def _b_alexnet_no_head():
+    from dl_techniques.models.vision.alexnet import create_alexnet
+    return create_alexnet(num_classes=4, input_shape=(67, 67, 3),
+                          dropout_rate=0.0, include_top=False)
+
+
+@_no_head("deepsort")
+def _b_deepsort_no_head():
+    from dl_techniques.models.vision.deepsort import create_deepsort_embedding
+    return create_deepsort_embedding(include_top=False, dropout_rate=0.0)
+
+
+@_no_head("rad_convnet")
+def _b_rad_convnet_no_head():
+    from dl_techniques.models.vision.rad_convnet import create_rad_convnet
+    return create_rad_convnet(variant="tiny", num_classes=4,
+                              input_shape=(32, 32, 3), include_top=False)

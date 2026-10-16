@@ -450,7 +450,7 @@ class Mamba2Layer(keras.layers.Layer):
         # Reaching v1-parity for v2 needs chunking the full-sequence SSM
         # precompute, explicitly OUT of this plan's scope; do not attempt that
         # rewrite here.
-        if keras.backend.backend() == "tensorflow":
+        if keras.config.backend() == "tensorflow":
             import tensorflow as tf
             scan_fn = tf.recompute_grad(self._ssm_scan)
         else:

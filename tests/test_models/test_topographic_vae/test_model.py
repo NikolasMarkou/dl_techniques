@@ -120,6 +120,15 @@ def _sample(batch=2, sequence=SEQUENCE, seed=0):
     return rng.random((batch, sequence) + FRAME).astype("float32")
 
 
+def _compiled(model):
+    """Compile ``model`` the way a caller does: Adam and the ELBO."""
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+        loss=TopographicVAELoss(name="topographic_elbo"),
+    )
+    return model
+
+
 def _relative(model):
     """Weight paths with the model-root segment stripped, so instances compare."""
     return sorted(w.path.split("/", 1)[-1] for w in model.weights)
@@ -1592,21 +1601,48 @@ class TestVariantsAndFactory:
         assert model.coherence_window == 5
         assert model.neighborhood_size == 1
 
-    def test_the_factory_compiles_with_the_elbo(self):
+    def test_the_factory_returns_an_uncompiled_model(self):
+        """GUIDE section 1: ``create_<model>`` only delegates to ``from_variant``.
+
+        The factory used to compile with Adam and the ELBO, so a caller's own
+        ``compile()`` silently replaced an optimizer it never chose
+        (plan-2026-10-14T062616-81938e81 D-078). The caller compiles.
+        """
         model = create_topographic_vae("mnist", **_FACTORY_OVERRIDES)
-        assert isinstance(
-            model._compile_loss._user_loss, TopographicVAELoss
-        ), model._compile_loss._user_loss
+        assert model.compiled is False
+        assert getattr(model, "_compile_loss", None) is None
+
+    @pytest.mark.parametrize(
+        "knob",
+        ["optimizer", "learning_rate", "kl_loss_weight",
+         "reconstruction_sum_reduction"],
+    )
+    def test_the_factory_takes_no_training_knob(self, knob):
+        """A compile knob given to the factory reaches the constructor, which
+        refuses it, rather than being read by a factory that no longer compiles."""
+        with pytest.raises(ValueError, match=knob):
+            create_topographic_vae("mnist", **{knob: 1}, **_FACTORY_OVERRIDES)
+
+    def test_the_factory_equals_from_variant(self):
+        keras.utils.set_random_seed(3)
+        made = create_topographic_vae("mnist", **_FACTORY_OVERRIDES)
+        keras.utils.set_random_seed(3)
+        direct = TopographicVAE.from_variant("mnist", **_FACTORY_OVERRIDES)
+        made_config, direct_config = made.get_config(), direct.get_config()
+        # Keras uniquifies the default name per instance; nothing else differs.
+        made_config.pop("name")
+        direct_config.pop("name")
+        assert made_config == direct_config
 
     def test_the_factory_model_trains(self):
-        """The full compiled path: factory -> ELBO -> optimizer -> one epoch.
+        """The full path: factory -> caller's compile with the ELBO -> one epoch.
 
         ``input_shape`` is overridden because the factory takes its frame
         geometry from the VARIANT, and the reference frames here are 16x16x1
         rather than the paper's 28x28x3 -- otherwise the model rejects its own
         input, which is the right behaviour and the wrong test.
         """
-        model = create_topographic_vae("mnist", **_FACTORY_OVERRIDES)
+        model = _compiled(create_topographic_vae("mnist", **_FACTORY_OVERRIDES))
         assert model._input_shape == FRAME, model._input_shape
         sample = _sample(batch=4)
         history = model.fit(sample, sample, epochs=1, batch_size=2, verbose=0)
@@ -1619,7 +1655,7 @@ class TestVariantsAndFactory:
         overrides = dict(
             _FACTORY_OVERRIDES, use_variance_variables=False, coherence_window=0
         )
-        model = create_topographic_vae("mnist", **overrides)
+        model = _compiled(create_topographic_vae("mnist", **overrides))
         sample = _sample(batch=4)
         history = model.fit(sample, sample, epochs=1, batch_size=2, verbose=0)
         assert np.isfinite(history.history["loss"][0])
@@ -1631,3 +1667,42 @@ class TestVariantsAndFactory:
         # If it did call it, construction would raise here.
         model = create_topographic_vae("mnist", **_FACTORY_OVERRIDES)
         assert not model.built
+
+
+def _unregistered_swish(x):
+    """A plain, UNREGISTERED activation: the case a raw config entry breaks."""
+    return x * keras.ops.sigmoid(x)
+
+
+class TestAnActivationCallableRoundTrips:
+    """``activation``/``final_activation`` go through ``serialize_activation``.
+
+    The config used to store the raw constructor value, so a callable left
+    ``get_config()`` holding a function object: not JSON-serializable, and an
+    unregistered one could not be read back from a ``.keras`` archive
+    (``tests/test_the_raw_activation_config_population_is_closed.py``).
+    """
+
+    def test_the_config_is_json_and_rebuilds_the_same_function(self, tmp_path):
+        import json
+
+        model = _build(activation=_unregistered_swish,
+                       final_activation=_unregistered_swish)
+        sample = _sample()
+        model(sample)
+        config = model.get_config()
+        json.dumps(config)
+        # An unregistered function is found by name, the way load_model finds
+        # it with custom_objects; a raw function object in the config could
+        # not even be written as JSON.
+        with keras.saving.custom_object_scope(
+                {"_unregistered_swish": _unregistered_swish}):
+            rebuilt = TopographicVAE.from_config(config)
+        rebuilt(sample)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(rebuilt(sample, training=False)["z_mean"]),
+            ops.convert_to_numpy(model(sample, training=False)["z_mean"]),
+            atol=0.0, rtol=0,
+        )
+        assert rebuilt.get_config()["activation"] == config["activation"]

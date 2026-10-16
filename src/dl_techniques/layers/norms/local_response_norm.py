@@ -237,7 +237,7 @@ class LocalResponseNormalization(keras.layers.Layer):
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.k = float(k)
-        self.data_format = data_format or keras.backend.image_data_format()
+        self.data_format = data_format or keras.config.image_data_format()
 
         logger.debug(
             f"Initialized LocalResponseNormalization with depth_radius="
