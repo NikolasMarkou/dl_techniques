@@ -73,7 +73,7 @@ pins each one) and were checked against `--help`.
 | `--model-analysis` / `--no-model-analysis` | on | End-of-run ModelAnalyzer, weights and spectral analyses only, into `model_analysis/`. |
 | `--output-dir` | `results` | Output root; a relative path is anchored at the repo root. |
 | `--experiment-name` | `convunext_seg_<variant>_<timestamp>` | Run directory name. |
-| `--gpu` | none | Sets `CUDA_VISIBLE_DEVICES` and overrides an exported value. Not a config field. |
+| `--gpu` | none | Counts within an exported `CUDA_VISIBLE_DEVICES` (names a physical GPU only when it is unset) and narrows the variable to that GPU. Not a config field. |
 
 Fixed, not flags: optimizer AdamW with `clipnorm=1.0`, cosine schedule, loss
 `SparseCategoricalCrossentropy(from_logits=True)`, random horizontal flip
@@ -121,8 +121,9 @@ per-class IoU (and the `border` class in particular, a thin band) is the honest 
 
 `CUDA_VISIBLE_DEVICES` exported in the shell is the supported control. `--gpu N` also works
 (`main()` parses first, then calls `setup_gpu(gpu_id=N)`, which sets the variable before
-TensorFlow first enumerates devices and overrides an exported value); do not pass it together
-with an exported variable and do not rely on it after any earlier device query in the process.
+TensorFlow first enumerates devices; with an exported variable, `N` counts within it, so
+`CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on physical GPU 1). Do not rely on it after any earlier
+device query in the process.
 The summary stores `gpu_name`, `tf_visible_devices` and `cuda_visible_devices`, and `run.log`
 names all three before data loading.
 

@@ -146,7 +146,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Seed of the data splits and of the model initialization.")
 
     parser.add_argument("--gpu", type=int, default=None,
-                        help="GPU index to use (overwrites CUDA_VISIBLE_DEVICES).")
+                        help="GPU index; counts within CUDA_VISIBLE_DEVICES when it "
+                             "is set, else names a physical GPU.")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Base directory of the run (default: <repo>/results).")
     parser.add_argument("--experiment-name", type=str, default=None,

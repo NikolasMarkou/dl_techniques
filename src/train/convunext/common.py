@@ -48,7 +48,7 @@ Refusals happen at config time, before any directory is created:
 A missing or incompatible TFDS cache raises from :func:`load_oxford_pet` inside
 :func:`train` BEFORE the run directory is created. ``--help`` parses first, so it allocates
 no GPU and no directory. ``--gpu`` is not a config field: ``main`` hands it to
-``setup_gpu``, which OVERWRITES an exported ``CUDA_VISIBLE_DEVICES``.
+``setup_gpu``, which counts it within an exported ``CUDA_VISIBLE_DEVICES``.
 """
 
 import argparse
@@ -357,8 +357,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Run directory name (default: convunext_seg_<variant>_<timestamp>). "
                           "A name that already holds a run is refused.")
     out.add_argument("--gpu", type=int, default=None,
-                     help="GPU device index; sets CUDA_VISIBLE_DEVICES before TensorFlow first "
-                          "enumerates devices and OVERRIDES an exported CUDA_VISIBLE_DEVICES. "
+                     help="GPU index; narrows CUDA_VISIBLE_DEVICES to it before TensorFlow first "
+                          "enumerates devices. Counts within an exported CUDA_VISIBLE_DEVICES; "
+                          "names a physical GPU only when it is unset. "
                           "Default: use the environment.")
     return parser
 

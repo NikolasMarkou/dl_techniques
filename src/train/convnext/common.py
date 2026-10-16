@@ -435,9 +435,10 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                      help=f"Run directory name (default: convnext_{model_family}_<dataset>_"
                           "<variant>_<timestamp>). A name that already holds a run is refused.")
     out.add_argument("--gpu", type=int, default=None,
-                     help="GPU device index; sets CUDA_VISIBLE_DEVICES before TensorFlow first "
-                          "enumerates devices (measured effective here, and it overrides an "
-                          "exported CUDA_VISIBLE_DEVICES). Default: use the environment. The "
+                     help="GPU index; narrows CUDA_VISIBLE_DEVICES to it before TensorFlow first "
+                          "enumerates devices (measured effective here). Counts within an "
+                          "exported CUDA_VISIBLE_DEVICES; names a physical GPU only when it is "
+                          "unset. Default: use the environment. The "
                           "summary records the device TF actually used (gpu_name).")
     return parser
 

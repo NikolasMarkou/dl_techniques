@@ -784,7 +784,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--gpu", type=int, default=None,
-                        help="GPU index to use (None -> all visible).")
+                        help="GPU index for setup_gpu: counts within "
+                             "CUDA_VISIBLE_DEVICES when it is set, else names "
+                             "a physical GPU (None -> all visible).")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128,
                         dest="batch_size")
@@ -818,10 +820,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main() -> None:
     """Entry point."""
     args = _parse_args()
-    # Configure CUDA_VISIBLE_DEVICES BEFORE TF / Keras allocate any device.
-    if args.gpu is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    setup_gpu(gpu_id=None)  # memory growth on the visible GPU(s)
+    # Before TF / Keras allocate any device; setup_gpu resolves --gpu against
+    # an exported CUDA_VISIBLE_DEVICES (D-110).
+    setup_gpu(gpu_id=args.gpu)
     try:
         train_all_variants(args)
     except KeyboardInterrupt:

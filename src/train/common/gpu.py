@@ -11,17 +11,65 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+def visible_device_for(gpu_id: int, visible: Optional[str]) -> str:
+    """The ``CUDA_VISIBLE_DEVICES`` value that selects GPU ``gpu_id``.
+
+    Interface contract (callers: :func:`setup_gpu`; any code that must turn a
+    ``--gpu`` index into an environment value uses this, not its own rule):
+
+    * ``visible`` is the current ``CUDA_VISIBLE_DEVICES`` (``None`` when the
+      variable is unset). When it is set, ``gpu_id`` indexes into its
+      comma-separated entries, in order, and the selected entry is returned
+      verbatim (an index or a ``GPU-<uuid>``). When it is unset, ``gpu_id``
+      names a physical device and ``str(gpu_id)`` is returned.
+    * Raises ``ValueError`` for a negative ``gpu_id``, and for an index outside
+      the visible list (an empty ``visible`` lists no device).
+    * Pure: reads and writes no environment.
+
+    Args:
+        gpu_id: Index of the GPU to use.
+        visible: The current ``CUDA_VISIBLE_DEVICES``, or ``None`` if unset.
+
+    Returns:
+        The single-device ``CUDA_VISIBLE_DEVICES`` value.
+    """
+    if gpu_id < 0:
+        raise ValueError(
+            f"GPU index {gpu_id} is negative; to run without a GPU set "
+            "CUDA_VISIBLE_DEVICES= (empty) instead.")
+    if visible is None:
+        return str(gpu_id)
+    # DECISION plan-2026-10-14T062616-81938e81/D-110
+    # Index INTO an exported CUDA_VISIBLE_DEVICES; do NOT overwrite it with
+    # str(gpu_id). Overwriting sent `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` to
+    # physical GPU 0 (every Step 13.5 smoke ran on the wrong GPU that way).
+    entries = [entry.strip() for entry in visible.split(",") if entry.strip()]
+    if gpu_id >= len(entries):
+        raise ValueError(
+            f"GPU index {gpu_id} is outside CUDA_VISIBLE_DEVICES={visible!r}, "
+            f"which lists {len(entries)} device(s); the index counts within "
+            "that list, not over the physical GPUs.")
+    return entries[gpu_id]
+
+
 def setup_gpu(gpu_id: Optional[int] = None):
     """Configure GPU settings for optimal training.
 
     Args:
-        gpu_id: Specific GPU device index to use. If provided, sets
-            CUDA_VISIBLE_DEVICES to restrict to that GPU. If None,
-            enables memory growth on all available GPUs.
+        gpu_id: Index of the GPU to use, resolved by :func:`visible_device_for`:
+            it counts within an exported ``CUDA_VISIBLE_DEVICES`` and names a
+            physical device only when that variable is unset. The result
+            restricts ``CUDA_VISIBLE_DEVICES`` to that one GPU. If None, the
+            environment is left alone and memory growth is enabled on every
+            visible GPU.
+
+    Raises:
+        ValueError: ``gpu_id`` is negative or outside the visible list.
     """
     if gpu_id is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        logger.info(f"Set CUDA_VISIBLE_DEVICES={gpu_id}")
+        selected = visible_device_for(gpu_id, os.environ.get("CUDA_VISIBLE_DEVICES"))
+        os.environ["CUDA_VISIBLE_DEVICES"] = selected
+        logger.info(f"--gpu {gpu_id}: set CUDA_VISIBLE_DEVICES={selected}")
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:

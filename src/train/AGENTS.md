@@ -168,7 +168,7 @@ substitute, because it resolves at epoch end by matching a compiled metric objec
 
 | Symbol | Notes |
 |---|---|
-| `setup_gpu(gpu_id)` | Memory growth + device selection. Every script supports `--gpu` and calls `setup_gpu(args.gpu)`: it sets `CUDA_VISIBLE_DEVICES` for a specific GPU, or enables memory growth on all of them when `None`. It OVERWRITES a `CUDA_VISIBLE_DEVICES` already set in the environment, so `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on GPU 0: pick one mechanism |
+| `setup_gpu(gpu_id)` | Memory growth + device selection. Every script supports `--gpu` and calls `setup_gpu(args.gpu)`: it sets `CUDA_VISIBLE_DEVICES` for a specific GPU, or enables memory growth on all of them when `None`. When `CUDA_VISIBLE_DEVICES` is already set, `gpu_id` counts WITHIN that list (`CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on physical GPU 1; `--gpu 1` there raises `ValueError`); only when it is unset does `gpu_id` name a physical GPU. `visible_device_for(gpu_id, visible)` is the one rule (D-110) |
 | `create_callbacks(...)` / `create_nlp_callbacks(...)` | See above |
 | `resolve_monitor_mode(monitor, mode=None)` | The ONE producer of a checkpoint-selection direction |
 | `create_base_argument_parser(description, default_dataset)` | Only for scripts using `load_dataset()` |

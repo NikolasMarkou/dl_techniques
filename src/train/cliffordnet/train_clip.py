@@ -144,35 +144,13 @@ import argparse
 import csv
 import json
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# ---------------------------------------------------------------------------
-# Early GPU binding — MUST run before TensorFlow is imported.
-#
-# If ``--gpu N`` is on the command line, set ``CUDA_VISIBLE_DEVICES`` here so
-# TensorFlow only sees the requested physical device when it initialises CUDA
-# at import time. Setting the env var later (inside ``setup_gpu``) is too
-# late: once ``import tensorflow`` has claimed the device list, changing
-# ``CUDA_VISIBLE_DEVICES`` has no effect and TF silently allocates on every
-# visible GPU — which breaks the single-GPU-job invariant on shared boxes.
-#
-# We keep the ``--gpu`` flag on the argparse parser as well so the rest of
-# the script can still read ``args.gpu`` for logging and memory-growth setup.
-# ---------------------------------------------------------------------------
-for _i, _a in enumerate(sys.argv):
-    if _a == "--gpu" and _i + 1 < len(sys.argv):
-        os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[_i + 1]
-        break
-    if _a.startswith("--gpu="):
-        os.environ["CUDA_VISIBLE_DEVICES"] = _a.split("=", 1)[1]
-        break
-
-import keras  # noqa: E402
-import numpy as np  # noqa: E402
-import tensorflow as tf  # noqa: E402
+import keras
+import numpy as np
+import tensorflow as tf
 
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
 from dl_techniques.optimization import (
@@ -1862,7 +1840,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir", type=str, default=None,
         help="Run directory (default: results/cliffordclip_<variant>_<timestamp>).",
     )
-    parser.add_argument("--gpu", type=int, default=None)
+    parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="GPU index for setup_gpu: counts within CUDA_VISIBLE_DEVICES when "
+             "it is set, else names a physical GPU (default: all visible).",
+    )
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Global seed for tf/keras + dataset shuffle (D-006).",

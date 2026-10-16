@@ -89,7 +89,7 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--gradient-clip-norm` | 1.0 | the optimizer's global-norm clip |
 | `--patience` | 10 | early stopping on `val_loss` |
 | `--seed` | 0 | the three data streams and the model initialization (`set_seeds`) |
-| `--gpu` | none | `setup_gpu`, which OVERWRITES `CUDA_VISIBLE_DEVICES`; to pick a GPU from the environment instead, omit it |
+| `--gpu` | none | `setup_gpu`: counts within an exported `CUDA_VISIBLE_DEVICES`, names a physical GPU only when it is unset |
 | `--output-dir` | `<repo>/results` | the run directory's parent |
 | `--experiment-name` | `neural_hmm_<variant>_<timestamp>` | the run directory's name |
 

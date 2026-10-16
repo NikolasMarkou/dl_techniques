@@ -341,7 +341,9 @@ def create_base_argument_parser(
 
     # GPU
     parser.add_argument('--gpu', type=int, default=None,
-                        help='GPU device index to use (default: all GPUs)')
+                        help='GPU index; counts within CUDA_VISIBLE_DEVICES when it is '
+                             'set, else names a physical GPU (default: all '
+                             'visible GPUs)')
 
     # Output
     # DECISION plan-2026-10-14T062616-81938e81/D-094
@@ -450,7 +452,9 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
 
     # GPU
     parser.add_argument("--gpu", type=int, default=None,
-                        help="GPU device index to use (default: all GPUs)")
+                        help="GPU index; counts within CUDA_VISIBLE_DEVICES when it is "
+                             "set, else names a physical GPU (default: all "
+                             "visible GPUs)")
 
     return parser
 

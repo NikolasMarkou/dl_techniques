@@ -286,11 +286,11 @@ These numbers prove plumbing only and support no comparison and no quality claim
 
 ## 8. GPU note
 
-`--gpu N` calls `train.common.setup_gpu`, which **overwrites** `CUDA_VISIBLE_DEVICES` with `N`.
-`CUDA_VISIBLE_DEVICES=1` together with `--gpu 0` therefore runs on physical GPU 0 (this
-happened in the first smoke run and was found by reading the run summaries). Select the device
-one way only: `CUDA_VISIBLE_DEVICES=1` alone, or `--gpu 1` alone. Every command in this
-README uses the first form.
+`--gpu N` calls `train.common.setup_gpu`. With `CUDA_VISIBLE_DEVICES` exported, `N` counts
+within that list, so `CUDA_VISIBLE_DEVICES=1` together with `--gpu 0` runs on physical GPU 1
+(until plan-2026-10-14T062616-81938e81 D-110 it overwrote the variable and ran on physical GPU 0,
+which happened in the first smoke run here). With the variable unset, `N` names a physical GPU.
+Every command in this README uses `CUDA_VISIBLE_DEVICES=1` alone.
 
 ## 9. Evaluation metrics (`eval_homography`)
 
