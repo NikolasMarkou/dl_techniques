@@ -155,7 +155,9 @@ def create_cifar_dataset(config: TrainingConfig):
     )
 
     def prepare(images, labels, training):
-        images = images.astype("float32") / 255.0
+        # A tf.data map hands this function symbolic tensors, which have no
+        # NumPy ``astype``.
+        images = tf.cast(images, tf.float32) / 255.0
         images = (images - mean) / std
         # Upsample 32x32 to the model's input. AlexNet was defined at 227; on
         # CIFAR a smaller legal size is a deliberate cost trade, not the paper's
