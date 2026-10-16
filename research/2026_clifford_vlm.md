@@ -107,11 +107,22 @@ warning; all dropped raises.
    `Dense`, with the §8 masking rule. Gated by the RED-first leak probe.
 4. **`context_kernel_size` plumbing in `CliffordNetLM`** — `lm.py`
    hardcodes K=3 for all blocks; V3 needs per-block K. ~5 lines.
-5. **Inner/wedge norm taps in `SRGP`** — `call()` discards `components`;
+5. **`CliffordNetLM` embed/decode split** — `call()` accepts only token IDs
+   (`token_embedding(ids) + position_embedding(arange)` internally); there is
+   no `embed_tokens`/`decode_embeddings` path for a pre-formed
+   `[vision; text]` sequence. V2/V3 need the split (or a sibling package)
+   before P4. Hard prerequisite, currently invisible.
+6. **Inner/wedge norm taps in `SRGP`** — `call()` discards `components`;
    all geometric health metrics are unobservable until this lands.
-6. **Scalar-metric sink** — `utils/logger.py` exports no functions; route
+7. **Scalar-metric sink** — `utils/logger.py` exports no functions; route
    Clifford scalars through `StepCheckpointCallback`, not a new `log_scalar`.
-7. **Multi-class Hungarian matcher** — `_Sam3HungarianMatcher`
+8. **Padding/masking pins** — sequence-mode blocks declare
+   `supports_masking=False`, and the non-causal global branch pools over pad
+   (measured per-position deltas 0.074–0.449, including position 0). Pin in
+   P0: right-pad-only + causal decoder + `ignore_index=0` on the byte path,
+   and `use_global_context=False` in the bridge while the token count is
+   fixed.
+9. **Multi-class Hungarian matcher** — `_Sam3HungarianMatcher`
    (`losses/sam3_detection_loss.py`) is private by decision, binary-only,
    and bound to the SAM-3 packed layout. A closed-80 DETR head needs its own
    `(Q,C)×(N,C)` cost written from scratch. Detection is a P5 item, not P0.
@@ -160,8 +171,9 @@ Image (B,320,320,3)                              raw UTF-8 bytes
 (B,400,128) vision map                   patch-embed → (B, P, D)
      |
      v
-[Bridge: CLS prepend + PixelShuffle(s=2) + Dense + 1–3 × CliffordNetBlock (sequence)]
-     |  (V0: same compression, Dense-GELU-Dense instead of blocks)
+[Bridge: Dense(128→384) + 1–3 × CliffordNetBlock (sequence) @400
+         → CLS prepend + PixelShuffle(s=2) → (B,101,384)]
+     |  (V0: Dense-GELU-Dense @400, then same compression)
      v
 projected vision tokens (B, Sv, D) ──┐
                                       ├── concat (B, Sv+P, D)
@@ -194,9 +206,9 @@ Default: **patch 16 → 400 tokens**. Two prefix options, both verified:
 | Prefix | How | Tokens | Stride | Use |
 |---|---|---|---|---|
 | full | direct | 400 | 16px | P2 large-prefix arm |
-| default | `ModalityProjection(128→384, scale_factor=2)` on (CLS + 400) | **101** | 32px | ship default |
+| default | `Dense`(128→384) + blocks @400, then CLS + `ModalityProjection(384→384, s=2)` | **101** | 32px | ship default |
 
-101 was verified end-to-end (401 in → 101 out). Stride 32 ≈ one 9×9 sudoku
+The compression step was verified end-to-end (401 in → 101 out). Stride 32 ≈ one 9×9 sudoku
 cell per token at 320px — the granularity §9's puzzle suite needs, and the
 scale P2's needle probe will confirm or reject. The hierarchical
 CliffordCLIP tower is *not* the VLM backbone (its 10×10 S4 map forces the
@@ -210,10 +222,15 @@ positional table to interpolate on the vision side.
 
 ## 6. The Bridge
 
-The bridge is a learned-CLS prepend, `PixelShuffle(scale_factor=2)` (400 →
-101 tokens, verified), a `Dense` dim-align (blocks are isotropic — channel
-mismatch raises), then 1–3 `CliffordNetBlock`s in sequence mode (rank-3
-verified). The SRGP inside these blocks *is* the cross-modal geometric operator: inner
+The bridge reasons first and compresses last. A `Dense` dim-align (128→384 —
+blocks are isotropic, channel mismatch raises) feeds 1–3 `CliffordNetBlock`s
+in sequence mode over all 400 tokens (rank-3 verified); a learned-CLS
+prepend and `PixelShuffle(scale_factor=2)` then compress to 101 tokens
+(compression verified 401→101). This ordering is deliberate:
+compress-then-reason would hand the SRGP pre-aggregated 64px cells,
+destroying the tower's 16px detail before any geometric fusion runs. Same
+parameters either way; ~4× the bridge FLOPs, negligible beside the decoder.
+The SRGP inside these blocks *is* the cross-modal geometric operator: inner
 for vision-text alignment, wedge for antisymmetric structural difference.
 One block at D=384 costs 1.33M params (measured; 885k of it the SRGP
 projection).
@@ -226,7 +243,7 @@ Five arms, fixed tower and decoder, bridge swapped:
 | C2 | SRGP + GGR, `cli_mode="inner"` |
 | C3 | SRGP + GGR, `cli_mode="wedge"` — **the paper's novelty** |
 | C4 | SRGP + GGR, `cli_mode="full"` |
-| C5 | dim-align only — floor |
+| C5 | dim-align + compress, no blocks — floor |
 
 If `wedge` alone doesn't beat `inner`, the thesis is rewritten, not the
 experiment. Ship gate (§13, P3): C4 beats C1 by ≥2% relative needle accuracy
@@ -263,6 +280,13 @@ is a smoke signal, not a verdict. Position-specific retrieval ("which
 patch?") is unanswerable in principle under a local window + rank-1 mean;
 that is the accepted ceiling of the replacement track, and grounding-heavy
 tasks are where V1 is expected to win.
+
+Converted to responses (1 patch = 4 bytes ≈ 1.25 BPE tokens at the measured
+3.20 bytes/token): V2's local reach ≈ **27 BPE tokens** (4% of the 512-patch
+context), V3's ≈ **212** (33%). Past that horizon only the rank-1 mean
+reaches the image — short answers (VQA, cell queries, captions ≈ 15 patches)
+are fine on all arms; multi-turn SFT responses go blind on V2. P2's
+delayed-query sweep measures exactly this.
 
 Measured decoder sizes (vocab 256): D=384/L=12 → 16.3M; D=384/L=18 →
 24.3M; D=256/L=18 → 10.9M. P1 matches params across arms (adjust depth) and
@@ -336,7 +360,7 @@ leave the 512-patch tail untrained. COCO/CC3M stay CLIP-contrastive-only.
 | Stage | Dataset (HF id) | Size | Use |
 |---|---|---|---|
 | 0a (CLIP init) | CC3M / LAION-400M | 3–400M | Contrastive vision-tower init (one option among §9.2) |
-| 0b (byte LM, opt) | FineWeb-Edu (bytes) | ~20B bytes | Decoder warmup before vision joins |
+| 0b (byte LM warmup) | FineWeb-Edu (bytes) | ~20B bytes | **Mandatory for V2/V3** — a from-scratch Clifford decoder without it never learns English; optional for V0/V1. Single largest compute item in the plan |
 | 1 (align, 320px) | `allenai/pixmo-cap`, `nlphuji/flickr30k` | ~0.5M | Bridge warmup, short contexts; encoder at low LR (Penguin: train it, don't freeze it) |
 | 2a (instruct, packed) | `liuhaotian/LLaVA-Instruct-150K` | 150k | Core instruction |
 | 2b (instruct mix) | `HuggingFaceH4/llava-instruct-mix-vsft` | ~100k | Diversity |
@@ -405,14 +429,13 @@ keys and the call **overwrites** rather than appends). `TerminateOnNaN`
 
 ## 10. Metrics & Monitoring
 
-Only observable metrics gate anything. Clifford inner/wedge norms and the
-scalar sink land in P0 — until then the per-block thresholds below are aspirations, not
-gates.
+Clifford inner/wedge norms and the scalar sink land in P0 (items 0.5–0.6) —
+until then the per-block thresholds below are aspirations, not gates.
 
 **Every step (all exist):** train loss (text positions only), perplexity,
 per-component LR, grad norm before/after clipping, tokens/sec.
 
-**Clifford health (needs P0 items 0.4–0.5):** `layerscale_gamma` mean/max per
+**Clifford health (needs P0 items 0.5–0.6):** `layerscale_gamma` mean/max per
 block (access via `block.ggr.gamma.gamma` — `gamma` is a sub-layer, not a
 weight); `inner_norm`, `wedge_norm`, `inner_wedge_ratio` per SRGP
 (healthy 0.3–3.0; collapse of either side to 0 = dead channel);
@@ -424,7 +447,11 @@ grid-cell needle vs K (P2); plain-vs-styled puzzle gap (§9.3).
 
 **Validation:** held-out caption loss/ppl; text-only ppl (forgetting tripwire
 — rising while VLM loss falls means add text data); CIDEr/BLEU-4 on COCO-val;
-VQA exact-match on a VQAv2 slice. **Scoped to 320px reality:** DocVQA,
+VQA exact-match on a VQAv2 slice. **Expectation band** (single 4090, ~1–2M
+pairs, decoder from scratch): COCO CIDEr ≈ 0.8–1.1, VQA near chance,
+validity/single-cell puzzles learnable, full grids/paths not. These are
+acceptable experiment outcomes and unacceptable model failures — P4
+interprets against this band. **Scoped to 320px reality:** DocVQA,
 OCRBench, MMMU, MathVista, RefCOCO, NYUv2/KITTI stay out of v1 gating —
 Docmatix is already deferred on resolution grounds.
 
@@ -442,7 +469,7 @@ estimates):
 | Part | Config | Params |
 |---|---|---|
 | vision body | CliffordNet 128/12, patch 16 @320 | **1,518,593** |
-| bridge | CLS + PixelShuffle(s=2) + Dense + 1 × Block-384 | **~1.5M** (block 1,332,096 incl. 885,120 SRGP; compress Dense ~0.2M) |
+| bridge | Dense(128→384) + 1 × Block-384 @400 + CLS/PixelShuffle(s=2) | **~2.0M** (block 1,332,096 incl. 885,120 SRGP; compress Dense 590,976 measured) |
 | patch-embed | table 256×384 + concat-4 → Dense | 98,304 + 590,592 |
 | byte table | 256×384, tied | 98,304 (assert `== 98,304`) |
 | decoder V2/V3 | CliffordNetLM 384/12, ctx 1024 | ~16.5M |
@@ -450,8 +477,8 @@ estimates):
 | detection head (P5) | Q=100, 2–3 cross layers | ~5M (new matcher required, §2.3.7) |
 | seg head (P5) | `SegmentationHead` tap | ~1M |
 
-Ship sketch (V2/V3, 1-block bridge): 1.5 + 1.5 + 0.7 + 16.5 ≈ **~20M**.
-V1 sketch: 1.5 + 0.5 (Dense bridge) + 10.5 ≈ **~13M**. Movers: decoder depth
+Ship sketch (V2/V3, 1-block bridge): 1.5 + 2.0 + 0.7 + 16.5 ≈ **~21M**.
+V1 sketch: 1.5 + 0.9 (Dense bridge @400 + compress) + 10.5 ≈ **~13M**. Movers: decoder depth
 12→18 (+8M), 3-block bridge (+2.7M), untied byte head (+98k — still don't).
 
 Scale story, stated honestly: SRGP costs `2·|S|·D²` parameters — at every
@@ -471,7 +498,10 @@ describe V2/V3, and only if P1 keeps them alive.
    never tested. P3's C3 arm is the test.
 3. **What is each arm's usable vision prefix?** Nominal `4L+1` overstates
    measured reach by 2–4× on random init. P2 replaces argument with a number;
-   re-check RF on trained weights.
+   re-check RF on trained weights. P2's delayed-query sweep additionally
+   measures reach *into the response* (vision access decays with distance);
+   V2 is expected blind past ~22 patches, which excludes it from
+   long-response SFT without a reach fix.
 4. **Does variable-K survive training?** Dilated causal convs are the
    Clifford-native local/global answer, but large-K kernels on 384-d stacks
    are untested here. P1's A2/A3 arms decide.
@@ -493,6 +523,7 @@ describe V2/V3, and only if P1 keeps them alive.
 | Clifford LM uncompetitive at matched params | Medium | High | P1 kill gate; V1 ships |
 | Wedge adds nothing cross-modally | Medium | High | P3 gate; C1 bridge, §1 rewritten |
 | RF caps prefix below puzzle needs | Medium | Medium | P2 sets Sv; resolution trigger; V1 fallback |
+| Vision access decays past reach mid-response | Medium | High | Delayed-query arm in P2; V2 out of long-response SFT without reach |
 | Cross-modal shift subspaces don't interact | Medium | Medium | Bridge aligns first; LayerScale starts near-identity |
 |Instability in joint training | Low | Medium | Frozen-decoder align first; `TerminateOnNaN`; grad clip |
 
@@ -509,23 +540,33 @@ P0  shared spine (built once, serves every arm) · ~3–5 days
          └─> P5  ship + scale + dense heads + depth/JEPA tracks
 ```
 
-**P0 — shared spine.** Nothing else starts until 0.1–0.3 land.
-0.1 reusable vision body (stage-map return); 0.2 byte head + RED-first leak
-probe; 0.3 `context_kernel_size` plumbing; 0.4 SRGP norm taps; 0.5 metric
-sink via `StepCheckpointCallback`; 0.6 pre-registered gates + frozen eval
-suite. Side effects: fix the (small) spec blockers the audit found as you
-touch them; delete nothing under `results/`.
+**P0 — shared spine.** Nothing else starts until 0.1–0.5 and 0.8 land (build
+prerequisites plus the padding pins). 0.1 reusable vision body (stage-map
+return); 0.2 byte head + RED-first leak probe; 0.3 `context_kernel_size`
+plumbing; 0.4 `CliffordNetLM` embed/decode split (hard prerequisite for
+V2/V3); 0.5 SRGP norm taps; 0.6 metric sink via `StepCheckpointCallback`;
+0.7 pre-registered gates + frozen eval suite; 0.8 padding/masking pins.
+Side effects: fix the (small) spec blockers the audit found as you touch
+them; delete nothing under `results/`.
 
 **P1 — text-only bake-off.** Arms A0 (Gemma3 ref) / A1 (uniform K=3) / A2
-(variable-K) / A3 (+global branch). Metric: val bits/byte at matched
-tokens-seen + byte needle-vs-distance. Gates: ≤0.25 → replacement lives;
-0.25–0.50 → proceed with V1 as ship candidate; >0.50 → kill replacement,
-V1 ships, Clifford survives as the bridge operator.
+(variable-K) / A3 (+global branch). **Primary metric: byte-needle accuracy
+vs distance** (reach) — perplexity is dominated by local statistics and can
+pass a reach-blind arm; bits/byte at matched tokens-seen is secondary.
+Gates on bits/byte: ≤0.25 → replacement lives; 0.25–0.50 → proceed with V1
+as ship candidate; >0.50 → kill replacement, V1 ships, Clifford survives as
+the bridge operator. Plus a reach floor no gate waives: a surviving arm must
+retrieve above chance at 256 patches (≈ ship prefix + response hypothesis) —
+otherwise it cannot serve the prefix regardless of bits/byte.
 
 **P2 — visual needle probe.** Grid images, "value at (r,c)?", K ∈
 {4,8,12,16,20}. Arms B0 (Gemma3) / B1 / B2 / B3 (B0+Dense bridge, isolates
-decoder from bridge). Output: max operable prefix per arm → Sv,
-`scale_factor`, resolution trigger. Default hypothesis: Sv=101 @ stride 32.
+decoder from bridge). Two sweeps: (a) grid size K at response start → max
+operable prefix per arm → Sv, `scale_factor`, resolution trigger; (b)
+**delayed query** — same question after N bytes of filler, sweep N →
+**vision reach in patches per arm**, the number the whole design hinges on
+(V2 is expected blind past ~22 patches; without this sweep P2 cannot detect
+it and P4 would waste a week). Default hypothesis: Sv=101 @ stride 32.
 
 **P3 — bridge ablation.** Arms C1–C5 (§6). Metrics: P2 needle + captioning
 bits/byte + wall-clock. Gate: C4 over C1 by the §6 margins or the ship
@@ -619,28 +660,30 @@ class CliffordVLM(keras.Model):
 
 
 class CliffordBridge(keras.layers.Layer):
-    """Compress, align, then geometric fusion (the §1 thesis)."""
+    """Reason at full resolution; compress last (the §1 thesis)."""
 
     def __init__(self, vision_dim, lm_dim, num_blocks=1,
                  shifts=[1, 2, 4], cli_mode="full"):
-        self.cls_token = keras.layers.Embedding(1, vision_dim)
-        self.compress = ModalityProjection(vision_dim, lm_dim,
-                                           scale_factor=2)  # 401 → 101
+        self.dim_align = keras.layers.Dense(lm_dim)      # 128 → 384
         self.blocks = [CliffordNetBlock(lm_dim, shifts, cli_mode,
                                         input_mode="sequence")
-                       for _ in range(num_blocks)]
-        # C1 arm: replace blocks with Dense-GELU-Dense. C5: compress only.
+                       for _ in range(num_blocks)]        # @400 tokens
+        self.cls_token = keras.layers.Embedding(1, lm_dim)
+        self.compress = ModalityProjection(lm_dim, lm_dim,
+                                           scale_factor=2)  # 401 → 101
+        # C1 arm: replace blocks with Dense-GELU-Dense.
+        # C5: dim_align + compress only.
 
     def call(self, vision_map):
-        # vision_map (B,400,128) → prepend CLS → (B,401,128)
-        # → PixelShuffle+Dense+GELU+LN → (B,101,384) → Clifford blocks
+        # vision_map (B,400,128) → align → (B,400,384) → Clifford blocks @400
+        # → prepend CLS → (B,401,384) → PixelShuffle+Dense+GELU+LN → (B,101,384)
         b = keras.ops.shape(vision_map)[0]
-        cls = keras.ops.repeat(self.cls_token(keras.ops.zeros((b, 1), "int32")),
-                               1, axis=0)
-        z = self.compress(concat([cls, vision_map], axis=1))
+        z = self.dim_align(vision_map)
         for block in self.blocks:
             z = z + block(z)     # external residual, unconditional
-        return z
+        cls = keras.ops.repeat(self.cls_token(keras.ops.zeros((b, 1), "int32")),
+                               1, axis=0)
+        return self.compress(concat([cls, z], axis=1))
 ```
 
 ## Appendix B: The Honest Attention Comparison
