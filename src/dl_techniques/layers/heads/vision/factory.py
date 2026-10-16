@@ -196,6 +196,17 @@ def _validated_block_dims(
     return block_dims
 
 
+#: Registered attention types a vision head can construct but never run, and
+#: why. A head calls its attention stage with one feature stream and nothing
+#: else; these layers need more per call. Refused in ``BaseVisionHead`` when
+#: the attention stage is on (D-089).
+_UNRUNNABLE_ATTENTION_TYPES: Dict[str, str] = {
+    'shared_weights_cross': (
+        "SharedWeightsCrossAttention needs split_sizes on every call to split "
+        "its input into modalities, and a vision head attends over one stream"
+    ),
+}
+
 #: Values per box of a :class:`DetectionHead` regression branch when the
 #: caller gives none: the usual corner or centre form.
 _DEFAULT_BBOX_DIMS = 4
@@ -575,6 +586,16 @@ class BaseVisionHead(keras.layers.Layer):
         self.use_ffn = use_ffn
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
+
+        # DECISION plan-2026-10-14T062616-81938e81/D-089: refuse a type the
+        # head can build but never run, here, naming the reason. Do not let it
+        # through to fail inside call() far from the argument (it used to).
+        if self.use_attention and self.attention_type in _UNRUNNABLE_ATTENTION_TYPES:
+            raise ValueError(
+                f"{type(self).__name__}: attention_type="
+                f"{self.attention_type!r} cannot run in a vision head: "
+                f"{_UNRUNNABLE_ATTENTION_TYPES[self.attention_type]}."
+            )
 
         # Create common layers
         self._create_common_layers()
