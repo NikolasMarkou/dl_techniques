@@ -3293,26 +3293,22 @@ def _train_in_run_dir(
 
     model_loading_validated: Optional[bool] = None
     if round_trip_pred is not None:
-        try:
-            # fp16 save/load drifts more; relax the tolerance so the check does not
-            # false-WARN under mixed_precision.
-            tol = 5e-2 if config.mixed_precision else 1e-4
-            model_loading_validated = bool(validate_model_loading(
-                str(final_path),
-                round_trip_sample,
-                round_trip_pred,
-                custom_objects=None,  # all layers are @register_dl_technique
-                tolerance=tol,
-            ))
-            if not model_loading_validated:
-                logger.warning(
-                    "final_model.keras round-trip check FAILED: reloaded outputs "
-                    f"differ from pre-save (tol={tol:.1e}). The saved file may not "
-                    "reload identically."
-                )
-        except Exception as e:
+        # A reload error surfaces (D-085); a value mismatch is the recorded False.
+        # fp16 save/load drifts more; relax the tolerance so the check does not
+        # false-WARN under mixed_precision.
+        tol = 5e-2 if config.mixed_precision else 1e-4
+        model_loading_validated = bool(validate_model_loading(
+            str(final_path),
+            round_trip_sample,
+            round_trip_pred,
+            custom_objects=None,  # all layers are @register_dl_technique
+            tolerance=tol,
+        ))
+        if not model_loading_validated:
             logger.warning(
-                f"final_model.keras round-trip check errored (non-fatal): {e}"
+                "final_model.keras round-trip check FAILED: reloaded outputs "
+                f"differ from pre-save (tol={tol:.1e}). The saved file may not "
+                "reload identically."
             )
 
     # DECISION plan-2026-09-19T131351-b8d39688/D-015: the finished summary is written LAST,

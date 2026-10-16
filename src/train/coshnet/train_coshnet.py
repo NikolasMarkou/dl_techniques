@@ -138,12 +138,11 @@ def train_model(args) -> None:
     pre_save_output = model.predict(test_sample, verbose=0)
 
     final_path = os.path.join(results_dir, f"coshnet_{args.dataset}_{args.variant}_final.keras")
-    try:
-        model.save(final_path)
-        logger.info(f"Final model saved to: {final_path}")
-        validate_model_loading(final_path, test_sample, pre_save_output, CUSTOM_OBJECTS)
-    except Exception as e:
-        logger.warning(f"Failed to save final model: {e}")
+    # A save or reload error surfaces (D-085); a value mismatch is logged by
+    # validate_model_loading itself.
+    model.save(final_path)
+    logger.info(f"Final model saved to: {final_path}")
+    validate_model_loading(final_path, test_sample, pre_save_output, CUSTOM_OBJECTS)
 
     # Load best and evaluate
     best_path = os.path.join(results_dir, 'best_model.keras')

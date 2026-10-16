@@ -1166,13 +1166,10 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
 
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
-        load_check: Optional[bool] = None
-        try:
-            sample = data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0
-            load_check = bool(validate_model_loading(
-                str(final_path), sample, model.predict(sample, verbose=0)))
-        except Exception as e:  # noqa: BLE001 - log-only
-            logger.warning(f"validate_model_loading raised: {e}")
+        # A reload error surfaces (D-085); a value mismatch is the recorded False.
+        sample = data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0
+        load_check: Optional[bool] = bool(validate_model_loading(
+            str(final_path), sample, model.predict(sample, verbose=0)))
 
         # Both are isolated: nothing below can fail a run whose weights are already on disk.
         visualizations = _write_figures(run_dir, grid, model, hist, best_epoch, test_metrics_best, config)

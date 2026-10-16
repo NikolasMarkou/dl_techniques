@@ -937,14 +937,11 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
 
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
-        load_check: Optional[bool] = None
-        try:
-            sample = x_val[:LOAD_CHECK_SAMPLES]
-            load_check = bool(validate_model_loading(
-                str(final_path), sample, model.predict(sample, verbose=0)
-            ))
-        except Exception as e:  # noqa: BLE001 - log-only
-            logger.warning(f"validate_model_loading raised: {e}")
+        # A reload error surfaces (D-085); a value mismatch is the recorded False.
+        sample = x_val[:LOAD_CHECK_SAMPLES]
+        load_check: Optional[bool] = bool(validate_model_loading(
+            str(final_path), sample, model.predict(sample, verbose=0)
+        ))
 
         probs = model.predict(x_test, batch_size=1024, verbose=0)
         visualizations = run_summary.write_classification_figures(

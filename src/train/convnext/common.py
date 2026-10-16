@@ -1239,14 +1239,11 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
-        load_check: Optional[bool] = None
-        try:
-            sample = data.x_val[:LOAD_CHECK_SAMPLES]
-            load_check = bool(validate_model_loading(
-                str(final_path), sample, model.predict(sample, verbose=0)
-            ))
-        except Exception as e:  # noqa: BLE001 - log-only
-            logger.warning(f"validate_model_loading raised: {e}")
+        # A reload error surfaces (D-085); a value mismatch is the recorded False.
+        sample = data.x_val[:LOAD_CHECK_SAMPLES]
+        load_check: Optional[bool] = bool(validate_model_loading(
+            str(final_path), sample, model.predict(sample, verbose=0)
+        ))
 
         val_keys = [k for k in hist if k.startswith("val_")]
         summary: Dict[str, Any] = {

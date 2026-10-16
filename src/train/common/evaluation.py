@@ -54,57 +54,67 @@ def validate_model_loading(
     Returns
     -------
     bool
-        True if model loads correctly and outputs match.
+        True if the reloaded outputs match ``expected_output`` within
+        ``tolerance``; False (with a warning) if they do not. A mismatch is a
+        verdict the caller records.
+
+    Raises
+    ------
+    Exception
+        Whatever ``keras.models.load_model`` or ``predict`` raises (a missing,
+        corrupt or unloadable archive, an input the reloaded model cannot
+        run). That is not a verdict about the values, so it is not turned into
+        ``False``: an archive that does not load is a defect to surface.
     """
-    try:
-        loaded_model = keras.models.load_model(
-            model_path, custom_objects=custom_objects or {}
-        )
+    # DECISION plan-2026-10-14T062616-81938e81/D-085: no `except Exception`
+    # here. A load error used to return False with a warning, so an archive
+    # that does not load read like one whose values drifted. Let it raise.
+    # compile=False: the check compares inference outputs; restoring the
+    # optimizer of a model saved before any fit only warns about it.
+    loaded_model = keras.models.load_model(
+        model_path, custom_objects=custom_objects or {}, compile=False
+    )
 
-        if isinstance(test_sample, tf.Tensor):
-            test_sample = test_sample.numpy()
+    if isinstance(test_sample, tf.Tensor):
+        test_sample = test_sample.numpy()
 
-        loaded_output = loaded_model.predict(test_sample, verbose=0)
+    loaded_output = loaded_model.predict(test_sample, verbose=0)
 
-        if isinstance(expected_output, dict) or isinstance(loaded_output, dict):
-            if not (isinstance(expected_output, dict) and isinstance(loaded_output, dict)):
-                logger.warning(
-                    "Model output structure mismatch after loading "
-                    f"(expected={type(expected_output).__name__}, "
-                    f"loaded={type(loaded_output).__name__})"
-                )
-                return False
-            if set(expected_output.keys()) != set(loaded_output.keys()):
-                logger.warning(
-                    "Model output keys differ after loading "
-                    f"(expected={sorted(expected_output.keys())}, "
-                    f"loaded={sorted(loaded_output.keys())})"
-                )
-                return False
-            max_diff = 0.0
-            for k in expected_output:
-                diff = np.max(np.abs(
-                    np.asarray(loaded_output[k]) - np.asarray(expected_output[k])
-                ))
-                max_diff = max(max_diff, float(diff))
-            if max_diff <= tolerance:
-                logger.info("Model loading validation passed")
-                return True
+    if isinstance(expected_output, dict) or isinstance(loaded_output, dict):
+        if not (isinstance(expected_output, dict) and isinstance(loaded_output, dict)):
             logger.warning(
-                f"Model outputs differ after loading (max_diff={max_diff:.6f})"
+                "Model output structure mismatch after loading "
+                f"(expected={type(expected_output).__name__}, "
+                f"loaded={type(loaded_output).__name__})"
             )
             return False
-
-        if np.allclose(expected_output, loaded_output, atol=tolerance):
+        if set(expected_output.keys()) != set(loaded_output.keys()):
+            logger.warning(
+                "Model output keys differ after loading "
+                f"(expected={sorted(expected_output.keys())}, "
+                f"loaded={sorted(loaded_output.keys())})"
+            )
+            return False
+        max_diff = 0.0
+        for k in expected_output:
+            diff = np.max(np.abs(
+                np.asarray(loaded_output[k]) - np.asarray(expected_output[k])
+            ))
+            max_diff = max(max_diff, float(diff))
+        if max_diff <= tolerance:
             logger.info("Model loading validation passed")
             return True
-        else:
-            max_diff = np.max(np.abs(loaded_output - expected_output))
-            logger.warning(f"Model outputs differ after loading (max_diff={max_diff:.6f})")
-            return False
+        logger.warning(
+            f"Model outputs differ after loading (max_diff={max_diff:.6f})"
+        )
+        return False
 
-    except Exception as e:
-        logger.warning(f"Model loading validation failed: {e}")
+    if np.allclose(expected_output, loaded_output, atol=tolerance):
+        logger.info("Model loading validation passed")
+        return True
+    else:
+        max_diff = np.max(np.abs(loaded_output - expected_output))
+        logger.warning(f"Model outputs differ after loading (max_diff={max_diff:.6f})")
         return False
 
 

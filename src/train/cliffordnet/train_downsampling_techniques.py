@@ -615,29 +615,28 @@ def train_one_variant(
     #      the existing CliffordNet test suite) ----
     if not args.skip_save and variant_name != "V0_baseline_isotropic":
         test_sample = x_test[:4]
-        try:
-            stats_mean = np.array(
-                [0.5071, 0.4867, 0.4408], dtype=np.float32
-            )
-            stats_std = np.array(
-                [0.2675, 0.2565, 0.2761], dtype=np.float32
-            )
-            test_norm = (test_sample - stats_mean) / stats_std
-            pre_save = model.predict(test_norm, verbose=0)
-            final_path = os.path.join(
-                results_dir, f"{variant_name}_final.keras"
-            )
-            model.save(final_path)
-            logger.info(f"  saved final model to {final_path}")
-            validate_model_loading(
-                final_path, test_norm, pre_save,
-                custom_objects={
-                    "CliffordNetBlock": CliffordNetBlock,
-                    "PatchMerging": PatchMerging,
-                },
-            )
-        except Exception as exc:
-            logger.warning(f"  save / validate failed: {exc}")
+        # A save or reload error surfaces (D-085); a value mismatch is logged
+        # by validate_model_loading itself.
+        stats_mean = np.array(
+            [0.5071, 0.4867, 0.4408], dtype=np.float32
+        )
+        stats_std = np.array(
+            [0.2675, 0.2565, 0.2761], dtype=np.float32
+        )
+        test_norm = (test_sample - stats_mean) / stats_std
+        pre_save = model.predict(test_norm, verbose=0)
+        final_path = os.path.join(
+            results_dir, f"{variant_name}_final.keras"
+        )
+        model.save(final_path)
+        logger.info(f"  saved final model to {final_path}")
+        validate_model_loading(
+            final_path, test_norm, pre_save,
+            custom_objects={
+                "CliffordNetBlock": CliffordNetBlock,
+                "PatchMerging": PatchMerging,
+            },
+        )
 
     summary_path = os.path.join(results_dir, "training_summary.txt")
     with open(summary_path, "w") as f:
