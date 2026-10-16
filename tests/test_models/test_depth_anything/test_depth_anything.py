@@ -599,11 +599,14 @@ class TestTrainPathAugmentation:
             np.full((h, w, 1), _DEPTH_A, dtype="float32"),
             np.full((h, w, 1), _DEPTH_B, dtype="float32"),
         ])
-        x_aug, (y_mix,) = m._augment_with_targets(x, [y])
+        x_aug, (y_mix,), box = m._augment_with_targets(x, [y])
         x_aug, y_mix = np.asarray(x_aug), np.asarray(y_mix)
 
         cut = np.isclose(x_aug[0, :, :, 0], _SCENE_B)
         assert cut.sum() > 0, "liveness: no pixel of row 0 was replaced"
+        # The returned box is the cut region (step 13.6, D-113: the unlabeled
+        # loss scores the two regions separately).
+        np.testing.assert_array_equal(np.asarray(box)[:, :, 0] > 0, cut)
         assert np.all(np.isclose(y_mix[0, :, :, 0][cut], _DEPTH_B)), (
             "depth target's cut region does not carry the donor's depth"
         )
@@ -620,7 +623,8 @@ class TestTrainPathAugmentation:
         m.augmentation = None
         x = np.zeros((2,) + small_image_shape, dtype="float32")
         y = np.ones((2,) + small_image_shape[:2] + (1,), dtype="float32")
-        x_out, (y_out,) = m._augment_with_targets(x, [y])
+        x_out, (y_out,), box = m._augment_with_targets(x, [y])
+        assert box is None
         np.testing.assert_allclose(np.asarray(x_out), x)
         np.testing.assert_allclose(np.asarray(y_out), y)
 

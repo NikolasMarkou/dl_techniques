@@ -6,7 +6,7 @@ Pattern-5 (depth-estimation) training scaffold for
 > The default encoder is the in-tree `dl_techniques.models.vision.vit.ViT`
 > (`--encoder-kind real`). The decoder ends in a ReLU, as the reference head does. `train_step`
 > dispatches to a clean labeled path or a semi-sup path that adds FAL +
-> stop-gradient pseudo-label L1 consistency. Semi-supervised data feed
+> stop-gradient pseudo-label consistency (affine-invariant per CutMix region, eq. 6-8). Semi-supervised data feed
 > is wired end-to-end via `--unlabeled-image-glob`, which builds an
 > `UnlabeledImageDataset` paired with `MegaDepthDataset` into
 > `((x_lab, x_unlab), y_lab)` batches. On-step EMA decay is driven by
@@ -157,8 +157,9 @@ EMA) `--use-feature-alignment` + `--ema-schedule`. The script then:
 3. Routes batches into `DepthAnything._train_step_semi_supervised`, which
    adds two loss terms on top of the labeled `compute_loss`:
    * **FAL** between pooled student/teacher features on `x_unlab`.
-   * **L1 pseudo-label consistency** between the student's depth on
-     `x_unlab` and the EMA teacher's stop-gradient pseudo-depth.
+   * **Pseudo-label consistency** between the student's depth on
+     `x_unlab` and the EMA teacher's stop-gradient pseudo-depth: the
+     paper's affine-invariant loss per CutMix region (eq. 6-8).
 4. Drives the EMA teacher per training batch via `TeacherEMACallback`
    using the chosen schedule.
 

@@ -15,7 +15,8 @@ The encoder is the in-tree `dl_techniques.models.vision.vit.ViT` (`encoder_kind=
 the default); the decoder is the shared `DepthEstimationHead(decoder_style='dpt')` and ends in a
 ReLU, as the reference heads do (see "Output range" below). `train_step` dispatches to a
 clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
-an L1 pseudo-label consistency term on student-vs-teacher depth over `x_unlab`. On-step EMA
+a pseudo-label consistency term on student-vs-teacher depth over `x_unlab` (the paper's
+affine-invariant loss per CutMix region, eq. 6-8). On-step EMA
 decay is provided by `TeacherEMACallback` with cosine/linear schedules, and
 `DepthAnything.from_pretrained_encoder(path)` loads encoder weights from a saved `.keras`
 checkpoint and re-syncs the teacher. `StrongAugmentation` supports any number of channels,
@@ -91,8 +92,8 @@ un-augmented forward pass.
 * `(x, y)` — labeled-only path (default).
 * `((x_lab, x_unlab), y_lab)` — semi-supervised path. Active when
   `enable_semi_supervised=True`. Adds a stop-gradient pseudo-label
-  L1-consistency term over `x_unlab` against the weight-shared frozen
-  teacher, plus a Feature-Alignment Loss term on unlabeled features when
+  consistency term over `x_unlab` against the weight-shared frozen
+  teacher (affine-invariant, per CutMix region, eq. 6-8 of the paper), plus a Feature-Alignment Loss term on unlabeled features when
   `use_feature_alignment=True` as well.
 
 ---
@@ -284,9 +285,13 @@ model.fit(paired_ds, epochs=100, steps_per_epoch=len(labeled_ds),
 ```
 
 The semi-supervised `train_step` adds two losses on top of the labeled loss:
-**FAL** between pooled student/teacher features, and **L1 pseudo-label
+**FAL** between pooled student/teacher features, and **pseudo-label
 consistency** between the student's depth and the teacher's stop-gradient depth
-pseudo-labels. In both terms the student sees the *augmented* unlabeled batch
+pseudo-labels. The consistency term is the paper's (arXiv 2401.10891, eq. 6-8): the
+affine-invariant loss of eq. 1-3 (median shift, mean-absolute-deviation scale, MAE)
+computed separately over the pixels outside the CutMix box and inside it, averaged by
+their pixel shares (`DepthAnything._unlabeled_consistency`); without a mix it is that
+loss over the whole map. It was a plain L1 until plan-2026-10-14T062616-81938e81 D-113. In both terms the student sees the *augmented* unlabeled batch
 while the teacher reads the *clean* one — that asymmetry is the recipe — and the
 teacher's pseudo-depth is then mixed by the same CutMix box the student's input
 received, so the consistency term never asks the student to reproduce another

@@ -58,7 +58,6 @@ References:
 """
 
 import keras
-from keras import ops
 import tensorflow as tf
 from typing import Dict, Tuple, Optional, Union, Any, List
 
@@ -479,7 +478,7 @@ class DepthAnything(keras.Model):
         # (B, N+1, D) → drop CLS → (B, N, D) → reshape (B, h, w, D)
         x = x[:, 1:, :]
         d = self.encoder_embed_dim or x.shape[-1]
-        return ops.reshape(x, (-1, self.encoder_h, self.encoder_w, d))
+        return keras.ops.reshape(x, (-1, self.encoder_h, self.encoder_w, d))
 
     def _create_placeholder_encoder(self, trainable: bool = True) -> keras.Model:
         """Create the placeholder Conv-BN-ReLU encoder (legacy mode).
@@ -681,7 +680,7 @@ class DepthAnything(keras.Model):
         if isinstance(pseudo, dict):
             pseudo = pseudo['depth']
 
-        return ops.stop_gradient(pseudo)
+        return keras.ops.stop_gradient(pseudo)
 
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-014: augmentation stays in the training path, never in `call()`.
     # `call()` has no target in scope, so a `call()`-side CutMix mixed the image but not the depth map on ~cutmix_prob of batches. See decisions.md.
@@ -689,29 +688,83 @@ class DepthAnything(keras.Model):
         self,
         x: keras.KerasTensor,
         targets: List[keras.KerasTensor],
-    ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
+    ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor], Optional[keras.KerasTensor]]:
         """Strongly augment ``x`` and apply the same CutMix box to each target.
 
         Interface contract (called from both training paths):
 
-        * Returns ``(x_aug, mixed_targets)`` with ``len(mixed_targets) ==
-          len(targets)``, each entry shaped like its input.
+        * Returns ``(x_aug, mixed_targets, box)`` with ``len(mixed_targets) ==
+          len(targets)``, each entry shaped like its input. ``box`` is the
+          ``(H, W, 1)`` CutMix mask (1 where a pixel came from the donor image,
+          all 0 when CutMix was skipped), or ``None`` when nothing was mixed.
         * Every target must share ``x``'s batch and spatial axes; channel counts
           are free (depth alone, or depth + validity mask).
         * When ``self.augmentation`` is ``None`` — tests and callers that opt out
-          of strong augmentation set it so — the inputs are returned unchanged.
+          of strong augmentation set it so — the inputs are returned unchanged,
+          with ``box`` ``None``.
 
         :param x: Image batch ``(B, H, W, C)``.
         :type x: keras.KerasTensor
         :param targets: Tensors to mix by the same box as ``x``.
         :type targets: List[keras.KerasTensor]
-        :return: The augmented images and the identically mixed targets.
-        :rtype: Tuple[keras.KerasTensor, List[keras.KerasTensor]]
+        :return: The augmented images, the identically mixed targets and the box.
+        :rtype: Tuple[keras.KerasTensor, List[keras.KerasTensor], Optional[keras.KerasTensor]]
         """
         if self.augmentation is None:
-            return x, list(targets)
+            return x, list(targets), None
         x_aug, mix = self.augmentation.augment_with_mix(x, training=True)
-        return x_aug, [self.augmentation.apply_mix_to_target(t, mix) for t in targets]
+        box = None if mix is None else mix[0]
+        return x_aug, [self.augmentation.apply_mix_to_target(t, mix) for t in targets], box
+
+    @staticmethod
+    def _unlabeled_consistency(
+        y_pred: keras.KerasTensor,
+        pseudo: keras.KerasTensor,
+        box: Optional[keras.KerasTensor],
+    ) -> keras.KerasTensor:
+        """The unlabeled loss of the paper, eq. 6-8 (arXiv 2401.10891, section 3.2).
+
+        The affine-invariant loss ``rho`` (eq. 1-3, ``AffineInvariantLoss``
+        with a mask) runs separately over the pixels the student's input kept
+        from its own image (``1 - box``) and over the CutMix box (eq. 6, 7),
+        each against the identically mixed pseudo-depth, and the two are
+        averaged by their pixel shares (eq. 8). Without a mix ``box`` is
+        ``None`` (or all 0) and the result is ``rho`` over the whole map.
+        Each output channel is scored as its own map.
+
+        :param y_pred: Student depth on the augmented batch ``(B, H, W, C)``.
+        :type y_pred: keras.KerasTensor
+        :param pseudo: The teacher's pseudo-depth, mixed by ``box``, same shape.
+        :type pseudo: keras.KerasTensor
+        :param box: ``(H, W, 1)`` CutMix mask, or ``None``.
+        :type box: Optional[keras.KerasTensor]
+        :return: Scalar loss, the batch mean of eq. 8.
+        :rtype: keras.KerasTensor
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-113
+        # Do NOT score this term with a plain L1 (the old `mean(|S - T|)`):
+        # the paper uses the affine-invariant loss here as for the labels, per
+        # CutMix region, and a raw L1 against an unaligned teacher map
+        # penalises scale and shift the labeled loss deliberately ignores.
+        shape = keras.ops.shape(y_pred)
+        channels = shape[3]
+        # Each channel becomes its own (H, W, 1) map: (B, H, W, C) -> (B*C, H, W, 1).
+        def per_channel(t):
+            t = keras.ops.transpose(t, (0, 3, 1, 2))
+            return keras.ops.reshape(t, (-1, shape[1], shape[2], 1))
+        pred, target = per_channel(y_pred), per_channel(keras.ops.cast(pseudo, y_pred.dtype))
+        if box is None:
+            donor = keras.ops.zeros_like(pred)
+        else:
+            donor = keras.ops.broadcast_to(
+                keras.ops.cast(box, pred.dtype), keras.ops.shape(pred))
+        rho = AffineInvariantLoss(masked=True)
+        total = keras.ops.zeros(keras.ops.shape(pred)[:1], dtype=pred.dtype)
+        for region in (1.0 - donor, donor):
+            share = keras.ops.mean(region, axis=(1, 2, 3))
+            mask_and_target = keras.ops.concatenate([target, region], axis=-1)
+            total = total + share * rho.call(mask_and_target, pred)
+        return keras.ops.mean(keras.ops.reshape(total, (-1, channels)))
 
     # DECISION plan-2026-08-17T183311-79c63e38/D-033: both custom step methods must end by calling this.
     # `compute_loss` does not feed `_loss_tracker` the way the default `train_step` does; skipping this left `history["loss"]` at 0.0 every step. See decisions.md.
@@ -775,7 +828,7 @@ class DepthAnything(keras.Model):
         """
         # DECISION plan-2026-08-17T183311-79c63e38/D-034: differentiate the scaled loss, report the unscaled one.
         # Under mixed_float16 skipping `scale_loss` divides every gradient by the loss scale (measured |dW| ratio ~2.8e4); float32 is unaffected. See decisions.md.
-        x, (y,) = self._augment_with_targets(x, [y])
+        x, (y,), _ = self._augment_with_targets(x, [y])
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
             # Keras-3 canonical train_step — replaces deprecated
@@ -805,7 +858,7 @@ class DepthAnything(keras.Model):
         the target following: the pseudo-label is therefore mixed by the same box
         as the student's input before the consistency term compares them.
         """
-        x_lab, (y,) = self._augment_with_targets(x_lab, [y])
+        x_lab, (y,), _ = self._augment_with_targets(x_lab, [y])
         with tf.GradientTape() as tape:
             # ---- labeled supervision ----
             y_pred = self(x_lab, training=True)
@@ -819,7 +872,7 @@ class DepthAnything(keras.Model):
                 # The teacher's pseudo-depth is read off the clean batch, then
                 # mixed by the same box the student's input received.
                 pseudo = self._pseudo_label_depth(x_unlab)
-                x_unlab_aug, (pseudo,) = self._augment_with_targets(
+                x_unlab_aug, (pseudo,), box = self._augment_with_targets(
                     x_unlab, [pseudo]
                 )
 
@@ -834,19 +887,20 @@ class DepthAnything(keras.Model):
                     feat_teacher = self.frozen_encoder(x_unlab, training=False)
                     # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
                     if len(feat_student.shape) == 4:
-                        feat_student = ops.mean(feat_student, axis=[1, 2])
-                        feat_teacher = ops.mean(feat_teacher, axis=[1, 2])
+                        feat_student = keras.ops.mean(feat_student, axis=[1, 2])
+                        feat_teacher = keras.ops.mean(feat_teacher, axis=[1, 2])
                     elif len(feat_student.shape) == 3:
-                        feat_student = ops.mean(feat_student[:, 1:, :], axis=1)
-                        feat_teacher = ops.mean(feat_teacher[:, 1:, :], axis=1)
+                        feat_student = keras.ops.mean(feat_student[:, 1:, :], axis=1)
+                        feat_teacher = keras.ops.mean(feat_teacher[:, 1:, :], axis=1)
                     fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
                     loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
-                # Pseudo-label consistency: L1 between student depth on the
+                # Pseudo-label consistency: the affine-invariant loss per
+                # CutMix region (eq. 6-8) between student depth on the
                 # augmented batch and the teacher's identically mixed,
                 # stop-gradient pseudo-depth.
                 y_pred_unlab = self(x_unlab_aug, training=True)
-                consistency = ops.mean(ops.abs(y_pred_unlab - pseudo))
+                consistency = self._unlabeled_consistency(y_pred_unlab, pseudo, box)
                 loss = loss + self.loss_weights.get('unlabeled', 0.5) * consistency
 
             scaled_loss = self.optimizer.scale_loss(loss)
@@ -867,7 +921,8 @@ class DepthAnything(keras.Model):
         * ``((x_lab, x_unlab), y_lab)`` — semi-supervised path. Active only
           when ``self.enable_semi_supervised`` is True. Routed to
           :meth:`_train_step_semi_supervised`, which adds a stop-gradient
-          pseudo-label L1-consistency term over ``x_unlab`` and, when
+          pseudo-label consistency term over ``x_unlab`` (the affine-invariant
+          loss per CutMix region, :meth:`_unlabeled_consistency`) and, when
           ``use_feature_alignment`` is also set, a Feature-Alignment-Loss term.
 
         :param data: Training data batch.
