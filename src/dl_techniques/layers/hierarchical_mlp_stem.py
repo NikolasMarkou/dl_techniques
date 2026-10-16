@@ -196,7 +196,7 @@ class HierarchicalMLPStem(keras.layers.Layer):
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.norm_layer = norm_layer
-        # DECISION D-401: store the resolved activation, never an
+        # DECISION plan-2026-08-23T091307-9a110062/D-401: store the resolved activation, never an
         # 'activation_name' placeholder, which drops callables. See decisions.md.
         self.activation = deserialize_activation(activation)
         self.use_bias = use_bias

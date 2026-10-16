@@ -297,7 +297,7 @@ class LeVJEPAEncoder(keras.Model):
                 f"attention_dropout_rate must be in [0, 1], got {attention_dropout_rate}"
             )
 
-        # DECISION D-013: use_rope is the only positional toggle; do not add a
+        # DECISION plan-2026-09-03T113223-2a714a91/D-013: use_rope is the only positional toggle; do not add a
         # separate pos_embed argument. See decisions.md.
         self.input_shape_config = tuple(input_shape)
         self.num_frames = int(num_frames)

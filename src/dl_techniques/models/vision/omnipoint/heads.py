@@ -231,7 +231,7 @@ class MaskHead(keras.layers.Layer):
         self.decoder = DPTDecoder(
             dims=self.dims,
             output_channels=1,
-            # DECISION D-010: linear logits, not sigmoid; MaskLoss wraps
+            # DECISION plan-2026-09-11T050223-1b47bcf6/D-010: linear logits, not sigmoid; MaskLoss wraps
             # BinaryCrossentropy(from_logits=True). See decisions.md.
             output_activation="linear",
             kernel_initializer=self.kernel_initializer,

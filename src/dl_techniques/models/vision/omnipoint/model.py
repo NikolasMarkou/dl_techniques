@@ -252,7 +252,7 @@ class OmniPoint(keras.Model):
         self.conditioning_hidden_channels = int(conditioning_hidden_channels)
         self.splat_kernel_size = (int(splat_kernel_size[0]), int(splat_kernel_size[1]))
         self.splat_sigma = float(splat_sigma)
-        # DECISION D-013: widen the encoder's input channels here, at __init__
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-013: widen the encoder's input channels here, at __init__
         # time; the patch-embedding kernel shape is fixed at build. decisions.md.
         self._encoder_input_channels = img_c + (
             (self.intrinsics_channels + self.depth_channels)
@@ -280,7 +280,7 @@ class OmniPoint(keras.Model):
                 name="conditioning_state_embedding",
             )
 
-        # DECISION D-011: upsample_factor=1 on both dense heads; patch_size 14
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-011: upsample_factor=1 on both dense heads; patch_size 14
         # is not a power of 2 and DPTDecoder needs one. See decisions.md.
         self.ray_distance_head = RayDistanceHead(
             dims=self.decoder_dims,
@@ -328,7 +328,7 @@ class OmniPoint(keras.Model):
                 name=f"encoder_vit_{self.vit_scale}",
             )
         super().build(input_shape)
-        # DECISION D-023: force-build the heads with a dummy pass here; a .keras
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023: force-build the heads with a dummy pass here; a .keras
         # reload runs build() but never call(), so lazy heads lose their weights.
         dummy_spatial = keras.ops.zeros((1, self.grid_h, self.grid_w, self.embed_dim))
         dummy_cls = keras.ops.zeros((1, self.embed_dim))
@@ -336,7 +336,7 @@ class OmniPoint(keras.Model):
         _ = self.mask_head(dummy_spatial)
         _ = self.metric_scale_head(dummy_cls)
 
-        # DECISION D-023: the conditioning layers need the same force-build;
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023: the conditioning layers need the same force-build;
         # without it a round-trip lost 8 of 212 weights. See decisions.md.
         if self.conditioning_input_encoder is not None:
             img_h, img_w, img_c = self.image_shape
@@ -546,7 +546,7 @@ class OmniPoint(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION D-127: copy the preset before updating it; splatting the
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset before updating it; splatting the
         # shared dict would poison MODEL_VARIANTS for later callers.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)

@@ -177,7 +177,7 @@ class ConditioningInputEncoder(keras.layers.Layer):
             positional input this layer is invoked on.
         :type input_shape: tuple
         """
-        # DECISION D-015: build every sublayer here, unconditionally; an unbuilt
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-015: build every sublayer here, unconditionally; an unbuilt
         # self.splat makes Keras 3 report unbuilt state. See decisions.md.
         self.intrinsics_conv1.build((None, None, None, 3))
         self.intrinsics_conv2.build((None, None, None, self.conv_hidden_channels))

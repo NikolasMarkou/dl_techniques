@@ -228,7 +228,7 @@ class DeChunkLayer(keras.layers.Layer):
             return step < inner_len
 
         def body(step, carry_state, accumulated):
-            # DECISION D-014: keep the loop and the masked add; the closed form
+            # DECISION plan-2026-09-09T042752-6d66ac56/D-014: keep the loop and the masked add; the closed form
             # nans at M >= 64, slice_update has no gradient. See decisions.md.
             p_step = keras.ops.expand_dims(p[:, step], axis=-1)
             carry_state = (
@@ -327,7 +327,7 @@ class DeChunkLayer(keras.layers.Layer):
         ) * keras.ops.cast(seq_len, "int32")
         seq_sorted_indices = keras.ops.argsort(token_idx, axis=1)
 
-        # DECISION D-029: take the permutation to width M with the same helper
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-029: take the permutation to width M with the same helper
         # ChunkLayer uses; slicing gives min(L, M) and breaks L < M. decisions.md.
         gather_idx = pad_permutation_to_width(
             seq_sorted_indices, inner_len

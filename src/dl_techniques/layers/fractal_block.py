@@ -186,7 +186,7 @@ class FractalBlock(keras.layers.Layer):
             self.shallow = None
             logger.debug("Created FractalBlock base case with depth=1")
         else:
-            # DECISION D-057: the deep branch composes two depth-(k-1) fractals;
+            # DECISION plan-2026-08-18T140459-7991552f/D-057: the deep branch composes two depth-(k-1) fractals;
             # two parallel branches collapse every path to length 1. decisions.md.
             self.block = None
             self.deep_first = FractalBlock(

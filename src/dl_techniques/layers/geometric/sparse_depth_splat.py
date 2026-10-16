@@ -152,7 +152,7 @@ class SparseDepthSplat(keras.layers.Layer):
             ``(sparse_depth_shape, validity_mask_shape)``.
         :type input_shape: list of tuple
         """
-        # DECISION D-015: build both filters here, unconditionally; an owner
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-015: build both filters here, unconditionally; an owner
         # that never calls this layer would otherwise leave them unbuilt, which
         # Keras 3 reports as unbuilt state. See decisions.md.
         single_channel_shape = (None, None, None, 1)

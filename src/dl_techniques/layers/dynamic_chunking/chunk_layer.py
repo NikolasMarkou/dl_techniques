@@ -184,7 +184,7 @@ class ChunkLayer(keras.layers.Layer):
                 "layer(hidden_states, boundary_mask=...)"
             )
 
-        # DECISION D-013: mask is combined into boundary_mask here, where dc.py
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-013: mask is combined into boundary_mask here, where dc.py
         # reads boundary_mask alone. Keep the and. See decisions.md.
         keep = keras.ops.cast(boundary_mask, "bool")
         if mask is not None:
@@ -212,7 +212,7 @@ class ChunkLayer(keras.layers.Layer):
         # and triu raise TypeError under tf.function. See decisions.md.
         seq_sorted_indices = keras.ops.argsort(token_idx, axis=1)
 
-        # DECISION D-007: width is max_chunks, not a per-batch max; the slice
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-007: width is max_chunks, not a per-batch max; the slice
         # keeps the first C boundaries in position order, not top-k
         # (decisions.md).
         gather_idx = pad_permutation_to_width(

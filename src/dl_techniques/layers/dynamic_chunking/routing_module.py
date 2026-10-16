@@ -257,7 +257,7 @@ class RoutingModule(keras.layers.Layer):
             [one - boundary_prob, boundary_prob], axis=-1
         )
 
-        # DECISION D-012: keep the strict p > 0.5; argmax tie behaviour is
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-012: keep the strict p > 0.5; argmax tie behaviour is
         # backend-defined and p >= 0.5 is a different layer. See decisions.md.
         half = keras.ops.cast(0.5, boundary_prob.dtype)
         is_boundary = keras.ops.greater(boundary_prob, half)

@@ -302,7 +302,7 @@ class DINOv3(keras.Model):
         rope_theta: float = 10000.0,
         rope_percentage: float = 1.0,
         activation: Union[str, Callable] = 'gelu',
-        # DECISION D-504: default to DINO_KERNEL_INITIALIZER, never the bare
+        # DECISION plan-2026-08-23T091307-9a110062/D-504: default to DINO_KERNEL_INITIALIZER, never the bare
         # string, which is Keras' stddev=0.05 not DINO's 0.02. See decisions.md.
         kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = DINO_KERNEL_INITIALIZER,
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
@@ -337,7 +337,7 @@ class DINOv3(keras.Model):
         if not 0.0 <= rope_percentage <= 1.0:
             raise ValueError(f"rope_percentage must be in [0, 1], got {rope_percentage}")
 
-        # DECISION D-001: call super().__init__(inputs=, outputs=) once, at the
+        # DECISION plan_2026-06-15_39a31d4a/D-001: call super().__init__(inputs=, outputs=) once, at the
         # end; a bare super().__init__(**kwargs) double-inits it. decisions.md.
 
         self.image_size = image_size
@@ -368,7 +368,7 @@ class DINOv3(keras.Model):
         inputs = keras.Input(shape=(*image_size, 3), name="input_image")
         outputs = self._build_model(inputs)
 
-        # DECISION D-082: keep `name` a setdefault, never a literal; from_config
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: keep `name` a setdefault, never a literal; from_config
         # passes name through **kwargs and a duplicate keyword raises.
         kwargs.setdefault("name", "DINOv3")
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
@@ -392,7 +392,7 @@ class DINOv3(keras.Model):
 
     def _build_patch_embedding(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Create the patch embedding layer and apply it."""
-        # DECISION D-540: give every consumer its own clone_initializer copy; a
+        # DECISION plan-2026-08-23T091307-9a110062/D-540: give every consumer its own clone_initializer copy; a
         # shared seedless instance replays its draw. See decisions.md.
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
@@ -407,12 +407,12 @@ class DINOv3(keras.Model):
 
     def _build_token_processing(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Prepend the [CLS] token and add positional information."""
-        # DECISION D-001: own the CLS token via ClassTokenPrepend, not an inline
+        # DECISION plan_2026-06-15_39a31d4a/D-001: own the CLS token via ClassTokenPrepend, not an inline
         # add_weight; this runs before super().__init__. See decisions.md.
         self.cls_token_layer = ClassTokenPrepend(name="cls_token")
         x = self.cls_token_layer(x)
 
-        # DECISION D-015: omit the learned table under 'rope', never stack it on
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-015: omit the learned table under 'rope', never stack it on
         # the rotation; two position signals are redundant. See decisions.md.
         if self.positional_embedding_type == 'rope':
             self.pos_embed = None
@@ -446,7 +446,7 @@ class DINOv3(keras.Model):
         :return: ``(attention_type, attention_args)``.
         :rtype: tuple
         """
-        # DECISION D-015: reach RoPE through registered group_query attention,
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-015: reach RoPE through registered group_query attention,
         # never by rotating the token stream. See decisions.md.
         if self.positional_embedding_type == 'rope':
             return 'group_query', {
@@ -461,7 +461,7 @@ class DINOv3(keras.Model):
     def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Create the stack of transformer encoder layers and apply it."""
         self.encoder_layers = []
-        # DECISION D-004: use linear_drop_path_rates, not a hand-rolled
+        # DECISION plan-2026-08-11T165740-53dac34a/D-004: use linear_drop_path_rates, not a hand-rolled
         # ops.linspace ramp; a keras tensor has no .item(). See decisions.md.
         dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
@@ -505,7 +505,7 @@ class DINOv3(keras.Model):
 
         if self.include_top:
             if self.num_classes > 0:
-                # DECISION D-504: DINO_KERNEL_INITIALIZER here too, never the
+                # DECISION plan-2026-08-23T091307-9a110062/D-504: DINO_KERNEL_INITIALIZER here too, never the
                 # bare string, which is Keras' stddev=0.05. See decisions.md.
                 self.classifier = layers.Dense(
                     units=self.num_classes,
@@ -601,7 +601,7 @@ class DINOv3(keras.Model):
         :return: Serializable configuration dictionary.
         :rtype: dict
         """
-        # DECISION D-082: call super().get_config() first; without it name and
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: call super().get_config() first; without it name and
         # trainable reload at defaults, so a frozen model comes back unfrozen.
         config = super().get_config()
         config.update({
@@ -704,7 +704,7 @@ def create_dino_v3(
     """
     reject_input_shape(kwargs, "create_dino_v3")
 
-    # DECISION D-069: raise on pretrained=True, do not warn and continue; no
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and continue; no
     # checkpoints ship with this repository. See decisions.md.
     if pretrained:
         raise NotImplementedError(
@@ -718,7 +718,7 @@ def create_dino_v3(
             f"load_weights is silent about a checkpoint that matches nothing."
         )
 
-    # DECISION D-017: patch_size=None defers to the variant; a concrete default
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: patch_size=None defers to the variant; a concrete default
     # would silently turn create_dino_v3('giant') from /14 into /16.
     if patch_size is not None:
         kwargs['patch_size'] = patch_size

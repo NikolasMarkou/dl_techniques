@@ -44,7 +44,7 @@ from dl_techniques.layers.attention.common import (
 
 # ---------------------------------------------------------------------
 
-# DECISION D-011: no LayerScale sub-layers; the reference uses plain residual
+# DECISION plan-2026-09-03T113223-2a714a91/D-011: no LayerScale sub-layers; the reference uses plain residual
 # addition on both branches. See decisions.md.
 
 REFERENCE_INIT_STD = 0.02
@@ -322,7 +322,7 @@ class LeVJEPABlock(keras.layers.Layer):
 
         self._scale = compute_attention_scale(self.head_dim)
 
-        # DECISION D-012: depth rescaling is a pre-scaled initializer std, never
+        # DECISION plan-2026-09-03T113223-2a714a91/D-012: depth rescaling is a pre-scaled initializer std, never
         # a post-build .assign(), which StatelessScope discards. decisions.md.
         rescale_std = self.init_std
         if self.layer_id is not None:
