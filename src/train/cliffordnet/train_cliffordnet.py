@@ -683,8 +683,6 @@ def main() -> None:
 
     try:
         train_model(args)
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user.")
     except Exception as exc:
         logger.error(f"Unexpected error: {exc}", exc_info=True)
         raise

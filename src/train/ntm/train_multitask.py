@@ -243,7 +243,8 @@ def train_multitask_ntm(
         interrupted_path = f"{results_dir}/multitask_ntm_interrupted.keras"
         model.save(interrupted_path)
         logger.warning(f"Training interrupted by user. Model saved to {interrupted_path}")
-        return model, getattr(model, "history", None)
+        # The interrupt still ends the run: no evaluation, and a non-zero exit.
+        raise
 
     final_path = f"{results_dir}/multitask_ntm_final.keras"
     model.save(final_path)
@@ -387,12 +388,9 @@ def main() -> None:
     try:
         model, history = train_multitask_ntm(config)
         evaluate_tasks(model, config)
-    except KeyboardInterrupt:
-        # An interrupt during fit is handled (and saved) inside
-        # train_multitask_ntm; this catches one during setup or evaluation.
-        logger.warning("Interrupted by user outside the training loop.")
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":

@@ -341,8 +341,6 @@ def main():
 
     try:
         train_with_mae_pretraining(args)
-    except KeyboardInterrupt:
-        logger.info("\nTraining interrupted by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise

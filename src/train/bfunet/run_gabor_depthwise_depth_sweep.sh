@@ -11,13 +11,29 @@ REPO=/media/arxwn/data_fast/repositories/dl_techniques
 cd "$REPO"
 mkdir -p logs
 
-GPU="${1:-1}"
 PY="$REPO/.venv/bin/python"
 TS="$(date +%F_%H%M%S)"
 
 export MPLBACKEND=Agg
 
 log() { printf "[%s] %s\n" "$(date +%F_%H:%M:%S)" "$*"; }
+
+# The device, resolved ONCE by the repo's one rule (child_visible_devices in
+# train/common/gpu.py, D-110/D-116/D-118): an optional first argument is a GPU
+# index that counts within an exported CUDA_VISIBLE_DEVICES; with no argument
+# an export is used as is; with neither, physical GPU 1. The trainers get the
+# resolved list and no GPU flag of their own (a forwarded index 1 raised
+# under CUDA_VISIBLE_DEVICES=1).
+select_visible_devices() {
+  "$PY" -c 'import os, sys
+from train.common.gpu import VISIBLE_DEVICES, child_visible_devices
+print(child_visible_devices(int(sys.argv[1]) if sys.argv[1] else None,
+                            os.environ.get(VISIBLE_DEVICES), 1))' "${1:-}"
+}
+
+VISIBLE="$(select_visible_devices "${1:-}")" || { log "GPU selection failed"; exit 1; }
+export CUDA_VISIBLE_DEVICES="$VISIBLE"
+log "trainers get CUDA_VISIBLE_DEVICES=${VISIBLE}"
 
 COMMON_ARGS=(
   --convnext-version v1
@@ -39,7 +55,6 @@ COMMON_ARGS=(
   --gradient-clipping 1.0
   --sigma-max-start 0.025
   --sigma-max-end 0.25
-  --gpu "$GPU"
 )
 
 for DEPTH in 1 2 3; do

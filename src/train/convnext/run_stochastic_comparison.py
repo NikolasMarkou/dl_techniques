@@ -21,18 +21,9 @@ import json
 import argparse
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from train.common.gpu import env_with_visible_devices, hide_gpus, visible_device_for
-
-# The driver only ORCHESTRATES training subprocesses (each gets its GPU through
-# CUDA_VISIBLE_DEVICES in the child env, resolved from --gpu) and runs a CPU-side
-# comparison at the end. It must NOT hold a GPU context: a second TF context on
-# the training GPU fragments/starves the trainer's XLA allocator and can SIGABRT
-# it (observed as `Check failed: h != kInvalidChunkHandle`). Force the driver
-# process CPU-only before TF lists a device; the child env re-enables the GPU.
-# The inherited value is kept: --gpu counts within it (D-110/D-116).
-INHERITED_VISIBLE_DEVICES = hide_gpus()
-
 from train.common.args import resolved_run_dir
 from train.common.compare_runs import compare_runs
 from train.common.run_io import default_experiment_name
@@ -83,7 +74,16 @@ def run_summary_path(output_dir: str, experiment_name: str) -> Path:
     return Path(run_dir) / 'results_summary.json'
 
 
-def run_comparison(args: argparse.Namespace) -> None:
+def run_comparison(
+        args: argparse.Namespace,
+        inherited_visible_devices: Optional[str],
+) -> None:
+    """Train both modes as children, then compare them.
+
+    :param args: Parsed driver arguments.
+    :param inherited_visible_devices: The ``CUDA_VISIBLE_DEVICES`` the driver
+        was started with (``None`` if unset); ``--gpu`` counts within it.
+    """
     target_module = f'train.convnext.train_convnext_{args.model}'
     repo_root = os.getcwd()
     stem = default_experiment_name(
@@ -92,7 +92,7 @@ def run_comparison(args: argparse.Namespace) -> None:
     # Resolved once, before the first mode (an index outside the inherited list
     # is refused here). A negative --gpu is this driver's CPU mode.
     visible_devices = ('' if args.gpu < 0
-                       else visible_device_for(args.gpu, INHERITED_VISIBLE_DEVICES))
+                       else visible_device_for(args.gpu, inherited_visible_devices))
     logger.info(f"children get CUDA_VISIBLE_DEVICES={visible_devices!r}")
 
     for mode in args.modes:
@@ -152,9 +152,21 @@ def run_comparison(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # The driver only ORCHESTRATES training subprocesses (each gets its GPU
+    # through CUDA_VISIBLE_DEVICES in the child env, resolved from --gpu) and
+    # runs a CPU-side comparison at the end. It must NOT hold a GPU context: a
+    # second TF context on the training GPU fragments/starves the trainer's XLA
+    # allocator and can SIGABRT it (observed as `Check failed: h !=
+    # kInvalidChunkHandle`). The inherited value is kept: --gpu counts within
+    # it (D-110/D-116).
+    # DECISION plan-2026-10-14T062616-81938e81/D-118
+    # Hide the GPUs HERE, first thing in main; do NOT move hide_gpus() back to
+    # module level: at import it hid every GPU from any importer for good (a
+    # pytest run that collected this driver's test ran later GPU tests on CPU).
+    inherited_visible_devices = hide_gpus()
     parser = build_argument_parser()
     args = parser.parse_args()
-    run_comparison(args)
+    run_comparison(args, inherited_visible_devices)
 
 
 if __name__ == '__main__':

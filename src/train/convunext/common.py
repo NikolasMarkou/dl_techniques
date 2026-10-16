@@ -1263,8 +1263,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     setup_gpu(gpu_id=args.gpu)
     try:
         train(config)
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"Training failed: {e}", exc_info=True)
         raise

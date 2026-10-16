@@ -30,7 +30,7 @@ Usage (SMOKE)::
         -m train.cliffordnet.filter_cc3m_clipscore \\
         --checkpoint results/.../checkpoints/final.keras \\
         --out-manifest /tmp/cc3m_filtered.jsonl \\
-        --threshold 0.20 --max-samples 1000 --gpu 1
+        --threshold 0.20 --max-samples 1000
 
 Usage (FULL, user-launched)::
 
@@ -38,7 +38,7 @@ Usage (FULL, user-launched)::
         -m train.cliffordnet.filter_cc3m_clipscore \\
         --checkpoint results/.../checkpoints/final.keras \\
         --out-manifest /media/.../cc3m/train_captions_clip0.20.jsonl \\
-        --threshold 0.20 --gpu 1
+        --threshold 0.20
 """
 
 import argparse
@@ -51,6 +51,7 @@ import numpy as np
 import tiktoken
 
 from train.common import setup_gpu
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 from train.common.image_text import (
     _cc3m_shard_of,
     make_image_text_tf_dataset,
@@ -114,7 +115,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Scoring batch size",
     )
     p.add_argument(
-        "--gpu", type=int, default=1, help="GPU device index",
+        "--gpu", type=int, default=None,
+        help=("GPU index; counts within an exported CUDA_VISIBLE_DEVICES, "
+              "else names a physical GPU. Default: the exported list as is, "
+              "or physical GPU 1 when none is exported."),
     )
     return p
 
@@ -254,7 +258,9 @@ def filter_cc3m(args: argparse.Namespace) -> Dict[str, float]:
     :return: Summary dict with ``total``, ``kept``, ``kept_fraction``, and
         ``mean_score`` keys.
     """
-    setup_gpu(gpu_id=args.gpu)
+    # An export is respected; physical GPU 1 only when none is given (D-118).
+    setup_gpu(gpu_id=gpu_or_default(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), 1))
 
     logger.info(f"Loading checkpoint: {args.checkpoint}")
     model = keras.models.load_model(

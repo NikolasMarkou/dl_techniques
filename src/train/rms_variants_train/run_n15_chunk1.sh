@@ -21,8 +21,10 @@ log() { printf "[%s] %s\n" "$(date +%F_%H:%M:%S)" "$*"; }
 # ---------------- 1. Chunk 1 — Core OOB, n=15 ----------------
 log "=== START n15_chunk1 ==="
 cd "$REPO/src"
+# --gpu counts WITHIN the exported list (D-110): index 0 of "1" is physical
+# GPU 1; `--gpu 1` here raises before the first cell.
 CUDA_VISIBLE_DEVICES=1 "$PY" -m train.rms_variants_train.sweep \
-  --gpu 1 \
+  --gpu 0 \
   --experiments e1,e2,e3,e4,e5 \
   --norms "$NORMS_8" \
   --modes oob --regimes default \

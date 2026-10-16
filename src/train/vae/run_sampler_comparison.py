@@ -12,9 +12,10 @@ CPU-only driver rationale:
     CPU-side comparison (pandas / matplotlib) at the end. It must NOT hold a GPU
     context: a second TF context on the training GPU fragments/starves the
     trainer's XLA allocator and can SIGABRT it (observed elsewhere as
-    ``Check failed: h != kInvalidChunkHandle``). The driver process is forced
-    CPU-only BELOW (``hide_gpus``) before TF lists any device; each child
-    subprocess re-enables the GPU via its own env.
+    ``Check failed: h != kInvalidChunkHandle``). ``main`` forces the driver
+    process CPU-only (``hide_gpus``) before TF lists any device; importing the
+    module changes nothing. Each child subprocess re-enables the GPU via its
+    own env.
 
 GPU selection (D-110/D-116): ``--gpu N`` counts within the
 ``CUDA_VISIBLE_DEVICES`` the driver inherited, or names a physical GPU when
@@ -34,15 +35,9 @@ import os
 import sys
 import argparse
 import subprocess
+from typing import Optional
 
 from train.common.gpu import child_visible_devices, env_with_visible_devices, hide_gpus
-
-# Force the driver process CPU-only BEFORE TF lists a device (the driver only
-# orchestrates subprocesses + a CPU-side compare_runs; a GPU context here would
-# starve the child trainer's XLA allocator). Each child re-enables the GPU via
-# its own env; the inherited value is kept to resolve the child's device.
-INHERITED_VISIBLE_DEVICES = hide_gpus()
-
 from train.common.compare_runs import compare_runs
 from dl_techniques.utils.logger import logger
 
@@ -79,7 +74,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_comparison(args: argparse.Namespace) -> None:
+def run_comparison(
+        args: argparse.Namespace,
+        inherited_visible_devices: Optional[str],
+) -> None:
+    """Train both arms as children, then compare them.
+
+    :param args: Parsed driver arguments.
+    :param inherited_visible_devices: The ``CUDA_VISIBLE_DEVICES`` the driver
+        was started with (``None`` if unset); resolves the children's device.
+    """
     os.makedirs('results', exist_ok=True)
 
     repo_root = os.getcwd()
@@ -90,7 +94,7 @@ def run_comparison(args: argparse.Namespace) -> None:
     # The child gets the resolved device and NO --gpu of its own; do NOT pass
     # --gpu again: the child's setup_gpu would index its one-entry list and raise.
     visible_devices = child_visible_devices(
-        args.gpu, INHERITED_VISIBLE_DEVICES, DEFAULT_GPU)
+        args.gpu, inherited_visible_devices, DEFAULT_GPU)
     logger.info(f"children get CUDA_VISIBLE_DEVICES={visible_devices!r}")
 
     for arm in ARMS:
@@ -145,9 +149,14 @@ def run_comparison(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # CPU-only BEFORE TF lists a device (the driver only orchestrates
+    # subprocesses + a CPU-side compare_runs; a GPU context here would starve
+    # the child trainer's XLA allocator). Here, not at import (D-118): an
+    # import-time pin hid every GPU from any importer for good.
+    inherited_visible_devices = hide_gpus()
     parser = build_argument_parser()
     args = parser.parse_args()
-    run_comparison(args)
+    run_comparison(args, inherited_visible_devices)
 
 
 if __name__ == '__main__':

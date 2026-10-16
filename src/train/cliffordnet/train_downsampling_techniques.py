@@ -832,10 +832,12 @@ def main() -> None:
     # Before TF / Keras allocate any device; setup_gpu resolves --gpu against
     # an exported CUDA_VISIBLE_DEVICES (D-110).
     setup_gpu(gpu_id=args.gpu)
+    # DECISION plan-2026-10-14T062616-81938e81/D-118
+    # No `except KeyboardInterrupt` here: do NOT catch Ctrl-C to log and return.
+    # That handler made an interrupted sweep exit 0, the code of a finished one;
+    # a census test refuses it in every entry point under src/.
     try:
         train_all_variants(args)
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user.")
     except Exception as exc:
         logger.error(f"Unexpected error: {exc}", exc_info=True)
         raise

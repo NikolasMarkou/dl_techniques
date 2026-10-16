@@ -374,3 +374,164 @@ def test_a_variant_whose_writes_succeed_returns_its_row(monkeypatch, tmp_path):
     for name in ("config.json", "training_history.json", "training_summary.txt"):
         assert os.path.isfile(os.path.join(results_dir, name)), name
     assert len(model.saved) == 1, model.saved
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C (step 14 Part 0, D-118)
+# ---------------------------------------------------------------------------
+#
+# Measured at 7bd01f8c5: ``train_downsampling_techniques.main`` caught
+# ``KeyboardInterrupt``, logged "Interrupted by user." and returned, so a run
+# stopped with Ctrl-C exited 0, the code of a run that finished. Seven more
+# entry points in ``src/train`` had the same handler (the census below).
+
+import ast  # noqa: E402
+import subprocess  # noqa: E402
+import warnings  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_SRC = Path(__file__).resolve().parents[2] / "src"
+
+
+def test_an_interrupted_downsampling_run_propagates_the_interrupt(monkeypatch):
+    from train.cliffordnet import train_downsampling_techniques as module
+
+    def interrupted(_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(module, "setup_gpu", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "train_all_variants", interrupted)
+    monkeypatch.setattr(sys, "argv", ["train_downsampling_techniques"])
+    with pytest.raises(KeyboardInterrupt):
+        module.main()
+
+
+def test_an_interrupted_downsampling_process_exits_non_zero():
+    """The process-level claim: the exit code a shell or a launcher sees."""
+    script = (
+        "import sys\n"
+        "import train.cliffordnet.train_downsampling_techniques as m\n"
+        "m.setup_gpu = lambda **_kwargs: None\n"
+        "def interrupted(_args):\n"
+        "    raise KeyboardInterrupt\n"
+        "m.train_all_variants = interrupted\n"
+        "sys.argv = ['train_downsampling_techniques']\n"
+        "m.main()\n"
+    )
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MPLBACKEND="Agg")
+    done = subprocess.run([sys.executable, "-c", script], env=env,
+                          cwd=str(_SRC), capture_output=True, text=True,
+                          timeout=300)
+    assert done.returncode != 0, done.stderr[-2000:]
+
+
+def _swallowing_interrupt_handlers(source):
+    """Line numbers of ``except KeyboardInterrupt`` handlers that exit 0.
+
+    A handler passes when its body re-raises (any ``raise``, which includes
+    ``raise SystemExit(...)``), calls ``sys.exit``/``exit`` with a non-zero
+    integer literal, or returns a non-zero integer literal (an entry point
+    whose ``__main__`` exits with ``main()``'s value). Anything else lets the
+    process end with code 0.
+    """
+    def catches_interrupt(handler):
+        names = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+                 else [handler.type])
+        return any(isinstance(name, ast.Name) and name.id == "KeyboardInterrupt"
+                   for name in names)
+
+    def non_zero_literal(node):
+        return (isinstance(node, ast.Constant) and isinstance(node.value, int)
+                and not isinstance(node.value, bool) and node.value != 0)
+
+    def exits_non_zero(handler):
+        for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+            if isinstance(node, ast.Raise):
+                return True
+            if isinstance(node, ast.Return) and non_zero_literal(node.value):
+                return True
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (func.attr if isinstance(func, ast.Attribute)
+                        else getattr(func, "id", None))
+                if name == "exit" and node.args and non_zero_literal(node.args[0]):
+                    return True
+        return False
+
+    with warnings.catch_warnings():  # invalid escapes in scanned sources
+        warnings.simplefilter("ignore", (DeprecationWarning, SyntaxWarning))
+        tree = ast.parse(source)
+    return sorted(
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler) and node.type is not None
+        and catches_interrupt(node) and not exits_non_zero(node))
+
+
+_HANDLER_FORMS = '''
+try:
+    run()
+except KeyboardInterrupt:
+    logger.info("interrupted")
+try:
+    run()
+except KeyboardInterrupt:
+    return None
+try:
+    run()
+except (KeyboardInterrupt, SystemExit):
+    sys.exit(0)
+try:
+    run()
+except KeyboardInterrupt:
+    raise
+try:
+    run()
+except KeyboardInterrupt:
+    raise SystemExit(130)
+try:
+    run()
+except KeyboardInterrupt:
+    return 130
+try:
+    run()
+except KeyboardInterrupt:
+    sys.exit(1)
+try:
+    run()
+except Exception:
+    pass
+'''
+
+
+def test_the_interactive_prompt_exemption_is_still_a_prompt():
+    """The one exemption must still be what justifies it: Ctrl-C ends an
+    ``input()`` loop. If the file stops being a prompt, it loses the waiver."""
+    for relative in _INTERACTIVE_PROMPTS:
+        source = (_SRC / relative).read_text(encoding="utf-8")
+        assert "input(" in source and _swallowing_interrupt_handlers(source), relative
+
+
+def test_the_interrupt_census_tells_a_swallow_from_an_exit():
+    """Positive control: the three exit-0 handlers are found, nothing else."""
+    lines = _HANDLER_FORMS.splitlines()
+    swallowing = [i for i, line in enumerate(lines, start=1)
+                  if line.startswith("except") and "Exception" not in line][:3]
+    assert _swallowing_interrupt_handlers(_HANDLER_FORMS) == swallowing
+
+
+# Not a run: an interactive prompt whose documented way out is Ctrl-C (or
+# "quit"); leaving it is the expected end, so exit code 0 is right there.
+_INTERACTIVE_PROMPTS = {"train/bert/deploy.py"}
+
+
+def test_no_entry_point_turns_ctrl_c_into_exit_0():
+    offenders = []
+    for path in sorted(_SRC.rglob("*.py")):
+        relative = path.relative_to(_SRC).as_posix()
+        if relative in _INTERACTIVE_PROMPTS:
+            continue
+        for line in _swallowing_interrupt_handlers(path.read_text(encoding="utf-8")):
+            offenders.append(f"{relative}:{line}")
+    assert offenders == [], (
+        "these handlers turn Ctrl-C into exit code 0; let the interrupt "
+        "propagate (or exit non-zero):\n" + "\n".join(offenders))

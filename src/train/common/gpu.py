@@ -65,7 +65,10 @@ def gpu_or_default(
     """The GPU index a script with its own default device selects.
 
     Interface contract (callers: :func:`child_visible_devices`,
-    ``bfunet/eval_per_pixel_uncertainty.py``):
+    ``bfunet/eval_per_pixel_uncertainty.py``, ``nam/eval_dfsa.py``,
+    ``nam/test_extreme.py``, ``cliffordnet/eval_clip_retrieval.py``,
+    ``cliffordnet/filter_cc3m_clipscore.py``; a script with a preferred GPU
+    defaults ``--gpu`` to ``None`` and picks it here, D-118):
 
     * An explicit ``gpu_id`` wins and is returned unchanged.
     * With no ``gpu_id``, an exported ``CUDA_VISIBLE_DEVICES`` (``visible`` is
@@ -87,7 +90,9 @@ def child_visible_devices(
     """The ``CUDA_VISIBLE_DEVICES`` value to give a child process.
 
     Interface contract (callers: ``vae/run_sampler_comparison.py``,
-    ``logic/multiseed_sweep.py``): :func:`gpu_or_default` picks the index, and
+    ``logic/multiseed_sweep.py``, ``mothnet/multiseed_sweep.py``,
+    ``bfunet/run_gabor_depthwise_depth_sweep.sh``): :func:`gpu_or_default`
+    picks the index, and
     :func:`visible_device_for` resolves it against ``visible`` (the launcher's
     own, inherited value). When nothing is selected, ``visible`` is returned
     verbatim. Raises ``ValueError`` as :func:`visible_device_for` does. Pure.
@@ -126,9 +131,9 @@ def env_with_visible_devices(
 def hide_gpus() -> Optional[str]:
     """Make THIS process CPU-only, before TensorFlow lists its devices.
 
-    Interface contract (callers: the comparison drivers, which orchestrate
-    GPU children and must not hold a GPU context themselves; the time-series
-    export scripts, whose exported graph must be device-neutral):
+    Interface contract (callers: the comparison drivers' ``main``, which
+    orchestrate GPU children and must not hold a GPU context themselves; the
+    time-series export scripts, whose exported graph must be device-neutral):
 
     * Sets ``CUDA_VISIBLE_DEVICES`` to the empty string in ``os.environ``.
     * Returns the value it replaced (``None`` if the variable was unset), so a
@@ -136,6 +141,8 @@ def hide_gpus() -> Optional[str]:
       inherited.
     * Takes effect when called before the first device listing; importing
       TensorFlow (as this module does) lists none (measured in step 13.7).
+    * Never call it at import time of a module something else imports: the
+      importer loses its GPUs for good (D-118).
     """
     inherited = os.environ.get(VISIBLE_DEVICES)
     os.environ[VISIBLE_DEVICES] = ""

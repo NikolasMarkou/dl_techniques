@@ -1889,13 +1889,10 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> Optional[Path]:
-    """Entry point; returns the run directory (``None`` if interrupted)."""
+    """Entry point; returns the run directory. Ctrl-C propagates (non-zero exit)."""
     args = parse_arguments(argv)
     try:
         return train(args)
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user.")
-        return None
     except Exception as exc:
         logger.error(f"Unexpected error: {exc}", exc_info=True)
         raise

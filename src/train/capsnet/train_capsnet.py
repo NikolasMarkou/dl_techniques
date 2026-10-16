@@ -714,8 +714,6 @@ def main():
 
     try:
         train_model(args)
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise

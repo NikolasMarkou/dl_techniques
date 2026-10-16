@@ -28,7 +28,7 @@ Usage::
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \\
         -m train.cliffordnet.eval_clip_retrieval \\
         --checkpoint results/.../checkpoints/final.keras \\
-        --max-samples 1000 --gpu 1
+        --max-samples 1000
 
 A/B Launch Runbook (user-launched)
 ----------------------------------
@@ -95,12 +95,14 @@ OUT-OF-SCOPE limitation (documented)
 """
 
 import argparse
+import os
 from typing import Dict
 
 import keras
 import tiktoken
 
 from train.common import setup_gpu
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 from train.common.image_text import (
     load_coco2017_local_split,
     make_image_text_tf_dataset,
@@ -150,7 +152,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Eval batch size",
     )
     p.add_argument(
-        "--gpu", type=int, default=1, help="GPU device index",
+        "--gpu", type=int, default=None,
+        help=("GPU index; counts within an exported CUDA_VISIBLE_DEVICES, "
+              "else names a physical GPU. Default: the exported list as is, "
+              "or physical GPU 1 when none is exported."),
     )
     return p
 
@@ -162,7 +167,9 @@ def evaluate(args: argparse.Namespace) -> Dict[str, float]:
     :return: Metrics dict with ``i2t_r@{1,5,10}``, ``t2i_r@{1,5,10}`` and
         ``num_pairs`` keys (as returned by ``_compute_retrieval_metrics``).
     """
-    setup_gpu(gpu_id=args.gpu)
+    # An export is respected; physical GPU 1 only when none is given (D-118).
+    setup_gpu(gpu_id=gpu_or_default(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), 1))
 
     logger.info(f"Loading checkpoint: {args.checkpoint}")
     model = keras.models.load_model(

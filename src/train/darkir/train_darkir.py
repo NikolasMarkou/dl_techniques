@@ -503,8 +503,6 @@ def main():
 
     try:
         train_model(args)
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
         raise

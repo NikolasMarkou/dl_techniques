@@ -32,7 +32,7 @@ def _first_command(monkeypatch, argv: List[str]) -> List[str]:
     monkeypatch.setattr(subprocess, "run", fake_run)
     args = driver.build_argument_parser().parse_args(argv)
     with pytest.raises(_Stop):
-        driver.run_comparison(args)
+        driver.run_comparison(args, None)
     return seen[0]
 
 

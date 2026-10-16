@@ -288,11 +288,18 @@ if __name__ == "__main__":
         "--alpha", type=float, default=0.0,
         help="Residual alpha (only meaningful if --use-learned-residual)",
     )
-    parser.add_argument("--gpu", type=int, default=1)
+    parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="GPU index; counts within an exported CUDA_VISIBLE_DEVICES, else "
+             "names a physical GPU. Default: the exported list as is, or "
+             "physical GPU 1 when none is exported.")
     args = parser.parse_args()
 
+    import os
     from train.common import setup_gpu
-    setup_gpu(args.gpu)
+    from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
+    # An export is respected; physical GPU 1 only when none is given (D-118).
+    setup_gpu(gpu_or_default(args.gpu, os.environ.get(VISIBLE_DEVICES), 1))
 
     model = DifferentiableFSA(
         hidden_size=args.hidden_size,

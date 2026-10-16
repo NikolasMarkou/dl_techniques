@@ -41,6 +41,11 @@ import numpy as np
 import pandas as pd
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import (
+    VISIBLE_DEVICES,
+    child_visible_devices,
+    env_with_visible_devices,
+)
 from train.common.stats import (
     bootstrap_ci,
     format_mean_std,
@@ -49,6 +54,9 @@ from train.common.stats import (
     min_reachable_p_signflip,
     paired_permutation_test,
 )
+
+# Physical GPU used when neither --gpu nor CUDA_VISIBLE_DEVICES is given.
+DEFAULT_GPU = 1
 
 # Matches train_mothnet.py's own REPO_ROOT derivation
 # (src/train/mothnet/multiseed_sweep.py: [0] mothnet, [1] train, [2] src, [3] <repo>).
@@ -76,12 +84,11 @@ class RunSpec:
     arm: str            # "baseline" | "candidate"
     mb_units: int
     seed: int
-    gpu: int
     experiment_name: str
 
 
 def build_run_specs(
-    seeds: Sequence[int], mb_units_baseline: int, mb_units_candidate: int, gpu: int,
+    seeds: Sequence[int], mb_units_baseline: int, mb_units_candidate: int,
 ) -> List[RunSpec]:
     """Enumerate the 2-arm x N-seed cross-product; baseline arm first, then candidate."""
     arm_values = {"baseline": mb_units_baseline, "candidate": mb_units_candidate}
@@ -92,7 +99,6 @@ def build_run_specs(
                 arm=arm,
                 mb_units=arm_values[arm],
                 seed=seed,
-                gpu=gpu,
                 experiment_name=f"mothnet_sweep_{arm}_seed{seed}",
             ))
     return specs
@@ -100,6 +106,10 @@ def build_run_specs(
 
 def run_one(spec: RunSpec, timeout_s: float, env: Dict[str, str]) -> Dict[str, object]:
     """Launch one ``train.mothnet.train_mothnet`` subprocess.
+
+    The child's device comes from ``env`` (``CUDA_VISIBLE_DEVICES`` already
+    narrowed by :func:`main`); the child is given no ``--gpu``, so its own
+    default index 0 selects that device.
 
     Non-zero exit and timeout are logged as WARNING and tolerated (the caller
     continues the sweep with the remaining runs). ``--viz-freq 0`` skips
@@ -115,7 +125,6 @@ def run_one(spec: RunSpec, timeout_s: float, env: Dict[str, str]) -> Dict[str, o
         "--epochs", str(_EPOCHS),
         "--num-train-samples", str(_NUM_TRAIN_SAMPLES),
         "--num-val-samples", str(_NUM_VAL_SAMPLES),
-        "--gpu", str(spec.gpu),
         "--experiment-name", spec.experiment_name,
         "--viz-freq", "0",
     ]
@@ -387,8 +396,13 @@ def parse_arguments(argv=None) -> argparse.Namespace:
         help="Per-run subprocess wall-clock timeout in seconds (default: 120.0).",
     )
     parser.add_argument(
-        "--gpu", type=int, default=1,
-        help="GPU index forwarded to each subprocess's own --gpu flag (default: 1).",
+        "--gpu", type=int, default=None,
+        help=(
+            "GPU index for every child run; counts within an exported "
+            "CUDA_VISIBLE_DEVICES, else names a physical GPU. Default: the "
+            "exported list as is, or physical GPU 1 when none is exported. "
+            "Resolved once; the children get the resolved device and no --gpu."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -397,10 +411,21 @@ def main(argv=None) -> int:
     """Entry point. First statement parses argv — ``--help`` exits 0, no side effects."""
     args = parse_arguments(argv)
 
+    # Resolved once, before any child starts (an index outside the exported
+    # list is refused here, not in every child).
+    # DECISION plan-2026-10-14T062616-81938e81/D-118
+    # Children get the resolved CUDA_VISIBLE_DEVICES and NO --gpu; do NOT
+    # forward --gpu: under CUDA_VISIBLE_DEVICES=1 the forwarded default 1
+    # made every child's setup_gpu(1) raise, so no seed trained.
+    visible_devices = child_visible_devices(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), DEFAULT_GPU)
+    logger.info(f"--gpu {args.gpu}: children get "
+                f"{VISIBLE_DEVICES}={visible_devices!r}")
+
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     specs = build_run_specs(
         seeds=seeds, mb_units_baseline=args.mb_units_baseline,
-        mb_units_candidate=args.mb_units_candidate, gpu=args.gpu,
+        mb_units_candidate=args.mb_units_candidate,
     )
     logger.info(
         f"=== MothNet mb_units sweep === seeds={seeds} "
@@ -410,7 +435,7 @@ def main(argv=None) -> int:
     )
 
     results_root = REPO_ROOT / "results"
-    env = os.environ.copy()
+    env = env_with_visible_devices(visible_devices)
     env.setdefault("MPLBACKEND", "Agg")
     env["PYTHONPATH"] = f"{REPO_ROOT / 'src'}:{env.get('PYTHONPATH', '')}"
 
