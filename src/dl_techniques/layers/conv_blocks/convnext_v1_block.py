@@ -254,15 +254,25 @@ class ConvNextV1Block(keras.layers.Layer):
                 name="layer_norm"
             )
 
-        # Prepare convolution parameters
+        # DECISION plan-2026-10-14T062616-81938e81/D-091: one initializer
+        # INSTANCE per pointwise conv. A seedless instance replays one draw at
+        # every weight it initializes, so the shared conv_params instance made
+        # every block's expand and reduce kernels the same random numbers
+        # (r = 1.0, the reduce kernel the expand draw's prefix). Do not put a
+        # kernel_initializer instance back into conv_params.
+        def pointwise_initializer() -> keras.initializers.Initializer:
+            if self.use_softorthonormal_regularizer:
+                return OrthogonalHypersphereInitializer()
+            return keras.initializers.TruncatedNormal(
+                mean=self.INITIALIZER_MEAN,
+                stddev=self.INITIALIZER_STDDEV
+            )
+
+        # Prepare convolution parameters (the initializer is per conv, above)
         conv_params = {
             "kernel_size": self.POINTWISE_KERNEL_SIZE,
             "padding": "same",
             "use_bias": self.use_bias,
-            "kernel_initializer": keras.initializers.TruncatedNormal(
-                mean=self.INITIALIZER_MEAN,
-                stddev=self.INITIALIZER_STDDEV
-            ),
             "kernel_regularizer": copy.deepcopy(self.kernel_regularizer)
         }
 
@@ -277,12 +287,11 @@ class ConvNextV1Block(keras.layers.Layer):
                 )
             )
 
-            conv_params["kernel_initializer"] = OrthogonalHypersphereInitializer()
-
         # First pointwise convolution (expansion)
         self.conv_2 = keras.layers.Conv2D(
             filters=self.filters * self.EXPANSION_FACTOR,
             name="expand_conv",
+            kernel_initializer=pointwise_initializer(),
             **conv_params
         )
 
@@ -290,6 +299,7 @@ class ConvNextV1Block(keras.layers.Layer):
         self.conv_3 = keras.layers.Conv2D(
             filters=self.filters,
             name="reduce_conv",
+            kernel_initializer=pointwise_initializer(),
             **conv_params
         )
 

@@ -257,13 +257,21 @@ class TestFreezingComposesWithTheStemKind:
         assert stem.kernel.path in {w.path for w in model.trainable_weights}
 
     def test_freezing_leaves_homogeneity_intact(self):
-        """Homogeneity comes from `use_bias=False`, not from frozen-ness or stem kind."""
+        """Homogeneity comes from `use_bias=False`, not from frozen-ness or stem kind.
+
+        The forward passes run on the CPU: the 1e-5 bound is float32 rounding, and
+        on GPU 1 TensorFlow's default TF32 convolutions read 7.0e-04 here (red since
+        before plan-2026-10-14T062616-81938e81 step 12; D-093).
+        """
+        import tensorflow as tf
+
         y = np.random.RandomState(0).rand(1, 32, 32, CHANNELS).astype("float32")
         for frozen in (True, False):
             model = _build(gabor_filters_per_channel=PER_CHANNEL,
                            trainable_gabor_stem=not frozen)
-            base = np.asarray(model(y, training=False))
-            got = np.asarray(model(np.float32(3.0) * y, training=False))
+            with tf.device("/CPU:0"):
+                base = np.asarray(model(y, training=False))
+                got = np.asarray(model(np.float32(3.0) * y, training=False))
             want = np.float32(3.0) * base
             rel = float(np.max(np.abs(got - want))) / max(float(np.max(np.abs(want))), 1e-30)
             assert rel < 1e-5, f"frozen={frozen}: D(a*x) != a*D(x) ({rel:.3e})"

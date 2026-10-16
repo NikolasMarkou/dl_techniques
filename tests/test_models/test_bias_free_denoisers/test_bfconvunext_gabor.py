@@ -64,16 +64,27 @@ def max_homogeneity_relative_error(model, input_shape, alphas=HOMOGENEITY_ALPHAS
     non-negative float; a positively homogeneous model returns ~float32 rounding noise.
     Shared by the convunext and bfunet homogeneity guards AND by their RED proofs, so
     the guard and its falsification use one instrument.
+
+    The forward passes run on the CPU. The bound is derived from float32 rounding,
+    and on an Ampere-or-later GPU TensorFlow runs float32 convolutions and matmuls
+    in TF32 (a 10-bit mantissa) by default: MEASURED at step 12 of
+    plan-2026-10-14T062616-81938e81 on GPU 1 (RTX 4070), the three bias-free
+    guards read 5.6e-04 .. 1.0e-03 there (red since before the step) and pass on
+    the CPU. A device scope, not ``enable_tensor_float_32_execution(False)``,
+    because that switch is process-global (see ``test_bfconvunext_norm_sentinel``).
     """
+    import tensorflow as tf
+
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 1.0, size=(2, *input_shape)).astype("float32")
-    base = np.asarray(model(x, training=False))
-    worst = 0.0
-    for a in alphas:
-        got = np.asarray(model(np.float32(a) * x, training=False))
-        want = np.float32(a) * base
-        scale = max(float(np.max(np.abs(want))), 1e-30)
-        worst = max(worst, float(np.max(np.abs(got - want))) / scale)
+    with tf.device("/CPU:0"):
+        base = np.asarray(model(x, training=False))
+        worst = 0.0
+        for a in alphas:
+            got = np.asarray(model(np.float32(a) * x, training=False))
+            want = np.float32(a) * base
+            scale = max(float(np.max(np.abs(want))), 1e-30)
+            worst = max(worst, float(np.max(np.abs(got - want))) / scale)
     return worst
 
 

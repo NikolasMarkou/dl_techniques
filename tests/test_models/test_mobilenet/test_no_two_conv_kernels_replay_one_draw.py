@@ -27,19 +27,18 @@ classifier; inside ``DepthwiseSeparableBlock`` and
 ``UniversalInvertedBottleneck`` one instance reached every conv. V4 passes a
 string, so only the in-block sharing tied it. After D-076 every count is 0.
 
-The instrument below compares every pair, not only equal sizes: the leading
-``_PREFIX`` values of each flattened kernel, so a prefix replay across
+The instrument (``initializer_replay_oracle.replayed_pairs``, shared with the
+ConvNeXt guard) compares every pair, not only equal sizes: the leading
+``PREFIX`` values of each flattened kernel, so a prefix replay across
 different shapes is caught too. Its positive control is
 ``test_the_detector_sees_a_planted_shared_instance``.
 """
-
-import itertools
-from typing import List, Tuple
 
 import keras
 import numpy as np
 import pytest
 
+from ..initializer_replay_oracle import replayed_pairs as _replayed_pairs
 from dl_techniques.models.vision.mobilenet import (
     MobileNetV1,
     MobileNetV2,
@@ -47,56 +46,11 @@ from dl_techniques.models.vision.mobilenet import (
     MobileNetV4,
 )
 
-#: Leading values compared per flattened kernel. Large enough that two
-#: independent draws never correlate above the threshold by chance (the null
-#: standard deviation of r at n = 256 is 1 / sqrt(255) = 0.063), small enough
-#: that the all-pairs sweep stays cheap.
-_PREFIX = 256
-
-#: Shortest kernel compared. A 3 x 3 depthwise kernel of one channel has 9
-#: values; below 16 the correlation is too noisy to read.
-_MIN_SIZE = 16
-
-#: A replayed draw correlates at 1 up to float rounding (scaled He/Glorot
-#: draws: r = 0.99999999999); independent draws sit near 0.
-_REPLAY_R = 0.9999
-
 _VARIANTS = [
     (cls, variant)
     for cls in (MobileNetV1, MobileNetV2, MobileNetV3, MobileNetV4)
     for variant in cls.MODEL_VARIANTS
 ]
-
-
-def _replayed_pairs(model: keras.Model) -> Tuple[List[str], int]:
-    """Return ``(replayed pairs, pairs compared)`` over the built weights.
-
-    :param model: A built model.
-    :return: ``"path_a ~ path_b (r=...)"`` for every pair of trainable
-        ``ndim >= 2`` weights with at least ``_MIN_SIZE`` values whose leading
-        ``min(_PREFIX, size_a, size_b)`` flattened values correlate above
-        ``_REPLAY_R``, and the number of pairs compared.
-    """
-    kernels = []
-    for weight in model.weights:
-        if not weight.trainable:
-            continue
-        values = np.asarray(weight, dtype=np.float64)
-        if values.ndim < 2 or values.size < _MIN_SIZE or np.ptp(values) == 0.0:
-            continue
-        kernels.append((weight.path, values.ravel()))
-    replayed: List[str] = []
-    compared = 0
-    for (path_a, a), (path_b, b) in itertools.combinations(kernels, 2):
-        n = min(_PREFIX, a.size, b.size)
-        x, y = a[:n], b[:n]
-        if np.ptp(x) == 0.0 or np.ptp(y) == 0.0:
-            continue
-        compared += 1
-        r = float(np.corrcoef(x, y)[0, 1])
-        if abs(r) > _REPLAY_R:
-            replayed.append(f"{path_a} ~ {path_b} (r={r:.6f})")
-    return replayed, compared
 
 
 def _build(cls, variant: str) -> keras.Model:

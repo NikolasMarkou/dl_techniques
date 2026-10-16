@@ -24,7 +24,20 @@ reader cannot re-file the set as a dead model:
    truncate. It ships frozen, deliberately.
 2. **The three no-object / empty-memory embeddings (3):** ``no_mem_pos_enc``,
    ``no_obj_ptr``, ``no_obj_embed_spatial``. Reached only on a frame with no
-   memory or no object; this clip has both on every frame.
+   memory or no object. "No object" is the MODEL'S verdict, not the clip's:
+   ``SAM2._mark_occlusion`` adds ``no_obj_embed_spatial`` where the frame's
+   object-score logit is ``<= 0`` (a hard threshold), and a later frame reads
+   that memory. So its membership is decided by the sign of a predicted logit at
+   the measured weights, and the guards below derive it from those logits
+   (:func:`_expected_off_graph`) instead of pinning it. At the 2026-08-21
+   weights every frame scored ``> 0`` after the Adam step (re-measured at
+   step 12 of plan-2026-10-14T062616-81938e81: ``[[0.28, 0.30, 0.32],
+   [0.17, 0.32, 0.31]]``), so all three were off-graph (40). D-091 gave the
+   ConvNeXt blocks of the memory encoder one initializer instance per
+   pointwise conv, which moves every fixed-seed draw after them; the same
+   measurement now reads ``[[0.0015, -0.136, -0.139], [-0.333, -0.113,
+   -0.123]]``, frames 0 and 1 are read as occluded, and
+   ``no_obj_embed_spatial`` is live (39 off-graph).
 3. **The prompt encoder's unused branches (13):** ``mask_downscaling`` (9, no
    mask prompt), ``point_embedding_2/3`` (2, no box prompt) and
    ``point_embedding_0`` (1, the background-label row -- every label in this
@@ -109,6 +122,23 @@ EXPECTED_OFF_GRAPH = tuple(sorted(
     + [f"hypernetwork_mlp_{m}/hyper_dense{i}_{m}/{w}"
        for m in (1, 2, 3) for i in (1, 2, 3) for w in ("kernel", "bias")]
 ))
+
+
+def _expected_off_graph(model: keras.Model, inputs) -> tuple:
+    """:data:`EXPECTED_OFF_GRAPH` as the model's own object scores decide it.
+
+    ``no_obj_embed_spatial`` is on the backward graph exactly when a frame
+    whose memory a LATER frame reads (frames ``0 .. T-2``) scores an object
+    logit ``<= 0`` (``SAM2._mark_occlusion``'s hard threshold). Called on the
+    same weights and inputs as the gradient report, after the Adam step.
+
+    :return: The expected off-graph suffixes.
+    """
+    scores = np.asarray(model(inputs, training=True)[SAM2_OBJECT_SCORE_LOGITS])
+    occluded = bool(np.any(scores[:, :-1] <= 0.0))
+    if occluded:
+        return tuple(s for s in EXPECTED_OFF_GRAPH if s != "/no_obj_embed_spatial")
+    return EXPECTED_OFF_GRAPH
 
 
 def _one_adam_step(model: keras.Model, inputs) -> None:
@@ -204,15 +234,17 @@ class TestSAM2GradientFlow:
         model = _built()
         x = clip_inputs(model)
         _one_adam_step(model, x)
+        expected = _expected_off_graph(model, x)
         report = gradient_report(model, x)
         dead = [p for p, v in report.items() if v is None or v == 0.0]
 
-        assert len(dead) == GF_N_OFF_GRAPH, (
-            f"expected {GF_N_OFF_GRAPH} off-graph weights, got {len(dead)}: "
+        n_expected = GF_N_OFF_GRAPH - (len(EXPECTED_OFF_GRAPH) - len(expected))
+        assert len(dead) == n_expected, (
+            f"expected {n_expected} off-graph weights, got {len(dead)}: "
             f"{sorted(dead)}"
         )
         unexplained = [p for p in dead
-                       if not any(p.endswith(s) for s in EXPECTED_OFF_GRAPH)]
+                       if not any(p.endswith(s) for s in expected)]
         assert not unexplained, (
             f"off-graph weights with NO attributed cause: {sorted(unexplained)}"
         )
@@ -221,13 +253,15 @@ class TestSAM2GradientFlow:
         model = _built()
         x = clip_inputs(model)
         _one_adam_step(model, x)
+        expected = _expected_off_graph(model, x)
 
         report = assert_gradients_reach_every_trainable_weight(
-            model, x, expect_zero=EXPECTED_OFF_GRAPH)
+            model, x, expect_zero=expected)
 
         assert len(report) == GF_N_WEIGHTS == len(model.trainable_weights)
         live = [p for p, v in report.items() if v is not None and v > 0.0]
-        assert len(live) == GF_N_WEIGHTS - GF_N_OFF_GRAPH
+        n_off = GF_N_OFF_GRAPH - (len(EXPECTED_OFF_GRAPH) - len(expected))
+        assert len(live) == GF_N_WEIGHTS - n_off
 
     def test_the_memory_pathway_is_among_the_live_weights(self):
         """The claim the wrapper exists to make.
