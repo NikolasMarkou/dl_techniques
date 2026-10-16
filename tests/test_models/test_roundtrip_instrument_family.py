@@ -130,10 +130,13 @@ STOCHASTIC_OUTPUT = {
     # stack defines. It is a property of the instrument, not of the model: an
     # unperturbed instance's self spread is O(1) on the reconstruction.
     "topographic_vae": "calibrate",
-    # Not stochastic in the same sense: its own two calls agree to 9.31e-10, a
-    # float32 reduction-order difference, so a fixed small bound is honest and
-    # `calibrate` would be flaky at exactly 0.0.
-    "vq_vae": 1e-8,
+    # ``vq_vae`` used to sit here at a fixed 1e-8 ("its own two calls agree to
+    # 9.31e-10, a float32 reduction-order difference"), and ``vq_vae_rotation``
+    # flaked at 0.0 for the same reason. Neither is stochastic: the shared test
+    # codec's transposed convs ran cuDNN backward-data, whose timing autotuner
+    # can pick the non-deterministic engine 25 after an earlier subject warmed
+    # it (D-083). The codec now upsamples with forward convs and both are held
+    # to the exact default.
 }
 
 #: The measured round-trip/self-spread ratios are 1.54 (``vae``), 0.88

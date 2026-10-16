@@ -573,7 +573,11 @@ _sub("vae", _b_vae, lambda: _f32(1, 32, 32, 1))
 
 
 def _tiny_conv_codec(latent: int = 8):
-    """A 2-conv encoder / 2-deconv decoder pair, the smallest VQ-VAE harness."""
+    """A 2-conv encoder / upsample-conv decoder pair, the smallest VQ-VAE harness.
+
+    The decoder upsamples with ``UpSampling2D`` + ``Conv2D``, never
+    ``Conv2DTranspose``: see the D-083 anchor below.
+    """
     import keras
     encoder = keras.Sequential([
         keras.layers.Input((32, 32, 1)),
@@ -582,12 +586,20 @@ def _tiny_conv_codec(latent: int = 8):
         keras.layers.Conv2D(latent, 3, strides=2, padding="same",
                             name="enc_conv_2"),
     ], name="tiny_encoder")
+    # DECISION plan-2026-10-14T062616-81938e81/D-083: no Conv2DTranspose in
+    # this harness. A transposed conv's GPU forward is Conv2DBackpropInput,
+    # autotuned by timing; once an earlier subject's transposed conv has
+    # loaded cuDNN engine 25 (flagged non-deterministic) it can win the
+    # timing, and the round trip's exact (atol=0.0) value comparison then
+    # sees a ~1e-9 call-to-call spread. This is the vq_vae_rotation flake.
+    # Do not "fix" it with a tolerance; keep the decoder on forward convs.
     decoder = keras.Sequential([
         keras.layers.Input((8, 8, latent)),
-        keras.layers.Conv2DTranspose(16, 3, strides=2, padding="same",
-                                     activation="relu", name="dec_deconv_1"),
-        keras.layers.Conv2DTranspose(1, 3, strides=2, padding="same",
-                                     name="dec_deconv_2"),
+        keras.layers.UpSampling2D(2, name="dec_up_1"),
+        keras.layers.Conv2D(16, 3, padding="same", activation="relu",
+                            name="dec_conv_1"),
+        keras.layers.UpSampling2D(2, name="dec_up_2"),
+        keras.layers.Conv2D(1, 3, padding="same", name="dec_conv_2"),
     ], name="tiny_decoder")
     return encoder, decoder
 
@@ -600,8 +612,8 @@ def _b_vq_vae():
 
 
 # ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- 1 of 9 in BOTH
-# arms (fp16 ``grad_norm_sum`` 1.945405e-02, float32 1.936058e-02). The
-# codebook is updated by the commitment path, not by this loss.
+# arms (fp16 ``grad_norm_sum`` 1.373193e-01, float32 1.389689e-01, re-measured
+# on the upsample-conv codec, D-083). The codebook is updated by the commitment path, not by this loss.
 _sub("vq_vae", _b_vq_vae, lambda: _f32(1, 32, 32, 1), allowed_none_grads=1)
 
 
@@ -613,7 +625,8 @@ def _b_vq_vae_rotation():
 
 
 # ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- 1 of 9 in BOTH
-# arms (fp16 ``grad_norm_sum`` 1.536274e-02, float32 1.534150e-02).
+# arms (fp16 ``grad_norm_sum`` 9.519658e-02, float32 9.573041e-02, re-measured
+# on the upsample-conv codec, D-083).
 _sub("vq_vae_rotation", _b_vq_vae_rotation, lambda: _f32(1, 32, 32, 1),
      allowed_none_grads=1)
 
