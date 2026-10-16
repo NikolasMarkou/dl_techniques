@@ -115,7 +115,7 @@ on this machine.
 | `--epochs`                    | `100`                                     | |
 | `--batch-size`                | `16`                                      | |
 | `--patch-size`                | `384`                                     | RGB+depth crop size; matches default `input_shape`. |
-| `--learning-rate`             | `5e-6`                                    | |
+| `--learning-rate`             | `5e-6` with `--init-from` or `--pretrained-encoder-weights`, else `2e-4` | `5e-6` is the paper's rate for a pretrained encoder; `2e-4` was measured for a random encoder (see "Learning rate" below). An explicit value always wins. |
 | `--weight-decay`              | `1e-5`                                    | AdamW decoupled weight decay. |
 | `--gradient-clipping`         | `1.0`                                     | Forwarded to `optimizer_builder`. |
 | `--warmup-epochs`             | `5`                                       | Cosine warmup epoch count. |
@@ -129,6 +129,29 @@ on this machine.
 | `--gpu`                       | `None`                                    | GPU index (or `None` for all visible). |
 | `--output-dir`                | `results`                                 | Results parent directory. |
 | `--experiment-name`           | auto                                      | Defaults to `depth_anything_<encoder>_<timestamp>`. |
+
+### Learning rate
+
+The paper (arXiv 2401.10891, section 4.1) trains a *pretrained* encoder at 5e-6 and
+the randomly initialised decoder at 10 times that. This trainer has one rate for
+the whole model, and no pretrained encoder ships, so the default depends on the
+start: 5e-6 when `--init-from` or `--pretrained-encoder-weights` is given, else 2e-4.
+The 2e-4 was measured (plan-2026-10-14T062616-81938e81 D-115) on the RTX 4070:
+`vit_s`, batch 4, 256 px, 10 epochs of 40 steps, 1 warm-up epoch, 512 training and
+58 validation pairs, one run per rate.
+
+| LR | train loss, epoch 1 -> 10 | mean of last 3 | val loss, epoch 1 -> 10 | mean of last 3 | best val |
+|---|---|---|---|---|---|
+| 5e-6 | 1.688 -> 1.493 | 1.481 | 1.682 -> 1.495 | 1.533 | 1.495 |
+| 5e-5 | 1.659 -> 1.340 | 1.324 | 1.972 -> 1.452 | 1.404 | 1.351 |
+| 2e-4 | 1.578 -> 1.304 | 1.292 | 1.686 -> 1.378 | 1.459 | 1.314 |
+| 1e-3 | 1.504 -> 1.307 | 1.288 | 1.845 -> 1.359 | 1.413 | 1.359 |
+
+5e-6 trains measurably slower; 5e-5 to 1e-3 are not separable at this budget (the
+validation loss moves by up to 0.37 between consecutive epochs of one run). 2e-4 is
+the middle of that range. A constant prediction scores exactly 1.0 under this loss,
+and every run here is still above that after 400 steps: these numbers rank
+learning rates, they do not show a trained model.
 
 ## Output layout
 

@@ -98,6 +98,42 @@ from dl_techniques.callbacks.depth_visualization import (
 # CONFIGURATION
 # ---------------------------------------------------------------------
 
+#: The paper's base learning rate for a PRETRAINED encoder (arXiv 2401.10891,
+#: section 4.1; it gives the randomly initialised decoder 10x that, which this
+#: trainer's single rate does not split).
+PRETRAINED_LEARNING_RATE = 5e-6
+
+#: The default when the encoder starts from random weights (no pretrained
+#: encoder ships). Measured, Step 13.6 (plan-2026-10-14T062616-81938e81 D-115):
+#: vit_s, 400 steps of batch 4 at 256 px on MegaDepth; 5e-6 reached a mean
+#: training loss of 1.481 over the last three epochs, 5e-5 / 2e-4 / 1e-3
+#: reached 1.324 / 1.292 / 1.288, with validation losses those few steps do
+#: not separate (1.404 / 1.459 / 1.413).
+FROM_SCRATCH_LEARNING_RATE = 2e-4
+
+
+def default_learning_rate(
+    init_from: Optional[str], pretrained_encoder_weights: Optional[str]
+) -> float:
+    """The learning rate a run gets when none is given.
+
+    Interface contract: :data:`PRETRAINED_LEARNING_RATE` when either path is
+    given (the run starts from trained weights), else
+    :data:`FROM_SCRATCH_LEARNING_RATE`. Pure; never raises.
+
+    :param init_from: ``--init-from`` checkpoint, or ``None``.
+    :param pretrained_encoder_weights: ``--pretrained-encoder-weights``, or ``None``.
+    :return: The default learning rate.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-115
+    # Do NOT make 5e-6 the unconditional default again: it is the paper's rate
+    # for a pretrained encoder; from random weights it trains measurably slower
+    # than 5e-5..1e-3 (the sweep above, numbers in decisions.md).
+    if init_from is not None or pretrained_encoder_weights is not None:
+        return PRETRAINED_LEARNING_RATE
+    return FROM_SCRATCH_LEARNING_RATE
+
+
 
 @dataclass
 class DepthAnythingTrainingConfig:
@@ -135,7 +171,9 @@ class DepthAnythingTrainingConfig:
     steps_per_epoch: Optional[int] = None
 
     # Optimization
-    learning_rate: float = 5e-6
+    #: ``None`` resolves in ``__post_init__`` to :func:`default_learning_rate`
+    #: (5e-6 from a pretrained start, the measured from-scratch rate otherwise).
+    learning_rate: Optional[float] = None
     optimizer_type: str = "adamw"
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: int = 5
@@ -173,6 +211,9 @@ class DepthAnythingTrainingConfig:
             )
         if not 0.0 < self.min_valid_ratio <= 1.0:
             raise ValueError("min_valid_ratio must be in (0, 1]")
+        if self.learning_rate is None:
+            self.learning_rate = default_learning_rate(
+                self.init_from, self.pretrained_encoder_weights)
 
 
 # ---------------------------------------------------------------------
@@ -676,7 +717,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--patch-size", type=int, default=384)
-    parser.add_argument("--learning-rate", type=float, default=5e-6)
+    parser.add_argument(
+        "--learning-rate", type=float, default=None,
+        help=(
+            f"Default: {PRETRAINED_LEARNING_RATE} (the paper's rate for a "
+            "pretrained encoder) with --init-from or --pretrained-encoder-weights, "
+            f"else {FROM_SCRATCH_LEARNING_RATE} (measured for a random encoder)."
+        ),
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--gradient-clipping", type=float, default=1.0)
     parser.add_argument("--warmup-epochs", type=int, default=5)
