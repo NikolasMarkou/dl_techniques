@@ -49,7 +49,6 @@ References:
 # Do not convert it back to Google style. See decisions.md.
 
 import keras
-from keras.saving import serialize_keras_object, deserialize_keras_object
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -250,7 +249,7 @@ def _coerce_backbone(backbone: Any) -> "BeitModel":
     if isinstance(backbone, BeitModel):
         return backbone
     if isinstance(backbone, dict):
-        obj = deserialize_keras_object(backbone)
+        obj = keras.saving.deserialize_keras_object(backbone)
         if not isinstance(obj, BeitModel):
             raise TypeError(
                 f"Deserialized backbone is a {type(obj).__name__}, expected BeitModel"
@@ -1121,7 +1120,7 @@ class BeitForMaskedImageModeling(keras.Model):
         """
         config = super().get_config()
         config.update({
-            "backbone": serialize_keras_object(self.backbone),
+            "backbone": keras.saving.serialize_keras_object(self.backbone),
             "vocab_size": self.vocab_size,
         })
         return config
@@ -1136,7 +1135,7 @@ class BeitForMaskedImageModeling(keras.Model):
         :rtype: BeitForMaskedImageModeling
         """
         config = dict(config)
-        config["backbone"] = deserialize_keras_object(config["backbone"])
+        config["backbone"] = keras.saving.deserialize_keras_object(config["backbone"])
         return cls(**config)
 
 
@@ -1376,14 +1375,21 @@ class BeitForImageClassification(keras.Model):
                     pooled = self.pool(inputs, training=training)  # (B, D), excludes CLS
                     pooled = self.norm(pooled, training=training)
                     pooled = self.dropout(pooled, training=training)
-                    # The linear classifier output, under the one key the
-                    # model reads. No 'probabilities': that label would hold
-                    # the logits.
-                    return {'logits': self.classifier(pooled)}
+                    # DECISION plan-2026-10-14T062616-81938e81/D-099
+                    # The shared ClassificationHead's two keys: linear logits and
+                    # their softmax. Do NOT return a one-key dict: Keras 3.8's
+                    # `model.summary()` indexes a one-entry shape structure with
+                    # `[0]` and raises KeyError on it. See decisions.md.
+                    logits = self.classifier(pooled)
+                    return {
+                        'logits': logits,
+                        'probabilities': keras.ops.softmax(logits, axis=-1),
+                    }
 
                 def compute_output_shape(self, input_shape):
-                    # Mirrors call(): one key.
-                    return {'logits': (input_shape[0], self.num_classes)}
+                    # Mirrors call(): the same two keys.
+                    shape = (input_shape[0], self.num_classes)
+                    return {'logits': shape, 'probabilities': shape}
 
                 def get_config(self):
                     config = super().get_config()
@@ -1479,7 +1485,7 @@ class BeitForImageClassification(keras.Model):
         """
         config = super().get_config()
         config.update({
-            "backbone": serialize_keras_object(self.backbone),
+            "backbone": keras.saving.serialize_keras_object(self.backbone),
             "num_classes": self.num_classes,
             "dropout_rate": self.dropout_rate,
             "include_top": self.include_top,
@@ -1496,7 +1502,7 @@ class BeitForImageClassification(keras.Model):
         :rtype: BeitForImageClassification
         """
         config = dict(config)
-        config["backbone"] = deserialize_keras_object(config["backbone"])
+        config["backbone"] = keras.saving.deserialize_keras_object(config["backbone"])
         return cls(**config)
 
 
