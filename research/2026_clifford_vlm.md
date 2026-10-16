@@ -1,6 +1,6 @@
 # CliffordVLM: A Geometric Algebra Vision-Language Model
 
-**Author**: Nikolas Markou | **Date**: 2026-04-17 | **Status**: Research & Architecture Design
+**Author**: Nikolas Markou | **Date**: 2026-04-17 (locked plan update 2026-10-16) | **Status**: Research & Architecture Design + Locked Build Plan (English-only, byte-patch, 320px COCO, ~21M ship)
 
 ## Table of Contents
 
@@ -21,6 +21,15 @@
 - [Appendix B: Why Not Just Use Cross-Attention?](#appendix-b-why-not-just-use-cross-attention)
 
 ---
+
+> **LOCKED 2026-10-16 errata (byte-patch, English-only ship).** The following
+> passages predate the locked plan and are superseded where they assume BPE:
+> §4.1 "Token Embed + PosEmbed" → byte-patch embedding (§6.5.2); §6.1 token-ID
+> LM description → byte patches in, byte head out (§6.5); §6.4/Q4 tokenizer
+> recommendation → no tokenizer (§Q4, §6.5); §10 legacy ladders → §10.1 ship
+> rows (~21M); Appendix A `token_embedding( vocab_size)` → byte table (256×D)
+> and `logits[:, N:, :]` over 256 byte classes. Schedules, losses, metrics,
+> depth/JEPA tracks, and Architecture B/D research directions stand unchanged.
 
 ## 1. Executive Summary
 
@@ -57,6 +66,10 @@ Standard VLMs fuse vision and language through dot-product cross-attention, whic
 | **Vision-to-LM projector** | **Needed** | Lightweight adapter |
 | **Clifford depth decoder** | **Needed** | CliffordNetBlock stack + 1x1 Conv head |
 | **Training pipeline** | **Needed** | `train/cliffordnet/train_vlm.py` |
+| **Byte-patch embedding (fixed k=4, vocab 256, no tokenizer)** | **Needed (LOCKED, §6.5)** | New: `datasets/puzzle_vlm/byte_patch.py` + patch-embed layer (byte table 256×D, concat-k → Dense) |
+| **Byte output head (scatter-repeat + causal local head, 256-way)** | **Needed (LOCKED, §6.5)** | New: `byte_lm_head.py`; leak probe RED-first gates acceptance |
+| **Mixed local/global causal decoder (5:1, Gemma3TransformerBlock)** | **Block exists, new stack (LOCKED, §6.6)** | `layers/transformers/gemma3_transformer.py` + `models/language/gemma/gemma3.py` (`layer_types`); `TextDecoder` untouched by design |
+| **Structured detection head (DETR-style, Q=100, no YOLO)** | **Needed (LOCKED, §4.5)** | `query_embed` + cross-attn decoder + class/bbox heads; Hungarian matcher precedent `losses/sam3_detection_loss.py` |
 
 ---
 
@@ -762,6 +775,130 @@ Options:
 - Only viable with very large image-text datasets
 - Dual learning (language + vision-language) in one stage
 
+### 6.5 Byte-Patch Text Representation (LOCKED 2026-10-16, English-only)
+
+No BPE, no tiktoken on the VLM path. Text is raw UTF-8 bytes grouped into
+**fixed patches of k=4** (CANINE-style [[Clark 2022]](#13-references)).
+
+**6.5.1 Encoding (`datasets/puzzle_vlm/byte_patch.py`, new)**
+
+```
+utf8 bytes (B, L)            uint8, 0x00 reserved as PAD (never valid UTF-8)
+  -> pad L up to multiple of k with 0x00
+  -> reshape (B, L/k, k)     static shapes throughout (no dynamic lengths)
+```
+
+Primitives already in-tree: `datasets/byte_lm.py` (`text_to_byte_ids`,
+`pack_byte_windows`, `build_byte_clm_dataset`, `estimate_byte_clm_steps_per_epoch`);
+trainer Pattern 6 (`src/train/AGENTS.md`) is the byte-LM recipe (no tokenizer at
+all, packed causal windows). Reuse, don't re-derive.
+
+Length math (the reason k=4): English averages ~4 bytes per BPE token, so
+512 BPE tokens ≈ 2000 bytes → **~500 patches**. Ship joint length:
+26 vision + 500 text ≈ **526 positions** — the 512-context, w=32 locality ratio
+(~6%), and every cost estimate in §2.5/§10 carry over unchanged, redefined in
+patches. `max_seq_len` counts patches from here on.
+
+**6.5.2 Patch embedding (new layer, ~50 lines)**
+
+```
+byte ids (B, P, k)  ->  byte table Lookup(256, D)  ->  (B, P, k, D)
+  -> concat last two axes -> (B, P, k*D)
+  -> Dense(D) + LayerNorm  ->  patch embeddings (B, P, D)
+```
+
+Byte table: 256×384 = **98,304 params** (vs 19.3M for a 50K BPE table at the same
+width — the single largest param saving in the ship model). Golden-rule layer
+(`__init__`/`build`/`call`/`get_config`, `@register_dl_technique`). Fixed
+boundaries cut words arbitrarily (CANINE accepts this; the concat+dense span of
+k bytes smooths it). No entropy model, no pretraining stage, no dynamic padding.
+
+**6.5.3 Byte output head (new layer — the one subtle component)**
+
+The global transformer runs at **patch resolution** (cheap); only the head
+touches byte resolution:
+
+```
+patch states (B, P, D)  ->  scatter-repeat ×k  ->  (B, P*k, D) byte-frame states
+  -> tiny local causal head (1 self-attn or conv over past bytes in-frame)
+  -> Dense(256)  ->  next-byte logits (B, P*k, 256)
+```
+
+**Causality rule (load-bearing):** byte *j* may see patch states of patches
+**strictly before** `patch(j)`, plus earlier bytes inside its own patch via the
+local head. Naive repeat-and-predict leaks: patch *i*'s state was computed from
+bytes up to the end of patch *i*, so predicting byte *j ∈ patch i* from it reads
+the future. The local head's mask is therefore `patch_id_strictly_less OR
+(same_patch AND byte_pos_less)` — two conditions, both required.
+
+Acceptance is gated by a **RED-first leak probe** in the repo's own style
+(`models/language/AGENTS.md`: two forwards differing at one future byte must
+leave all earlier predictions unchanged). Required arms: (a) shuffle future
+bytes *within* the target patch → earlier-byte logits bit-identical; (b) shuffle
+a *future patch* → all current-patch logits bit-identical; (c) positive control
+— shuffle a *past* byte → logits move (proves the probe can see a real
+dependency). The head is not accepted until (a)+(b) pass and (c) moves.
+Additional arms: `ignore_index=0x00` pad masking exactness; per-position CE
+correctness vs a naive per-byte loop oracle on 8-byte inputs; `.keras`
+value round-trip.
+
+**6.5.4 Loss, generate, decode**
+
+Loss: standard next-byte CE over the trailing text positions (reuse
+`text_position_logits` trailing-slice from `losses/nano_vlm_loss.py` — the
+vision prefix is dropped the same way; do not copy it). `ignore_index=0x00`.
+`generate()`: emit bytes autoregressively, stop at reserved EOS byte `0xFF`
+(never valid UTF-8 alone — cleaner than overloading newline), decode UTF-8 with
+replacement at the end. Byte round-trip acceptance:
+`decode(generate(x)) → re-encode` identity on ASCII inputs.
+
+**6.5.5 What this deletes**
+
+tiktoken/BPE on the VLM path, the eot-as-pad hack (GPT-2 has no PAD), the
+50K-vocabulary table (19.3M), `vocab_size` mismatch failure modes between
+tokenizer and model, and the `tables=`/vocabulary-change load machinery for the
+VLM (CLIP side keeps its own BPE — separate model, unaffected, since
+contrastive losses never see token IDs).
+
+### 6.6 Mixed Local/Global Causal Decoder (LOCKED 2026-10-16)
+
+No `TextDecoder`: its defaults are legacy GPT-2
+(`multi_head/layer_norm/post/mlp/gelu`, `layers/transformers/text_decoder.py:160`)
+and it is single-`attention_type` only with no
+`attention_args/n_kv_head/ffn_args` passthrough (verified by execution
+2026-10-15 — `attention_type='group_query'` through it degrades to MHA-width KV
+and double-counts position via learned table + GQA RoPE). The new package owns a
+small causal decoder stacking the in-tree mixed-attention block, exposing the
+same `embed_tokens/decode_embeddings` two-half interface `NanoVLM` uses (patch
+embeds from §6.5.2 feed `embed_tokens`; byte head from §6.5.3 consumes
+`decode_embeddings` output), so `call`/`generate`/`NanoVLMLoss`-at-bytes work
+unchanged. `TextDecoder` stays untouched by design.
+
+Mechanism (`layers/transformers/gemma3_transformer.py`,
+`Gemma3TransformerBlock`): per-block `attention_type: sliding_window |
+full_attention`; the block builds its own **causal + (when windowed) banded mask
+internally, OR-ed**, rank-3 so it is never misread as padding. Attention + FFN
+from the **`group_query` and `geglu` factories** — real KV-head control, no
+surgery. QK-norm skipped, `rope_theta` default (GQA registry `max_seq_len=2048`
+covers the 526 ship length with headroom; position comes from RoPE, so there is
+no learned position table to resize and no tail-undertraining problem).
+
+```python
+decoder = dict(depth=6, embed_dim=384, num_heads=6, num_key_value_heads=2,
+    max_seq_len=512, sliding_window_size=32,   # patches, not BPE tokens
+    layer_types=["sliding_window"]*5 + ["full_attention"])  # 5:1, global last (Gemma-270m convention)
+```
+
+Precedents: Gemma3 `layer_types` 5×sliding+1×full ×3, window 512
+(`models/language/gemma/gemma3.py:224`; small 2:1; locals extract, globals route
+every 4–6); ModernBERT `window_band` local + global every `interval=3`
+(`models/language/modern_bert/model.py:22,236` — local band is dense N×N+mask,
+bias not FLOPs, so the ship win is the extractor/router bias). Window 32 at
+N≈526 is genuinely local (~6%). At depth 12 the pattern becomes
+`(5×S+1×G)×2` with globals at 6,12. Probes: both-directions causality on a
+sliding layer AND the 5:1 stack; window-ablation 32→526 must move local-layer
+outputs (proves the band binds).
+
 ---
 
 ## 7. The Bridge: Clifford Geometric Fusion
@@ -1012,16 +1149,103 @@ The `AffineInvariantLoss` normalizes both prediction and target by median and MA
 
 **Per-component LR scheduling** (following Penguin-VL): The vision encoder, projector, and LM decoder each get independent learning rates. This prevents the projector (randomly initialized) from destabilizing the pre-trained towers. Penguin-VL demonstrated that differential LR is critical -- the encoder needs a gentler schedule than the projector.
 
-### 8.4 Data Pipeline
+### 8.4 Data Pipeline (LOCKED 2026-10-16)
 
-| Stage | Dataset | Size | Format | Reconstruction Teacher |
-|-------|---------|------|--------|----------------------|
-| 0a (CLIP) | CC3M, LAION-400M | 3-400M pairs | (image, caption) | -- |
-| 0b (LM) | OpenWebText, FineWeb | 10-100B tokens | text | -- |
-| 1.1 (low-res align) | CC3M + LLaVA-Pretrain | ~3.5M pairs | (image, caption) | Frozen CliffordCLIP/SigLIP |
-| 1.2 (high-res align) | Curated high-quality | ~1M pairs | (image, long caption) | -- |
-| 2 (pre-train) | Multi-task mix | ~5-10M samples | Mixed | -- |
-| 3 (SFT) | Instruction data | ~500K conversations | (image, instruction, response) | -- |
+English-only throughout (matches the byte model — bytes remove the tokenizer,
+not the language decision). Text is raw UTF-8 → bytes → k=4 patches (§6.5);
+packing via `datasets/byte_lm.py` (`pack_byte_windows`,
+`estimate_byte_clm_steps_per_epoch`); trainer Pattern 6
+(`src/train/AGENTS.md`). Packing is mandatory from Stage 2 on — caption batches
+leave the 512-patch tail untrained. COCO/CC3M stay CLIP-contrastive-only.
+
+| Stage | Dataset (HF id) | Size | Use / notes |
+|-------|-----------------|------|-------------|
+| 0a (CLIP, separate) | CC3M / LAION-400M | 3–400M pairs | Contrastive only; tiktoken `gpt2` side |
+| 0b (byte LM warmup, opt) | FineWeb-Edu (bytes) | ~20B bytes | Optional decoder warmup before vision joins |
+| 1 (align, 320px) | `allenai/pixmo-cap`, `nlphuji/flickr30k` | ~0.5M dense/short captions | Projector + adapter warmup; short contexts |
+| 2a (instruct, packed) | `liuhaotian/LLaVA-Instruct-150K` | 150k multi-turn | Core instruction; packing required |
+| 2b (instruct mix, packed) | `HuggingFaceH4/llava-instruct-mix-vsft` | ~100ks | Diversity mix |
+| 2c (multi-task, sampled) | `HuggingFaceM4/the_cauldron` | 50–100k of 1.88M first | VQAv2/GQA/ChartQA unified; full 1.88M later |
+| 2d (synthetic, §8.5) | in-tree generators | 5–10% of mix | Puzzles below; seeded, style-shift eval |
+| 3a (text-in-image) | `facebook/textvqa` (45k Q / 28k OpenImages) | 45k | PICK for 320px; readable at this res |
+| 3b (diagram math) | `hiyouga/geometry3k` | ~3k | MathVista proxy |
+| 3c (docs, DEFERRED) | `HuggingFaceM4/Docmatix` (2.4M imgs / 9.5M QA) | — | Needs >320px to stay legible; gated on res bump |
+| 3d (dense COCO) | COCO-2017 (80-class closed) | 118k train | Detection (Hungarian set loss) + seg (CE); P1 warmup then joint |
+| 4 (preference, later) | `HuggingFaceH4/rlaif-v_formatted` | 83k DPO pairs | Hallucination reduction post-SFT |
+| Eval | `merve/vqav2-small`, TextVQA-val, DocVQA-test, MMMU/MathVista/MMStar-mini | — | Same suite as SmolVLM for comparability |
+
+English filter at load (fastText or HF metadata; LLaVA samples ~all English).
+Text-only bytes ~10% in Stage 2 (no forgetting). All sets Apache-2.0 / open
+(SmolVLM recipe: Cauldron + Docmatix). COCO det/seg: 320px resize/letterbox
+(square required by Clifford `image_size`, `clifford_clip/model.py:459`).
+
+### 8.5 Synthetic Puzzle Data (5–10% of Stage 2 mix, LOCKED 2026-10-16)
+
+Seeded numpy + scipy at module scope, PIL lazy (house rule precedent
+`synthetic_warp.py` / `dtsprompt.py`, guard-enforced; no cv2/skimage). All Q/A
+byte-short (<128 bytes ⇒ <32 patches, `NanoVLMLoss`-compatible). Hold out
+unseen palette/texture/size bins per family; report the plain-vs-styled gap as
+the vision-robustness metric. Proposal: 20k validity / 10k single-cell / 5k
+full-solve equivalents per family (pending confirm).
+
+**8.5.1 Sudoku** (solver-backed, unique solutions). Render 9×9 at 320px
+(~35px/cell). Tasks, easiest first: `valid?` (yes/no) → `digit at (r,c)?` →
+`missing digits in row/col/box?` → `full solution row?` → full 81-char grid.
+Difficulty: mono thin/thick box lines → cell/box background colors (randomized
+palette per sample) → digit glyph styles + background textures (procedural
+noise/paper/wood numpy grain, no external assets) → rotated/mirrored boards,
+missing grid lines.
+
+**8.5.2 Mazes — rectangular / circular / 3D-projected + camera distortion.**
+One generator, three geometries, identical action vocab (U/D/L/R equivalents),
+answers in *topology coords* (viewpoint invariance, never pixels):
+- *Rectangular*: DFS + braid, sizes 9→15→21, cells `(r,c)`.
+- *Circular*: polar rings×wedges (e.g. 4×12 → 8×16 hard), neighbors radial +
+  angular (wrap-around), rendered as annulus sectors (PIL pieslices), start at
+  center. Cell id `(ring, wedge)`.
+- *3D-projected*: rectangular maze on a world plane → homography to a randomized
+  quadrilateral (tilt/pan/roll, horizon out of frame) + radial lens distortion
+  `r(1+k1r²+k2r⁴)`, k1/k2 mild→strong, numpy bilinear sampling (precedents
+  `transform_sequences._affine_warp`, `synthetic_warp`; closed-form maps only).
+  Start/goal markers projected with the same map.
+Tasks: `next move from start?` → `steps to goal?` → `full path?` (<64 bytes at
+21×21) → `unreachable?` (islands). Curriculum: rectangular flat → circular flat
+→ rectangular tilted → circular tilted → full distortion + texture. Eval on
+held-out (tilt, k1, k2) bins.
+
+**8.5.3 Color Nonograms** (8×8–12×12 from random pixel art; clues rendered
+*in-image* beside the grid so the model reads them visually, not as text):
+`cell (r,c) filled?` → `complete row r?` → `full board?` (bitstring rows).
+Difficulty: mono → multi-color layers (per-color clue sets) → mixed clue
+fonts/colors → clue-cell shading + background texture.
+
+**8.5.4 ARC rule grids** (5×5–10×10, reuse `datasets/arc/`): recolor-by-neighbor-count,
+complete-the-symmetry (h/v/rot), motif translate, count-and-point.
+`apply rule → output grid?` (compact row-strings) → `which rule?` (multiple
+choice) → `where is the motif?` (coords). Difficulty: 2-color flat → 4–6
+randomized palette → textured fills (same hue, different grain — color alone
+won't solve) → larger grid + distractor shapes.
+
+**8.5.5 Texture odd-one-out + tile swap** (4×4–6×6 tiles; all share shape+color
+except one differing in exactly one attribute: 90° rotation, mirror, hue shift,
+texture grain, 0.9× scale): `which tile (r,c)?` → `how does it differ?`
+(rotation/mirror/color/texture) → `swap two tiles to fix symmetry?`.
+Difficulty: flat colors → just-noticeable hue/grain gaps → busy backgrounds +
+low-contrast grain → smaller tiles at 320px. Directly probes whether the
+geometric product sees orientation (wedge) vs color blobs.
+
+**8.5.6 Spot-the-difference montages** (single-image constraint → A|B panels +
+divider + A/B tags in one 320px frame, ~140px/panel — fine-grain edits viable).
+Base scene (shape grid / maze top-down / board fragment / block room) × N
+sampled edits from {remove, add, recolor, retexture, move, rotate, scale,
+count-change}. Tasks: `how many?` → `what's missing/added in B?` (object +
+attribute) → `where? (panel, region)` → `describe all (N≤3)`. Difficulty:
+1 coarse aligned → 2–3 styled → panel jitter (±2px / 0.95× kills pixel-diff
+shortcuts, forces object correspondence). Multi-image interleaved (SmolVLM-style)
+is the later upgrade; montage keeps the single-image model unchanged.
+
+Tiny-model note: 6-layer nets saturate on validity/single-cell/next-move; full
+grids/full paths are stretch goals — gate promotion on early-task saturation.
 
 ### 8.5 Training Stability
 
@@ -1239,9 +1463,25 @@ if step % 500 == 0:
 
 ## 10. Model Variants & Scaling
 
-### 10.1 Proposed Variants
+### 10.1 Proposed Variants (LOCKED ship row + byte recompute, 2026-10-16)
 
-Based on existing CliffordNet/CliffordNetLM/CliffordCLIP variant ladders:
+The old CliffordNetLM-based ladder below is superseded for the VLM by the
+byte-patch + mixed-decoder ship (§6.5–§6.6). Kept for the pure-LM backbones;
+the VLM ladder is:
+
+| Variant | Vision (ch/depth/shifts) | Decoder (Dt/depth/heads/pattern) | Text | Total | Target |
+|---|---|---|---|---|---|
+| **ship** | 128/-/3,3,3,3/[1,2],[1,2],[1,2,4],[1,2,4] (nano-ladder, ~3.5M) | 384/6/6Q-2KV/5:1 w=32, GeGLU, sandwich | bytes k=4, ctx 512 | **~21M** | v1: 320px COCO + VLM |
+| ship-12 | same vision | 384/12/8Q-2KV/(5:1)×2, w=64 | bytes k=4, ctx 1024 | ~36M | long-ctx + Docmatix |
+| ship-wide | [192,192,384,384] vision (~8.5M) | 512/8/8Q-2KV/5:1, w=64 | bytes k=4, ctx 512 | ~45M | quality push |
+
+Ship budget detail: vision ~3.5M · CLS+ModalityProjection (256→s=2→1024→384)
+~0.4M · decoder 6× ~10.3M (~1.7M/layer: attn ~0.4M, GeGLU~1152 ~1.3M) · tied byte
+table 256×384 = 98,304 · detection head (Q=100, 2–3 cross layers) ~5M · seg head
+~1M. Movers: depth 12 (+~15M), mini-ladder vision (+~5M), untied byte head
+(+98k second matrix — still don't). Record per-part budgets as build assertions
+(vision ≤6M, table == 98,304); exact `count_params()` replaces estimates at
+build time. Legacy CliffordNetLM-based ladder (BPE, attention-free decoder):
 
 | Variant | Vision (ch/depth/shifts) | LM (ch/depth/shifts) | Projector | Total Params | Target |
 |---------|:-:|:-:|:-:|:-:|---|
@@ -1314,12 +1554,25 @@ Attention-based LMs can dynamically route information from any position to any o
 
 **Q4: What is the optimal tokenizer for CliffordNetLM?**
 
-The codebase has a BPE tokenizer implementation (`layers/tokenizers/bpe.py`). For VLM use, we need:
-- Compatible with existing pre-trained LM weights (if using transfer from CliffordNetLM)
-- Large enough vocabulary for instruction-following (32K-50K tokens)
-- Support for special tokens: `<image>`, `<|im_start|>`, `<|im_end|>`, etc.
+**LOCKED 2026-10-16: No tokenizer. Fixed byte patches (k=4), English-only.**
 
-*Recommendation*: Use the GPT-2 [[Radford 2019]](#13-references) tokenizer (50257 tokens) for compatibility with existing CliffordCLIP training, or train a custom BPE tokenizer on the target corpus.
+Rationale: a 50K BPE table at Dt=384 costs 19.3M params (~48% of a 40M ship model)
+for an English-only model, plus a tiktoken dependency, an eot-as-pad hack (GPT-2
+has no PAD), and fragility to typos/noise. Raw UTF-8 bytes need a 256-entry table
+(98k params), `0x00` never occurs in valid UTF-8 so it is a clean pad id, and a
+reserved `0xFF` byte (never valid alone) serves as EOS. Multilingual spillover and
+character noise are handled for free. Full design in §6.5. The CLIP contrastive
+side keeps tiktoken `gpt2` (separate model, separate tokenizer is fine --
+contrastive losses operate on features/logits, never token IDs).
+
+Deferred alternatives (documented, not pursued for v1): BLT entropy patching
+(`layers/blt/`: `DynamicPatcher` + 3.3M-param `EntropyModel`, dynamic per-row
+boundaries, separate entropy-pretraining stage, own `train_step`/`generate` --
+marrying it to the vision prefix + Gemma stack is deep surgery inheriting the
+leak/pruning subtleties its README pins down) and H-Net learned chunking
+(`layers/dynamic_chunking/`: route→chunk→dechunk triple with hard `p>0.5`
+boundaries and EMA scatter -- elegant but exacting semantics plus its own stack;
+research-grade risk on top of a new model).
 
 **Q5: Should the vision encoder use Penguin-style LLM initialization?**
 
@@ -1362,10 +1615,46 @@ The hypothesis is that training a CliffordNet depth decoder alongside the VLM fo
 9. Whether the SRGP can serve as an effective JEPA predictor (predicting masked patch embeddings from context), and whether this produces better vision features than contrastive pre-training for downstream VLM use
 10. Whether a Clifford-native depth decoder (CliffordNetBlocks + 1x1 Conv) can match Depth Anything V2's quality at a fraction of the parameters, and whether the depth auxiliary signal measurably improves spatial VLM reasoning
 11. Whether the wedge product between visual features and depth embeddings (Strategy 3) encodes meaningful 3D structural information (occlusion boundaries, depth discontinuities) that dot-product-based fusion cannot capture
+12. Whether the byte head leaks within-patch future (gated by the §6.5.3 RED-first probe — must go green before any training run counts)
+13. Whether 512-patch tail positions train without packed long-form data (if tail perplexity diverges while head perplexity falls, packing is insufficient — add multi-turn/instruction mass, not more caption data)
+14. Whether stride-32 S4-only detection collapses small-object AP at 320px (the S3+S4 500-key fallback exists for exactly this; trigger: AP-S gap vs a 640px probe run)
+15. Whether fixed k=4 boundaries hurt morphologically-rich English (CANINE evidence says no at this scale; ablation: k=8 vs k=4 on TextVQA-val)
 
 ---
 
-## 12. Implementation Roadmap
+## 12. Implementation Roadmap (LOCKED build order, 2026-10-16)
+
+Ship: `models/vision_language/clifford_nanovlm/` (`CliffordNanoVLM`,
+`create_clifford_nanovlm`, registration
+`dl_techniques.models.clifford_nanovlm.model`) + sibling `clifford_detseg/`
+sharing the vision-body module (or one dict-output joint model if training
+jointly from day one). `TextDecoder` untouched by design.
+
+1. **Byte primitives** (`datasets/puzzle_vlm/byte_patch.py` + patch-embed layer):
+   `bytes_to_patches(k=4)`, round-trip identity, padding exactness,
+   `L_patches == ceil(L_bytes/k)` gate.
+2. **Byte head + leak probe**: scatter-repeat + causal local head, 256-way Dense.
+   Leak probe RED-first (§6.5.3 arms a/b/c); ignore-index + loop-oracle arms;
+   `.keras` value round-trip target `0.0`.
+3. **Adapter + mixed decoder**: Sv=26 @320/s=2, `H'%s` refusal, CLS handling;
+   parity vs `NanoVLM` tiny on CPU; causality probes on a sliding layer AND the
+   5:1 stack, both directions; window-ablation 32→538 moves local outputs.
+4. **Model + serialization**: `get_config` value round-trip;
+   `tests/test_models/test_clifford_nanovlm/`; tree-wide `--collect-only`;
+   per-part param assertions (vision ≤6M, table == 98,304).
+5. **Stage-map return + structured-head smoke** (S3+S4 500 keys, Q=100, no
+   anchors/NMS/neck): queries move in one optimizer step; Hungarian
+   permutation-invariance, Q-overflow, empty-image probes; seg head mIoU smoke.
+6. **Fix CliffordCLIP trainer staleness** (§1: rename or delete the
+   `_VisionClassifier` path) — required before any CLIP-side run counts.
+7. **Synthetic generators** (§8.5, six families) + held-out style bins +
+   plain-vs-styled gap metric.
+8. **Trainers**: P1 dense COCO warmup (320px, det+seg, VLM frozen) → P2 joint
+   (contrastive bridge + byte-NTP, calibrated `loss_weights`, LLaVA/Cauldron
+   byte-packing mandatory); per-task curves split; `exclude_from_weight_decay`
+   on `logit_scale`; `TerminateOnNaN`.
+
+### Legacy phase plan (pre-lock, kept for the depth/JEPA/Architecture-B tracks)
 
 ### Phase 1: Validate Components (1-2 weeks)
 
@@ -1458,6 +1747,12 @@ The hypothesis is that training a CliffordNet depth decoder alongside the VLM fo
 
 - **[Allal 2025]** Allal, L.B., et al. (2025). SmolVLM: Redefining Small and Efficient Multimodal Models. arXiv:2504.05299.
 - **[Radford 2019]** Radford, A., et al. (2019). Language Models are Unsupervised Multitask Learners (GPT-2). OpenAI Technical Report.
+
+**Byte-Level & Tokenizer-Free Models**
+
+- **[Clark 2022]** Clark, J.H., et al. (2022). CANINE: Pre-training an Efficient Tokenization-Free Encoder for Language Representation. TACL. (Fixed character-blocking precedent for §6.5.)
+- **[Pagnoni 2024]** Pagnoni, A., et al. (2024). Byte Latent Transformer: Patches Scale Better Than Tokens. arXiv:2412.09871. (Entropy patching — deferred alternative, §Q4.)
+- **[Hwang 2025]** Hwang, C., et al. (2025). H-Net: Dynamic Chunking for End-to-end Hierarchical Sequence Modeling. arXiv:2507.07955. (Learned chunking — deferred alternative, §Q4.)
 
 **JEPA Family**
 
