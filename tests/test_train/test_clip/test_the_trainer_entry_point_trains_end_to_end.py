@@ -41,10 +41,10 @@ from PIL import Image
 
 from train.clip.train_clip import (
     CLIPDataLoader,
-    StackedCLIPLogits,
     build_caption_vocabulary,
     main,
 )
+from train.common.contrastive import StackedCLIPLogits
 
 #: A ViT-B/32 row shrunk to seconds: 4 patches of 32px, one block per tower,
 #: widths divisible by the row's own head and kv-head counts (12/4 and 8/8).

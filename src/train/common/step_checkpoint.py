@@ -87,7 +87,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         ``final.keras`` and handed to the analyzer. ``None`` (the default) is
         the model ``fit`` trains (``self.model``). Pass the inner model when
         ``fit`` trains a training-only wrapper that is never saved, such as
-        the contrastive bridge ``train.clip.train_clip.StackedCLIPLogits``.
+        the contrastive bridge ``train.common.contrastive.StackedCLIPLogits``.
     """
 
     def __init__(

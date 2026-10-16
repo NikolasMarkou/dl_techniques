@@ -11,7 +11,7 @@ first batch with::
 (plan-2026-08-30T203107-30455f66 D-001). The wrapper and its hand-written
 ``train_step`` are gone since plan-2026-10-14T062616-81938e81 D-045: the trainer
 builds the inner loss with ``build_contrastive_loss`` and trains through the
-stock-``fit`` bridge of ``train.clip.train_clip``
+stock-``fit`` bridge of ``train.common.contrastive``
 (``compile_for_contrastive_training``), whose ``StackedCLIPContrastiveLoss``
 calls the inner loss's ``call``, the polymorphic reduction D-001 introduced.
 
@@ -35,15 +35,15 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
-from train.clip.train_clip import (
-    StackedCLIPContrastiveLoss,
-    StackedCLIPLogits,
-    compile_for_contrastive_training,
-)
 from train.cliffordnet.train_clip import (
     _build_arg_parser,
-    build_contrastive_loss,
     parse_arguments,
+)
+from train.common.contrastive import (
+    StackedCLIPContrastiveLoss,
+    StackedCLIPLogits,
+    build_contrastive_loss,
+    compile_for_contrastive_training,
 )
 
 IMAGE_SIZE = 32

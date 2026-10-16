@@ -41,7 +41,7 @@ for; the distillation reconstruction losses described in the Penguin-VL
 paper (amplitude/direction/relation) require a frozen teacher encoder and
 are intentionally left out. Adding them would mean a teacher forward pass
 inside the compiled loss of the stock ``compile``/``fit`` bridge
-(``train.clip.train_clip.compile_for_contrastive_training``) this script
+(``train.common.contrastive.compile_for_contrastive_training``) this script
 trains through.
 
 Dataset: uses the ``coco_captions`` tfds builder by default. Pass
@@ -131,7 +131,7 @@ Example::
         --steps-per-epoch 2 --output-dir /tmp/cliffordclip_smoke
 
 Training is stock ``keras.Model.fit`` on the contrastive bridge of
-``train.clip.train_clip`` (`compile_for_contrastive_training`), which stacks
+``train.common.contrastive`` (`compile_for_contrastive_training`), which stacks
 the two logit matrices into one output for the compiled loss. Every ``.keras``
 the run writes (``checkpoints/step_*.keras``, ``checkpoints/final.keras``,
 ``cliffordclip_<variant>.keras``) is the bare :class:`CliffordCLIP`, never the
@@ -174,7 +174,6 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
-from dl_techniques.losses import CLIPContrastiveLoss, SigLIPContrastiveLoss
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -182,6 +181,7 @@ from dl_techniques.optimization import (
 )
 from dl_techniques.utils.logger import logger
 
+from train.common.image_text import IMAGE_MEAN, IMAGE_STD
 from train.common import (
     StepCheckpointCallback,
     build_synthetic_image_text_dataset,
@@ -192,8 +192,9 @@ from train.common import (
     setup_gpu,
     validate_model_loading,
 )
-from train.clip.train_clip import (
+from train.common.contrastive import (
     as_contrastive_fit_batches,
+    build_contrastive_loss,
     compile_for_contrastive_training,
 )
 
@@ -234,60 +235,16 @@ class CliffordCLIPTrainConfig:
 # =============================================================================
 #
 # DECISION plan-2026-10-14T062616-81938e81/D-045: train through stock
-# `compile`/`fit` on the stacking bridge of `train.clip.train_clip`
+# `compile`/`fit` on the stacking bridge of `train.common.contrastive`
 # (`compile_for_contrastive_training`, D-036): `StackedCLIPLogits` stacks the
 # two logit matrices into one output and `StackedCLIPContrastiveLoss` hands
-# them to the inner loss built below. Do NOT bring back a training wrapper
+# them to the inner loss `build_contrastive_loss` builds. Do NOT bring back a training wrapper
 # with its own `train_step`/`test_step` (the old `ContrastiveCliffordCLIP`,
 # whose D-003 said a dict-output CLIP could not use stock fit; the bridge is
 # the measured counterexample), and do NOT save the bridge: every `.keras`
 # this run writes is the bare CliffordCLIP (`StepCheckpointCallback(
 # saved_model=...)`). The step-override census in test_package_api_contract.py
 # no longer lists this file. See decisions.md D-045.
-
-
-def build_contrastive_loss(loss: str, label_smoothing: float) -> keras.losses.Loss:
-    """The inner contrastive loss for ``--loss``.
-
-    Interface contract (callers: `train`, tests): returns a
-    `keras.losses.Loss` whose ``call(None, {'logits_per_image',
-    'logits_per_text'})`` is the per-sample loss, the shape
-    ``train.clip.train_clip.StackedCLIPContrastiveLoss`` requires of its
-    ``inner``. Neither loss applies a temperature of its own.
-
-    :param loss: ``"clip"`` or ``"siglip"`` (the parser's ``--loss`` choices).
-    :param label_smoothing: CLIP label smoothing; must be ``0.0`` for
-        ``"siglip"``, which has no smoothing (the parser enforces it).
-    :return: The loss.
-    :raises ValueError: For an unknown ``loss``, or label smoothing with
-        ``"siglip"``.
-    """
-    # DECISION plan-2026-07-15T114613-5add9baa/D-002: --loss selects CLIP vs
-    # SigLIP (both consume the same {logits_per_image, logits_per_text} dict
-    # schema); default "clip" is byte-identical to the prior hardcoded path
-    # (O1). SigLIP is built with temperature=1.0 / use_learnable_temperature=
-    # False on purpose -- CliffordCLIP already applies exp(logit_scale) in its
-    # forward pass, so do NOT enable a second temperature here (it would
-    # compound the scaling, exactly as apply_temperature=False guards on the
-    # CLIP path). See decisions.md D-002.
-    if loss == "siglip":
-        if label_smoothing:
-            raise ValueError(
-                f"--loss siglip has no label smoothing; got "
-                f"label_smoothing={label_smoothing}"
-            )
-        return SigLIPContrastiveLoss(
-            temperature=1.0,
-            use_learnable_temperature=False,
-            name="siglip_contrastive_loss",
-        )
-    if loss == "clip":
-        return CLIPContrastiveLoss(
-            apply_temperature=False,
-            label_smoothing=label_smoothing,
-            name="clip_contrastive_loss",
-        )
-    raise ValueError(f"unknown contrastive loss {loss!r}; expected 'clip' or 'siglip'")
 
 
 class LogitScaleLogger(keras.callbacks.Callback):
@@ -564,7 +521,7 @@ class GammaProbeCallback(keras.callbacks.Callback):
     the learned-query-residual arm is actually using its extra machinery.
 
     The ``model`` Keras attaches via ``set_model`` is the training wrapper
-    (``train.clip.train_clip.StackedCLIPLogits``); the head_scale layers live
+    (``train.common.contrastive.StackedCLIPLogits``); the head_scale layers live
     on the inner :class:`CliffordCLIP` (``self.model.clip_model``).
 
     Heads other than ``learned_query_residual`` (notably ``head_kind="plain"``)
@@ -788,6 +745,51 @@ class _VisionClassifier(keras.Model):
 _CIFAR_IMAGE_SHAPE: Tuple[int, int, int] = (32, 32, 3)
 _CIFAR100_CLASSES = 100
 
+# DECISION plan-2026-10-14T062616-81938e81/D-090: the vision pretraining
+# normalises with the CONTRASTIVE stage's constants (train.common.image_text's
+# IMAGE_MEAN/IMAGE_STD, the objects that stage's augment_and_normalize reads),
+# not CIFAR-100's own statistics. With CIFAR stats the pretrained tower met a
+# shifted input distribution the moment contrastive training began. Do not
+# give the pretraining its own constant again.
+_PRETRAIN_NORMALIZATION = (IMAGE_MEAN, IMAGE_STD)
+
+
+def _pretrain_vision_datasets(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    batch_size: int,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """The CIFAR-100 pretraining datasets, normalised like the contrastive stage.
+
+    Interface contract (callers: `_run_pretrain_vision`, tests): the
+    augmented training and plain evaluation pipelines of
+    ``train.cliffordnet.train_cliffordnet`` with ``_PRETRAIN_NORMALIZATION``
+    in place of the CIFAR-100 statistics. Images are ``[0, 1]`` floats.
+
+    :return: ``(train_ds, val_ds)``.
+    """
+    from train.cliffordnet.train_cliffordnet import (
+        build_eval_dataset,
+        build_train_dataset,
+    )
+
+    train_ds = build_train_dataset(
+        x_train, y_train,
+        batch_size=batch_size,
+        dataset_name="cifar100",
+        random_erasing_prob=0.25,
+        normalization=_PRETRAIN_NORMALIZATION,
+    )
+    val_ds = build_eval_dataset(
+        x_test, y_test,
+        batch_size=batch_size,
+        dataset_name="cifar100",
+        normalization=_PRETRAIN_NORMALIZATION,
+    )
+    return train_ds, val_ds
+
 
 def _synthetic_cifar100(num_samples: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
     """Random CIFAR-100-shaped images in ``[0, 1]`` and labels in ``[0, 100)``.
@@ -808,9 +810,10 @@ def _run_pretrain_vision(
 ) -> None:
     """Pretrain the CliffordCLIP vision tower on CIFAR-100 classification.
 
-    Reuses the augmentation + normalisation pipeline from
+    Reuses the augmentation pipeline from
     ``train.cliffordnet.train_cliffordnet`` (AutoAugment CIFAR-10 policy,
-    random crop, HFlip, per-channel normalise, RandomErasing). Under
+    random crop, HFlip, per-channel normalise, RandomErasing), normalised
+    with the contrastive stage's mean/std (`_pretrain_vision_datasets`). Under
     ``--synthetic`` the arrays are random (two training batches and one
     validation batch) and the pipeline is the same.
 
@@ -818,10 +821,6 @@ def _run_pretrain_vision(
     or the budget, whichever is shorter, and the epoch count is the budget
     over that, rounded up.
     """
-    from train.cliffordnet.train_cliffordnet import (
-        build_train_dataset as _cifar_build_train,
-        build_eval_dataset as _cifar_build_eval,
-    )
     from train.common import load_dataset
 
     steps_budget = int(args.pretrain_vision_steps)
@@ -844,17 +843,8 @@ def _run_pretrain_vision(
             f"got num_classes={num_classes}"
         )
 
-    train_ds = _cifar_build_train(
-        x_train, y_train,
-        batch_size=batch_size,
-        dataset_name="cifar100",
-        random_erasing_prob=0.25,
-    )
-    val_ds = _cifar_build_eval(
-        x_test, y_test,
-        batch_size=batch_size,
-        dataset_name="cifar100",
-    )
+    train_ds, val_ds = _pretrain_vision_datasets(
+        x_train, y_train, x_test, y_test, batch_size)
     steps_per_epoch = max(1, min(len(x_train) // batch_size, steps_budget))
     pretrain_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
     warmup_steps = max(1, int(0.05 * steps_budget))

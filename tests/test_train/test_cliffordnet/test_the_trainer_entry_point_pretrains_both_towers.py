@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
-from train.clip.train_clip import StackedCLIPLogits
+from train.common.contrastive import StackedCLIPLogits
 from train.cliffordnet.train_clip import main
 
 from .test_the_trainer_entry_point_trains_under_stock_fit import _TINY_ROW

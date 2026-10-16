@@ -37,12 +37,12 @@ import tensorflow as tf
 
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
 from dl_techniques.models.vision_language.clip.model import CLIP
-from train.clip.train_clip import (
+from train.clip.train_clip import build_clip_optimizer
+from train.common.contrastive import (
     StackedCLIPAccuracy,
     StackedCLIPContrastiveLoss,
     StackedCLIPLogits,
     StackedCLIPRecallAtK,
-    build_clip_optimizer,
     compile_for_contrastive_training,
 )
 

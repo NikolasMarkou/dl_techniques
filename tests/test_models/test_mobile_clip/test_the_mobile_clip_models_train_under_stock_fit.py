@@ -10,7 +10,7 @@ A tower that is built but bypassed, or cut off by a ``stop_gradient``, keeps
 its init and is named in the failure.
 
 The loss bridge is the CLIP trainer's own (``StackedCLIPLogits`` /
-``StackedCLIPContrastiveLoss`` from ``train.clip.train_clip``): the model's
+``StackedCLIPContrastiveLoss`` from ``train.common.contrastive``): the model's
 dict output is stacked into one ``(N, 2, N)`` tensor, because Keras'
 ``CompileLoss`` broadcasts one loss over every leaf of a structured output.
 For v1, which emits features but no logits, the bridge forms them with
@@ -30,7 +30,7 @@ import tensorflow as tf
 from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v1 import (
     MobileClipModel,
 )
-from train.clip.train_clip import StackedCLIPContrastiveLoss, StackedCLIPLogits
+from train.common.contrastive import StackedCLIPContrastiveLoss, StackedCLIPLogits
 
 from .test_mobile_clip_v2 import _IMG as _V2_IMG
 from .test_mobile_clip_v2 import _SEQ as _V2_SEQ

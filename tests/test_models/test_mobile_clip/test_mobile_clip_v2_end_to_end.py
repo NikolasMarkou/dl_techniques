@@ -19,7 +19,7 @@ Five things are exercised here that nothing else exercises:
     `{'logits_per_image', 'logits_per_text'}` dict (or a 2-tuple); our model's
     `call` returns a 5-key dict. The bridge is the CLIP trainer's own
     (`StackedCLIPLogits` + `StackedCLIPContrastiveLoss` from
-    `train.clip.train_clip`), so this proves MobileCLIP2 trains through the
+    `train.common.contrastive`), so this proves MobileCLIP2 trains through the
     exact code the CLIP trainer runs — neither the model's output contract nor
     the loss is changed to suit the test. Training uses STOCK `fit()`; there is
     no custom `train_step` anywhere in this file or in the bridge.
@@ -54,7 +54,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import MobileClipV2Model
-from train.clip.train_clip import StackedCLIPContrastiveLoss, StackedCLIPLogits
+from train.common.contrastive import StackedCLIPContrastiveLoss, StackedCLIPLogits
 
 # ---------------------------------------------------------------------
 # Reduced-but-representative configurations.

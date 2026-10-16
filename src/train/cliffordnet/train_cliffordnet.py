@@ -12,7 +12,7 @@ import math
 import numpy as np
 import tensorflow as tf
 import keras
-from typing import Dict, Any, List, Literal, Tuple, Optional
+from typing import Dict, Any, List, Literal, Tuple, Optional, Sequence
 from PIL import Image, ImageOps, ImageEnhance
 
 # ---------------------------------------------------------------------
@@ -240,17 +240,30 @@ def _random_erase(
 # ---------------------------------------------------------------------
 
 
+def _normalization_stats(
+    dataset_name: str,
+    normalization: Optional[Tuple[Sequence[float], Sequence[float]]],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``(mean, std)`` as float32 arrays: the caller's, else the dataset's."""
+    if normalization is None:
+        stats = _CIFAR_STATS[dataset_name]
+        return stats["mean"], stats["std"]
+    mean, std = normalization
+    return np.asarray(mean, dtype=np.float32), np.asarray(std, dtype=np.float32)
+
+
 def _make_train_augment_fn(
     dataset_name: str, random_erasing_prob: float = 0.25,
+    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
 ):
     """Create a per-image train augmentation function (numpy-level).
 
     Returned callable takes a float32 [0,1] HWC array and returns
-    a normalised float32 HWC array with augmentations applied.
+    a normalised float32 HWC array with augmentations applied. The
+    normalisation is ``normalization`` (``(mean, std)``) when given, else the
+    dataset's own statistics.
     """
-    stats = _CIFAR_STATS[dataset_name]
-    mean = stats["mean"]
-    std = stats["std"]
+    mean, std = _normalization_stats(dataset_name, normalization)
     erasing_prob = random_erasing_prob
 
     def augment(image_np: np.ndarray) -> np.ndarray:
@@ -290,9 +303,15 @@ def build_train_dataset(
     batch_size: int,
     dataset_name: str,
     random_erasing_prob: float = 0.25,
+    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
 ) -> tf.data.Dataset:
-    """Build a shuffled, augmented, normalised training dataset."""
-    augment_fn = _make_train_augment_fn(dataset_name, random_erasing_prob)
+    """Build a shuffled, augmented, normalised training dataset.
+
+    ``normalization`` (``(mean, std)``) overrides the dataset statistics; the
+    CliffordCLIP vision pretraining passes the contrastive stage's (D-090).
+    """
+    augment_fn = _make_train_augment_fn(
+        dataset_name, random_erasing_prob, normalization)
 
     ds = tf.data.Dataset.from_tensor_slices((x, y))
     ds = ds.shuffle(buffer_size=len(x), reshuffle_each_iteration=True)
@@ -312,11 +331,15 @@ def build_eval_dataset(
     y: np.ndarray,
     batch_size: int,
     dataset_name: str,
+    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
 ) -> tf.data.Dataset:
-    """Build a normalised (no augmentation) evaluation dataset."""
-    stats = _CIFAR_STATS[dataset_name]
-    mean = tf.constant(stats["mean"])
-    std = tf.constant(stats["std"])
+    """Build a normalised (no augmentation) evaluation dataset.
+
+    ``normalization`` (``(mean, std)``) overrides the dataset statistics.
+    """
+    mean_np, std_np = _normalization_stats(dataset_name, normalization)
+    mean = tf.constant(mean_np)
+    std = tf.constant(std_np)
 
     def _normalize(image, label):
         return (image - mean) / std, label
@@ -537,12 +560,11 @@ def train_model(args) -> None:
         results_dir,
         f"cliffordnet_{args.variant}_{args.dataset}_final.keras",
     )
-    try:
-        model.save(final_path)
-        logger.info(f"Final model saved to: {final_path}")
-        validate_model_loading(final_path, test_sample, pre_save_output, custom_objects)
-    except Exception as exc:
-        logger.warning(f"Failed to save / validate final model: {exc}")
+    # A save or reload error surfaces (D-085); a value mismatch is logged by
+    # validate_model_loading itself.
+    model.save(final_path)
+    logger.info(f"Final model saved to: {final_path}")
+    validate_model_loading(final_path, test_sample, pre_save_output, custom_objects)
 
     # ---- Load best checkpoint & evaluate -----------------------------
     best_path = os.path.join(results_dir, "best_model.keras")

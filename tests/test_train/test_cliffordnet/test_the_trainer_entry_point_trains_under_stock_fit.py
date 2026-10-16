@@ -7,7 +7,7 @@ Until plan-2026-10-14T062616-81938e81 D-045 the CliffordCLIP trainer trained a
 in the step-override census), saved that WRAPPER as every step checkpoint, had
 no `--output-dir` (every run wrote into the repo-root `results/`) and no step
 limit, and no test had ever driven `main()`. It now trains through the D-036
-bridge of `train.clip.train_clip` (`compile_for_contrastive_training`) and
+bridge of `train.common.contrastive` (`compile_for_contrastive_training`) and
 writes the bare `CliffordCLIP` everywhere.
 
 This file drives `main(argv)` itself on the in-memory synthetic pairs, with the
@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
-from train.clip.train_clip import StackedCLIPLogits
+from train.common.contrastive import StackedCLIPLogits
 from train.cliffordnet.train_clip import RetrievalProbeCallback, main, parse_arguments
 
 _BATCH = 8

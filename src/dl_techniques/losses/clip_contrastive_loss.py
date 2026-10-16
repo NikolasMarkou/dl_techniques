@@ -260,7 +260,7 @@ class CLIPContrastiveLoss(keras.losses.Loss):
         # logit matrices. The CLIP trainer stacks them into one (N, 2, N) tensor
         # and unstacks them for this loss. The model applies its own learnable
         # temperature, so apply_temperature stays False.
-        from train.clip.train_clip import (
+        from train.common.contrastive import (
             as_contrastive_fit_batches, compile_for_contrastive_training)
 
         wrapper = compile_for_contrastive_training(
