@@ -342,6 +342,16 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # 2026-10-04; pre-existing drift, not a new port).
         "rbf_protonet",
         "resnet",
+        # clifford_clip, sam1, sam2, sam3: each README names `pretrained=True`
+        # only to say it raises (clifford_clip README:224, sam1 :115, sam2
+        # :125, sam3 :124; the refusals added at plan-2026-10-14T062616-81938e81
+        # step 11, D-045, which never ran this file). Each factory really
+        # raises `NotImplementedError`, verified at step 12 by EXECUTING
+        # `create_clifford_clip(<variant>, vocab_size=100, image_size=64,
+        # context_length=16, pretrained=True)`, `create_sam('vit_b', ...)`,
+        # `create_sam2('tiny', ...)` and `create_sam3('tiny', ...)` and reading
+        # the raise. Both halves checked.
+        "clifford_clip", "sam1", "sam2", "sam3",
         # siamfc: README section 2 names `pretrained=True` only to say it
         # raises; model.py `create_siamfc` really does
         # `raise NotImplementedError`, verified by EXECUTING
