@@ -635,12 +635,11 @@ def train_omnipoint(config: OmniPointTrainingConfig) -> keras.Model:
         except Exception as exc:  # noqa: BLE001 -- plotting must never fail a training run
             logger.warning(f"Failed to save loss curve plot: {exc}")
 
-    try:
-        inference_path = output_dir / "omnipoint_inference.keras"
-        omnipoint.save(str(inference_path))
-        logger.info(f"Inference model saved to: {inference_path}")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Failed to save inference model: {exc}")
+    # A failed save fails the run (D-102 of plan-2026-10-14T062616-81938e81).
+    # The loss plot above stays best-effort: it is a picture, not the model.
+    inference_path = output_dir / "omnipoint_inference.keras"
+    omnipoint.save(str(inference_path))
+    logger.info(f"Inference model saved to: {inference_path}")
 
     return omnipoint
 

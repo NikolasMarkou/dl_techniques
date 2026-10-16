@@ -165,7 +165,7 @@ SAM 2 templates carry it (decisions.md D-030).
 import argparse
 import json
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -1399,25 +1399,20 @@ def train_sam3(config: Sam3TrainingConfig
         except Exception as error:  # pragma: no cover - reporting path
             logger.warning("Could not read GPU memory info: %s", error)
 
-    try:
-        payload = {
-            "history": {key: [float(v) for v in values]
-                        for key, values in history.history.items()},
-            "final_metrics": metrics,
-            "selection_metric": SELECTION_METRIC,
-            "last_epoch_selection_metric": last_epoch,
-        }
-        with open(output_dir / "training_history.json", "w") as handle:
-            json.dump(payload, handle, indent=2)
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.warning("Failed to write training history: %s", error)
-
-    try:
-        model.save(output_dir / "final_model.keras")
-        logger.info("Final model saved to %s",
-                    output_dir / "final_model.keras")
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.error("Failed to save the final model: %s", error)
+    # A failed final save or history write fails the run; the model is saved
+    # first so a failed history write never costs the weights (D-102 of
+    # plan-2026-10-14T062616-81938e81).
+    model.save(output_dir / "final_model.keras")
+    logger.info("Final model saved to %s", output_dir / "final_model.keras")
+    payload = {
+        "history": {key: [float(v) for v in values]
+                    for key, values in history.history.items()},
+        "final_metrics": metrics,
+        "selection_metric": SELECTION_METRIC,
+        "last_epoch_selection_metric": last_epoch,
+    }
+    with open(output_dir / "training_history.json", "w") as handle:
+        json.dump(payload, handle, indent=2)
 
     return model, history, metrics
 

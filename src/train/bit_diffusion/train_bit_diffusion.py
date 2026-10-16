@@ -762,23 +762,20 @@ def train_bit_diffusion(config: TrainingConfig) -> Tuple[DiTXA, Any, Path]:
             losses[0], losses[-1], len(losses), losses[-1] - losses[0],
         )
 
-    try:
-        payload = {
-            "history": {
-                key: [float(v) for v in values]
-                for key, values in history.history.items()
-            },
-        }
-        with open(run_dir / "training_history.json", "w") as handle:
-            json.dump(payload, handle, indent=2)
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.warning("Failed to write training history: %s", error)
-
-    try:
-        model.save(run_dir / "final_model.keras")
-        logger.info("Final model saved to %s", run_dir / "final_model.keras")
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.error("Failed to save the final model: %s", error)
+    # DECISION plan-2026-10-14T062616-81938e81/D-102
+    # Do NOT wrap the final save or the history write in a logging `except`:
+    # a run that lost its artefacts must exit non-zero. The model is saved
+    # FIRST so a failed history write never costs the weights.
+    model.save(run_dir / "final_model.keras")
+    logger.info("Final model saved to %s", run_dir / "final_model.keras")
+    payload = {
+        "history": {
+            key: [float(v) for v in values]
+            for key, values in history.history.items()
+        },
+    }
+    with open(run_dir / "training_history.json", "w") as handle:
+        json.dump(payload, handle, indent=2)
 
     return model, history, run_dir
 

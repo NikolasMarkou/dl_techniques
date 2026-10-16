@@ -659,11 +659,9 @@ def train_sam(config: SAMTrainingConfig) -> Tuple[SAMTrainingModel, Any]:
 
     save_training_history_json(history, output_dir)
 
-    try:
-        model.save(output_dir / "final_model.keras")
-        logger.info("Final model saved to %s", output_dir / "final_model.keras")
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.error("Failed to save the final model: %s", error)
+    # A failed final save fails the run (D-102 of plan-2026-10-14T062616-81938e81).
+    model.save(output_dir / "final_model.keras")
+    logger.info("Final model saved to %s", output_dir / "final_model.keras")
 
     return model, history
 

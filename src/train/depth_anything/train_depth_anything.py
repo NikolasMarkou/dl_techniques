@@ -608,33 +608,30 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
 
     save_training_history_json(history, output_dir)
 
-    try:
-        trained_epochs = len(history.history.get("loss", []))
-        best_loss = min(history.history.get("val_loss", [float("nan")]))
-        summary_path = output_dir / "training_summary.txt"
-        with open(summary_path, "w") as f:
-            f.write("Depth Anything — Monocular Depth Estimation Training Summary\n")
-            f.write("=" * 60 + "\n\n")
-            f.write(f"Encoder type      : {config.encoder_type}\n")
-            f.write(f"Parameters        : {model.count_params():,}\n")
-            f.write(f"Epochs trained    : {trained_epochs}\n")
-            f.write(f"Best val_loss     : {best_loss:.6f}\n")
-            f.write(f"Batch size        : {config.batch_size}\n")
-            f.write(f"Patch size        : {config.patch_size}\n")
-            f.write(f"Learning rate     : {config.learning_rate}\n")
-            f.write(f"Train pairs       : {len(train_rgb)}\n")
-            f.write(f"Val pairs         : {len(val_rgb)}\n")
-            f.write(f"Duration          : {elapsed:.1f}s\n")
-        logger.info(f"Summary written to: {summary_path}")
-    except Exception as e:
-        logger.warning(f"Failed to write training summary: {e}")
+    # A failed save or summary fails the run; the model is saved first so a
+    # failed summary never costs the weights (D-102 of
+    # plan-2026-10-14T062616-81938e81).
+    inference_path = output_dir / "model_inference.keras"
+    model.save(str(inference_path))
+    logger.info(f"Inference model saved to: {inference_path}")
 
-    try:
-        inference_path = output_dir / "model_inference.keras"
-        model.save(str(inference_path))
-        logger.info(f"Inference model saved to: {inference_path}")
-    except Exception as e:
-        logger.warning(f"Failed to save inference model: {e}")
+    trained_epochs = len(history.history.get("loss", []))
+    best_loss = min(history.history.get("val_loss", [float("nan")]))
+    summary_path = output_dir / "training_summary.txt"
+    with open(summary_path, "w") as f:
+        f.write("Depth Anything — Monocular Depth Estimation Training Summary\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Encoder type      : {config.encoder_type}\n")
+        f.write(f"Parameters        : {model.count_params():,}\n")
+        f.write(f"Epochs trained    : {trained_epochs}\n")
+        f.write(f"Best val_loss     : {best_loss:.6f}\n")
+        f.write(f"Batch size        : {config.batch_size}\n")
+        f.write(f"Patch size        : {config.patch_size}\n")
+        f.write(f"Learning rate     : {config.learning_rate}\n")
+        f.write(f"Train pairs       : {len(train_rgb)}\n")
+        f.write(f"Val pairs         : {len(val_rgb)}\n")
+        f.write(f"Duration          : {elapsed:.1f}s\n")
+    logger.info(f"Summary written to: {summary_path}")
 
     gc.collect()
     return model
