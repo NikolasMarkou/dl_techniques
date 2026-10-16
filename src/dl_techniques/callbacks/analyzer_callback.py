@@ -93,6 +93,8 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
         :type epoch: int
         :param logs: A dictionary of logs from the training process (e.g., loss, acc).
         :type logs: Optional[dict]
+        :raises Exception: Whatever the analysis raises; it propagates out of
+            ``fit``, so a run whose analysis failed does not exit 0.
         """
         # Keras epochs are 0-indexed, but we often think of them as 1-indexed.
         current_epoch = epoch + 1
@@ -107,24 +109,21 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
             )
             logger.info(f"Saving results to: {epoch_output_dir}")
 
-            try:
-                # 1. Instantiate the ModelAnalyzer with the current model state
-                analyzer = ModelAnalyzer(
-                    models={self.model_name: self.model},
-                    config=self.analysis_config,
-                    output_dir=epoch_output_dir
-                )
+            # DECISION plan-2026-10-14T062616-81938e81/D-117
+            # No try/except here: a failed analysis raises out of fit. Do NOT
+            # log-and-continue; that hid the Step 13 DarkIR run's NaN weights
+            # ("SVD did not converge" at every epoch) behind an exit code of 0.
+            # 1. Instantiate the ModelAnalyzer with the current model state
+            analyzer = ModelAnalyzer(
+                models={self.model_name: self.model},
+                config=self.analysis_config,
+                output_dir=epoch_output_dir
+            )
 
-                # 2. Run the analysis (no data needed for this configuration)
-                # The `analyze` method will save plots and JSON to the epoch_output_dir
-                _ = analyzer.analyze()
+            # 2. Run the analysis (no data needed for this configuration)
+            # The `analyze` method will save plots and JSON to the epoch_output_dir
+            _ = analyzer.analyze()
 
-                logger.info(
-                    f" Epoch {current_epoch} analysis complete ---"
-                )
-
-            except Exception as e:
-                logger.error(
-                    f"EpochAnalyzerCallback failed at epoch {current_epoch}: {e}",
-                    exc_info=True
-                )
+            logger.info(
+                f" Epoch {current_epoch} analysis complete ---"
+            )

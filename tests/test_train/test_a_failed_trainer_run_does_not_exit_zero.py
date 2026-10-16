@@ -18,6 +18,7 @@ history write or summary write raises instead of being logged (seven trainers,
 below).
 """
 
+import os
 import sys
 
 import numpy as np
@@ -306,4 +307,70 @@ def test_a_run_whose_history_or_summary_write_fails_raises(
         run()
     # The model is saved before the reporting write, so a failed report never
     # costs the weights.
+    assert len(model.saved) == 1, model.saved
+
+
+# ---------------------------------------------------------------------------
+# The downsampling sweep's per-variant JSON artefacts (step 13.7 (b), D-117)
+# ---------------------------------------------------------------------------
+#
+# Measured at b50fd4e80: ``train_one_variant`` wrapped its ``config.json`` and
+# ``training_history.json`` writes in ``try/except Exception`` and logged a
+# WARNING, so the variant was recorded as trained with its record missing and
+# the sweep exited 0. ``save_training_history_json`` is best-effort by contract
+# (D-102) and returns ``None`` on failure; the trainer now checks it.
+
+
+class _PredictingStubModel(_StubModel):
+    def predict(self, x, *args, **kwargs):
+        return np.zeros((len(x), 100), dtype=np.float32)
+
+
+def _one_variant(monkeypatch, tmp_path, model):
+    from train.cliffordnet import train_downsampling_techniques as module
+
+    monkeypatch.setattr(module, "build_variant", lambda *a, **k: model)
+    monkeypatch.setattr(module, "_smoke_forward", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_train_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_eval_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(module, "validate_model_loading", lambda *a, **k: None)
+    args = module._parse_args(["--output-dir", str(tmp_path)])
+    (x, y), (x_test, y_test), input_shape, num_classes = _tiny_cifar()
+
+    def run():
+        return module.train_one_variant(
+            "V2_3stage_avgpool", args, str(tmp_path), x, y, x_test, y_test,
+            num_classes, input_shape)
+
+    return module, run
+
+
+def test_a_variant_whose_config_json_write_fails_raises(monkeypatch, tmp_path):
+    model = _PredictingStubModel(fail_save=False)
+    module, run = _one_variant(monkeypatch, tmp_path, model)
+    monkeypatch.setattr(module, "open", _failing_open("config.json"), raising=False)
+    with pytest.raises(_DiskFull, match="config.json"):
+        run()
+    # The weights are saved before the record, so a failed record never costs them.
+    assert len(model.saved) == 1, model.saved
+
+
+def test_a_variant_whose_history_write_fails_raises(monkeypatch, tmp_path):
+    model = _PredictingStubModel(fail_save=False)
+    module, run = _one_variant(monkeypatch, tmp_path, model)
+    # The shared writer's failure contract: it logs and returns None.
+    monkeypatch.setattr(module, "save_training_history_json", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="training_history"):
+        run()
+    assert len(model.saved) == 1, model.saved
+
+
+def test_a_variant_whose_writes_succeed_returns_its_row(monkeypatch, tmp_path):
+    model = _PredictingStubModel(fail_save=False)
+    _module, run = _one_variant(monkeypatch, tmp_path, model)
+    row = run()
+    assert row is not None and row["variant"] == "V2_3stage_avgpool"
+    results_dir = row["results_dir"]
+    for name in ("config.json", "training_history.json", "training_summary.txt"):
+        assert os.path.isfile(os.path.join(results_dir, name)), name
     assert len(model.saved) == 1, model.saved

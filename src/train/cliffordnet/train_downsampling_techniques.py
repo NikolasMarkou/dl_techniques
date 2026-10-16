@@ -462,6 +462,10 @@ def train_one_variant(
 ) -> Optional[Dict[str, Any]]:
     """Train one variant end-to-end. Returns a result dict or ``None`` on failure.
 
+    A failed build or ``fit`` returns ``None``; a failed save or a failed
+    ``config.json`` / ``training_history.json`` / summary write raises. The
+    sweep records either as a failed variant and raises at its end (D-095).
+
     Records:
         - best_val_accuracy, final_val_accuracy, val_top5_accuracy
         - parameters, wall_seconds
@@ -582,31 +586,6 @@ def train_one_variant(
     final_val_acc = val_acc_history[-1] if val_acc_history else float("nan")
     best_val_top5 = max(val_top5_history) if val_top5_history else float("nan")
 
-    # ---- Save artifacts ----
-    try:
-        with open(os.path.join(results_dir, "config.json"), "w") as f:
-            json.dump({
-                "variant": variant_name,
-                "description": VARIANTS[variant_name]["description"]
-                if variant_name in VARIANTS else "",
-                "stages": VARIANTS[variant_name]["stages"]
-                if variant_name in VARIANTS else None,
-                "downsamplers": VARIANTS[variant_name]["downsamplers"]
-                if variant_name in VARIANTS else None,
-                "stem": VARIANTS[variant_name]["stem"]
-                if variant_name in VARIANTS else None,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "learning_rate": args.learning_rate,
-                "weight_decay": args.weight_decay,
-                "stochastic_depth_rate": args.stochastic_depth_rate,
-                "layer_scale_init": args.layer_scale_init,
-                "parameters": param_count,
-            }, f, indent=2)
-        save_training_history_json(history, results_dir)
-    except Exception as exc:
-        logger.warning(f"  failed to write JSON artifacts: {exc}")
-
     # ---- Round-trip check (skip for V0 due to the known Keras-3.8
     #      .keras + by_name=True bug; V0 round-trip is already covered by
     #      the existing CliffordNet test suite) ----
@@ -632,6 +611,36 @@ def train_one_variant(
                 "PatchMerging": PatchMerging,
             },
         )
+
+    # ---- Save artifacts ----
+    # DECISION plan-2026-10-14T062616-81938e81/D-117
+    # Written after the model save, and a failed write RAISES: do NOT wrap these
+    # in try/except-and-warn (that recorded a trained variant with its record
+    # missing and exited 0). The shared history writer is best-effort by
+    # contract (D-102) and returns None on failure, so its result is checked.
+    with open(os.path.join(results_dir, "config.json"), "w") as f:
+        json.dump({
+            "variant": variant_name,
+            "description": VARIANTS[variant_name]["description"]
+            if variant_name in VARIANTS else "",
+            "stages": VARIANTS[variant_name]["stages"]
+            if variant_name in VARIANTS else None,
+            "downsamplers": VARIANTS[variant_name]["downsamplers"]
+            if variant_name in VARIANTS else None,
+            "stem": VARIANTS[variant_name]["stem"]
+            if variant_name in VARIANTS else None,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "stochastic_depth_rate": args.stochastic_depth_rate,
+            "layer_scale_init": args.layer_scale_init,
+            "parameters": param_count,
+        }, f, indent=2)
+    if save_training_history_json(history, results_dir) is None:
+        raise RuntimeError(
+            f"{variant_name}: training_history.json was not written to "
+            f"{results_dir} (the reason is logged above)")
 
     summary_path = os.path.join(results_dir, "training_summary.txt")
     with open(summary_path, "w") as f:
