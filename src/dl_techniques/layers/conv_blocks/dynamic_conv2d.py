@@ -341,10 +341,9 @@ class DynamicConv2D(keras.layers.Layer):
         attention_weights = keras.ops.softmax(attention_logits / self.temperature)
 
         # Run every expert convolution over the same input.
-        conv_outputs = []
-        for conv_layer in self.conv_layers:
-            conv_output = conv_layer(inputs, training=training)
-            conv_outputs.append(conv_output)
+        conv_outputs = [
+            self._expert_output(conv_layer, inputs) for conv_layer in self.conv_layers
+        ]
 
         # Stack to (num_kernels, batch_size, H', W', filters).
         stacked_outputs = keras.ops.stack(conv_outputs, axis=0)
@@ -365,6 +364,62 @@ class DynamicConv2D(keras.layers.Layer):
             aggregated_output = self.activation(aggregated_output)
 
         return aggregated_output
+
+    def _expert_output(
+            self,
+            conv_layer: keras.layers.Conv2D,
+            inputs: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """One expert's convolution of ``inputs``, before aggregation.
+
+        For ``groups > 1`` with a dilation above 1 the grouped convolution is
+        computed from the expert's own ``kernel`` and ``bias``; otherwise the
+        expert ``Conv2D`` is called. The weights are the same either way.
+
+        :param conv_layer: One of ``self.conv_layers`` (built).
+        :type conv_layer: keras.layers.Conv2D
+        :param inputs: Input tensor ``(batch, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :return: The expert's output ``(batch, height', width', filters)``.
+        :rtype: keras.KerasTensor
+        """
+        if self.groups == 1 or max(self.dilation_rate) == 1:
+            return conv_layer(inputs)
+        # DECISION plan-2026-10-14T062616-81938e81/D-107
+        # Do NOT call the grouped, dilated `Conv2D` here: under XLA the
+        # TensorFlow bridge folds its kernel into a compile-time constant, so
+        # every weight update recompiles the training step (the D-096 trap,
+        # measured for groups 2 and C at dilation 2 and 4). A depthwise conv
+        # (one channel per group) or one dense dilated conv per group compiles
+        # with the kernel as an argument, and computes the same convolution.
+        kernel = conv_layer.kernel
+        channels = inputs.shape[-1]
+        conv_kwargs = dict(
+            strides=self.strides, padding=self.padding,
+            dilation_rate=self.dilation_rate,
+        )
+        if self.groups == channels:
+            # (kh, kw, 1, C * m) holds output channel c * m + j of input c,
+            # exactly the (kh, kw, C, m) depthwise layout.
+            depthwise_kernel = keras.ops.reshape(
+                kernel,
+                (*self.kernel_size, channels, self.filters // channels),
+            )
+            outputs = keras.ops.depthwise_conv(inputs, depthwise_kernel, **conv_kwargs)
+        else:
+            in_per_group = channels // self.groups
+            out_per_group = self.filters // self.groups
+            outputs = keras.ops.concatenate([
+                keras.ops.conv(
+                    inputs[..., g * in_per_group:(g + 1) * in_per_group],
+                    kernel[..., g * out_per_group:(g + 1) * out_per_group],
+                    **conv_kwargs,
+                )
+                for g in range(self.groups)
+            ], axis=-1)
+        if conv_layer.use_bias:
+            outputs = outputs + conv_layer.bias
+        return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
