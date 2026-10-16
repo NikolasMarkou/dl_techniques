@@ -19,6 +19,7 @@
 13. [References](#13-references)
 - [Appendix A: CliffordVLM Pseudocode](#appendix-a-cliffordvlm-pseudocode)
 - [Appendix B: Why Not Just Use Cross-Attention?](#appendix-b-why-not-just-use-cross-attention)
+- [Appendix C: Locked Ship Specification & Audit Findings](#appendix-c-locked-ship-specification--audit-findings)
 
 ---
 
@@ -1856,3 +1857,85 @@ A natural question: why build a CliffordVLM when we could just add cross-attenti
 The CliffordVLM approach is not necessarily *better* than cross-attention -- it's *different*. The goal is to explore whether geometric algebra provides a competitive alternative to attention for cross-modal fusion, with potential advantages in efficiency and expressiveness.
 
 If the geometric approach proves insufficient for certain tasks, a hybrid approach (Clifford blocks + occasional attention layers) remains an option, but should be explored only after pure-Clifford baselines are established.
+
+## Appendix C: Locked Ship Specification & Audit Findings
+
+*Consolidated 2026-10-16 from `research/2026_clifford_clip_audit_and_small_vlm_plan.md`
+and `research/2026_clifford_full_system_plan.md` (both removed — this document
+takes precedence; on any conflict this appendix wins). Every executable claim
+below was verified CPU-only (`CUDA_VISIBLE_DEVICES=""`).*
+
+### C.1 Locked ship (one paragraph)
+
+320px COCO, Clifford 4-stage vision (p4, nano-ladder `[128,128,256,256]`,
+`cli_mode=full`, `ctx_mode=diff`, external residuals) → learned CLS +
+`ModalityProjection`(s=2) → **Sv=26** prefix → package-owned 6-layer mixed
+decoder (`Gemma3TransformerBlock`, 5×sliding w=32 + 1×full, GQA 6Q/2KV, GeGLU,
+sandwich norm, Dt=384) over byte k=4 patches (vocab 256, pad `0x00`, EOS `0xFF`,
+`max_seq_len=512` patches, joint 538) with scatter-repeat byte head (256-way,
+strict patch-boundary masking, RED-first leak probe) → tied logits; DETR-style
+structured detection (Q=100, S3+S4 500 keys, Hungarian + CE/focal + L1 + GIoU,
+closed COCO-80, no YOLO/anchors/NMS/neck) + `SegmentationHead` tap; English-only
+throughout; **~21M params** (vision ~3.5M, adapter ~0.4M, decoder ~10.3M, byte
+table 98,304, det ~5M, seg ~1M).
+
+### C.2 CliffordCLIP audit (condensed, vs vanilla `clip/model.py:63`)
+
+1. Vision: conv stem + staged `CliffordNetBlock`s + `PatchMerging`, external
+   residual + `StochasticDepth` (`model.py:632,1107`); tiny 1-stage forwards
+   `(2,32,32,3)->(2,32)` ✓
+2. Text: learned token+position embeddings + `CausalCliffordNetBlock`s —
+   position is a learned table, NOT RoPE (vanilla uses GQA+RoPE) ✓
+3. Pooling: vision `SequencePooling(mean)` anchor (vanilla: CLS-0 — intentional
+   delta); text `last_non_pad_token(pad=0)`, right-pad assumption, both ✓
+4. Heads: all 4 `head_kind`s verified (`plain` builds no `*_head_geo`;
+   residual gates `LayerScale` γ=1e-5) ✓
+5. Projection `LN→Dropout?→Dense(use_bias=True)→fp32 L2` vs vanilla bias-free;
+   norms measure `1.0` — real divergence, keep ✓
+6. Temperature init 2.6592 (~14.28) both; Clifford clips ≤100, vanilla unclamped ✓
+7. **MISMATCH: `CliffordCLIP.call` requires both modalities** (`model.py:1277`,
+   single-modality raises `KeyError`); vanilla is partial. Fix or document
+   before retrieval use.
+8. `CLIPContrastiveLoss(dummy, {logits…}|tuple)→(B,)`, `apply_temperature=False`
+   (verified `1.0379`, dict≡tuple); stock `fit` needs the
+   `train/clip/train_clip.py:StackedCLIPLogits` bridge ✓
+9. `from_variant` data args required (no 224/77 defaults, D-047);
+   `refuse_pretrained`; `.keras` round-trip max-diff `0.0` ✓
+10. 77 tests collected (`test_clifford_clip/` + `test_clip/`, `--collect-only`) ✓
+11. **Trainer staleness (real):** `train/cliffordnet/train_clip.py:650,707,789`
+    names `vision_global_pool/vision_query_pool/text_query_pool` — zero matches
+    in the model (now `vision_det_pool/vision_ctx_pool/…`). `_VisionClassifier`
+    will `AttributeError`; contrastive path unaffected. Rename or delete before
+    any CLIP-side run counts.
+
+### C.3 Adapter + stage-map surgery (only new vision code)
+
+`_apply_vision_body` gains `return_stages=True` → `(final, [stem, S1..S4])`,
+all post-residual. VLM tap: S4 `(B,20,20,256)` → flatten 400 → prepend learned
+CLS → `ModalityProjection(input_dim=256, output_dim=384, s=2)` → `(B,26,384)`
+(`PixelShuffle` needs `H'%s==0`: 20%2==0 ✓; `num_vision_tokens` stays derived).
+Detection tap: S3+S4 concatenated keys (400+100=500, neck-free). Seg tap:
+stride-8 fused map + `[stem_map, S1]` skip list. New packages:
+`models/vision_language/clifford_nanovlm/` (+ sibling `clifford_detseg/` sharing
+the vision body, or one joint dict-output model); registration
+`dl_techniques.models.clifford_nanovlm.model`; `TextDecoder` untouched.
+
+### C.4 Loss wiring + curriculum (picked)
+
+`MultiTaskLoss` is MSE-only (`multi_task_loss.py:51`) — wrong tool. Stock
+`compile(loss={det_cls: CE, det_reg: smoothL1/GIoU, seg: CE, vlm_logits: byte-NTP,
+clip: stacked-contrastive}, loss_weights={1.0, 2.0, 1.0, 1.0})`, calibrated once
+(500 steps: divide each weight by its mean magnitude, then freeze; log per-task
+curves split). Curriculum: P1 dense-only COCO warmup 5–10 epochs (VLM frozen)
+→ P2 joint, backbone LR ×0.1. `exclude_from_weight_decay(logit_scale)`;
+`TerminateOnNaN`.
+
+### C.5 Locked / remaining (2026-10-16)
+
+Locked: 320px · post-residual taps · closed-80 · no-YOLO structured head
+(S3+S4/Q=100) · generic seg · GQA 6Q/2KV · mixed 5:1 w=32 · ctx 512 patches ·
+byte k=4, vocab 256, English-only · ~21M · generate() intact · COCO/CC3M
+CLIP-only · 6 puzzle families + montage pairs · 2-phase curriculum ·
+package-owned decoder.
+Remaining: puzzle sample counts (20k/10k/5k proposal) · sibling-vs-single joint
+model · Docmatix timing · 640px trigger (AP-S gap) · depth-12/1024 upgrade.
