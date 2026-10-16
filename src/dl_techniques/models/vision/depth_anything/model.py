@@ -26,7 +26,8 @@ of the student and only becomes an EMA average once the caller attaches
 `TeacherEMACallback` (`teacher_ema.py`); nothing in this module advances it
 on its own. `compile()` with no `loss=` defaults to `AffineInvariantLoss`,
 matching the relative-depth objective; `src/train/depth_anything/` passes
-its own `DepthEstimationLoss` instead. `use_feature_alignment` defaults to
+`AffineInvariantLoss(masked=True)`, the same objective over the valid pixels
+of sparse ground truth. `use_feature_alignment` defaults to
 `True` and `enable_semi_supervised` to `False`, so a default-configured
 model builds a teacher that the default `train_step` path never uses;
 `__init__` warns when it detects this combination.

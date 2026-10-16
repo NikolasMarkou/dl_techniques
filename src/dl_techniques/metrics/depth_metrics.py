@@ -30,7 +30,6 @@ References
 from typing import Any, Dict, Optional
 
 import keras
-from keras import ops
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -54,6 +53,47 @@ def _unpack_depth_and_mask(
     depth = y_true_and_mask[..., :1]
     mask = y_true_and_mask[..., 1:]
     return depth, mask
+
+
+def align_scale_and_shift(
+    y_pred: keras.KerasTensor,
+    depth_true: keras.KerasTensor,
+    mask: keras.KerasTensor,
+) -> keras.KerasTensor:
+    """Least-squares scale-and-shift alignment of ``y_pred`` to ``depth_true``.
+
+    Per image, solves ``min_{s, t} sum_p mask_p (s * y_pred_p + t - depth_true_p)^2``
+    in closed form and returns ``s * y_pred + t``: the alignment the MiDaS
+    authors' reference loss (``compute_scale_and_shift``) and the relative-depth
+    evaluation protocol apply to a prediction known only up to scale and shift.
+
+    Interface contract: all three tensors are ``(B, H, W, 1)``; ``mask`` is 1
+    on valid pixels. An image whose system is singular (fewer than two
+    distinct valid predictions, or no valid pixel) gets ``s = t = 0``, as in the
+    reference. Never raises; differentiable in ``y_pred``.
+
+    Args:
+        y_pred: Prediction, any scale and shift.
+        depth_true: Target in the space the metrics compare in.
+        mask: Validity mask.
+
+    Returns:
+        The aligned prediction, shape of ``y_pred``.
+    """
+    axes = (1, 2, 3)
+    a_00 = keras.ops.sum(mask * y_pred * y_pred, axis=axes)
+    a_01 = keras.ops.sum(mask * y_pred, axis=axes)
+    a_11 = keras.ops.sum(mask, axis=axes)
+    b_0 = keras.ops.sum(mask * y_pred * depth_true, axis=axes)
+    b_1 = keras.ops.sum(mask * depth_true, axis=axes)
+    det = a_00 * a_11 - a_01 * a_01
+    valid = det > 0
+    safe_det = keras.ops.where(valid, det, keras.ops.ones_like(det))
+    scale = keras.ops.where(valid, (a_11 * b_0 - a_01 * b_1) / safe_det, 0.0)
+    shift = keras.ops.where(valid, (a_00 * b_1 - a_01 * b_0) / safe_det, 0.0)
+    scale = keras.ops.reshape(scale, (-1, 1, 1, 1))
+    shift = keras.ops.reshape(shift, (-1, 1, 1, 1))
+    return scale * y_pred + shift
 
 
 def _to_positive_range(
@@ -120,16 +160,16 @@ class AbsRelMetric(keras.metrics.Metric):
         dp = _to_positive_range(y_pred)
 
         # Exclude near-zero ground truth to avoid division instability
-        depth_valid = ops.cast(dt > self.min_depth, mask.dtype) * mask
-        dt_safe = ops.maximum(dt, ops.cast(self.min_depth, dt.dtype))
+        depth_valid = keras.ops.cast(dt > self.min_depth, mask.dtype) * mask
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(self.min_depth, dt.dtype))
 
-        rel_err = ops.abs(dp - dt) / dt_safe * depth_valid
-        self.total.assign_add(ops.sum(rel_err))
-        self.count.assign_add(ops.sum(depth_valid))
+        rel_err = keras.ops.abs(dp - dt) / dt_safe * depth_valid
+        self.total.assign_add(keras.ops.sum(rel_err))
+        self.count.assign_add(keras.ops.sum(depth_valid))
 
     def result(self) -> keras.KerasTensor:
         """Return mean absolute relative error."""
-        return self.total / ops.maximum(self.count, 1.0)
+        return self.total / keras.ops.maximum(self.count, 1.0)
 
     def reset_state(self) -> None:
         self.total.assign(0.0)
@@ -202,18 +242,18 @@ class DeltaThresholdMetric(keras.metrics.Metric):
         dt = _to_positive_range(depth_true)
         dp = _to_positive_range(y_pred)
 
-        dt_safe = ops.maximum(dt, ops.cast(1e-6, dt.dtype))
-        dp_safe = ops.maximum(dp, ops.cast(1e-6, dp.dtype))
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(1e-6, dt.dtype))
+        dp_safe = keras.ops.maximum(dp, keras.ops.cast(1e-6, dp.dtype))
 
-        ratio = ops.maximum(dp_safe / dt_safe, dt_safe / dp_safe)
-        within = ops.cast(ratio < self.threshold, mask.dtype) * mask
+        ratio = keras.ops.maximum(dp_safe / dt_safe, dt_safe / dp_safe)
+        within = keras.ops.cast(ratio < self.threshold, mask.dtype) * mask
 
-        self.correct.assign_add(ops.sum(within))
-        self.count.assign_add(ops.sum(mask))
+        self.correct.assign_add(keras.ops.sum(within))
+        self.count.assign_add(keras.ops.sum(mask))
 
     def result(self) -> keras.KerasTensor:
         """Return fraction of pixels within the threshold."""
-        return self.correct / ops.maximum(self.count, 1.0)
+        return self.correct / keras.ops.maximum(self.count, 1.0)
 
     def reset_state(self) -> None:
         self.correct.assign(0.0)
@@ -274,15 +314,15 @@ class SqRelMetric(keras.metrics.Metric):
         dt = _to_positive_range(depth_true)
         dp = _to_positive_range(y_pred)
 
-        depth_valid = ops.cast(dt > self.min_depth, mask.dtype) * mask
-        dt_safe = ops.maximum(dt, ops.cast(self.min_depth, dt.dtype))
+        depth_valid = keras.ops.cast(dt > self.min_depth, mask.dtype) * mask
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(self.min_depth, dt.dtype))
 
-        sq_rel = ops.square(dp - dt) / dt_safe * depth_valid
-        self.total.assign_add(ops.sum(sq_rel))
-        self.count.assign_add(ops.sum(depth_valid))
+        sq_rel = keras.ops.square(dp - dt) / dt_safe * depth_valid
+        self.total.assign_add(keras.ops.sum(sq_rel))
+        self.count.assign_add(keras.ops.sum(depth_valid))
 
     def result(self) -> keras.KerasTensor:
-        return self.total / ops.maximum(self.count, 1.0)
+        return self.total / keras.ops.maximum(self.count, 1.0)
 
     def reset_state(self) -> None:
         self.total.assign(0.0)
@@ -340,12 +380,12 @@ class RMSEMetric(keras.metrics.Metric):
         dt = _to_positive_range(depth_true)
         dp = _to_positive_range(y_pred)
 
-        sq_err = ops.square(dp - dt) * mask
-        self.total.assign_add(ops.sum(sq_err))
-        self.count.assign_add(ops.sum(mask))
+        sq_err = keras.ops.square(dp - dt) * mask
+        self.total.assign_add(keras.ops.sum(sq_err))
+        self.count.assign_add(keras.ops.sum(mask))
 
     def result(self) -> keras.KerasTensor:
-        return ops.sqrt(self.total / ops.maximum(self.count, 1.0))
+        return keras.ops.sqrt(self.total / keras.ops.maximum(self.count, 1.0))
 
     def reset_state(self) -> None:
         self.total.assign(0.0)
@@ -404,17 +444,17 @@ class RMSELogMetric(keras.metrics.Metric):
         dt = _to_positive_range(depth_true)
         dp = _to_positive_range(y_pred)
 
-        dt_safe = ops.maximum(dt, ops.cast(self.min_depth, dt.dtype))
-        dp_safe = ops.maximum(dp, ops.cast(self.min_depth, dp.dtype))
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(self.min_depth, dt.dtype))
+        dp_safe = keras.ops.maximum(dp, keras.ops.cast(self.min_depth, dp.dtype))
 
-        log_diff = ops.log(dp_safe) - ops.log(dt_safe)
-        sq_log_err = ops.square(log_diff) * mask
+        log_diff = keras.ops.log(dp_safe) - keras.ops.log(dt_safe)
+        sq_log_err = keras.ops.square(log_diff) * mask
 
-        self.total.assign_add(ops.sum(sq_log_err))
-        self.count.assign_add(ops.sum(mask))
+        self.total.assign_add(keras.ops.sum(sq_log_err))
+        self.count.assign_add(keras.ops.sum(mask))
 
     def result(self) -> keras.KerasTensor:
-        return ops.sqrt(self.total / ops.maximum(self.count, 1.0))
+        return keras.ops.sqrt(self.total / keras.ops.maximum(self.count, 1.0))
 
     def reset_state(self) -> None:
         self.total.assign(0.0)

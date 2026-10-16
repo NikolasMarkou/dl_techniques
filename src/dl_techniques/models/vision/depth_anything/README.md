@@ -59,9 +59,9 @@ A `.keras` archive saved before 2026-10-15 still loads, with every weight restor
 is then the ReLU of what it returned before (measured: max difference 0.0 against the old output
 clamped at zero). Nothing marks such an archive, so the change is silent.
 
-This port supervises depth (MegaDepth) rather than the paper's disparity, and its decoder is a plain
-conv stack rather than the reference's fusion blocks; the ReLU is the one part of the reference's
-output contract that carries over unchanged.
+The trainer (`src/train/depth_anything/`) supervises the paper's target and loss: per-map normalized
+MegaDepth disparity in `[0, 1]` and the masked affine-invariant MAE (`AffineInvariantLoss(masked=True)`).
+The decoder is a plain conv stack rather than the reference's fusion blocks.
 
 It is composed of three sub-networks:
 

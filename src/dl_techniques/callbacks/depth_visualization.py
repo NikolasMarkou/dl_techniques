@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 import keras
 import numpy as np
 
+from dl_techniques.metrics.depth_metrics import align_scale_and_shift
 from dl_techniques.utils.logger import logger
 # Lazy-import matplotlib to avoid import-time side effects; the shared importer
 # defaults the backend to Agg when MPLBACKEND is unset, and respects MPLBACKEND
@@ -40,14 +41,21 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
 
     - Row 1: RGB input (de-normalized to ``[0, 1]``)
     - Row 2: Ground-truth depth (invalid pixels shown in gray)
-    - Row 3: Predicted depth
+    - Row 3: Predicted depth, after per-image least-squares scale-and-shift
+      alignment to the ground truth (``align_scale_and_shift``)
+
+    Rows 2 and 3 share one colour range per sample, the ground truth's valid
+    range, so they are comparable whatever unit the target is in. The aligned
+    prediction is what a relative-depth model (one trained with a
+    scale-and-shift-invariant loss) can be judged by; for a model whose output
+    is already in the target's units the alignment is close to the identity.
 
     The callback is model-agnostic — it calls ``self.model(rgb)`` and
     expects a single-channel depth output.
 
     Args:
         val_rgb: Validation RGB tensor ``(N, H, W, 3)`` in ``[-1, 1]``.
-        val_depth: Validation depth tensor ``(N, H, W, 1)`` in ``[-1, 1]``.
+        val_depth: Validation target tensor ``(N, H, W, 1)``, any range.
         val_mask: Validation mask tensor ``(N, H, W, 1)`` with 1=valid.
         output_dir: Directory for saving grid PNGs.
         frequency: Save every *frequency* epochs.  Defaults to 5.
@@ -99,18 +107,20 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
                     primary = [k for k in pred_depth if "_aux_" not in k]
                     pred_depth = pred_depth[primary[0]]
 
-            # Log masked MSE for quick monitoring
-            import keras.ops as ops
-            valid_count = ops.sum(self.val_mask)
+            pred_depth = align_scale_and_shift(
+                pred_depth, self.val_depth, self.val_mask)
+
+            # Log masked MSE (of the aligned prediction) for quick monitoring
+            valid_count = keras.ops.sum(self.val_mask)
             if valid_count > 0:
                 masked_mse = (
-                    ops.sum(
-                        ops.square(pred_depth - self.val_depth) * self.val_mask
+                    keras.ops.sum(
+                        keras.ops.square(pred_depth - self.val_depth) * self.val_mask
                     ) / valid_count
                 )
                 logger.info(
                     f"Epoch {epoch + 1} depth monitor — "
-                    f"masked MSE: {float(masked_mse):.6f}"
+                    f"aligned masked MSE: {float(masked_mse):.6f}"
                 )
 
             self._save_grid(epoch + 1, pred_depth)
@@ -150,15 +160,18 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
                 # RGB: [-1, 1] → [0, 1]
                 rgb_img = np.clip((rgb_np[i] + 1.0) / 2.0, 0, 1)
 
-                # GT depth: [-1, 1] → [0, 1], gray for invalid
+                # GT and aligned prediction on the GT's valid range → [0, 1];
+                # invalid GT pixels in gray.
                 gt = gt_np[i].squeeze(-1)
-                gt_vis = np.clip((gt + 1.0) / 2.0, 0, 1)
                 m = mask_np[i].squeeze(-1)
-                gt_vis = np.where(m > 0, gt_vis, 0.5)
-
-                # Predicted depth: [-1, 1] → [0, 1]
+                lo, hi = (
+                    (float(gt[m > 0].min()), float(gt[m > 0].max()))
+                    if np.any(m > 0) else (0.0, 1.0)
+                )
+                span = max(hi - lo, 1e-12)
+                gt_vis = np.where(m > 0, np.clip((gt - lo) / span, 0, 1), 0.5)
                 pred = pred_np[i].squeeze(-1)
-                pred_vis = np.clip((pred + 1.0) / 2.0, 0, 1)
+                pred_vis = np.clip((pred - lo) / span, 0, 1)
 
                 labels = ["RGB", "GT Depth", "Predicted"]
                 images = [rgb_img, gt_vis, pred_vis]

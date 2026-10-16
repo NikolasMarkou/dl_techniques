@@ -43,7 +43,16 @@ Mathematical Formulation:
 
     Loss = || d_pred_norm - d_true_norm ||₁
 
+Masked targets:
+    With ``masked=True`` the last channel of ``y_true`` is a validity mask
+    (1 = valid) and ``y_true[..., :-1]`` the target. The median, the mean
+    absolute deviation and the L1 then run over the valid pixels of each map
+    only, which is Depth Anything V1's labeled loss (arXiv 2401.10891, section
+    3.1, eq. 1-3) on sparse ground truth such as MegaDepth's.
+
 References:
+    -   Yang, L., et al. (2024). "Depth Anything: Unleashing the Power of
+        Large-Scale Unlabeled Data." arXiv 2401.10891, eq. 1-3.
     The concept of a scale-invariant loss was popularized in early deep
     learning approaches to monocular depth estimation.
     -   Eigen, D., Puhrsch, C., & Fergus, R. (2014). "Depth Map Prediction
@@ -52,7 +61,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any
 
 # ---------------------------------------------------------------------
@@ -63,6 +71,28 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+
+
+def _masked_median(values: keras.KerasTensor, mask: keras.KerasTensor) -> keras.KerasTensor:
+    """Per-row median of ``values`` over ``mask``; ``(B, N)`` inputs, ``(B,)`` output.
+
+    A row with no valid entry gets 0. The two middle order statistics are read
+    with one flat ``take`` (row offset plus rank), not ``take_along_axis``,
+    whose XLA lowering on GPU fails to retrace at a second batch size.
+    """
+    count = keras.ops.sum(mask, axis=1)
+    n_pixels = keras.ops.shape(values)[1]
+    # Invalid entries sort after every valid one.
+    above = keras.ops.stop_gradient(keras.ops.max(values)) + 1.0
+    ordered = keras.ops.sort(keras.ops.where(mask > 0, values, above), axis=1)
+    rank = keras.ops.maximum(count - 1.0, 0.0) / 2.0
+    lo = keras.ops.cast(keras.ops.floor(rank), "int32")
+    hi = keras.ops.cast(keras.ops.ceil(rank), "int32")
+    rows = keras.ops.arange(keras.ops.shape(values)[0], dtype="int32") * n_pixels
+    flat = keras.ops.reshape(ordered, (-1,))
+    median = 0.5 * (keras.ops.take(flat, rows + lo) + keras.ops.take(flat, rows + hi))
+    return keras.ops.where(count > 0, median, keras.ops.zeros_like(median))
+
 
 @register_dl_technique("dl_techniques.losses.affine_invariant_loss")
 class AffineInvariantLoss(keras.losses.Loss):
@@ -76,6 +106,10 @@ class AffineInvariantLoss(keras.losses.Loss):
     Args:
         epsilon: Float, small constant for numerical stability when
             computing scale normalization. Defaults to 1e-6.
+        masked: Bool. ``True`` reads a validity mask from the last channel of
+            ``y_true`` and computes every statistic over the valid pixels only
+            (see the module docstring). Defaults to ``False``, the unmasked
+            loss over every pixel.
         name: String, name of the loss function. Defaults to 'affine_invariant_loss'.
         **kwargs: Additional keyword arguments passed to the parent Loss class.
     """
@@ -83,6 +117,7 @@ class AffineInvariantLoss(keras.losses.Loss):
     def __init__(
             self,
             epsilon: float = 1e-6,
+            masked: bool = False,
             name: str = 'affine_invariant_loss',
             **kwargs: Any
     ) -> None:
@@ -92,6 +127,7 @@ class AffineInvariantLoss(keras.losses.Loss):
             raise ValueError(f"Epsilon must be positive, got {epsilon}")
 
         self.epsilon = epsilon
+        self.masked = bool(masked)
         logger.info(f"Initialized AffineInvariantLoss with epsilon={epsilon}")
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
@@ -107,10 +143,13 @@ class AffineInvariantLoss(keras.losses.Loss):
             return; keeping the batch axis is what lets ``sample_weight`` and
             ``reduction=`` select rows.
         """
+        if self.masked:
+            return self._masked_loss(y_true, y_pred)
+
         # Flatten spatial dimensions for statistics computation
-        batch_size = ops.shape(y_true)[0]
-        y_true_flat = ops.reshape(y_true, (batch_size, -1))
-        y_pred_flat = ops.reshape(y_pred, (batch_size, -1))
+        batch_size = keras.ops.shape(y_true)[0]
+        y_true_flat = keras.ops.reshape(y_true, (batch_size, -1))
+        y_pred_flat = keras.ops.reshape(y_pred, (batch_size, -1))
 
         # Apply scale and shift normalization
         y_true_scaled = self._scale_and_shift(y_true_flat)
@@ -121,9 +160,28 @@ class AffineInvariantLoss(keras.losses.Loss):
         # charging every row the batch aggregate. The scale/shift normalization is
         # already per-sample, and every row holds the same pixel count, so the mean
         # of this vector equals the old all-axes mean exactly.
-        loss = ops.mean(ops.abs(ops.subtract(y_true_scaled, y_pred_scaled)), axis=-1)
+        loss = keras.ops.mean(keras.ops.abs(keras.ops.subtract(y_true_scaled, y_pred_scaled)), axis=-1)
 
         return loss
+
+    def _masked_loss(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        """Per-sample masked loss; ``y_true[..., -1]`` is the validity mask."""
+        batch_size = keras.ops.shape(y_pred)[0]
+        pred = keras.ops.reshape(y_pred, (batch_size, -1))
+        target = keras.ops.cast(
+            keras.ops.reshape(y_true[..., :-1], (batch_size, -1)), pred.dtype)
+        mask = keras.ops.cast(
+            keras.ops.reshape(y_true[..., -1:], (batch_size, -1)), pred.dtype)
+        count = keras.ops.maximum(keras.ops.sum(mask, axis=1), 1.0)
+
+        def normalize(d):
+            t = keras.ops.expand_dims(_masked_median(d, mask), axis=-1)
+            s = keras.ops.sum(keras.ops.abs(d - t) * mask, axis=1, keepdims=True)
+            s = s / keras.ops.expand_dims(count, axis=-1)
+            return (d - t) / keras.ops.maximum(s, keras.ops.cast(self.epsilon, s.dtype))
+
+        error = keras.ops.abs(normalize(pred) - normalize(target)) * mask
+        return keras.ops.sum(error, axis=1) / count
 
     def _scale_and_shift(self, d: keras.KerasTensor) -> keras.KerasTensor:
         """Apply scale and shift normalization to depth values.
@@ -135,14 +193,14 @@ class AffineInvariantLoss(keras.losses.Loss):
             Normalized depth tensor with same shape as input.
         """
         # Compute median (approximate using sorted values)
-        d_sorted = ops.sort(d, axis=-1)
-        num_pixels = ops.shape(d)[-1]
-        median_idx = ops.cast(num_pixels // 2, dtype="int32")
+        d_sorted = keras.ops.sort(d, axis=-1)
+        num_pixels = keras.ops.shape(d)[-1]
+        median_idx = keras.ops.cast(num_pixels // 2, dtype="int32")
 
         # Handle even/odd number of pixels for median
-        if_even = ops.equal(num_pixels % 2, 0)
-        median_even = ops.mean(
-            ops.stack([
+        if_even = keras.ops.equal(num_pixels % 2, 0)
+        median_even = keras.ops.mean(
+            keras.ops.stack([
                 d_sorted[:, median_idx - 1],
                 d_sorted[:, median_idx]
             ], axis=-1),
@@ -150,16 +208,16 @@ class AffineInvariantLoss(keras.losses.Loss):
         )
         median_odd = d_sorted[:, median_idx]
 
-        t = ops.where(if_even, median_even, median_odd)
-        t = ops.expand_dims(t, axis=-1)  # Add back last dimension
+        t = keras.ops.where(if_even, median_even, median_odd)
+        t = keras.ops.expand_dims(t, axis=-1)  # Add back last dimension
 
         # Compute scale (mean absolute deviation from median)
-        s = ops.mean(ops.abs(ops.subtract(d, t)), axis=-1, keepdims=True)
+        s = keras.ops.mean(keras.ops.abs(keras.ops.subtract(d, t)), axis=-1, keepdims=True)
 
         # Apply normalization with epsilon for numerical stability
-        s_stable = ops.maximum(s, ops.cast(self.epsilon, s.dtype))
+        s_stable = keras.ops.maximum(s, keras.ops.cast(self.epsilon, s.dtype))
 
-        return ops.divide(ops.subtract(d, t), s_stable)
+        return keras.ops.divide(keras.ops.subtract(d, t), s_stable)
 
     def get_config(self) -> dict[str, Any]:
         """Returns the configuration of the loss function.
@@ -170,6 +228,7 @@ class AffineInvariantLoss(keras.losses.Loss):
         config = super().get_config()
         config.update({
             "epsilon": self.epsilon,
+            "masked": self.masked,
         })
         return config
 

@@ -15,8 +15,15 @@ The pipeline produces ``(rgb, y_true)`` pairs where:
 
 - ``rgb``: float32 ``(patch_size, patch_size, 3)`` in ``[-1, +1]``
 - ``y_true``: float32 ``(patch_size, patch_size, 2)`` —
-  channel 0 = per-sample normalized depth ``[-1, +1]``,
+  channel 0 = per-map normalized **disparity** in ``[0, 1]`` (see
+  :func:`normalized_disparity`; 1 is the nearest valid pixel, 0 the farthest,
+  and invalid pixels are 0),
   channel 1 = validity mask (1 = valid, 0 = invalid)
+
+The target is the Depth Anything V1 relative-depth target (arXiv 2401.10891,
+section 3.1: "the depth value is first transformed into the disparity space by
+d = 1/t and then normalized to 0~1 on each depth map"), which a non-negative
+(ReLU) depth head can represent.
 
 Usage::
 
@@ -104,6 +111,44 @@ def discover_megadepth_pairs(
 
 
 # =====================================================================
+# Target
+# =====================================================================
+
+
+def normalized_disparity(
+        depth: np.ndarray, valid_mask: np.ndarray,
+) -> np.ndarray:
+    """Per-map min-max normalized disparity ``1 / depth`` over the valid pixels.
+
+    Interface contract: ``depth`` and ``valid_mask`` have the same shape;
+    ``valid_mask`` is 1 where ``depth`` is a valid (positive) value. Returns a
+    float32 array of that shape in ``[0, 1]``: the nearest valid pixel is 1, the
+    farthest 0, and invalid pixels are 0. A map with no valid pixel, or whose
+    valid disparities span less than ``1e-6`` of their maximum, returns zeros.
+    Never raises.
+
+    :param depth: Depth map (any positive scale; MegaDepth's is SfM depth).
+    :param valid_mask: Validity mask, 1 = valid.
+    :return: The normalized disparity, float32.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-108
+    # Do NOT go back to min-max DEPTH scaled to [-1, 1]: DepthAnything's head
+    # ends in a ReLU (D-031), so the negative half of that target could never be
+    # predicted, and the reference trains on per-map normalized disparity.
+    valid = valid_mask > 0
+    disparity = np.zeros(depth.shape, dtype=np.float64)
+    disparity[valid] = 1.0 / depth[valid].astype(np.float64)
+    if not np.any(valid):
+        return disparity.astype(np.float32)
+    lo = disparity[valid].min()
+    hi = disparity[valid].max()
+    if hi - lo <= 1e-6 * hi:
+        return np.zeros(depth.shape, dtype=np.float32)
+    disparity[valid] = (disparity[valid] - lo) / (hi - lo)
+    return disparity.astype(np.float32)
+
+
+# =====================================================================
 # Single-pair loading
 # =====================================================================
 
@@ -115,12 +160,14 @@ def load_and_process_pair(
     min_valid_ratio: float = 0.1,
     augment: bool = False,
     max_crop_attempts: int = 10,
+    rng: Optional[np.random.Generator] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Load one RGB+depth pair, random crop, normalize, and augment.
 
     Loads an RGB image (JPEG/PNG) and its paired HDF5 depth map,
     resizes if needed to match spatial dimensions, extracts a random
-    crop, normalizes depth per-sample to ``[-1, +1]``, and optionally
+    crop, converts depth to per-map normalized disparity in ``[0, 1]``
+    (:func:`normalized_disparity`), and optionally
     applies geometric augmentations (horizontal/vertical flip + 90-degree
     rotations).
 
@@ -134,12 +181,17 @@ def load_and_process_pair(
         augment: Whether to apply random geometric augmentations.
         max_crop_attempts: Number of random crops to try before giving
             up.  Defaults to ``10``.
+        rng: Generator for the crop position and the augmentation.
+            ``None`` (the default) draws from the global ``np.random``
+            state, as training does; a seeded generator gives the same crop
+            on every call, which is how :class:`MegaDepthDataset` keeps its
+            validation set fixed across epochs.
 
     Returns:
         Tuple of ``(rgb, y_true)`` where ``rgb`` has shape
         ``(patch_size, patch_size, 3)`` in ``[-1, 1]`` and ``y_true``
         has shape ``(patch_size, patch_size, 2)`` with
-        ``[depth, mask]``.  Returns ``None`` if no valid crop was found.
+        ``[disparity, mask]``.  Returns ``None`` if no valid crop was found.
     """
     from PIL import Image
     import matplotlib.pyplot as plt
@@ -180,11 +232,14 @@ def load_and_process_pair(
         depth = np.array(depth_pil, dtype=np.float32)
         h, w = new_h, new_w
 
+    randint = np.random.randint if rng is None else rng.integers
+    uniform = np.random.random if rng is None else rng.random
+
     # Random crop — try multiple times for enough valid pixels
     valid_mask = None
     for _ in range(max_crop_attempts):
-        y = np.random.randint(0, h - patch_size + 1)
-        x = np.random.randint(0, w - patch_size + 1)
+        y = randint(0, h - patch_size + 1)
+        x = randint(0, w - patch_size + 1)
         depth_patch = depth[y:y + patch_size, x:x + patch_size]
         valid_mask = (depth_patch > 0).astype(np.float32)
         if valid_mask.mean() >= min_valid_ratio:
@@ -197,33 +252,18 @@ def load_and_process_pair(
     depth_patch = depth_patch[..., np.newaxis]  # (ps, ps, 1)
     valid_mask = valid_mask[..., np.newaxis]     # (ps, ps, 1)
 
-    # Normalize depth per-sample to [-1, +1] using valid pixel range
-    valid_depths = depth_patch[valid_mask > 0]
-    if len(valid_depths) > 0:
-        d_min = valid_depths.min()
-        d_max = valid_depths.max()
-        d_range = d_max - d_min
-        if d_range > 1e-6:
-            depth_patch = np.where(
-                valid_mask > 0,
-                (depth_patch - d_min) / d_range * 2.0 - 1.0,
-                0.0,
-            )
-        else:
-            depth_patch = np.zeros_like(depth_patch)
-    else:
-        depth_patch = np.zeros_like(depth_patch)
+    depth_patch = normalized_disparity(depth_patch, valid_mask)
 
     # Augmentation (numpy — runs in worker process)
     if augment:
         combined = np.concatenate(
             [rgb_patch, depth_patch, valid_mask], axis=-1
         )
-        if np.random.random() > 0.5:
+        if uniform() > 0.5:
             combined = combined[:, ::-1, :]
-        if np.random.random() > 0.5:
+        if uniform() > 0.5:
             combined = combined[::-1, :, :]
-        k = np.random.randint(0, 4)
+        k = randint(0, 4)
         combined = np.rot90(combined, k, axes=(0, 1))
         rgb_patch = combined[..., :3].copy()
         depth_patch = combined[..., 3:4].copy()
@@ -250,6 +290,7 @@ def load_and_resize_pair(
     Unlike :func:`load_and_process_pair` which extracts random crops,
     this resizes the **entire** image to ``(target_size, target_size)``.
     This gives the model global scene context at the cost of resolution.
+    The target channel is :func:`normalized_disparity`, as there.
 
     Args:
         rgb_path: Path to the RGB image file.
@@ -302,9 +343,12 @@ def load_and_resize_pair(
     )
     rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
 
+    # NEAREST, not BILINEAR: a bilinear resize blends the invalid zeros into
+    # their valid neighbours, and 1 / (a blended small depth) is a huge
+    # disparity that would set the per-map maximum.
     depth_pil = Image.fromarray(depth)
     depth_pil = depth_pil.resize(
-        (target_size, target_size), Image.BILINEAR,
+        (target_size, target_size), Image.NEAREST,
     )
     depth = np.array(depth_pil, dtype=np.float32)
 
@@ -318,22 +362,7 @@ def load_and_resize_pair(
     depth = depth[..., np.newaxis]
     valid_mask = valid_mask[..., np.newaxis]
 
-    # Normalize depth per-sample to [-1, +1] using valid pixel range
-    valid_depths = depth[valid_mask > 0]
-    if len(valid_depths) > 0:
-        d_min = valid_depths.min()
-        d_max = valid_depths.max()
-        d_range = d_max - d_min
-        if d_range > 1e-6:
-            depth = np.where(
-                valid_mask > 0,
-                (depth - d_min) / d_range * 2.0 - 1.0,
-                0.0,
-            )
-        else:
-            depth = np.zeros_like(depth)
-    else:
-        depth = np.zeros_like(depth)
+    depth = normalized_disparity(depth, valid_mask * (depth > 0))
 
     # Augmentation
     if augment:
@@ -370,7 +399,8 @@ class MegaDepthDataset(keras.utils.PyDataset):
 
     - ``rgb_batch``: ``(batch_size, patch_size, patch_size, 3)``
     - ``y_true_batch``: ``(batch_size, patch_size, patch_size, 2)``
-      with ``[depth, mask]`` concatenated on the last axis.
+      with ``[disparity, mask]`` concatenated on the last axis
+      (disparity in ``[0, 1]``, :func:`normalized_disparity`).
 
     Args:
         rgb_paths: List of RGB image file paths.
@@ -381,7 +411,9 @@ class MegaDepthDataset(keras.utils.PyDataset):
             crop.  Defaults to ``0.1``.
         augment: Whether to apply random augmentations (flips + rot90).
             Defaults to ``True``.
-        is_training: If ``True``, shuffles indices each epoch.
+        is_training: If ``True``, shuffles indices each epoch and crops at
+            random; if ``False``, each file's crop is fixed for the run
+            (seeded by its index).
         workers: Number of multiprocessing workers.
         **kwargs: Passed to :class:`keras.utils.PyDataset`.
     """
@@ -427,17 +459,28 @@ class MegaDepthDataset(keras.utils.PyDataset):
             i = self.indices[sample_idx]
             attempts += 1
 
-            loader_fn = (
-                load_and_resize_pair if self.use_resize
-                else load_and_process_pair
-            )
-            result = loader_fn(
-                self.rgb_paths[i],
-                self.depth_paths[i],
-                self.patch_size,
-                self.min_valid_ratio,
-                augment=self.is_training and self.augment,
-            )
+            if self.use_resize:
+                result = load_and_resize_pair(
+                    self.rgb_paths[i],
+                    self.depth_paths[i],
+                    self.patch_size,
+                    self.min_valid_ratio,
+                    augment=self.is_training and self.augment,
+                )
+            else:
+                # DECISION plan-2026-10-14T062616-81938e81/D-109
+                # Do NOT let a validation crop draw from the global RNG: each
+                # epoch would score different crops of the same files, and the
+                # val_loss trend would be crop noise. Seeding by file index
+                # fixes each file's crop for the whole run.
+                result = load_and_process_pair(
+                    self.rgb_paths[i],
+                    self.depth_paths[i],
+                    self.patch_size,
+                    self.min_valid_ratio,
+                    augment=self.is_training and self.augment,
+                    rng=None if self.is_training else np.random.default_rng(int(i)),
+                )
             if result is None:
                 continue
             rgb, y_true = result

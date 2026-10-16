@@ -56,13 +56,26 @@ on this machine.
 
 - Loads MegaDepth RGB+depth pairs via `train.common.megadepth.MegaDepthDataset`.
 - Builds a `DepthAnything` model via `create_depth_anything(...)`.
-- Compiles with a **masked L1 + multi-scale gradient-matching loss**
-  (locally-defined `DepthEstimationLoss`). The model's final projection ends in a
-  ReLU, as in the reference Depth Anything head, so every prediction the loss sees
-  is non-negative (no upper bound).
+- Supervises the Depth Anything V1 relative-depth target (arXiv 2401.10891,
+  section 3.1): `MegaDepthDataset` turns each depth map into disparity `1 / t`
+  normalized to `[0, 1]` per map over its valid pixels
+  (`train.common.megadepth.normalized_disparity`; nearest valid pixel 1,
+  farthest 0). The model's final projection ends in a ReLU, as in the reference
+  head, so its output range `[0, inf)` contains the target's.
+- Compiles the paper's **affine-invariant mean absolute error** (eq. 1-3,
+  `build_depth_loss` = `AffineInvariantLoss(masked=True)`): per map, prediction
+  and target are each shifted by their median and divided by their mean absolute
+  deviation over the valid pixels, then compared with L1. It is invariant to the
+  prediction's scale and shift. Until 2026-10-16 the target was min-max depth in
+  `[-1, 1]` (half of it below what the ReLU can output) and the loss a masked L1
+  plus gradient matching on the raw output; runs before that date trained a
+  different objective.
 - Compiles the five depth metrics from `dl_techniques.metrics.depth_metrics`
   (`build_depth_metrics`). They take `MegaDepthDataset`'s two-channel
-  `y_true = concat([depth, mask], -1)` whole and mask invalid pixels themselves.
+  `y_true = concat([disparity, mask], -1)` whole, mask invalid pixels
+  themselves, and score the prediction after per-image least-squares
+  scale-and-shift alignment (`align_scale_and_shift`), so their values are on
+  the normalized-disparity scale, not metric depth.
   Until 2026-10-16 a `_DepthOnlyMetricWrapper` sliced the mask channel off
   first, which left no valid pixel: every metric column of every run since the
   trainer was added (b9dccdcea, 2026-05-10) reads 0.0.
@@ -180,7 +193,7 @@ comes from the former CliffordNet depth trainer, from which it differs in:
 
 - Single-output model (no deep supervision), so no `_MultiScaleDataset` or
   `DeepSupervisionWeightScheduler`.
-- Metrics take MegaDepth's two-channel `y_true = concat([depth, mask], -1)`
+- Metrics take MegaDepth's two-channel `y_true = concat([disparity, mask], -1)`
   directly; the depth metrics read the mask channel themselves.
 - `init_from` skips the decoder by `model.decoder.name` (`depth_estimation_head`), not by the
   `head_` prefix CliffordNet used. It skipped the literal `dpt_decoder` until 2026-10-15, a name

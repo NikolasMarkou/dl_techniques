@@ -271,7 +271,8 @@ Keep local: model creation and compilation, domain-specific losses, custom argpa
 `(x_train, y_train), (x_test, y_test), input_shape, num_classes` for the numpy datasets and
 `train_ds, val_ds, input_shape, num_classes` for ImageNet (tf.data). For text use
 `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth` (yielding
-`(rgb, y_true)` with `y_true = [depth, mask]` on the last axis). For anything else write local
+`(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity per-map
+normalized to `[0, 1]`). For anything else write local
 loading — do NOT force it through `load_dataset()`.
 
 ## Scripts that don't use `train.common` callbacks (and why)

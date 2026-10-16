@@ -3,11 +3,16 @@
 Pattern-5 trainer for ``dl_techniques.models.vision.depth_anything.DepthAnything`` on
 MegaDepth.  Structurally a Pattern-5 trainer (it was derived 1:1 from the
 now-deleted ``train.cliffordnet.train_depth_estimation``, which is why the two
-read alike in the git history), swapping in ``create_depth_anything`` as the model factory and
-using a locally-defined ``DepthEstimationLoss`` (masked L1 + multi-scale
-gradient matching). The model's output is ReLU'd, as in the reference Depth
-Anything head, so every prediction is non-negative and unbounded above; the
-loss takes it as it is.
+read alike in the git history), swapping in ``create_depth_anything`` as the model factory. The target and
+the loss are the Depth Anything V1 relative-depth ones (arXiv 2401.10891,
+section 3.1): per-map normalized disparity in ``[0, 1]``
+(``train.common.megadepth.normalized_disparity``) and the affine-invariant
+mean absolute error ``AffineInvariantLoss(masked=True)`` (median / mean-
+absolute-deviation alignment of prediction and target over the valid pixels,
+eq. 1-3; ``build_depth_loss``). The model's output is
+ReLU'd, as in the reference head, so it is non-negative, like the target;
+the loss is invariant to its scale and shift. The logged metrics score the
+prediction after least-squares scale-and-shift alignment.
 
 > **Read** ``src/train/depth_anything/README.md`` ("Known Issues — depth
 > quality") **before running this script.** The encoder is the in-tree ViT,
@@ -70,7 +75,9 @@ from dl_techniques.models.vision.depth_anything.teacher_ema import (
     cosine_ema_schedule,
     linear_ema_schedule,
 )
+from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.metrics.depth_metrics import (
+    align_scale_and_shift,
     AbsRelMetric,
     DeltaThresholdMetric,
     RMSELogMetric,
@@ -169,88 +176,29 @@ class DepthAnythingTrainingConfig:
 
 
 # ---------------------------------------------------------------------
-# DEPTH ESTIMATION LOSS (masked L1 + multi-scale gradient matching)
+# LOSS
 # ---------------------------------------------------------------------
 
 
-class DepthEstimationLoss(keras.losses.Loss):
-    """Masked L1 + multi-scale gradient matching loss for depth estimation.
+def build_depth_loss() -> keras.losses.Loss:
+    """The loss the trainer compiles: Depth Anything V1's affine-invariant MAE.
 
-    ``L = L1_masked + gradient_weight * L_grad``
+    Interface contract: returns a fresh ``AffineInvariantLoss(masked=True)``.
+    It takes ``y_true = concat([disparity, mask], -1)`` from
+    ``MegaDepthDataset`` and the model's ``(B, H, W, 1)`` output; per map, the
+    prediction and the target are each shifted by their median and divided by
+    their mean absolute deviation over the valid pixels, and the loss is the
+    mean absolute difference there (arXiv 2401.10891, eq. 1-3). It is invariant
+    to a positive scale and any shift of the prediction.
 
-    Places no constraint on the prediction's range; DepthAnything's is
-    non-negative (a final ReLU, as in the reference head).
+    :return: The loss for ``model.compile``.
     """
-
-    def __init__(
-        self,
-        gradient_weight: float = 0.5,
-        n_scales: int = 4,
-        name: str = "depth_loss",
-        **kwargs,
-    ):
-        super().__init__(name=name, **kwargs)
-        self.gradient_weight = gradient_weight
-        self.n_scales = n_scales
-
-    @staticmethod
-    def _gradient_xy(d):
-        dx = d[:, :, 1:, :] - d[:, :, :-1, :]
-        dy = d[:, 1:, :, :] - d[:, :-1, :, :]
-        return dx, dy
-
-    @staticmethod
-    def _downsample_2x(d):
-        return keras.ops.average_pool(d, pool_size=2, strides=2, padding="valid")
-
-    def call(self, y_true_and_mask, y_pred):
-        depth_true = y_true_and_mask[..., :1]
-        mask = y_true_and_mask[..., 1:]
-
-        l1_error = keras.ops.abs(y_pred - depth_true) * mask
-        valid_count = keras.ops.maximum(
-            keras.ops.sum(mask), keras.ops.cast(1.0, mask.dtype)
-        )
-        l_l1 = keras.ops.sum(l1_error) / valid_count
-
-        l_grad = keras.ops.cast(0.0, y_pred.dtype)
-        d_pred = y_pred
-        d_true = depth_true
-        m = mask
-
-        for _ in range(self.n_scales):
-            dx_pred, dy_pred = self._gradient_xy(d_pred)
-            dx_true, dy_true = self._gradient_xy(d_true)
-
-            mx = keras.ops.minimum(m[:, :, 1:, :], m[:, :, :-1, :])
-            my = keras.ops.minimum(m[:, 1:, :, :], m[:, :-1, :, :])
-
-            mx_count = keras.ops.maximum(
-                keras.ops.sum(mx), keras.ops.cast(1.0, mx.dtype)
-            )
-            my_count = keras.ops.maximum(
-                keras.ops.sum(my), keras.ops.cast(1.0, my.dtype)
-            )
-
-            l_grad = l_grad + (
-                keras.ops.sum(keras.ops.abs(dx_pred - dx_true) * mx) / mx_count
-                + keras.ops.sum(keras.ops.abs(dy_pred - dy_true) * my) / my_count
-            )
-
-            d_pred = self._downsample_2x(d_pred)
-            d_true = self._downsample_2x(d_true)
-            m = self._downsample_2x(m)
-            m = keras.ops.cast(m > 0.5, m.dtype)
-
-        return l_l1 + self.gradient_weight * l_grad
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "gradient_weight": self.gradient_weight,
-            "n_scales": self.n_scales,
-        })
-        return config
+    # DECISION plan-2026-10-14T062616-81938e81/D-108
+    # Do NOT go back to an L1 on the raw prediction against a fixed-range
+    # target: DepthAnything's output is ReLU'd (D-031), so a [-1, 1] target
+    # had a half no prediction could reach. The reference loss compares the
+    # median/MAD-normalized maps, which a non-negative output can match.
+    return AffineInvariantLoss(masked=True)
 
 
 # ---------------------------------------------------------------------
@@ -258,13 +206,41 @@ class DepthEstimationLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
+def _scale_shift_aligned(metric_cls):
+    """A subclass of a ``depth_metrics`` metric that scores the aligned prediction.
+
+    The prediction is first aligned to the target by per-image least squares
+    (``align_scale_and_shift``), since the affine-invariant loss leaves its
+    scale and shift free. The shared metrics take values in ``[-1, 1]`` and
+    shift them to ``[0, 1]`` themselves, so the ``[0, 1]`` target and the
+    aligned prediction are handed over as ``2 x - 1``.
+    """
+
+    class Aligned(metric_cls):
+        def update_state(self, y_true_and_mask, y_pred, sample_weight=None):
+            target = y_true_and_mask[..., :1]
+            mask = y_true_and_mask[..., 1:]
+            aligned = align_scale_and_shift(y_pred, target, mask)
+            super().update_state(
+                keras.ops.concatenate([target * 2.0 - 1.0, mask], axis=-1),
+                aligned * 2.0 - 1.0,
+                sample_weight,
+            )
+
+    Aligned.__name__ = Aligned.__qualname__ = f"ScaleShiftAligned{metric_cls.__name__}"
+    return Aligned
+
+
 def build_depth_metrics() -> List[keras.metrics.Metric]:
     """The five depth metrics the trainer compiles, under their history keys.
 
     Interface contract: returns fresh metric objects named ``abs_rel``,
     ``sq_rel``, ``rmse``, ``rmse_log`` and ``delta_1.25``. Each takes the
-    two-channel ``y_true = concat([depth, mask], -1)`` that ``MegaDepthDataset``
-    yields and masks invalid pixels itself, so ``y_true`` is passed whole.
+    two-channel ``y_true = concat([disparity, mask], -1)`` that
+    ``MegaDepthDataset`` yields, masks invalid pixels itself, and scores the
+    prediction after per-image least-squares scale-and-shift alignment to the
+    target, so the values are on the ``[0, 1]`` normalized-disparity scale (not
+    metric depth, and not comparable with the paper's depth-space numbers).
 
     :return: The metric list for ``model.compile``.
     """
@@ -273,11 +249,11 @@ def build_depth_metrics() -> List[keras.metrics.Metric]:
     # `_DepthOnlyMetricWrapper`): they read the mask from `y_true[..., 1:]`, so
     # a depth-only `y_true` leaves no valid pixel and every metric reads 0.0.
     return [
-        AbsRelMetric(name="abs_rel"),
-        SqRelMetric(name="sq_rel"),
-        RMSEMetric(name="rmse"),
-        RMSELogMetric(name="rmse_log"),
-        DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
+        _scale_shift_aligned(AbsRelMetric)(name="abs_rel"),
+        _scale_shift_aligned(SqRelMetric)(name="sq_rel"),
+        _scale_shift_aligned(RMSEMetric)(name="rmse"),
+        _scale_shift_aligned(RMSELogMetric)(name="rmse_log"),
+        _scale_shift_aligned(DeltaThresholdMetric)(threshold=1.25, name="delta_1.25"),
     ]
 
 
@@ -521,7 +497,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
 
     model.compile(
         optimizer=optimizer,
-        loss=DepthEstimationLoss(gradient_weight=0.5, n_scales=4),
+        loss=build_depth_loss(),
         metrics=build_depth_metrics(),
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
