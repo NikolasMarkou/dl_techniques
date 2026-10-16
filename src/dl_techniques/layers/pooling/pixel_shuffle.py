@@ -14,7 +14,6 @@ divisible by ``scale_factor``. ``scale_factor=1`` is the identity.
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -158,7 +157,7 @@ class PixelShuffle(keras.layers.Layer):
         if self.scale_factor == 1:
             return inputs
 
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         batch_size = input_shape[0]
         seq_len = input_shape[1]
         channels = inputs.shape[-1]
@@ -168,27 +167,27 @@ class PixelShuffle(keras.layers.Layer):
 
         # Spatial tokens are assumed to form a square grid.
         spatial_len = seq_len - 1
-        h_float = ops.sqrt(ops.cast(spatial_len, "float32"))
-        h = ops.cast(h_float, "int32")
+        h_float = keras.ops.sqrt(keras.ops.cast(spatial_len, "float32"))
+        h = keras.ops.cast(h_float, "int32")
         w = h
 
-        spatial_tokens = ops.reshape(spatial_tokens, [batch_size, h, w, channels])
+        spatial_tokens = keras.ops.reshape(spatial_tokens, [batch_size, h, w, channels])
 
         new_h = h // self.scale_factor
         new_w = w // self.scale_factor
         new_c = channels * (self.scale_factor ** 2)
 
-        shuffled = ops.reshape(spatial_tokens, [
+        shuffled = keras.ops.reshape(spatial_tokens, [
             batch_size, new_h, self.scale_factor, new_w, self.scale_factor, channels
         ])
-        shuffled = ops.transpose(shuffled, [0, 1, 3, 2, 4, 5])
-        shuffled = ops.reshape(shuffled, [batch_size, new_h * new_w, new_c])
+        shuffled = keras.ops.transpose(shuffled, [0, 1, 3, 2, 4, 5])
+        shuffled = keras.ops.reshape(shuffled, [batch_size, new_h * new_w, new_c])
 
         padding_amount = new_c - channels
         paddings = [[0, 0], [0, 0], [0, padding_amount]]
-        cls_token_expanded = ops.pad(cls_token, paddings)
+        cls_token_expanded = keras.ops.pad(cls_token, paddings)
 
-        return ops.concatenate([cls_token_expanded, shuffled], axis=1)
+        return keras.ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.

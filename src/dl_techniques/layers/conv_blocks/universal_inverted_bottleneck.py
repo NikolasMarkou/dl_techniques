@@ -17,7 +17,6 @@ strided ``1x1`` projection decimates rather than filters.
 
 import keras
 from typing import Tuple, Optional, Any, Dict, Union
-from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
@@ -169,10 +168,10 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             use_bias: bool = False,
             padding: str = 'same',
             block_type: str = 'UIB',
-            kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-            depthwise_initializer: Union[str, initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            depthwise_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            depthwise_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            depthwise_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -228,10 +227,10 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.use_bias = use_bias
         self.padding = padding
         self.block_type = block_type
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.depthwise_initializer = initializers.get(depthwise_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.depthwise_regularizer = regularizers.get(depthwise_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.depthwise_initializer = keras.initializers.get(depthwise_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.depthwise_regularizer = keras.regularizers.get(depthwise_regularizer)
 
 
         # DECISION plan-2026-08-14T183218-f4c612aa/D-010: stride belongs to the block, applied
@@ -248,7 +247,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         # DECISION plan-2026-08-14T183218-f4c612aa/D-011: start_dw operates on unexpanded
         # channels and is a distinct slot from dw1/dw2 (both post-expansion); never remap use_dw1/use_dw2 to emulate it. See decisions.md.
         if self.use_start_dw:
-            self.start_dw = layers.DepthwiseConv2D(
+            self.start_dw = keras.layers.DepthwiseConv2D(
                 kernel_size=self.start_dw_kernel_size,
                 strides=self.stride if self._stride_owner == 'start_dw' else 1,
                 name='start_dw',
@@ -264,7 +263,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.start_dw_activation = None
 
         # Expansion phase
-        self.expand_conv = layers.Conv2D(
+        self.expand_conv = keras.layers.Conv2D(
             filters=1,  # Placeholder, will be set in build()
             kernel_size=1,
             name='expand_conv',
@@ -276,7 +275,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
 
         # Processing phase (depthwise convolutions)
         if self.use_dw1:
-            self.dw1 = layers.DepthwiseConv2D(
+            self.dw1 = keras.layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
                 strides=self.stride if self._stride_owner == 'dw1' else 1,
                 name='dw1',
@@ -286,7 +285,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw1_activation = self._create_activation_layer('dw1_activation')
 
             if self.dropout_rate > 0:
-                self.dw1_dropout = layers.Dropout(
+                self.dw1_dropout = keras.layers.Dropout(
                     self.dropout_rate, name='dw1_dropout'
                 )
             else:
@@ -298,7 +297,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw1_dropout = None
 
         if self.use_dw2:
-            self.dw2 = layers.DepthwiseConv2D(
+            self.dw2 = keras.layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
                 strides=self.stride if self._stride_owner == 'dw2' else 1,
                 name='dw2',
@@ -308,7 +307,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw2_activation = self._create_activation_layer('dw2_activation')
 
             if self.dropout_rate > 0:
-                self.dw2_dropout = layers.Dropout(
+                self.dw2_dropout = keras.layers.Dropout(
                     self.dropout_rate, name='dw2_dropout'
                 )
             else:
@@ -321,7 +320,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
 
         # Squeeze-and-Excitation block
         if self.use_squeeze_excitation:
-            self.se_squeeze = layers.GlobalAveragePooling2D(
+            self.se_squeeze = keras.layers.GlobalAveragePooling2D(
                 keepdims=True, name='se_squeeze'
             )
             # SE layers will be created in build() since they need channel info
@@ -330,7 +329,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.se_activation1 = create_activation_layer(
                 self.se_activation, name='se_activation1'
             )
-            self.se_activation2 = layers.Activation(
+            self.se_activation2 = keras.layers.Activation(
                 'sigmoid', name='se_activation2'
             )
         else:
@@ -346,7 +345,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         # is the honest cost of asking a block with no spatial operator to
         # downsample; the alternative — silently ignoring the stride — is the
         # defect D-010 closes.
-        self.project_conv = layers.Conv2D(
+        self.project_conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=1,
             strides=self.stride if self._stride_owner == 'project_conv' else 1,
@@ -467,7 +466,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             se_filters = max(1, int(expanded_filters_se * self.se_ratio))
 
             # Create SE layers with proper channel dimensions
-            self.se_reduce = layers.Conv2D(
+            self.se_reduce = keras.layers.Conv2D(
                 filters=se_filters,
                 kernel_size=1,
                 activation=None,
@@ -475,7 +474,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 **self._conv_kwargs()
             )
 
-            self.se_expand = layers.Conv2D(
+            self.se_expand = keras.layers.Conv2D(
                 filters=expanded_filters_se,
                 kernel_size=1,
                 activation=None,
@@ -549,7 +548,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         x = self.project_norm(x, training=training)
 
         # Residual connection
-        if self.stride == 1 and ops.shape(inputs)[-1] == self.filters:
+        if self.stride == 1 and keras.ops.shape(inputs)[-1] == self.filters:
             return shortcut + x
         return x
 
@@ -594,13 +593,13 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "padding": self.padding,
             "block_type": self.block_type,
             "kernel_initializer":
-                initializers.serialize(self.kernel_initializer),
+                keras.initializers.serialize(self.kernel_initializer),
             "depthwise_initializer":
-                initializers.serialize(self.depthwise_initializer),
+                keras.initializers.serialize(self.depthwise_initializer),
             "kernel_regularizer":
-                regularizers.serialize(self.kernel_regularizer),
+                keras.regularizers.serialize(self.kernel_regularizer),
             "depthwise_regularizer":
-                regularizers.serialize(self.depthwise_regularizer),
+                keras.regularizers.serialize(self.depthwise_regularizer),
         })
         return config
 

@@ -605,8 +605,13 @@ class NanoVLM(keras.Model):
                 f"prompt_length ({prompt_length}) + max_length ({max_length}) "
                 f"exceeds text_config['max_seq_len']={max_text_len}"
             )
-        # Built through build(), not lazily by the sub-layer calls below: a
-        # later build() would then rebuild an already-built projection.
+        # DECISION plan-2026-10-14T062616-81938e81/D-081: build() here is the
+        # decoder's precondition, not a workaround. embed_tokens() and
+        # decode_embeddings() require a BUILT TextDecoder (their contract);
+        # called lazily they build its sub-layers but leave the decoder
+        # unbuilt, and the model's next build() then re-builds them and Keras
+        # refuses. Do not delete it (ModalityProjection.build is idempotent
+        # now; the decoder is the reason this stays).
         if not self.built:
             self.build({'images': tuple(images.shape), 'text_tokens': (None, None)})
 

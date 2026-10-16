@@ -41,6 +41,10 @@ MODULES = [
     "train/bert/wikipedia/finetune.py",
     "train/tree_transformer/finetune.py",
     "train/cliffordnet/train_clip.py",
+    # Step 12 Part F items 7 and 17: an unread ``stage_idx`` and a dead
+    # ``create_topographic_vae`` import.
+    "dl_techniques/models/vision_language/clifford_clip/model.py",
+    "train/topographic_vae/train_topographic_vae.py",
 ]
 
 

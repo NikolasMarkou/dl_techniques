@@ -163,6 +163,12 @@ class ModalityProjection(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid or incompatible.
         """
+        # A second build (a lazily built projection reached again through a
+        # parent's build()) must not re-build the sub-layers: Keras refuses
+        # to add state to a built layer.
+        if self.built:
+            return
+
         # Store input shape for serialization
         self._build_input_shape = input_shape
 

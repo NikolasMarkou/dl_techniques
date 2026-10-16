@@ -65,6 +65,8 @@ LIGHTGLUE_ROWS: Tuple[Row, ...] = (
         "/probe/lightglue-output-dir"),
     Row(("--experiment-name",), ("--experiment-name", "probe-experiment-name"),
         "experiment_name", "probe-experiment-name"),
+    Row(("--viz-every",), ("--viz-every", "31"), "viz_every", 31),
+    Row(("--viz-pairs",), ("--viz-pairs", "11"), "viz_pairs", 11),
 )
 
 LIGHTGLUE_TRAINER = Contract(

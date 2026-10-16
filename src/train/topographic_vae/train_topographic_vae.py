@@ -70,10 +70,7 @@ import numpy as np
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vision.topographic_vae import (
-    TopographicVAE,
-    create_topographic_vae,
-)
+from dl_techniques.models.vision.topographic_vae import TopographicVAE
 from dl_techniques.losses.topographic_vae_loss import TopographicVAELoss
 from dl_techniques.metrics.topographic import (
     capcorr_correlation,

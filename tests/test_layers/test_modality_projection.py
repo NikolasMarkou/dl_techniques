@@ -66,3 +66,31 @@ class TestModalityProjection:
         layer = ModalityProjection(input_dim=IN, output_dim=OUT, use_gelu=False, use_layer_norm=False)
         rebuilt = ModalityProjection.from_config(layer.get_config())
         assert rebuilt.use_gelu is False and rebuilt.use_layer_norm is False
+
+
+class TestASecondBuildIsANoOp:
+    """``build`` on a built projection returns without touching its weights.
+
+    Before Step 12 (D-041) ``build`` had no built guard: a lazily built
+    projection asked to build again called ``projection_dense.build`` a
+    second time and Keras refused to add state to a built layer.
+    """
+
+    @pytest.mark.parametrize("first_build", ["call", "build"])
+    def test_build_twice_then_call_keeps_the_weights(self, sample, first_build):
+        layer = ModalityProjection(input_dim=IN, output_dim=OUT, scale_factor=2)
+        if first_build == "call":
+            y0 = keras.ops.convert_to_numpy(layer(sample))
+        else:
+            layer.build(sample.shape)
+            y0 = keras.ops.convert_to_numpy(layer(sample))
+        w0 = [keras.ops.convert_to_numpy(w).copy() for w in layer.weights]
+        n0 = len(layer.weights)
+
+        layer.build(sample.shape)
+        y1 = keras.ops.convert_to_numpy(layer(sample))
+
+        assert len(layer.weights) == n0
+        for before, after in zip(w0, layer.weights):
+            np.testing.assert_array_equal(before, keras.ops.convert_to_numpy(after))
+        np.testing.assert_array_equal(y0, y1)

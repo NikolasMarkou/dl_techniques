@@ -732,12 +732,10 @@ class CliffordCLIP(keras.Model):
         # Index in `vision_blocks` of each stage's first block.
         self._vision_stage_offsets: List[int] = []
         block_idx = 0
-        for stage_idx, (stage_c, stage_d, stage_sh) in enumerate(
-            zip(
-                self.vision_stage_channels,
-                self.vision_stage_depths,
-                self.vision_stage_shifts,
-            )
+        for stage_c, stage_d, stage_sh in zip(
+            self.vision_stage_channels,
+            self.vision_stage_depths,
+            self.vision_stage_shifts,
         ):
             self._vision_stage_offsets.append(block_idx)
             block_kw: Dict[str, Any] = dict(

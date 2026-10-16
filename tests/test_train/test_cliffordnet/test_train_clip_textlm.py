@@ -12,6 +12,7 @@ This is the first test module under ``tests/test_train/test_cliffordnet/``; the
 site previously had zero coverage of any kind.
 """
 
+import keras
 import numpy as np
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
@@ -101,7 +102,6 @@ def test_text_lm_wrapper_applies_external_residual():
     pretraining phase optimize a different function from the contrastive phase
     that later reuses these weights.
     """
-    from keras import ops
 
     m = _tiny_clip()
     m.build({"image": (None, 32, 32, 3), "text": (None, CONTEXT)})
@@ -114,7 +114,7 @@ def test_text_lm_wrapper_applies_external_residual():
 
     # Recompute encode_text's ladder locally and push it through the SAME
     # lm_head, so the ONLY thing under test is the block loop itself.
-    positions = ops.arange(CONTEXT)
+    positions = keras.ops.arange(CONTEXT)
     x = m.token_embedding(ids) + m.position_embedding(positions)
     x = m.text_embed_norm(x)
     x = m.text_embed_dropout(x, training=False)
@@ -125,7 +125,7 @@ def test_text_lm_wrapper_applies_external_residual():
         pre_head = m.text_head_dropout(pre_head, training=False)
     want = wrapper.lm_head(pre_head)
 
-    delta = float(ops.max(ops.abs(got - want)))
+    delta = float(keras.ops.max(keras.ops.abs(got - want)))
     assert delta == 0.0, (
         f"_TextLMWrapper's block ladder diverged from CliffordCLIP.encode_text: "
         f"max|delta| = {delta:.6e}, expected exactly 0.0. Keep the loop as "
@@ -136,12 +136,12 @@ def test_text_lm_wrapper_applies_external_residual():
     # Independent of the comparison above: the signal must survive the ladder.
     # A residual-free loop collapses it by ~1e-5 per block, so this catches the
     # regression even if the reference were computed the same wrong way.
-    embed_absmax = float(ops.max(ops.abs(
+    embed_absmax = float(keras.ops.max(keras.ops.abs(
         m.text_embed_norm(
             m.token_embedding(ids) + m.position_embedding(positions)
         )
     )))
-    pre_head_absmax = float(ops.max(ops.abs(pre_head)))
+    pre_head_absmax = float(keras.ops.max(keras.ops.abs(pre_head)))
     assert pre_head_absmax > 0.01 * embed_absmax, (
         f"text-block ladder annihilated the signal: pre-head absmax "
         f"{pre_head_absmax:.6e} vs embedding absmax {embed_absmax:.6e}. The "
@@ -157,7 +157,7 @@ def test_text_lm_wrapper_applies_drop_path(monkeypatch):
     reduced to the per-sample keep/drop realization its Bernoulli mask
     produced. A wrapper that bypasses ``m.text_drop_paths`` records nothing.
 
-    Do NOT reduce this to ``ops.max(ops.abs(logits))`` over the batch again
+    Do NOT reduce this to ``keras.ops.max(keras.ops.abs(logits))`` over the batch again
     (D-061): ``StochasticDepth`` draws ONE independent mask per sample, so a
     surviving sample carrying the batch extremum makes that scalar insensitive
     to the drop. Measured 5 failures / 74 fresh-process runs (~6.8%) on the
@@ -172,7 +172,6 @@ def test_text_lm_wrapper_applies_drop_path(monkeypatch):
     # rather than re-deriving the Bernoulli draw -- restating the
     # implementation would make this a self-referential oracle. See
     # plans/plan-2026-08-19T070627-a616f581/decisions.md D-004.
-    from keras import ops
 
     m = _tiny_clip(text_stochastic_depth_rate=0.5)
     m.build({"image": (None, 32, 32, 3), "text": (None, CONTEXT)})
@@ -210,10 +209,10 @@ def test_text_lm_wrapper_applies_drop_path(monkeypatch):
         # kept one is ``inputs / keep_prob``. Read the realization off the
         # output rather than re-deriving the mask, so this oracle does not
         # restate the implementation it is meant to observe.
-        flat_in = ops.reshape(inputs, (ops.shape(inputs)[0], -1))
-        flat_out = ops.reshape(out, (ops.shape(out)[0], -1))
-        live_in = np.asarray(ops.max(ops.abs(flat_in), axis=-1))
-        live_out = np.asarray(ops.max(ops.abs(flat_out), axis=-1))
+        flat_in = keras.ops.reshape(inputs, (keras.ops.shape(inputs)[0], -1))
+        flat_out = keras.ops.reshape(out, (keras.ops.shape(out)[0], -1))
+        live_in = np.asarray(keras.ops.max(keras.ops.abs(flat_in), axis=-1))
+        live_out = np.asarray(keras.ops.max(keras.ops.abs(flat_out), axis=-1))
         observed.append((bool(training), self.name, self.drop_path_rate,
                          tuple(float(v) for v in live_in),
                          tuple(bool(v > 0.0) for v in live_out)))
