@@ -76,6 +76,8 @@ from train.cliffordnet.train_cliffordnet import (
     build_train_dataset,
 )
 from train.common import (
+    CIFAR100_MEAN,
+    CIFAR100_STD,
     create_callbacks,
     load_dataset,
     setup_gpu,
@@ -612,12 +614,10 @@ def train_one_variant(
         test_sample = x_test[:4]
         # A save or reload error surfaces (D-085); a value mismatch is logged
         # by validate_model_loading itself.
-        stats_mean = np.array(
-            [0.5071, 0.4867, 0.4408], dtype=np.float32
-        )
-        stats_std = np.array(
-            [0.2675, 0.2565, 0.2761], dtype=np.float32
-        )
+        # The statistics build_train_dataset / build_eval_dataset normalise
+        # CIFAR-100 with (one home, D-112).
+        stats_mean = np.array(CIFAR100_MEAN, dtype=np.float32)
+        stats_std = np.array(CIFAR100_STD, dtype=np.float32)
         test_norm = (test_sample - stats_mean) / stats_std
         pre_save = model.predict(test_norm, verbose=0)
         final_path = os.path.join(

@@ -28,6 +28,10 @@ CIFAR10_STD = [0.2470, 0.2435, 0.2616]
 # mean 0.50707516 0.48654887 0.44091784, std 0.26733429 0.25643846 0.27615047.
 # The often-quoted (0.2675, 0.2565, 0.2761) / 0.4867 do not come out of this
 # computation.
+# DECISION plan-2026-10-14T062616-81938e81/D-112
+# The ONE home of the CIFAR-100 statistics: trainers import these names, they
+# do NOT keep a literal copy (a guard scans src/train for one), and do NOT
+# "correct" them to the often-quoted values above.
 CIFAR100_MEAN = [0.5071, 0.4865, 0.4409]
 CIFAR100_STD = [0.2673, 0.2564, 0.2762]
 

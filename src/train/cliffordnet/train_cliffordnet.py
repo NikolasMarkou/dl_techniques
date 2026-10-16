@@ -36,6 +36,8 @@ from train.common import (
     save_config_json,
     CIFAR10_MEAN,
     CIFAR10_STD,
+    CIFAR100_MEAN,
+    CIFAR100_STD,
 )
 from train.common.run_io import save_training_history_json
 
@@ -47,7 +49,8 @@ Variant = Literal["nano", "lite", "lite_g", "custom"]
 
 
 # ---------------------------------------------------------------------
-# Per-channel normalisation constants (computed from training sets)
+# Per-channel normalisation constants (computed from training sets; the
+# one home is train.common.datasets, D-112)
 # ---------------------------------------------------------------------
 
 _CIFAR_STATS: Dict[str, Dict[str, np.ndarray]] = {
@@ -56,8 +59,8 @@ _CIFAR_STATS: Dict[str, Dict[str, np.ndarray]] = {
         "std": np.array(CIFAR10_STD, dtype=np.float32),
     },
     "cifar100": {
-        "mean": np.array([0.5071, 0.4867, 0.4408], dtype=np.float32),
-        "std": np.array([0.2675, 0.2565, 0.2761], dtype=np.float32),
+        "mean": np.array(CIFAR100_MEAN, dtype=np.float32),
+        "std": np.array(CIFAR100_STD, dtype=np.float32),
     },
 }
 

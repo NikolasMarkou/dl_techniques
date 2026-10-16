@@ -63,12 +63,5 @@ def test_cifar100_is_normalised_with_cifar100_statistics(monkeypatch):
     )
 
 
-def test_the_cifar100_statistics_are_the_training_set_statistics():
-    # Re-derived from the data (population per-channel mean/std of the 50,000
-    # training images in [0, 1], float64); the constant keeps 4 places.
-    from train.common import CIFAR100_MEAN, CIFAR100_STD
-
-    (x, _), _ = keras.datasets.cifar100.load_data()
-    x = x.reshape(-1, 3).astype(np.float64) / 255.0
-    np.testing.assert_allclose(CIFAR100_MEAN, x.mean(axis=0), rtol=0, atol=5e-5)
-    np.testing.assert_allclose(CIFAR100_STD, x.std(axis=0), rtol=0, atol=5e-5)
+# The re-derivation of CIFAR100_MEAN/STD from the data lives with their one
+# home's guard: tests/test_train/test_common_cifar100_statistics_have_one_home.py.
