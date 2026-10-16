@@ -1480,6 +1480,29 @@ class TestEvaluation:
             "this fixture has masks off, so val_mask_iou must be nan -- "
             "otherwise the nan-fill arm of this test is vacuous")
 
+    def test_a_failed_evaluation_fails_the_epoch(
+            self, monkeypatch, tiny_config: Sam3TrainingConfig,
+            tiny_model: Any) -> None:
+        """Step 13.6 (b), D-111: a failure raises, it is not a row of ``nan``.
+
+        The callback logged a warning and wrote ``nan`` for every key, so a
+        broken evaluator looked like a configuration that measures nothing,
+        and early stopping selected on ``nan`` for the rest of the run.
+        """
+        import train.sam3.train_sam3 as trainer
+
+        def broken(model, dataset):
+            raise RuntimeError("evaluator broke")
+
+        monkeypatch.setattr(trainer, "evaluate_sam3", broken)
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callback = trainer._Sam3EvalCallback(val_dataset)
+        callback.set_model(tiny_model)
+        logs: Dict[str, Any] = {"loss": 1.0}
+        with pytest.raises(RuntimeError, match="evaluator broke"):
+            callback.on_epoch_end(0, logs)
+        assert logs == {"loss": 1.0}
+
     def test_the_metrics_callback_runs_before_the_csv_logger(
             self, tiny_config: Sam3TrainingConfig, tiny_model: Any,
             tmp_path) -> None:

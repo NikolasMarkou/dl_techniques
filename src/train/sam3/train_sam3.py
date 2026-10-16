@@ -1213,7 +1213,7 @@ class _Sam3EvalCallback(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch: int,
                      logs: Optional[Dict[str, Any]] = None) -> None:
-        """Measure, then write EVERY key -- filling failures with ``nan``.
+        """Measure, then write EVERY key; a failed measurement raises.
 
         :param epoch: Zero-based epoch index.
         :type epoch: int
@@ -1232,14 +1232,14 @@ class _Sam3EvalCallback(keras.callbacks.Callback):
         # that disappears breaks the row. Ordering matters for the same reason:
         # a callback appended AFTER CSVLogger writes into a dict CSVLogger has
         # already consumed. See decisions.md D-028.
-        try:
-            metrics = evaluate_sam3(self.model, self.dataset)
-        except Exception as error:  # pragma: no cover - reporting path
-            logger.warning("evaluate_sam3 failed at epoch %d: %s", epoch, error)
-            metrics = {key: float("nan") for key in EVAL_METRIC_KEYS}
+        # DECISION plan-2026-10-14T062616-81938e81/D-111
+        # Do NOT catch here: a failed evaluation logged as a row of `nan` read
+        # like a configuration that measures nothing, and the selection
+        # callbacks then compared `nan`. `nan` stays only for a metric
+        # `evaluate_sam3` itself reports as unmeasurable.
+        metrics = evaluate_sam3(self.model, self.dataset)
         for key in EVAL_METRIC_KEYS:
-            logs[f"{self.prefix}{key}"] = float(
-                metrics.get(key, float("nan")))
+            logs[f"{self.prefix}{key}"] = float(metrics[key])
 
 
 # ---------------------------------------------------------------------------
