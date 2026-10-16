@@ -38,6 +38,7 @@ from dl_techniques.layers.spatial_layer import coordinate_grid
 # Reuse the recursive image-discovery helper instead of re-implementing rglob
 # (thera/data.py already imports the same one).
 from train.common.datasets import collect_image_paths
+from train.common.gpu import setup_gpu
 
 # THERA per-channel image statistics. Imported from the trainer so the eval and
 # training paths share one source of truth (DRY); redefined here only if that
@@ -336,15 +337,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Border pixels to crop before metrics (default: the scale s).",
     )
     parser.add_argument("--y-only", action="store_true")
-    parser.add_argument("--gpu", type=int, default=None)
+    parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="GPU index; counts within an exported CUDA_VISIBLE_DEVICES, else "
+             "names a physical GPU. Default: every visible GPU.",
+    )
     return parser
 
 
 def main() -> None:
     args = _build_parser().parse_args()
 
-    if args.gpu is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    # Before the first device use: --gpu counts within an exported
+    # CUDA_VISIBLE_DEVICES (D-110), never overwrites it.
+    setup_gpu(args.gpu)
 
     scales = tuple(int(s) for s in str(args.scales).split(",") if s.strip())
 

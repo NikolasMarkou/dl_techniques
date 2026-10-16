@@ -29,9 +29,9 @@ Design notes:
   - This is a shared library: it does NOT mutate global process state on import.
     In particular it does NOT set ``CUDA_VISIBLE_DEVICES``. CPU-pinning (needed
     to avoid non-portable CudnnRNN ops) remains the caller's ``export.py``
-    responsibility — those scripts set ``os.environ["CUDA_VISIBLE_DEVICES"]=""``
-    BEFORE importing TensorFlow/Keras, which a shared module imported later
-    cannot do anyway.
+    responsibility — those scripts call ``train.common.gpu.hide_gpus()`` (the
+    one writer of the variable, D-116) at the top, before TensorFlow lists a
+    device, which a shared module imported later cannot guarantee.
   - ``onnxruntime`` is an optional dependency: it is imported lazily inside
     :func:`verify_standard_ts_model` so that ``import ts_export`` (and therefore
     the export-only path) never hard-requires it.

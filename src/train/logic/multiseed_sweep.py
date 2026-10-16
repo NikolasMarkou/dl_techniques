@@ -48,6 +48,11 @@ import numpy as np
 import pandas as pd
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import (
+    VISIBLE_DEVICES,
+    child_visible_devices,
+    env_with_visible_devices,
+)
 from train.common.stats import (
     bootstrap_ci,
     format_mean_std,
@@ -624,9 +629,11 @@ def main() -> int:
     logger.info(f"total subprocess runs planned: {len(specs)}")
 
     caps = {"e1": args.e1_timeout_s, "e3": args.e3_timeout_s, "e5": args.e5_timeout_s}
-    env = os.environ.copy()
+    # An exported CUDA_VISIBLE_DEVICES is used as is; physical GPU 0 otherwise
+    # (the old setdefault's behaviour, now through the one writer, D-116).
+    env = env_with_visible_devices(child_visible_devices(
+        None, os.environ.get(VISIBLE_DEVICES), default_gpu=0))
     env.setdefault("MPLBACKEND", "Agg")
-    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
     # Ensure src/ is importable inside subprocess.
     repo_root = Path(__file__).resolve().parents[3]
     env["PYTHONPATH"] = f"{repo_root / 'src'}:{env.get('PYTHONPATH', '')}"

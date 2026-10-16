@@ -16,7 +16,9 @@ properties worth preserving, each of which that harness paid for:
 - **Failures are collected, never fatal.** One bad cell must not end the sweep.
 - **``MPLBACKEND`` and ``CUDA_VISIBLE_DEVICES`` are hard-set, not defaulted.**
   ``setdefault`` inherits whatever the parent shell exported, which is how a
-  sweep silently lands on the wrong GPU.
+  sweep silently lands on the wrong GPU. The device is ``--gpu`` resolved once
+  against the parent's exported list (``train.common.gpu.visible_device_for``,
+  D-110), so ``CUDA_VISIBLE_DEVICES=1 ... --gpu 0`` runs every cell on GPU 1.
 """
 
 import argparse
@@ -35,6 +37,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import (
+    VISIBLE_DEVICES,
+    env_with_visible_devices,
+    visible_device_for,
+)
 
 from .train_embeddings import resolve_output_dir
 
@@ -226,7 +233,7 @@ def run_one(
     spec: RunSpec,
     *,
     python_exe: str,
-    gpu_id: int,
+    visible_devices: str,
     cell_timeout_s: float,
     deadline_s: Optional[float] = None,
 ) -> Tuple[bool, str]:
@@ -236,8 +243,9 @@ def run_one(
     :type spec: RunSpec
     :param python_exe: Interpreter to run the trainer with.
     :type python_exe: str
-    :param gpu_id: GPU index; hard-set, never inherited.
-    :type gpu_id: int
+    :param visible_devices: The cell's ``CUDA_VISIBLE_DEVICES``, already
+        resolved from ``--gpu`` by :func:`main`; hard-set, never inherited.
+    :type visible_devices: str
     :param cell_timeout_s: Per-cell wall-clock limit.
     :type cell_timeout_s: float
     :param deadline_s: Optional absolute deadline for the whole sweep.
@@ -248,11 +256,10 @@ def run_one(
     os.makedirs(spec.cell_dir, exist_ok=True)
     log_path = os.path.join(spec.cell_dir, "cell.log")
 
-    env = dict(os.environ)
     # Hard-set, not setdefault: inheriting these is how a sweep silently lands
     # on the wrong GPU or opens an X11 connection on a headless host.
+    env = env_with_visible_devices(visible_devices)
     env["MPLBACKEND"] = "Agg"
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     timeout = cell_timeout_s
     if deadline_s is not None:
@@ -292,7 +299,7 @@ def run_one(
 
     with open(log_path, "w") as handle:
         handle.write(f"# cmd: {' '.join(command)}\n")
-        handle.write(f"# gpu: {gpu_id}\n")
+        handle.write(f"# {VISIBLE_DEVICES}: {visible_devices}\n")
         handle.write(f"# elapsed: {time.time() - started:.1f}s\n\n")
         handle.write(stdout)
         handle.write("\n--- stderr ---\n")
@@ -305,7 +312,7 @@ def run_one_with_oom_retry(
     spec: RunSpec,
     *,
     python_exe: str,
-    gpu_id: int,
+    visible_devices: str,
     cell_timeout_s: float,
     deadline_s: Optional[float] = None,
     settle_s: float = OOM_SETTLE_S,
@@ -329,8 +336,8 @@ def run_one_with_oom_retry(
     :type spec: RunSpec
     :param python_exe: Interpreter to run the trainer with.
     :type python_exe: str
-    :param gpu_id: GPU index to pin.
-    :type gpu_id: int
+    :param visible_devices: The cell's resolved ``CUDA_VISIBLE_DEVICES``.
+    :type visible_devices: str
     :param cell_timeout_s: Per-cell timeout.
     :type cell_timeout_s: float
     :param deadline_s: Wall-clock deadline for the whole sweep.
@@ -343,7 +350,7 @@ def run_one_with_oom_retry(
     :rtype: tuple[bool, str]
     """
     ok, stderr_tail = run_one(
-        spec, python_exe=python_exe, gpu_id=gpu_id,
+        spec, python_exe=python_exe, visible_devices=visible_devices,
         cell_timeout_s=cell_timeout_s, deadline_s=deadline_s,
     )
     if ok or not looks_like_oom(stderr_tail):
@@ -356,7 +363,7 @@ def run_one_with_oom_retry(
     )
     sleep(settle_s)
     ok, stderr_tail = run_one(
-        spec, python_exe=python_exe, gpu_id=gpu_id,
+        spec, python_exe=python_exe, visible_devices=visible_devices,
         cell_timeout_s=cell_timeout_s, deadline_s=deadline_s,
     )
     logger.info(f"{spec.cell_id} retry after OOM: {'OK' if ok else 'FAILED again'}")
@@ -453,7 +460,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "sweep launched from src/ does not create src/results/."
         ),
     )
-    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument(
+        "--gpu", type=int, default=0,
+        help=(
+            "GPU index; counts within an exported CUDA_VISIBLE_DEVICES, else "
+            "names a physical GPU. Resolved once; every cell gets that device."
+        ),
+    )
     parser.add_argument("--max-cells", type=int, default=DEFAULT_MAX_CELLS)
     parser.add_argument(
         "--cell-timeout-s", type=float, default=7200.0,
@@ -538,6 +551,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
     args.sweep_root = resolve_output_dir(args.sweep_root)
+    # Resolved before the grid is even listed, so a bad index fails a dry run
+    # too, and every cell gets the same device.
+    visible_devices = visible_device_for(args.gpu, os.environ.get(VISIBLE_DEVICES))
+    logger.info(f"--gpu {args.gpu}: cells get {VISIBLE_DEVICES}={visible_devices}")
 
     try:
         specs = build_run_specs(
@@ -573,7 +590,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ok, stderr_tail = run_one_with_oom_retry(
             spec,
             python_exe=args.python_exe,
-            gpu_id=args.gpu,
+            visible_devices=visible_devices,
             cell_timeout_s=args.cell_timeout_s,
             deadline_s=deadline,
         )

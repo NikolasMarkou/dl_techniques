@@ -22,13 +22,16 @@ import argparse
 import subprocess
 from pathlib import Path
 
-# The driver only ORCHESTRATES training subprocesses (each gets its own GPU via
-# --gpu / a hard-set CUDA_VISIBLE_DEVICES in the child env) and runs a CPU-side
+from train.common.gpu import env_with_visible_devices, hide_gpus, visible_device_for
+
+# The driver only ORCHESTRATES training subprocesses (each gets its GPU through
+# CUDA_VISIBLE_DEVICES in the child env, resolved from --gpu) and runs a CPU-side
 # comparison at the end. It must NOT hold a GPU context: a second TF context on
 # the training GPU fragments/starves the trainer's XLA allocator and can SIGABRT
 # it (observed as `Check failed: h != kInvalidChunkHandle`). Force the driver
-# process CPU-only BEFORE TF is imported below; the child env re-enables the GPU.
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
+# process CPU-only before TF lists a device; the child env re-enables the GPU.
+# The inherited value is kept: --gpu counts within it (D-110/D-116).
+INHERITED_VISIBLE_DEVICES = hide_gpus()
 
 from train.common.args import resolved_run_dir
 from train.common.compare_runs import compare_runs
@@ -47,9 +50,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--gpu', type=int, default=0,
-                        help='GPU index given to each training subprocess as '
-                             'CUDA_VISIBLE_DEVICES (the driver itself stays CPU-only); '
-                             'a negative value hides every GPU (CPU training).')
+                        help='GPU index for each training subprocess; counts within '
+                             'an exported CUDA_VISIBLE_DEVICES, else names a physical '
+                             'GPU (the driver itself stays CPU-only); a negative '
+                             'value hides every GPU (CPU training).')
     parser.add_argument('--strides', type=int, default=None,
                         help='Stem + inter-stage downsample stride; forwarded only when '
                              'given, so the trainer default (2: 16,8 feature maps for the '
@@ -85,11 +89,15 @@ def run_comparison(args: argparse.Namespace) -> None:
     stem = default_experiment_name(
         'convnext', args.model, 'stochastic', args.dataset, args.variant)
     run_dirs = {}
+    # Resolved once, before the first mode (an index outside the inherited list
+    # is refused here). A negative --gpu is this driver's CPU mode.
+    visible_devices = ('' if args.gpu < 0
+                       else visible_device_for(args.gpu, INHERITED_VISIBLE_DEVICES))
+    logger.info(f"children get CUDA_VISIBLE_DEVICES={visible_devices!r}")
 
     for mode in args.modes:
         experiment_name = f'{stem}_{mode}'
-        env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = str(args.gpu) if args.gpu >= 0 else ''
+        env = env_with_visible_devices(visible_devices)
         env['MPLBACKEND'] = 'Agg'
 
         cmd = [

@@ -53,7 +53,11 @@ import os
 
 # CRITICAL: Disable GPU BEFORE importing TensorFlow/Keras
 # This forces CPU-based LSTM implementation instead of CudnnRNNV3
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Through the one writer of the variable (D-116). Importing it imports
+# TensorFlow, which lists no device, so the pin still precedes device setup.
+from train.common.gpu import hide_gpus  # noqa: E402
+
+hide_gpus()
 
 import sys
 import argparse

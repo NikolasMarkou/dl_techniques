@@ -42,13 +42,14 @@ Usage::
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.eval_per_pixel_uncertainty \\
         --checkpoint results/20260701_convunext_denoiser/best_model.keras --gpu 1
 
-GPU note: GPU0 is typically busy with live training, so this script defaults to
-GPU1 and sets ``CUDA_VISIBLE_DEVICES`` BEFORE importing TensorFlow. NEVER run it
-on GPU0 in parallel with a training job.
+GPU note: GPU0 is typically busy with live training, so with neither ``--gpu``
+nor an exported ``CUDA_VISIBLE_DEVICES`` this script selects physical GPU1. An
+exported ``CUDA_VISIBLE_DEVICES`` is respected, and ``--gpu N`` counts within it
+(``train.common.gpu``, D-110/D-116). NEVER run it on GPU0 in parallel with a
+training job.
 """
 
 import os
-import sys
 import json
 import argparse
 from pathlib import Path
@@ -59,41 +60,18 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------
-# GPU selection MUST happen before TensorFlow is imported: TF grabs the
-# visible CUDA devices at import time, so CUDA_VISIBLE_DEVICES has to be
-# set first. Default is GPU1 (RTX 4070) because GPU0 (RTX 4090) is usually
-# occupied by a live training run and parallel GPU jobs are forbidden.
+# GPU selection happens in main(), through train.common.gpu, before the first
+# device use. Importing TensorFlow lists no device, so it need not precede the
+# imports (measured in step 13.7; the old import-time write also overwrote an
+# exported CUDA_VISIBLE_DEVICES, and did so in every importer, tests included).
+# Default is GPU1 (RTX 4070) because GPU0 (RTX 4090) is usually occupied by a
+# live training run and parallel GPU jobs are forbidden.
 # DECISION plan_2026-07-06_2d62fdd4/D-002: validate on the frozen convunext
 # checkpoint on GPU1, never in parallel with the GPU0 training job. Do NOT
-# switch the default to GPU0 or move this below the TF import.
+# switch the default to GPU0.
 # ---------------------------------------------------------------------
 
 DEFAULT_GPU: int = 1
-
-
-def _preparse_gpu(argv: List[str], default: int = DEFAULT_GPU) -> str:
-    """Extract ``--gpu N`` / ``--gpu=N`` from argv before argparse/TF import.
-
-    Returns the GPU id as a string suitable for ``CUDA_VISIBLE_DEVICES``. Falls
-    back to ``default`` when the flag is absent or malformed (never GPU0 by
-    default). ``--gpu -1`` disables CUDA (empty ``CUDA_VISIBLE_DEVICES``).
-    """
-    gpu = default
-    for i, tok in enumerate(argv):
-        if tok == "--gpu" and i + 1 < len(argv):
-            try:
-                gpu = int(argv[i + 1])
-            except ValueError:
-                gpu = default
-        elif tok.startswith("--gpu="):
-            try:
-                gpu = int(tok.split("=", 1)[1])
-            except ValueError:
-                gpu = default
-    return "" if gpu is not None and gpu < 0 else str(gpu)
-
-
-os.environ["CUDA_VISIBLE_DEVICES"] = _preparse_gpu(sys.argv)
 
 import matplotlib
 matplotlib.use("Agg")  # headless: avoid X11 crashes
@@ -102,6 +80,7 @@ import matplotlib.pyplot as plt
 import keras
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default, setup_gpu
 from dl_techniques.utils.conformal_denoiser_intervals import (
     calibrate_per_sigma,
     calibrate_per_sigma_normalized,
@@ -651,11 +630,20 @@ def main() -> None:
                         help="repo-root results dir for the eval output")
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--gpu", type=int, default=DEFAULT_GPU,
-                        help="GPU id (default 1; GPU0 is usually busy with training)")
+    parser.add_argument("--gpu", type=int, default=None,
+                        help="GPU index; counts within an exported "
+                             "CUDA_VISIBLE_DEVICES, else names a physical GPU. "
+                             "Default: the exported list as is, or physical GPU 1 "
+                             "when none is exported (GPU0 is usually busy with "
+                             "training)")
     args = parser.parse_args()
 
-    logger.info("CUDA_VISIBLE_DEVICES=%r", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    # DECISION plan-2026-10-14T062616-81938e81/D-116
+    # Respect an exported CUDA_VISIBLE_DEVICES; do NOT pin physical GPU 1 over
+    # it. GPU 1 is only the default when nothing was exported.
+    setup_gpu(gpu_or_default(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), DEFAULT_GPU))
+    logger.info("CUDA_VISIBLE_DEVICES=%r", os.environ.get(VISIBLE_DEVICES))
     run_evaluation(args)
 
 

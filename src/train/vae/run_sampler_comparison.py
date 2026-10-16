@@ -7,14 +7,20 @@ baseline — so the sampler's effect can be read off ``comparison.md`` +
 loss/metric curves.
 
 CPU-only driver rationale:
-    This module only ORCHESTRATES training subprocesses (each child gets its own
-    GPU via ``--gpu`` / a hard-set ``CUDA_VISIBLE_DEVICES`` in its env) and runs a
+    This module only ORCHESTRATES training subprocesses (each child gets its
+    GPU through ``CUDA_VISIBLE_DEVICES`` in its env, resolved from ``--gpu``) and runs a
     CPU-side comparison (pandas / matplotlib) at the end. It must NOT hold a GPU
     context: a second TF context on the training GPU fragments/starves the
     trainer's XLA allocator and can SIGABRT it (observed elsewhere as
     ``Check failed: h != kInvalidChunkHandle``). The driver process is forced
-    CPU-only BELOW (``CUDA_VISIBLE_DEVICES=''``) BEFORE any TF/keras import; each
-    child subprocess re-enables the GPU via its own env.
+    CPU-only BELOW (``hide_gpus``) before TF lists any device; each child
+    subprocess re-enables the GPU via its own env.
+
+GPU selection (D-110/D-116): ``--gpu N`` counts within the
+``CUDA_VISIBLE_DEVICES`` the driver inherited, or names a physical GPU when
+none was exported. Without ``--gpu``, an exported value is used as is, and
+physical GPU 1 is the default otherwise. The child is not given ``--gpu``: its
+list already holds the one selected device.
 
 Arms run STRICTLY SERIALLY (never in parallel) on a single GPU (default GPU1).
 
@@ -29,14 +35,19 @@ import sys
 import argparse
 import subprocess
 
-# Force the driver process CPU-only BEFORE TF is imported below (the driver only
+from train.common.gpu import child_visible_devices, env_with_visible_devices, hide_gpus
+
+# Force the driver process CPU-only BEFORE TF lists a device (the driver only
 # orchestrates subprocesses + a CPU-side compare_runs; a GPU context here would
 # starve the child trainer's XLA allocator). Each child re-enables the GPU via
-# its own env (see env['CUDA_VISIBLE_DEVICES'] below).
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
+# its own env; the inherited value is kept to resolve the child's device.
+INHERITED_VISIBLE_DEVICES = hide_gpus()
 
 from train.common.compare_runs import compare_runs
 from dl_techniques.utils.logger import logger
+
+# Physical GPU used when neither --gpu nor CUDA_VISIBLE_DEVICES is given.
+DEFAULT_GPU = 1
 
 # Fixed, ordered arm list. gaussian is the baseline the hypersphere arm is
 # compared against.
@@ -51,9 +62,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--dataset', type=str, default='mnist',
                         help='Dataset for every arm (default mnist — smaller/faster '
                              'than cifar10 for the A/B).')
-    parser.add_argument('--gpu', type=int, default=1,
-                        help='GPU id for the child trainers (default 1, per GPU1 pref). '
-                             'The driver itself stays CPU-only.')
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU index for the child trainers; counts within an '
+                             'exported CUDA_VISIBLE_DEVICES, else names a physical '
+                             'GPU. Default: the exported list as is, or physical '
+                             'GPU 1 when none is exported. The driver itself stays '
+                             'CPU-only.')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Optional epoch override forwarded to each arm '
                              '(default None = use the trainer default).')
@@ -70,6 +84,14 @@ def run_comparison(args: argparse.Namespace) -> None:
 
     repo_root = os.getcwd()
     run_dirs = {}
+    # Resolved once, before the first arm (an index outside the inherited list
+    # is refused here).
+    # DECISION plan-2026-10-14T062616-81938e81/D-116
+    # The child gets the resolved device and NO --gpu of its own; do NOT pass
+    # --gpu again: the child's setup_gpu would index its one-entry list and raise.
+    visible_devices = child_visible_devices(
+        args.gpu, INHERITED_VISIBLE_DEVICES, DEFAULT_GPU)
+    logger.info(f"children get CUDA_VISIBLE_DEVICES={visible_devices!r}")
 
     for arm in ARMS:
         before = {
@@ -77,8 +99,7 @@ def run_comparison(args: argparse.Namespace) -> None:
             if os.path.isdir(os.path.join('results', d))
         }
 
-        env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+        env = env_with_visible_devices(visible_devices)
         env['MPLBACKEND'] = 'Agg'
 
         cmd = [
@@ -86,7 +107,6 @@ def run_comparison(args: argparse.Namespace) -> None:
             '--sampler', arm,
             '--dataset', args.dataset,
             '--seed', str(args.seed),
-            '--gpu', str(args.gpu),
             '--no-epoch-analyzer',
         ]
         if args.smoke:

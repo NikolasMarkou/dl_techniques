@@ -8,6 +8,7 @@ asserted directly rather than by running cells.
 import json
 import logging
 import os
+import subprocess
 
 import train.embeddings_experimental.sweep as sweep_module
 
@@ -127,18 +128,33 @@ class TestCommand:
         )
         assert spec.cell_dir.startswith(str(tmp_path))
 
-    def test_the_gpu_and_backend_are_hard_set_not_defaulted(self):
-        """`setdefault` would inherit the parent shell and land on a stray GPU."""
-        import inspect
+    def test_the_gpu_and_backend_are_hard_set_not_defaulted(
+            self, monkeypatch, tmp_path):
+        """`setdefault` would inherit the parent shell and land on a stray GPU.
 
-        from train.embeddings_experimental import sweep
+        Behaviour, not text (step 13.7, D-116): the child gets exactly the
+        device ``main`` resolved, and ``Agg``, whatever the parent exported.
+        ``main``'s resolution of ``--gpu`` is guarded in
+        tests/test_train/test_launchers_select_their_gpu_by_the_d110_rule.py.
+        """
+        seen = []
 
-        source = inspect.getsource(sweep.run_one)
-        assert 'env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)' in source
-        assert 'env["MPLBACKEND"] = "Agg"' in source
-        # Match the CALL, not the word: the function's own comment explains
-        # why setdefault is wrong, and a bare substring test matches that.
-        assert "env.setdefault(" not in source
+        def fake_run(command, **kwargs):
+            seen.append(dict(kwargs["env"]))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(sweep_module.subprocess, "run", fake_run)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        monkeypatch.setenv("MPLBACKEND", "TkAgg")
+        spec = RunSpec(
+            model="ascii_bert", variant="tiny", pooling="mean", seed=0,
+            sweep_root=str(tmp_path),
+        )
+        ok, _ = sweep_module.run_one(
+            spec, python_exe="python", visible_devices="1", cell_timeout_s=10.0)
+        assert ok
+        assert seen[0]["CUDA_VISIBLE_DEVICES"] == "1"
+        assert seen[0]["MPLBACKEND"] == "Agg"
 
 
 class TestCollectResults:
@@ -630,7 +646,7 @@ class TestAnOomIsRetriedOnceAndNothingElseIs:
         monkeypatch.setattr(sweep_module, "run_one", fake_run_one)
         slept = []
         ok, tail = sweep_module.run_one_with_oom_retry(
-            self._spec(), python_exe="python", gpu_id=0, cell_timeout_s=10.0,
+            self._spec(), python_exe="python", visible_devices="0", cell_timeout_s=10.0,
             settle_s=1.0, sleep=slept.append,
         )
         return ok, tail, calls["n"], slept

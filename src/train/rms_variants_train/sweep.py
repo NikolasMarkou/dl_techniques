@@ -41,6 +41,11 @@ from typing import List, Optional, Sequence, Tuple
 import pandas as pd
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import (
+    VISIBLE_DEVICES,
+    env_with_visible_devices,
+    visible_device_for,
+)
 from train.rms_variants_train.config import NORM_VARIANTS
 
 
@@ -258,15 +263,16 @@ def run_one(
     python_exe: str,
     cell_timeout_s: int,
     deadline_s: float,
-    gpu_id: int,
+    visible_devices: str,
 ) -> Tuple[bool, str]:
     """Launch one subprocess. Returns (success, stderr_tail).
 
-    The ``gpu_id`` argument is the single source of truth for the subprocess
-    ``CUDA_VISIBLE_DEVICES`` value. It is **hard-set** (not ``setdefault``)
-    so the parent shell's CVD value cannot leak through and silently re-bind
-    the cell to the wrong GPU (the bug that killed plan_74a935a2's sweep,
-    LESSONS L93).
+    ``visible_devices`` is the cell's ``CUDA_VISIBLE_DEVICES`` value, resolved
+    ONCE by :func:`main` from ``--gpu`` with ``visible_device_for`` (D-110:
+    ``--gpu`` counts within the parent's exported list). It is **hard-set**
+    (not ``setdefault``), so an unresolved parent value cannot leak through and
+    silently re-bind the cell to the wrong GPU (the bug that killed
+    plan_74a935a2's sweep, LESSONS L93).
     """
     now = time.time()
     remaining = deadline_s - now
@@ -277,19 +283,19 @@ def run_one(
     os.makedirs(run_cfg.out_dir, exist_ok=True)
     log_path = os.path.join(run_cfg.out_dir, "cell.log")
     cmd = [python_exe, "-m", run_cfg.module, *run_cfg.extra_args]
-    env = os.environ.copy()
     # DECISION plan_2026-05-18_63121227/D-002: hard-set both env vars below
     # (was ``setdefault``, which silently honoured the parent shell). The
-    # ``--gpu`` CLI flag is the canonical source of truth; parent CVD is
-    # explicitly overridden. See LESSONS L93 for the failure mode.
+    # ``--gpu`` CLI flag is the canonical source of truth. See LESSONS L93 for
+    # the failure mode. It is resolved against the parent's exported list
+    # (D-116), not written as str(gpu_id).
+    env = env_with_visible_devices(visible_devices)
     env["MPLBACKEND"] = "Agg"
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     t0 = time.time()
     with open(log_path, "w") as log_f:
         log_f.write(
             f"# cmd: {' '.join(cmd)}\n"
-            f"# CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}\n"
+            f"# CUDA_VISIBLE_DEVICES={env[VISIBLE_DEVICES]}\n"
             f"# MPLBACKEND={env['MPLBACKEND']}\n"
             f"# timeout: {timeout}s\n\n"
         )
@@ -384,9 +390,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Total wall-clock cap (default 12h)")
     p.add_argument("--python-exe", type=str, default=sys.executable)
     p.add_argument("--gpu", type=int, default=0,
-                   help="GPU index. Hard-sets CUDA_VISIBLE_DEVICES for each "
-                        "cell subprocess, overriding any value inherited from "
-                        "the parent shell (LESSONS L93 / D-002). Default 0.")
+                   help="GPU index; counts within an exported "
+                        "CUDA_VISIBLE_DEVICES, else names a physical GPU. "
+                        "Resolved once; every cell subprocess gets that one "
+                        "device (LESSONS L93 / D-002, D-116). Default 0.")
     p.add_argument("--no-report", action="store_true",
                    help="Skip the report.py invocation at the end.")
     # Plan plan_e1f12eab Step 5 / D-003 additions.
@@ -407,6 +414,11 @@ def main() -> int:
     args = _parse_args()
     if args.mode is not None:
         args.modes = [args.mode]
+    # Before anything is created or launched: an index outside the exported
+    # list is refused here, not in the first cell.
+    visible_devices = visible_device_for(args.gpu, os.environ.get(VISIBLE_DEVICES))
+    logger.info(f"[sweep] --gpu {args.gpu}: cells get "
+                f"{VISIBLE_DEVICES}={visible_devices}")
 
     os.makedirs(args.out_dir, exist_ok=True)
     sweep_log_path = os.path.join(args.out_dir, "sweep.log")
@@ -437,7 +449,7 @@ def main() -> int:
             python_exe=args.python_exe,
             cell_timeout_s=cell_timeout,
             deadline_s=deadline,
-            gpu_id=args.gpu,
+            visible_devices=visible_devices,
         )
         if ok:
             successes += 1

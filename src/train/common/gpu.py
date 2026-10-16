@@ -1,7 +1,7 @@
 """Common GPU setup utilities for training scripts."""
 
 import os
-from typing import Optional
+from typing import Dict, Mapping, Optional
 
 import keras
 import tensorflow as tf
@@ -10,6 +10,11 @@ from dl_techniques.utils.logger import logger
 
 
 # ---------------------------------------------------------------------
+
+# The variable this module is the only writer of (census in
+# tests/test_train/test_common_setup_gpu_respects_visible_devices.py).
+VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
+
 
 def visible_device_for(gpu_id: int, visible: Optional[str]) -> str:
     """The ``CUDA_VISIBLE_DEVICES`` value that selects GPU ``gpu_id``.
@@ -52,6 +57,91 @@ def visible_device_for(gpu_id: int, visible: Optional[str]) -> str:
     return entries[gpu_id]
 
 
+def gpu_or_default(
+        gpu_id: Optional[int],
+        visible: Optional[str],
+        default_gpu: int,
+) -> Optional[int]:
+    """The GPU index a script with its own default device selects.
+
+    Interface contract (callers: :func:`child_visible_devices`,
+    ``bfunet/eval_per_pixel_uncertainty.py``):
+
+    * An explicit ``gpu_id`` wins and is returned unchanged.
+    * With no ``gpu_id``, an exported ``CUDA_VISIBLE_DEVICES`` (``visible`` is
+      not ``None``, including the empty string) is respected: returns ``None``,
+      meaning "select nothing, keep the exported list".
+    * With neither, returns ``default_gpu``, which then names a physical GPU.
+    * Pure: reads and writes no environment.
+    """
+    if gpu_id is not None:
+        return gpu_id
+    return None if visible is not None else default_gpu
+
+
+def child_visible_devices(
+        gpu_id: Optional[int],
+        visible: Optional[str],
+        default_gpu: int,
+) -> str:
+    """The ``CUDA_VISIBLE_DEVICES`` value to give a child process.
+
+    Interface contract (callers: ``vae/run_sampler_comparison.py``,
+    ``logic/multiseed_sweep.py``): :func:`gpu_or_default` picks the index, and
+    :func:`visible_device_for` resolves it against ``visible`` (the launcher's
+    own, inherited value). When nothing is selected, ``visible`` is returned
+    verbatim. Raises ``ValueError`` as :func:`visible_device_for` does. Pure.
+    """
+    selection = gpu_or_default(gpu_id, visible, default_gpu)
+    if selection is None:
+        return visible
+    return visible_device_for(selection, visible)
+
+
+def env_with_visible_devices(
+        value: str,
+        base: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """A copy of ``base`` whose ``CUDA_VISIBLE_DEVICES`` is ``value``.
+
+    Interface contract (callers: every launcher that starts a training child):
+
+    * ``value`` is an already resolved list -- from :func:`visible_device_for`
+      or :func:`child_visible_devices`, or ``""`` for a CPU-only child. Never
+      pass ``str(gpu_id)``: that is the rule D-110 replaced.
+    * ``base`` defaults to ``os.environ``; it is copied, never modified.
+    * Returns the new mapping, ready for ``subprocess.run(env=...)``.
+    """
+    env = dict(os.environ if base is None else base)
+    # DECISION plan-2026-10-14T062616-81938e81/D-116
+    # Launchers build a child's environment HERE; do NOT write
+    # env["CUDA_VISIBLE_DEVICES"] = str(gpu_id) in a launcher. Six scripts kept
+    # that write after D-110 and sent `CUDA_VISIBLE_DEVICES=1 ... --gpu 0`
+    # children to physical GPU 0; a census test holds this module as the only
+    # writer.
+    env[VISIBLE_DEVICES] = value
+    return env
+
+
+def hide_gpus() -> Optional[str]:
+    """Make THIS process CPU-only, before TensorFlow lists its devices.
+
+    Interface contract (callers: the comparison drivers, which orchestrate
+    GPU children and must not hold a GPU context themselves; the time-series
+    export scripts, whose exported graph must be device-neutral):
+
+    * Sets ``CUDA_VISIBLE_DEVICES`` to the empty string in ``os.environ``.
+    * Returns the value it replaced (``None`` if the variable was unset), so a
+      driver can still resolve its children's ``--gpu`` against what it
+      inherited.
+    * Takes effect when called before the first device listing; importing
+      TensorFlow (as this module does) lists none (measured in step 13.7).
+    """
+    inherited = os.environ.get(VISIBLE_DEVICES)
+    os.environ[VISIBLE_DEVICES] = ""
+    return inherited
+
+
 def setup_gpu(gpu_id: Optional[int] = None):
     """Configure GPU settings for optimal training.
 
@@ -67,8 +157,8 @@ def setup_gpu(gpu_id: Optional[int] = None):
         ValueError: ``gpu_id`` is negative or outside the visible list.
     """
     if gpu_id is not None:
-        selected = visible_device_for(gpu_id, os.environ.get("CUDA_VISIBLE_DEVICES"))
-        os.environ["CUDA_VISIBLE_DEVICES"] = selected
+        selected = visible_device_for(gpu_id, os.environ.get(VISIBLE_DEVICES))
+        os.environ[VISIBLE_DEVICES] = selected
         logger.info(f"--gpu {gpu_id}: set CUDA_VISIBLE_DEVICES={selected}")
 
     gpus = tf.config.experimental.list_physical_devices('GPU')

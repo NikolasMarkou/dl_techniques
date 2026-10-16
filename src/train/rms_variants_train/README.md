@@ -131,7 +131,7 @@ src/train/rms_variants_train/
 ├── stats.py                  re-export from train.common.stats
 ├── hypotheses.py             VARIANT_HYPOTHESES registry + evaluate_hypothesis / evaluate_all
 ├── callbacks.py              7 callbacks: 4 mechanistic probes + Calibration + Robustness + DistributionShift
-├── sweep.py                  subprocess sweep driver (--gpu hard-sets CUDA_VISIBLE_DEVICES per cell)
+├── sweep.py                  subprocess sweep driver (--gpu, counted within an exported CUDA_VISIBLE_DEVICES, is resolved once and hard-set per cell)
 ├── report.py                 summary.md writer + post-hoc derivations
 ├── norm_overhead_bench.py    standalone per-norm compute-overhead CLI
 ├── README.md                 this file
