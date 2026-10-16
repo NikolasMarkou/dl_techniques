@@ -181,24 +181,16 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # in a single test body. It is promoted here so the next test anywhere in the
 # suite that reaches a trainer entry point is watched by default rather than by
 # remembering.
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_ROOT = REPO_ROOT / "results"
-
-
-def _results_entries() -> frozenset:
-    """Names directly under the repo-root ``results/``; empty if absent.
-
-    One ``os.scandir`` on ONE directory, no recursion and no ``stat``, because
-    this runs twice per test for the whole suite.
-
-    :return: entry names, or an empty frozenset when ``results/`` does not
-        exist (a fresh clone) or is unreadable.
-    """
-    try:
-        with os.scandir(RESULTS_ROOT) as it:
-            return frozenset(entry.name for entry in it)
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
-        return frozenset()
+# The listing and the watched root live in `tests/results_session_guard.py`,
+# which also holds the SESSION-level half of this guard (a write made outside
+# any one test's window: a module/session fixture, an import, between tests).
+# Importing its two hooks here registers them for every run under tests/.
+from tests.results_session_guard import (  # noqa: E402,F401
+    pytest_sessionfinish,
+    pytest_sessionstart,
+    results_entries,
+    results_root,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -222,9 +214,10 @@ def no_repo_root_results_writes():
     :raises AssertionError: if new entries appear directly under ``results/``
         while the test runs.
     """
-    before = _results_entries()
+    root = results_root()
+    before = results_entries(root)
     yield
-    new = sorted(_results_entries() - before)
+    new = sorted(results_entries(root) - before)
     assert not new, (
         f"this test wrote into the repo-root results/ directory: {new}. "
         "A trainer's relative output_dir resolves against the repo root; route "

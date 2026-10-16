@@ -221,6 +221,9 @@ def test_a_dataset_smaller_than_one_batch_is_refused(tmp_path):
     ("--synthetic", "--image-dir", "x", "--captions-file", "y"),
     ("--image-dir", "x"),
 ])
-def test_the_command_line_needs_exactly_one_data_source(argv):
+def test_the_command_line_needs_exactly_one_data_source(argv, tmp_path):
+    # The output dir is routed through tmp_path even though the parse refuses
+    # first: a parse regression must not train into the repo-root results/
+    # (D-048, D-084).
     with pytest.raises(SystemExit):
-        main(list(argv))
+        main([*argv, "--output-dir", str(tmp_path / "run")])
