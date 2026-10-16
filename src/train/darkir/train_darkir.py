@@ -20,7 +20,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks, load_dataset
+from train.common import setup_gpu, create_callbacks, load_dataset
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -92,28 +92,56 @@ def load_restoration_dataset(
     return train_ds, val_ds, len(val_x)
 
 
+#: Gamma and noise level of the synthetic low-light degradation.
+SYNTHETIC_GAMMA = 2.5
+SYNTHETIC_NOISE_STD = 0.02
+
+
+def synthetic_low_light_pairs(
+        images: np.ndarray, img_size: Tuple[int, int], noise_seed: int,
+) -> tf.data.Dataset:
+    """Lazily map ``[0, 1]`` CIFAR images to ``(low, high)`` pairs at ``img_size``.
+
+    ``high`` is the image resized to ``img_size``; ``low`` is
+    ``clip(high ** SYNTHETIC_GAMMA + noise, 0, 1)`` with Gaussian noise of std
+    ``SYNTHETIC_NOISE_STD``. The resize and the degradation run per element
+    inside ``tf.data``, so only the 32x32 source arrays are held in memory, and
+    the noise is a stateless draw keyed on ``(noise_seed, index)``: each image
+    gets the same noise on every epoch, as the materialised copy had.
+
+    :param images: ``(N, H, W, 3)`` float32 images in ``[0, 1]``.
+    :param img_size: Output ``(height, width)``.
+    :param noise_seed: Seed of the stateless noise; use a different one per split.
+    :return: An unbatched dataset of ``(low, high)`` float32 pairs.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-106
+    # Do NOT resize and darken the whole split up front with NumPy: at 128 px
+    # that is about 10 GB per copy for CIFAR-10's 50,000 training images.
+    def to_pair(index, image):
+        high = tf.image.resize(image, img_size)
+        noise = tf.random.stateless_normal(
+            tf.shape(high), seed=tf.stack([tf.constant(noise_seed, tf.int64), index]),
+            stddev=SYNTHETIC_NOISE_STD,
+        )
+        low = tf.clip_by_value(high ** SYNTHETIC_GAMMA + noise, 0.0, 1.0)
+        return low, high
+
+    return tf.data.Dataset.from_tensor_slices(images).enumerate().map(
+        to_pair, num_parallel_calls=tf.data.AUTOTUNE)
+
+
 def _create_synthetic_dataset(img_size, batch_size):
     """Create synthetic low-light data from CIFAR-10 for testing."""
     (x_train, _), (x_test, _), _, _ = load_dataset("cifar10")
 
-    x_train = tf.image.resize(x_train, img_size).numpy()
-    x_test = tf.image.resize(x_test, img_size).numpy()
-
-    def darken(img):
-        img_dark = img ** 2.5
-        noise = np.random.normal(0, 0.02, img.shape)
-        return np.clip(img_dark + noise, 0, 1).astype('float32')
-
-    x_train_low = darken(x_train)
-    x_test_low = darken(x_test)
-
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train_low, x_train))
+    train_ds = synthetic_low_light_pairs(x_train, img_size, noise_seed=0)
     train_ds = train_ds.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    val_ds = tf.data.Dataset.from_tensor_slices((x_test_low, x_test))
+    val_ds = synthetic_low_light_pairs(x_test, img_size, noise_seed=1)
     val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    logger.info(f"Generated synthetic dataset: {len(x_train)} train, {len(x_test)} val samples")
+    logger.info(f"Synthetic dataset: {len(x_train)} train, {len(x_test)} val samples, "
+                f"resized to {img_size} per batch")
     return train_ds, val_ds, len(x_test)
 
 
@@ -248,28 +276,58 @@ def run_model_analysis(
 ):
     """Run weight distribution and training dynamics analysis."""
     logger.info("Running model analysis...")
-    try:
-        analysis_config = AnalysisConfig(
-            analyze_weights=True,
-            analyze_training_dynamics=True,
-            analyze_calibration=False,
-            save_plots=True,
-            save_format='png',
-        )
-        analysis_dir = os.path.join(results_dir, "model_analysis")
-        analyzer = ModelAnalyzer(
-            models={model_name: model},
-            training_history={model_name: training_history.history},
-            config=analysis_config,
-            output_dir=analysis_dir,
-        )
-        analyzer.analyze(data=None)
-        logger.info(f"Model analysis saved to {analysis_dir}")
-    except Exception as e:
-        logger.warning(f"Model analysis failed: {e}")
+    # The information-flow analysis needs input data and this call passes
+    # none; left at its default (on) it raised "Data is required for:
+    # {'information_flow'}" on every run, which the old `except` logged (D-105
+    # of plan-2026-10-14T062616-81938e81). A failure now fails the run.
+    analysis_config = AnalysisConfig(
+        analyze_weights=True,
+        analyze_training_dynamics=True,
+        analyze_calibration=False,
+        analyze_information_flow=False,
+        save_plots=True,
+        save_format='png',
+    )
+    analysis_dir = os.path.join(results_dir, "model_analysis")
+    analyzer = ModelAnalyzer(
+        models={model_name: model},
+        training_history={model_name: training_history.history},
+        config=analysis_config,
+        output_dir=analysis_dir,
+    )
+    analyzer.analyze(data=None)
+    logger.info(f"Model analysis saved to {analysis_dir}")
 
 
 # ---------------------------------------------------------------------
+
+def cosine_decay_steps(train_ds: tf.data.Dataset, epochs: int, warmup_steps: int) -> int:
+    """Steps of the cosine decay that follows the warmup, from the real run length.
+
+    ``WarmupSchedule`` starts the primary schedule after the warmup, so the
+    decay spans ``epochs * steps_per_epoch - warmup_steps`` steps and ends on
+    the last training step. ``steps_per_epoch`` is the batched training set's
+    cardinality.
+
+    :param train_ds: The batched, finite training dataset ``fit`` iterates.
+    :param epochs: Number of epochs.
+    :param warmup_steps: Warmup steps ahead of the decay.
+    :return: The decay length, at least 1.
+    :raises ValueError: If the dataset's cardinality is unknown or infinite.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-105
+    # Do NOT go back to `epochs * 1000` (synthetic) / `epochs * 500` (paired):
+    # neither is the step count of any run, so the LR reached its floor after
+    # 16 % of a synthetic 128 px run at batch 8 and never decayed fully on a
+    # small paired set.
+    steps_per_epoch = int(train_ds.cardinality())
+    if steps_per_epoch < 1:
+        raise ValueError(
+            f"The training dataset's cardinality is {steps_per_epoch} (unknown or "
+            f"infinite); the cosine decay needs the real number of steps per epoch."
+        )
+    return max(1, epochs * steps_per_epoch - warmup_steps)
+
 
 def train_model(args: argparse.Namespace):
     """Main training loop."""
@@ -304,7 +362,7 @@ def train_model(args: argparse.Namespace):
         "warmup_steps": args.warmup_steps,
         "warmup_start_lr": 1e-7,
         "learning_rate": args.learning_rate,
-        "decay_steps": args.epochs * (1000 if args.dataset_path is None else 500),
+        "decay_steps": cosine_decay_steps(train_ds, args.epochs, args.warmup_steps),
         "alpha": 1e-6,
     })
     optimizer = optimizer_builder({
@@ -403,8 +461,24 @@ def train_model(args: argparse.Namespace):
 
 # ---------------------------------------------------------------------
 
-def main():
-    parser = create_base_argument_parser(description="Train DarkIR for Image Restoration")
+def build_parser() -> argparse.ArgumentParser:
+    """The DarkIR command line: only flags ``train_model`` reads.
+
+    It no longer extends ``create_base_argument_parser``: of that parser's
+    flags, ``--dataset``, ``--image-size`` (DarkIR's size is ``--img-size``),
+    ``--lr-schedule`` (the schedule is always cosine with warmup) and
+    ``--show-plots`` were accepted and never read (D-105 of
+    plan-2026-10-14T062616-81938e81).
+    """
+    parser = argparse.ArgumentParser(description="Train DarkIR for Image Restoration")
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=8, help='Training batch size')
+    parser.add_argument('--learning-rate', type=float, default=2e-4,
+                        help='Peak learning rate of the cosine schedule')
+    parser.add_argument('--weight-decay', type=float, default=1e-4, help='AdamW weight decay')
+    parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU device index to use (default: all GPUs)')
 
     # DarkIR-specific args
     parser.add_argument('--dataset-path', type=str, default=None,
@@ -421,15 +495,11 @@ def main():
                         help='Weight of the bottleneck side loss (only used with --side-loss)')
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Directory under which the timestamped run directory is created')
+    return parser
 
-    # Override base defaults for restoration task
-    parser.set_defaults(
-        batch_size=8,
-        learning_rate=2e-4,
-        patience=20,
-    )
 
-    args = parser.parse_args()
+def main():
+    args = build_parser().parse_args()
 
     try:
         train_model(args)
