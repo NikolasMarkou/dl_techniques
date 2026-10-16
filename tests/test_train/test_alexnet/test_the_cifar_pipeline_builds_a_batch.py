@@ -40,3 +40,35 @@ def test_the_cifar_pipeline_builds_a_batch(monkeypatch):
     )
     assert (steps, val_steps) == (2, 1)
     assert next(iter(val_ds))[0].shape == (2, 64, 64, 3)
+
+
+def _tiny_white(*_args, **_kwargs):
+    return _tiny_cifar()
+
+
+def test_cifar100_is_normalised_with_cifar100_statistics(monkeypatch):
+    # Step 13.5 (D-103): the CIFAR-100 path used the CIFAR-10 mean/std.
+    from train.common import CIFAR100_MEAN, CIFAR100_STD
+
+    monkeypatch.setattr(keras.datasets.cifar100, "load_data", _tiny_white)
+    config = module.TrainingConfig(
+        dataset="cifar100", image_size=64, batch_size=2, augment_data=False,
+    )
+    train_ds, _val_ds, _steps, _val_steps = module.create_cifar_dataset(config)
+    images, _labels = next(iter(train_ds))
+    expected = (1.0 - np.asarray(CIFAR100_MEAN)) / np.asarray(CIFAR100_STD)
+    np.testing.assert_allclose(
+        np.asarray(images)[0, 0, 0], expected,
+        rtol=4 * np.finfo(np.float32).eps,
+    )
+
+
+def test_the_cifar100_statistics_are_the_training_set_statistics():
+    # Re-derived from the data (population per-channel mean/std of the 50,000
+    # training images in [0, 1], float64); the constant keeps 4 places.
+    from train.common import CIFAR100_MEAN, CIFAR100_STD
+
+    (x, _), _ = keras.datasets.cifar100.load_data()
+    x = x.reshape(-1, 3).astype(np.float64) / 255.0
+    np.testing.assert_allclose(CIFAR100_MEAN, x.mean(axis=0), rtol=0, atol=5e-5)
+    np.testing.assert_allclose(CIFAR100_STD, x.std(axis=0), rtol=0, atol=5e-5)

@@ -21,6 +21,16 @@ from dl_techniques.utils.logger import logger
 CIFAR10_MEAN = [0.4914, 0.4822, 0.4465]
 CIFAR10_STD = [0.2470, 0.2435, 0.2616]
 
+# CIFAR-100 per-channel mean/std, derived from the data the same way as the
+# CIFAR-10 pair above (which it reproduces to 4 places): the population mean
+# and standard deviation of every pixel of the 50,000 training images scaled
+# to [0, 1], computed in float64 (2026-10-16, `keras.datasets.cifar100`):
+# mean 0.50707516 0.48654887 0.44091784, std 0.26733429 0.25643846 0.27615047.
+# The often-quoted (0.2675, 0.2565, 0.2761) / 0.4867 do not come out of this
+# computation.
+CIFAR100_MEAN = [0.5071, 0.4865, 0.4409]
+CIFAR100_STD = [0.2673, 0.2564, 0.2762]
+
 
 # ---------------------------------------------------------------------
 # ImageNet per-channel normalisation constants (the canonical ILSVRC /
@@ -509,6 +519,55 @@ SUPPORTED_DATASETS: Tuple[str, ...] = tuple(DATASET_NUM_CLASSES)
 # Element map function: (image, label) -> whatever the trainer wants the batch element to be.
 ElementMapFn = Callable[..., Any]
 
+#: ``crop_policy`` values of :func:`build_raw_image_dataset`. ``"resize"`` is the
+#: original behaviour every existing caller gets. ``"random_resized_crop"`` is the
+#: ImageNet-classifier recipe (Inception-style random-resized crop plus flip for
+#: training, resize-then-centre-crop for evaluation), imagenette only.
+CROP_POLICIES: Tuple[str, ...] = ("resize", "random_resized_crop")
+
+#: Evaluation centre-crop fraction of ``"random_resized_crop"``: the shorter side
+#: is resized to ``image_size / EVAL_CROP_FRACTION`` and the centre
+#: ``image_size`` square is kept (the torchvision 256 -> 224 ratio).
+EVAL_CROP_FRACTION = 0.875
+
+#: Area and aspect-ratio ranges of the training random-resized crop (the
+#: Inception / torchvision ``RandomResizedCrop`` defaults).
+RANDOM_RESIZED_CROP_AREA = (0.08, 1.0)
+RANDOM_RESIZED_CROP_RATIO = (3.0 / 4.0, 4.0 / 3.0)
+
+
+def _random_resized_crop(
+        image: tf.Tensor, image_size: int, seed: Optional[int] = None,
+) -> tf.Tensor:
+    """Random-resized crop plus horizontal flip of one ``[0, 1]`` image.
+
+    Samples a box covering :data:`RANDOM_RESIZED_CROP_AREA` of the image at an
+    aspect ratio in :data:`RANDOM_RESIZED_CROP_RATIO` (falling back to the whole
+    image when no box fits), resizes it to ``image_size`` square, then flips.
+    """
+    begin, size, _ = tf.image.sample_distorted_bounding_box(
+        tf.shape(image),
+        bounding_boxes=tf.zeros([0, 0, 4], tf.float32),
+        min_object_covered=0.0,
+        aspect_ratio_range=RANDOM_RESIZED_CROP_RATIO,
+        area_range=RANDOM_RESIZED_CROP_AREA,
+        max_attempts=10,
+        use_image_if_no_bounding_boxes=True,
+        seed=seed,
+    )
+    image = tf.slice(image, begin, size)
+    image = tf.image.resize(image, (image_size, image_size), method="bilinear")
+    return tf.image.random_flip_left_right(image, seed=seed)
+
+
+def _resize_and_centre_crop(image: tf.Tensor, image_size: int) -> tf.Tensor:
+    """Resize the shorter side to ``image_size / EVAL_CROP_FRACTION``, keep the centre square."""
+    shape = tf.cast(tf.shape(image)[:2], tf.float32)
+    scale = (image_size / EVAL_CROP_FRACTION) / tf.reduce_min(shape)
+    resized = tf.cast(tf.round(shape * scale), tf.int32)
+    image = tf.image.resize(image, resized, method="bilinear")
+    return tf.image.resize_with_crop_or_pad(image, image_size, image_size)
+
 
 def _normalization_constants(dataset: str) -> Tuple[List[float], List[float]]:
     """Per-channel mean/std for the [0,1]-scaled images of ``dataset``."""
@@ -545,6 +604,7 @@ def build_raw_image_dataset(
         shuffle_buffer: int = 4096,
         seed: Optional[int] = None,
         shuffle_files_seed: Optional[int] = None,
+        crop_policy: str = "resize",
         num_parallel_calls: int = tf.data.AUTOTUNE,
         prefetch_buffer: int = tf.data.AUTOTUNE,
 ) -> Tuple[tf.data.Dataset, int, int]:
@@ -596,6 +656,16 @@ def build_raw_image_dataset(
             per process, two processes) gave four DIFFERENT label sequences, with the
             per-class count of one class ranging 16-25 out of 256 samples. See
             decisions.md D-040.
+        crop_policy: Image geometry, one of :data:`CROP_POLICIES`. ``"resize"``
+            (the default, what every caller before 2026-10-16 gets) resizes
+            the whole image to ``image_size`` square and augments with flip
+            plus reflect-pad-and-crop. ``"random_resized_crop"`` (imagenette
+            only) trains on a random-resized crop plus flip of the
+            full-resolution decode and evaluates on a resize to
+            ``image_size / EVAL_CROP_FRACTION`` then centre crop; with
+            ``augment=False`` the training pipeline uses the evaluation
+            geometry. The crop runs before the shuffle buffer, so the buffer
+            holds ``image_size`` images as in ``"resize"``.
         num_parallel_calls: ``tf.data`` parallelism.
         prefetch_buffer: ``tf.data`` prefetch depth.
 
@@ -605,7 +675,8 @@ def build_raw_image_dataset(
 
     Raises:
         ValueError: If ``dataset`` is not supported or ``image_size``/``batch_size`` are
-            non-positive; if BOTH ``element_map_fn`` and ``indexed_element_map_fn`` are
+            non-positive; if ``crop_policy`` is unknown, or is
+            ``"random_resized_crop"`` with a dataset other than imagenette; if BOTH ``element_map_fn`` and ``indexed_element_map_fn`` are
             supplied; or if ``indexed_element_map_fn`` is supplied with
             ``is_training=False``.
     """
@@ -646,6 +717,15 @@ def build_raw_image_dataset(
         raise ValueError(f"image_size must be positive, got {image_size}")
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if crop_policy not in CROP_POLICIES:
+        raise ValueError(
+            f"Unknown crop_policy {crop_policy!r}; known: {list(CROP_POLICIES)}"
+        )
+    if crop_policy == "random_resized_crop" and dataset != "imagenette":
+        raise ValueError(
+            "crop_policy='random_resized_crop' is implemented for imagenette "
+            f"only (full-resolution records to crop from), not {dataset!r}"
+        )
 
     mean_vals, std_vals = _normalization_constants(dataset)
     mean = tf.constant(mean_vals, dtype=tf.float32, shape=(1, 1, 3))
@@ -678,11 +758,24 @@ def build_raw_image_dataset(
             ds = builder.as_dataset(
                 split=split, shuffle_files=is_training, read_config=read_config)
 
+        # DECISION plan-2026-10-14T062616-81938e81/D-104
+        # Do NOT move the random-resized crop after `.shuffle()` with the other
+        # augmentation: the buffer would then hold full-resolution decodes
+        # (~1.5 MB each as float32, 4096 of them by default) instead of
+        # `image_size` crops. Crop-then-shuffle draws the same distribution.
+        random_crop = (
+            crop_policy == "random_resized_crop" and is_training and augment)
+
         def _decode(element: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
             # Imagenette records are VARIABLE-SIZE (e.g. 320x396x3). The resize is MANDATORY:
             # without it the batch is ragged and tf.data raises at the first batch.
             image = tf.cast(element["image"], tf.float32) / 255.0
-            image = tf.image.resize(image, (image_size, image_size), method="bilinear")
+            if crop_policy == "resize":
+                image = tf.image.resize(image, (image_size, image_size), method="bilinear")
+            elif random_crop:
+                image = _random_resized_crop(image, image_size, seed=seed)
+            else:
+                image = _resize_and_centre_crop(image, image_size)
             image = tf.ensure_shape(image, (image_size, image_size, 3))
             return image, tf.cast(element["label"], tf.int32)
 
@@ -713,7 +806,8 @@ def build_raw_image_dataset(
 
     if is_training:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
-        if augment:
+        # "random_resized_crop" augmented in `_decode`; only "resize" augments here.
+        if augment and crop_policy == "resize":
             ds = ds.map(
                 lambda img, lbl: (_augment(img, seed=seed), lbl),
                 num_parallel_calls=num_parallel_calls,

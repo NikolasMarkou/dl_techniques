@@ -8,7 +8,7 @@ from train.common.args import (
     explicitly_set_flags,
     resolved_run_dir,
 )
-from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
+from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, CIFAR100_MEAN, CIFAR100_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
 from train.common.optimizer import build_optimizer
 from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback, resolve_monitor_mode
 from train.common.augment import augment_patch, augment_pair
@@ -163,6 +163,8 @@ __all__ = [
     "bytes_feature",
     "CIFAR10_MEAN",
     "CIFAR10_STD",
+    "CIFAR100_MEAN",
+    "CIFAR100_STD",
     "collect_image_paths",
     "config_values_from_args",
     "convert_keras_history_to_training_history",

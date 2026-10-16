@@ -1,14 +1,28 @@
 """
 AlexNet classification training (Pattern 1: vision classification).
 
-Trains ``dl_techniques.models.vision.alexnet.AlexNet`` on CIFAR-10 / CIFAR-100 /
-ImageNet. Structure follows ``train/vit/train_vit.py`` (Pattern 1 exemplar) without
-ViT's deep-supervision or patch-embedding paths, none of which apply here.
+Trains ``dl_techniques.models.vision.alexnet.AlexNet`` on Imagenette (the default),
+CIFAR-10, CIFAR-100 or ImageNet. Structure follows ``train/vit/train_vit.py``
+(Pattern 1 exemplar) without ViT's deep-supervision or patch-embedding paths, none of
+which apply here.
 
-Paper recipe (Krizhevsky et al. 2012, section 4): 90 epochs, SGD with momentum 0.9,
-learning rate 0.1 **halved every 30 epochs**, weight decay 5e-4, batch size 256. That
-is the default here. On modern hardware the schedule is aggressive and usually wants
-tuning -- pass ``--lr-schedule`` to change it.
+Default recipe: 90 epochs, SGD with momentum 0.9, learning rate 0.1 **divided by 10
+every 30 epochs** (``--lr-decay-factor 0.1``), weight decay 5e-4, batch size 256. On
+modern hardware the schedule is aggressive and usually wants tuning -- pass
+``--lr-schedule`` to change it. The paper (Krizhevsky et al. 2012, section 5) used a
+batch of 128 and a learning rate of 0.01, divided by 10 when the validation error
+stopped improving (three times in about 90 epochs); the batch and learning-rate
+defaults here are not the paper's.
+
+Imagenette (``imagenette/320px-v2`` from TFDS, read from ``$TFDS_DATA_DIR`` and
+never downloaded; 9,469 train / 3,925 validation images, 10 classes) is the
+default because AlexNet is an ImageNet architecture and Imagenette is a
+10-class ImageNet subset that is on disk. It runs at the model's own 227 input
+through the shared ``train.common.build_raw_image_dataset`` with
+``crop_policy="random_resized_crop"``: a random-resized crop plus flip for
+training, a resize to 227 / 0.875 = 259 then centre crop for validation, and
+the ImageNet mean/std. CIFAR-10 and CIFAR-100 are each normalised with their own
+training-set statistics.
 
 Note the input size. AlexNet was defined at 227x227, and the port's default is
 227. CIFAR's native 32x32 is upsampled to ``--image-size``; at 32 the feature map
@@ -17,7 +31,11 @@ smaller), so a CIFAR run uses a small but legal size such as 64 or 128, and pays
 proportional input cost. 227 is the faithful choice and the expensive one.
 
 Usage:
-    # Paper-faithful ImageNet-scale defaults
+    # Default: Imagenette at 227 (TFDS records on disk)
+    python -m train.alexnet.train_alexnet --epochs 30 --batch-size 128 \\
+        --learning-rate 0.01 --gpu 0
+
+    # ImageNet-scale run from a class-directory tree
     python -m train.alexnet.train_alexnet --dataset imagenet \\
         --train-data-dir /data/imagenet/train --val-data-dir /data/imagenet/val \\
         --image-size 227 --epochs 90 --batch-size 256 \\
@@ -47,6 +65,10 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     CIFAR10_MEAN,
     CIFAR10_STD,
+    CIFAR100_MEAN,
+    CIFAR100_STD,
+    IMAGENETTE_NUM_CLASSES,
+    build_raw_image_dataset,
     make_imagenet_filesystem_dataset,
     EpochMetricsPlotCallback,
 )
@@ -73,14 +95,15 @@ from dl_techniques.models.vision.alexnet.model import MIN_SPATIAL_EXTENT
 class TrainingConfig:
     """Configuration for AlexNet classification training.
 
-    Defaults reproduce the paper's ImageNet recipe. There is no variant field
+    The data default is Imagenette; the optimisation defaults are the module
+    docstring's recipe (not the paper's batch or learning rate). There is no variant field
     because ``models/vision/alexnet`` has no variant table: AlexNet is a single
     architecture, and inventing a variant selector here would have nothing to
     select.
     """
 
     # Data
-    dataset: str = "imagenet"  # cifar10 | cifar100 | imagenet
+    dataset: str = "imagenette"  # imagenette | cifar10 | cifar100 | imagenet
     train_data_dir: Optional[str] = None  # only used for imagenet
     val_data_dir: Optional[str] = None  # only used for imagenet
     image_size: int = 227
@@ -88,7 +111,7 @@ class TrainingConfig:
     augment_data: bool = True
 
     # Model
-    num_classes: int = 1000
+    num_classes: int = IMAGENETTE_NUM_CLASSES
     dropout_rate: float = 0.5
     include_top: bool = True
     #: Local-response-normalization hyper-parameters; None keeps the paper's
@@ -105,8 +128,8 @@ class TrainingConfig:
     optimizer_type: str = "sgd"  # sgd | adam | adamw
     lr_schedule_type: str = "exponential_decay"  # exponential_decay | cosine_decay | cosine_decay_restarts
     #: `exponential_decay` multiplies the LR by `lr_decay_factor` every
-    #: `lr_decay_steps` epochs, which is exactly the paper's "divide by 10 every 30
-    #: of 90 epochs" rule. Set `lr_decay_factor=0.5` for the halved schedule some
+    #: `lr_decay_steps` epochs: "divide by 10 every 30 of 90 epochs", a fixed-step
+    #: version of the paper's divide-on-plateau rule. Set `lr_decay_factor=0.5` for the halved schedule some
     #: reproductions use instead.
     lr_decay_steps: int = 30
     lr_decay_factor: float = 0.1
@@ -137,22 +160,15 @@ def create_cifar_dataset(config: TrainingConfig):
     :rtype: Tuple[Any, Any, int, int]
     :raises ValueError: If ``image_size`` is below the model's minimum.
     """
-    if config.image_size < MIN_SPATIAL_EXTENT:
-        raise ValueError(
-            f"--image-size {config.image_size} is below AlexNet's minimum spatial "
-            f"extent {MIN_SPATIAL_EXTENT}; the final pool is padding='valid' and "
-            f"would produce an all-NaN feature map. Use at least "
-            f"{MIN_SPATIAL_EXTENT}, and note the cost grows with the square of "
-            f"this number."
-        )
-
-    mean, std = CIFAR10_MEAN, CIFAR10_STD
-
-    (x_train, y_train), (x_test, y_test) = (
-        keras.datasets.cifar10.load_data()
-        if config.dataset == "cifar10"
-        else keras.datasets.cifar100.load_data()
-    )
+    _check_image_size(config)
+    if config.dataset == "cifar10":
+        mean, std = CIFAR10_MEAN, CIFAR10_STD
+        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
+    else:
+        # Each CIFAR split with its own training-set statistics (D-103 of
+        # plan-2026-10-14T062616-81938e81).
+        mean, std = CIFAR100_MEAN, CIFAR100_STD
+        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
 
     def prepare(images, labels, training):
         # A tf.data map hands this function symbolic tensors, which have no
@@ -183,6 +199,56 @@ def create_cifar_dataset(config: TrainingConfig):
     steps_per_epoch = len(x_train) // config.batch_size
     val_steps = max(1, len(x_test) // config.batch_size)
     return x_train_ds, x_test_ds, steps_per_epoch, val_steps
+
+
+def _check_image_size(config: TrainingConfig) -> None:
+    """Refuse an ``image_size`` below the model's minimum spatial extent.
+
+    :param config: The training configuration.
+    :type config: TrainingConfig
+    :raises ValueError: If ``image_size`` is below the model's minimum.
+    """
+    if config.image_size < MIN_SPATIAL_EXTENT:
+        raise ValueError(
+            f"--image-size {config.image_size} is below AlexNet's minimum spatial "
+            f"extent {MIN_SPATIAL_EXTENT}; the final pool is padding='valid' and "
+            f"would produce an all-NaN feature map. Use at least "
+            f"{MIN_SPATIAL_EXTENT}, and note the cost grows with the square of "
+            f"this number."
+        )
+
+
+def create_imagenette_dataset(config: TrainingConfig):
+    """Build the Imagenette train/validation pipelines.
+
+    Reads ``imagenette/320px-v2`` from ``$TFDS_DATA_DIR`` (never downloads)
+    through the shared ``build_raw_image_dataset`` with
+    ``crop_policy="random_resized_crop"``: training images are a random-resized
+    crop plus flip of the full-resolution decode, validation images a resize
+    to ``image_size / 0.875`` and a centre crop; both are normalised with the
+    ImageNet mean/std (Imagenette is an ImageNet subset).
+
+    :param config: The training configuration.
+    :type config: TrainingConfig
+    :return: ``(train_ds, val_ds, steps_per_epoch, val_steps)``. The training
+        pipeline repeats; the validation one is one finite pass, and
+        ``val_steps`` covers all of it.
+    :rtype: Tuple[Any, Any, int, int]
+    :raises ValueError: If ``image_size`` is below the model's minimum.
+    """
+    _check_image_size(config)
+    common = dict(crop_policy="random_resized_crop")
+    train_ds, num_train, _ = build_raw_image_dataset(
+        "imagenette", config.image_size, config.batch_size,
+        is_training=True, augment=config.augment_data, **common,
+    )
+    val_ds, num_val, _ = build_raw_image_dataset(
+        "imagenette", config.image_size, config.batch_size,
+        is_training=False, **common,
+    )
+    steps_per_epoch = num_train // config.batch_size
+    val_steps = -(-num_val // config.batch_size)
+    return train_ds, val_ds, steps_per_epoch, val_steps
 
 
 def _count_images(directory: str) -> int:
@@ -293,7 +359,9 @@ def train_alexnet(
     output_dir = prepare_run_dir(config)
 
     # ---- Datasets ----
-    if config.dataset in ("cifar10", "cifar100"):
+    if config.dataset == "imagenette":
+        train_ds, val_ds, steps_per_epoch, val_steps = create_imagenette_dataset(config)
+    elif config.dataset in ("cifar10", "cifar100"):
         train_ds, val_ds, steps_per_epoch, val_steps = create_cifar_dataset(config)
     elif config.dataset == "imagenet":
         if not config.train_data_dir or not config.val_data_dir:
@@ -339,7 +407,7 @@ def train_alexnet(
 
     # ---- Optimization ----
     # The schedule names are dl_techniques.optimization's, NOT Keras's: the
-    # paper's "halve every 30 epochs" is `exponential_decay` here, because it is the
+    # step decay ("divide by 10 every 30 epochs") is `exponential_decay` here, because it is the
     # type that takes a `decay_rate`. There is no `step_decay` key, and passing one
     # raises ValueError naming the three that exist.
     lr_schedule = learning_rate_schedule_builder({
@@ -403,9 +471,20 @@ def train_alexnet(
 # =============================================================================
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse the command line. Defaults are the paper's recipe.
+#: ``--dataset`` choices and the class count each one implies.
+DATASET_CLASSES: Dict[str, int] = {
+    "imagenette": IMAGENETTE_NUM_CLASSES,
+    "cifar10": 10,
+    "cifar100": 100,
+    "imagenet": 1000,
+}
 
+
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse the command line.
+
+    :param argv: Tokens without the program name. ``None`` reads ``sys.argv[1:]``.
+    :type argv: Optional[List[str]]
     :return: The parsed arguments.
     :rtype: argparse.Namespace
     """
@@ -415,8 +494,8 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     # Data
-    parser.add_argument("--dataset", type=str, default="imagenet",
-                        choices=["cifar10", "cifar100", "imagenet"])
+    parser.add_argument("--dataset", type=str, default="imagenette",
+                        choices=list(DATASET_CLASSES))
     parser.add_argument("--train-data-dir", type=str, default=None,
                         help="Required only when --dataset imagenet")
     parser.add_argument("--val-data-dir", type=str, default=None,
@@ -428,7 +507,8 @@ def parse_arguments() -> argparse.Namespace:
 
     # Model
     parser.add_argument("--num-classes", type=int, default=None,
-                        help="Auto: 10 / 100 / 1000 for cifar10 / cifar100 / imagenet")
+                        help="Auto: 10 / 10 / 100 / 1000 for imagenette / cifar10 / "
+                             "cifar100 / imagenet")
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lrn-depth-radius", type=int, default=2,
                         help="n = 2*radius+1; the paper uses 2, i.e. n=5")
@@ -467,7 +547,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--success-threshold", type=float, default=None,
                         help="Override the auto-derived val_accuracy threshold")
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 # =============================================================================
@@ -480,8 +560,8 @@ def main() -> None:
     args = parse_arguments()
 
     ds = args.dataset.lower()
-    num_classes = args.num_classes if args.num_classes is not None else (
-        10 if ds == "cifar10" else (100 if ds == "cifar100" else 1000)
+    num_classes = (
+        args.num_classes if args.num_classes is not None else DATASET_CLASSES[ds]
     )
 
     config = TrainingConfig(
