@@ -10,9 +10,11 @@ Pattern-5 (depth-estimation) training scaffold for
 > is wired end-to-end via `--unlabeled-image-glob`, which builds an
 > `UnlabeledImageDataset` paired with `MegaDepthDataset` into
 > `((x_lab, x_unlab), y_lab)` batches. On-step EMA decay is driven by
-> `TeacherEMACallback` (`--ema-schedule {cosine,linear,none}`). External
-> encoder weights can be loaded via `--pretrained-encoder-weights`
-> (`from_pretrained_encoder` re-syncs the teacher).
+> `TeacherEMACallback` (`--ema-schedule {cosine,linear,none}`). The official
+> DINOv2 encoder weights load with `--pretrained-encoder` (the paper's start: the
+> head then trains at 10x the encoder's rate); a saved encoder loads via
+> `--pretrained-encoder-weights` (`from_pretrained_encoder` re-syncs the teacher).
+> Every dataset feeds ImageNet-standardized RGB, the encoder's training input.
 
 ## Quick start
 
@@ -134,6 +136,7 @@ machine.
 | `--enable-semi-supervised`    | off                                       | Activates the pseudo-label consistency train_step path on `((x_lab,x_unlab),y_lab)`, plus the FAL term when `--use-feature-alignment` is also on. Combine with `--unlabeled-image-glob`. |
 | `--unlabeled-image-glob`      | `None`                                    | Glob to unlabeled RGB images (e.g. `'/data/unlab/**/*.jpg'`); paired with `MegaDepthDataset` via `pair_labeled_unlabeled`. |
 | `--pretrained-encoder-weights`| `None`                                    | Path to a saved encoder `.keras` file. Loaded via `DepthAnything.from_pretrained_encoder`; re-syncs the EMA teacher. |
+| `--pretrained-encoder`        | off                                       | Load the official DINOv2 weights of `--encoder-type` (`facebook/dinov2-{small,base,large}`, a local download; see the model README, "Pretrained encoder") into the encoder, strictly; re-syncs the EMA teacher. The paper's start. Refused with `--init-from`, `--pretrained-encoder-weights` or `--encoder-kind placeholder`. |
 | `--ema-schedule`              | `none`                                    | `{cosine,linear,none}`. Drives `TeacherEMACallback` when `--use-feature-alignment` **or** `--enable-semi-supervised` is on (both read the teacher). |
 | `--ema-decay-start`           | `0.5`                                     | EMA decay at step 0. |
 | `--ema-decay-end`             | `0.999`                                   | EMA decay asymptote at the end of the run. |
@@ -144,7 +147,7 @@ machine.
 | `--epochs`                    | `100`                                     | |
 | `--batch-size`                | `16`                                      | |
 | `--patch-size`                | `518`                                     | RGB+depth crop side; a multiple of 14 with the DINOv2 encoder (the reference trains at 518). |
-| `--learning-rate`             | `5e-6` with `--init-from` or `--pretrained-encoder-weights`, else `2e-4` | `5e-6` is the paper's rate for a pretrained encoder; `2e-4` was measured for a random encoder (see "Learning rate" below). An explicit value always wins. |
+| `--learning-rate`             | `5e-6` with `--init-from`, `--pretrained-encoder-weights` or `--pretrained-encoder`, else `2e-4` | The encoder's rate. From a pretrained start the head (`model.decoder`) trains at 10x it (`LRMultiplierAdamW`, the paper's recipe); from a random start every variable trains at this rate. `5e-6` is the paper's encoder rate; `2e-4` was measured for a random encoder (see "Learning rate" below). An explicit value always wins. |
 | `--weight-decay`              | `1e-5`                                    | AdamW decoupled weight decay. |
 | `--gradient-clipping`         | `1.0`                                     | Forwarded to `optimizer_builder`. |
 | `--warmup-epochs`             | `5`                                       | Cosine warmup epoch count. |

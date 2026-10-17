@@ -13,6 +13,9 @@ and comprehensive error handling.
 
 Available Functions:
     - optimizer_builder: Creates optimizers (Adam, AdamW, SGD, RMSprop, Adadelta)
+    - LRMultiplierAdamW: AdamW with a per-variable learning-rate multiplier
+      (parameter groups under stock fit; the builder returns it for an
+      ``"adamw"`` config that carries ``lr_multipliers``)
     - learning_rate_schedule_builder: Creates LR schedules with warmup
     - create_learning_rate_schedule: Epoch-facing cosine/exponential/constant LR
     - create_warmup_lr_schedule: Epoch-facing warmup-ratio + cosine LR
@@ -65,6 +68,7 @@ from .muon_optimizer import Muon
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
 from .gefen_optimizer import Gefen
+from .lr_multiplier_adamw import LRMultiplierAdamW
 from .ww_pgd_optimizer import WWTailConfig, ww_pgd_project, WWPGDProjectionCallback
 from .ssp import (
     SSPStrategy,
@@ -90,6 +94,7 @@ __all__ = [
     "SGLD",
     "VSGD",
     "Gefen",
+    "LRMultiplierAdamW",
     "WWTailConfig",
     "ww_pgd_project",
     "WWPGDProjectionCallback",

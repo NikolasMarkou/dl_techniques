@@ -38,6 +38,7 @@ from dl_techniques.utils.logger import logger
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
 from .gefen_optimizer import Gefen
+from .lr_multiplier_adamw import LRMultiplierAdamW
 from .constants import *
 
 # ---------------------------------------------------------------------
@@ -108,6 +109,9 @@ def optimizer_builder(
                   exclude from weight decay (matched with ``re.search``). The
                   conventional recipe is ``["bias", "gamma", "beta"]``. Ignored
                   (with a warning) on optimizers that do not support it.
+                - lr_multipliers: ``'adamw'`` only. Variable path (or
+                  ``/``-bounded path prefix) -> learning-rate multiplier;
+                  non-empty returns an ``LRMultiplierAdamW``.
         lr_schedule: Learning rate as float or LearningRateSchedule instance.
 
     Returns:
@@ -135,6 +139,10 @@ def optimizer_builder(
         raise ValueError("optimizer type must be specified in config")
 
     optimizer_type = optimizer_type.strip().lower()
+    if config.get("lr_multipliers") and optimizer_type != OptimizerType.ADAMW:
+        raise ValueError(
+            f"lr_multipliers is only supported for 'adamw' (LRMultiplierAdamW), "
+            f"got type [{optimizer_type}]; the table would be ignored")
 
     # Extract gradient clipping configuration
     gradient_clipvalue = config.get("gradient_clipping_by_value")
@@ -294,6 +302,11 @@ def _build_adamw_optimizer(
 ) -> keras.optimizers.AdamW:
     """Build AdamW optimizer with configuration parameters.
 
+    A non-empty ``config["lr_multipliers"]`` (variable path or ``/``-bounded
+    path prefix -> learning-rate multiplier) returns an
+    :class:`LRMultiplierAdamW` with the same parameters; without one the
+    result is a stock ``keras.optimizers.AdamW``, unchanged.
+
     Args:
         config: Configuration dictionary with AdamW-specific parameters.
         base_params: Base parameters common to all optimizers.
@@ -311,6 +324,9 @@ def _build_adamw_optimizer(
         **base_params
     }
 
+    if config.get("lr_multipliers"):
+        return LRMultiplierAdamW(
+            lr_multipliers=config["lr_multipliers"], **optimizer_params)
     return keras.optimizers.AdamW(**optimizer_params)
 
 

@@ -3,7 +3,8 @@
 Pattern-5 trainer for ``dl_techniques.models.vision.depth_anything.DepthAnything`` on
 MegaDepth.  Structurally a Pattern-5 trainer (it was derived 1:1 from the
 now-deleted ``train.cliffordnet.train_depth_estimation``, which is why the two
-read alike in the git history), swapping in ``create_depth_anything`` as the model factory. The target and
+read alike in the git history), swapping in ``create_depth_anything`` as the model factory. The input RGB is
+ImageNet-standardized (the DINOv2 encoder's training input). The target and
 the loss are the Depth Anything V1 relative-depth ones (arXiv 2401.10891,
 section 3.1): per-map normalized disparity in ``[0, 1]``
 (``train.common.megadepth.normalized_disparity``) and the affine-invariant
@@ -26,7 +27,12 @@ Usage::
         --epochs 2 --batch-size 4 --patch-size 252 \\
         --max-train-files 100 --max-val-files 20
 
-    # With pretrained encoder transfer:
+    # The paper's start: the official DINOv2 encoder, head at 10x the encoder's 5e-6:
+    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
+        --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 518 \\
+        --pretrained-encoder --seed 42
+
+    # With pretrained encoder transfer from an earlier run:
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
         --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 518 \\
         --init-from results/depth_anything_pretrain_*/model_inference.keras \\
@@ -42,7 +48,7 @@ import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional
 
 from train.common import (
     setup_gpu,
@@ -57,6 +63,7 @@ from train.common.megadepth import (
     MegaDepthDataset,
     UnlabeledImageDataset,
     pair_labeled_unlabeled,
+    standardize_imagenet,
     _discover_image_files,
 )
 from dl_techniques.utils.logger import logger
@@ -97,9 +104,12 @@ from dl_techniques.callbacks.depth_visualization import (
 # ---------------------------------------------------------------------
 
 #: The paper's base learning rate for a PRETRAINED encoder (arXiv 2401.10891,
-#: section 4.1; it gives the randomly initialised decoder 10x that, which this
-#: trainer's single rate does not split).
+#: section 4.1); the decoder trains at :data:`DECODER_LR_MULTIPLIER` times it.
 PRETRAINED_LEARNING_RATE = 5e-6
+
+#: "the randomly initialized decoder uses a 10x larger learning rate" (arXiv
+#: 2401.10891, section 4.1): the decoder's multiplier from a pretrained start.
+DECODER_LR_MULTIPLIER = 10.0
 
 #: The default when the encoder starts from random weights (no pretrained
 #: encoder ships). Measured, Step 13.6 (plan-2026-10-14T062616-81938e81 D-115):
@@ -110,26 +120,66 @@ PRETRAINED_LEARNING_RATE = 5e-6
 FROM_SCRATCH_LEARNING_RATE = 2e-4
 
 
+def is_pretrained_start(
+    init_from: Optional[str],
+    pretrained_encoder_weights: Optional[str],
+    pretrained_encoder: bool = False,
+) -> bool:
+    """Whether a run starts its encoder from trained weights.
+
+    Interface contract (callers: :func:`default_learning_rate` and
+    :func:`decoder_lr_multipliers`): ``True`` when ``--init-from``,
+    ``--pretrained-encoder-weights`` or ``--pretrained-encoder`` is given.
+    Pure; never raises.
+    """
+    return init_from is not None or pretrained_encoder_weights is not None or bool(pretrained_encoder)
+
+
 def default_learning_rate(
-    init_from: Optional[str], pretrained_encoder_weights: Optional[str]
+    init_from: Optional[str],
+    pretrained_encoder_weights: Optional[str],
+    pretrained_encoder: bool = False,
 ) -> float:
     """The learning rate a run gets when none is given.
 
-    Interface contract: :data:`PRETRAINED_LEARNING_RATE` when either path is
-    given (the run starts from trained weights), else
-    :data:`FROM_SCRATCH_LEARNING_RATE`. Pure; never raises.
+    Interface contract: :data:`PRETRAINED_LEARNING_RATE` from a pretrained
+    start (:func:`is_pretrained_start`), else :data:`FROM_SCRATCH_LEARNING_RATE`.
+    Pure; never raises.
 
     :param init_from: ``--init-from`` checkpoint, or ``None``.
     :param pretrained_encoder_weights: ``--pretrained-encoder-weights``, or ``None``.
+    :param pretrained_encoder: ``--pretrained-encoder`` (the official DINOv2 weights).
     :return: The default learning rate.
     """
     # DECISION plan-2026-10-14T062616-81938e81/D-115
     # Do NOT make 5e-6 the unconditional default again: it is the paper's rate
     # for a pretrained encoder; from random weights it trains measurably slower
     # than 5e-5..1e-3 (the sweep above, numbers in decisions.md).
-    if init_from is not None or pretrained_encoder_weights is not None:
+    if is_pretrained_start(init_from, pretrained_encoder_weights, pretrained_encoder):
         return PRETRAINED_LEARNING_RATE
     return FROM_SCRATCH_LEARNING_RATE
+
+
+def decoder_lr_multipliers(model: DepthAnything, pretrained_start: bool) -> Dict[str, float]:
+    """The optimizer's per-variable learning-rate table.
+
+    Interface contract (caller: :func:`train_depth_anything`): from a
+    pretrained start, every trainable variable of ``model.decoder`` (the DPT
+    head) by path -> :data:`DECODER_LR_MULTIPLIER`; from a random start an
+    empty table (every variable at the base rate, a stock ``AdamW``). Reads
+    variable paths only; never raises for a built model.
+
+    :param model: The built model.
+    :param pretrained_start: :func:`is_pretrained_start` of the run.
+    :return: ``{variable path: multiplier}`` for ``optimizer_builder``.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-138
+    # Do NOT give a random start the 10x head: the paper's 10x is for a
+    # randomly initialized decoder on a PRETRAINED encoder, and every
+    # from-scratch measurement here (D-115, D-132) trained one rate.
+    if not pretrained_start:
+        return {}
+    return {v.path: DECODER_LR_MULTIPLIER for v in model.decoder.trainable_variables}
 
 
 
@@ -173,7 +223,8 @@ class DepthAnythingTrainingConfig:
 
     # Optimization
     #: ``None`` resolves in ``__post_init__`` to :func:`default_learning_rate`
-    #: (5e-6 from a pretrained start, the measured from-scratch rate otherwise).
+    #: (5e-6 from a pretrained start, the measured from-scratch rate otherwise);
+    #: from a pretrained start the decoder trains at 10x it.
     learning_rate: Optional[float] = None
     optimizer_type: str = "adamw"
     lr_schedule_type: str = "cosine_decay"
@@ -194,6 +245,8 @@ class DepthAnythingTrainingConfig:
     init_from: Optional[str] = None
     # Pretrained encoder weights — applied via DepthAnything.from_pretrained_encoder.
     pretrained_encoder_weights: Optional[str] = None
+    # The official DINOv2 weights of encoder_type (DepthAnything.load_official_encoder_weights).
+    pretrained_encoder: bool = False
     # Semi-supervised: glob for unlabeled RGB images
     unlabeled_image_glob: Optional[str] = None
     # EMA schedule for teacher updates (used when either use_feature_alignment
@@ -212,9 +265,16 @@ class DepthAnythingTrainingConfig:
             )
         if not 0.0 < self.min_valid_ratio <= 1.0:
             raise ValueError("min_valid_ratio must be in (0, 1]")
+        if self.pretrained_encoder and (
+                self.init_from is not None or self.pretrained_encoder_weights is not None):
+            raise ValueError(
+                "pretrained_encoder loads the official DINOv2 encoder; pass it, "
+                "init_from or pretrained_encoder_weights, not two")
+        if self.pretrained_encoder and self.encoder_kind != "real":
+            raise ValueError("pretrained_encoder needs encoder_kind='real' (DINOv2)")
         if self.learning_rate is None:
             self.learning_rate = default_learning_rate(
-                self.init_from, self.pretrained_encoder_weights)
+                self.init_from, self.pretrained_encoder_weights, self.pretrained_encoder)
 
 
 # ---------------------------------------------------------------------
@@ -362,12 +422,13 @@ def create_callbacks(
     if val_data is not None:
         val_rgb, val_depth, val_mask = val_data
         common_callbacks.append(DepthPredictionGridCallback(
-            val_rgb=tf.constant(val_rgb),
+            val_rgb=tf.constant(standardize_imagenet(val_rgb)),   # the model's input
             val_depth=tf.constant(val_depth),
             val_mask=tf.constant(val_mask),
             output_dir=viz_dir,
             frequency=config.monitor_every_n_epochs,
             title="Depth Anything Estimation",
+            display_rgb=tf.constant(val_rgb),
         ))
         logger.info(
             f"Depth monitor: loaded {val_rgb.shape[0]} validation "
@@ -473,6 +534,11 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     num_workers = max(1, min(os.cpu_count() or 4, 10) - 2)
     logger.info(f"Using {num_workers} data-loading worker processes")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-139
+    # Do NOT feed the encoder this module's [-1, 1] RGB: the official DINOv2
+    # (and Depth Anything) were trained on ImageNet-standardized RGB (the
+    # reference transform's NormalizeImage), a different scale and shift per
+    # channel, so a loaded encoder would see off-distribution inputs.
     train_ds = MegaDepthDataset(
         train_rgb, train_depth,
         batch_size=config.batch_size,
@@ -481,6 +547,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
         augment=config.augment_data,
         is_training=True, workers=num_workers,
         use_resize=False,
+        imagenet_standardize=True,
     )
     val_ds = MegaDepthDataset(
         val_rgb, val_depth,
@@ -490,6 +557,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
         augment=False,
         is_training=False, workers=max(1, num_workers // 2),
         use_resize=False,
+        imagenet_standardize=True,
     )
 
     if config.steps_per_epoch is not None:
@@ -513,6 +581,18 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
         )
         model.from_pretrained_encoder(config.pretrained_encoder_weights)
 
+    # The official DINOv2 weights of encoder_type, strictly (the head keeps its init).
+    if config.pretrained_encoder:
+        logger.info(f"Loading the official DINOv2 encoder weights of {config.encoder_type}")
+        model.load_official_encoder_weights()
+
+    lr_multipliers = decoder_lr_multipliers(model, is_pretrained_start(
+        config.init_from, config.pretrained_encoder_weights, config.pretrained_encoder))
+    if lr_multipliers:
+        logger.info(
+            f"Decoder learning rate {DECODER_LR_MULTIPLIER:g}x the encoder's "
+            f"({len(lr_multipliers)} head variables)")
+
     lr_schedule = learning_rate_schedule_builder({
         "type": config.lr_schedule_type,
         "learning_rate": config.learning_rate,
@@ -525,6 +605,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
             "type": config.optimizer_type,
             "gradient_clipping_by_norm": config.gradient_clipping,
             "weight_decay": config.weight_decay,
+            "lr_multipliers": lr_multipliers,
         },
         lr_schedule,
     )
@@ -592,6 +673,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
             patch_size=config.patch_size,
             is_training=True,
             workers=max(1, num_workers // 2),
+            imagenet_standardize=True,
         )
         fit_train_data = pair_labeled_unlabeled(
             train_ds, unlabeled_ds,
@@ -730,9 +812,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--learning-rate", type=float, default=None,
         help=(
-            f"Default: {PRETRAINED_LEARNING_RATE} (the paper's rate for a "
-            "pretrained encoder) with --init-from or --pretrained-encoder-weights, "
-            f"else {FROM_SCRATCH_LEARNING_RATE} (measured for a random encoder)."
+            f"Default: {PRETRAINED_LEARNING_RATE} (the paper's encoder rate) with "
+            "--init-from, --pretrained-encoder-weights or --pretrained-encoder, "
+            f"the decoder then at {DECODER_LR_MULTIPLIER:g}x; else "
+            f"{FROM_SCRATCH_LEARNING_RATE} for every variable (measured for a random encoder)."
         ),
     )
     parser.add_argument("--weight-decay", type=float, default=1e-5)
@@ -767,6 +850,16 @@ def parse_arguments() -> argparse.Namespace:
             "then re-synced into the EMA teacher when feature alignment is "
             "enabled. Distinct from --init-from (which loads into the full "
             "depth model)."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-encoder", action="store_true",
+        help=(
+            "Load the official DINOv2 weights of --encoder-type "
+            "(facebook/dinov2-{small,base,large}, a local download; see the "
+            "model README) into the encoder before training, strictly. The "
+            "head starts from its initialization and trains at "
+            f"{DECODER_LR_MULTIPLIER:g}x the encoder's rate."
         ),
     )
     parser.add_argument(
@@ -846,6 +939,7 @@ def main():
         experiment_name=args.experiment_name,
         init_from=args.init_from,
         pretrained_encoder_weights=args.pretrained_encoder_weights,
+        pretrained_encoder=args.pretrained_encoder,
         unlabeled_image_glob=args.unlabeled_image_glob,
         ema_schedule=args.ema_schedule,
         ema_decay_start=args.ema_decay_start,

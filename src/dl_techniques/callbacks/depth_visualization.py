@@ -54,7 +54,8 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
     expects a single-channel depth output.
 
     Args:
-        val_rgb: Validation RGB tensor ``(N, H, W, 3)`` in ``[-1, 1]``.
+        val_rgb: Validation RGB tensor ``(N, H, W, 3)``, the model's input; shown
+            in row 1 as ``[-1, 1]`` unless ``display_rgb`` is given.
         val_depth: Validation target tensor ``(N, H, W, 1)``, any range.
         val_mask: Validation mask tensor ``(N, H, W, 1)`` with 1=valid.
         output_dir: Directory for saving grid PNGs.
@@ -63,6 +64,9 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
             Defaults to 8.
         title: Title prefix for the grid.  Defaults to
             ``"Depth Estimation"``.
+        display_rgb: The same images in ``[-1, 1]`` for row 1, when
+            ``val_rgb`` is the model's input in another convention (e.g.
+            ImageNet-standardized). ``None`` shows ``val_rgb``.
     """
 
     def __init__(
@@ -74,9 +78,11 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
         frequency: int = 5,
         max_samples: int = 8,
         title: str = "Depth Estimation",
+        display_rgb: Optional[Any] = None,
     ) -> None:
         super().__init__()
         self.val_rgb = val_rgb
+        self.display_rgb = display_rgb
         self.val_depth = val_depth
         self.val_mask = val_mask
         self.output_dir = Path(output_dir)
@@ -151,7 +157,7 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
             if n == 1:
                 axes = axes[:, np.newaxis]
 
-            rgb_np = np.array(self.val_rgb)
+            rgb_np = np.array(self.val_rgb if self.display_rgb is None else self.display_rgb)
             gt_np = np.array(self.val_depth)
             mask_np = np.array(self.val_mask)
             pred_np = np.array(pred_depth)

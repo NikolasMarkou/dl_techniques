@@ -46,6 +46,8 @@ import h5py
 import keras
 import numpy as np
 
+from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD
+
 logger = logging.getLogger(__name__)
 
 
@@ -259,6 +261,25 @@ def normalized_disparity(
         return np.zeros(depth.shape, dtype=np.float32)
     disparity[valid] = (disparity[valid] - lo) / (hi - lo)
     return disparity.astype(np.float32)
+
+
+def standardize_imagenet(rgb: np.ndarray) -> np.ndarray:
+    """This module's ``[-1, +1]`` RGB -> ImageNet-standardized RGB.
+
+    Interface contract (callers: :class:`MegaDepthDataset` and
+    :class:`UnlabeledImageDataset` with ``imagenet_standardize=True``, and the
+    Depth Anything trainer's monitor samples): returns float32
+    ``((rgb + 1) / 2 - IMAGENET_MEAN) / IMAGENET_STD`` per channel, the last
+    axis being R, G, B; the input convention the official DINOv2 / Depth
+    Anything encoders were trained with (the reference's ``NormalizeImage``).
+    Pure; any shape whose last axis is 3.
+
+    :param rgb: RGB in ``[-1, +1]``.
+    :return: The standardized RGB, same shape.
+    """
+    mean = np.asarray(IMAGENET_MEAN, np.float32)
+    std = np.asarray(IMAGENET_STD, np.float32)
+    return (((np.asarray(rgb, np.float32) + 1.0) * 0.5 - mean) / std).astype(np.float32)
 
 
 def _has_spread(disparity: np.ndarray) -> bool:
@@ -549,6 +570,9 @@ class MegaDepthDataset(keras.utils.PyDataset):
             random; if ``False``, each file's crop is fixed for the run
             (seeded by its index).
         workers: Number of multiprocessing workers.
+        imagenet_standardize: If ``True``, the RGB batch is
+            :func:`standardize_imagenet`'d (the official DINOv2 input);
+            otherwise it stays in ``[-1, +1]``. Defaults to ``False``.
         **kwargs: Passed to :class:`keras.utils.PyDataset`.
     """
 
@@ -563,6 +587,7 @@ class MegaDepthDataset(keras.utils.PyDataset):
         is_training: bool = True,
         workers: int = 8,
         use_resize: bool = False,
+        imagenet_standardize: bool = False,
         **kwargs,
     ):
         super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
@@ -574,6 +599,7 @@ class MegaDepthDataset(keras.utils.PyDataset):
         self.augment = augment
         self.is_training = is_training
         self.use_resize = use_resize
+        self.imagenet_standardize = bool(imagenet_standardize)
         self.n_pairs = len(rgb_paths)
         self.indices = np.arange(self.n_pairs)
         if is_training:
@@ -630,7 +656,10 @@ class MegaDepthDataset(keras.utils.PyDataset):
             batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
             batch_ytrue = [np.zeros((ps, ps, 2), dtype=np.float32)]
 
-        return np.stack(batch_rgb), np.stack(batch_ytrue)
+        rgb = np.stack(batch_rgb)
+        if self.imagenet_standardize:
+            rgb = standardize_imagenet(rgb)
+        return rgb, np.stack(batch_ytrue)
 
     def on_epoch_end(self):
         if self.is_training:
@@ -666,6 +695,8 @@ class UnlabeledImageDataset(keras.utils.PyDataset):
         patch_size: Spatial size of resized images.
         is_training: If ``True``, shuffles indices each epoch.
         workers: Number of multiprocessing workers (default 4).
+        imagenet_standardize: If ``True``, the batch is
+            :func:`standardize_imagenet`'d, as :class:`MegaDepthDataset`'s.
         **kwargs: Passed to :class:`keras.utils.PyDataset`.
     """
 
@@ -676,6 +707,7 @@ class UnlabeledImageDataset(keras.utils.PyDataset):
         patch_size: int = 256,
         is_training: bool = True,
         workers: int = 4,
+        imagenet_standardize: bool = False,
         **kwargs,
     ):
         super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
@@ -685,6 +717,7 @@ class UnlabeledImageDataset(keras.utils.PyDataset):
         self.batch_size = int(batch_size)
         self.patch_size = int(patch_size)
         self.is_training = bool(is_training)
+        self.imagenet_standardize = bool(imagenet_standardize)
         self.n = len(self.rgb_paths)
         self.indices = np.arange(self.n)
         if self.is_training:
@@ -718,7 +751,8 @@ class UnlabeledImageDataset(keras.utils.PyDataset):
                 raise OSError(
                     f"UnlabeledImageDataset: cannot read {self.rgb_paths[i]}: {exc}"
                 ) from exc
-        return np.stack(batch).astype(np.float32)
+        batch = np.stack(batch).astype(np.float32)
+        return standardize_imagenet(batch) if self.imagenet_standardize else batch
 
     def on_epoch_end(self) -> None:
         if self.is_training:
