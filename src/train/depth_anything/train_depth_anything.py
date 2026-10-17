@@ -105,14 +105,18 @@ from dl_techniques.callbacks.depth_visualization import (
 
 #: The paper's base learning rate for a PRETRAINED encoder (arXiv 2401.10891,
 #: section 4.1); the decoder trains at :data:`DECODER_LR_MULTIPLIER` times it.
+#: Measured (plan-2026-10-14T062616-81938e81 D-140): official DINOv2-small,
+#: vit_s, 252 px, batch 8, 3,000 steps, seeds 42/43/44: held-out loss 0.570 /
+#: 0.593 / 0.588 and Pearson 0.81 on 64 crops of 19 unseen scenes, against
+#: 1.000 for a constant and 1.045 for the average training layout.
 PRETRAINED_LEARNING_RATE = 5e-6
 
 #: "the randomly initialized decoder uses a 10x larger learning rate" (arXiv
 #: 2401.10891, section 4.1): the decoder's multiplier from a pretrained start.
 DECODER_LR_MULTIPLIER = 10.0
 
-#: The default when the encoder starts from random weights (no pretrained
-#: encoder ships). Measured, Step 13.6 (plan-2026-10-14T062616-81938e81 D-115):
+#: The default when the encoder starts from random weights. From scratch the
+#: model learns the average depth layout at smoke budgets (D-132). Measured, Step 13.6 (plan-2026-10-14T062616-81938e81 D-115):
 #: vit_s, 400 steps of batch 4 at 256 px on MegaDepth; 5e-6 reached a mean
 #: training loss of 1.481 over the last three epochs, 5e-5 / 2e-4 / 1e-3
 #: reached 1.324 / 1.292 / 1.288, with validation losses those few steps do

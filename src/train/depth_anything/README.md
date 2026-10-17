@@ -164,13 +164,46 @@ machine.
 
 ### Learning rate
 
-The paper (arXiv 2401.10891, section 4.1) trains a *pretrained* encoder at 5e-6 and
-the randomly initialised decoder at 10 times that. This trainer has one rate for
-the whole model, and no pretrained encoder ships, so the default depends on the
-start: 5e-6 when `--init-from` or `--pretrained-encoder-weights` is given, else 2e-4.
-The 2e-4 was measured (plan-2026-10-14T062616-81938e81 D-115) on the RTX 4070:
-`vit_s`, batch 4, 256 px, 10 epochs of 40 steps, 1 warm-up epoch, 512 training and
-58 validation pairs, one run per rate.
+The paper (arXiv 2401.10891, section 4.1) trains the *pretrained* encoder at 5e-6 and
+the randomly initialised decoder at 10 times that. The trainer does the same from a
+pretrained start (`--pretrained-encoder`, `--pretrained-encoder-weights` or
+`--init-from`): `--learning-rate` (default 5e-6) is the encoder's rate and every head
+variable trains at 10x it (`LRMultiplierAdamW`). From a random start every variable
+trains at one rate, default 2e-4.
+
+**Pretrained start, measured** (plan-2026-10-14T062616-81938e81 D-140; RTX 4070):
+`--pretrained-encoder` (official DINOv2-small), `vit_s`, 252 px, batch 8,
+30 x 100 = 3,000 steps, 1 warm-up epoch then cosine, encoder 5e-6 / head 5e-5,
+weight decay 1e-5, clip 1.0, 10,000 training pairs from 176 scenes. Held out: 64 crops
+spread over all 19 validation scenes (no scene shared with training), inference mode,
+the masked affine-invariant loss and the per-crop Pearson correlation on valid pixels
+(mean +- SEM over the 64 crops). Baselines on the same crops: a constant, and the
+average layout of 512 training targets (mask-weighted mean; the plain mean scores
+1.061 +- 0.051 / Pearson 0.408).
+
+| Seed | Held-out loss | Pearson | Constant | Average layout | Model minus layout | Best val_loss (epoch) |
+|---|---|---|---|---|---|---|
+| 42 | 0.570 +- 0.041 | 0.813 +- 0.023 | 1.000 | 1.045 +- 0.051 (Pearson 0.418) | -0.475 +- 0.043 | 0.522 (28) |
+| 43 | 0.593 +- 0.042 | 0.810 +- 0.023 | 1.000 | 1.045 +- 0.051 | -0.452 +- 0.046 | 0.502 (28) |
+| 44 | 0.588 +- 0.044 | 0.802 +- 0.026 | 1.000 | 1.045 +- 0.051 | -0.456 +- 0.043 | 0.486 (28) |
+
+Across seeds: loss 0.584 (sd 0.012), Pearson 0.808 (sd 0.006). Every seed is below 1.0,
+below the average layout by about ten of its standard errors, and above 0.5 in Pearson.
+Only the paper's rate was run; no other pretrained-start rate was measured.
+
+**From scratch, measured: the model learns the average depth layout, not the image.**
+With the same head, data and split, a random-init encoder at 3,000 steps scores a
+held-out loss of 1.034 to 1.042 (+- 0.055) and Pearson 0.39 to 0.40 at 5e-5, 2e-4 and
+1e-3 (256 px, the patch-16 encoder of the time; D-132), against 1.047 +- 0.052 /
+Pearson 0.413 for the average layout of 512 training targets on the same crops; its
+predictions correlate 0.96 to 0.97 with that layout. It does memorise one batch
+(loss 0.200, Pearson 0.969 at 600 steps, D-128), so it can fit images; at these
+budgets it does not generalise past the mean layout. Train from scratch only to test
+the pipeline; use `--pretrained-encoder` for depth.
+
+The from-scratch default 2e-4 is unchanged (D-115): measured on the RTX 4070, `vit_s`,
+batch 4, 256 px, 10 epochs of 40 steps, 1 warm-up epoch, 512 training and 58
+validation pairs, one run per rate:
 
 | LR | train loss, epoch 1 -> 10 | mean of last 3 | val loss, epoch 1 -> 10 | mean of last 3 | best val |
 |---|---|---|---|---|---|
@@ -179,11 +212,8 @@ The 2e-4 was measured (plan-2026-10-14T062616-81938e81 D-115) on the RTX 4070:
 | 2e-4 | 1.578 -> 1.304 | 1.292 | 1.686 -> 1.378 | 1.459 | 1.314 |
 | 1e-3 | 1.504 -> 1.307 | 1.288 | 1.845 -> 1.359 | 1.413 | 1.359 |
 
-5e-6 trains measurably slower; 5e-5 to 1e-3 are not separable at this budget (the
-validation loss moves by up to 0.37 between consecutive epochs of one run). 2e-4 is
-the middle of that range. A constant prediction scores exactly 1.0 under this loss,
-and every run here is still above that after 400 steps: these numbers rank
-learning rates, they do not show a trained model.
+5e-6 trains measurably slower from random weights; 5e-5 to 1e-3 are not separable,
+here or at 3,000 steps (D-132). A constant prediction scores exactly 1.0 under this loss.
 
 ## Output layout
 
