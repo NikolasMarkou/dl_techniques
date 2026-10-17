@@ -3,10 +3,13 @@ DPT-style decoder head, and an optional Mean-Teacher branch for
 semi-supervised training. Implements the Depth Anything V1 recipe, not V2: no
 synthetic training data and no distillation through a large teacher.
 
-The decoder is the shared `DepthEstimationHead` in its `decoder_style='dpt'`
-mode (`layers/heads/vision`), the same stage structure as this package's
-`DPTDecoder`, which OmniPoint uses. Its output ends in a ReLU, as both official
-relative-depth heads do (V1 `depth_anything/dpt.py`, V2
+The decoder is `DPTHead` (`components.py`), a port of the reference V1 head
+(LiheYoung/Depth-Anything `depth_anything/dpt.py`, `use_bn=False`): it reads
+the patch tokens of the encoder's last four layers, each through the final
+norm, reassembles them at four scales, fuses them coarse to fine with
+`refinenet4..1` and predicts at the input resolution. Its widths default to
+the published checkpoint of each encoder size. Its output ends in a ReLU, as
+both official relative-depth heads do (V1 `depth_anything/dpt.py`, V2
 `depth_anything_v2/dpt.py`), so every prediction is non-negative and has no
 upper bound.
 
@@ -44,7 +47,7 @@ References:
       Not implemented here; listed to mark which generation this is.
     - Ranftl et al., 2021. Vision Transformers for Dense Prediction (DPT).
       (https://arxiv.org/abs/2103.13413)
-      The decoder this one is named after and simplifies.
+      The reassemble-and-fuse decoder `DPTHead` follows.
     - Ranftl et al., 2020. Towards Robust Monocular Depth Estimation: Mixing
       Datasets for Zero-shot Cross-dataset Transfer (MiDaS).
       (https://arxiv.org/abs/1907.01341)
@@ -71,10 +74,8 @@ from dl_techniques.layers.signal_processing.strong_augmentation import StrongAug
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 from dl_techniques.models.vision.vit.model import ViT
-from dl_techniques.layers.heads.vision import create_vision_head
-from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
-from .components import REFERENCE_BN_EPSILON
+from .components import REFERENCE_BN_EPSILON, DPTHead, resize_bilinear_align_corners
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Map depth_anything encoder_type slugs to ViT scale names.
@@ -89,6 +90,18 @@ _VIT_SCALE_MAP: Dict[str, str] = {
     "vit_l": "large",
 }
 _VIT_PATCH_SIZE: int = 16
+
+#: ``DPTHead`` widths ``(features, out_channels)`` per encoder size, from the
+#: ``config.json`` of the published checkpoints ``LiheYoung/depth_anything_vit{s,b,l}14``
+#: (all three: ``use_bn=False``, ``use_clstoken=False``).
+_DPT_HEAD_CONFIGS: Dict[str, Tuple[int, Tuple[int, int, int, int]]] = {
+    "vit_s": (64, (48, 96, 192, 384)),
+    "vit_b": (128, (96, 192, 384, 768)),
+    "vit_l": (256, (256, 512, 1024, 1024)),
+}
+
+#: How many encoder layers the head reads (``get_intermediate_layers(x, 4)``).
+_DPT_NUM_LAYERS: int = 4
 
 # ---------------------------------------------------------------------
 
@@ -108,19 +121,16 @@ class DepthAnything(keras.Model):
         │ encoder: ViT (patch 16) or   │────► frozen_encoder (EMA teacher,
         │ placeholder Conv-BN-ReLU     │       optional, weight-shared clone)
         └──────────────┬───────────────┘
-                       │  [B, N+1, D] (ViT) or [B, h, w, D]
+                       │  ViT: patch tokens of the last 4 layers, each
+                       │  through the final norm, reshaped to [B, h, w, D];
+                       │  placeholder: its one [B, h, w, D] map, 4 times
                        ▼
         ┌──────────────────────────────┐
-        │ _features_to_spatial:        │  (ViT path only: drop CLS token,
-        │ reshape to [B, h, w, D]      │   reshape on image_shape // stride)
+        │ decoder: DPTHead (reference  │
+        │ V1 head, no BN): reassemble, │
+        │ refinenet4..1, output convs  │
         └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │ decoder: DepthEstimationHead │
-        │ dpt mode, upsample = stride, │
-        │ ReLU output                  │
-        └──────────────┬───────────────┘
-                       ▼
+                       ▼  resize to (H, W) if needed, ReLU
         Output [B, H, W, output_channels]  (non-negative)
 
     Training (semi-supervised, `enable_semi_supervised=True`):
@@ -137,8 +147,14 @@ class DepthAnything(keras.Model):
     :type encoder_type: str
     :param image_shape: Input image shape ``(height, width, channels)``.
     :type image_shape: Tuple[int, int, int]
-    :param decoder_dims: Channel dimension per decoder stage.
-    :type decoder_dims: Optional[List[int]]
+    :param dpt_features: Fusion width of the ``DPTHead`` (``features`` in the
+        reference). ``None`` takes the published checkpoint's value for
+        ``encoder_type`` (64 / 128 / 256).
+    :type dpt_features: Optional[int]
+    :param dpt_out_channels: The four projection widths of the ``DPTHead``
+        (``out_channels`` in the reference). ``None`` takes the published
+        checkpoint's values for ``encoder_type``.
+    :type dpt_out_channels: Optional[List[int]]
     :param output_channels: Number of channels in the predicted depth map.
     :type output_channels: int
     :param kernel_initializer: Initializer for the encoder's and the
@@ -185,7 +201,6 @@ class DepthAnything(keras.Model):
             model = DepthAnything(
                 encoder_type='vit_l',
                 image_shape=(384, 384, 3),
-                decoder_dims=[256, 128, 64, 32]
             )
             x = keras.random.normal([2, 384, 384, 3])
             depth = model(x)
@@ -206,7 +221,8 @@ class DepthAnything(keras.Model):
         self,
         encoder_type: str = 'vit_l',
         image_shape: Tuple[int, int, int] = (384, 384, 3),
-        decoder_dims: Optional[List[int]] = None,
+        dpt_features: Optional[int] = None,
+        dpt_out_channels: Optional[List[int]] = None,
         output_channels: int = 1,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -238,7 +254,10 @@ class DepthAnything(keras.Model):
         # Store configuration parameters
         self.encoder_type = encoder_type
         self.image_shape = tuple(image_shape)
-        self.decoder_dims = decoder_dims if decoder_dims is not None else [256, 128, 64, 32]
+        default_features, default_out_channels = _DPT_HEAD_CONFIGS[encoder_type]
+        self.dpt_features = int(default_features if dpt_features is None else dpt_features)
+        self.dpt_out_channels = [int(c) for c in (
+            default_out_channels if dpt_out_channels is None else dpt_out_channels)]
         self.output_channels = output_channels
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -281,10 +300,9 @@ class DepthAnything(keras.Model):
         # deserialization), accept it directly so its saved topology + weights
         # survive the load. Otherwise build() will create one fresh.
         self.encoder: Optional[keras.Model] = encoder
-        self.encoder_embed_dim: Optional[int] = None
-        if self.encoder_kind == 'real':
-            scale = _VIT_SCALE_MAP[self.encoder_type]
-            self.encoder_embed_dim = ViT.SCALE_CONFIGS[scale][0]
+        # The ViT's width; the placeholder projects its features to the same
+        # width, so the head sees one input width per encoder_type.
+        self.encoder_embed_dim: int = ViT.SCALE_CONFIGS[_VIT_SCALE_MAP[self.encoder_type]][0]
 
         # Other components — initialized in build().
         self.decoder: Optional[keras.layers.Layer] = None
@@ -324,11 +342,11 @@ class DepthAnything(keras.Model):
                 )
             else:
                 self.encoder = self._create_placeholder_encoder(trainable=True)
+        # The head reads the ViT through get_intermediate_layers, not __call__,
+        # which would build it on first use; build it here instead.
+        if not self.encoder.built:
+            self.encoder.build((None,) + tuple(self.image_shape))
 
-        # Decoder: use DepthEstimationHead with DPT-style decoder
-        # For real ViT (stride=16) with len(decoder_dims)>=4, upsample_factor=16 is
-        # representable as 4 stages of 2x. For placeholder (stride=16 here) ditto.
-        upsample_factor = self.encoder_stride
         # DECISION plan-2026-10-14T062616-81938e81/D-031
         # The output is ReLU'd, as in the reference: both official relative
         # heads (Depth-Anything depth_anything/dpt.py, Depth-Anything-V2
@@ -340,20 +358,26 @@ class DepthAnything(keras.Model):
         # claim), and the DPT decoder refuses them. See decisions.md D-031.
         # Without the head, call() returns before the decoder, so none is
         # created: an unrun, unbuilt decoder is a sub-layer with no weights.
+        # DECISION plan-2026-10-14T062616-81938e81/D-128
+        # Do NOT go back to the shared DepthEstimationHead's dpt mode here: it
+        # decodes ONE feature map through Conv-BN-ReLU stages, while the
+        # reference head (Depth-Anything DPTHead, use_bn=False) fuses four
+        # encoder layers through refinenet4..1 and has no BatchNorm. The BN
+        # was where the old decoder's train/inference gap sat (step-150 loss
+        # 1.06 inference vs 0.39 training, D-127).
         if self.include_top:
-            self.decoder = create_vision_head(
-                VisionTaskType.DEPTH_ESTIMATION,
+            self.decoder = DPTHead(
+                features=self.dpt_features,
+                out_channels=self.dpt_out_channels,
+                patch_size=self.encoder_stride,
                 output_channels=self.output_channels,
-                decoder_style="dpt",
-                dpt_dims=self.decoder_dims,
-                dpt_use_bias=False,
-                dpt_activation="relu",
-                dpt_output_activation="relu",
-                dpt_upsample_factor=upsample_factor,
-                dpt_kernel_initializer=self.kernel_initializer,
-                dpt_kernel_regularizer=self.kernel_regularizer,
-                name='depth_estimation_head'
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name='depth_head',
             )
+            self.decoder.build([
+                (None, self.encoder_h, self.encoder_w, self.encoder_embed_dim)
+            ] * _DPT_NUM_LAYERS)
 
         # Build order: ensure the student encoder is built, clone its topology and
         # force-build the clone, then copy weights student -> teacher and freeze.
@@ -477,8 +501,45 @@ class DepthAnything(keras.Model):
             return x
         # (B, N+1, D) → drop CLS → (B, N, D) → reshape (B, h, w, D)
         x = x[:, 1:, :]
-        d = self.encoder_embed_dim or x.shape[-1]
-        return keras.ops.reshape(x, (-1, self.encoder_h, self.encoder_w, d))
+        return keras.ops.reshape(x, (-1, self.encoder_h, self.encoder_w, x.shape[-1]))
+
+    def _encoder_layers(
+            self, encoder: keras.Model, x: keras.KerasTensor, training: Optional[bool],
+    ) -> List[keras.KerasTensor]:
+        """The four ``(B, h, w, D)`` maps the head reads, from ``encoder``.
+
+        Interface contract (two callers: the student path in `call` and the
+        teacher in `_pseudo_label_depth`): a ViT gives the patch tokens of its
+        last four layers, each through its final norm (``get_intermediate_layers``),
+        reshaped to the patch grid; the placeholder Conv encoder has no
+        intermediate layers, so its one feature map is returned four times.
+
+        :param encoder: The student encoder or the frozen teacher.
+        :type encoder: keras.Model
+        :param x: Images ``(B, H, W, C)``.
+        :type x: keras.KerasTensor
+        :param training: Forwarded to the encoder.
+        :type training: Optional[bool]
+        :return: Four feature maps, shallowest first.
+        :rtype: List[keras.KerasTensor]
+        """
+        if hasattr(encoder, "get_intermediate_layers"):
+            return [
+                keras.ops.reshape(t, (-1, self.encoder_h, self.encoder_w, t.shape[-1]))
+                for t in encoder.get_intermediate_layers(x, _DPT_NUM_LAYERS, training=training)]
+        return [encoder(x, training=training)] * _DPT_NUM_LAYERS
+
+    def _decode(self, layers: List[keras.KerasTensor]) -> keras.KerasTensor:
+        """Run the head, resize to ``image_shape`` if needed, ReLU (the reference's tail).
+
+        :param layers: The four maps from :meth:`_encoder_layers`.
+        :type layers: List[keras.KerasTensor]
+        :return: Depth ``(B, H, W, output_channels)``, non-negative.
+        :rtype: keras.KerasTensor
+        """
+        depth = self.decoder(layers)
+        depth = resize_bilinear_align_corners(depth, self.image_shape[0], self.image_shape[1])
+        return keras.ops.relu(depth)
 
     def _create_placeholder_encoder(self, trainable: bool = True) -> keras.Model:
         """Create the placeholder Conv-BN-ReLU encoder (legacy mode).
@@ -555,9 +616,9 @@ class DepthAnything(keras.Model):
                     name=f'pool_block_{i}'
                 )(x)
 
-        # Feature projection layer
+        # Feature projection layer, to the ViT width of this encoder_type
         features = keras.layers.Conv2D(
-            filters=self.decoder_dims[0],  # Match decoder input
+            filters=self.encoder_embed_dim,
             kernel_size=1,
             padding='same',
             kernel_initializer=self.kernel_initializer,
@@ -604,27 +665,17 @@ class DepthAnything(keras.Model):
         else:
             x = inputs
 
-        # Extract features. ViT returns (B, N+1, D); placeholder returns 4-D.
-        features = self.encoder(x, training=training)
-
         if not self.include_top:
-            # Return encoder features for custom heads
+            # Return encoder features for custom heads.
+            # ViT returns (B, N+1, D); placeholder returns 4-D.
+            features = self.encoder(x, training=training)
             spatial_features = self._features_to_spatial(features)
             return {
                 "encoder_features": features,
                 "spatial_features": spatial_features
             }
 
-        # Reshape sequence features to spatial 4-D before the decoder.
-        features = self._features_to_spatial(features)
-
-        # Decode features to depth.
-        depth_output = self.decoder(features, training=training)
-
-        # DepthEstimationHead returns dict with 'depth' and 'confidence'
-        if isinstance(depth_output, dict):
-            return depth_output['depth']
-        return depth_output
+        return self._decode(self._encoder_layers(self.encoder, x, training))
 
     def compile(
         self,
@@ -672,14 +723,7 @@ class DepthAnything(keras.Model):
         :return: Pseudo-depth tensor ``(B, H, W, output_channels)``, no gradient.
         :rtype: keras.KerasTensor
         """
-        feat = self.frozen_encoder(x_unlab, training=False)
-        feat = self._features_to_spatial(feat)
-        pseudo = self.decoder(feat, training=False)
-
-        # DepthEstimationHead returns dict with 'depth' and 'confidence'
-        if isinstance(pseudo, dict):
-            pseudo = pseudo['depth']
-
+        pseudo = self._decode(self._encoder_layers(self.frozen_encoder, x_unlab, False))
         return keras.ops.stop_gradient(pseudo)
 
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-014: augmentation stays in the training path, never in `call()`.
@@ -949,7 +993,8 @@ class DepthAnything(keras.Model):
         config.update({
             "encoder_type": self.encoder_type,
             "image_shape": self.image_shape,
-            "decoder_dims": self.decoder_dims,
+            "dpt_features": self.dpt_features,
+            "dpt_out_channels": list(self.dpt_out_channels),
             "output_channels": self.output_channels,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -1029,7 +1074,8 @@ class DepthAnything(keras.Model):
 def create_depth_anything(
     encoder_type: str = 'vit_l',
     image_shape: Tuple[int, int, int] = (384, 384, 3),
-    decoder_dims: Optional[List[int]] = None,
+    dpt_features: Optional[int] = None,
+    dpt_out_channels: Optional[List[int]] = None,
     output_channels: int = 1,
     kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
     kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -1063,8 +1109,12 @@ def create_depth_anything(
     :type encoder_type: str
     :param image_shape: Input image shape ``(height, width, channels)``.
     :type image_shape: Tuple[int, int, int]
-    :param decoder_dims: Channel dimension per decoder stage.
-    :type decoder_dims: Optional[List[int]]
+    :param dpt_features: Fusion width of the ``DPTHead``; ``None`` takes the
+        published checkpoint's value for ``encoder_type``.
+    :type dpt_features: Optional[int]
+    :param dpt_out_channels: The head's four projection widths; ``None``
+        takes the published checkpoint's values for ``encoder_type``.
+    :type dpt_out_channels: Optional[List[int]]
     :param output_channels: Number of channels in the predicted depth map.
     :type output_channels: int
     :param kernel_initializer: Initializer for convolutional kernels.
@@ -1115,7 +1165,8 @@ def create_depth_anything(
     model = DepthAnything(
         encoder_type=encoder_type,
         image_shape=image_shape,
-        decoder_dims=decoder_dims,
+        dpt_features=dpt_features,
+        dpt_out_channels=dpt_out_channels,
         output_channels=output_channels,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,

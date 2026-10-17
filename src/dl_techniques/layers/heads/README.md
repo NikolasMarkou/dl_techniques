@@ -98,8 +98,7 @@ Where a head also returns `'probabilities'` (NLP and vision classification, NLP 
 is `softmax('logits')`, computed in the head's compute dtype. Two outputs are squashed by design,
 because they are range maps for regression targets, not class scores: the progressive
 `DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid (the DPT depth decoder applies
-its `dpt_output_activation`, `'linear'` by default; DepthAnything passes `'relu'`, the reference
-head's final ReLU). Surface normals are L2-normalized to unit length and optical flow is linear and
+its `dpt_output_activation`, `'linear'` by default). Surface normals are L2-normalized to unit length and optical flow is linear and
 signed. The per-domain READMEs give each head's keys.
 
 Every head owns only the sub-layers its `call` runs. Arguments that a head's `call`

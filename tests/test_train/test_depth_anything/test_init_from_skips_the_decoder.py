@@ -20,7 +20,7 @@ def _model(seed: int):
     keras.utils.set_random_seed(seed)
     return create_depth_anything(
         encoder_type="vit_s", encoder_kind="placeholder",
-        image_shape=(32, 32, 3), decoder_dims=[8, 8, 8, 8],
+        image_shape=(32, 32, 3), dpt_features=8, dpt_out_channels=[8, 8, 8, 8],
         use_feature_alignment=False)
 
 

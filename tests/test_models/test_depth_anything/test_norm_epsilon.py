@@ -71,7 +71,7 @@ class TestPlaceholderEncoderAgreesWithTheHead:
         model = DepthAnything(
             image_shape=(64, 64, 3),
             encoder_kind="placeholder",
-            decoder_dims=[8, 16, 16, 16],
+            dpt_features=8, dpt_out_channels=[8, 16, 16, 16],
         )
         # The encoder is constructed lazily in `build()`, not in `__init__`.
         model.build((None, 64, 64, 3))

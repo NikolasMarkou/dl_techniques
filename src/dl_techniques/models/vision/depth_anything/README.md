@@ -1,19 +1,20 @@
 # Depth Anything
 
 Keras 3 reference implementation of the *Depth Anything* monocular depth
-estimation architecture (`encoder + DPT-style decoder`). Source files:
+estimation architecture (`encoder + DPT head`). Source files:
 
 ```
 src/dl_techniques/models/vision/depth_anything/
-├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTDecoder
-├── components.py      # DPTDecoder layer (exported; used by OmniPoint, not by DepthAnything)
+├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTHead, DPTDecoder
+├── components.py      # DPTHead (DepthAnything's decoder), DPTDecoder (OmniPoint's)
 ├── model.py           # DepthAnything keras.Model + create_depth_anything factory
 └── teacher_ema.py     # TeacherEMACallback, cosine_ema_schedule, linear_ema_schedule
 ```
 
 The encoder is the in-tree `dl_techniques.models.vision.vit.ViT` (`encoder_kind='real'`,
-the default); the decoder is the shared `DepthEstimationHead(decoder_style='dpt')` and ends in a
-ReLU, as the reference heads do (see "Output range" below). `train_step` dispatches to a
+the default); the decoder is `DPTHead`, a port of the reference V1 head that fuses the encoder's
+last four layers, and it ends in a ReLU, as the reference heads do (see "DPT head" and "Output
+range" below). `train_step` dispatches to a
 clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
 a pseudo-label consistency term on student-vs-teacher depth over `x_unlab` (the paper's
 affine-invariant loss per CutMix region, eq. 6-8). On-step EMA
@@ -62,21 +63,60 @@ clamped at zero). Nothing marks such an archive, so the change is silent.
 
 The trainer (`src/train/depth_anything/`) supervises the paper's target and loss: per-map normalized
 MegaDepth disparity in `[0, 1]` and the masked affine-invariant MAE (`AffineInvariantLoss(masked=True)`).
-The decoder is a plain conv stack rather than the reference's fusion blocks.
+
+### DPT head
+
+`DPTHead` (`components.py`) ports `DPTHead` of LiheYoung/Depth-Anything `depth_anything/dpt.py`
+(with `FeatureFusionBlock` and `ResidualConvUnit` of `blocks.py`, fetched 2026-10-17) for one
+output map with `use_bn=False` and `use_clstoken=False`, the configuration of all three published
+checkpoints:
+
+```
+ViT layers L-4..L-1, patch tokens, each through the final norm, as (B, g, g, D)
+  projects[i]       Conv1x1 D -> C_i
+  resize_layers     ConvTranspose 4x4/4 (4g) | ConvTranspose 2x2/2 (2g) | identity (g) | Conv3x3/2, pad 1 (g/2)
+  layer{i}_rn       Conv3x3 C_i -> F, no bias
+  refinenet4..1     ResidualConvUnit(skip) + path -> ResidualConvUnit -> bilinear (align_corners) -> Conv1x1
+  output_conv1      Conv3x3 F -> F/2, bilinear (align_corners) to g * 16
+  output_conv2      Conv3x3 -> 32, ReLU, Conv1x1 -> 1, ReLU
+```
+
+| Encoder | `dpt_features` (F) | `dpt_out_channels` (C_1..C_4) | Head parameters | Reference module list |
+|---------|--------------------|-------------------------------|-----------------|-----------------------|
+| `vit_s` | 64  | 48, 96, 192, 384      | 2,654,657  | 2,728,513 (summed from the published `vits14` checkpoint's tensors) |
+| `vit_b` | 128 | 96, 192, 384, 768     | 10,595,137 | 10,890,305 (hand sum of `DPTHead`'s module list) |
+| `vit_l` | 256 | 256, 512, 1024, 1024  | 29,766,849 | 30,947,009 (hand sum of `DPTHead`'s module list) |
+
+The defaults are the published `config.json` values per encoder size. The difference from the
+official count is exactly `refinenet4.resConfUnit1`, which the reference builds and its forward
+never calls (refinenet4 has no skip input): this port does not build it. The ResidualConvUnits have
+no BatchNorm (`use_bn=False`), so the head computes the same function in training and inference
+mode. Torch's `Conv2d(3, stride 2, padding 1)` pads both sides, which Keras' `'same'` does not for
+an even input, so `resize_layers_3` is an explicit `ZeroPadding2D(1)` and a `'valid'` conv; Keras'
+bilinear resize uses half-pixel centres, so the head resizes with
+`resize_bilinear_align_corners`, the reference's `align_corners=True`. The reference's DINOv2 has
+patch 14 and interpolates to `14 * g`; this ViT has patch 16, so the head returns `16 * g`, the
+input size. The placeholder Conv encoder has no intermediate layers; its one feature map (projected
+to the ViT width of `encoder_type`) feeds all four paths. Guard:
+`tests/test_models/test_depth_anything/test_the_dpt_head_is_the_references.py`.
+
+Until 2026-10-17 the decoder was the shared `DepthEstimationHead(decoder_style='dpt')`: one
+feature map through `Conv3x3 -> BN -> ReLU` stages and `decoder_dims` (removed, no alias). A
+`.keras` archive saved before that does not load into this model.
 
 It is composed of three sub-networks:
 
 | Sub-network        | Type                          | Where built       | Trainable |
 |--------------------|-------------------------------|-------------------|-----------|
 | `encoder`          | `keras.Model` (`ViT` or Conv) | `__init__`/`build()` | yes |
-| `decoder`          | `DepthEstimationHead` (`decoder_style='dpt'`), named `depth_estimation_head` | `build()`, only when `include_top=True` | yes |
+| `decoder`          | `DPTHead`, named `depth_head` | `build()`, only when `include_top=True` | yes |
 | `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
 | `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
 Forward path (`call`):
 
 ```
-x → encoder → [_features_to_spatial if ViT] → decoder → depth
+x → encoder (last 4 layers, or the placeholder's map 4 times) → decoder → [resize to H, W] → ReLU → depth
 ```
 
 `call` does **not** augment. CutMix mixes across batch rows, so the depth
@@ -112,7 +152,8 @@ full `get_config()` / `from_config()` round-trip.
 DepthAnything(
     encoder_type:           str = 'vit_l',                # {'vit_s','vit_b','vit_l'}
     image_shape:            Tuple[int,int,int] = (384, 384, 3),
-    decoder_dims:           Optional[List[int]] = [256, 128, 64, 32],
+    dpt_features:           Optional[int] = None,         # None: the published value per encoder
+    dpt_out_channels:       Optional[List[int]] = None,   # None: the published values per encoder
     output_channels:        int  = 1,
     kernel_initializer:     Union[str, Initializer] = 'he_normal',
     kernel_regularizer:     Optional[Regularizer]   = None,
@@ -161,7 +202,6 @@ model = create_depth_anything(
     encoder_kind='real',
     encoder_type='vit_l',
     image_shape=(384, 384, 3),
-    decoder_dims=[256, 128, 64, 32],
     use_feature_alignment=False,
 )
 ```
@@ -174,8 +214,8 @@ when returned.
 `keras.layers.Layer` registered as
 `dl_techniques.models.depth_anything.components>DPTDecoder` via
 `@register_dl_technique(...)`. Convolutional decoder head with optional bilinear
-upsampling. `DepthAnything` does not use it (its decoder is the shared
-`DepthEstimationHead` in `'dpt'` mode, the same stage structure); OmniPoint's dense heads do.
+upsampling. `DepthAnything` does not use it (its decoder is `DPTHead`); OmniPoint's dense heads
+do, and keep it unchanged (BatchNorm included).
 
 **Architecture**:
 
@@ -315,7 +355,8 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 | `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`. Picks ViT scale. |
 | `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds in-tree `ViT`; `'placeholder'` builds the legacy Conv-BN-ReLU. |
 | `image_shape`            | `Tuple[int,int,int]`       | `(384, 384, 3)`                        | Input image shape. |
-| `decoder_dims`           | `List[int]`                | `[256, 128, 64, 32]`                   | Stage widths; last entry is the penultimate decoder width. |
+| `dpt_features`           | `int` \| `None`            | `None` (64 / 128 / 256)                | `DPTHead` fusion width; `None` takes the published value for `encoder_type`. |
+| `dpt_out_channels`       | `List[int]` \| `None`      | `None` (see "DPT head")                | The head's four projection widths. |
 | `output_channels`        | `int`                      | `1`                                    | Final depth-map channel count. |
 | `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches the encoder and every decoder conv (one clone per conv). |
 | `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches the encoder and every decoder conv. Do **not** combine with `AdamW(weight_decay=...)`. |
@@ -326,21 +367,10 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 | `use_feature_alignment`  | `bool`                     | `True`                                 | Adds the FAL term in the semi-supervised step. Also builds `frozen_encoder` — but so does `enable_semi_supervised`, which needs a teacher for its consistency term. Setting this True with `enable_semi_supervised=False` builds a teacher nothing reads, and warns. |
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
-The decoder, `DepthEstimationHead(decoder_style='dpt')`, built in `build()` when `include_top=True`:
-
-| Argument                 | Value DepthAnything passes | Notes |
-|--------------------------|----------------------------|-------|
-| `dpt_dims`               | `decoder_dims`             | One `Conv3x3 → BN → ReLU` stage per entry. |
-| `output_channels`        | `output_channels`          | |
-| `dpt_use_bias`           | `False`                    | Stage convs; the output conv has a bias. |
-| `dpt_activation`         | `'relu'`                   | Stage activation. |
-| `dpt_output_activation`  | `'relu'`                   | The reference's final ReLU; see "Output range". |
-| `dpt_upsample_factor`    | `encoder_stride` (16)      | Same for the real and the placeholder encoder. Power of 2 only. |
-| `dpt_kernel_initializer` | `kernel_initializer`       | Cloned per conv. |
-| `dpt_kernel_regularizer` | `kernel_regularizer`       | |
-
-`min_depth`, `max_depth` and `use_log_depth` are not passed: they configure the head's progressive
-decoder, and the DPT mode refuses them.
+The decoder, `DPTHead`, built in `build()` when `include_top=True`, takes `features=dpt_features`,
+`out_channels=dpt_out_channels`, `patch_size=16`, `output_channels`, and `kernel_initializer`
+(cloned per conv) and `kernel_regularizer`. It has no range knob (`min_depth`, `max_depth`,
+`use_log_depth`); see "Output range".
 
 ---
 
@@ -370,6 +400,8 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
   Unlabeled Data."** CVPR 2024.
 - Ranftl, René et al. **"Vision Transformers for Dense Prediction"** (DPT
   decoder). ICCV 2021.
+- LiheYoung/Depth-Anything, `depth_anything/dpt.py` and `depth_anything/blocks.py` (the head
+  `DPTHead` ports), and the `config.json` of `LiheYoung/depth_anything_vit{s,b,l}14`.
 - Oquab, Maxime et al. **"DINOv2: Learning Robust Visual Features without
   Supervision."** 2023.
 - In-tree canonical Keras-3 `train_step` pattern:
@@ -383,6 +415,6 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
   (MegaDepth + masked depth loss + visualization callbacks).
 - `src/train/AGENTS.md` § "Pattern 5: Depth Estimation (MegaDepth)" — the pattern
   this trainer implements. `train_depth_anything.py` is the only Pattern-5 trainer.
-- `src/dl_techniques/models/vision/depth_anything/components.py` — `DPTDecoder` source.
+- `src/dl_techniques/models/vision/depth_anything/components.py` — `DPTHead` and `DPTDecoder` source.
 - `src/dl_techniques/models/vision/depth_anything/model.py` — `DepthAnything` source.
 - `tests/test_models/test_depth_anything/` — pytest coverage.

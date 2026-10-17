@@ -25,7 +25,7 @@ def _build():
     from dl_techniques.models.vision.depth_anything.model import create_depth_anything
     return create_depth_anything(
         encoder_type='vit_s', image_shape=(64, 64, 3),
-        encoder_kind='placeholder', decoder_dims=[16, 16, 16, 16],
+        encoder_kind='placeholder', dpt_features=16, dpt_out_channels=[16, 16, 16, 16],
     )
 
 
@@ -39,6 +39,11 @@ def test_depth_anythings_partial_build_costs_nothing_across_a_round_trip():
     perturbed (BatchNorm moving statistics excluded); perturbation liveness
     **2.169124e+00**; reload weights 114; round trip **max|delta| exactly
     0.000000e+00** at ``atol=0.0``.
+
+    Re-measured 2026-10-17 with the reference DPTHead (D-128 of
+    plan-2026-10-14T062616-81938e81; CPU): 152 weights (60 in the head, no
+    BatchNorm), 116 perturbed, liveness 6.670453e+01, reload weights 152, round
+    trip max|delta| exactly 0.0.
     """
     report = assert_lazy_build_costs_nothing(
         build=_build,

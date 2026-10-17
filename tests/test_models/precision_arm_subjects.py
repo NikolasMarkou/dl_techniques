@@ -314,7 +314,7 @@ def _b_depth_anything():
     from dl_techniques.models.vision.depth_anything import create_depth_anything
     return create_depth_anything(encoder_type="vit_s", image_shape=(64, 64, 3),
                                  encoder_kind="placeholder",
-                                 decoder_dims=[16, 16, 16, 16])
+                                 dpt_features=16, dpt_out_channels=[16, 16, 16, 16])
 
 
 _sub("depth_anything", _b_depth_anything, lambda: _f32(1, 64, 64, 3))
@@ -1934,7 +1934,7 @@ def _b_depth_anything_no_head():
     from dl_techniques.models.vision.depth_anything import create_depth_anything
     return create_depth_anything(encoder_type="vit_s", image_shape=(64, 64, 3),
                                  encoder_kind="placeholder",
-                                 decoder_dims=[16, 16, 16, 16], include_top=False)
+                                 dpt_features=16, dpt_out_channels=[16, 16, 16, 16], include_top=False)
 
 
 # The three restoration models: ``include_top=False`` builds no tail and

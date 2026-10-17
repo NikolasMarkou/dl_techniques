@@ -1937,7 +1937,7 @@ class DepthEstimationHead(BaseVisionHead):
     unless ``use_attention`` or ``use_ffn`` is on, where it is that stage's
     dropout.
 
-    ``decoder_style='dpt'`` (the DepthAnything decoder) runs one
+    ``decoder_style='dpt'`` (no in-tree model builds it since 2026-10-17) runs one
     ``Conv2D -> BatchNormalization -> activation`` stage per ``dpt_dims``
     entry, with a 2x bilinear upsample after each of the first
     ``log2(dpt_upsample_factor)`` stages, then ``dpt_output_conv``. Its

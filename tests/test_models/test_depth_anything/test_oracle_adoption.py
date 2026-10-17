@@ -28,6 +28,7 @@ import keras
 import pytest
 import tensorflow as tf
 
+from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.models.vision.depth_anything import DepthAnything
 
 from ..gradient_flow_oracle import (
@@ -47,7 +48,10 @@ IMAGE_SHAPE = (64, 64, 3)
 #: Measured 2026-08-21 at encoder_kind='real', encoder_type='vit_s', 64x64.
 #: Updated 2026-10-10 after fixing DepthEstimationHead to not create unused norm layer:
 #: **164** trainable weights, **0** dead, **0** non-finite.
-GF_N_WEIGHTS = 164
+#: Updated 2026-10-17 (plan-2026-10-14T062616-81938e81 D-128), the decoder now
+#: the reference DPTHead: **210** trainable weights (150 ViT + 60 head), **0**
+#: dead, **0** non-finite.
+GF_N_WEIGHTS = 210
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -55,6 +59,12 @@ def _images(batch: int = 2) -> np.ndarray:
 
 
 def _model(**overrides):
+    # Seeded: behind the reference head's final ReLU the share of exactly-zero
+    # output pixels at init depends on the draw (MEASURED 2026-10-17, vit_s,
+    # 10 seeds: 0.053 to 0.987 at 64x64), and an all-zero map has no gradient
+    # anywhere, so an unseeded draw made the gradient-flow arm order-dependent
+    # (0/210 live in one full-directory run). Seed 0 starts at 0.229.
+    keras.utils.set_random_seed(0)
     kwargs = dict(encoder_kind="real", encoder_type="vit_s", image_shape=IMAGE_SHAPE)
     kwargs.update(overrides)
     model = DepthAnything(**kwargs)
@@ -63,11 +73,20 @@ def _model(**overrides):
 
 
 def _one_adam_step(model, inputs) -> None:
+    """One Adam step on the model's own objective, the affine-invariant loss.
+
+    Not on ``default_loss``: the mean of squares pulls every output toward 0,
+    and behind the reference head's final ReLU one such step leaves the map
+    all zero (MEASURED 2026-10-17, vit_s 64x64: zero fraction 0.023 -> 0.995;
+    at 256x256 1.000), a point with no gradient at all. The affine-invariant
+    loss has no pull toward a constant (zero fraction 0.010 after the step).
+    """
     optimizer = keras.optimizers.Adam(1e-3)
     variables = list(model.trainable_variables)
     optimizer.build(variables)
+    target = np.random.default_rng(1).random((inputs.shape[0],) + IMAGE_SHAPE[:2] + (1,))
     with tf.GradientTape() as tape:
-        loss = default_loss(model(inputs, training=True))
+        loss = AffineInvariantLoss()(target.astype("float32"), model(inputs, training=True))
     optimizer.apply_gradients(zip(tape.gradient(loss, variables), variables))
 
 
@@ -111,13 +130,21 @@ class TestDepthAnythingKnobSensitivity:
         ]
         assert sizes[0] < sizes[1], f"vit_b is not larger than vit_s: {sizes}"
 
-    def test_decoder_dims_changes_the_parameterisation(self):
+    def test_dpt_features_changes_the_parameterisation(self):
         """A knob that reaches the DECODER only, so it cannot be met by the encoder."""
         builders = {
-            tuple(d): (lambda d=d: _model(decoder_dims=list(d)))
-            for d in ([32, 32, 32, 32], [48, 48, 48, 48])
+            f: (lambda f=f: _model(dpt_features=f))
+            for f in (32, 48)
         }
-        assert_structural_knob_changes_weights(builders, knob="decoder_dims")
+        assert_structural_knob_changes_weights(builders, knob="dpt_features")
+
+    def test_dpt_out_channels_changes_the_parameterisation(self):
+        """The head's four projection widths, a second decoder-only knob."""
+        builders = {
+            tuple(c): (lambda c=c: _model(dpt_out_channels=list(c)))
+            for c in ([16, 16, 32, 32], [24, 24, 48, 48])
+        }
+        assert_structural_knob_changes_weights(builders, knob="dpt_out_channels")
 
     def test_the_knob_assertion_can_fail(self):
         builders = {"a": (lambda: _model(encoder_type="vit_s")),

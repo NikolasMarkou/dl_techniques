@@ -10,8 +10,14 @@ carried BOTH families for the same tensors — measured 2026-08-22 at exactly
 
 The half that was load-bearing is the force-build in `load_own_variables`, which
 materializes the sub-Models before Keras restores into them. The second test here
-is that half's "something changed" twin: with the force-build removed the round
-trip stops being exact, which is the 2026-05-10 defect returning.
+was that half's "something changed" twin: with the force-build removed the round
+trip stopped being exact, which is the 2026-05-10 defect returning. It went
+GREEN at plan-2026-10-14T062616-81938e81 step 8 (D-128) for a stated reason:
+`DepthAnything.build` now builds the encoder (the head reads it through
+`get_intermediate_layers`, not `__call__`, so nothing else would) and the head
+explicitly, so `load_model`'s own build materializes every weight before the
+restore. The twin now pins that property: without the hook the round trip is
+exact. The hook stays (anchor D-009 of plan-2026-08-22T035419-a11304c8 keeps it).
 
 A single round trip is NOT enough to see this defect class, so both tests do two
 (`save -> load -> save -> load`): `load_model` rebuilds from the saved
@@ -122,13 +128,14 @@ def test_every_weight_is_written_exactly_once(tmp_path):
     assert second_delta == 0.0, f"second round trip moved the output by {second_delta}"
 
 
-def test_removing_the_force_build_breaks_the_round_trip(tmp_path, monkeypatch):
-    """The "something changed" twin: `load_own_variables` is load-bearing.
+def test_build_alone_materializes_every_weight_for_the_round_trip(tmp_path, monkeypatch):
+    """The "something changed" twin: `build` alone restores every weight.
 
-    Without it, Keras restores into sub-Models whose sub-layers do not exist yet
-    and the weights come back re-initialised. If this test ever goes GREEN, the
-    framework has stopped needing the hook and the override may be deleted —
-    that is the only condition under which deleting it is safe.
+    Until D-128 the round trip without `load_own_variables` came back with
+    re-initialised weights (Keras restored into sub-Models whose sub-layers did
+    not exist yet). Since `build` builds the encoder and the head explicitly,
+    the round trip is exact without the hook. If this goes RED, a sub-layer is
+    created lazily again and the hook is load-bearing once more.
     """
     monkeypatch.delattr(DepthAnything, "load_own_variables")
 
@@ -146,11 +153,11 @@ def test_removing_the_force_build_breaks_the_round_trip(tmp_path, monkeypatch):
             )
         )
     )
-    assert delta > 1e-3, (
-        "the path-based restore round-tripped exactly WITHOUT the force-build "
-        f"in `DepthAnything.load_own_variables` (max|delta| = {delta}). Keras "
-        "may have started materializing nested sub-Models on its own; re-check "
-        "D-009 before relying on the override."
+    assert float(np.max(np.abs(reference))) > 1e-3, "degenerate probe: an all-zero output"
+    assert delta == 0.0, (
+        "without the force-build in `DepthAnything.load_own_variables` the "
+        f"round trip moved the output by max|delta| = {delta}: `build` no longer "
+        "materializes every weight before the restore (D-128)."
     )
 
 

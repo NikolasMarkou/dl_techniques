@@ -76,7 +76,7 @@ def test_the_target_range_is_inside_the_heads_output_range(tmp_path):
     keras.utils.set_random_seed(0)
     model = create_depth_anything(
         encoder_type="vit_s", encoder_kind="placeholder",
-        image_shape=(64, 64, 3), decoder_dims=[8, 8, 8, 8],
+        image_shape=(64, 64, 3), dpt_features=8, dpt_out_channels=[8, 8, 8, 8],
     )
     out = np.asarray(model(np.random.default_rng(2).standard_normal(
         (2, 64, 64, 3)).astype("float32"), training=False))

@@ -153,7 +153,9 @@ class DepthAnythingTrainingConfig:
     # Model — DepthAnything-specific
     encoder_type: str = "vit_l"            # one of {'vit_s','vit_b','vit_l'}
     encoder_kind: str = "real"             # 'real' (in-tree ViT) or 'placeholder' (Conv-BN-ReLU)
-    decoder_dims: Tuple[int, ...] = (256, 128, 64, 32)
+    #: DPTHead widths; ``None`` takes the published checkpoint's for ``encoder_type``.
+    dpt_features: Optional[int] = None
+    dpt_out_channels: Optional[Tuple[int, int, int, int]] = None
     output_channels: int = 1
     use_feature_alignment: bool = False    # see Known Issue #2 in model README
     enable_semi_supervised: bool = False   # adds pseudo-label consistency on unlabeled batches inside train_step
@@ -388,7 +390,9 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
     return create_depth_anything(
         encoder_type=config.encoder_type,
         image_shape=(config.patch_size, config.patch_size, 3),
-        decoder_dims=list(config.decoder_dims),
+        dpt_features=config.dpt_features,
+        dpt_out_channels=(
+            None if config.dpt_out_channels is None else list(config.dpt_out_channels)),
         output_channels=config.output_channels,
         use_feature_alignment=config.use_feature_alignment,
         cutmix_prob=config.cutmix_prob,
@@ -416,9 +420,9 @@ def init_from_checkpoint(model: DepthAnything, ckpt_path: str) -> TransferReport
     """
     logger.info(f"Initializing from pretrained checkpoint: {ckpt_path}")
     # The prefix is read off the model. It used to be the literal
-    # "dpt_decoder", a name no DepthAnything layer has carried since the
-    # decoder became the 'depth_estimation_head' vision head, so the decoder
-    # was transferred too, contrary to --init-from's help text.
+    # "dpt_decoder", a name no DepthAnything layer carried (the decoder was
+    # the 'depth_estimation_head' vision head, now the 'depth_head' DPTHead),
+    # so the decoder was transferred too, contrary to --init-from's help text.
     report = load_weights_from_checkpoint(
         target=model,
         ckpt_path=ckpt_path,

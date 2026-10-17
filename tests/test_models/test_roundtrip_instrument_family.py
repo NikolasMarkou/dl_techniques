@@ -19,7 +19,7 @@ What the family found, rather than merely instrumented
 * **The substance of R-063/R-073 passes everywhere.** 72 subjects, weight-value
   delta across a save/load cycle **exactly ``0.000000e+00``** in every one. The
   charge was that the comparison was never MADE, and that was correct.
-* **``depth_anything`` has 46 of 114 weights on a colliding relative path** --
+* **``depth_anything`` has 46 of 152 weights on a colliding relative path** --
   its frozen teacher is a ``clone_model`` of the student and ``clone_model``
   bakes the STUDENT's name into the clone. Pinned below rather than repaired:
   the name is fixed at clone time, and every alternative (rebuilding the clone
@@ -100,7 +100,7 @@ PATH_COLLISIONS = {
     # `DepthAnything` keeps a frozen teacher built with
     # `keras.models.clone_model(self.encoder)`. `clone_model` reproduces the
     # source's NAME, so student and teacher are both `encoder_vit_s` and 46 of
-    # the 114 weights cannot be addressed by path. The `.keras` archive is
+    # the 152 weights cannot be addressed by path. The `.keras` archive is
     # positional and round-trips at 0.0 either way; what is lost is
     # `load_weights(by_name)` and any by-name checkpoint.
     "depth_anything": 46,
@@ -170,7 +170,7 @@ NO_HEAD_MARKERS = {
     "vit_hmlp": "head/",
     "vit_siglip": "head/",
     "beit": "mean_pooling_classification_head/",
-    "depth_anything": "depth_estimation_head/",
+    "depth_anything": "depth_head/",
     # The restoration models' tails (plan-2026-10-14T062616-81938e81 step 6.1):
     # SCUNet's and DarkIR's are an EnhancementHead with block_dims=() (1 and 2
     # weights); PFT-SR's light variant ends in its official

@@ -103,7 +103,7 @@ on this machine.
   with `AdamW.weight_decay` (avoids double weight decay).
 - Optional pretrained backbone init via `--init-from <ckpt.keras>`
   (`init_from_checkpoint`): every layer of the checkpoint except the decoder, which is
-  skipped by the name of `model.decoder` (`depth_estimation_head`) and so starts
+  skipped by the name of `model.decoder` (`depth_head`) and so starts
   freshly initialized.
 
 ## CLI flags
@@ -234,6 +234,6 @@ comes from the former CliffordNet depth trainer, from which it differs in:
   `DeepSupervisionWeightScheduler`.
 - Metrics take MegaDepth's two-channel `y_true = concat([disparity, mask], -1)`
   directly; the depth metrics read the mask channel themselves.
-- `init_from` skips the decoder by `model.decoder.name` (`depth_estimation_head`), not by the
+- `init_from` skips the decoder by `model.decoder.name` (`depth_head`), not by the
   `head_` prefix CliffordNet used. It skipped the literal `dpt_decoder` until 2026-10-15, a name
   no layer carried, so the decoder was transferred as well.

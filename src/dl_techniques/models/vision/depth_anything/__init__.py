@@ -1,7 +1,7 @@
 """Depth Anything model package — public API."""
 
 from .model import DepthAnything, create_depth_anything
-from .components import DPTDecoder
+from .components import DPTDecoder, DPTHead
 from .teacher_ema import (
     TeacherEMACallback,
     cosine_ema_schedule,
@@ -12,6 +12,7 @@ __all__ = [
     "DepthAnything",
     "create_depth_anything",
     "DPTDecoder",
+    "DPTHead",
     "TeacherEMACallback",
     "cosine_ema_schedule",
     "linear_ema_schedule",
