@@ -119,13 +119,17 @@ Forward path (`call`):
 x → encoder (last 4 layers, or the placeholder's map 4 times) → decoder → [resize to H, W] → ReLU → depth
 ```
 
-`call` does **not** augment. CutMix mixes across batch rows, so the depth
-target has to be mixed by the same rectangle, and only the training path holds
-a target: `train_step` calls `_augment_with_targets(x, [y, ...])`, which returns
-the augmented image together with every identically-mixed target. Both training
-paths go through it — the labeled path for `y`, the semi-supervised path a
-second time for the teacher's pseudo-depth. `model(x, training=True)` is a plain
-un-augmented forward pass.
+`call` does **not** augment. CutMix mixes across batch rows, so a target has to
+be mixed by the same rectangle, and only the training path holds one: the
+semi-supervised `train_step` calls `_augment_with_targets(x_unlab, [pseudo])`,
+which returns the augmented unlabeled image together with the identically-mixed
+teacher pseudo-depth. The labeled batch is **not** strongly augmented in either
+path: the paper's only labeled-image augmentation is a horizontal flip (arXiv
+2401.10891, section 4.1), which the MegaDepth loader applies; CutMix and colour
+jitter are its perturbations for unlabeled images (section 3.2). Until
+2026-10-17 both paths CutMixed and jittered the labeled batch and its depth
+target as well (D-131). `model(x, training=True)` is a plain un-augmented
+forward pass.
 
 `train_step` accepts two input shapes:
 
@@ -361,8 +365,8 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 | `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches the encoder and every decoder conv (one clone per conv). |
 | `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches the encoder and every decoder conv. Do **not** combine with `AdamW(weight_decay=...)`. |
 | `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
-| `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`. |
-| `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`. |
+| `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`; unlabeled batches only. |
+| `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`; unlabeled batches only. |
 | `input_value_range`      | `Tuple[float,float]` \| `None` | `(0.0, 1.0)`                       | Declared input range for the colour-jitter clip. `None` for standardized / `[-1,+1]` inputs. |
 | `use_feature_alignment`  | `bool`                     | `True`                                 | Adds the FAL term in the semi-supervised step. Also builds `frozen_encoder` — but so does `enable_semi_supervised`, which needs a teacher for its consistency term. Setting this True with `enable_semi_supervised=False` builds a teacher nothing reads, and warns. |
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |

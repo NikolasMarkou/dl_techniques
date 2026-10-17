@@ -20,7 +20,9 @@ of an image against a target taken from the teacher's prediction on the clean
 image, so the two disagree and there is a gradient to learn from. A second
 term aligns student features to the teacher to preserve the encoder's
 pretrained semantic structure. Augmentation runs inside `train_step`, not
-`call`, because CutMix changes the correct target over the mixed region.
+`call`, because CutMix changes the correct target over the mixed region. Only
+the unlabeled batch is strongly augmented; the labeled batch trains as loaded
+(the paper's horizontal flip happens in the data loader).
 
 The encoder is this repository's plain `ViT` (patch size 16) or a
 `Conv-BN-ReLU` placeholder stack, not DINOv2, and ships no pretrained
@@ -166,11 +168,14 @@ class DepthAnything(keras.Model):
     :param loss_weights: Weight per loss term, keys ``"labeled"``,
         ``"unlabeled"``, ``"feature"``.
     :type loss_weights: Optional[Dict[str, float]]
-    :param cutmix_prob: Probability of applying CutMix. Runs inside
-        `train_step`, not `call`, so the depth target is CutMixed by the same
-        box as the image.
+    :param cutmix_prob: Probability of applying CutMix to an UNLABELED batch
+        in the semi-supervised step (the paper's perturbation for unlabeled
+        images). Runs inside `train_step`, not `call`, so the teacher's
+        pseudo-depth is CutMixed by the same box as the image. The labeled
+        batch is never mixed.
     :type cutmix_prob: float
-    :param color_jitter_strength: Strength of the color-jitter augmentation.
+    :param color_jitter_strength: Strength of the color-jitter augmentation
+        of an unlabeled batch (the labeled batch is never jittered).
     :type color_jitter_strength: float
     :param input_value_range: Declared value range of the input images; color
         jitter clips back into it. Pass ``None`` for standardized or
@@ -644,8 +649,9 @@ class DepthAnything(keras.Model):
         """Forward pass through the model.
 
         This is the plain encoder-decoder path. It does not augment: strong
-        augmentation is applied by `train_step` (see `_augment_with_targets`),
-        where the depth target is in scope and can be CutMixed by the same box.
+        augmentation is applied by the semi-supervised `train_step` to the
+        unlabeled batch (see `_augment_with_targets`), where the teacher's
+        pseudo-depth is in scope and can be CutMixed by the same box.
 
         :param inputs: Input tensor, shape ``(batch_size, height, width, 3)``,
             or a tuple of ``(labeled, unlabeled)`` tensors for training.
@@ -735,7 +741,9 @@ class DepthAnything(keras.Model):
     ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor], Optional[keras.KerasTensor]]:
         """Strongly augment ``x`` and apply the same CutMix box to each target.
 
-        Interface contract (called from both training paths):
+        Interface contract (called by the semi-supervised step, for the
+        unlabeled batch and its pseudo-depth; the labeled batch is not
+        augmented, D-131):
 
         * Returns ``(x_aug, mixed_targets, box)`` with ``len(mixed_targets) ==
           len(targets)``, each entry shaped like its input. ``box`` is the
@@ -865,14 +873,20 @@ class DepthAnything(keras.Model):
         x: keras.KerasTensor,
         y: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Labeled-only path: augment image+target together, forward, backprop.
+        """Labeled-only path: forward the batch as given, backprop.
 
+        The labeled batch is not strongly augmented (see the D-131 anchor);
+        its only augmentation, a horizontal flip, happens in the data loader.
         Both step methods differentiate ``scaled_loss`` and report ``loss``.
         See the D-034 anchor below for why the two must not be collapsed.
         """
         # DECISION plan-2026-08-17T183311-79c63e38/D-034: differentiate the scaled loss, report the unscaled one.
         # Under mixed_float16 skipping `scale_loss` divides every gradient by the loss scale (measured |dW| ratio ~2.8e4); float32 is unaffected. See decisions.md.
-        x, (y,), _ = self._augment_with_targets(x, [y])
+        # DECISION plan-2026-10-14T062616-81938e81/D-131
+        # Do NOT CutMix or colour-jitter the labeled batch: the paper applies
+        # only horizontal flipping to labeled images (arXiv 2401.10891, 4.1,
+        # done by the MegaDepth loader); the strong perturbations are its
+        # recipe for unlabeled images (3.2), applied in the semi-supervised step.
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
             # Keras-3 canonical train_step — replaces deprecated
@@ -896,13 +910,14 @@ class DepthAnything(keras.Model):
     ) -> Dict[str, keras.KerasTensor]:
         """Semi-supervised path: labeled compute_loss + consistency + optional FAL.
 
-        Both branches take the teacher's view from the *clean* batch and the
-        student's from the *augmented* one — that asymmetry is the whole recipe.
-        What is not part of the recipe is CutMix mixing across batch rows without
-        the target following: the pseudo-label is therefore mixed by the same box
-        as the student's input before the consistency term compares them.
+        Both unlabeled branches take the teacher's view from the *clean* batch
+        and the student's from the *augmented* one — that asymmetry is the whole
+        recipe. What is not part of the recipe is CutMix mixing across batch rows
+        without the target following: the pseudo-label is therefore mixed by the
+        same box as the student's input before the consistency term compares
+        them. The labeled batch is not augmented here (D-131, as in
+        :meth:`_train_step_labeled`).
         """
-        x_lab, (y,), _ = self._augment_with_targets(x_lab, [y])
         with tf.GradientTape() as tape:
             # ---- labeled supervision ----
             y_pred = self(x_lab, training=True)
@@ -1100,9 +1115,11 @@ def create_depth_anything(
     those to `[0, 1]` would flatten every negative pixel to zero on the
     training path only, while evaluation saw the untouched image.
 
-    Augmentation runs inside `train_step`, not inside `call`: CutMix mixes
-    across batch rows, so the depth target has to be mixed by the same
-    rectangle, and only the training path has the target. Calling
+    Augmentation runs inside `train_step`, not inside `call`, and only on the
+    unlabeled batch of the semi-supervised step: CutMix mixes across batch
+    rows, so the teacher's pseudo-depth has to be mixed by the same rectangle,
+    and only the training path has it. The labeled batch is not strongly
+    augmented (the paper flips it horizontally, in the data loader). Calling
     `model(x, training=True)` directly returns an un-augmented forward pass.
 
     :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``.

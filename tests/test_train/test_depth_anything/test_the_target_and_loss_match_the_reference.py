@@ -117,7 +117,8 @@ def trainer_loss(tmp_path_factory):
     model = _CompileCapture()
     mp = pytest.MonkeyPatch()
     try:
-        mp.setattr(module, "discover_megadepth_pairs", lambda *a, **k: (paths, paths))
+        mp.setattr(module, "split_megadepth_pairs",
+                   lambda *a, **k: (paths[:18], paths[:18], paths[18:], paths[18:]))
         mp.setattr(module, "MegaDepthDataset", lambda *a, **k: _OneBatch())
         mp.setattr(module, "create_model", lambda config: model)
         config = module.DepthAnythingTrainingConfig(

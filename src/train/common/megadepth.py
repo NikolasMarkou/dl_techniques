@@ -27,11 +27,12 @@ d = 1/t and then normalized to 0~1 on each depth map"), which a non-negative
 
 Usage::
 
-    from train.common.megadepth import discover_megadepth_pairs, MegaDepthDataset
+    from train.common.megadepth import split_megadepth_pairs, MegaDepthDataset
 
-    rgb_paths, depth_paths = discover_megadepth_pairs("/path/to/Megadepth")
+    train_rgb, train_depth, val_rgb, val_depth = split_megadepth_pairs(
+        "/path/to/Megadepth", train_split=0.9)
     ds = MegaDepthDataset(
-        rgb_paths, depth_paths,
+        train_rgb, train_depth,
         batch_size=16, patch_size=256,
         is_training=True, workers=8,
     )
@@ -53,6 +54,95 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 
+def scene_of(path: str) -> str:
+    """The MegaDepth scene a pair belongs to: ``{root}/{scene}/dense{N}/{imgs,depths}/{file}``.
+
+    Args:
+        path: An RGB or depth path returned by the discovery functions.
+
+    Returns:
+        The scene directory name.
+    """
+    return Path(path).parts[-4]
+
+
+def discover_megadepth_scenes(
+    root: str,
+) -> List[Tuple[str, List[str], List[str]]]:
+    """Every scene's matched RGB+depth pairs.
+
+    Interface contract: returns ``[(scene, rgb_paths, depth_paths), ...]``,
+    scenes sorted by name and each scene's pairs sorted by depth file path,
+    with only the scenes that hold at least one pair. An image matches the
+    HDF5 depth file of the same stem in the same ``dense{N}`` directory. Never
+    raises for a missing ``imgs``/``depths`` directory (the scene is skipped).
+
+    Args:
+        root: Path to the MegaDepth dataset root directory.
+
+    Returns:
+        One ``(scene, rgb_paths, depth_paths)`` entry per non-empty scene.
+    """
+    scenes = []
+    for scene_dir in sorted(Path(root).iterdir()):
+        if not scene_dir.is_dir():
+            continue
+        pairs = []
+        for dense_dir in sorted(scene_dir.iterdir()):
+            if not dense_dir.is_dir() or not dense_dir.name.startswith("dense"):
+                continue
+            imgs_dir = dense_dir / "imgs"
+            depths_dir = dense_dir / "depths"
+            if not imgs_dir.exists() or not depths_dir.exists():
+                continue
+            img_stems = {
+                fp.stem: str(fp) for fp in imgs_dir.iterdir()
+                if fp.suffix.lower() in (".jpg", ".jpeg", ".png")}
+            for fp in sorted(depths_dir.iterdir()):
+                if fp.suffix.lower() == ".h5" and fp.stem in img_stems:
+                    pairs.append((img_stems[fp.stem], str(fp)))
+        if pairs:
+            scenes.append((scene_dir.name, [p[0] for p in pairs], [p[1] for p in pairs]))
+    return scenes
+
+
+def _take_across_scenes(
+    scenes: List[Tuple[str, List[str], List[str]]],
+    max_files: Optional[int],
+) -> Tuple[List[str], List[str]]:
+    """Up to ``max_files`` pairs, spread as evenly over the scenes as their sizes allow.
+
+    Every scene gets the same quota, a scene smaller than the quota gives up
+    the rest to the others (a water-fill), and a scene's share is taken evenly
+    spaced through its sorted pairs. ``None`` takes every pair. The result
+    stays grouped by scene, in scene order.
+    """
+    if not max_files:
+        quota = {name: len(rgb) for name, rgb, _ in scenes}
+    else:
+        quota = {name: 0 for name, _, _ in scenes}
+        sizes = {name: len(rgb) for name, rgb, _ in scenes}
+        remaining = int(max_files)
+        open_scenes = [name for name, _, _ in scenes]
+        while remaining > 0 and open_scenes:
+            share = max(1, remaining // len(open_scenes))
+            for name in list(open_scenes):
+                give = min(share, sizes[name] - quota[name], remaining)
+                quota[name] += give
+                remaining -= give
+                if quota[name] == sizes[name]:
+                    open_scenes.remove(name)
+                if remaining == 0:
+                    break
+    rgb_out, depth_out = [], []
+    for name, rgb, depth in scenes:
+        k = quota[name]
+        for index in (np.arange(k) * len(rgb)) // max(k, 1):
+            rgb_out.append(rgb[index])
+            depth_out.append(depth[index])
+    return rgb_out, depth_out
+
+
 def discover_megadepth_pairs(
     root: str,
     max_files: Optional[int] = None,
@@ -61,53 +151,76 @@ def discover_megadepth_pairs(
 
     Walks all ``{root}/{scene}/dense{N}/`` subdirectories, matching
     image files in ``imgs/`` to HDF5 depth files in ``depths/`` by
-    filename stem.
+    filename stem (:func:`discover_megadepth_scenes`).
 
     Args:
         root: Path to the MegaDepth dataset root directory.
-        max_files: Maximum number of pairs to return.  ``None`` for
+        max_files: Maximum number of pairs to return, spread evenly across
+            the scenes (:func:`_take_across_scenes`).  ``None`` for
             unlimited.
 
     Returns:
         Tuple of ``(rgb_paths, depth_paths)`` — matched lists of
-        absolute file paths.
+        absolute file paths, grouped by scene in scene order.
     """
-    root_path = Path(root)
-    rgb_paths: List[str] = []
-    depth_paths: List[str] = []
-
-    for scene_dir in sorted(root_path.iterdir()):
-        if not scene_dir.is_dir():
-            continue
-        for dense_dir in sorted(scene_dir.iterdir()):
-            if not dense_dir.is_dir() or not dense_dir.name.startswith("dense"):
-                continue
-
-            imgs_dir = dense_dir / "imgs"
-            depths_dir = dense_dir / "depths"
-            if not imgs_dir.exists() or not depths_dir.exists():
-                continue
-
-            # Build stem → path maps
-            img_stems = {}
-            for fp in imgs_dir.iterdir():
-                if fp.suffix.lower() in (".jpg", ".jpeg", ".png"):
-                    img_stems[fp.stem] = str(fp)
-
-            for fp in depths_dir.iterdir():
-                if fp.suffix.lower() == ".h5":
-                    stem = fp.stem
-                    if stem in img_stems:
-                        rgb_paths.append(img_stems[stem])
-                        depth_paths.append(str(fp))
-
-            if max_files and len(rgb_paths) >= max_files:
-                rgb_paths = rgb_paths[:max_files]
-                depth_paths = depth_paths[:max_files]
-                return rgb_paths, depth_paths
-
+    # DECISION plan-2026-10-14T062616-81938e81/D-129
+    # Do NOT go back to the first max_files pairs in scene order: MegaDepth's
+    # scenes hold 19 to 3970 pairs, so the trainer's default 11,000 covered 5
+    # of 195 scenes.
+    rgb_paths, depth_paths = _take_across_scenes(
+        discover_megadepth_scenes(root), max_files)
     logger.info(f"Discovered {len(rgb_paths)} MegaDepth RGB+depth pairs")
     return rgb_paths, depth_paths
+
+
+def split_megadepth_pairs(
+    root: str,
+    train_split: float = 0.9,
+    max_train_files: Optional[int] = None,
+    max_val_files: Optional[int] = None,
+) -> Tuple[List[str], List[str], List[str], List[str]]:
+    """A scene-disjoint train/validation split of MegaDepth.
+
+    Interface contract: returns ``(train_rgb, train_depth, val_rgb,
+    val_depth)``. The scenes (sorted by name) are dealt so that
+    ``1 - train_split`` of them, spread evenly over the sorted list, are
+    validation scenes and the rest training scenes; no scene contributes to
+    both. Each side is then capped at its ``max_*_files``, taken evenly
+    across its scenes (``None`` keeps every pair). Deterministic: the same
+    root and arguments give the same lists. Raises ``ValueError`` when
+    ``train_split`` is not in ``(0, 1)`` or a side would get no scene.
+
+    Args:
+        root: Path to the MegaDepth dataset root directory.
+        train_split: Fraction of the scenes used for training.
+        max_train_files: Cap on the training pairs, or ``None``.
+        max_val_files: Cap on the validation pairs, or ``None``.
+
+    Returns:
+        The four path lists.
+
+    Raises:
+        ValueError: If ``train_split`` is outside ``(0, 1)`` or either side
+            has no scene.
+    """
+    if not 0.0 < train_split < 1.0:
+        raise ValueError(f"train_split must be in (0, 1), got {train_split}")
+    scenes = discover_megadepth_scenes(root)
+    n_val = int(round(len(scenes) * (1.0 - train_split)))
+    val_index = {(2 * j + 1) * len(scenes) // (2 * n_val) for j in range(n_val)}
+    train_scenes = [s for i, s in enumerate(scenes) if i not in val_index]
+    val_scenes = [s for i, s in enumerate(scenes) if i in val_index]
+    if not train_scenes or not val_scenes:
+        raise ValueError(
+            f"train_split={train_split} over {len(scenes)} scenes leaves "
+            f"{len(train_scenes)} training and {len(val_scenes)} validation scenes")
+    train_rgb, train_depth = _take_across_scenes(train_scenes, max_train_files)
+    val_rgb, val_depth = _take_across_scenes(val_scenes, max_val_files)
+    logger.info(
+        f"MegaDepth split: {len(train_rgb)} training pairs from "
+        f"{len(train_scenes)} scenes, {len(val_rgb)} validation pairs from "
+        f"{len(val_scenes)} scenes")
+    return train_rgb, train_depth, val_rgb, val_depth
 
 
 # =====================================================================
@@ -595,13 +708,16 @@ class UnlabeledImageDataset(keras.utils.PyDataset):
         for k in range(self.batch_size):
             sample_idx = (idx * self.batch_size + k) % self.n
             i = self.indices[sample_idx]
+            # DECISION plan-2026-10-14T062616-81938e81/D-130
+            # Do NOT pad an unreadable image with zeros again: a missing or
+            # corrupt file became a uniform grey input for the student and the
+            # teacher alike, with nothing in the log. The run stops instead.
             try:
                 batch.append(self._load_one(self.rgb_paths[i]))
-            except Exception:
-                # Pad with zeros on read failure rather than abort training.
-                batch.append(
-                    np.zeros((self.patch_size, self.patch_size, 3), dtype=np.float32)
-                )
+            except OSError as exc:
+                raise OSError(
+                    f"UnlabeledImageDataset: cannot read {self.rgb_paths[i]}: {exc}"
+                ) from exc
         return np.stack(batch).astype(np.float32)
 
     def on_epoch_end(self) -> None:

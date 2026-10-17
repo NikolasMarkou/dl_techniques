@@ -18,39 +18,38 @@ Pattern-5 (depth-estimation) training scaffold for
 
 ```bash
 # Smoke run (2 epochs on 100 train pairs / 20 val pairs)
-MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_s \
     --epochs 2 --batch-size 4 --patch-size 256 \
-    --max-train-files 100 --max-val-files 20 \
-    --gpu 0
+    --max-train-files 100 --max-val-files 20
 
 # Real run
-MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 384 \
     --learning-rate 5e-6 --weight-decay 1e-5 \
     --warmup-epochs 5 --early-stopping-patience 20 \
-    --seed 42 --gpu 0
+    --seed 42
 
 # With pretrained transfer (from a prior compatible .keras checkpoint)
-MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_l --epochs 100 --batch-size 16 \
-    --init-from results/depth_anything_pretrain_*/model_inference.keras \
-    --gpu 0
+    --init-from results/depth_anything_pretrain_*/model_inference.keras
 
 # Semi-supervised run with EMA teacher + paired unlabeled images
-MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_l --epochs 100 --batch-size 8 --patch-size 384 \
     --use-feature-alignment --enable-semi-supervised \
     --unlabeled-image-glob '/data/unlabeled/**/*.jpg' \
     --ema-schedule cosine --ema-decay-start 0.5 --ema-decay-end 0.999 \
     --ema-warmup-steps 0 \
-    --pretrained-encoder-weights /path/to/vit_encoder.keras \
-    --gpu 0
+    --pretrained-encoder-weights /path/to/vit_encoder.keras
 ```
 
 `MPLBACKEND=Agg` is required to avoid X11 crashes on headless/remote systems.
-Use a single GPU (`--gpu 0` or `--gpu 1`); never run two GPU jobs in parallel
-on this machine.
+Select the GPU with the `CUDA_VISIBLE_DEVICES` export and pass no `--gpu`: the
+flag counts within the visible devices (D-110), so without an export an index
+picks a GPU of the whole machine. Never run two GPU jobs in parallel on this
+machine.
 
 ## What this script does
 
@@ -70,6 +69,21 @@ on this machine.
     mostly such maps (60 of 94 in scene `0001`).
   - Batch `i` reads files `i*B .. i*B+B-1` once each. Before the fix, a batch read
     every other file and overlapped the next batch by half (D-126).
+- Splits MegaDepth by scene with `split_megadepth_pairs`: `round(n_scenes * (1 -
+  --train-split))` scenes, spread evenly over the sorted scene list, are validation
+  scenes, the rest training scenes, and no scene is in both. `--max-train-files` and
+  `--max-val-files` are then taken evenly across each side's scenes. Until 2026-10-17
+  the trainer took the first `max_train_files + max_val_files` pairs in scene order
+  and split that list at 90%: the defaults covered scenes `0000`-`0004` of 195, and
+  the validation pairs came from scene `0004`, whose other images were in training
+  (D-129).
+- The labeled batch trains as loaded: the horizontal flip above is its only
+  augmentation, as in the paper. CutMix (`--cutmix-prob`) and colour jitter
+  (`--color-jitter-strength`) perturb the unlabeled batches of a semi-supervised run
+  only. Until 2026-10-17 `DepthAnything.train_step` also CutMixed and jittered every
+  labeled batch (D-131).
+- `UnlabeledImageDataset` raises `OSError`, naming the file, for an image it cannot
+  read. It used to substitute an all-zero image (D-130).
 - Builds a `DepthAnything` model via `create_depth_anything(...)`.
 - Supervises the Depth Anything V1 relative-depth target (arXiv 2401.10891,
   section 3.1): `MegaDepthDataset` turns each depth map into disparity `1 / t`
@@ -125,8 +139,8 @@ on this machine.
 | `--ema-decay-end`             | `0.999`                                   | EMA decay asymptote at the end of the run. |
 | `--ema-warmup-steps`          | `0`                                       | Number of training steps before EMA updates begin. |
 | `--use-feature-alignment`     | off                                       | Enables `frozen_encoder` (weight-shared teacher; EMA via `update_teacher_ema`). Default off. |
-| `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`. The depth target is CutMixed by the same box as the image, inside `DepthAnything.train_step`. |
-| `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`. |
+| `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`, for the unlabeled batches of `--enable-semi-supervised` only: the teacher's pseudo-depth is CutMixed by the same box as the image, inside `DepthAnything.train_step`. The labeled batch is never mixed (paper: horizontal flip only). |
+| `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`; unlabeled batches only. |
 | `--epochs`                    | `100`                                     | |
 | `--batch-size`                | `16`                                      | |
 | `--patch-size`                | `384`                                     | RGB+depth crop size; matches default `input_shape`. |
@@ -141,7 +155,7 @@ on this machine.
 | `--validation-steps`          | `200`                                     | |
 | `--init-from`                 | `None`                                    | Path to a `.keras` checkpoint for backbone transfer. |
 | `--seed`                      | `42`                                      | Seeds Python/NumPy/TF/Keras. |
-| `--gpu`                       | `None`                                    | GPU index (or `None` for all visible). |
+| `--gpu`                       | `None`                                    | Index within the visible devices (D-110). Select the GPU with `CUDA_VISIBLE_DEVICES` instead and leave this unset. |
 | `--output-dir`                | `results`                                 | Results parent directory. |
 | `--experiment-name`           | auto                                      | Defaults to `depth_anything_<encoder>_<timestamp>`. |
 

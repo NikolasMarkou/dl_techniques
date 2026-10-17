@@ -16,10 +16,11 @@ Covers:
   `((x_lab, x_unlab), y_lab)`).
 - StrongAugmentation forward pass (D-005 keras.random + D-005-followup
   graph-mode cutmix gate).
-- C-2/C-19: augmentation runs in the training path and carries the depth
-  target and the teacher pseudo-label through the same CutMix box; `call`
-  augments nothing; the feature-alignment term does not bypass the
-  augmentation (`TestTrainPathAugmentation`).
+- C-2/C-19: augmentation runs in the training path and carries the teacher
+  pseudo-label through the same CutMix box as the unlabeled image; the labeled
+  batch is not augmented (D-131); `call` augments nothing; the
+  feature-alignment term does not bypass the augmentation
+  (`TestTrainPathAugmentation`).
 
 All tests force CPU at module import time (via `CUDA_VISIBLE_DEVICES=""`)
 and use 64x64 images with `vit_s` to keep total runtime well under a minute.
@@ -588,7 +589,7 @@ class TestTrainPathAugmentation:
     def test_augment_with_targets_mixes_target_by_the_image_box(
         self, small_image_shape, pinned_reverse_permutation
     ):
-        """The helper both training paths use mixes image and target as one."""
+        """The helper the semi-supervised path uses mixes image and target as one."""
         m = _augmenting_model(small_image_shape)
         h, w, c = small_image_shape
         x = np.stack([
@@ -628,10 +629,15 @@ class TestTrainPathAugmentation:
         np.testing.assert_allclose(np.asarray(x_out), x)
         np.testing.assert_allclose(np.asarray(y_out), y)
 
-    def test_labeled_train_step_routes_the_depth_target_through_augmentation(
+    def test_labeled_train_step_does_not_augment_its_batch(
         self, small_image_shape
     ):
-        """The labeled path must hand its target to the augmentation helper."""
+        """The labeled path hands nothing to the augmentation helper.
+
+        It used to CutMix and jitter the labeled batch with its target; the
+        paper flips labeled images horizontally only (in the loader), D-131 of
+        plan-2026-10-14T062616-81938e81.
+        """
         m = _augmenting_model(small_image_shape)
         m.compile(optimizer=keras.optimizers.AdamW(1e-4))
         seen = []
@@ -646,8 +652,8 @@ class TestTrainPathAugmentation:
         y = keras.random.uniform((2,) + small_image_shape[:2] + (1,), 0.0, 1.0)
         m._train_step_labeled(x, y)
 
-        assert seen == [[(2,) + small_image_shape[:2] + (1,)]], (
-            "the labeled depth target did not reach the augmentation helper: "
+        assert seen == [], (
+            "the labeled step augmented its batch: "
             f"recorded target shapes = {seen}"
         )
 
@@ -695,11 +701,12 @@ class TestTrainPathAugmentation:
         assert len(pseudo_seen) == 1, "the teacher pseudo-label was not computed once"
         expected_pseudo = pseudo_seen[0]
 
-        assert len(seen) == 2, (
-            "the unlabeled branch never augmented anything with a target: "
+        assert len(seen) == 1, (
+            "the semi-supervised step must augment exactly one batch, the "
+            "unlabeled one with its pseudo-label: "
             f"{len(seen)} call(s) to _augment_with_targets"
         )
-        unlab_x, unlab_targets = seen[1]
+        unlab_x, unlab_targets = seen[0]
         np.testing.assert_allclose(unlab_x, np.asarray(x_unlab), atol=1e-6)
         assert len(unlab_targets) == 1, (
             "the unlabeled branch augmented its image without the pseudo-label: "

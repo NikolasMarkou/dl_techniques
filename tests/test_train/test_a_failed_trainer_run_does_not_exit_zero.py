@@ -236,8 +236,8 @@ def _depth_anything(monkeypatch, tmp_path, model):
     paths = [str(tmp_path / f"p{i}") for i in range(20)]
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(module, "discover_megadepth_pairs",
-                        lambda *a, **k: (paths, paths))
+    monkeypatch.setattr(module, "split_megadepth_pairs",
+                        lambda *a, **k: (paths[:18], paths[:18], paths[18:], paths[18:]))
     monkeypatch.setattr(module, "MegaDepthDataset", lambda *a, **k: _Sized())
     monkeypatch.setattr(module, "create_model", lambda config: model)
     monkeypatch.setattr(module, "create_callbacks",

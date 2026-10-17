@@ -22,17 +22,16 @@ prediction after least-squares scale-and-shift alignment.
 Usage::
 
     # Smoke run (does not train to convergence):
-    MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
+    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
         --encoder-type vit_s \\
         --epochs 2 --batch-size 4 --patch-size 256 \\
-        --max-train-files 100 --max-val-files 20 \\
-        --gpu 0
+        --max-train-files 100 --max-val-files 20
 
     # With pretrained encoder transfer:
-    MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
+    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
         --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 384 \\
         --init-from results/depth_anything_pretrain_*/model_inference.keras \\
-        --seed 42 --gpu 0
+        --seed 42
 """
 
 import gc
@@ -54,7 +53,7 @@ from train.common import (
 )
 from train.common.run_io import save_training_history_json
 from train.common.megadepth import (
-    discover_megadepth_pairs,
+    split_megadepth_pairs,
     load_and_process_pair as _load_and_process_pair,
     MegaDepthDataset,
     UnlabeledImageDataset,
@@ -449,31 +448,21 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
         f"{config.experiment_name}"
     )
 
-    rgb_paths, depth_paths = discover_megadepth_pairs(
+    # DECISION plan-2026-10-14T062616-81938e81/D-129
+    # Do NOT split one scene-ordered file list by position again: validation
+    # then came from the last scene the cap reached, whose other images were
+    # in training, and the default caps covered 5 of 195 scenes.
+    train_rgb, train_depth, val_rgb, val_depth = split_megadepth_pairs(
         config.megadepth_root,
-        max_files=(config.max_train_files or 0) + (config.max_val_files or 0)
-        if config.max_train_files and config.max_val_files
-        else None,
+        train_split=config.train_split,
+        max_train_files=config.max_train_files,
+        max_val_files=config.max_val_files,
     )
-    if len(rgb_paths) < 10:
+    if len(train_rgb) + len(val_rgb) < 10:
         raise ValueError(
-            f"Only found {len(rgb_paths)} MegaDepth pairs — "
+            f"Only found {len(train_rgb) + len(val_rgb)} MegaDepth pairs — "
             f"need at least 10. Check megadepth_root: {config.megadepth_root}"
         )
-
-    n = len(rgb_paths)
-    split_idx = int(n * config.train_split)
-    train_rgb = rgb_paths[:split_idx]
-    train_depth = depth_paths[:split_idx]
-    val_rgb = rgb_paths[split_idx:]
-    val_depth = depth_paths[split_idx:]
-
-    if config.max_train_files and len(train_rgb) > config.max_train_files:
-        train_rgb = train_rgb[:config.max_train_files]
-        train_depth = train_depth[:config.max_train_files]
-    if config.max_val_files and len(val_rgb) > config.max_val_files:
-        val_rgb = val_rgb[:config.max_val_files]
-        val_depth = val_depth[:config.max_val_files]
 
     logger.info(
         f"Dataset: {len(train_rgb)} training, "
@@ -675,9 +664,19 @@ def parse_arguments() -> argparse.Namespace:
         default="/media/arxwn/data0_4tb/datasets/Megadepth",
         help="Path to MegaDepth dataset root",
     )
-    parser.add_argument("--train-split", type=float, default=0.9)
-    parser.add_argument("--max-train-files", type=int, default=10000)
-    parser.add_argument("--max-val-files", type=int, default=1000)
+    parser.add_argument(
+        "--train-split", type=float, default=0.9,
+        help="Fraction of the MegaDepth scenes used for training; the rest are "
+             "validation scenes (no scene is in both)",
+    )
+    parser.add_argument(
+        "--max-train-files", type=int, default=10000,
+        help="Cap on training pairs, taken evenly across the training scenes",
+    )
+    parser.add_argument(
+        "--max-val-files", type=int, default=1000,
+        help="Cap on validation pairs, taken evenly across the validation scenes",
+    )
     parser.add_argument("--min-valid-ratio", type=float, default=0.1)
 
     # Model
@@ -708,13 +707,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--cutmix-prob", type=float, default=0.5,
         help=(
-            "Probability of applying CutMix during training. The depth target is "
-            "mixed by the same box as the image (model.train_step)."
+            "Probability of applying CutMix to an unlabeled batch "
+            "(--enable-semi-supervised); the teacher's pseudo-depth is mixed by "
+            "the same box as the image (model.train_step). The labeled batch "
+            "is never mixed."
         ),
     )
     parser.add_argument(
         "--color-jitter-strength", type=float, default=0.2,
-        help="Strength of color jitter during training",
+        help="Strength of color jitter on an unlabeled batch (labeled: none)",
     )
 
     # Training
@@ -799,7 +800,9 @@ def parse_arguments() -> argparse.Namespace:
 
     # GPU
     parser.add_argument(
-        "--gpu", type=int, default=None, help="GPU device index"
+        "--gpu", type=int, default=None,
+        help="Index within the visible devices (D-110); leave unset and select "
+             "the GPU with CUDA_VISIBLE_DEVICES"
     )
 
     return parser.parse_args()
