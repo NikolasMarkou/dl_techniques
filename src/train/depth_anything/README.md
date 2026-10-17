@@ -55,6 +55,21 @@ on this machine.
 ## What this script does
 
 - Loads MegaDepth RGB+depth pairs via `train.common.megadepth.MegaDepthDataset`.
+  Three rules there, each fixed on 2026-10-17 (plan-2026-10-14T062616-81938e81,
+  iteration 2):
+  - The training augmentation is a horizontal flip only, the reference's only
+    labeled-image augmentation (arXiv 2401.10891, section 4.1). Up-down flips and
+    90-degree rotations kept a random-init model at a nearly constant map: on the
+    RTX 4070, `vit_s`, 1500 steps, training loss 1.26 and held-out Pearson 0.05,
+    against 0.82 and 0.23 with the flip only (D-124). Every run before that date
+    trained with them.
+  - A crop whose valid depth is one constant is skipped like a crop with too few
+    valid pixels. Part of MegaDepth stores ordinal depth (2.0 or 5.0 on every
+    valid pixel); its target is all zeros, scores exactly 1.0 for any prediction
+    and has no gradient (D-125). The first validation files of a small run are
+    mostly such maps (60 of 94 in scene `0001`).
+  - Batch `i` reads files `i*B .. i*B+B-1` once each. Before the fix, a batch read
+    every other file and overlapped the next batch by half (D-126).
 - Builds a `DepthAnything` model via `create_depth_anything(...)`.
 - Supervises the Depth Anything V1 relative-depth target (arXiv 2401.10891,
   section 3.1): `MegaDepthDataset` turns each depth map into disparity `1 / t`

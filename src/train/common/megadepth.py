@@ -148,6 +148,43 @@ def normalized_disparity(
     return disparity.astype(np.float32)
 
 
+def _has_spread(disparity: np.ndarray) -> bool:
+    """Whether a :func:`normalized_disparity` target can supervise anything.
+
+    Interface contract (2 callers, the two pair loaders): ``disparity`` is the
+    output of :func:`normalized_disparity`, which is all zeros exactly when
+    the valid pixels have no spread or there are none. Such a target scores
+    1.0 under the affine-invariant loss for any non-constant prediction, with
+    zero gradient. Never raises.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-125
+    # Do NOT accept a crop whose valid depth is one constant: part of
+    # MegaDepth stores ordinal depth (2.0 or 5.0 on every valid pixel), whose
+    # all-zero target supervises nothing, floors val_loss and makes the
+    # Pearson correlation undefined. Skip it like a crop with too few valid pixels.
+    return bool(disparity.max() > 0)
+
+
+def _mirror_left_right(rgb, disparity, valid_mask, draw):
+    """The labeled-image augmentation: a horizontal flip with probability 0.5.
+
+    Interface contract (2 callers, the two pair loaders): ``rgb``,
+    ``disparity`` and ``valid_mask`` are ``(H, W, C)`` arrays of one sample;
+    ``draw()`` returns a float in ``[0, 1)`` and is called exactly once.
+    Returns the three arrays, all mirrored left-right or all unchanged.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-124
+    # Do NOT add up-down flips or 90-degree rotations back: they remove where
+    # "down" is in the image, and from random weights Depth Anything then sat
+    # at a nearly constant map (training loss 1.26, held-out Pearson 0.05 vs
+    # 0.82 and 0.23 with this flip only). The paper (arXiv 2401.10891, section
+    # 4.1): "We only apply horizontal flipping ... for labeled images."
+    if draw() > 0.5:
+        return (rgb[:, ::-1].copy(), disparity[:, ::-1].copy(),
+                valid_mask[:, ::-1].copy())
+    return rgb, disparity, valid_mask
+
+
 # =====================================================================
 # Single-pair loading
 # =====================================================================
@@ -167,18 +204,19 @@ def load_and_process_pair(
     Loads an RGB image (JPEG/PNG) and its paired HDF5 depth map,
     resizes if needed to match spatial dimensions, extracts a random
     crop, converts depth to per-map normalized disparity in ``[0, 1]``
-    (:func:`normalized_disparity`), and optionally
-    applies geometric augmentations (horizontal/vertical flip + 90-degree
-    rotations).
+    (:func:`normalized_disparity`), and optionally mirrors it left-right
+    (the reference's only labeled-image augmentation). A crop qualifies when
+    at least ``min_valid_ratio`` of it is valid and its valid depth has
+    spread (MegaDepth's ordinal maps, one constant value, never do).
 
     Args:
         rgb_path: Path to the RGB image file.
         depth_path: Path to the HDF5 depth file (key ``"depth"``).
         patch_size: Spatial size of the output crop.
         min_valid_ratio: Minimum fraction of valid (non-zero) depth
-            pixels required in a crop.  Crops below this threshold are
-            rejected.  Defaults to ``0.1``.
-        augment: Whether to apply random geometric augmentations.
+            pixels required in a crop.  Crops below this threshold, or whose
+            valid depth is one constant, are rejected.  Defaults to ``0.1``.
+        augment: Whether to mirror the sample left-right with probability 0.5.
         max_crop_attempts: Number of random crops to try before giving
             up.  Defaults to ``10``.
         rng: Generator for the crop position and the augmentation.
@@ -191,7 +229,7 @@ def load_and_process_pair(
         Tuple of ``(rgb, y_true)`` where ``rgb`` has shape
         ``(patch_size, patch_size, 3)`` in ``[-1, 1]`` and ``y_true``
         has shape ``(patch_size, patch_size, 2)`` with
-        ``[disparity, mask]``.  Returns ``None`` if no valid crop was found.
+        ``[disparity, mask]``.  Returns ``None`` if no crop qualified.
     """
     from PIL import Image
     import matplotlib.pyplot as plt
@@ -235,39 +273,27 @@ def load_and_process_pair(
     randint = np.random.randint if rng is None else rng.integers
     uniform = np.random.random if rng is None else rng.random
 
-    # Random crop — try multiple times for enough valid pixels
-    valid_mask = None
+    # Random crop — try multiple times for enough valid pixels with spread
     for _ in range(max_crop_attempts):
         y = randint(0, h - patch_size + 1)
         x = randint(0, w - patch_size + 1)
-        depth_patch = depth[y:y + patch_size, x:x + patch_size]
-        valid_mask = (depth_patch > 0).astype(np.float32)
-        if valid_mask.mean() >= min_valid_ratio:
+        valid_mask = (depth[y:y + patch_size, x:x + patch_size] > 0).astype(np.float32)
+        if valid_mask.mean() < min_valid_ratio:
+            continue
+        valid_mask = valid_mask[..., np.newaxis]  # (ps, ps, 1)
+        depth_patch = normalized_disparity(
+            depth[y:y + patch_size, x:x + patch_size, np.newaxis], valid_mask)
+        if _has_spread(depth_patch):
             break
     else:
-        if valid_mask is None or valid_mask.mean() < min_valid_ratio:
-            return None
+        return None
 
     rgb_patch = rgb[y:y + patch_size, x:x + patch_size, :3]
-    depth_patch = depth_patch[..., np.newaxis]  # (ps, ps, 1)
-    valid_mask = valid_mask[..., np.newaxis]     # (ps, ps, 1)
-
-    depth_patch = normalized_disparity(depth_patch, valid_mask)
 
     # Augmentation (numpy — runs in worker process)
     if augment:
-        combined = np.concatenate(
-            [rgb_patch, depth_patch, valid_mask], axis=-1
-        )
-        if uniform() > 0.5:
-            combined = combined[:, ::-1, :]
-        if uniform() > 0.5:
-            combined = combined[::-1, :, :]
-        k = randint(0, 4)
-        combined = np.rot90(combined, k, axes=(0, 1))
-        rgb_patch = combined[..., :3].copy()
-        depth_patch = combined[..., 3:4].copy()
-        valid_mask = combined[..., 4:5].copy()
+        rgb_patch, depth_patch, valid_mask = _mirror_left_right(
+            rgb_patch, depth_patch, valid_mask, uniform)
 
     # y_true = concat([depth, mask], axis=-1)
     y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
@@ -297,10 +323,11 @@ def load_and_resize_pair(
         depth_path: Path to the HDF5 depth file (key ``"depth"``).
         target_size: Output spatial size (both height and width).
         min_valid_ratio: Minimum fraction of valid depth pixels.
-        augment: Whether to apply random geometric augmentations.
+        augment: Whether to mirror the sample left-right with probability 0.5.
 
     Returns:
-        Tuple of ``(rgb, y_true)`` or ``None`` if below valid ratio.
+        Tuple of ``(rgb, y_true)``, or ``None`` if below the valid ratio or
+        if the valid depth is one constant (an ordinal map).
     """
     from PIL import Image
 
@@ -363,19 +390,13 @@ def load_and_resize_pair(
     valid_mask = valid_mask[..., np.newaxis]
 
     depth = normalized_disparity(depth, valid_mask * (depth > 0))
+    if not _has_spread(depth):
+        return None
 
     # Augmentation
     if augment:
-        combined = np.concatenate([rgb, depth, valid_mask], axis=-1)
-        if np.random.random() > 0.5:
-            combined = combined[:, ::-1, :]
-        if np.random.random() > 0.5:
-            combined = combined[::-1, :, :]
-        k = np.random.randint(0, 4)
-        combined = np.rot90(combined, k, axes=(0, 1))
-        rgb = combined[..., :3].copy()
-        depth = combined[..., 3:4].copy()
-        valid_mask = combined[..., 4:5].copy()
+        rgb, depth, valid_mask = _mirror_left_right(
+            rgb, depth, valid_mask, np.random.random)
 
     y_true = np.concatenate([depth, valid_mask], axis=-1)
     return (
@@ -409,8 +430,8 @@ class MegaDepthDataset(keras.utils.PyDataset):
         patch_size: Spatial size of cropped patches.
         min_valid_ratio: Minimum fraction of valid depth pixels per
             crop.  Defaults to ``0.1``.
-        augment: Whether to apply random augmentations (flips + rot90).
-            Defaults to ``True``.
+        augment: Whether to mirror samples left-right at random (the only
+            labeled-image augmentation of the reference). Defaults to ``True``.
         is_training: If ``True``, shuffles indices each epoch and crops at
             random; if ``False``, each file's crop is fixed for the run
             (seeded by its index).
@@ -451,13 +472,16 @@ class MegaDepthDataset(keras.utils.PyDataset):
     def __getitem__(self, idx: int):
         batch_rgb, batch_ytrue = [], []
 
-        attempts = 0
-        while len(batch_rgb) < self.batch_size and attempts < self.batch_size * 3:
-            sample_idx = (
-                idx * self.batch_size + len(batch_rgb) + attempts
-            ) % self.n_pairs
+        for attempt in range(self.batch_size * 3):
+            if len(batch_rgb) == self.batch_size:
+                break
+            # DECISION plan-2026-10-14T062616-81938e81/D-126
+            # Do NOT add len(batch_rgb) to this offset: `attempt` already
+            # counts every load, kept or skipped, so the sum advanced by 2
+            # per sample. Consecutive batches overlapped by half and the files
+            # at odd offsets were never read.
+            sample_idx = (idx * self.batch_size + attempt) % self.n_pairs
             i = self.indices[sample_idx]
-            attempts += 1
 
             if self.use_resize:
                 result = load_and_resize_pair(
