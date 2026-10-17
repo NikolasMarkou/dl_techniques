@@ -523,11 +523,15 @@ class DPTFeatureFusionBlock(keras.layers.Layer):
         self.has_skip = bool(has_skip)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        unit = dict(features=self.features, kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer)
-        self.res_conf_unit1 = (
-            DPTResidualConvUnit(name="res_conf_unit1", **unit) if self.has_skip else None)
-        self.res_conf_unit2 = DPTResidualConvUnit(name="res_conf_unit2", **unit)
+
+        def unit(name: str) -> DPTResidualConvUnit:
+            return DPTResidualConvUnit(
+                features=self.features,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer, name=name)
+
+        self.res_conf_unit1 = unit("res_conf_unit1") if self.has_skip else None
+        self.res_conf_unit2 = unit("res_conf_unit2")
         self.out_conv = keras.layers.Conv2D(
             self.features, 1, use_bias=True,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -712,10 +716,14 @@ class DPTHead(keras.layers.Layer):
         self.layer_rn = [
             conv(self.features, 3, f"layer{i + 1}_rn", padding="same", use_bias=False)
             for i in range(4)]
-        fusion = dict(features=self.features, kernel_initializer=self.kernel_initializer,
-                      kernel_regularizer=self.kernel_regularizer)
+        # DECISION plan-2026-10-14T062616-81938e81/D-141: each sublayer gets its own
+        # clone_initializer(...), never one kwargs dict carrying the shared instance
+        # (the shared-initializer census counts that dict as a role suspect).
         self.refinenets = [
-            DPTFeatureFusionBlock(has_skip=i < 3, name=f"refinenet{i + 1}", **fusion)
+            DPTFeatureFusionBlock(
+                features=self.features, has_skip=i < 3,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer, name=f"refinenet{i + 1}")
             for i in range(4)]
         self.output_conv1 = conv(self.features // 2, 3, "output_conv1", padding="same")
         # output_conv2 is nn.Sequential(Conv 3x3, ReLU, Conv 1x1, ReLU, Identity).

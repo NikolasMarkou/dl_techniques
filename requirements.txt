@@ -19,6 +19,7 @@ datasets # hugging face datasets
 Pillow
 requests
 h5py # MATLAB v7.3 / HDF5 readers: datasets/pusht_hdf5.py, datasets/document_rectification/uvdoc.py
+safetensors # official DINOv2 checkpoints: models/vision/dino/official_weights.py
 python-dotenv
 streamlit~=1.58 # applications/anomaly_detection web GUI
 streamlit-webrtc~=0.72 # live webcam streaming for anomaly_detection

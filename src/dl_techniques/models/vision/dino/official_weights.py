@@ -271,7 +271,8 @@ def load_official_dinov2_file(backbone: keras.Model, variant: str) -> Path:
         from safetensors.numpy import load_file
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(
-            "loading the official DINOv2 weights needs the 'safetensors' package") from exc
+            "loading the official DINOv2 weights needs the 'safetensors' package, "
+            "declared in the 'data' extra: pip install '.[data]'") from exc
     load_official_dinov2_weights(backbone, load_file(str(path)))
     logger.info(f"Loaded official DINOv2-{variant} weights from {path}")
     return path
