@@ -1,7 +1,7 @@
 """Tests for `dl_techniques.models.vision.depth_anything`.
 
 Covers:
-- Build + forward shape with `encoder_kind='real'` (small ViT) and
+- Build + forward shape with `encoder_kind='real'` (small DINOv2) and
   `encoder_kind='placeholder'` (legacy Conv-BN-ReLU).
 - DPTDecoder default activation is `'linear'`.
 - Save/load round-trip equality (the SC-6 fix from
@@ -23,7 +23,8 @@ Covers:
   (`TestTrainPathAugmentation`).
 
 All tests force CPU at module import time (via `CUDA_VISIBLE_DEVICES=""`)
-and use 64x64 images with `vit_s` to keep total runtime well under a minute.
+and use 56x56 images (a 4x4 grid of the DINOv2 patch 14) with `vit_s` to
+keep total runtime well under a minute.
 """
 
 import os
@@ -57,7 +58,7 @@ from dl_techniques.layers.signal_processing.strong_augmentation import StrongAug
 
 @pytest.fixture(scope="module")
 def small_image_shape() -> Tuple[int, int, int]:
-    return (64, 64, 3)
+    return (56, 56, 3)
 
 
 @pytest.fixture()
@@ -81,7 +82,7 @@ def real_vit_small_model(small_image_shape):
 class TestDepthAnything:
     """Forward / topology / serialization tests for DepthAnything."""
 
-    def test_build_real_vit_small_64(self, small_image_shape):
+    def test_build_real_vit_small_56(self, small_image_shape):
         m = DepthAnything(
             encoder_kind="real",
             encoder_type="vit_s",
@@ -89,7 +90,7 @@ class TestDepthAnything:
         )
         x = keras.random.normal((1,) + small_image_shape)
         y = m(x)
-        assert tuple(y.shape) == (1, 64, 64, 1), y.shape
+        assert tuple(y.shape) == (1, 56, 56, 1), y.shape
 
     def test_build_placeholder(self, small_image_shape):
         m = DepthAnything(
@@ -99,7 +100,7 @@ class TestDepthAnything:
         )
         x = keras.random.normal((1,) + small_image_shape)
         y = m(x)
-        assert tuple(y.shape) == (1, 64, 64, 1), y.shape
+        assert tuple(y.shape) == (1, 56, 56, 1), y.shape
 
     def test_decoder_default_linear(self):
         d = DPTDecoder(dims=[16, 8, 4])
@@ -131,7 +132,7 @@ class TestDepthAnything:
             use_feature_alignment=False,
         )
         x = np.random.randn(2, *small_image_shape).astype("float32")
-        y = np.random.randn(2, 64, 64, 1).astype("float32")
+        y = np.random.randn(2, 56, 56, 1).astype("float32")
         # Build once before fit (per LESSONS / prior plan recipe).
         _ = m(x)
         m.augmentation = None
@@ -151,7 +152,7 @@ class TestDepthAnything:
         )
         x_lab = np.random.randn(2, *small_image_shape).astype("float32")
         x_unlab = np.random.randn(2, *small_image_shape).astype("float32")
-        y_lab = np.random.randn(2, 64, 64, 1).astype("float32")
+        y_lab = np.random.randn(2, 56, 56, 1).astype("float32")
         _ = m(x_lab)  # build
         m.augmentation = None
 
@@ -165,7 +166,7 @@ class TestDepthAnything:
                     tf.TensorSpec((2,) + small_image_shape, tf.float32),
                     tf.TensorSpec((2,) + small_image_shape, tf.float32),
                 ),
-                tf.TensorSpec((2, 64, 64, 1), tf.float32),
+                tf.TensorSpec((2, 56, 56, 1), tf.float32),
             ),
         )
         m.compile(optimizer=keras.optimizers.AdamW(1e-4))
@@ -402,7 +403,7 @@ class TestPseudoLabelDepth:
         # (stop_gradient + frozen_encoder is non-trainable).
         grads = tape.gradient(pseudo, m.encoder.trainable_variables)
         assert all(g is None for g in grads), "pseudo-label leaked gradients into student"
-        assert tuple(pseudo.shape) == (2, 64, 64, 1), pseudo.shape
+        assert tuple(pseudo.shape) == (2, 56, 56, 1), pseudo.shape
 
 
 # ---------------------------------------------------------------------
@@ -430,7 +431,7 @@ class TestMultiEpochFALStability:
 
         x_lab = np.random.randn(2, *small_image_shape).astype("float32")
         x_unlab = np.random.randn(2, *small_image_shape).astype("float32")
-        y_lab = np.random.randn(2, 64, 64, 1).astype("float32")
+        y_lab = np.random.randn(2, 56, 56, 1).astype("float32")
 
         def gen():
             # Repeat indefinitely; steps_per_epoch caps consumption.
@@ -444,7 +445,7 @@ class TestMultiEpochFALStability:
                     tf.TensorSpec((2,) + small_image_shape, tf.float32),
                     tf.TensorSpec((2,) + small_image_shape, tf.float32),
                 ),
-                tf.TensorSpec((2, 64, 64, 1), tf.float32),
+                tf.TensorSpec((2, 56, 56, 1), tf.float32),
             ),
         )
 

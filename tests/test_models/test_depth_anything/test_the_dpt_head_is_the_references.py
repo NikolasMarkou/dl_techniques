@@ -183,28 +183,30 @@ def test_the_head_count_is_the_reference_hand_sum(encoder_type):
 
 def _small_model(**kwargs):
     keras.utils.set_random_seed(0)
-    kwargs = dict(dict(encoder_type="vit_s", image_shape=(32, 32, 3), dpt_features=8,
+    kwargs = dict(dict(encoder_type="vit_s", image_shape=(28, 28, 3), dpt_features=8,
                        dpt_out_channels=[4, 4, 8, 8], use_feature_alignment=False), **kwargs)
     model = DepthAnything(**kwargs)
     model(np.zeros((1,) + kwargs["image_shape"], dtype="float32"))
     return model
 
 
-def _images(n=2, size=32, seed=0):
+def _images(n=2, size=28, seed=0):
     return np.random.default_rng(seed).normal(size=(n, size, size, 3)).astype("float32")
 
 
 def test_the_head_reads_the_last_four_vit_layers_each_through_the_final_norm():
+    # The block outputs are read off the encoder's own functional graph, a path
+    # independent of `get_intermediate_layers`, which the head uses.
     model = _small_model()
     encoder, x = model.encoder, _images()
-    tokens = encoder._embed_tokens(x, training=False)
-    by_hand = []
-    for layer in encoder.transformer_layers:
-        tokens = layer(tokens, training=False)
-        by_hand.append(encoder.norm(tokens)[:, 1:, :])
+    depth = encoder.depth
+    graph = keras.Model(encoder.inputs, [encoder.get_layer(f"block_{i}").output
+                                         for i in range(depth - 4, depth)])
+    blocks = graph([x, np.zeros((2, encoder.num_patches), bool)])
+    by_hand = [encoder.norm(b)[:, 1:, :] for b in blocks]
     read = model._encoder_layers(encoder, x, False)
     assert len(read) == 4
-    for got, want in zip(read, by_hand[-4:]):
+    for got, want in zip(read, by_hand):
         np.testing.assert_array_equal(
             keras.ops.convert_to_numpy(got),
             keras.ops.convert_to_numpy(keras.ops.reshape(want, (2, 2, 2, -1))))
@@ -252,10 +254,10 @@ def test_a_keras_round_trip_keeps_every_output_value(tmp_path):
 
 
 def test_the_output_is_the_same_in_training_and_inference_mode():
-    # No BatchNorm and no dropout anywhere in the ViT model: the two modes
-    # compute one function.
+    # No BatchNorm, no dropout and no stochastic depth anywhere in the DINOv2
+    # model: the two modes compute one function.
     keras.utils.set_random_seed(0)
-    model = DepthAnything(encoder_type="vit_s", image_shape=(32, 32, 3),
+    model = DepthAnything(encoder_type="vit_s", image_shape=(28, 28, 3),
                           use_feature_alignment=False)
     x = _images()
     inference = keras.ops.convert_to_numpy(model(x, training=False))

@@ -38,9 +38,10 @@ from dl_techniques.models.vision.depth_anything.model import (
     create_depth_anything,
 )
 
-#: Smallest geometry that still exercises the real ViT encoder + DPT decoder.
+#: Smallest geometry that still exercises the real DINOv2 encoder + DPT decoder
+#: (a 4 x 4 grid of the patch 14).
 ENCODER_TYPE = "vit_s"
-IMAGE_SHAPE = (64, 64, 3)
+IMAGE_SHAPE = (56, 56, 3)
 
 #: Flat `vars/0`, `vars/1`, ... keys — the shape of the removed duplicate dump.
 _FLAT_KEY = re.compile(r"^vars/\d+$")

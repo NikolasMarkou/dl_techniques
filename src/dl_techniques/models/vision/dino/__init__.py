@@ -7,7 +7,10 @@ one factory surface but no common trunk (see
 - ``dino_v1``: Caron et al., 2021. Exposes ``DINOHead``, the projection head
   every version's SSL pretraining uses, and ``create_dino_teacher_student_pair``.
 - ``dino_v2``: Oquab et al., 2023. Adds register tokens, LayerScale, iBOT-style
-  patch masking on the forward path, and a SwiGLU FFN on ``giant``.
+  patch masking on the forward path, and a SwiGLU FFN on ``giant``. Loads the
+  official ViT-S/B/L/14 weights with ``pretrained=True``.
+- ``official_weights``: the strict loader behind that flag (local download
+  of ``facebook/dinov2-{small,base,large}``, every tensor mapped once).
 - ``training``: ``DINOTrainingModel``, student plus frozen EMA teacher over a
   multi-crop batch, trainable under stock ``model.fit()``. The SSL pretraining
   pipeline compiles this object with ``DINOLoss``.
@@ -43,9 +46,21 @@ from .dino_v1 import (
 )
 from .dino_v2 import (
     DINOv2Block,
+    DINOv2PositionEmbedding,
     DINOv2VisionTransformer,
     DINOv2,
     create_dino_v2,
+    torch_bicubic_resize_matrix,
+)
+from .official_weights import (
+    DINOV2_WEIGHTS_DIR,
+    DINOV2_WEIGHTS_DIR_ENV,
+    OFFICIAL_DINOV2_CHECKPOINTS,
+    OFFICIAL_DINOV2_POS_GRID,
+    official_dinov2_weights_path,
+    official_weight_map,
+    load_official_dinov2_weights,
+    load_official_dinov2_file,
 )
 from .dino_v3 import (
     DINOv3,
@@ -62,6 +77,7 @@ __all__ = [
     "DINOHead",
     "DINOv1",
     "DINOv2Block",
+    "DINOv2PositionEmbedding",
     "DINOv2VisionTransformer",
     "DINOv2",
     "DINOv3",
@@ -72,4 +88,13 @@ __all__ = [
     "DINOTrainingModel",
     "create_dino_training_model",
     "N_GLOBAL_VIEWS",
+    "torch_bicubic_resize_matrix",
+    "DINOV2_WEIGHTS_DIR",
+    "DINOV2_WEIGHTS_DIR_ENV",
+    "OFFICIAL_DINOV2_CHECKPOINTS",
+    "OFFICIAL_DINOV2_POS_GRID",
+    "official_dinov2_weights_path",
+    "official_weight_map",
+    "load_official_dinov2_weights",
+    "load_official_dinov2_file",
 ]

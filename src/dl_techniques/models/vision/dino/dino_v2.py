@@ -17,24 +17,31 @@ This file is architecture only. The DINO, iBOT and KoLeo losses are
 `DINOLoss`, `iBOTPatchLoss` and `KoLeoLoss` in `dl_techniques.losses.dino_loss`;
 the teacher EMA is in `dl_techniques.models.vision.dino.training`.
 Sinkhorn-Knopp centering is not implemented anywhere in this repository
-(`DINOLoss` offers EMA centering only), and variable-resolution
-positional-embedding interpolation is not implemented either:
-`interpolate_antialias` and `interpolate_offset` are accepted, stored and
-serialized, but nothing reads them, and the positional table is sized for
-one resolution.
+(`DINOLoss` offers EMA centering only).
 
 The backbone takes a 2-element list `[images, masks]`, where `masks` is a
 boolean `(batch, num_patches)` tensor marking the iBOT positions; pass an
 all-`False` mask to disable masking. Its output is always the same 5-key
 dictionary (`x_norm_clstoken`, `x_norm_regtokens`, `x_norm_patchtokens`,
-`x_prenorm`, `masks`) regardless of `training`. The positional table is
-sized `num_patches + 1` and applied before register tokens are concatenated,
-so registers carry no positional signal at all, matching their definition
-rather than an off-by-R bug. LayerScale gains are created with
-`constraint='non_neg'`, unlike the unconstrained reference. `patch_size=None`
-resolves to 14 for every v2 variant. No DINOv2 weights ship with this
-repository, so `pretrained=True` raises `NotImplementedError`; warm-start
-from a local checkpoint with `model.load_weights(path)` instead.
+`x_prenorm`, `masks`) regardless of `training`.
+`get_intermediate_layers(images, n)` returns the patch tokens of the last
+`n` blocks, each through the final norm (the reference method of the same
+name, `norm=True`), without the mask input. The positional table is
+applied before register tokens are concatenated, so registers carry no
+positional signal at all, matching their definition rather than an off-by-R
+bug. By default the table is sized `num_patches + 1` for `image_size`; with
+`pos_embed_grid_size=M` it is the reference's square `1 + M * M` table,
+resampled to the input's patch grid as the reference does it
+(`DINOv2PositionEmbedding`: torch's bicubic kernel, `interpolate_offset`,
+no anti-aliasing). LayerScale gains are unconstrained, as in the reference.
+`patch_size=None` resolves to 14 for every v2 variant.
+
+`pretrained=True` loads the official weights of `small`, `base` and
+`large` (`facebook/dinov2-{small,base,large}`, the checkpoints Depth
+Anything starts from) from a local download, strictly
+(`official_weights.py`): every official tensor is used once with a matching
+shape and every backbone weight is filled, or the load raises. `tiny` and
+`giant` have no wired official weights and raise `NotImplementedError`.
 
 References:
     - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
@@ -55,9 +62,11 @@ References:
       FFN). (https://arxiv.org/abs/2002.05202)
 """
 
+import math
 import keras
+import numpy as np
 from keras import layers, initializers
-from typing import Optional, Union, Dict, Any, Tuple, Literal
+from typing import Optional, Union, Dict, Any, Tuple, Literal, List
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -75,6 +84,11 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.models.vision.dino.common import reject_input_shape
+from dl_techniques.models.vision.dino.official_weights import (
+    OFFICIAL_DINOV2_POS_GRID,
+    official_dinov2_weights_path,
+    load_official_dinov2_file,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 
@@ -86,6 +100,235 @@ from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
 # here carries no per-variant `patch_size`, so `create_dino_v2(patch_size=None)`
 # resolves to this for EVERY variant. Oquab et al. 2023 use ViT-L/14 and ViT-g/14.
 _DEFAULT_PATCH_SIZE = 14
+
+# The cubic convolution constant of torch's `upsample_bicubic2d`
+# (`aten/src/ATen/native/UpSample.h`, `get_cubic_upsample_coefficients`).
+_TORCH_BICUBIC_A = -0.75
+
+
+def torch_bicubic_resize_matrix(
+        in_size: int,
+        out_size: int,
+        scale_factor: Optional[float] = None,
+) -> np.ndarray:
+    """The ``(out_size, in_size)`` matrix of torch's 1-D bicubic resampling.
+
+    Interface contract (callers: `DINOv2PositionEmbedding`, once per axis):
+    ``matrix @ v`` equals ``torch.nn.functional.interpolate(v, mode="bicubic",
+    align_corners=False, antialias=False)`` along one axis, given
+    ``scale_factor`` (the reference's offset form, where torch maps output
+    index ``o`` to source ``(o + 0.5) / scale_factor - 0.5``) or, when it is
+    ``None``, the output size alone (source ``(o + 0.5) * in / out - 0.5``).
+    Taps use the cubic convolution kernel with ``A = -0.75`` and read
+    clamped indices at the borders, as torch does. Pure numpy, float64;
+    raises ``ValueError`` for a non-positive size or scale.
+
+    :param in_size: Length of the source axis.
+    :type in_size: int
+    :param out_size: Length of the resampled axis.
+    :type out_size: int
+    :param scale_factor: torch's ``scale_factor`` for this axis, or ``None``.
+    :type scale_factor: Optional[float]
+    :return: The resampling matrix, rows summing to 1.
+    :rtype: np.ndarray
+    """
+    if in_size < 1 or out_size < 1 or (scale_factor is not None and scale_factor <= 0):
+        raise ValueError(
+            f"sizes must be >= 1 and scale_factor > 0; got {in_size}, {out_size}, {scale_factor}")
+    a = _TORCH_BICUBIC_A
+    step = 1.0 / scale_factor if scale_factor is not None else in_size / out_size
+
+    def near(t: float) -> float:  # |t| <= 1
+        return ((a + 2.0) * t - (a + 3.0)) * t * t + 1.0
+
+    def far(t: float) -> float:  # 1 < |t| < 2
+        return ((a * t - 5.0 * a) * t + 8.0 * a) * t - 4.0 * a
+
+    matrix = np.zeros((out_size, in_size), dtype=np.float64)
+    for o in range(out_size):
+        source = step * (o + 0.5) - 0.5
+        base = math.floor(source)
+        t = source - base
+        for k, weight in enumerate((far(t + 1.0), near(t), near(1.0 - t), far(2.0 - t))):
+            matrix[o, min(max(base - 1 + k, 0), in_size - 1)] += weight
+    return matrix
+
+
+def _require_official_structure(
+        config: Dict[str, Any],
+        patch_size: Union[int, Tuple[int, int]],
+        num_register_tokens: int,
+        init_values: Optional[float],
+) -> None:
+    """Refuse a ``pretrained=True`` backbone whose structure the checkpoint lacks.
+
+    Interface contract (callers: both ``from_variant`` methods): raises
+    ``ValueError`` naming the first argument that differs from the official
+    DINOv2 ViT-S/B/L/14 structure; returns ``None`` otherwise. Reads the merged
+    variant + caller ``config`` and the three explicit arguments only.
+
+    :param config: The variant's entry updated with the caller's kwargs.
+    :type config: Dict[str, Any]
+    :param patch_size: The requested patch size.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param num_register_tokens: The requested register-token count.
+    :type num_register_tokens: int
+    :param init_values: The LayerScale init (``None`` builds no LayerScale).
+    :type init_values: Optional[float]
+    """
+    official = {
+        'patch_size': (_DEFAULT_PATCH_SIZE, _DEFAULT_PATCH_SIZE),
+        'num_register_tokens': 0,
+        'pos_embed_grid_size': OFFICIAL_DINOV2_POS_GRID,
+        'ffn_type': 'mlp',
+        'attention_type': 'multi_head',
+        'normalization_type': 'layer_norm',
+        'qkv_bias': True,
+        'ffn_bias': True,
+        'in_chans': 3,
+        'include_top': True,
+        'interpolate_antialias': False,
+    }
+    given = {
+        'patch_size': tuple(patch_size) if isinstance(patch_size, (tuple, list))
+        else (patch_size, patch_size),
+        'num_register_tokens': num_register_tokens,
+    }
+    for key, value in official.items():
+        actual = given.get(key, config.get(key, value))
+        if actual != value:
+            raise ValueError(
+                f"pretrained=True loads the official DINOv2 checkpoint, which has "
+                f"{key}={value!r}; got {actual!r}")
+    if init_values is None:
+        raise ValueError(
+            "pretrained=True needs LayerScale (the official blocks have it); "
+            "init_values must not be None")
+
+
+# ---------------------------------------------------------------------
+
+@register_dl_technique("dl_techniques.models.dino.dino_v2")
+class DINOv2PositionEmbedding(keras.layers.Layer):
+    """The reference DINOv2 position table, resampled to the input's patch grid.
+
+    Owns one weight ``pos_embed`` of shape ``(1, 1 + M * M, D)``: a [CLS]
+    row and a square ``M x M`` grid, the layout of every official DINOv2
+    checkpoint (``M = 37``, from 518 px at patch 14). For an input grid
+    ``(h, w)`` it adds the [CLS] row to the [CLS] token and the grid,
+    resampled to ``(h, w)``, to the patch tokens, exactly as the reference's
+    ``interpolate_pos_encoding``: the table is used as is when
+    ``h == w == M``, and otherwise every axis is resampled with torch's
+    bicubic kernel at ``scale_factor = (n + interpolate_offset) / M``
+    (``interpolate_offset = 0`` resamples to the output size instead, the
+    reference's other branch). The resampling is a fixed matrix per axis
+    (`torch_bicubic_resize_matrix`), so the gradient reaches the stored grid.
+
+    .. code-block:: text
+
+        pos_embed (1, 1 + M*M, D) ──► [CLS] row ─────────────────────┐
+                    └─► grid (M, M, D) ─► W_h · grid · W_wᵀ (h, w, D) ┤
+        tokens (B, 1 + h*w, D) ──────────────────────────────────────(+)──► out
+
+    :param grid_size: ``M``, the side of the stored square grid.
+    :type grid_size: int
+    :param output_grid: ``(h, w)``, the input's patch grid.
+    :type output_grid: Tuple[int, int]
+    :param interpolate_offset: The reference's offset; ``0`` means "resample
+        to the output size".
+    :type interpolate_offset: float
+    :param initializer: Initializer of the table; ``None`` is the
+        reference's ``trunc_normal_(std=0.02)``.
+    :type initializer: Optional[Union[str, keras.initializers.Initializer]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    Input shape:
+        ``(batch, 1 + h * w, D)``: [CLS] then the patch tokens, row-major.
+
+    Output shape:
+        Same as the input.
+    """
+
+    def __init__(
+            self,
+            grid_size: int,
+            output_grid: Tuple[int, int],
+            interpolate_offset: float = 0.1,
+            initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        output_grid = tuple(int(n) for n in output_grid)
+        if int(grid_size) < 1 or len(output_grid) != 2 or min(output_grid) < 1:
+            raise ValueError(
+                f"grid_size must be >= 1 and output_grid two sizes >= 1; got {grid_size}, {output_grid}")
+        if interpolate_offset < 0:
+            raise ValueError(f"interpolate_offset must be >= 0, got {interpolate_offset}")
+        self.grid_size = int(grid_size)
+        self.output_grid = output_grid
+        self.interpolate_offset = float(interpolate_offset)
+        # A fresh instance per layer: a shared default instance is one RNG stream
+        # for every table (tests/test_the_shared_initializer_population_cannot_grow.py).
+        self.initializer = (
+            initializers.TruncatedNormal(stddev=0.02) if initializer is None
+            else keras.initializers.get(initializer))
+        m = self.grid_size
+        self.is_identity = output_grid == (m, m)
+        self._resample = [
+            torch_bicubic_resize_matrix(
+                m, n, (n + self.interpolate_offset) / m if self.interpolate_offset else None
+            ).astype("float32")
+            for n in output_grid
+        ]
+        self.pos_embed = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the ``(1, 1 + M * M, D)`` table."""
+        h, w = self.output_grid
+        if input_shape[1] is not None and input_shape[1] != 1 + h * w:
+            raise ValueError(
+                f"expected 1 + {h} * {w} tokens for output_grid {self.output_grid}, "
+                f"got input shape {input_shape}")
+        self.pos_embed = self.add_weight(
+            name="pos_embed",
+            shape=(1, 1 + self.grid_size * self.grid_size, input_shape[-1]),
+            initializer=self.initializer,
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def resampled_table(self) -> keras.KerasTensor:
+        """The ``(1, 1 + h * w, D)`` table this layer adds, in float32."""
+        table = keras.ops.convert_to_tensor(self.pos_embed)
+        if self.is_identity:
+            return table
+        m, (h, w) = self.grid_size, self.output_grid
+        dim = table.shape[-1]
+        grid = keras.ops.reshape(table[:, 1:], (m, m * dim))
+        grid = keras.ops.matmul(self._resample[0], grid)                      # (h, M*D)
+        grid = keras.ops.reshape(grid, (h, m, dim))
+        grid = keras.ops.einsum("wj,hjd->hwd", self._resample[1], grid)       # (h, w, D)
+        return keras.ops.concatenate(
+            [table[:, :1], keras.ops.reshape(grid, (1, h * w, dim))], axis=1)
+
+    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Add the resampled table to the tokens."""
+        return inputs + keras.ops.cast(self.resampled_table(), inputs.dtype)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Same as the input."""
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Every constructor argument."""
+        config = super().get_config()
+        config.update({
+            "grid_size": self.grid_size,
+            "output_grid": list(self.output_grid),
+            "interpolate_offset": self.interpolate_offset,
+            "initializer": keras.initializers.serialize(self.initializer),
+        })
+        return config
 
 
 # ---------------------------------------------------------------------
@@ -270,17 +513,23 @@ class DINOv2Block(keras.layers.Layer):
         )
 
         # LayerScale gains for the two residual branches
+        # DECISION plan-2026-10-14T062616-81938e81/D-134
+        # Do NOT constrain these gains to be non-negative (LayerScale's default):
+        # the reference's `gamma` is a free parameter, and about half the
+        # entries of every official checkpoint are negative (small: 4441 of
+        # 9216, min -10.2). A `non_neg` constraint clips them all to 0 on the
+        # first optimizer step, which deletes the pretrained residual branches.
         if self.init_values is not None:
             self.ls1 = LayerScale(
                 multiplier_type='CHANNEL',
                 initializer=initializers.Constant(self.init_values),
-                constraint='non_neg',
+                constraint=None,
                 name="ls1"
             )
             self.ls2 = LayerScale(
                 multiplier_type='CHANNEL',
                 initializer=initializers.Constant(self.init_values),
-                constraint='non_neg',
+                constraint=None,
                 name="ls2"
             )
         else:
@@ -435,8 +684,18 @@ class DINOv2VisionTransformer(keras.Model):
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization.
         num_register_tokens: Number of register tokens to use.
-        interpolate_antialias: Use anti-aliasing for positional embedding interpolation.
-        interpolate_offset: Offset for positional embedding interpolation.
+        interpolate_antialias: Must be False when ``pos_embed_grid_size`` is
+            set: the anti-aliased resampling is not implemented (the official
+            checkpoints use none). Unread otherwise.
+        interpolate_offset: The reference's offset for resampling the
+            position table (``scale_factor = (n + offset) / M``; ``0``
+            resamples to the output size). Read only when
+            ``pos_embed_grid_size`` is set.
+        pos_embed_grid_size: ``None`` sizes the position table for
+            ``image_size`` (``num_patches + 1`` rows, added as is). An int
+            ``M`` stores the reference's square ``1 + M * M`` table and
+            resamples it to the input's patch grid
+            (`DINOv2PositionEmbedding`); the official checkpoints use 37.
         include_top: Whether to include the final normalization layer.
         input_shape: Input shape. If None, computed from image_size and in_chans.
         **kwargs: Additional keyword arguments for the Model base class.
@@ -534,9 +793,15 @@ class DINOv2VisionTransformer(keras.Model):
             interpolate_offset: float = 0.1,
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            pos_embed_grid_size: Optional[int] = None,
             **kwargs
     ) -> None:
         refuse_unknown_model_kwargs(kwargs, type(self).__name__)
+        if pos_embed_grid_size is not None and interpolate_antialias:
+            raise ValueError(
+                "interpolate_antialias=True is not implemented: the position "
+                "table is resampled without anti-aliasing, as the official "
+                "DINOv2 checkpoints are")
         # Validate inputs
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
@@ -570,6 +835,7 @@ class DINOv2VisionTransformer(keras.Model):
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
         self.include_top = include_top
+        self.pos_embed_grid_size = None if pos_embed_grid_size is None else int(pos_embed_grid_size)
 
         # Computed attributes
         self.num_features = embed_dim
@@ -702,16 +968,30 @@ class DINOv2VisionTransformer(keras.Model):
         # See decisions.md.
         x = self.cls_token_layer(x)
 
-        # B4/B7: positional embeddings. The weight is sized num_patches + num_tokens (CLS),
-        # so it accounts for the prepended CLS; PositionalEmbedding.call slices to the seq
-        # length. Variable-resolution interpolation is out of scope.
-        pos_embed_seq_len = self.num_patches + self.num_tokens
-        self.pos_embed = create_embedding_layer(
-            'positional_learned',
-            max_seq_len=pos_embed_seq_len,
-            dim=self.embed_dim,
-            name='pos_embed'
-        )
+        # B4/B7: positional embeddings. Without a grid size the weight is sized
+        # num_patches + num_tokens (CLS) for this image size. With one, it is the
+        # reference's square table, resampled to this patch grid.
+        if self.pos_embed_grid_size is None:
+            pos_embed_seq_len = self.num_patches + self.num_tokens
+            self.pos_embed = create_embedding_layer(
+                'positional_learned',
+                max_seq_len=pos_embed_seq_len,
+                dim=self.embed_dim,
+                name='pos_embed'
+            )
+        else:
+            # DECISION plan-2026-10-14T062616-81938e81/D-135
+            # Do NOT resample with keras.ops.image.resize('bicubic'): it is TF's
+            # Keys kernel (A = -0.5) at the output-size scale, while the reference
+            # uses torch's kernel (A = -0.75) at scale (n + 0.1) / M, so a loaded
+            # official table would land on other values at every grid but 37.
+            self.pos_embed = DINOv2PositionEmbedding(
+                grid_size=self.pos_embed_grid_size,
+                output_grid=(self.image_size[0] // self.patch_size[0],
+                             self.image_size[1] // self.patch_size[1]),
+                interpolate_offset=self.interpolate_offset,
+                name='pos_embed'
+            )
         # DECISION plan_2026-06-15_e2759fbc/D-004: call as `x = self.pos_embed(x)`, never a nested Lambda or `_get_interpolated_pos_embed`.
         # A nested Lambda-in-Lambda is illegal layer creation in trace, and variable-resolution interpolation is out of scope. See decisions.md.
         x = self.pos_embed(x)
@@ -826,6 +1106,7 @@ class DINOv2VisionTransformer(keras.Model):
             init_values: Optional[float] = 1e-5,
             stochastic_depth_rate: float = 0.0,
             input_shape: Optional[Tuple[int, ...]] = None,
+            pretrained: bool = False,
             **kwargs
     ) -> "DINOv2VisionTransformer":
         """
@@ -833,19 +1114,30 @@ class DINOv2VisionTransformer(keras.Model):
 
         Args:
             variant: Size variant ('tiny', 'small', 'base', 'large', 'giant').
-            image_size: Input image size.
+            image_size: Input image size; a multiple of ``patch_size``.
             patch_size: Patch size for patch embedding.
             num_register_tokens: Number of register tokens to use.
             init_values: LayerScale initialization value.
             stochastic_depth_rate: Maximum stochastic depth rate.
             input_shape: Input shape. If None, computed from image_size.
+            pretrained: ``True`` loads the official weights of ``small``,
+                ``base`` or ``large`` from their local download
+                (`official_weights.py`), strictly, after building the
+                official structure: ``pos_embed_grid_size`` defaults to 37
+                and the table is resampled to ``image_size``.
             **kwargs: Additional arguments for the model.
 
         Returns:
             DINOv2VisionTransformer instance.
 
         Raises:
-            ValueError: If variant is not recognized.
+            ValueError: If variant is not recognized, or if ``pretrained``
+                is combined with a structure the official checkpoint does
+                not have.
+            NotImplementedError: If ``pretrained`` is True for a variant
+                without wired official weights (``tiny``, ``giant``).
+            FileNotFoundError: If ``pretrained`` is True and the download
+                is absent (checked before anything is built).
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(f"Unknown variant: {variant}. Choose from {list(cls.MODEL_VARIANTS.keys())}")
@@ -853,10 +1145,19 @@ class DINOv2VisionTransformer(keras.Model):
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
 
+        if pretrained:
+            # GUIDE section 1: resolve the weights first (raise before building),
+            # build the official structure, then load strictly.
+            official_dinov2_weights_path(variant)
+            config.setdefault('pos_embed_grid_size', OFFICIAL_DINOV2_POS_GRID)
+            _require_official_structure(
+                config, patch_size=patch_size, num_register_tokens=num_register_tokens,
+                init_values=init_values)
+
         logger.info(f"Creating DINOv2-{variant.upper()} Vision Transformer")
         logger.info(f"Configuration: {config}")
 
-        return cls(
+        model = cls(
             image_size=image_size,
             patch_size=patch_size,
             num_register_tokens=num_register_tokens,
@@ -865,6 +1166,9 @@ class DINOv2VisionTransformer(keras.Model):
             input_shape=input_shape,
             **config
         )
+        if pretrained:
+            load_official_dinov2_file(model, variant)
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
@@ -893,8 +1197,53 @@ class DINOv2VisionTransformer(keras.Model):
             'interpolate_offset': self.interpolate_offset,
             'include_top': self.include_top,
             'input_shape': self._input_shape_arg,
+            'pos_embed_grid_size': self.pos_embed_grid_size,
         })
         return config
+
+    def get_intermediate_layers(
+            self,
+            inputs: keras.KerasTensor,
+            n: int = 1,
+            training: Optional[bool] = None,
+    ) -> List[keras.KerasTensor]:
+        """The patch tokens of the last ``n`` blocks, each through the final norm.
+
+        Interface contract (caller: Depth Anything's DPT head, which reads
+        ``n = 4``): the reference ``get_intermediate_layers(x, n, norm=True)``
+        with an int ``n`` and no mask. Returns ``n`` tensors
+        ``(batch, num_patches, embed_dim)``, shallowest first, with the [CLS]
+        and register tokens dropped (and no final norm when
+        ``include_top=False``, which builds none). Runs the backbone's own
+        layers, so it shares every weight with ``__call__``. Raises
+        ``ValueError`` for ``n`` outside ``[1, depth]``.
+
+        Args:
+            inputs: Images ``(batch, height, width, in_chans)`` at ``image_size``.
+            n: How many of the last blocks to return.
+            training: Forwarded to every block.
+
+        Returns:
+            The ``n`` normalized patch-token tensors.
+        """
+        if not 1 <= int(n) <= self.depth:
+            raise ValueError(f"n must be in [1, {self.depth}], got {n}")
+        x = self.patch_embed(inputs)
+        x = self.cls_token_layer(x)
+        x = self.pos_embed(x)
+        if self.register_token_layer is not None:
+            x = keras.ops.concatenate(
+                [x[:, :1], self.register_token_layer(x), x[:, 1:]], axis=1)
+        outputs = []
+        first = self.depth - int(n)
+        for i, block in enumerate(self.transformer_blocks):
+            x = block(x, training=training)
+            if i >= first:
+                outputs.append(x)
+        if self.norm is not None:
+            outputs = [self.norm(x) for x in outputs]
+        start = 1 + self.num_register_tokens
+        return [x[:, start:] for x in outputs]
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
@@ -1094,6 +1443,7 @@ class DINOv2(keras.Model):
             num_classes: int = 1000,
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            pretrained: bool = False,
             **kwargs
     ) -> "DINOv2":
         """
@@ -1106,13 +1456,21 @@ class DINOv2(keras.Model):
             num_classes: Number of output classes.
             include_top: Whether to include classification head.
             input_shape: Input shape.
+            pretrained: ``True`` loads the official backbone weights of
+                ``small``, ``base`` or ``large`` strictly, as
+                `DINOv2VisionTransformer.from_variant` does; the classifier
+                (which the official checkpoint does not have) stays at its
+                initialization.
             **kwargs: Additional arguments for the model.
 
         Returns:
             DINOv2 instance.
 
         Raises:
-            ValueError: If variant is not recognized.
+            ValueError: If variant is not recognized, or if ``pretrained``
+                is combined with a non-official backbone structure.
+            NotImplementedError: If ``pretrained`` is True for ``tiny`` or ``giant``.
+            FileNotFoundError: If ``pretrained`` is True and the download is absent.
         """
         if variant not in DINOv2VisionTransformer.MODEL_VARIANTS:
             raise ValueError(f"Unknown variant: {variant}. Choose from {list(DINOv2VisionTransformer.MODEL_VARIANTS.keys())}")
@@ -1120,9 +1478,19 @@ class DINOv2(keras.Model):
         config = DINOv2VisionTransformer.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
 
+        if pretrained:
+            official_dinov2_weights_path(variant)
+            config.setdefault('pos_embed_grid_size', OFFICIAL_DINOV2_POS_GRID)
+            # The checkpoint holds the gains; any init builds the LayerScale it fills.
+            config.setdefault('init_values', 1.0)
+            _require_official_structure(
+                dict(config, include_top=True), patch_size=patch_size,
+                num_register_tokens=config.get('num_register_tokens', 0),
+                init_values=config.get('init_values'))
+
         logger.info(f"Creating DINOv2-{variant.upper()} complete model")
 
-        return cls(
+        model = cls(
             image_size=image_size,
             patch_size=patch_size,
             num_classes=num_classes,
@@ -1130,6 +1498,9 @@ class DINOv2(keras.Model):
             input_shape=input_shape,
             **config
         )
+        if pretrained:
+            load_official_dinov2_file(model.backbone, variant)
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
@@ -1217,8 +1588,10 @@ def create_dino_v2(
         stochastic_depth_rate: Maximum stochastic depth rate.
         ffn_type: Type of FFN. ``None`` defers to the variant ('swiglu' for
             'giant', 'mlp' otherwise).
-        pretrained: Must be False. `True` raises `NotImplementedError` — no
-            DINOv2 checkpoints ship with this package.
+        pretrained: ``True`` loads the official backbone weights of
+            ``small``, ``base`` or ``large`` from their local download
+            (`DINOv2.from_variant`); ``tiny`` and ``giant`` raise
+            ``NotImplementedError``.
         **kwargs: Additional arguments for the model.
 
     Returns:
@@ -1249,20 +1622,6 @@ def create_dino_v2(
     """
     reject_input_shape(kwargs, "create_dino_v2")
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on `pretrained=True`, never `logger.warning(...)` and continue with random weights.
-    # A warning-only path lets a caller silently ship an untrained model. Build with `pretrained=False` and call `model.load_weights(path)` instead. See decisions.md.
-    if pretrained:
-        raise NotImplementedError(
-            f"No pretrained DINOv2 weights are distributed with dl_techniques "
-            f"(requested variant '{variant}'). Build the architecture with "
-            f"pretrained=False and warm-start from a local checkpoint instead: "
-            f"model = create_dino_v2('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras'). Prefer "
-            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
-            f"path), which raises when a load changes ZERO variables -- raw "
-            f"load_weights is silent about a checkpoint that matches nothing."
-        )
-
     if patch_size is None:
         patch_size = _DEFAULT_PATCH_SIZE
 
@@ -1272,7 +1631,8 @@ def create_dino_v2(
     if ffn_type is None:
         ffn_type = variant_config.get('ffn_type', 'mlp')
     if num_register_tokens is None:
-        num_register_tokens = 4 if variant in ('large', 'giant') else 0
+        # The official checkpoints have no registers; a pretrained 'large' gets 0.
+        num_register_tokens = 4 if variant in ('large', 'giant') and not pretrained else 0
 
     logger.info(f"Creating DINOv2-{variant.upper()} model with:")
     logger.info(f"  - FFN type: {ffn_type}")
@@ -1290,5 +1650,6 @@ def create_dino_v2(
         init_values=init_values,
         stochastic_depth_rate=stochastic_depth_rate,
         ffn_type=ffn_type,
+        pretrained=pretrained,
         **kwargs
     )

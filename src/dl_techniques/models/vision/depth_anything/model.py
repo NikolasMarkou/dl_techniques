@@ -1,4 +1,4 @@
-"""`DepthAnything`, a monocular depth model built from a ViT encoder, a
+"""`DepthAnything`, a monocular depth model built from a DINOv2 encoder, a
 DPT-style decoder head, and an optional Mean-Teacher branch for
 semi-supervised training. Implements the Depth Anything V1 recipe, not V2: no
 synthetic training data and no distillation through a large teacher.
@@ -24,9 +24,15 @@ pretrained semantic structure. Augmentation runs inside `train_step`, not
 the unlabeled batch is strongly augmented; the labeled batch trains as loaded
 (the paper's horizontal flip happens in the data loader).
 
-The encoder is this repository's plain `ViT` (patch size 16) or a
-`Conv-BN-ReLU` placeholder stack, not DINOv2, and ships no pretrained
-weights; `from_pretrained_encoder` loads one. The teacher starts as a clone
+The encoder is the reference's: this repository's DINOv2 backbone
+(`DINOv2VisionTransformer`, ViT-S/B/L at patch 14, pre-norm, LayerScale,
+the official square position table resampled to the input grid), or a
+`Conv-BN-ReLU` placeholder stack. The image sides must be multiples of 14,
+as in the reference (518 by default). `from_variant(..., pretrained=True)`
+loads the official DINOv2 weights (`facebook/dinov2-{small,base,large}`,
+local download) into the encoder, strictly; the head starts from its
+initialization, as in the paper. `from_pretrained_encoder` loads a saved
+`.keras` encoder instead. The teacher starts as a clone
 of the student and only becomes an EMA average once the caller attaches
 `TeacherEMACallback` (`teacher_ema.py`); nothing in this module advances it
 on its own. `compile()` with no `loss=` defaults to `AffineInvariantLoss`,
@@ -59,7 +65,7 @@ References:
       The EMA teacher that `teacher_ema.py` drives.
     - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
       Supervision. (https://arxiv.org/abs/2304.07193)
-      The paper's encoder, which this package does not ship.
+      The paper's encoder; its official weights load from a local download.
 """
 
 import keras
@@ -75,12 +81,17 @@ from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.signal_processing.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
-from dl_techniques.models.vision.vit.model import ViT
+from dl_techniques.models.vision.dino.dino_v2 import DINOv2VisionTransformer
+from dl_techniques.models.vision.dino.official_weights import (
+    OFFICIAL_DINOV2_POS_GRID as _OFFICIAL_POS_GRID,
+    official_dinov2_weights_path,
+    load_official_dinov2_file,
+)
 
 from .components import REFERENCE_BN_EPSILON, DPTHead, resize_bilinear_align_corners
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# Map depth_anything encoder_type slugs to ViT scale names.
+# Map depth_anything encoder_type slugs to DINOv2 variant names.
 #
 # Kept as a module-level constant because it is also the source of
 # ``DepthAnything.MODEL_VARIANTS`` below: the three slugs are named in exactly
@@ -91,7 +102,11 @@ _VIT_SCALE_MAP: Dict[str, str] = {
     "vit_b": "base",
     "vit_l": "large",
 }
-_VIT_PATCH_SIZE: int = 16
+#: The reference encoder's patch size (DINOv2 ViT-*/14); image sides are multiples of it.
+_DINOV2_PATCH_SIZE: int = 14
+
+#: The placeholder Conv encoder's stride (a stride-2 conv and three stride-2 pools).
+_PLACEHOLDER_STRIDE: int = 16
 
 #: ``DPTHead`` widths ``(features, out_channels)`` per encoder size, from the
 #: ``config.json`` of the published checkpoints ``LiheYoung/depth_anything_vit{s,b,l}14``
@@ -110,7 +125,7 @@ _DPT_NUM_LAYERS: int = 4
 
 @register_dl_technique("dl_techniques.models.depth_anything.model")
 class DepthAnything(keras.Model):
-    """Monocular depth model: ViT encoder, DPT-style decoder, optional teacher.
+    """Monocular depth model: DINOv2 encoder, DPT-style decoder, optional teacher.
 
     Architecture:
 
@@ -120,10 +135,10 @@ class DepthAnything(keras.Model):
               │
               ▼
         ┌──────────────────────────────┐
-        │ encoder: ViT (patch 16) or   │────► frozen_encoder (EMA teacher,
-        │ placeholder Conv-BN-ReLU     │       optional, weight-shared clone)
+        │ encoder: DINOv2 (patch 14)   │────► frozen_encoder (EMA teacher,
+        │ or placeholder Conv-BN-ReLU  │       optional, weight-shared clone)
         └──────────────┬───────────────┘
-                       │  ViT: patch tokens of the last 4 layers, each
+                       │  DINOv2: patch tokens of the last 4 layers, each
                        │  through the final norm, reshaped to [B, h, w, D];
                        │  placeholder: its one [B, h, w, D] map, 4 times
                        ▼
@@ -145,9 +160,12 @@ class DepthAnything(keras.Model):
         student features ──► FeatureAlignmentLoss ──► frozen_encoder features
                                                         (only if use_feature_alignment)
 
-    :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``.
+    :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``
+        (DINOv2 ViT-S/14, ViT-B/14, ViT-L/14).
     :type encoder_type: str
-    :param image_shape: Input image shape ``(height, width, channels)``.
+    :param image_shape: Input image shape ``(height, width, channels)``. With
+        the DINOv2 encoder both sides must be multiples of 14 (the
+        reference's 518 by default).
     :type image_shape: Tuple[int, int, int]
     :param dpt_features: Fusion width of the ``DPTHead`` (``features`` in the
         reference). ``None`` takes the published checkpoint's value for
@@ -190,7 +208,9 @@ class DepthAnything(keras.Model):
     :type use_feature_alignment: bool
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
-    :raises ValueError: If `encoder_type` or `encoder_kind` is not recognized.
+    :raises ValueError: If `encoder_type` or `encoder_kind` is not recognized,
+        or if a side of `image_shape` is not a multiple of 14 with the DINOv2
+        encoder.
 
     Input shape:
         4D tensor ``(batch_size, height, width, 3)``, or a tuple of two such
@@ -205,11 +225,11 @@ class DepthAnything(keras.Model):
 
             model = DepthAnything(
                 encoder_type='vit_l',
-                image_shape=(384, 384, 3),
+                image_shape=(518, 518, 3),
             )
-            x = keras.random.normal([2, 384, 384, 3])
+            x = keras.random.normal([2, 518, 518, 3])
             depth = model(x)
-            print(depth.shape)  # (2, 384, 384, 1)
+            print(depth.shape)  # (2, 518, 518, 1)
     """
 
     # DECISION plan-2026-08-19T070627-a616f581/D-009: keep this table derived from `_VIT_SCALE_MAP`, never re-inline the slug list.
@@ -225,7 +245,7 @@ class DepthAnything(keras.Model):
     def __init__(
         self,
         encoder_type: str = 'vit_l',
-        image_shape: Tuple[int, int, int] = (384, 384, 3),
+        image_shape: Tuple[int, int, int] = (518, 518, 3),
         dpt_features: Optional[int] = None,
         dpt_out_channels: Optional[List[int]] = None,
         output_channels: int = 1,
@@ -289,25 +309,32 @@ class DepthAnything(keras.Model):
                 "use_feature_alignment=False to stop paying for it."
             )
 
-        # Encoder geometry: stride from patch_size for real ViT, 32 for placeholder
-        # (initial stride-2 conv + 3 maxpools across 4 stages — last stage no pool).
+        # Encoder geometry: the DINOv2 patch grid, or the placeholder's stride-16 map.
         if self.encoder_kind == 'real':
-            self.encoder_stride = _VIT_PATCH_SIZE  # 16
+            self.encoder_stride = _DINOV2_PATCH_SIZE
+            if self.image_shape[0] % _DINOV2_PATCH_SIZE or self.image_shape[1] % _DINOV2_PATCH_SIZE:
+                raise ValueError(
+                    f"image_shape {self.image_shape}: with the DINOv2 encoder both "
+                    f"sides must be multiples of {_DINOV2_PATCH_SIZE} (the reference "
+                    f"uses 518)")
+            self.encoder_h = self.image_shape[0] // self.encoder_stride
+            self.encoder_w = self.image_shape[1] // self.encoder_stride
         else:
             # Placeholder Conv encoder: initial stride-2 conv => /2, then 3
-            # stride-2 maxpools across stages 0..2 (stage 3 has no pool) => /8.
-            # Total stride 16 (matches the 4-stage DPT decoder's upsample).
-            self.encoder_stride = 16
-        self.encoder_h = self.image_shape[0] // self.encoder_stride
-        self.encoder_w = self.image_shape[1] // self.encoder_stride
+            # stride-2 'same' maxpools across stages 0..2 (stage 3 has no pool),
+            # each rounding up => ceil(side / 16).
+            self.encoder_stride = _PLACEHOLDER_STRIDE
+            self.encoder_h = -(-self.image_shape[0] // self.encoder_stride)
+            self.encoder_w = -(-self.image_shape[1] // self.encoder_stride)
 
         # If an encoder was supplied (typically by `from_config` after
         # deserialization), accept it directly so its saved topology + weights
         # survive the load. Otherwise build() will create one fresh.
         self.encoder: Optional[keras.Model] = encoder
-        # The ViT's width; the placeholder projects its features to the same
+        # The DINOv2 width; the placeholder projects its features to the same
         # width, so the head sees one input width per encoder_type.
-        self.encoder_embed_dim: int = ViT.SCALE_CONFIGS[_VIT_SCALE_MAP[self.encoder_type]][0]
+        self.encoder_embed_dim: int = DINOv2VisionTransformer.MODEL_VARIANTS[
+            _VIT_SCALE_MAP[self.encoder_type]]['embed_dim']
 
         # Other components — initialized in build().
         self.decoder: Optional[keras.layers.Layer] = None
@@ -334,23 +361,26 @@ class DepthAnything(keras.Model):
         # deserialized keras.Model with the saved topology + weights.
         if self.encoder is None:
             if self.encoder_kind == 'real':
-                scale = _VIT_SCALE_MAP[self.encoder_type]
-                self.encoder = ViT(
-                    input_shape=self.image_shape,
-                    scale=scale,
-                    patch_size=_VIT_PATCH_SIZE,
-                    include_top=False,
-                    pooling=None,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
+                # DECISION plan-2026-10-14T062616-81938e81/D-136
+                # Do NOT go back to the in-tree ViT (patch 16, post-norm by
+                # default, no LayerScale): the reference encoder is DINOv2
+                # ViT-*/14, and only this backbone takes the official weights.
+                # Its position table is the official square 37 x 37 grid,
+                # resampled to this image's patch grid as the reference does.
+                self.encoder = DINOv2VisionTransformer.from_variant(
+                    _VIT_SCALE_MAP[self.encoder_type],
+                    image_size=self.image_shape[:2],
+                    patch_size=_DINOV2_PATCH_SIZE,
+                    num_register_tokens=0,
+                    pos_embed_grid_size=_OFFICIAL_POS_GRID,
                     name=f'encoder_{self.encoder_type}_real',
                 )
             else:
                 self.encoder = self._create_placeholder_encoder(trainable=True)
-        # The head reads the ViT through get_intermediate_layers, not __call__,
-        # which would build it on first use; build it here instead.
-        if not self.encoder.built:
-            self.encoder.build((None,) + tuple(self.image_shape))
+        if isinstance(self.encoder, DINOv2VisionTransformer):
+            # The iBOT mask token never enters a depth forward (no masks), so
+            # it gets no gradient; it stays a loaded, frozen weight.
+            self.encoder.mask_token_layer.trainable = False
 
         # DECISION plan-2026-10-14T062616-81938e81/D-031
         # The output is ReLU'd, as in the reference: both official relative
@@ -384,16 +414,20 @@ class DepthAnything(keras.Model):
                 (None, self.encoder_h, self.encoder_w, self.encoder_embed_dim)
             ] * _DPT_NUM_LAYERS)
 
-        # Build order: ensure the student encoder is built, clone its topology and
-        # force-build the clone, then copy weights student -> teacher and freeze.
+        # Build order: the student encoder is built; clone its topology, copy
+        # weights student -> teacher and freeze.
         # DECISION plan-2026-08-17T183311-79c63e38/D-033: build the teacher when either flag is set, not `use_feature_alignment` alone.
         # `enable_semi_supervised` needs a teacher for pseudo-label consistency too; narrowing this silently degraded to labeled-only training. See decisions.md.
         if self.use_feature_alignment or self.enable_semi_supervised:
             try:
-                dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
-                _ = self.encoder(dummy, training=False)
-                self.frozen_encoder = keras.models.clone_model(self.encoder)
-                _ = self.frozen_encoder(dummy, training=False)
+                if isinstance(self.encoder, DINOv2VisionTransformer):
+                    # The class rebuilds its own graph from its config. clone_model
+                    # would return a plain Functional without get_intermediate_layers,
+                    # and under load_model's safe mode it refuses the graph's Lambdas.
+                    self.frozen_encoder = DINOv2VisionTransformer.from_config(
+                        self.encoder.get_config())
+                else:
+                    self.frozen_encoder = keras.models.clone_model(self.encoder)
                 self.frozen_encoder.set_weights(self.encoder.get_weights())
                 self.frozen_encoder.trainable = False
             except Exception as exc:  # pragma: no cover — diagnostic path
@@ -485,39 +519,54 @@ class DepthAnything(keras.Model):
             f"missing_in_source={len(report.missing_in_source)} "
             f"unused_in_source={len(report.unused_in_source)}"
         )
-        # Re-sync the frozen teacher so it starts from the pretrained snapshot.
-        if self.frozen_encoder is not None:
-            try:
-                self.frozen_encoder.set_weights(self.encoder.get_weights())
-                logger.info("from_pretrained_encoder: teacher re-synced from student.")
-            except Exception as exc:  # pragma: no cover — diagnostic path
-                logger.warning(
-                    f"from_pretrained_encoder: teacher re-sync failed ({exc!r})."
-                )
+        self._sync_teacher()
         return self
 
-    def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Convert a ViT-style ``(B, N+1, D)`` sequence into ``(B, h, w, D)``.
+    def load_official_encoder_weights(self) -> 'DepthAnything':
+        """Load the official DINOv2 weights of ``encoder_type`` into the encoder.
 
-        Drops the CLS token and reshapes using the encoder geometry derived from
-        ``image_shape`` and ``patch_size``. 4-D inputs are returned unchanged.
+        Interface contract (callers: ``from_variant(pretrained=True)`` and the
+        trainer's ``--pretrained-encoder``): strict, as
+        `dl_techniques.models.vision.dino.official_weights.load_official_dinov2_file`
+        (raises ``FileNotFoundError`` without the local download, ``ValueError``
+        when a tensor does not fit). Then re-copies student -> teacher. The
+        head keeps its initialization (the paper's randomly initialized decoder).
+
+        :return: ``self``, so calls can chain.
+        :rtype: DepthAnything
+        :raises ValueError: If the encoder is the placeholder.
         """
-        if len(x.shape) == 4:
-            return x
-        # (B, N+1, D) → drop CLS → (B, N, D) → reshape (B, h, w, D)
-        x = x[:, 1:, :]
-        return keras.ops.reshape(x, (-1, self.encoder_h, self.encoder_w, x.shape[-1]))
+        if self.encoder_kind != 'real':
+            raise ValueError("official DINOv2 weights need encoder_kind='real'")
+        if not self.built:
+            self.build((None,) + tuple(self.image_shape))
+        load_official_dinov2_file(self.encoder, _VIT_SCALE_MAP[self.encoder_type])
+        self._sync_teacher()
+        return self
+
+    def _sync_teacher(self) -> None:
+        """Copy the student encoder's weights into the frozen teacher, if one exists.
+
+        Raises whatever ``set_weights`` raises: a teacher left at other weights
+        than the loaded student would feed the consistency term silently.
+        """
+        if self.frozen_encoder is not None:
+            self.frozen_encoder.set_weights(self.encoder.get_weights())
+            logger.info("DepthAnything: teacher re-synced from student.")
 
     def _encoder_layers(
             self, encoder: keras.Model, x: keras.KerasTensor, training: Optional[bool],
+            n: int = _DPT_NUM_LAYERS,
     ) -> List[keras.KerasTensor]:
-        """The four ``(B, h, w, D)`` maps the head reads, from ``encoder``.
+        """The last ``n`` ``(B, h, w, D)`` encoder maps, from ``encoder``.
 
-        Interface contract (two callers: the student path in `call` and the
-        teacher in `_pseudo_label_depth`): a ViT gives the patch tokens of its
-        last four layers, each through its final norm (``get_intermediate_layers``),
-        reshaped to the patch grid; the placeholder Conv encoder has no
-        intermediate layers, so its one feature map is returned four times.
+        Interface contract (callers: the student path in `call`, the teacher
+        in `_pseudo_label_depth`, both with ``n = 4`` for the head, and the
+        encoder-feature paths with ``n = 1``): the DINOv2 encoder gives the
+        patch tokens of its last ``n`` blocks, each through its final norm
+        (``get_intermediate_layers``), reshaped to the patch grid; the
+        placeholder Conv encoder has no intermediate layers, so its one
+        feature map is returned ``n`` times.
 
         :param encoder: The student encoder or the frozen teacher.
         :type encoder: keras.Model
@@ -525,14 +574,16 @@ class DepthAnything(keras.Model):
         :type x: keras.KerasTensor
         :param training: Forwarded to the encoder.
         :type training: Optional[bool]
-        :return: Four feature maps, shallowest first.
+        :param n: How many of the last layers.
+        :type n: int
+        :return: ``n`` feature maps, shallowest first.
         :rtype: List[keras.KerasTensor]
         """
         if hasattr(encoder, "get_intermediate_layers"):
             return [
                 keras.ops.reshape(t, (-1, self.encoder_h, self.encoder_w, t.shape[-1]))
-                for t in encoder.get_intermediate_layers(x, _DPT_NUM_LAYERS, training=training)]
-        return [encoder(x, training=training)] * _DPT_NUM_LAYERS
+                for t in encoder.get_intermediate_layers(x, n, training=training)]
+        return [encoder(x, training=training)] * n
 
     def _decode(self, layers: List[keras.KerasTensor]) -> keras.KerasTensor:
         """Run the head, resize to ``image_shape`` if needed, ReLU (the reference's tail).
@@ -550,7 +601,7 @@ class DepthAnything(keras.Model):
         """Create the placeholder Conv-BN-ReLU encoder (legacy mode).
 
         Used when ``encoder_kind='placeholder'``. For ``encoder_kind='real'``
-        the actual ViT backbone is constructed eagerly in ``__init__``.
+        :meth:`build` constructs the DINOv2 backbone.
 
         :param trainable: Whether the encoder should be trainable.
         :type trainable: bool
@@ -672,10 +723,11 @@ class DepthAnything(keras.Model):
             x = inputs
 
         if not self.include_top:
-            # Return encoder features for custom heads.
-            # ViT returns (B, N+1, D); placeholder returns 4-D.
-            features = self.encoder(x, training=training)
-            spatial_features = self._features_to_spatial(features)
+            # Return encoder features for custom heads: the last layer's
+            # normalized patch tokens, as a sequence and on the patch grid.
+            spatial_features = self._encoder_layers(self.encoder, x, training, n=1)[0]
+            features = keras.ops.reshape(
+                spatial_features, (-1, self.encoder_h * self.encoder_w, spatial_features.shape[-1]))
             return {
                 "encoder_features": features,
                 "spatial_features": spatial_features
@@ -942,15 +994,11 @@ class DepthAnything(keras.Model):
                     # `self.augmentation` and reduce the term to a
                     # train/eval-mode difference between two initially
                     # identical encoders.
-                    feat_student = self.encoder(x_unlab_aug, training=True)
-                    feat_teacher = self.frozen_encoder(x_unlab, training=False)
-                    # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
-                    if len(feat_student.shape) == 4:
-                        feat_student = keras.ops.mean(feat_student, axis=[1, 2])
-                        feat_teacher = keras.ops.mean(feat_teacher, axis=[1, 2])
-                    elif len(feat_student.shape) == 3:
-                        feat_student = keras.ops.mean(feat_student[:, 1:, :], axis=1)
-                        feat_teacher = keras.ops.mean(feat_teacher[:, 1:, :], axis=1)
+                    # Pool the last layer's patch tokens to (B, D).
+                    feat_student = keras.ops.mean(self._encoder_layers(
+                        self.encoder, x_unlab_aug, True, n=1)[0], axis=[1, 2])
+                    feat_teacher = keras.ops.mean(self._encoder_layers(
+                        self.frozen_encoder, x_unlab, False, n=1)[0], axis=[1, 2])
                     fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
                     loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
@@ -997,6 +1045,50 @@ class DepthAnything(keras.Model):
         ):
             return self._train_step_semi_supervised(x[0], x[1], y)
         return self._train_step_labeled(x, y)
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        pretrained: bool = False,
+        **kwargs: Any
+    ) -> 'DepthAnything':
+        """Build a built Depth Anything of one published encoder size.
+
+        GUIDE section 1 path: with ``pretrained=True`` the official DINOv2
+        weights of the variant's encoder are located first (raising
+        ``FileNotFoundError`` before anything is built), then the model is
+        built and the encoder loaded strictly
+        (:meth:`load_official_encoder_weights`). The head keeps its
+        initialization: the paper fine-tunes a randomly initialized decoder
+        on a pretrained encoder.
+
+        :param variant: ``"vit_s"``, ``"vit_b"`` or ``"vit_l"`` (the
+            ``encoder_type``).
+        :type variant: str
+        :param pretrained: Load the official DINOv2 encoder weights.
+        :type pretrained: bool
+        :param kwargs: Any other constructor argument.
+        :return: The built model.
+        :rtype: DepthAnything
+        :raises ValueError: If ``variant`` is unknown, ``kwargs`` names an
+            ``encoder_type``, or ``pretrained`` is combined with the
+            placeholder encoder.
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Choose from {list(cls.MODEL_VARIANTS)}")
+        if 'encoder_type' in kwargs:
+            raise ValueError("pass the encoder size as `variant`, not encoder_type")
+        if pretrained:
+            if kwargs.get('encoder_kind', 'real') != 'real':
+                raise ValueError("pretrained=True loads DINOv2 weights; encoder_kind must be 'real'")
+            official_dinov2_weights_path(_VIT_SCALE_MAP[variant])
+        model = cls(encoder_type=variant, **kwargs)
+        model.build((None,) + tuple(model.image_shape))
+        if pretrained:
+            model.load_official_encoder_weights()
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
@@ -1088,7 +1180,7 @@ class DepthAnything(keras.Model):
 
 def create_depth_anything(
     encoder_type: str = 'vit_l',
-    image_shape: Tuple[int, int, int] = (384, 384, 3),
+    image_shape: Tuple[int, int, int] = (518, 518, 3),
     dpt_features: Optional[int] = None,
     dpt_out_channels: Optional[List[int]] = None,
     output_channels: int = 1,
@@ -1102,6 +1194,7 @@ def create_depth_anything(
     enable_semi_supervised: bool = False,
     input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
     include_top: bool = True,
+    pretrained: bool = False,
 ) -> DepthAnything:
     """Create and build Depth Anything model instance.
 
@@ -1124,7 +1217,8 @@ def create_depth_anything(
 
     :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``.
     :type encoder_type: str
-    :param image_shape: Input image shape ``(height, width, channels)``.
+    :param image_shape: Input image shape ``(height, width, channels)``;
+        sides are multiples of 14 with the DINOv2 encoder.
     :type image_shape: Tuple[int, int, int]
     :param dpt_features: Fusion width of the ``DPTHead``; ``None`` takes the
         published checkpoint's value for ``encoder_type``.
@@ -1159,6 +1253,9 @@ def create_depth_anything(
     :param include_top: Whether to include the depth estimation head.
         When False, returns encoder features for custom heads. Defaults to True.
     :type include_top: bool
+    :param pretrained: Load the official DINOv2 weights of ``encoder_type``
+        into the encoder (`DepthAnything.from_variant`).
+    :type pretrained: bool
     :return: Configured and built DepthAnything model instance.
     :rtype: DepthAnything
     :raises ValueError: If `encoder_type` is not recognized.
@@ -1168,8 +1265,8 @@ def create_depth_anything(
 
             model = create_depth_anything(
                 encoder_type='vit_l',
-                image_shape=(384, 384, 3),
-                kernel_regularizer=keras.regularizers.L2(0.01)
+                image_shape=(518, 518, 3),
+                pretrained=True,
             )
             model.compile(
                 optimizer=keras.optimizers.AdamW(learning_rate=5e-6),
@@ -1179,8 +1276,9 @@ def create_depth_anything(
     logger.info(f"Creating DepthAnything model with encoder: {encoder_type}")
 
     # Create model with specified configuration
-    model = DepthAnything(
-        encoder_type=encoder_type,
+    model = DepthAnything.from_variant(
+        encoder_type,
+        pretrained=pretrained,
         image_shape=image_shape,
         dpt_features=dpt_features,
         dpt_out_channels=dpt_out_channels,

@@ -11,8 +11,15 @@ src/dl_techniques/models/vision/depth_anything/
 └── teacher_ema.py     # TeacherEMACallback, cosine_ema_schedule, linear_ema_schedule
 ```
 
-The encoder is the in-tree `dl_techniques.models.vision.vit.ViT` (`encoder_kind='real'`,
-the default); the decoder is `DPTHead`, a port of the reference V1 head that fuses the encoder's
+The encoder is the reference's DINOv2 (`encoder_kind='real'`, the default):
+`dl_techniques.models.vision.dino.DINOv2VisionTransformer` at ViT-S/B/L/14, pre-norm, LayerScale,
+no register tokens, with the official 37 x 37 position table resampled to the input's patch grid
+(torch's bicubic kernel at scale `(n + 0.1) / 37`, as the reference's `interpolate_pos_encoding`).
+Image sides must be multiples of 14 (the reference trains at 518, the default).
+`DepthAnything.from_variant('vit_s', pretrained=True)` (and `create_depth_anything(...,
+pretrained=True)`) load the official DINOv2 weights (`facebook/dinov2-{small,base,large}`, a local
+download, see "Pretrained encoder" below) into the encoder; the head starts from its
+initialization, as in the paper. The decoder is `DPTHead`, a port of the reference V1 head that fuses the encoder's
 last four layers, and it ends in a ReLU, as the reference heads do (see "DPT head" and "Output
 range" below). `train_step` dispatches to a
 clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
@@ -94,10 +101,10 @@ no BatchNorm (`use_bn=False`), so the head computes the same function in trainin
 mode. Torch's `Conv2d(3, stride 2, padding 1)` pads both sides, which Keras' `'same'` does not for
 an even input, so `resize_layers_3` is an explicit `ZeroPadding2D(1)` and a `'valid'` conv; Keras'
 bilinear resize uses half-pixel centres, so the head resizes with
-`resize_bilinear_align_corners`, the reference's `align_corners=True`. The reference's DINOv2 has
-patch 14 and interpolates to `14 * g`; this ViT has patch 16, so the head returns `16 * g`, the
-input size. The placeholder Conv encoder has no intermediate layers; its one feature map (projected
-to the ViT width of `encoder_type`) feeds all four paths. Guard:
+`resize_bilinear_align_corners`, the reference's `align_corners=True`. The DINOv2 encoder has
+patch 14 and the head interpolates to `14 * g`, the input size, as the reference does. The
+placeholder Conv encoder (stride 16) has no intermediate layers; its one feature map (projected
+to the DINOv2 width of `encoder_type`) feeds all four paths. Guard:
 `tests/test_models/test_depth_anything/test_the_dpt_head_is_the_references.py`.
 
 Until 2026-10-17 the decoder was the shared `DepthEstimationHead(decoder_style='dpt')`: one
@@ -108,9 +115,9 @@ It is composed of three sub-networks:
 
 | Sub-network        | Type                          | Where built       | Trainable |
 |--------------------|-------------------------------|-------------------|-----------|
-| `encoder`          | `keras.Model` (`ViT` or Conv) | `__init__`/`build()` | yes |
+| `encoder`          | `DINOv2VisionTransformer` or the Conv placeholder | `build()` | yes (the unused iBOT mask token frozen) |
 | `decoder`          | `DPTHead`, named `depth_head` | `build()`, only when `include_top=True` | yes |
-| `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
+| `frozen_encoder`   | a second encoder of the same config (DINOv2 rebuilt from its config, the placeholder by `clone_model`), weights copied at build | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
 | `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
 Forward path (`call`):
@@ -155,7 +162,7 @@ full `get_config()` / `from_config()` round-trip.
 ```python
 DepthAnything(
     encoder_type:           str = 'vit_l',                # {'vit_s','vit_b','vit_l'}
-    image_shape:            Tuple[int,int,int] = (384, 384, 3),
+    image_shape:            Tuple[int,int,int] = (518, 518, 3),   # sides multiples of 14
     dpt_features:           Optional[int] = None,         # None: the published value per encoder
     dpt_out_channels:       Optional[List[int]] = None,   # None: the published values per encoder
     output_channels:        int  = 1,
@@ -182,7 +189,7 @@ pass `image_shape`. A saved config that still carries `input_shape` no longer lo
 **Save/load.** `DepthAnything` overrides Keras 3's `load_own_variables` to
 force-build the nested sub-Models with a dummy forward before the framework
 restores into them; without it the path-based restore lands on a tree whose
-sub-layers do not exist yet and (with a wrapped `ViT` sub-Model) 55 of 172 kernel
+sub-layers do not exist yet and (with the wrapped `ViT` sub-Model of the time) 55 of 172 kernel
 arrays come back re-initialized. The save side is the stock Keras recursive save;
 the model must not add a second, flat dump of `self.weights` on top of it, because
 that runs alongside the framework's path-walking rather than replacing it and
@@ -195,9 +202,11 @@ teacher's weights toward the student via in-place EMA. Call this from a
 custom on-step callback when training semi-supervised. Default decay is
 0.999.
 
-### `create_depth_anything(...)` (in `model.py`)
+### `create_depth_anything(...)` and `DepthAnything.from_variant(...)` (in `model.py`)
 
-Convenience factory that returns a *built* `DepthAnything`:
+`from_variant(variant, pretrained=False, **kwargs)` takes the encoder size (`'vit_s'`, `'vit_b'`,
+`'vit_l'`) and returns a built model; `create_depth_anything` delegates to it and ends with a dummy
+forward pass:
 
 ```python
 from dl_techniques.models.vision.depth_anything import create_depth_anything
@@ -205,13 +214,31 @@ from dl_techniques.models.vision.depth_anything import create_depth_anything
 model = create_depth_anything(
     encoder_kind='real',
     encoder_type='vit_l',
-    image_shape=(384, 384, 3),
+    image_shape=(518, 518, 3),
     use_feature_alignment=False,
+    pretrained=True,          # the official DINOv2 ViT-L/14 encoder weights
 )
 ```
 
-The factory ends with a dummy forward pass so the model is fully built
-when returned.
+### Pretrained encoder
+
+`pretrained=True` follows `models/GUIDE.md` section 1: the official file is located first
+(`FileNotFoundError`, naming the path, before anything is built), the model is built, then
+`load_official_encoder_weights()` loads the encoder strictly through
+`dl_techniques.models.vision.dino.official_weights` (every official tensor used once with a
+matching shape, every encoder weight filled, or `ValueError` with nothing assigned) and re-copies
+student -> teacher. The files are not distributed; download each `model.safetensors` once to
+`<dir>/dinov2-{small,base,large}/model.safetensors`, where `<dir>` is
+`/media/arxwn/data0_4tb/datasets/pretrained/dinov2` or `$DL_TECHNIQUES_DINOV2_WEIGHTS_DIR`.
+All three sizes are wired (sha256 of each published file in `OFFICIAL_DINOV2_CHECKPOINTS`).
+The encoder expects ImageNet-standardized RGB, as the reference's transform produces. Guards:
+`tests/test_models/test_depth_anything/test_the_encoder_is_the_references_dinov2.py` (the four
+maps the head reads equal a float64 numpy port of the official model over the downloaded file)
+and `tests/test_models/test_dino/test_the_official_dinov2_weights_load_strictly.py`.
+
+Until 2026-10-17 the `'real'` encoder was the in-tree `ViT` at patch 16, with its own position
+table; an archive saved before that does not load into this model, and `image_shape` sides that
+are not multiples of 14 are now refused with the DINOv2 encoder.
 
 ### `DPTDecoder` (in `components.py`)
 
@@ -273,11 +300,11 @@ import keras
 from dl_techniques.models.vision.depth_anything import create_depth_anything
 
 model = create_depth_anything(encoder_kind='real', encoder_type='vit_l',
-                              image_shape=(384, 384, 3),
+                              image_shape=(518, 518, 3),
                               use_feature_alignment=False)
-x = keras.random.normal([2, 384, 384, 3])
+x = keras.random.normal([2, 518, 518, 3])
 depth = model(x, training=False)
-print(depth.shape)  # (2, 384, 384, 1)
+print(depth.shape)  # (2, 518, 518, 1)
 ```
 
 ### Compile / train (labeled-only)
@@ -302,7 +329,7 @@ from train.common.megadepth import (
 )
 
 model = create_depth_anything(
-    encoder_kind='real', encoder_type='vit_l', image_shape=(384, 384, 3),
+    encoder_kind='real', encoder_type='vit_l', image_shape=(518, 518, 3),
     use_feature_alignment=True, enable_semi_supervised=True,
 )
 
@@ -313,9 +340,9 @@ model = create_depth_anything(
 model.compile(optimizer=keras.optimizers.AdamW(1e-4))
 
 # Build a paired ((x_lab, x_unlab), y_lab) tf.data.Dataset.
-labeled_ds   = MegaDepthDataset(rgb_paths, depth_paths, batch_size=8, patch_size=384)
-unlabeled_ds = UnlabeledImageDataset(unlab_paths, batch_size=8, patch_size=384)
-paired_ds    = pair_labeled_unlabeled(labeled_ds, unlabeled_ds, patch_size=384, batch_size=8)
+labeled_ds   = MegaDepthDataset(rgb_paths, depth_paths, batch_size=8, patch_size=518)
+unlabeled_ds = UnlabeledImageDataset(unlab_paths, batch_size=8, patch_size=518)
+paired_ds    = pair_labeled_unlabeled(labeled_ds, unlabeled_ds, patch_size=518, batch_size=8)
 
 # On-step EMA decay (cosine 0.5 → 0.999 over the run).
 total_steps = len(labeled_ds) * 100
@@ -356,14 +383,14 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 
 | Argument                 | Type                       | Default                                | Notes |
 |--------------------------|----------------------------|----------------------------------------|-------|
-| `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`. Picks ViT scale. |
-| `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds in-tree `ViT`; `'placeholder'` builds the legacy Conv-BN-ReLU. |
-| `image_shape`            | `Tuple[int,int,int]`       | `(384, 384, 3)`                        | Input image shape. |
+| `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`: DINOv2 ViT-S/14, ViT-B/14, ViT-L/14. |
+| `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds the DINOv2 backbone; `'placeholder'` builds the legacy Conv-BN-ReLU. |
+| `image_shape`            | `Tuple[int,int,int]`       | `(518, 518, 3)`                        | Input image shape; sides multiples of 14 with the DINOv2 encoder. |
 | `dpt_features`           | `int` \| `None`            | `None` (64 / 128 / 256)                | `DPTHead` fusion width; `None` takes the published value for `encoder_type`. |
 | `dpt_out_channels`       | `List[int]` \| `None`      | `None` (see "DPT head")                | The head's four projection widths. |
 | `output_channels`        | `int`                      | `1`                                    | Final depth-map channel count. |
-| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches the encoder and every decoder conv (one clone per conv). |
-| `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches the encoder and every decoder conv. Do **not** combine with `AdamW(weight_decay=...)`. |
+| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches every decoder conv (one clone per conv) and the placeholder encoder; the DINOv2 encoder uses its own initializers (or the official weights). |
+| `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches every decoder conv and the placeholder encoder, not the DINOv2 encoder. Do **not** combine with `AdamW(weight_decay=...)`. |
 | `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
 | `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`; unlabeled batches only. |
 | `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`; unlabeled batches only. |
@@ -372,7 +399,7 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
 The decoder, `DPTHead`, built in `build()` when `include_top=True`, takes `features=dpt_features`,
-`out_channels=dpt_out_channels`, `patch_size=16`, `output_channels`, and `kernel_initializer`
+`out_channels=dpt_out_channels`, `patch_size=14` (16 with the placeholder), `output_channels`, and `kernel_initializer`
 (cloned per conv) and `kernel_regularizer`. It has no range knob (`min_depth`, `max_depth`,
 `use_log_depth`); see "Output range".
 
@@ -407,7 +434,8 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
 - LiheYoung/Depth-Anything, `depth_anything/dpt.py` and `depth_anything/blocks.py` (the head
   `DPTHead` ports), and the `config.json` of `LiheYoung/depth_anything_vit{s,b,l}14`.
 - Oquab, Maxime et al. **"DINOv2: Learning Robust Visual Features without
-  Supervision."** 2023.
+  Supervision."** 2023. The encoder; facebookresearch/dinov2
+  `dinov2/models/vision_transformer.py` and the Hugging Face `facebook/dinov2-*` checkpoints.
 - In-tree canonical Keras-3 `train_step` pattern:
   `src/dl_techniques/models/common/masked_language_model/mlm.py`.
 

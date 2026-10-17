@@ -43,7 +43,7 @@ from ..smoke_contract_oracle import (
     broken_forward,
 )
 
-IMAGE_SHAPE = (64, 64, 3)
+IMAGE_SHAPE = (56, 56, 3)
 
 #: Measured 2026-08-21 at encoder_kind='real', encoder_type='vit_s', 64x64.
 #: Updated 2026-10-10 after fixing DepthEstimationHead to not create unused norm layer:
@@ -51,7 +51,10 @@ IMAGE_SHAPE = (64, 64, 3)
 #: Updated 2026-10-17 (plan-2026-10-14T062616-81938e81 D-128), the decoder now
 #: the reference DPTHead: **210** trainable weights (150 ViT + 60 head), **0**
 #: dead, **0** non-finite.
-GF_N_WEIGHTS = 210
+#: Updated 2026-10-17 (plan-2026-10-14T062616-81938e81 D-136), the encoder now
+#: DINOv2 ViT-S/14 at 56x56: **234** trainable weights (174 encoder, the iBOT
+#: mask token frozen, + 60 head), **0** dead, **0** non-finite.
+GF_N_WEIGHTS = 234
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -61,9 +64,11 @@ def _images(batch: int = 2) -> np.ndarray:
 def _model(**overrides):
     # Seeded: behind the reference head's final ReLU the share of exactly-zero
     # output pixels at init depends on the draw (MEASURED 2026-10-17, vit_s,
-    # 10 seeds: 0.053 to 0.987 at 64x64), and an all-zero map has no gradient
+    # 10 seeds: 0.053 to 0.987 at 64x64 with the old ViT encoder; 0.171 to
+    # 0.981 at 56x56 with DINOv2), and an all-zero map has no gradient
     # anywhere, so an unseeded draw made the gradient-flow arm order-dependent
-    # (0/210 live in one full-directory run). Seed 0 starts at 0.229.
+    # (0/210 live in one full-directory run). Seed 0 starts at 0.714 (DINOv2,
+    # 56x56) and is at 0.002 after the one affine-invariant step.
     keras.utils.set_random_seed(0)
     kwargs = dict(encoder_kind="real", encoder_type="vit_s", image_shape=IMAGE_SHAPE)
     kwargs.update(overrides)

@@ -25,6 +25,7 @@ import importlib
 import inspect
 import re
 import sys
+import tempfile
 import types
 import warnings
 from collections.abc import Mapping
@@ -676,9 +677,19 @@ class TestPretrainedNeverSilentlyRandom:
         Cheap by construction: the smallest named variant, and never a forward
         pass. The contract is that the raise happens BEFORE any weight is
         allocated, so a site that got expensive here is itself a finding.
+
+        A site in ``_LOCAL_WEIGHT_LOADERS`` loads official weights from a local
+        download instead; its contract is the same "never silently random",
+        checked with the download directory pointed at an empty one: it must
+        raise ``FileNotFoundError`` before building anything.
         """
-        with pytest.raises(NotImplementedError):
-            factory(pretrained=True, **kwargs)
+        assert _probe_pretrained_refuses(label, factory, kwargs) == ""
+
+    def test_the_local_loader_waivers_are_live(self):
+        """Every ``_LOCAL_WEIGHT_LOADERS`` key names a site the arm reaches."""
+        reached = {label for label, _, _ in PRETRAINED_FACTORIES}
+        assert set(_LOCAL_WEIGHT_LOADERS) <= reached, (
+            sorted(set(_LOCAL_WEIGHT_LOADERS) - reached))
 
 
 def _docstring_line_numbers(path: Path) -> set:
@@ -2805,15 +2816,6 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
         "False; a genuine silent-knob-disable, routed to Phase 3 batch 5 as an "
         "R-119/R-120 candidate rather than waived away"
     ),
-    (
-        "models/vision/depth_anything/model.py",
-        "from_pretrained_encoder",
-        "Exception",
-    ): (
-        "not R-049 -- the pretrained load itself (load_weights_from_checkpoint) "
-        "is OUTSIDE any try; this handler covers only the post-load teacher "
-        "EMA re-sync"
-    ),
 }
 
 
@@ -2927,6 +2929,10 @@ class TestWeightLoadingContract:
 
         12 weight-load call sites and 9 handlers around a weight load, over
         ``src/dl_techniques/``. Floors are ``int(0.8 * n)`` of each -- 9 and 7.
+        Re-derived 2026-10-17 (plan-2026-10-14T062616-81938e81 D-136): 16 call
+        sites and 7 handlers at 2a8c73f6e; the handler around the Depth Anything
+        teacher re-sync in ``from_pretrained_encoder`` is gone (a failed re-sync
+        now raises), leaving 6, so the handler floor is ``int(0.8 * 6) = 4``.
         Note that this population is genuinely SMALL: the D-003 write-up proposed
         a floor of ">= 30 call sites" from a partial count, and re-deriving it at
         the moment the guard landed is what caught that. A floor above the
@@ -2938,8 +2944,8 @@ class TestWeightLoadingContract:
             f"expected ~12 weight-load call sites, found {n_calls}: the AST walk "
             "stopped seeing the tree"
         )
-        assert n_handlers >= 7, (
-            f"expected ~9 handlers around a weight load, found {n_handlers}"
+        assert n_handlers >= 4, (
+            f"expected ~6 handlers around a weight load, found {n_handlers}"
         )
 
     def test_predicates_fire_on_an_injected_defect(self, tmp_path):
@@ -3002,6 +3008,42 @@ class _InjectedPretrainedFixed:
         if pretrained:
             raise NotImplementedError("no public weights ship with dl_techniques")
         return cls.MODEL_VARIANTS[variant]
+
+
+#: Reached ``pretrained`` sites that LOAD official weights from a local download
+#: (plan-2026-10-14T062616-81938e81 iteration 2 step 1.7, D-137): the DINOv2
+#: ViT-S/B/L/14 checkpoints. ``create_dino_v2``'s default variant is ``base``
+#: and both Depth Anything sites resolve to an encoder size that has weights,
+#: so ``pretrained=True`` loads rather than raising ``NotImplementedError``.
+#: Their "never silently random" contract is checked with the download
+#: directory empty: ``FileNotFoundError`` before anything is built.
+_LOCAL_WEIGHT_LOADERS = {
+    "dino.create_dino_v2": "official facebook/dinov2-base, the default variant",
+    "depth_anything.DepthAnything.from_variant": "official DINOv2 encoder of vit_s",
+    "depth_anything.create_depth_anything": "official DINOv2 encoder of vit_l, the default",
+}
+
+
+def _probe_pretrained_refuses(label, fn, kwargs) -> str:
+    """``""`` if ``fn(pretrained=True, **kwargs)`` refuses to return random weights.
+
+    Contract: a ``_LOCAL_WEIGHT_LOADERS`` site must raise ``FileNotFoundError``
+    with ``DL_TECHNIQUES_DINOV2_WEIGHTS_DIR`` pointed at an empty directory;
+    every other site is ``_probe_pretrained_raises``. Returns a one-line
+    description of the violation otherwise.
+    """
+    if label not in _LOCAL_WEIGHT_LOADERS:
+        return _probe_pretrained_raises(fn, kwargs)
+    from dl_techniques.models.vision.dino.official_weights import DINOV2_WEIGHTS_DIR_ENV
+    with tempfile.TemporaryDirectory() as empty, pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DINOV2_WEIGHTS_DIR_ENV, empty)
+        try:
+            fn(pretrained=True, **kwargs)
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:  # noqa: BLE001 -- the wrong exception is also a failure
+            return f"raised {type(exc).__name__} instead of FileNotFoundError: {exc}"
+    return "returned a model with no weights file to load"
 
 
 def _probe_pretrained_raises(fn, kwargs) -> str:
@@ -3098,7 +3140,7 @@ class TestPretrainedBehaviouralArmIsProvenRed:
         problems = {
             label: problem
             for label, fn, kwargs in PRETRAINED_FACTORIES
-            if (problem := _probe_pretrained_raises(fn, kwargs))
+            if (problem := _probe_pretrained_refuses(label, fn, kwargs))
         }
         assert not problems, problems
 

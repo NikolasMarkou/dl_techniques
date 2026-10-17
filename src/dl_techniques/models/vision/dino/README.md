@@ -55,21 +55,45 @@ this code does not.
 
 | Mechanism | `DINOv1` | `DINOv2` | `DINOv3` |
 |---|---|---|---|
-| Learned absolute positional embedding | yes | yes | yes (default) |
+| Learned absolute positional embedding | yes | yes; with `pos_embed_grid_size=M` the reference's square `1 + M*M` table, resampled to the input grid (torch's bicubic, `interpolate_offset`) | yes (default) |
 | `DINOHead` projection head | yes (`include_projection_head=True`) | not built in — compose `DINOHead` yourself | not built in — compose `DINOHead` yourself |
 | `norm_last_layer` (unit-norm output prototypes) | **yes**, on `DINOHead` — see note below | via `DINOHead` | via `DINOHead` |
 | Teacher/student pair factory | `create_dino_teacher_student_pair` | none | none |
 | iBOT-style patch masking on the forward path | no | **yes** — the backbone takes `[images, masks]` and applies a learnable mask token (`MaskTokenApply`) | no |
 | The iBOT **loss** half | — | **not wired here.** `iBOTPatchLoss` exists in `src/dl_techniques/losses/dino_loss.py`; connecting it to the masked forward pass is the trainer's job, not the model's | — |
 | Register tokens (Darcet et al. 2023) | no | **yes** — `num_register_tokens`, defaulting to 4 on `large`/`giant` | **NOT IMPLEMENTED** |
-| LayerScale (`layers/regularization/layer_scale.py`) | no | yes — `init_values` | no |
+| LayerScale (`layers/regularization/layer_scale.py`) | no | yes — `init_values`, unconstrained gains as in the reference (D-134 of plan-2026-10-14T062616-81938e81) | no |
 | SwiGLU FFN | opt-in via `ffn_type` | **yes**, and it is the `giant` variant's default | opt-in via `ffn_type` |
 | RoPE positional embedding | no | no | **yes — but 1-D, not the paper's 2-D axial.** See note below |
 | Gram anchoring | — | — | **NOT IMPLEMENTED** (needs a third frozen "Gram teacher" network) |
 | Sinkhorn-Knopp centering | **NOT IMPLEMENTED** (EMA centering only) | **NOT IMPLEMENTED** | **NOT IMPLEMENTED** |
 | High-res adaptation / distillation from a large pretrained teacher | — | — | **NOT IMPLEMENTED** |
 | `get_last_selfattention()` (attention-map extraction) | **raises `NotImplementedError`** | not defined | **raises `NotImplementedError`** |
-| Pretrained weights | none shipped | `pretrained=True` raises `NotImplementedError` | `pretrained=True` raises `NotImplementedError` |
+| `get_intermediate_layers(x, n)` (last `n` blocks through the final norm, patch tokens) | no | **yes** — Depth Anything's DPT head reads it | no |
+| Pretrained weights | none shipped | **official `facebook/dinov2-{small,base,large}`** from a local download, strict (see below); `tiny`/`giant` raise `NotImplementedError` | `pretrained=True` raises `NotImplementedError` |
+
+### Official DINOv2 weights
+
+`DINOv2VisionTransformer.from_variant(v, pretrained=True)`, `DINOv2.from_variant(v,
+pretrained=True)` and `create_dino_v2(v, pretrained=True)` for `v` in `small`, `base`, `large`
+read `<dir>/dinov2-<v>/model.safetensors`, where `<dir>` is
+`/media/arxwn/data0_4tb/datasets/pretrained/dinov2` or `$DL_TECHNIQUES_DINOV2_WEIGHTS_DIR`
+(`official_weights.py`; nothing is distributed, download each file once from
+`https://huggingface.co/facebook/dinov2-<v>/resolve/main/model.safetensors`). The path is
+checked first (`FileNotFoundError` before anything is built), the official structure is enforced
+(patch 14, no registers, LayerScale, MLP FFN, `pos_embed_grid_size=37`), then every one of the
+223 (small, base) or 439 (large) tensors is mapped by name onto one backbone variable: torch's
+`Linear` and `Conv2d` layouts transposed, `query`/`key`/`value` fused into the backbone's one
+`qkv` kernel. The load is strict: a missing, left-over or mis-shaped tensor, or a backbone weight
+left unfilled, raises `ValueError` with nothing assigned. `DINOv2`'s classifier is not in the
+checkpoint and keeps its initialization. Measured 2026-10-17: the loaded `base` model reproduces
+transformers' published `facebook/dinov2-base` values (`last_hidden_state[0, :3, :3]` on its COCO
+fixture) to the 4 printed decimals in both of its interpolation conventions, offset 0.1 (v4.32 to
+v4.45, the reference's) and output size (`interpolate_offset=0`, v4.50); the loaded `small` model
+equals a float64 numpy port of the official model to 1.4e-4 absolute on features of magnitude 24.
+Guards: `tests/test_models/test_dino/test_the_official_dinov2_weights_load_strictly.py` (the
+file-dependent tests skip with the path when the download is absent) and
+`test_the_dinov2_backbone_is_the_references.py`.
 
 ### `norm_last_layer` on `DINOHead`
 
@@ -467,9 +491,8 @@ Gaps by decision, not oversight, named so none becomes a silent omission again.
 | Gram anchoring (DINOv3) | Needs a third frozen "Gram teacher" and a patch-feature Gram loss term. None of that machinery exists here. |
 | Sinkhorn-Knopp centering | `src/dl_techniques/losses/dino_loss.py` is EMA-only. |
 | 2-D axial RoPE, and register tokens, on `DINOv3` | The RoPE here is 1-D (§ 2), with no coordinate jittering; `DINOv2VisionTransformer` has register tokens and `DINOv3` does not. |
-| A real DINOv2 inside `depth_anything` | `src/dl_techniques/models/vision/depth_anything/model.py` uses a placeholder encoder and does not import from this package. An open opportunity, not a defect in either package. |
 | `get_last_selfattention()` | Blocked on `TransformerLayer.call` (`src/dl_techniques/layers/transformers/transformer.py`) not forwarding a `return_attention_weights` flag. Fixing it means touching a repo-wide shared layer. |
-| Pretrained weights | None are shipped. `pretrained=True` raises `NotImplementedError`; build with `pretrained=False` and warm-start with `model.load_weights(path)`. |
+| Pretrained weights | None are shipped. `DINOv2` loads the official ViT-S/B/L/14 weights from a local download (§ 2, "Official DINOv2 weights"); `DINOv1`, `DINOv3` and DINOv2 `tiny`/`giant` raise `NotImplementedError` for `pretrained=True`. |
 | Attributing the improved 60-epoch configuration | The verdict belongs to the PAIR (`ema_warmup_epochs 0 -> 1.0`, `teacher_temp_final 0.07 -> 0.04`); the two were separated only at 8 epochs, never at 60. `--ema-warmup-epochs` is itself a superset — it freezes the teacher EMA *and* re-bases the cosine EMA ramp — and those have never been separated either. |
 | Cropping local views from the ORIGINAL record | `build_raw_image_dataset` resizes each record to `image_size` before the multi-crop transform runs, so a "local crop of the source" is a crop of a downsampled square. The bounded remedy (`--source-image-size`) was run and measured NO DIFFERENCE (§ 6.2). |
 

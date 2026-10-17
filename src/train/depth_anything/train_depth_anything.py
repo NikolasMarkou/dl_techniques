@@ -15,21 +15,20 @@ the loss is invariant to its scale and shift. The logged metrics score the
 prediction after least-squares scale-and-shift alignment.
 
 > **Read** ``src/train/depth_anything/README.md`` ("Known Issues — depth
-> quality") **before running this script.** The encoder is the in-tree ViT,
-> not DINOv2, and no pretrained weights ship, so this is a scaffold that runs
-> end to end, not a route to the paper's numbers.
+> quality") **before running this script.** The encoder is DINOv2 ViT-*/14 as
+> in the paper; ``--patch-size`` (the crop side) must be a multiple of 14.
 
 Usage::
 
     # Smoke run (does not train to convergence):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
         --encoder-type vit_s \\
-        --epochs 2 --batch-size 4 --patch-size 256 \\
+        --epochs 2 --batch-size 4 --patch-size 252 \\
         --max-train-files 100 --max-val-files 20
 
     # With pretrained encoder transfer:
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \\
-        --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 384 \\
+        --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 518 \\
         --init-from results/depth_anything_pretrain_*/model_inference.keras \\
         --seed 42
 """
@@ -141,7 +140,8 @@ class DepthAnythingTrainingConfig:
     # Data
     megadepth_root: str = "/media/arxwn/data0_4tb/datasets/Megadepth"
     train_split: float = 0.9
-    patch_size: int = 384
+    #: Crop side; a multiple of the DINOv2 patch 14 (the reference's 518).
+    patch_size: int = 518
     min_valid_ratio: float = 0.1
 
     # Memory
@@ -151,7 +151,7 @@ class DepthAnythingTrainingConfig:
 
     # Model — DepthAnything-specific
     encoder_type: str = "vit_l"            # one of {'vit_s','vit_b','vit_l'}
-    encoder_kind: str = "real"             # 'real' (in-tree ViT) or 'placeholder' (Conv-BN-ReLU)
+    encoder_kind: str = "real"             # 'real' (DINOv2) or 'placeholder' (Conv-BN-ReLU)
     #: DPTHead widths; ``None`` takes the published checkpoint's for ``encoder_type``.
     dpt_features: Optional[int] = None
     dpt_out_channels: Optional[Tuple[int, int, int, int]] = None
@@ -688,7 +688,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--encoder-kind", choices=["real", "placeholder"], default="real",
         help=(
-            "'real' uses an in-tree dl_techniques.models.vision.vit.ViT backbone; "
+            "'real' uses the DINOv2 backbone of the reference "
+            "(dl_techniques.models.vision.dino.DINOv2VisionTransformer, patch 14); "
             "'placeholder' uses the legacy Conv-BN-ReLU stack (compat only)."
         ),
     )
@@ -721,7 +722,11 @@ def parse_arguments() -> argparse.Namespace:
     # Training
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--patch-size", type=int, default=384)
+    parser.add_argument(
+        "--patch-size", type=int, default=518,
+        help="Crop side in pixels; a multiple of 14 with the DINOv2 encoder "
+             "(the reference trains at 518)",
+    )
     parser.add_argument(
         "--learning-rate", type=float, default=None,
         help=(

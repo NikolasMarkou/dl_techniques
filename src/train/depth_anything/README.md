@@ -3,8 +3,8 @@
 Pattern-5 (depth-estimation) training scaffold for
 `dl_techniques.models.vision.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
-> The default encoder is the in-tree `dl_techniques.models.vision.vit.ViT`
-> (`--encoder-kind real`). The decoder ends in a ReLU, as the reference head does. `train_step`
+> The default encoder is DINOv2 (`dl_techniques.models.vision.dino.DINOv2VisionTransformer`,
+> ViT-*/14, `--encoder-kind real`), as in the paper. The decoder ends in a ReLU, as the reference head does. `train_step`
 > dispatches to a clean labeled path or a semi-sup path that adds FAL +
 > stop-gradient pseudo-label consistency (affine-invariant per CutMix region, eq. 6-8). Semi-supervised data feed
 > is wired end-to-end via `--unlabeled-image-glob`, which builds an
@@ -20,12 +20,12 @@ Pattern-5 (depth-estimation) training scaffold for
 # Smoke run (2 epochs on 100 train pairs / 20 val pairs)
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_s \
-    --epochs 2 --batch-size 4 --patch-size 256 \
+    --epochs 2 --batch-size 4 --patch-size 252 \
     --max-train-files 100 --max-val-files 20
 
 # Real run
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
-    --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 384 \
+    --encoder-type vit_l --epochs 100 --batch-size 16 --patch-size 518 \
     --learning-rate 5e-6 --weight-decay 1e-5 \
     --warmup-epochs 5 --early-stopping-patience 20 \
     --seed 42
@@ -37,7 +37,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.t
 
 # Semi-supervised run with EMA teacher + paired unlabeled images
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
-    --encoder-type vit_l --epochs 100 --batch-size 8 --patch-size 384 \
+    --encoder-type vit_l --epochs 100 --batch-size 8 --patch-size 518 \
     --use-feature-alignment --enable-semi-supervised \
     --unlabeled-image-glob '/data/unlabeled/**/*.jpg' \
     --ema-schedule cosine --ema-decay-start 0.5 --ema-decay-end 0.999 \
@@ -130,7 +130,7 @@ machine.
 | `--max-train-files`           | `10000`                                   | Cap on training pairs. |
 | `--max-val-files`             | `1000`                                    | Cap on validation pairs. |
 | `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. |
-| `--encoder-kind`              | `real`                                    | `real` (in-tree `ViT`) or `placeholder` (Conv-BN-ReLU compat). |
+| `--encoder-kind`              | `real`                                    | `real` (DINOv2 ViT-*/14, the reference encoder) or `placeholder` (Conv-BN-ReLU compat). |
 | `--enable-semi-supervised`    | off                                       | Activates the pseudo-label consistency train_step path on `((x_lab,x_unlab),y_lab)`, plus the FAL term when `--use-feature-alignment` is also on. Combine with `--unlabeled-image-glob`. |
 | `--unlabeled-image-glob`      | `None`                                    | Glob to unlabeled RGB images (e.g. `'/data/unlab/**/*.jpg'`); paired with `MegaDepthDataset` via `pair_labeled_unlabeled`. |
 | `--pretrained-encoder-weights`| `None`                                    | Path to a saved encoder `.keras` file. Loaded via `DepthAnything.from_pretrained_encoder`; re-syncs the EMA teacher. |
@@ -143,7 +143,7 @@ machine.
 | `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`; unlabeled batches only. |
 | `--epochs`                    | `100`                                     | |
 | `--batch-size`                | `16`                                      | |
-| `--patch-size`                | `384`                                     | RGB+depth crop size; matches default `input_shape`. |
+| `--patch-size`                | `518`                                     | RGB+depth crop side; a multiple of 14 with the DINOv2 encoder (the reference trains at 518). |
 | `--learning-rate`             | `5e-6` with `--init-from` or `--pretrained-encoder-weights`, else `2e-4` | `5e-6` is the paper's rate for a pretrained encoder; `2e-4` was measured for a random encoder (see "Learning rate" below). An explicit value always wins. |
 | `--weight-decay`              | `1e-5`                                    | AdamW decoupled weight decay. |
 | `--gradient-clipping`         | `1.0`                                     | Forwarded to `optimizer_builder`. |
@@ -223,11 +223,15 @@ RGB+depth pairs (sparse SfM ground truth caveats below).
 Even with this script working end-to-end, **do not expect publishable Depth
 Anything numbers**:
 
-1. **Encoder is in-tree `ViT`, not DINOv2.** No external pretrained weights
-   are loaded by default. Use `--pretrained-encoder-weights <ckpt.keras>`
-   (encoder-only) or `--init-from <ckpt.keras>` (a full DepthAnything checkpoint,
-   decoder skipped) if you have a compatible checkpoint; otherwise initialization
-   is random.
+1. **The encoder is DINOv2 ViT-*/14, as in the paper** (since 2026-10-17; it
+   was the in-tree `ViT` at patch 16 before). `--patch-size` must be a multiple
+   of 14 (518 by default, 252 for small runs). Its official weights
+   (`facebook/dinov2-{small,base,large}`) load from a local download through
+   `DepthAnything.from_variant(..., pretrained=True)`, strictly (see the model
+   README, "Pretrained encoder"). `--pretrained-encoder-weights <ckpt.keras>`
+   (encoder-only) and `--init-from <ckpt.keras>` (a full DepthAnything
+   checkpoint, decoder skipped) load a saved `.keras` model instead; without
+   any of them the initialization is random.
 2. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
    correctly trained Depth Anything model will produce dense depth maps
    that look *qualitatively* good but disagree with sparse SfM ground
