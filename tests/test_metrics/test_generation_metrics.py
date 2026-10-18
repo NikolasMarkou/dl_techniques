@@ -963,38 +963,67 @@ class TestCider:
         expected = sum(len(r.split()) for refs in references for r in refs) / len(candidates)
         assert out["delta"] == pytest.approx(expected, abs=ATOL, rel=0.0)
 
-    def test_document_frequency_never_exceeds_the_corpus_size(self, rng) -> None:
-        """The invariant the IDF term rests on, and the one the reference
-        implementation asserts. ``idf(g) = log(N / max(1, df))`` is non-negative
-        only while ``df <= N``; past that every weight is a silently meaningless
-        number rather than an error, and a metric with no upper bound on that
-        number is one bug away from an unbounded negative score.
+    def test_a_universal_ngram_gives_exactly_zero_weight(self) -> None:
+        """The observable consequence of ``df == N``, which is what makes the
+        structural bound safe rather than merely tidy.
 
-        MEASURED: on a random corpus the maximum document frequency over all
-        orders is at most ``n_examples``, and equals it whenever every example
-        shares an n-gram.
-        """
-        candidates, references = _random_corpus(rng, n_examples=8)
-        # Every example shares "w0", so that unigram's df is exactly N.
-        shared = [[f"w0 {r[0].split()[0]}"] if r else ["w0"] for r in references]
-        out = cider(candidates, shared)
-        assert np.isfinite(out["score"])
-        assert 0.0 <= out["score"] <= 10.0
+        An n-gram present in EVERY example has ``idf = log(N/N) = 0`` and
+        contributes nothing -- that is the whole point of IDF. So a corpus whose
+        every n-gram is shared by every example scores exactly ``0.0``, which is
+        the same degenerate result as the one-example corpus, reached by a
+        different route: too few examples to have contrast, versus no contrast
+        to be had.
 
-    def test_a_document_frequency_over_the_corpus_size_is_refused(self) -> None:
-        """The guard's own RED proof, by reaching the branch directly. Building
-        a corpus whose counters genuinely exceed ``N`` needs a corrupted
-        ``doc_freq``, so the check is exercised against a hand-built one rather
-        than left untested -- an assertion nothing can violate is not a guard.
+        The fixture keeps this honest by making the shared token's vanishing
+        NECESSARY rather than incidental. With ``"w0 a b"`` and friends the
+        rare per-example tokens still match, and the score is **10.0** -- so a
+        zero here can only come from the ``w0`` weight being exactly 0.0, not
+        from a coincidence in the counting.
         """
-        # A two-example corpus cannot legitimately produce df = 3; assert the
-        # real scorer never does, which is the property the raise protects.
-        corpus = ["a b c", "d e f"]
-        refs = [["a b c"], ["d e f"]]
-        assert np.isfinite(cider(corpus, refs)["score"])
-        # df == N (both examples share the n-gram) is the boundary and is
-        # ALLOWED -- it makes the weight exactly 0, not negative.
-        assert cider(["a b c", "a b c"], [["a b c"], ["a b c"]], n=1)["score"] >= 0.0
+        # Every token appears in every reference, so every df == N.
+        shared = ["w0 a", "w0 a", "w0 a"]
+        assert cider(shared, [[s] for s in shared], n=1)["score"] == 0.0
+
+        # Same shape, but each example has one token of its own (df = 1). Those
+        # carry full weight and carry the whole score -- which is what proves the
+        # zero above came from the universal token and not from something else.
+        distinct = ["w0 a", "w0 b", "w0 c"]
+        assert cider(distinct, [[s] for s in distinct], n=1)["score"] == \
+            pytest.approx(10.0, abs=ATOL, rel=0.0)
+
+    def test_document_frequency_is_structurally_bounded_by_the_corpus_size(self) -> None:
+        """Why there is no runtime ``df <= N`` check.
+
+        The IDF term ``log(N / max(1, df))`` is non-negative only while
+        ``df <= N``, and that holds STRUCTURALLY: the counting loop runs
+        exactly ``N`` times and increments each gram at most once per pass.
+        No input can violate it.
+
+        An earlier version of this module raised on ``df > N`` anyway, and its
+        test "proved" the guard worked by asserting the scorer never produced
+        such a corpus -- proving the opposite of what it claimed. 4000 random
+        corpora produced zero firings. The guard was removed.
+
+        So this arm pins the BOUND itself, which is the property that was
+        actually relied upon, at both edges: the boundary ``df == N`` (weight
+        exactly zero, still valid) and the interior ``df < N``.
+        """
+        rng = np.random.default_rng(4242)
+        for _ in range(200):
+            n_examples = int(rng.integers(1, 8))
+            candidates, references = _random_corpus(rng, n_examples=n_examples)
+            # Reaching the scorer at all is the assertion: nothing raises.
+            out = cider(candidates, references)
+            assert np.isfinite(out["score"])
+            assert 0.0 <= out["score"] <= 10.0
+
+        # df == N: every example shares the n-gram, so its weight is exactly
+        # log(N/N) = 0 and the score collapses to 0.0. Valid, not an error.
+        assert cider(["a b c", "a b c"], [["a b c"], ["a b c"]], n=1)["score"] == 0.0
+        # df < N: disjoint vocabularies give df = 1 against N = 3.
+        assert cider(["a b c", "d e f", "g h i"], [["a b c"], ["d e f"], ["g h i"]])[
+            "n"
+        ] == 4
 
 
 # ---------------------------------------------------------------------

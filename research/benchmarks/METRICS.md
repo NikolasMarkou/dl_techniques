@@ -1660,8 +1660,10 @@ CIDEr-D = CIDEr with an extra  exp(-(len(s) - delta)**2 / (2*sigma**2))
 
 - **CIDEr is 0.0 on a one-example corpus.** `idf(g) = log(N/max(1,df))` is
   `log(1/1) = 0` for every n-gram, so every weight vanishes. Any corpus where
-  every candidate's n-grams appear in every reference has the same problem.
-  It needs enough examples for IDF to have contrast at all.
+  every candidate's n-grams appear in every reference has the same problem —
+  universal n-grams get weight exactly zero, which is IDF working correctly and
+  still leaves nothing to measure. It needs enough examples *and* enough
+  vocabulary contrast for the term to mean anything.
 - **The dot product is clipped**, so a candidate repeating an n-gram is not paid
   for the repetition — but the sum runs over the *candidate's* n-grams, so the
   expression is not symmetric.
@@ -1681,6 +1683,15 @@ metric). Higher is better. Default on MS-COCO captioning.
 `"c"`. Note the scale is `[0, 10]`, not `[0, 1]` — the one function in
 `generation_metrics` that is not normalized, and `generation_report` does not
 rescale it.
+
+There is deliberately **no runtime check that `df <= N`**: the counting loop
+runs exactly `N` times and increments each n-gram at most once per pass, so the
+bound is structural. (The reference implementation *can* assert it, because its
+`CiderScorer` accumulates corpora through `__iadd__` across separately-scored
+segments; this port has no such path.) The observable consequence is that a
+corpus whose every n-gram is shared by every example scores exactly `0.0` — the
+same degenerate result as a one-example corpus, reached by a different route:
+no contrast to be had, rather than too few examples to have it.
 
 ### BLEURT
 

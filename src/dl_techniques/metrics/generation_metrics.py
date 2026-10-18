@@ -436,6 +436,43 @@ def _smoothed_precisions(
       why the reference offers an ``effective_order`` switch; this module does
       not, because changing it would change the corpus number too.
 
+    ``add_k`` is the one exception to the second bullet, and it is worth being
+    precise about WHICH case it rescues, because the two are very different
+    numbers. It adds ``k`` to the clipped count and to the total *before* the
+    zero test, so:
+
+    - a **MISSING** order (``total == 0``, the candidate has no n-grams of that
+      length) becomes ``(0 + k) / (0 + k)`` = **exactly 1.0** -- a perfect
+      precision for an order that does not exist;
+    - a **PRESENT but zero-overlap** order becomes ``k / (total + k)``, which is
+      ``0.5`` at ``total == 1`` and ``1/3`` at ``total == 2``, not 1.0.
+
+    MEASURED. A three-token exact match has no 4-grams at all::
+
+        >>> corpus_bleu("a b c", [["a b c"]], smooth="none")["precisions"]
+        [1.0, 1.0, 1.0, 0.0]
+        >>> corpus_bleu("a b c", [["a b c"]], smooth="add_k")["precisions"]
+        [1.0, 1.0, 1.0, 1.0]
+
+    And a genuine partial match, where every order EXISTS but two of them match
+    nothing (``"a b x y"`` against ``"a b q r"``: 4 unigrams, 3 bigrams, 2
+    trigrams, 1 4-gram, of which only ``a``, ``a b`` and nothing higher match)::
+
+        >>> [round(p, 6) for p in corpus_bleu("a b x y", [["a b q r"]], smooth="add_k")["precisions"]]
+        [0.5, 0.5, 0.333333, 0.5]
+        >>> [round(p, 6) for p in corpus_bleu("a b x y", [["a b q r"]], smooth="none")["precisions"]]
+        [0.5, 0.333333, 0.0, 0.0]
+
+    The two zeroes are ``0/(2+1) = 1/3`` and ``0/(1+1) = 1/2`` -- inflated, but
+    nowhere near 1.0. So the manufactured perfect precision is confined to the
+    missing-order case, which is the one that matters for short-sentence
+    corpora.
+
+    So "a candidate shorter than ``max_order`` scores 0.0" holds for ``none``,
+    ``exp`` and ``floor`` and fails for ``add_k`` -- and the failure mode is a
+    manufactured 1.0 on an absent order, which is a worse thing to report than
+    a zero. :func:`sentence_bleu` states the same exception for callers.
+
     Args:
         per_order: ``(clipped, total)`` pairs, order 1 upward. Only an exact zero
             clipped count is smoothed.
@@ -443,32 +480,6 @@ def _smoothed_precisions(
 
     Returns:
         A list of precisions, one per entry of ``per_order``.
-
-    One exception to "smoothing only touches a zero PRECISION", and it is
-    load-bearing rather than an oversight: ``add_k`` adds its ``k`` to the
-    clipped count and the total BEFORE the zero test is applied, so it also
-    rescues an order whose candidate has no n-grams at all. That is what makes
-    it the one method under which a short exact match is not forced to zero.
-    MEASURED on a three-token exact match -- the candidate has no 4-grams, so
-    order 4 starts from ``total = 0`` and the added ``k`` carries it::
-
-        >>> corpus_bleu("a b c", [["a b c"]], smooth="none")["precisions"]
-        [1.0, 1.0, 1.0, 0.0]
-        >>> corpus_bleu("a b c", [["a b c"]], smooth="add_k")["precisions"]
-        [1.0, 1.0, 1.0, 1.0]
-        >>> round(corpus_bleu("a b c", [["a b c"]], smooth="add_k")["score"], 6)
-        1.0
-
-    Note the ``add_k`` result is 1.0 rather than something near 1: with
-    ``total == 0`` and ``correct == 0``, adding 1 to both leaves the ratio at
-    exactly 1. That is the method working as specified on a degenerate order,
-    and it is a further reason not to reach for ``add_k`` as a general fix for
-    short-sentence corpora -- it manufactures a perfect precision rather than
-    admitting the order is absent.
-
-    So "a candidate shorter than ``max_order`` always scores 0.0" holds for
-    ``none``, ``exp`` and ``floor`` but NOT for ``add_k``.
-    :func:`sentence_bleu` states the same exception.
 
     Raises:
         ValueError: If ``method`` is not one of
@@ -2141,6 +2152,18 @@ def cider(
     # Document frequency counts EXAMPLES, not references: an n-gram present in
     # any reference of one example contributes exactly 1, so one image with
     # five captions cannot out-vote five images with one caption each.
+
+    # The IDF term `log(N / max(1, df))` is non-negative only while
+    # `df <= N`, and that holds STRUCTURALLY here: the loop below runs exactly
+    # `len(cand_list)` times and increments each gram at most once per pass,
+    # so `df` cannot exceed `N` for any input. There is therefore deliberately
+    # NO runtime check for it, and an earlier version of this module carried
+    # one -- a guard no input could reach, whose test then "proved" it fired by
+    # asserting the opposite. The reference implementation asserts the same
+    # invariant because its `CiderScorer` accumulates corpora through
+    # `__iadd__` across separately-scored segments; this port has no such path,
+    # so the assertion has nothing to guard and was removed rather than left as
+    # decoration.
     doc_freq: List[Dict[Tuple[str, ...], int]] = [{} for _ in range(n_int)]
     for ref_lists in ref_token_lists:
         for order in range(1, n_int + 1):
@@ -2178,21 +2201,6 @@ def cider(
                     penalty *= _gaussian(cand_len - delta, sigma_f)
                 order_scores.append(similarity * penalty)
             per_order_totals[order] += float(np.mean(order_scores)) if order_scores else 0.0
-
-    # Refuse a corpus where document frequency exceeds the example count. The
-    # reference asserts this invariant too, and it is what keeps the IDF term
-    # non-negative: an n-gram "present" in more examples than exist means the
-    # counters are wrong, and every weight derived from it is a silently
-    # meaningless number rather than an error.
-    for order, freqs in enumerate(doc_freq, start=1):
-        over = [gram for gram, df in freqs.items() if df > len(cand_list)]
-        if over:
-            raise ValueError(
-                f"cider: document frequency exceeds the corpus size at order "
-                f"{order}: {len(over)} n-gram(s) appear in more than "
-                f"{len(cand_list)} example(s) (e.g. {over[0]!r}). This is an "
-                f"internal inconsistency, not a configuration problem."
-            )
 
     cider_n = [total / len(cand_list) for total in per_order_totals]
     score = 10.0 * float(np.mean(cider_n)) if cider_n else 0.0
