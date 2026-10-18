@@ -1506,17 +1506,30 @@ Lin's original used `beta -> inf` (effectively recall); modern implementations r
 **Typical reporting**: F1 percentage. Higher is better.
 
 **In this repository**: `generation_metrics.rouge_l` / `corpus_rouge_l`
-(single pair / pooled) and `rouge_lsum` (per-sentence LCS, unioned).
-`rouge_lsum` is **sentence-order-insensitive** while `rouge_l` is not: on
-`"a . b ."` against `"b . a ."` L gives **0.5** and Lsum gives **1.0**,
-because whole-string LCS must be monotone across the sequence while Lsum's
-per-sentence union ignores order. Specify which one you report. The union is
-what stops one candidate token being counted once per reference sentence (a sum
-returns `lcs = 4` where the union returns `3` on `["a b c"]` vs `["a b","b c"]`).
-`rouge_lsum`'s sentence splitter is a regex over terminal punctuation and does
-NOT handle abbreviations, so it disagrees with `rouge_score` on "Dr. Smith
-arrived."; pass `sentence_splitter` if that matters. Exact LCS is `O(mn)`:
-measured 0.33 s / 33 MB at 2000 tokens, so that is the practical ceiling.
+(single pair / pooled) and `rouge_lsum` (union-LCS over reference sentences
+under a global hit budget). `rouge_lsum` is **sentence-order-insensitive** while
+`rouge_l` is not: on `"a . b ."` against `"b . a ."` L gives **0.5** and Lsum
+gives **1.0**, because whole-string LCS must be monotone across the sequence
+while Lsum's per-sentence union ignores order. Specify which one you report.
+
+ROUGE-Lsum is a transcription of `rouge_score`'s `_summary_level_lcs`, and all
+three of its structural details are load-bearing: the outer loop is over
+**reference** sentences, the union is over **reference** positions, and a
+**global hit budget** caps how many times a token may be credited across the
+whole example. That budget is what keeps the hit count inside
+`[0, min(len(cand), len(ref))]`; an implementation without it returns
+F-measures **above 1.0** — measured at 9.8% of random multi-sentence cases, with
+`"b . b ."` against `"b ."` returning `F = 1.333` on a two-token reference.
+Because the union is over positions rather than lengths, the LCS **tie-break**
+matters too; `rouge_score` steps left only on a strictly greater neighbour,
+which selects a different (equally long) alignment than a length-only aligner.
+
+`rouge_lsum`'s sentence splitter is a regex over terminal punctuation, does NOT
+handle abbreviations, so it disagrees with `rouge_score` on "Dr. Smith arrived.";
+pass `sentence_splitter` if that matters. (`rouge_score` itself splits on
+NEWLINE unless `split_summaries` is set — a third convention again.) Exact LCS is
+`O(mn)`: measured 0.33 s / 33 MB at 2000 tokens, so that is the practical
+ceiling.
 
 ### METEOR
 
@@ -1597,7 +1610,11 @@ chrF and `word_order=2` for chrF++. Two rules that decide most of the number:
 
 Statistics pool over the corpus, and several references are resolved per
 segment **before** pooling (the reference with the best chrF wins) — the
-opposite of BLEU's per-n-gram max.
+opposite of BLEU's per-n-gram max. For **chrF++** the selection uses the
+**joint** character+word score, as the reference does, so switching
+`word_order` from 0 to 2 can change which reference wins; selecting on the
+character half alone is a divergence that fires on roughly 3 in 20,000 random
+cases and scores a candidate 17% below the reference on those.
 
 ### TER (Translation Edit Rate)
 

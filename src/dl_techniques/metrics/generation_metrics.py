@@ -1153,10 +1153,17 @@ def _lcs_alignment(
     A rolling-row dynamic program: an ``(m + 1) x (n + 1)`` table of VALUES is
     unnecessary because row ``i`` depends only on row ``i - 1``, so only two
     rows of values and one table of DIRECTIONS are kept. The direction table is
-    not optional -- ``rouge_lsum`` needs to know WHICH candidate positions the
-    LCS uses, and recovering that from the values afterwards means walking the
-    table backwards guessing which predecessor was maximal, which silently
-    picks the wrong alignment on every tie.
+    not optional -- recovering WHICH tokens the LCS used means walking the table
+    backwards guessing which predecessor was maximal, which silently picks the
+    wrong alignment on every tie.
+
+    Note this routine returns positions into the FIRST argument, and that
+    :func:`rouge_lsum` uses it on the REFERENCE side -- whereas the reference
+    implementation unions positions on the reference side as well. Its
+    ``>``/``>=`` tie-break differs from the one here, which selects a different
+    (equally long) alignment; :func:`_lcs_indices` is the variant that matches
+    the reference's tie-break, and ROUGE-Lsum needs that one because its union
+    is over POSITIONS, not lengths.
 
     **Cost is ``O(len_cand * len_ref)`` in both time and the direction table's
     memory.** Measured on an exact match: 0.001 s / 0.01 MB at 100 tokens,
@@ -1171,8 +1178,7 @@ def _lcs_alignment(
 
     Returns:
         ``(length, positions)`` -- the LCS length and the set of indices into
-        ``cand`` at which the LCS places its tokens. The positions are what
-        :func:`rouge_lsum` unions across reference sentences.
+        ``cand`` at which the LCS places its tokens.
     """
     n_ref = len(ref)
     prev_row = [0] * (n_ref + 1)
@@ -1212,6 +1218,57 @@ def _lcs_alignment(
         else:
             i -= 1
     return len(positions), positions
+
+
+def _lcs_indices(ref: Sequence[str], can: Sequence[str]) -> List[int]:
+    """Indices into ``ref`` at which ONE longest common subsequence places its
+    tokens, with the tie-break of the reference ROUGE implementation.
+
+    Transcribed from ``rouge_score.rouge_scorer.lcs_ind`` /
+    ``_backtrack_norec``: the table is filled over ``(ref, can)``, the walk
+    starts at the far corner, and it steps LEFT only when
+    ``table[i][j-1] > table[i-1][j]`` -- STRICTLY greater. A tie therefore steps
+    UP, which selects a different alignment than :func:`_lcs_alignment`'s
+    ``>=``-goes-LEFT rule.
+
+    The two agree on LENGTH, which is why ``rouge_l`` (a length-only consumer)
+    is unaffected and agrees with the reference. They disagree on WHICH
+    positions, which is why :func:`rouge_lsum` cannot use
+    :func:`_lcs_alignment`: its union is over positions, so a different
+    tie-break yields a different ``hits`` count.
+
+    Args:
+        ref: Reference tokens -- the argument whose INDICES are returned.
+        can: Candidate tokens.
+
+    Returns:
+        Indices into ``ref``, in increasing order.
+    """
+    n_ref, n_can = len(ref), len(can)
+    table = [[0] * (n_can + 1) for _ in range(n_ref + 1)]
+    for i in range(1, n_ref + 1):
+        prev_row, curr_row = table[i - 1], table[i]
+        ref_token = ref[i - 1]
+        for j in range(1, n_can + 1):
+            if ref_token == can[j - 1]:
+                curr_row[j] = prev_row[j - 1] + 1
+            else:
+                up, left = prev_row[j], curr_row[j - 1]
+                curr_row[j] = left if left > up else up
+
+    indices: List[int] = []
+    i, j = n_ref, n_can
+    while i > 0 and j > 0:
+        if ref[i - 1] == can[j - 1]:
+            indices.append(i - 1)
+            i -= 1
+            j -= 1
+        elif table[i][j - 1] > table[i - 1][j]:
+            j -= 1
+        else:
+            i -= 1
+    indices.reverse()
+    return indices
 
 
 def rouge_l(
@@ -1278,18 +1335,34 @@ def rouge_lsum(
         tokenizer: Optional[Tokenizer] = None,
         sentence_splitter: Optional[Callable[[str], List[str]]] = None,
 ) -> Dict[str, float]:
-    """ROUGE-Lsum: LCS computed per sentence pair, then unioned.
+    """ROUGE-Lsum: union-LCS over reference sentences, under a global hit budget.
 
     The multi-sentence form of :func:`rouge_l`, and the summarization metric to
-    report when references span sentences. For each candidate sentence and each
-    reference sentence an LCS alignment is computed, and the matched candidate
-    positions are **unioned** across reference sentences. The union is
-    load-bearing: summing instead lets one candidate token be counted once per
-    reference sentence it appears in, and drives precision above 1.
+    report when references span sentences. It is a transcription of
+    ``rouge_score``'s ``_summary_level_lcs``, and all three of its structural
+    details are load-bearing:
 
-    ROUGE-L and ROUGE-Lsum differ by several points on the same inputs, so a
-    report that says "ROUGE-L" without saying which is not reproducible. This
-    function is the sentence-aware one.
+    **The outer loop is over REFERENCE sentences**, and for each one the LCS is
+    taken against every candidate sentence with the resulting REFERENCE
+    positions **unioned**. Not the mirror image: unioning candidate positions
+    per candidate sentence selects a different alignment.
+
+    **There is a global hit budget.** A token may be counted as a hit at most
+    ``min(count_in_candidate, count_in_reference)`` times across the WHOLE
+    example; each accepted hit decrements both counters. This is what keeps the
+    hit count inside ``[0, min(len(cand), len(ref))]``. Without it the hit count
+    is uncapped and the F-measure leaves ``[0, 1]`` entirely -- measured at
+    **9.8% of random multi-sentence cases**, with the strongest observed at
+    ``F = 1.333`` on a two-token reference.
+
+    **The union is over positions, so the LCS tie-break matters.** See
+    :func:`_lcs_indices`, which matches the reference's walk; using the
+    length-only aligner here yields a different, equally-long alignment and
+    therefore a different hit count.
+
+    ROUGE-L and ROUGE-Lsum differ by several points on the same inputs -- on
+    reordered sentences the difference is the whole point -- so a report saying
+    "ROUGE-L" without saying which is not reproducible.
 
     Args:
         candidates: One candidate string, or one per example.
@@ -1302,11 +1375,15 @@ def rouge_lsum(
             expression over terminal punctuation and does NOT handle
             abbreviations, so it disagrees with ``rouge_score``'s
             tokenizer-based splitter on text like "Dr. Smith arrived."
+            ``rouge_score`` itself splits on NEWLINE unless its
+            ``split_summaries`` flag is set, so this is a third convention
+            again.
 
     Returns:
         A dict with ``score``, ``precision``, ``recall``, ``fmeasure``,
         ``lcs`` and ``beta``. Quantities are corpus-level: totals over every
-        candidate sentence, not a mean of per-example scores.
+        example, not a mean of per-example scores. ``lcs`` is the total HIT
+        count and is bounded by the total number of reference tokens.
 
     Raises:
         ValueError: If the candidate and reference lengths disagree, either
@@ -1314,11 +1391,11 @@ def rouge_lsum(
 
     Example:
         >>> from dl_techniques.metrics.generation_metrics import rouge_lsum
-        >>> # The union is observable: "b" matches BOTH reference sentences and
-        >>> # is counted once, so the LCS is 3 and not 4.
-        >>> out = rouge_lsum(["a b c"], [["a b", "b c"]])
-        >>> out["lcs"]
-        3
+        >>> # The budget is observable: two candidate sentences against one
+        >>> # two-token reference. The budget caps hits at 2, not 4.
+        >>> out = rouge_lsum(["b . b ."], [["b ."]])
+        >>> out["lcs"], round(out["fmeasure"], 6)
+        (2, 0.666667)
     """
     beta_f = _validate_positive_float(beta, "beta")
     tokenize = _check_tokenizer(tokenizer)
@@ -1332,35 +1409,66 @@ def rouge_lsum(
     cand_list = _as_candidates(candidates)
     ref_groups = _paired_references(cand_list, references)
 
-    total_lcs = 0
+    total_hits = 0
     total_cand = 0
     total_ref = 0
     for candidate, refs in zip(cand_list, ref_groups):
         cand_sentences = [tokenize(s) for s in split(candidate)]
         # ONE level of flattening, not two. Every reference in every reference
         # group is a peer sentence to align against; keeping the group nesting
-        # would hand `_lcs_alignment` a list of token LISTS, which matches
-        # nothing and silently reports lcs = 0 for a perfect summary.
+        # would hand the aligner a list of token LISTS, which matches nothing
+        # and silently reports 0 hits for a perfect summary.
         ref_sentences = [tokenize(s) for ref in refs for s in split(ref)]
         total_cand += sum(len(s) for s in cand_sentences)
         total_ref += sum(len(s) for s in ref_sentences)
 
-        for cand_sentence in cand_sentences:
-            matched: set = set()
-            for ref_sentence in ref_sentences:
-                _, positions = _lcs_alignment(cand_sentence, ref_sentence)
-                matched |= positions
-            total_lcs += len(matched)
+        # The GLOBAL budget, which is the mechanism this function was missing.
+        # A token may be counted as a hit at most min(its count in the candidate
+        # corpus, its count in the reference corpus) times ACROSS THE WHOLE
+        # EXAMPLE. Without it `hits` is uncapped: the previous implementation
+        # summed per candidate sentence and returned F-measures ABOVE 1.0 in
+        # 9.8% of random multi-sentence cases, claiming more matched tokens than
+        # the reference even contained.
+        #
+        # `remaining_ref` is PROVABLY REDUNDANT here and is kept only to
+        # mirror the reference line for line. `positions` is a set of indices
+        # INTO ONE REFERENCE SENTENCE, iterated once, so a token can be offered
+        # as a hit at most once per reference occurrence and `count_r` already
+        # bounds it. Deleting `remaining_ref` changes no number: verified by
+        # injection over 6000 random corpora, zero divergences. Only
+        # `remaining_cand` is load-bearing, because the candidate side has no
+        # equivalent structural bound.
+        remaining_cand: Dict[str, int] = {}
+        for sentence in cand_sentences:
+            for token in sentence:
+                remaining_cand[token] = remaining_cand.get(token, 0) + 1
+        remaining_ref: Dict[str, int] = {}
+        for sentence in ref_sentences:
+            for token in sentence:
+                remaining_ref[token] = remaining_ref.get(token, 0) + 1
 
-    precision = total_lcs / total_cand if total_cand else 0.0
-    recall = total_lcs / total_ref if total_ref else 0.0
+        # The outer loop is over REFERENCE sentences and the union is over
+        # REFERENCE positions -- the reference's shape, not the mirror of it.
+        for ref_sentence in ref_sentences:
+            positions: set = set()
+            for cand_sentence in cand_sentences:
+                positions.update(_lcs_indices(ref_sentence, cand_sentence))
+            for index in sorted(positions):
+                token = ref_sentence[index]
+                if remaining_cand.get(token, 0) > 0 and remaining_ref.get(token, 0) > 0:
+                    total_hits += 1
+                    remaining_cand[token] -= 1
+                    remaining_ref[token] -= 1
+
+    precision = total_hits / total_cand if total_cand else 0.0
+    recall = total_hits / total_ref if total_ref else 0.0
 
     return {
         "score": float(_f_score(precision, recall, beta_f)),
         "precision": float(precision),
         "recall": float(recall),
         "fmeasure": float(_f_score(precision, recall, 1.0)),
-        "lcs": int(total_lcs),
+        "lcs": int(total_hits),
         "beta": beta_f,
     }
 
@@ -1544,14 +1652,43 @@ def chrf(
             ]
             for ref in prepared
         ]
+        # The WORD counters are built BEFORE the reference is chosen, because
+        # the choice is made on the joint score and therefore needs them. They
+        # are only ACCUMULATED afterwards, so chrF++ costs the same two
+        # constructions it always did.
+        if word_order_int > 0:
+            cand_words = tokenize(cand_text)
+            word_counters = [
+                _ngram_counts(cand_words, order) for order in range(1, word_order_int + 1)
+            ]
+            per_ref_word = [
+                [_ngram_counts(tokenize(ref), order) for order in range(1, word_order_int + 1)]
+                for ref in prepared
+            ]
+        else:
+            word_counters, per_ref_word = [], []
 
-        # Best reference for this segment, chosen on the CHARACTER half alone
-        # -- the same ordering the reference implementation uses, so adding
-        # chrF++ cannot change which reference was picked.
+        # Best reference for this segment, chosen on the JOINT char+word score.
+        # The reference implementation appends the word n-gram counters to the
+        # character ones and then scores the CONCATENATION, so switching
+        # `word_order` from 0 to 2 CAN change which reference wins. Selecting on
+        # the character half alone is what this module used to do, on the
+        # reasoning that it would make the choice independent of `word_order`;
+        # the reference does not do that, and the divergence picks a different
+        # reference on measured fixtures (e.g. candidate "e b c" against
+        # ["b e e", "e e"] at char_order=3/word_order=2: this scores 0.22727 from
+        # the second reference where the reference scores 0.26667 from the
+        # first). It fires on ~3 in 20,000 random cases -- rare enough to
+        # survive casual testing and frequent enough to be a real divergence.
         best_ref = max(
             range(len(prepared)),
             key=lambda i: _chrf_from_stats(
-                _order_stats(char_counters, per_ref_char[i]), beta_f,
+                _order_stats(char_counters, per_ref_char[i])
+                + (
+                    _order_stats(word_counters, per_ref_word[i])
+                    if word_order_int > 0 else []
+                ),
+                beta_f,
             )[0],
         )
         for order in range(char_order_int):
@@ -1565,14 +1702,6 @@ def chrf(
                 char_stats.append((hyp_count, ref_count, match_count))
 
         if word_order_int > 0:
-            cand_words = tokenize(cand_text)
-            word_counters = [
-                _ngram_counts(cand_words, order) for order in range(1, word_order_int + 1)
-            ]
-            per_ref_word = [
-                [_ngram_counts(tokenize(ref), order) for order in range(1, word_order_int + 1)]
-                for ref in prepared
-            ]
             for order in range(word_order_int):
                 hyp_count, ref_count, match_count = _order_stats(
                     word_counters, per_ref_word[best_ref],
@@ -2186,12 +2315,22 @@ def cider(
         hyp_vectors, hyp_norms = _tfidf_vector(
             _cider_counts(cand_tokens, n_int), doc_freq, log_num_examples,
         )
+        # Each reference's tf-idf vector is built ONCE per example and reused
+        # across orders. It used to be rebuilt inside the `order` loop, which
+        # called `_tfidf_vector` 2.5x as often as necessary at n=4 (measured:
+        # 500 calls for a 100-example, single-reference corpus where 200
+        # suffice). The vectors do not depend on `order` -- each entry holds all
+        # orders at once -- so the rebuild was pure waste.
+        ref_vectors_cache = [
+            _tfidf_vector(
+                _cider_counts(ref_tokens, n_int), doc_freq, log_num_examples,
+            )
+            for ref_tokens in ref_token_lists[index]
+        ]
         for order in range(n_int):
             order_scores = []
-            for ref_tokens in ref_token_lists[index]:
-                ref_vectors, ref_norms = _tfidf_vector(
-                    _cider_counts(ref_tokens, n_int), doc_freq, log_num_examples,
-                )
+            for ref_index, ref_tokens in enumerate(ref_token_lists[index]):
+                ref_vectors, ref_norms = ref_vectors_cache[ref_index]
                 similarity = _clipped_similarity(
                     hyp_vectors[order], ref_vectors[order],
                     hyp_norms[order], ref_norms[order],

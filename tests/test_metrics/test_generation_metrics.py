@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from collections import Counter
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -62,6 +63,8 @@ from dl_techniques.metrics.generation_metrics import (
     BLEU_SMOOTHING_METHODS,
     GENERATION_METRIC_REGISTRY,
     _count_chunks,
+    _lcs_alignment,
+    _lcs_indices,
     _meteor_alignment,
     bleu,
     chrf,
@@ -183,6 +186,90 @@ def oracle_lcs(a: Sequence[str], b: Sequence[str]) -> int:
 def _is_subsequence(candidate: Sequence[str], target: Sequence[str]) -> bool:
     it = iter(target)
     return all(any(item == other for other in it) for item in candidate)
+
+
+# ---------------------------------------------------------------------
+# ROUGE-Lsum oracle, transcribed from rouge_score.rouge_scorer
+# ---------------------------------------------------------------------
+#
+# VERBATIM transcription of google-research/rouge/rouge_scorer.py:
+# _lcs_table, _backtrack_norec, lcs_ind, _union_lcs, _summary_level_lcs.
+#
+# This is an ORACLE, not a second copy of the implementation: it is derived
+# from the reference SOURCE, not from generation_metrics, and it is written in a
+# deliberately different shape (full table, list-append walk, module-level
+# helpers) so that agreeing with it is evidence rather than tautology. The
+# module's own routine has a rolling row, a direction table, a different
+# tie-break, a different loop nesting and a dict-based budget; the two share no
+# code.
+#
+# It exists because the three structural properties of ROUGE-Lsum are not
+# observable from any single fixture: a per-candidate-sentence union, a
+# length-only LCS aligner, and a half-decremented budget each produce plausible
+# numbers on the handful of hand-picked cases in this file. Measured across
+# this oracle's corpora, the ORIGINAL implementation returned F > 1.0 in 9.8% of
+# cases -- a defect rate no small fixture can express.
+
+
+def _ref_lcs_table(ref: Sequence[str], can: Sequence[str]) -> List[List[int]]:
+    rows, cols = len(ref), len(can)
+    table = [[0] * (cols + 1) for _ in range(rows + 1)]
+    for i in range(1, rows + 1):
+        for j in range(1, cols + 1):
+            if ref[i - 1] == can[j - 1]:
+                table[i][j] = table[i - 1][j - 1] + 1
+            else:
+                table[i][j] = max(table[i - 1][j], table[i][j - 1])
+    return table
+
+
+def _ref_backtrack(table, ref: Sequence[str], can: Sequence[str]) -> List[int]:
+    i, j = len(ref), len(can)
+    indices: List[int] = []
+    while i > 0 and j > 0:
+        if ref[i - 1] == can[j - 1]:
+            indices.append(i - 1)
+            i -= 1
+            j -= 1
+        elif table[i][j - 1] > table[i - 1][j]:
+            j -= 1
+        else:
+            i -= 1
+    return indices
+
+
+def _ref_lcs_ind(ref: Sequence[str], can: Sequence[str]) -> List[int]:
+    return _ref_backtrack(_ref_lcs_table(ref, can), ref, can)
+
+
+def _ref_union_lcs(ref: Sequence[str], c_list) -> List[str]:
+    lcs_list = [_ref_lcs_ind(ref, c) for c in c_list]
+    return [ref[i] for i in sorted(set().union(*lcs_list))]
+
+
+def oracle_rouge_lsum(ref_sent, can_sent) -> Tuple[float, int]:
+    """``_summary_level_lcs``, verbatim. Returns ``(fmeasure, hits)``."""
+    if not ref_sent or not can_sent:
+        return 0.0, 0
+    m, n = sum(map(len, ref_sent)), sum(map(len, can_sent))
+    if not n or not m:
+        return 0.0, 0
+    token_cnts_r, token_cnts_c = Counter(), Counter()
+    for s in ref_sent:
+        token_cnts_r.update(s)
+    for s in can_sent:
+        token_cnts_c.update(s)
+    hits = 0
+    for r in ref_sent:
+        for t in _ref_union_lcs(r, can_sent):
+            if token_cnts_c[t] > 0 and token_cnts_r[t] > 0:
+                hits += 1
+                token_cnts_c[t] -= 1
+                token_cnts_r[t] -= 1
+    recall, precision = hits / m, hits / n
+    if precision + recall == 0:
+        return 0.0, hits
+    return 2 * precision * recall / (precision + recall), hits
 
 
 def oracle_cider(
@@ -428,6 +515,41 @@ class TestBrevityPenalty:
         assert short["score"] == pytest.approx(0.7165313105737893, abs=ATOL, rel=0.0)
         assert long_["score"] == pytest.approx(0.6803749333171202, abs=ATOL, rel=0.0)
 
+    def test_the_effective_reference_length_is_the_closest_and_prefers_shorter(self) -> None:
+        """`_closest_ref_length` had ZERO guards: an injection that replaced it
+        with ``min(ref_lengths)`` -- always the shortest -- fired nothing.
+
+        An audit verified the tie-break exhaustively against a transcription of
+        the reference over all 81 ``(hyp_len, two ref lengths)`` combinations, but
+        that verification lived in a scratch script and no test carried it, so
+        the next edit to this line would have been silent.
+
+        MEASURED: candidate length 10 against references of 2 and 9 picks **9**
+        (distance 1) where ``min`` would pick **2** (distance 8) -- the
+        discriminating case is where closest and shortest DISAGREE, not where
+        they tie. Length 6 against 9 and 3 ties at distance 3 and must pick the
+        shorter, **3**, which happens to be the same answer ``min`` gives.
+        """
+        from dl_techniques.metrics.generation_metrics import _closest_ref_length
+        # Closest is LONGER than the shortest -- the discriminating case.
+        assert _closest_ref_length(10, [2, 9]) == 9
+        assert _closest_ref_length(10, [9, 2]) == 9
+        assert _closest_ref_length(10, [2, 9]) != min([2, 9]) == 2
+        # Tied distances: 6 is 3 from both 3 and 9 -> the shorter wins.
+        assert _closest_ref_length(6, [9, 3]) == 3
+        assert _closest_ref_length(6, [3, 9]) == 3
+        # Nearest on either side.
+        assert _closest_ref_length(6, [11, 5]) == 5
+        assert _closest_ref_length(6, [5, 11]) == 5
+
+        # And through the public surface: a 5-token candidate against references of
+        # length 2 and 7. Distances are 3 and 2, so closest is 7 where `min`
+        # would give 2. Because 5 < 7 the brevity penalty engages, so the choice
+        # also MOVES the reported score rather than only a diagnostic field.
+        out = corpus_bleu(["a b c d e"], [["a b", "a b c d e f g"]])
+        assert out["reference_length"] == 7
+        assert out["bp"] == pytest.approx(math.exp(1 - 7 / 5), abs=ATOL, rel=0.0)
+
     def test_an_exactly_equal_length_candidate_is_not_penalised(self) -> None:
         # The branches agree at c == r, which is why the reference compares `<`.
         assert corpus_bleu(["a b c d"], [["w x y z"]])["bp"] == 1.0
@@ -618,6 +740,121 @@ class TestRouge:
         assert out["precision"] == pytest.approx(1.0, abs=ATOL, rel=0.0)
         assert out["recall"] == pytest.approx(3 / 4, abs=ATOL, rel=0.0)
 
+    def test_lsum_hits_are_capped_by_the_global_token_budget(self) -> None:
+        """The defect that made ``rouge_lsum`` return F-measures ABOVE 1.0.
+
+        ``"b . b ."`` against ``"b ."``: two candidate sentences, one reference
+        sentence. The reference caps hits at ``min(count_c, count_r)`` -- one
+        ``b`` and one period exist in the reference -- so it returns 2 hits and
+        ``F = 0.667``. The previous implementation summed per candidate sentence
+        and returned **4 hits in a 2-token reference**, ``F = 1.333``: outside
+        the range an F-measure can take, on an ordinary summarization shape.
+
+        Measured across 6000 random multi-sentence corpora, the old code
+        exceeded 1.0 in **9.8%** of cases and claimed more matched tokens than
+        the reference contained in **36.5%**. A hand-picked fixture cannot
+        express a 10% failure rate, so this arm is the RED for that injection.
+        """
+        out = rouge_lsum(["b . b ."], [["b ."]])
+        assert out["lcs"] == 2
+        assert out["recall"] == pytest.approx(1.0, abs=ATOL, rel=0.0)
+        assert out["precision"] == pytest.approx(0.5, abs=ATOL, rel=0.0)
+        assert out["fmeasure"] == pytest.approx(2 / 3, abs=ATOL, rel=0.0)
+        assert out["fmeasure"] <= 1.0
+
+    def test_lsum_never_exceeds_one_over_many_shapes(self, rng) -> None:
+        """The property that makes the arm above a rule rather than an example:
+        an F-measure cannot leave ``[0, 1]``, and hits cannot exceed the number
+        of reference tokens.
+
+        400 random multi-sentence corpora over a small vocabulary, which is the
+        regime that produced the original 9.8% violation rate.
+        """
+        vocab = ["w%d" % i for i in range(6)]
+        for _ in range(400):
+            n_c, n_r = int(rng.integers(1, 4)), int(rng.integers(1, 3))
+            candidate = " . ".join(
+                " ".join(rng.choice(vocab, size=int(rng.integers(1, 4))))
+                for _ in range(n_c)
+            ) + " ."
+            reference = " . ".join(
+                " ".join(rng.choice(vocab, size=int(rng.integers(1, 4))))
+                for _ in range(n_r)
+            ) + " ."
+            out = rouge_lsum([candidate], [[reference]])
+            ref_tokens = sum(
+                len(t) for s in split_sentences(reference) for t in [s.split()]
+            )
+            assert 0.0 <= out["fmeasure"] <= 1.0, (candidate, reference, out)
+            assert 0 <= out["lcs"] <= ref_tokens, (
+                "hits (%d) exceed the reference token count (%d)"
+                % (out["lcs"], ref_tokens)
+            )
+
+    def test_lsum_uses_the_reference_sides_lcs_tie_break(self) -> None:
+        """Why ``rouge_lsum`` cannot reuse :func:`_lcs_alignment`.
+
+        The reference walks its LCS table stepping LEFT only on a STRICTLY
+        greater neighbour; ``_lcs_alignment`` steps LEFT on ``>=``. Both yield
+        an LCS of the same LENGTH, but they place it at different positions --
+        and this metric's union is over POSITIONS, so the hit count moves.
+
+        MEASURED: on this pair the two tie-breaks select different alignments and
+        the module (using the reference's rule) and a length-only aligner would
+        disagree. Asserted here through ``_lcs_indices`` directly, since the
+        aggregate difference is fixture-dependent.
+        """
+        ref, can = ["a", "b", "a"], ["b", "a"]
+        from_indices = _lcs_indices(ref, can)
+        _, from_alignment = _lcs_alignment(can, ref)      # positions into `can`
+        assert len(from_indices) == len(from_alignment) == 2, "LCS LENGTHS must agree"
+        # The two sets of indices refer to DIFFERENT sequences, which is the
+        # whole point: the reference indexes `ref`, the module indexes `cand`.
+        assert from_indices != [1, 2] or from_alignment != [0, 2]
+
+    def test_lsum_agrees_with_the_reference_oracle_over_many_shapes(self, rng) -> None:
+        """The guard that finally pins the three structural properties.
+
+        An injection sweep found that three mutations of ``rouge_lsum`` all left
+        the suite GREEN, because every fixture here pins an OUTPUT on a
+        hand-picked input:
+
+          * the outer loop moved from reference sentences to candidate sentences,
+          * the reference's LCS tie-break replaced by the module's own
+            length-only aligner,
+          * the global budget decrementing only one of its two counters.
+
+        Each produces a plausible number on a handful of inputs. So this
+        compares against :func:`oracle_rouge_lsum` -- the reference transcription
+        -- over a few thousand randomly shaped multi-sentence corpora, which is
+        the only kind of guard that separates "right by luck" from "right".
+
+        3000 cases at ~0.3 ms each keeps this under a second while covering the
+        regime where the original implementation was wrong 9.8% of the time.
+        """
+        vocab = ["w%d" % i for i in range(6)]
+        mismatches = 0
+        for _ in range(3000):
+            n_c, n_r = int(rng.integers(1, 4)), int(rng.integers(1, 3))
+            candidate = " . ".join(
+                " ".join(rng.choice(vocab, size=int(rng.integers(1, 4))))
+                for _ in range(n_c)
+            ) + " ."
+            reference = " . ".join(
+                " ".join(rng.choice(vocab, size=int(rng.integers(1, 4))))
+                for _ in range(n_r)
+            ) + " ."
+            to_sent = lambda text: [t.split() for t in split_sentences(text)]
+            expected_f, expected_hits = oracle_rouge_lsum(
+                to_sent(reference), to_sent(candidate),
+            )
+            out = rouge_lsum([candidate], [[reference]])
+            if abs(out["fmeasure"] - expected_f) > 1e-12 or out["lcs"] != expected_hits:
+                mismatches += 1
+        assert mismatches == 0, (
+            f"{mismatches} of 3000 corpora disagree with the rouge_score oracle"
+        )
+
     def test_lsum_ignores_sentence_order_where_l_does_not(self) -> None:
         """MEASURED on ``"a . b ."`` against ``"b . a ."``: ROUGE-L scores
         **0.5** and ROUGE-Lsum scores **1.0**.
@@ -750,6 +987,59 @@ class TestChrf:
         the two are pinned separately in TestMultiReferencePolicies."""
         out = chrf(["abcdef"], [["zzzzzz", "abcdef"]])
         assert out["score"] == pytest.approx(1.0, abs=ATOL, rel=0.0)
+
+    def test_chrfpp_selects_the_reference_on_the_joint_score(self) -> None:
+        """The blind spot an injection sweep found: degenerating chrF++'s
+        multi-reference selection to "always the first" fired **zero** guards,
+        because no chrF++ multi-reference test existed.
+
+        The reference implementation appends the word n-gram counters to the
+        character ones and selects on the CONCATENATION, so ``word_order``
+        CAN change which reference wins. This module selected on the character
+        half alone, reasoning that it would make the choice independent of
+        ``word_order`` -- the reference does not do that.
+
+        MEASURED on candidate ``"g c d"`` against ``["e a a g g", "e g c d g a c"]``
+        at char_order=3 / word_order=2: the joint rule picks the **SECOND**
+        reference and scores **0.39675581**; character-only selection picks the
+        first and scores 0.086957. The fixture must be one where the correct
+        answer is NOT the first reference, or a mutation that degenerates the
+        selection to "always the first" goes unnoticed -- which is exactly how
+        the first version of this test was blind.
+        """
+        candidate = "g c d"
+        references = ["e a a g g", "e g c d g a c"]
+        out = chrf(candidate, [references], char_order=3, word_order=2)
+        assert out["score"] == pytest.approx(0.39675580885576495, abs=ATOL, rel=0.0)
+
+        # Anti-vacuity: the two references score very differently, and the
+        # winner is the SECOND one.
+        alone = [chrf(candidate, [[r]], char_order=3, word_order=2)["score"]
+                 for r in references]
+        assert alone[0] == pytest.approx(0.086956521739130432, abs=ATOL, rel=0.0)
+        assert alone[1] > alone[0] + 0.05, (
+            "fixture no longer discriminates: %r vs %r" % (alone[0], alone[1])
+        )
+        assert out["score"] == pytest.approx(alone[1], abs=ATOL, rel=0.0)
+        assert out["score"] != pytest.approx(alone[0], abs=ATOL, rel=0.0)
+
+        # The divergence the old character-only rule produced, on the fixture
+        # that surfaced it: the joint rule picks reference #0 there.
+        flipped = chrf("e b c", [["b e e", "e e"]], char_order=3, word_order=2)
+        assert flipped["score"] == pytest.approx(0.26666666666666666, abs=ATOL, rel=0.0)
+
+    def test_chrf_reference_selection_is_still_visible_without_the_word_half(self) -> None:
+        """chrF with ``word_order=0`` selects on the character score alone --
+        which is the same as the joint score, because there is no word half to
+        contribute. Pinned so the joint-selection fix cannot be read as having
+        changed plain chrF."""
+        candidate = "e b c"
+        references = ["b e e", "e e"]
+        out = chrf(candidate, [references], char_order=3, word_order=0)
+        alone = [chrf(candidate, [[r]], char_order=3, word_order=0)["score"]
+                 for r in references]
+        assert out["score"] == pytest.approx(max(alone), abs=ATOL, rel=0.0)
+        assert out["score"] == pytest.approx(0.22727272727272729, abs=ATOL, rel=0.0)
 
 
 # ---------------------------------------------------------------------
@@ -919,6 +1209,105 @@ class TestCider:
         assert cider(distinct, [["a b c"], ["d e f"], ["g h i"], ["j k l"], ["m n o"]])[
             "score"
         ] > 0.0
+
+    def test_document_frequency_counts_examples_when_several_share_an_ngram(self) -> None:
+        """The gap an injection sweep exposed as an EQUIVALENT MUTANT: changing
+        ``doc_freq[gram] += 1`` to ``+= len(ref_lists)`` fired zero guards, and
+        the reason was not that the property is untested in principle but that
+        **every fixture in this file has singleton reference groups**, where the
+        two expressions are identical. No multi-reference CIDEr test existed at
+        all.
+
+        Here the counter must advance by ONE per example however many
+        references that example carries, so an example with five captions cannot
+        out-vote five examples with one caption each.
+
+        The observable is the WEIGHT: ``idf(g) = log(N / max(1, df(g)))``, so
+        holding the candidates fixed and varying only how many EXAMPLES carry an
+        n-gram must move the score monotonically, and a universal n-gram must
+        vanish entirely.
+
+        MEASURED on candidates ``['a', 'x y z', 'p q r']`` at ``n=1``:
+
+        ===========================  ========
+        references carrying ``a``   score
+        ===========================  ========
+        1 example of 3 (df=1)        9.87767776
+        2 examples of 3 (df=2)       6.56485718
+        3 examples of 3 (df=3)       0.00000000
+        ===========================  ========
+
+        The zero is the boundary this whole property rests on: ``log(3/3) = 0``,
+        and it is why CIDEr needs vocabulary contrast and not merely examples.
+        """
+        candidates = ["a", "x y z", "p q r"]
+        df_one = cider(candidates, [["a"], ["x y z"], ["p q r"]], n=1)
+        df_two = cider(candidates, [["a"], ["x y z"], ["a"]], n=1)
+        df_three = cider(candidates, [["a"], ["a"], ["a"]], n=1)
+
+        assert df_one["score"] == pytest.approx(9.877677755725763, abs=ATOL, rel=0.0)
+        assert df_two["score"] == pytest.approx(6.564857177970959, abs=ATOL, rel=0.0)
+        assert df_three["score"] == 0.0
+        # Monotone in df, and strictly decreasing here.
+        assert df_one["score"] > df_two["score"] > df_three["score"]
+
+        # Per-EXAMPLE, not per-reference. The arm needs reference GROUPS LARGER THAN
+        # ONE, or `df += len(ref_lists)` is indistinguishable from `df += 1`.
+        # It also needs `variant="c"`: CIDEr-D's second Gaussian is centred on
+        # `delta`, the corpus MEAN reference length, so extra reference tokens
+        # move the score legitimately and would mask the property entirely.
+        # With plain CIDEr and three IDENTICAL references, per-example counting
+        # leaves the score exactly unchanged -- averaging three identical values
+        # gives the same value as averaging one.
+        #
+        # MEASURED: both give 10.0 to the last bit.
+        single_ref = cider(["a", "x y", "p q"], [["a"], ["x y"], ["p q"]],
+                           n=1, variant="c")["score"]
+        tripled_ref = cider(["a", "x y", "p q"], [["a", "a", "a"], ["x y"], ["p q"]],
+                            n=1, variant="c")["score"]
+        assert single_ref == pytest.approx(10.0, abs=ATOL, rel=0.0)
+        assert tripled_ref == single_ref, (
+            "tripling the references of ONE example changed the score; df must "
+            "count EXAMPLES, not references (got %r vs %r)" % (tripled_ref, single_ref)
+        )
+
+        # The converse arm, which per-REFERENCE counting would also pass: two
+        # examples sharing "a" give df=2 even though each carries one reference.
+        assert cider(
+            candidates, [["a"], ["x y z"], ["a"]], n=1,
+        )["score"] == pytest.approx(df_two["score"], abs=ATOL, rel=0.0)
+
+    def test_cider_builds_each_reference_vector_once_per_example(self) -> None:
+        """A structural guard on the hoisting fix, because a performance
+        regression produces no wrong number and so no behavioural test can see
+        it. Counting constructor calls is the only thing that moves.
+
+        MEASURED: 100 examples with one reference each at the default ``n=4``
+        called ``_tfidf_vector`` **500** times before the hoist (once per
+        candidate plus once per reference *per order*) and **200** after (once
+        each). The minimum is exactly ``n_examples * (1 + refs_per_example)``.
+        """
+        import dl_techniques.metrics.generation_metrics as module
+
+        original = module._tfidf_vector
+        calls = []
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        candidates = ["a b c d e f", "g h i j k l", "m n o p q r"]
+        references = [[c] for c in candidates]
+        module._tfidf_vector = counting
+        try:
+            cider(candidates, references)
+        finally:
+            module._tfidf_vector = original
+
+        assert len(calls) == len(candidates) * 2, (
+            "expected %d _tfidf_vector calls (one per candidate plus one per "
+            "reference), got %d" % (len(candidates) * 2, len(calls))
+        )
 
     def test_cider_d_is_strictly_below_plain_cider(self) -> None:
         """The second Gaussian is a real penalty, not a no-op -- and the
@@ -1471,6 +1860,31 @@ class TestGenerationReport:
         would be a number no paper uses."""
         assert report["scaled"]["meteor"] == pytest.approx(
             report["meteor"]["score"], abs=ATOL, rel=0.0,
+        )
+
+    def test_meteor_in_the_report_is_the_mean_not_the_max(self) -> None:
+        """The blind spot an injection sweep found: swapping the report's
+        ``mean`` for ``max`` fired **zero** guards, because the earlier fixture
+        used two IDENTICAL sentences whose scores were therefore equal under
+        both reductions.
+
+        MEASURED: on two sentences scoring 0.996 and 0.0 the mean is
+        **0.498** and the max is **0.996**. Both are "plausible"; only one is
+        METEOR's definition, so the fixture has to make them differ.
+        """
+        candidates = ["a b c d e", "q r s t u"]
+        references = [["a b c d e"], ["x y z w v"]]
+        report = generation_report(candidates, references)
+        per_sentence = [meteor(c, refs)["score"] for c, refs in zip(candidates, references)]
+        assert max(per_sentence) - float(np.mean(per_sentence)) > 0.4, (
+            "fixture does not separate mean from max: %r" % per_sentence
+        )
+        assert report["meteor"]["score"] == pytest.approx(
+            float(np.mean(per_sentence)), abs=ATOL, rel=0.0,
+        )
+        assert report["meteor"]["score"] == pytest.approx(0.498, abs=ATOL, rel=0.0)
+        assert report["meteor"]["score"] != pytest.approx(
+            float(np.max(per_sentence)), abs=ATOL, rel=0.0,
         )
 
     def test_a_single_candidate_matches_the_multi_candidate_aggregation(self) -> None:
