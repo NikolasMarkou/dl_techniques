@@ -108,7 +108,7 @@ def train_model(args) -> None:
 
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=metrics
     )
 

@@ -83,7 +83,7 @@ Input (B, hidden_units[0])
 
 **`hidden_units` is read as `[input_dim, hidden_1, ..., hidden_n, output_dim]`.** The first entry describes the expected input width rather than creating a layer, and the last sizes the output. Optional batch normalization and dropout are applied after each hidden layer, in that order.
 
-**The output layer is a plain `Dense`, not a PowerMLP layer.** The final map needs an arbitrary activation — softmax, sigmoid, or none for regression — and `ReLU_k` on the logits would clamp them non-negative and destroy the parameterization every downstream loss expects.
+**The output layer is a plain `Dense`, not a PowerMLP layer.** The final map is linear — class logits, or regression values (a non-class activation such as `tanh` is accepted for a bounded regression target) — and `ReLU_k` on the logits would clamp them non-negative and destroy the parameterization every downstream loss expects. `output_activation='softmax'` or `'sigmoid'` raises `ValueError` (since 2026-10-17): a classifier emits logits and its loss takes `from_logits=True`.
 
 ---
 
@@ -122,11 +122,10 @@ model = PowerMLP.from_variant(
     "tiny",
     num_classes=10,
     input_dim=784,
-    output_activation="softmax",
 )
 model.compile(
     optimizer="adam",
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),  # logits out
     metrics=["accuracy"],
 )
 
@@ -151,7 +150,7 @@ model.summary()                    # only valid once built
 | **`PowerMLP.from_variant`** | — | Build a preset; wraps `hidden_units` as `[input_dim] + preset + [num_classes]`. |
 | **`create_power_mlp`** | `...power_mlp.model.create_power_mlp` | Create **and compile** in one call. |
 | **`create_power_mlp_regressor`** | — | Pins `loss='mse'`, `metrics=['mae','mse']`, linear output. |
-| **`create_power_mlp_binary_classifier`** | — | Pins `loss='binary_crossentropy'`, sigmoid output, accuracy/precision/recall. |
+| **`create_power_mlp_binary_classifier`** | — | Pins a linear one-unit logit, `BinaryCrossentropy(from_logits=True)`, accuracy/precision/recall thresholded at the logit 0. |
 | **`PowerMLPLayer`** | `...layers.ffn.power_mlp_layer.PowerMLPLayer` | The dual-branch layer. |
 | **`ReLUK`** | `...layers.activations.relu_k.ReLUK` | `max(0, x)^k`. |
 | **`BasisFunction`** | `...layers.activations.basis_function.BasisFunction` | Swish. |
@@ -162,12 +161,7 @@ Model methods beyond the Keras surface: `save_model(filepath, overwrite=True)` (
 
 ### `create_power_mlp` default-loss derivation
 
-`loss=None` (the default) **derives** a categorical cross-entropy whose `from_logits` matches the model's actual `output_activation`:
-
-| `output_activation` | Derived loss |
-|---|---|
-| `None` (default, linear) | `CategoricalCrossentropy(from_logits=True)` |
-| `'softmax'` / `'sigmoid'` | `CategoricalCrossentropy(from_logits=False)` |
+`loss=None` (the default) gives `CategoricalCrossentropy(from_logits=True)`: the output is linear, and `'softmax'` / `'sigmoid'` outputs are refused at construction.
 
 A fixed `loss="categorical_crossentropy"` string would compile with `from_logits=False` against the linear default, feeding unnormalized real values to a cross-entropy that renormalizes by `output / sum(output)` and clips — finite, meaningless, silent. Pass an explicit `loss=` to override.
 
@@ -206,10 +200,10 @@ Constructor arguments: `hidden_units`, `k=3`, `kernel_initializer='he_normal'`, 
 ```python
 model = PowerMLP.from_variant(
     "small", num_classes=10, input_dim=3072,      # CIFAR-10 flattened
-    output_activation="softmax",
     dropout_rate=0.2, batch_normalization=True,
 )
-model.compile(optimizer="adamw", loss="categorical_crossentropy",
+model.compile(optimizer="adamw",
+              loss=keras.losses.CategoricalCrossentropy(from_logits=True),
               metrics=["accuracy"])
 # model.fit(x_train_flat, y_train_onehot, ...)
 ```
@@ -246,7 +240,7 @@ The last entry should be `1`; anything else logs a warning rather than raising.
 
 ```python
 x = keras.layers.Flatten()(cnn_base.output)
-head = PowerMLP(hidden_units=[x.shape[-1], 256, 128, 10], output_activation="softmax")
+head = PowerMLP(hidden_units=[x.shape[-1], 256, 128, 10])  # logits: compile from_logits=True
 model = keras.Model(inputs=cnn_base.input, outputs=head(x))
 ```
 

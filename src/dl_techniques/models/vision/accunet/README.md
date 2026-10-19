@@ -75,7 +75,7 @@ Input (H, W, C)
 DECODER: 4 levels. Conv2DTranspose upsample, concatenate the processed skip, HANC blocks.
    |
    v
-1x1 convolution to num_classes, then sigmoid (num_classes == 1) or softmax
+1x1 convolution to num_classes, linear: the output is logits
 ```
 
 The bottleneck bypasses ResPath and MLFC entirely and goes straight into the decoder.
@@ -92,11 +92,15 @@ same block: **at `k = 1` the HANC layer pools nothing at all** and degenerates t
 projection of the input. The bottleneck level therefore carries no hierarchical context
 whatsoever; its receptive field is whatever the two stacked depthwise convolutions give it.
 
-### The Output Is Probabilities, Not Logits
+### The Output Is Logits
 
-The head applies its own activation — sigmoid for `num_classes == 1`, softmax otherwise. Compile
-with `from_logits=False` (the Keras default). Passing `from_logits=True` silently trains against
-a double-squashed target.
+The head is a linear 1x1 convolution (since 2026-10-17; it was a sigmoid or softmax before, and
+archives saved before then hold that layer and do not load). Compile with `from_logits=True`:
+`BinaryCrossentropy(from_logits=True)` for one channel, `SparseCategoricalCrossentropy(from_logits=True)`
+for integer masks, or the segmentation losses with `LossConfig(..., from_logits=True)`, which read
+one channel through a sigmoid and more through a softmax. Apply `keras.ops.sigmoid` (one channel)
+or `keras.ops.softmax` (more) to `predict` output when you need probabilities; a binary mask is
+`logits > 0`.
 
 ---
 
@@ -165,14 +169,16 @@ def make_data(n, size=128):
 x_train, y_train = make_data(32)
 x_val, y_val = make_data(8)
 
-# 2. Build. The head already applies sigmoid, so from_logits stays False.
+# 2. Build. The head emits logits, so the loss takes from_logits=True.
 model = create_acc_unet_binary(input_channels=1, input_shape=(128, 128), base_filters=16)
-model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+model.compile(optimizer="adam",
+              loss=keras.losses.BinaryCrossentropy(from_logits=True),
+              metrics=[keras.metrics.BinaryAccuracy(threshold=0.0)])
 
 # 3. Train and predict
 model.fit(x_train, y_train, validation_data=(x_val, y_val),
           epochs=1, batch_size=4, verbose=0)
-predicted_mask = model.predict(x_val[:1], verbose=0)[0]
+predicted_mask = model.predict(x_val[:1], verbose=0)[0] > 0.0  # logits > 0 <=> p > 0.5
 print(predicted_mask.shape)  # (128, 128, 1)
 ```
 
@@ -190,7 +196,7 @@ The subclassed model. Usually you want a factory instead, which wraps it in the 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
 | `input_channels` | (required) | Channels in the input image. A constructor argument, not inferred at build time, because `HANCBlock` fixes its expansion width from the channel count at construction. |
-| `num_classes` | (required) | Output classes. `1` selects the sigmoid head. |
+| `num_classes` | (required) | Output channels of logits. `1` is a binary logit map. |
 | `base_filters` | `32` | Width of encoder level 0. Levels then run `[b, 2b, 4b, 8b, 16b]`. |
 | `mlfc_iterations` | `3` | Number of stacked MLFC layers. |
 | `kernel_initializer` | `'glorot_uniform'` | Initializer for the convolutions. |
@@ -346,7 +352,7 @@ x = HANCBlock(filters=32, input_channels=3, k=3)(inputs)
 x = keras.layers.MaxPooling2D(2)(x)
 x = HANCBlock(filters=64, input_channels=32, k=3)(x)
 x = keras.layers.GlobalAveragePooling2D()(x)
-outputs = keras.layers.Dense(10, activation="softmax")(x)
+outputs = keras.layers.Dense(10)(x)  # logits; compile with from_logits=True
 custom_model = keras.Model(inputs, outputs)
 ```
 
@@ -398,11 +404,12 @@ Core hardware. Set the policy before building the model.
 
 ## 11. Training and Best Practices
 
-- **Binary.** `BinaryCrossentropy` combined with a Dice or Tversky loss is the usual choice —
-  BCE handles pixel-wise accuracy, Dice handles region overlap. Track `BinaryAccuracy` and IoU.
-- **Multi-class.** `SparseCategoricalCrossentropy` for integer masks, `CategoricalCrossentropy`
-  for one-hot. Track `MeanIoU`.
-- **Never set `from_logits=True`.** The head already applied sigmoid or softmax (§3).
+- **Binary.** `BinaryCrossentropy(from_logits=True)` combined with a Dice or Tversky loss is the
+  usual choice — BCE handles pixel-wise accuracy, Dice handles region overlap. Track
+  `BinaryAccuracy(threshold=0.0)` (a logit of 0 is a probability of 0.5) and IoU.
+- **Multi-class.** `SparseCategoricalCrossentropy(from_logits=True)` for integer masks,
+  `CategoricalCrossentropy(from_logits=True)` for one-hot. Track `MeanIoU` on the argmax.
+- **Always set `from_logits=True`.** The head is linear (§3).
 - **Augment.** Geometric (flips, rotations, scaling, cropping), photometric (brightness and
   contrast), and elastic deformation for medical images.
 - **Resize to a multiple of 16** in the data pipeline, not in the model.

@@ -111,10 +111,7 @@ def test_the_default_config_builds_the_486218_param_model() -> None:
     units = tpm.effective_hidden_units("mnist", "default", 784, 10)
     counts = {}
     for bn in (False, True):
-        model = PowerMLP(
-            hidden_units=units, k=config.k, batch_normalization=bn,
-            output_activation="softmax",
-        )
+        model = PowerMLP(hidden_units=units, k=config.k, batch_normalization=bn)
         model.build((None, 784))
         counts[bn] = model.count_params()
     assert config.batch_normalization is True
@@ -132,10 +129,7 @@ def test_the_cifar10_default_config_builds_the_3475594_param_model_without_bn() 
     units = tpm.effective_hidden_units("cifar10", "default", 3072, 10)
     counts = {}
     for bn in (False, True):
-        model = PowerMLP(
-            hidden_units=units, k=config.k, batch_normalization=bn,
-            output_activation="softmax",
-        )
+        model = PowerMLP(hidden_units=units, k=config.k, batch_normalization=bn)
         model.build((None, 3072))
         counts[bn] = model.count_params()
     assert config.batch_normalization is False
@@ -147,7 +141,7 @@ def test_the_built_model_has_the_preset_widths_and_params() -> None:
     """784 -> 256/128/64 -> 10 for mnist default: 3 hidden layers, 484,426 params."""
     units = tpm.effective_hidden_units("mnist", "default", 784, 10)
     assert units == [784, 256, 128, 64, 10]
-    model = PowerMLP(hidden_units=units, k=2, output_activation="softmax")
+    model = PowerMLP(hidden_units=units, k=2)
     model.build((None, 784))
     assert [layer.units for layer in model.hidden_layers] == [256, 128, 64]
     assert model.output_layer.units == 10
@@ -459,7 +453,8 @@ def test_smoke_labels_are_integer_and_the_loss_is_sparse(smoke) -> None:
     assert smoke.seen["y_ndim"] == 1
     loss = smoke.seen["loss"]
     assert isinstance(loss, keras.losses.SparseCategoricalCrossentropy), type(loss)
-    assert loss.get_config()["from_logits"] is False
+    # The model emits logits (D-149).
+    assert loss.get_config()["from_logits"] is True
 
 
 def test_smoke_analyzer_status_read_from_disk_is_success_and_matches_evaluate(smoke) -> None:
@@ -475,7 +470,8 @@ def test_smoke_analyzer_status_read_from_disk_is_success_and_matches_evaluate(sm
     _, _, (x_test, y_test), _ = smoke.data
     x, y = x_test[:1000], y_test[:1000]
     model = keras.models.load_model(smoke.run_dir / "final_model.keras")
-    probs = model.predict(x, verbose=0)
+    # The model emits logits (D-149); the analyzer's loss is the CE of their softmax.
+    probs = keras.ops.convert_to_numpy(keras.ops.softmax(model.predict(x, verbose=0), axis=-1))
     accuracy = float(np.mean(probs.argmax(axis=1) == y))
     assert metrics["accuracy"] == pytest.approx(accuracy, abs=1e-3)
     ce = float(-np.mean(np.log(np.clip(probs[np.arange(len(y)), y], 1e-7, 1.0))))

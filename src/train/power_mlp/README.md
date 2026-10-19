@@ -159,8 +159,9 @@ Parameter counts pinned by tests: MNIST `default` 486,218 with batch normalizati
 (484,426 without: batch normalization adds `4 * (256 + 128 + 64) = 1,792`); CIFAR-10
 `default` 3,475,594 without batch normalization (3,479,178 with).
 
-Fixed by design, not flags: batch norm is the only normalization, the output is a softmax
-(`from_logits=False`), gradient clipping is a per-variable norm of 1.0, `ReduceLROnPlateau`
+Fixed by design, not flags: batch norm is the only normalization, the output is linear
+logits (`from_logits=True`; a softmax before 2026-10-17, so earlier `final_model.keras`
+files do not load), gradient clipping is a per-variable norm of 1.0, `ReduceLROnPlateau`
 (factor 0.5, patience 5, floor `1e-7`) and `EarlyStopping(restore_best_weights=True)` come
 from `train.common.create_callbacks`, and `kernel_regularizer` is always `None`.
 

@@ -162,8 +162,7 @@ from dl_techniques.models.graph.relgt.model import create_relgt_model
 
 # 1. Create Model (Base configuration)
 model = create_relgt_model(
-    output_dim=2,               # Binary classification
-    problem_type="classification",
+    output_dim=2,               # Binary classification: two class logits
     model_size="base",          # 512 dim, 4 heads, 4096 centroids (official defaults)
     num_node_types=5
 )
@@ -177,10 +176,11 @@ inputs = {
     # Note: Real usage often requires specific tensor formats for GNN PE
 }
 
-# 3. Compile
+# 3. Compile. The output is linear (logits for classification), so the loss
+# takes from_logits=True.
 model.compile(
     optimizer="adam",
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 
@@ -212,8 +212,11 @@ model = RELGT(
 
 ### 6.2 Factory Function
 
-#### `create_relgt_model(output_dim, problem_type, model_size)`
-The recommended way to instantiate.
+#### `create_relgt_model(output_dim, model_size)`
+The recommended way to instantiate. The output is linear for every task: class
+logits or regression values. (`problem_type` was removed on 2026-10-17: with a
+linear head for classification it selected nothing. Archives whose config
+carries it do not load.)
 *   `model_size`: `'small'`, `'base'`, or `'repo_medium'`.
 
 ---
@@ -252,7 +255,6 @@ from dl_techniques.models.graph.relgt.model import create_relgt_model
 # 1. Setup
 model = create_relgt_model(
     output_dim=1,
-    problem_type="regression",
     model_size="small",
     num_node_types=10  # e.g., Atom types (C, O, N, etc.)
 )

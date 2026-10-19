@@ -40,6 +40,8 @@ from dl_techniques.losses.segmentation_metrics import (
     focal_tversky_scalar,
     focal_scalar,
     cross_entropy_scalar,
+    _prepare_probs,
+    _log_probs_from_logits,
 )
 
 # ---------------------------------------------------------------------
@@ -61,6 +63,11 @@ class LossConfig:
         combo_alpha: Weight for Dice component in Combo loss
         combo_beta: Weight for CE component in Combo loss
         boundary_theta: Distance threshold for boundary loss
+        from_logits: Whether ``y_pred`` holds logits. Every loss then reads
+            probabilities as a sigmoid of a one-channel map or a softmax over
+            the channel axis; cross-entropy and focal read log-probabilities
+            in log space, without the probability clip. Defaults to False
+            (probabilities, the behaviour before this field existed).
     """
     num_classes: int
     smooth_factor: float = 1e-6
@@ -72,6 +79,7 @@ class LossConfig:
     combo_alpha: float = 0.5
     combo_beta: float = 0.5
     boundary_theta: float = 1.5
+    from_logits: bool = False
 
     # ---------------------------------------------------------------------
     # Keras serialization hooks — keeps LossConfig usable as a serializable
@@ -149,6 +157,8 @@ class SegmentationLosses:
             raise ValueError(f"Tversky parameters must be non-negative")
         if config.combo_alpha < 0 or config.combo_beta < 0:
             raise ValueError(f"Combo parameters must be non-negative")
+        if not isinstance(config.from_logits, bool):
+            raise ValueError(f"from_logits must be a bool, got {config.from_logits!r}")
 
     @staticmethod
     def _validate_inputs(
@@ -187,7 +197,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
             weights: Optional class weights (num_classes,)
 
         Returns:
@@ -197,7 +208,7 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred, weights)
-        return cross_entropy_scalar(y_true, y_pred, weights, from_logits=False)
+        return cross_entropy_scalar(y_true, y_pred, weights, from_logits=self.config.from_logits)
 
     def dice_loss(
             self,
@@ -211,7 +222,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Dice loss tensor
@@ -220,7 +232,8 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        return dice_scalar(y_true, y_pred, from_logits=False, smooth=self.config.smooth_factor)
+        return dice_scalar(
+            y_true, y_pred, from_logits=self.config.from_logits, smooth=self.config.smooth_factor)
 
     def focal_loss(
             self,
@@ -240,7 +253,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Focal loss tensor
@@ -251,10 +265,15 @@ class SegmentationLosses:
         self._validate_inputs(y_true, y_pred)
         y_true = ops.cast(y_true, "float32")
 
-        epsilon = 1e-7
-        y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
+        if self.config.from_logits:
+            log_p = _log_probs_from_logits(y_pred)
+            y_pred = keras.ops.exp(log_p)
+        else:
+            epsilon = 1e-7
+            y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
+            log_p = ops.log(y_pred)
 
-        cross_entropy = -y_true * ops.log(y_pred)
+        cross_entropy = -y_true * log_p
         focal_factor = ops.power(1.0 - y_pred, self.config.focal_gamma)
 
         focal_ce = self.config.focal_alpha * focal_factor * cross_entropy
@@ -272,7 +291,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Tversky loss tensor
@@ -285,7 +305,7 @@ class SegmentationLosses:
             y_true, y_pred,
             alpha=self.config.tversky_alpha,
             beta=self.config.tversky_beta,
-            from_logits=False,
+            from_logits=self.config.from_logits,
             smooth=self.config.smooth_factor,
         )
 
@@ -301,7 +321,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Focal Tversky loss tensor
@@ -314,7 +335,7 @@ class SegmentationLosses:
             alpha=self.config.tversky_alpha,
             beta=self.config.tversky_beta,
             gamma=self.config.focal_tversky_gamma,
-            from_logits=False,
+            from_logits=self.config.from_logits,
             smooth=self.config.smooth_factor,
         )
 
@@ -330,7 +351,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Lovász-Softmax loss tensor
@@ -362,6 +384,7 @@ class SegmentationLosses:
             return jaccard_diff
 
         y_true = ops.cast(y_true, "float32")
+        y_pred = _prepare_probs(y_pred, self.config.from_logits)
         losses = []
 
         for c in range(self.config.num_classes):
@@ -397,7 +420,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Combo loss tensor
@@ -424,7 +448,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Boundary loss tensor
@@ -460,6 +485,7 @@ class SegmentationLosses:
             return magnitude
 
         boundary_map = compute_boundary_map(y_true)
+        y_pred = _prepare_probs(y_pred, self.config.from_logits)
 
         # Normalize boundary map
         boundary_map = ops.clip(boundary_map, 0, self.config.boundary_theta)
@@ -480,7 +506,8 @@ class SegmentationLosses:
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
-            y_pred: Predicted probabilities (batch_size, height, width, num_classes)
+            y_pred: Predicted probabilities, or logits when ``config.from_logits``
+                (batch_size, height, width, num_classes)
 
         Returns:
             Approximated Hausdorff Distance loss tensor
@@ -519,6 +546,7 @@ class SegmentationLosses:
 
             return result
 
+        y_pred = _prepare_probs(y_pred, self.config.from_logits)
         dt_true = approximate_distance_transform(y_true)
         dt_pred = approximate_distance_transform(y_pred)
 

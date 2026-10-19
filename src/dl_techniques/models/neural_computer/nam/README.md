@@ -66,7 +66,7 @@ carry, out = model(carry, batch, training=False)   # one reduction step
 
 | key | shape | meaning |
 |:---|:---|:---|
-| `result`, `valid` | `(B, 1)` | running answer and its validity flag |
+| `result`, `valid_logits` | `(B, 1)` | running answer and the validity head's logit (`sigmoid` of it is the predicted validity; the key was `valid` and held a sigmoid before 2026-10-17) |
 | `step_result`, `step_valid` | `(B, 1)` | this step's reduction |
 | `step_left_val`, `step_right_val` | `(B, 1)` | the two operands this step consumed |
 | `op_logits` | `(B, 4)` | operator classification |

@@ -151,10 +151,10 @@ model = create_coshnet(
 )
 
 # 2. Compile
-# CoShNet outputs standard probabilities, so use standard losses
+# CoShNet outputs logits (a linear classifier), so the loss takes from_logits=True
 model.compile(
     optimizer="adam",
-    loss="categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 

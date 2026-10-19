@@ -581,7 +581,9 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         yes_logits = last_token_logits[:, self.yes_token_id]
         no_logits = last_token_logits[:, self.no_token_id]
 
-        # Compute the score via softmax
+        # DECISION plan-2026-10-14T062616-81938e81/D-152: the output is P(yes), the
+        # reference model card's score (log_softmax over [no, yes], then exp); a
+        # named exception to the logits rule (models/GUIDE.md). Do not return yes - no.
         combined_logits = ops.stack([no_logits, yes_logits], axis=1)
         probabilities = keras.activations.softmax(combined_logits, axis=1)
 

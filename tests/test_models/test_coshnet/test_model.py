@@ -6,11 +6,12 @@ create_coshnet factory, a forward pass, and the M2 full .keras
 save -> load -> identical-output round-trip.
 
 `create_coshnet(variant, num_classes, input_shape)` -> CoShNet.from_variant.
-NHWC float32 image input; the classifier head is `Dense(activation="softmax")`,
-so it returns PROBABILITIES, not logits — compile with `from_logits=False`. The
-method below used to be named `test_forward_logits_shape` and this line used to say
-"logits"; nothing asserted the rows summed to 1, so the contradiction with
-`model.py:515-521` survived.
+NHWC float32 image input; the classifier head is a linear `Dense`, so it returns
+LOGITS (plan-2026-10-14T062616-81938e81 D-142; it was a softmax until
+2026-10-17). Compile with `from_logits=True`. A shape assertion cannot tell
+logits from probabilities, so the forward test shifts the classifier bias and
+requires the output to move by exactly that shift, and a stock `fit` with
+`from_logits=True` must memorise one batch (the D-122 training bar).
 """
 
 import os
@@ -58,19 +59,31 @@ class TestConstruction:
 
 class TestForward:
 
-    def test_forward_returns_a_probability_distribution(self):
+    def test_forward_returns_logits(self):
         model = create_coshnet("base", NUM_CLASSES, INPUT_SHAPE)
-        out = model(_images(), training=False)
-        assert tuple(out.shape) == (2, NUM_CLASSES)
-        values = keras.ops.convert_to_numpy(out)
-        assert not np.any(np.isnan(values))
-        # The head is `Dense(num_classes, activation="softmax")`. Asserting the shape
-        # alone cannot tell probabilities from logits, which is how the suite came to
-        # call this output "logits" while the module docstring correctly told callers
-        # to compile with `from_logits=False`.
-        np.testing.assert_allclose(values.sum(axis=-1), 1.0, atol=1e-5)
-        assert np.all(values >= 0.0)
-        assert np.all(values <= 1.0)
+        x = _images()
+        out = keras.ops.convert_to_numpy(model(x, training=False))
+        assert out.shape == (2, NUM_CLASSES)
+        assert np.all(np.isfinite(out))
+        # A linear head moves its output by exactly a shift of its bias; a
+        # softmax, sigmoid or ReLU tail does not (float32 bound: a few ulp of 50).
+        shift = -50.0
+        model.classifier.bias.assign(model.classifier.bias + shift)
+        shifted = keras.ops.convert_to_numpy(model(x, training=False))
+        np.testing.assert_allclose(shifted - out, shift, rtol=0, atol=64 * np.finfo(np.float32).eps * 50)
+
+    def test_fit_with_from_logits_memorises_one_batch(self):
+        keras.utils.set_random_seed(0)
+        model = create_coshnet("tiny", NUM_CLASSES, INPUT_SHAPE)
+        x = np.random.default_rng(1).random((8, *INPUT_SHAPE)).astype("float32")
+        y = np.arange(8) % NUM_CLASSES
+        model.compile(optimizer=keras.optimizers.Adam(1e-3),
+                      loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                      metrics=["accuracy"])
+        history = model.fit(x, y, batch_size=8, epochs=150, shuffle=False, verbose=0)
+        chance = float(np.log(NUM_CLASSES))
+        assert history.history["loss"][-1] < 0.1 * chance, history.history["loss"][-1]
+        assert history.history["accuracy"][-1] == 1.0
 
 
 class TestKerasRoundTrip:

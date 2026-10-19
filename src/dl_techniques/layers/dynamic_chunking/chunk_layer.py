@@ -28,8 +28,10 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-from dl_techniques.utils.sequence_ops import batched_gather, pad_permutation_to_width, cap_boundaries_by_position
+from dl_techniques.utils.sequence_ops import (
+    batched_gather,
+    pad_permutation_to_width,
+    cap_boundaries_by_position)
 
 # ---------------------------------------------------------------------
 

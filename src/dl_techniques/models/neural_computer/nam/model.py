@@ -38,7 +38,7 @@ Architecture::
                                     │  7. Halt decision (ACT)                │
                                     └────────────────────────────────────────┘
                                               │
-                                    Result Head → (scalar, validity)
+                                    Result Head → (scalar, validity logit)
 
 References:
     - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
@@ -119,7 +119,9 @@ class NAM(keras.Model):
 
     Output shape:
         ``(new_carry, outputs)``: ``new_carry`` is the updated carry dict;
-        ``outputs`` holds ``"result"`` and ``"valid"`` (each ``(B, 1)``),
+        ``outputs`` holds ``"result"`` and ``"valid_logits"`` (each ``(B, 1)``;
+        ``sigmoid(valid_logits)`` is the predicted validity, trained with
+        ``binary_crossentropy(from_logits=True)``),
         ``"q_halt_logits"`` and ``"q_continue_logits"`` (each ``(B,)``),
         and ``"step_results"``, a list of per-step ``(result, valid)``.
     """
@@ -189,9 +191,10 @@ class NAM(keras.Model):
 
         # --- Result readout ---
         self.result_head = keras.layers.Dense(1, name="result_head")
-        self.validity_head = keras.layers.Dense(
-            1, activation="sigmoid", name="validity_head"
-        )
+        # DECISION plan-2026-10-14T062616-81938e81/D-151: the validity head is linear
+        # and its output key is "valid_logits"; the trainer supervises it with BCE
+        # from_logits=True. Never a sigmoid here, and never a logit under "valid".
+        self.validity_head = keras.layers.Dense(1, name="validity_head")
 
         logger.info(
             f"NAM initialized: hidden_size={h}, "
@@ -419,7 +422,7 @@ class NAM(keras.Model):
         )
 
         final_result = self.result_head(result_input)  # (B, 1)
-        final_valid = self.validity_head(ops.stop_gradient(pooled))  # (B, 1)
+        valid_logits = self.validity_head(ops.stop_gradient(pooled))  # (B, 1)
 
         # --- Build new carry ---
         new_carry = {
@@ -430,7 +433,7 @@ class NAM(keras.Model):
 
         outputs = {
             "result": final_result,
-            "valid": final_valid,
+            "valid_logits": valid_logits,
             "step_result": cell_outputs["result"],
             "step_valid": cell_outputs["valid"],
             "op_logits": cell_outputs["op_logits"],

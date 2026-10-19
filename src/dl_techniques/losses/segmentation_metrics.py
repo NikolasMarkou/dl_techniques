@@ -52,15 +52,46 @@ def _reduce_non_batch(x: Any) -> Any:
 def _prepare_probs(y_pred: keras.KerasTensor, from_logits: bool) -> keras.KerasTensor:
     """Convert logits to probabilities if needed.
 
+    Logits become probabilities by a sigmoid when the channel axis has ONE
+    entry (a binary logit map) and by a softmax over the channel axis
+    otherwise. A softmax over a single channel would be the constant 1.
+
     Does NOT clip when from_logits=False, because 0/1 are valid probabilities
     for metrics like Dice/IoU where clipping would change the semantics
     (e.g., gated absent rows in SAM2 should contribute exactly zero).
     Individual loss functions that need numerical stability for log()
     should clip locally.
+
+    Interface contract (callers: every ``*_per_sample`` function here,
+    ``cross_entropy_scalar`` and ``SegmentationLosses``): ``y_pred`` is
+    channels-last with a static channel count; returns a tensor of the same
+    shape, ``y_pred`` itself when ``from_logits`` is False. Raises nothing.
     """
     if from_logits:
-        return ops.softmax(y_pred, axis=-1)
+        # DECISION plan-2026-10-14T062616-81938e81/D-143: a one-channel logit map
+        # is a sigmoid; never a softmax over one channel (the constant 1).
+        if y_pred.shape[-1] == 1:
+            return keras.ops.sigmoid(y_pred)
+        return keras.ops.softmax(y_pred, axis=-1)
     return y_pred
+
+
+def _log_probs_from_logits(y_pred: keras.KerasTensor) -> keras.KerasTensor:
+    """Log-probabilities of a channels-last logit map, in float32, without a clip.
+
+    ``log_sigmoid`` for one channel and ``log_softmax`` over the channel axis
+    otherwise (the same rule as :func:`_prepare_probs`). No probability clip, so
+    the gradient never meets the clip's zero-derivative region.
+
+    Interface contract (callers: ``cross_entropy_scalar`` and
+    ``SegmentationLosses.focal_loss``, both on their ``from_logits`` path):
+    ``y_pred`` is channels-last with a static channel count; returns float32 of
+    the same shape. Raises nothing.
+    """
+    y_pred = keras.ops.cast(y_pred, "float32")
+    if y_pred.shape[-1] == 1:
+        return keras.ops.log_sigmoid(y_pred)
+    return keras.ops.log_softmax(y_pred, axis=-1)
 
 
 def iou_per_sample(
@@ -313,18 +344,23 @@ def cross_entropy_scalar(
         y_true: Ground truth, shape ``(batch, ..., num_classes)``.
         y_pred: Predicted logits or probabilities, same shape.
         weights: Optional class weights ``(num_classes,)``.
-        from_logits: Whether ``y_pred`` contains raw logits.
+        from_logits: Whether ``y_pred`` contains raw logits. Logits are read
+            in log space (``log_sigmoid`` for one channel, ``log_softmax``
+            otherwise) with no clip; probabilities are clipped to
+            ``[1e-7, 1 - 1e-7]`` before the log.
 
     Returns:
         Scalar loss tensor.
     """
     y_true = ops.cast(y_true, "float32")
-    probs = _prepare_probs(y_pred, from_logits)
+    if from_logits:
+        log_probs = _log_probs_from_logits(y_pred)
+    else:
+        epsilon = 1e-7
+        probs = ops.clip(y_pred, epsilon, 1.0 - epsilon)
+        log_probs = ops.log(probs)
 
-    epsilon = 1e-7
-    probs = ops.clip(probs, epsilon, 1.0 - epsilon)
-
-    ce_loss = -ops.sum(y_true * ops.log(probs), axis=-1)
+    ce_loss = -ops.sum(y_true * log_probs, axis=-1)
 
     if weights is not None:
         weights = ops.cast(weights, "float32")

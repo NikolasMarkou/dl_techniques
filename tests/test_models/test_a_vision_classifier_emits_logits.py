@@ -377,6 +377,42 @@ def test_a_stock_from_logits_fit_step_moves_the_classifier(subject: str) -> None
     )
 
 
+def test_a_classifier_bias_shift_moves_the_output_by_exactly_the_shift(subject: str) -> None:
+    """N12 (plan-2026-10-14T062616-81938e81 iteration 2, D-122 item 6, D-153).
+
+    Add -50 to the classifier bias. A linear classifier moves every output by
+    exactly -50, within float32 rounding at the output's magnitude; a sigmoid,
+    softmax or ReLU tail does not (a softmax is invariant to the shift, a
+    sigmoid saturates, a ReLU clamps). ``test_the_output_is_not_normalized``
+    cannot see a sigmoid or ReLU tail; this arm can.
+
+    SqueezeNet V1/V2 are exempt by name, and the exemption is checked rather
+    than assumed: their ``conv10`` carries the paper's ReLU before the pool
+    (decision D-017), so the shift drives every output to exactly 0.
+    """
+    model, shape = _build(subject)
+    x = _images(shape)
+    out = keras.ops.convert_to_numpy(model(x, training=False)).astype(np.float64)
+    bias = _classifier(model).bias
+    original = keras.ops.convert_to_numpy(bias)
+    shift = -50.0
+    bias.assign(original + shift)
+    moved = keras.ops.convert_to_numpy(model(x, training=False)).astype(np.float64)
+    bias.assign(original)
+    if subject in CONV10_HEADS:
+        assert (moved == 0.0).all(), (
+            f"{subject}: the conv10 ReLU should clamp a -50 bias shift to 0; "
+            f"output range [{moved.min()}, {moved.max()}]")
+        return
+    bound = 8 * float(np.finfo(np.float32).eps) * (np.abs(out).max() + abs(shift))
+    error = np.abs(moved - out - shift).max()
+    assert error <= bound, (
+        f"{subject}: a {shift} classifier bias shift moved the output by "
+        f"{(moved - out).min():.4f}..{(moved - out).max():.4f}, not {shift} "
+        f"(max error {error:.3e} > {bound:.3e}); something after the classifier "
+        f"bends the logits")
+
+
 # ---------------------------------------------------------------------
 # D-013: each head is its reference's, and the model's knobs reach it
 # ---------------------------------------------------------------------

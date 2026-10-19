@@ -72,7 +72,7 @@ NAM_PATH_FRAGMENTS = ("token_embedding", "numeric_proj")
 #: are rank 1 on purpose.
 EXPECTED_SHAPES: Dict[str, tuple] = {
     "result": (BATCH, 1),
-    "valid": (BATCH, 1),
+    "valid_logits": (BATCH, 1),
     "step_result": (BATCH, 1),
     "step_valid": (BATCH, 1),
     "op_logits": (BATCH, 4),

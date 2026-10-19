@@ -44,9 +44,10 @@ class SHGCNModel(keras.Model):
     """Stack of sHGCN layers producing node embeddings or logits.
 
     Each hidden layer applies ``relu``; the output layer's activation is
-    configurable so the same class serves node classification (``softmax``
-    or ``linear`` for raw embeddings) and link prediction (``linear``
-    embeddings, paired with a decoder such as :class:`FermiDiracDecoder`).
+    configurable so the same class serves node classification (``linear``
+    class logits, compiled with ``from_logits=True``) and link prediction
+    (``linear`` embeddings, paired with a decoder such as
+    :class:`FermiDiracDecoder`).
 
     Architecture:
 
@@ -77,7 +78,8 @@ class SHGCNModel(keras.Model):
         positive.
     :type output_dim: int
     :param output_activation: Activation of the output layer. ``'linear'``
-        for embeddings, ``'softmax'`` for classification, or ``None``.
+        for embeddings and for class logits (the repository's logits rule),
+        or ``None``.
         Defaults to ``'linear'``.
     :type output_activation: Optional[Union[str, callable]]
     :param dropout_rate: Dropout probability inside each layer, in
@@ -103,7 +105,7 @@ class SHGCNModel(keras.Model):
 
     Output shape:
         ``(num_nodes, output_dim)`` -- embeddings in tangent space, or
-        class logits/probabilities depending on ``output_activation``.
+        class logits with ``output_activation='linear'``.
 
     :ivar hidden_layers: List of :class:`SHGCNLayer` instances.
     :ivar output_layer: Final :class:`SHGCNLayer` producing the model output.
@@ -118,12 +120,12 @@ class SHGCNModel(keras.Model):
             model = SHGCNModel(
                 hidden_dims=[64, 32],
                 output_dim=3,
-                output_activation='softmax',
+                output_activation='linear',
                 dropout_rate=0.5,
             )
             model.compile(
                 optimizer='adam',
-                loss='sparse_categorical_crossentropy',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=['accuracy'],
             )
             for _ in range(100):
@@ -272,7 +274,7 @@ class SHGCNModel(keras.Model):
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNNodeClassifier(keras.Model):
-    """sHGCN feature extractor with a softmax classification head.
+    """sHGCN feature extractor with a linear classification head (logits).
 
     Architecture:
 
@@ -287,10 +289,10 @@ class SHGCNNodeClassifier(keras.Model):
                    │ [N, embedding_dim]
                    ▼
             ┌───────────────┐
-            │ Dense+softmax │
+            │ Dense, linear │
             └──────┬────────┘
                    ▼
-            probabilities [N, num_classes]
+            logits [N, num_classes]
 
     :param num_classes: Number of output classes. Must be at least 2.
     :type num_classes: int
@@ -315,7 +317,8 @@ class SHGCNNodeClassifier(keras.Model):
         ``[features, adjacency]`` as for :class:`SHGCNModel`.
 
     Output shape:
-        ``(num_nodes, num_classes)``, rows summing to 1.
+        ``(num_nodes, num_classes)`` logits; compile with
+        ``from_logits=True``.
 
     Example:
         .. code-block:: python
@@ -328,7 +331,7 @@ class SHGCNNodeClassifier(keras.Model):
             )
             model.compile(
                 optimizer=keras.optimizers.Adam(learning_rate=0.01),
-                loss='sparse_categorical_crossentropy',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=['accuracy'],
             )
             for _ in range(200):
@@ -378,9 +381,10 @@ class SHGCNNodeClassifier(keras.Model):
             name='shgcn_backbone'
         )
 
+        # DECISION plan-2026-10-14T062616-81938e81/D-147: a linear classifier; the
+        # model emits logits (the GUIDE logits rule), never a softmax activation here.
         self.classifier = keras.layers.Dense(
             num_classes,
-            activation='softmax',
             name='classifier'
         )
 
@@ -419,16 +423,11 @@ class SHGCNNodeClassifier(keras.Model):
         :type inputs: List[keras.KerasTensor]
         :param training: Whether dropout is active.
         :type training: Optional[bool]
-        :return: Class probabilities, shape ``[num_nodes, num_classes]``.
+        :return: Class logits, shape ``[num_nodes, num_classes]``.
         :rtype: keras.KerasTensor
         """
         embeddings = self.backbone(inputs, training=training)
-
-        # These rows already sum to 1 (softmax head): treat as
-        # probabilities, not logits, when compiling a loss.
-        probabilities = self.classifier(embeddings)
-
-        return probabilities
+        return self.classifier(embeddings)
 
     def get_config(self) -> dict:
         """Return the config needed to reconstruct this model.

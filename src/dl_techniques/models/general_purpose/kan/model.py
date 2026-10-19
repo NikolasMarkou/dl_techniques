@@ -206,7 +206,7 @@ class KAN(keras.Model):
         >>> # From explicit per-layer configs
         >>> model = KAN(
         ...     layer_configs=[{"features": 32, "grid_size": 5},
-        ...                    {"features": 10, "activation": "softmax"}],
+        ...                    {"features": 10, "activation": "linear"}],
         ...     input_features=784,
         ... )
 
@@ -608,7 +608,8 @@ class KAN(keras.Model):
         :param output_features: Dimension of the output.
         :type output_features: int
         :param output_activation: Final activation. When omitted, defaults to
-            ``'softmax'`` for ``output_features > 1`` and ``'linear'`` otherwise.
+            ``'linear'``: class logits (compile with ``from_logits=True``) or
+            regression values, for any ``output_features``.
         :type output_activation: Optional[str]
         :param pretrained: A path to a local weights file, or ``False`` (default)
             for random initialization. ``True`` raises ``NotImplementedError`` --
@@ -657,12 +658,9 @@ class KAN(keras.Model):
         output_config = config_base.copy()
         output_config["features"] = output_features
 
-        if output_activation:
-            output_config["activation"] = output_activation
-        elif output_features > 1:
-            output_config["activation"] = "softmax"
-        else:
-            output_config["activation"] = "linear"
+        # DECISION plan-2026-10-14T062616-81938e81/D-150: the default output is linear
+        # (logits) for every output width; never a softmax default for a multi-unit head.
+        output_config["activation"] = output_activation or "linear"
 
         layer_configs.append(output_config)
 
@@ -742,7 +740,7 @@ class KAN(keras.Model):
         :param activation: Base activation for every layer.
         :type activation: str
         :param final_activation: Final activation. When omitted, defaults to
-            ``'softmax'`` for a multi-unit output and ``'linear'`` otherwise.
+            ``'linear'`` (logits or regression values) for any output width.
         :type final_activation: Optional[str]
         :param init_scheme: Forwarded to :class:`KAN`'s own ``init_scheme`` --
             unlike ``kan_layer_kwargs`` below, this is a KAN-level (not
@@ -780,12 +778,7 @@ class KAN(keras.Model):
 
             # Only the output layer gets a distinct final activation.
             if i == len(output_feature_sizes) - 1:
-                if final_activation:
-                    config["activation"] = final_activation
-                elif features > 1:
-                    config["activation"] = "softmax"
-                else:
-                    config["activation"] = "linear"
+                config["activation"] = final_activation or "linear"
 
             layer_configs.append(config)
 

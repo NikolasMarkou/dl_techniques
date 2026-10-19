@@ -228,14 +228,26 @@ That silence is the reason they are written down here.
   - stride-2 padding.
 
   A fully transposed relative-position bias in BEiT passed 219 tests.
-- **Classifier heads emit logits; compile with `from_logits=True`.** This is exact for every
-  model built on the `layers/heads` `ClassificationHead` (ResNet, CBAM, AlexNet, ConvNeXt V1/V2,
-  MobileNet V1-V4, ViT, ViT-HMLP, CliffordNet, BEiT, Swin, FractalNet, FastVLM), for BEiT's own
-  mean-pooling head, for the NLP and VLM class-score heads, and for SqueezeNet V1/V2, which build
-  the paper's `conv10` head themselves (a ReLU sits before the pool, so their logits are never
-  negative). The exceptions are CoShNet and AccUNet (documented softmax or sigmoid outputs,
-  compile with `from_logits=False`), CapsNet (capsule lengths) and RBF-ProtoNet (a normalized RBF
-  output). None of the four uses `layers/heads`.
+- **Classifier outputs are logits; compile with `from_logits=True`.** This is exact for every
+  classifier-like output in `src/dl_techniques/models`: every model built on the `layers/heads`
+  `ClassificationHead` (ResNet, CBAM, AlexNet, ConvNeXt V1/V2, MobileNet V1-V4, ViT, ViT-HMLP,
+  CliffordNet, BEiT, Swin, FractalNet, FastVLM), BEiT's own mean-pooling head, the NLP and VLM
+  class-score heads, SqueezeNet V1/V2 (the paper's `conv10` head: a ReLU sits before the pool, so
+  their logits are never negative), CoShNet, AccUNet, the DocScanner segmenter (its composite
+  applies the sigmoid before its `> 0.5` threshold), SHGCN's node classifier, RelGT, PowerMLP
+  (`output_activation='softmax'`/`'sigmoid'` raise), KAN's default output and NAM's
+  `valid_logits`. A sigmoid or softmax that maps to a range (boxes, pixels, gates, attention) is
+  not a class score. `tests/test_models/test_every_classifier_output_is_logits_or_a_named_exception.py`
+  is the AST census that holds this, and it reads the list below. The exceptions are exactly
+  these, each a probability that is the model's documented product:
+  - `CapsNet`: capsule lengths (Sabour et al. 2017, Eq. 1 squash), read by the margin loss.
+  - `CapsNetV2`: the same capsule lengths, in `(0, 1)`.
+  - `RBFProtoNet`: a normalized RBF output (`output_mode='normalized'`, its only mode), rows sum to 1.
+  - `CliffordRBFProtoNet`: the same normalized RBF head.
+  - `Qwen3RerankerModel`: `P(yes) = softmax([no, yes])[1]` at the last position, the reference
+    model card's score (`compute_logits`); its trainer's `BinaryCrossentropy` reads it.
+
+  None of the five uses `layers/heads`.
 - **Initializer instances:**
   - An unseeded Keras initializer instance seeds itself at construction and replays the same draw
     at the same shape. When filling N slices, call `clone_initializer` (`initializers/clone.py`)

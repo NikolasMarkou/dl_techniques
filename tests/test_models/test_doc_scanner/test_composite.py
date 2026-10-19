@@ -205,9 +205,17 @@ def _force_the_confidence_map(monkeypatch, confidence_fn):
     The other six maps are returned as ZEROS. If the composite ever read one of
     them instead of ``d0``, every arm built on this helper would go RED, which
     is the intent.
+
+    The segmenter emits LOGITS (D-146), so ``d0`` is returned as
+    ``log(p / (1 - p))`` of the forced confidence ``p``; the composite applies
+    the sigmoid. A confidence of exactly 0.5 is the logit 0, whose sigmoid is
+    exactly 0.5, so the tie arm still meets the threshold exactly.
     """
     def fake(self, inputs, training=None):
-        d0 = confidence_fn(inputs)
+        # keras.ops, not numpy: the composite's build traces this symbolically.
+        # A confidence of 1 is the logit +inf, whose sigmoid is exactly 1.
+        confidence = keras.ops.cast(confidence_fn(inputs), "float32")
+        d0 = keras.ops.log(confidence) - keras.ops.log1p(-confidence)
         zeros = keras.ops.zeros_like(d0)
         return [d0] + [zeros] * 6
 

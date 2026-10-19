@@ -89,11 +89,9 @@ class RELGT(keras.Model):
         repo_medium         256      8         64      512       4
 
     :param output_dim: Dimension of the final output, e.g. number of classes.
-        Must be positive.
+        Must be positive. The output is linear for every task: class logits
+        (compile with ``from_logits=True``) or regression values.
     :type output_dim: int
-    :param problem_type: ``'classification'`` or ``'regression'``; sets the
-        final activation.
-    :type problem_type: str
     :param embedding_dim: Main embedding dimension used throughout the model.
         Defaults to ``128``.
     :type embedding_dim: int
@@ -130,8 +128,7 @@ class RELGT(keras.Model):
     :type normalization_type: str
     :param kwargs: Forwarded to ``keras.Model``.
     :raises ValueError: If ``output_dim`` or ``embedding_dim`` is not positive,
-        if ``problem_type`` is invalid, or if ``num_transformer_blocks`` is
-        not positive.
+        or if ``num_transformer_blocks`` is not positive.
 
     Input shape:
         A dict of tensors matching :class:`RELGTTokenEncoder`'s inputs.
@@ -144,7 +141,6 @@ class RELGT(keras.Model):
 
             model = RELGT(
                 output_dim=10,
-                problem_type='classification',
                 embedding_dim=128,
                 num_node_types=5,
                 num_transformer_blocks=3,
@@ -152,7 +148,7 @@ class RELGT(keras.Model):
             )
             model.compile(
                 optimizer='adam',
-                loss='sparse_categorical_crossentropy',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=['accuracy'],
             )
     """
@@ -192,7 +188,6 @@ class RELGT(keras.Model):
     def __init__(
             self,
             output_dim: int,
-            problem_type: str = "classification",
             embedding_dim: int = 128,
             num_node_types: int = 10,
             max_hops: int = 2,
@@ -211,15 +206,12 @@ class RELGT(keras.Model):
 
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if problem_type not in ["classification", "regression"]:
-            raise ValueError(f"problem_type must be 'classification' or 'regression', got {problem_type}")
         if embedding_dim <= 0:
             raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
         if num_transformer_blocks <= 0:
             raise ValueError(f"num_transformer_blocks must be positive, got {num_transformer_blocks}")
 
         self.output_dim = output_dim
-        self.problem_type = problem_type
         self.embedding_dim = embedding_dim
         self.num_node_types = num_node_types
         self.max_hops = max_hops
@@ -264,7 +256,9 @@ class RELGT(keras.Model):
             name="SeedEncoder"
         )
 
-        final_activation = "softmax" if problem_type == "classification" else None
+        # DECISION plan-2026-10-14T062616-81938e81/D-148: the final Dense is linear for
+        # every task (class logits or regression values), so no task knob selects
+        # an activation; never a softmax here.
         self.prediction_head = keras.Sequential([
             create_ffn_layer(
                 ffn_type,
@@ -273,7 +267,7 @@ class RELGT(keras.Model):
                 dropout_rate=dropout_rate,
                 name="PredictionFFN"
             ),
-            layers.Dense(output_dim, activation=final_activation, name="FinalOutput")
+            layers.Dense(output_dim, name="FinalOutput")
         ], name="PredictionHead")
 
     def build(self, input_shape: Any) -> None:
@@ -342,7 +336,6 @@ class RELGT(keras.Model):
         config = super().get_config()
         config.update({
             "output_dim": self.output_dim,
-            "problem_type": self.problem_type,
             "embedding_dim": self.embedding_dim,
             "num_node_types": self.num_node_types,
             "max_hops": self.max_hops,
@@ -373,7 +366,6 @@ class RELGT(keras.Model):
 
 def create_relgt_model(
         output_dim: int,
-        problem_type: str = "classification",
         model_size: str = "base",
         **kwargs
 ) -> RELGT:
@@ -381,8 +373,6 @@ def create_relgt_model(
 
     :param output_dim: Dimension of the final output.
     :type output_dim: int
-    :param problem_type: ``'classification'`` or ``'regression'``.
-    :type problem_type: str
     :param model_size: ``'small'``, ``'base'``, or ``'repo_medium'``. Only
         ``'base'`` has an upstream counterpart; see :attr:`RELGT.MODEL_VARIANTS`.
     :type model_size: str
@@ -400,7 +390,6 @@ def create_relgt_model(
     config.update(kwargs)
     config.update({
         "output_dim": output_dim,
-        "problem_type": problem_type,
     })
 
     logger.info(f"Creating RELGT model with size='{model_size}' and config: {config}")

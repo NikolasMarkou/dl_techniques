@@ -382,8 +382,8 @@ class TestKANVariants:
 
         assert model.input_features == 784
         assert model.layer_configs[-1]["features"] == 10
-        # Should default to softmax for >1 output features
-        assert model.layer_configs[-1]["activation"] == "softmax"
+        # Defaults to linear (logits) for every output width (D-150)
+        assert model.layer_configs[-1]["activation"] == "linear"
         assert len(model.layer_configs) == 4  # [64, 32, 16] + [10]
 
         # Test forward pass
@@ -457,9 +457,9 @@ class TestKANVariants:
         assert model.layer_configs[0]["grid_size"] == 8
         assert model.layer_configs[0]["activation"] == 'gelu'
 
-        # Last layer logic (multiclass default)
+        # Last layer logic (multiclass default: linear logits, D-150)
         assert model.layer_configs[-1]["features"] == 10
-        assert model.layer_configs[-1]["activation"] == "softmax"
+        assert model.layer_configs[-1]["activation"] == "linear"
 
         # Test forward pass
         test_input = keras.random.normal([16, 784])
@@ -825,14 +825,22 @@ GF_INPUT_FEATURES = 16
 GF_OUTPUT_FEATURES = 4
 
 
-def _gf_model(init_scheme="glorot_inspired", init_seed=0):
+def _gf_model(init_scheme="glorot_inspired", init_seed=0, output_activation=None):
     return create_kan_model(
         variant="small",
         input_features=GF_INPUT_FEATURES,
         output_features=GF_OUTPUT_FEATURES,
         init_scheme=init_scheme,
         init_seed=init_seed,
+        output_activation=output_activation,
     )
+
+
+#: GF-01 was measured when ``from_variant`` appended a softmax to every
+#: multi-unit output. That default is linear since plan-2026-10-14T062616-81938e81
+#: D-150, so the legacy class below asks for the softmax EXPLICITLY to keep the
+#: documented finding reproducible exactly as measured.
+GF01_SOFTMAX = "softmax"
 
 
 def _gf_batch(rows: int = 4):
@@ -872,6 +880,11 @@ class TestKANGradientFlowLegacyBareDefaults:
     uniform, and uniform softmax is an exact critical point of a
     sum-of-squares loss. Hence *exactly* zero rather than merely small.
 
+    With the linear default of D-150 the same bare-default degeneracy shows as
+    every output unit carrying the SAME value within a row (the classes cannot
+    be told apart), not as a constant 1/C; the last test of this class pins
+    that form.
+
     The two tests below are deliberately a pair. Neither alone is honest:
     the xfail alone would look like a broken model with no working path, and the
     green one alone would hide the fact that this configuration's output is a
@@ -893,7 +906,7 @@ class TestKANGradientFlowLegacyBareDefaults:
         ),
     )
     def test_gradients_reach_every_trainable_weight_without_a_grid_pass(self):
-        model = _gf_model(init_scheme=None)
+        model = _gf_model(init_scheme=None, output_activation=GF01_SOFTMAX)
         x = _gf_batch()
         model(x, training=False)
 
@@ -908,7 +921,7 @@ class TestKANGradientFlowLegacyBareDefaults:
         measured constant, so it also fails if the model becomes a DIFFERENT
         constant.
         """
-        model = _gf_model(init_scheme=None)
+        model = _gf_model(init_scheme=None, output_activation=GF01_SOFTMAX)
         out = keras.ops.convert_to_numpy(model(_gf_batch(), training=False))
 
         np.testing.assert_allclose(out, 1.0 / GF_OUTPUT_FEATURES, atol=1e-6)
@@ -923,7 +936,7 @@ class TestKANGradientFlowLegacyBareDefaults:
         ``init_scheme=None`` it is the only state in which this model can be
         trained at all.
         """
-        model = _gf_model(init_scheme=None)
+        model = _gf_model(init_scheme=None, output_activation=GF01_SOFTMAX)
         # A representative sample, per update_kan_grids' docstring ("100-1000
         # samples"); the grid adaptation is a quantile match, so a 4-row batch
         # would adapt to noise.
@@ -943,7 +956,7 @@ class TestKANGradientFlowLegacyBareDefaults:
         collection-order RNG draw, say). It compares the SAME construction in the
         two states and requires the live-gradient count to move from 0 to 12.
         """
-        before = _gf_model(init_scheme=None)
+        before = _gf_model(init_scheme=None, output_activation=GF01_SOFTMAX)
         x = _gf_batch()
         before(x, training=False)
         n_live_before = sum(
@@ -951,7 +964,7 @@ class TestKANGradientFlowLegacyBareDefaults:
             if v is not None and v > 0.0
         )
 
-        after = _gf_model(init_scheme=None)
+        after = _gf_model(init_scheme=None, output_activation=GF01_SOFTMAX)
         after.update_kan_grids(_gf_batch(rows=256))
         n_live_after = sum(
             1 for v in gradient_report(after, x).values()
@@ -960,6 +973,13 @@ class TestKANGradientFlowLegacyBareDefaults:
 
         assert n_live_before == 0, n_live_before
         assert n_live_after == 12, n_live_after
+
+    def test_with_the_linear_default_every_output_unit_is_the_same(self):
+        """GF-01 under the linear default (D-150): rows differ, units do not."""
+        model = _gf_model(init_scheme=None)
+        out = keras.ops.convert_to_numpy(model(_gf_batch(), training=False))
+        assert float(np.std(out, axis=0).max()) > 0.0, "the output no longer varies with the input"
+        np.testing.assert_allclose(out, np.repeat(out[:, :1], out.shape[1], axis=1), rtol=1e-6, atol=0)
 
 
 class TestKANGradientFlowDefault:

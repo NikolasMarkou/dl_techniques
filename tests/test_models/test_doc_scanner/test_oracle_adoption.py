@@ -318,7 +318,7 @@ class TestWhyTheCompositeDoesNotCarryTheImpulseProbe:
             model.build((None, HEIGHT, WIDTH, 3))
             zeros = np.zeros((1, HEIGHT, WIDTH, 3), dtype="float32")
             confidence = np.asarray(keras.ops.convert_to_numpy(
-                model.segmenter(zeros, training=False)[0]))
+                keras.ops.sigmoid(model.segmenter(zeros, training=False)[0])))
             assert confidence.min() == confidence.max() == pytest.approx(0.5), (
                 f"seed {seed}: confidence at zero input is "
                 f"[{confidence.min()}, {confidence.max()}], not the flat 0.5 "
@@ -364,7 +364,7 @@ class TestWhyTheCompositeDoesNotCarryTheImpulseProbe:
         perturbed = base.copy()
         perturbed[:, HEIGHT // 2, WIDTH // 2, :] += 1.0
         confidence = np.asarray(keras.ops.convert_to_numpy(
-            model.segmenter(base, training=False)[0]))
+            keras.ops.sigmoid(model.segmenter(base, training=False)[0])))
         mask = float(confidence[0, HEIGHT // 2, WIDTH // 2, 0] > 0.5)
         delta = float(np.max(np.abs(
             np.asarray(keras.ops.convert_to_numpy(model(base, training=False)))

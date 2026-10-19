@@ -43,7 +43,7 @@ from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokeniz
 from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
 
 
-NAM_OUTPUT_KEYS = ("result", "valid", "q_halt_logits", "q_continue_logits")
+NAM_OUTPUT_KEYS = ("result", "valid_logits", "q_halt_logits", "q_continue_logits")
 
 
 @pytest.fixture
