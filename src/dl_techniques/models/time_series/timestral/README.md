@@ -121,8 +121,14 @@ Core Keras Model implementing the transformer.
 
 ```python
 model = TimestralModel(config)
-# For training, use TimestralTrainer which calls model.predict_block directly
+quantiles = model(context)  # (B, T) -> (B, H, Q); (B, T, V) -> (B, H, V, Q)
 ```
+
+`model(context)` is the training forward: one decode block after each context, the same
+path as `predict_block`, every horizon patch in the frame of the last context patch. The batch
+size must be static (batch a `tf.data` pipeline with `drop_remainder=True`). `compute_loss` is
+the training objective, so `model.compile(optimizer=...)` and `model.fit(context, horizon)` train
+it with no `loss=` argument; see Training below.
 
 `TimestralModel.from_variant(variant, prediction_length=96, patch_size=32, quantile_levels=None, **kwargs)`
 builds one of the four sizes in `TimestralModel.MODEL_VARIANTS`; both factories below delegate to it.

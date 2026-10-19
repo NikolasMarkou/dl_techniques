@@ -69,8 +69,7 @@ class TestTimestralModel:
         seq_len = 64
         x = np.random.randn(batch_size, seq_len, 1).astype(np.float32)
 
-        # Note: call() raises NotImplementedError for training path
-        # We test predict_block directly
+        # The scaler on its own; call() and predict_block are in test_training.py.
         scaled, loc, scale = model.scale(
             keras.ops.convert_to_tensor(x[:, :, 0]),
             keras.ops.convert_to_tensor(np.ones((batch_size, seq_len), dtype=bool))

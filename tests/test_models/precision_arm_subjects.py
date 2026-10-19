@@ -1727,9 +1727,10 @@ def _timestral_inputs():
 
 
 def _timestral_call(model, inputs, training):
-    """``TimestralModel.call`` raises by design; the forward is ``predict_block``.
+    """The forward judged is ``predict_block``, whose two paths ``call`` does not cover.
 
-    Both of its paths are judged: context-only, and the covariate window.
+    ``call`` is the context-only path for one decode block (the training forward);
+    ``predict_block`` also runs the covariate window. Both of its paths are judged.
     ``predict_block`` does not mark the model built, and ``.keras`` saving
     restores weights only into a built model, so the adapter calls
     ``model.build`` first, as a caller saving the model must.
@@ -1746,7 +1747,7 @@ def _timestral_call(model, inputs, training):
 
 
 # The R-073 call counter wraps this method on the loaded model (the oracle's
-# ``measure_roundtrip``); ``call`` is never reached, so counting it is vacuous.
+# ``measure_roundtrip``); this adapter never reaches ``call``, so counting it is vacuous.
 _timestral_call.forward_method = "predict_block"
 _extra("timestral", _b_timestral, _timestral_inputs, call_fn=_timestral_call)
 

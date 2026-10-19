@@ -8,6 +8,19 @@ True meaning "may attend". Pure Keras ops — no framework-specific calls.
 import keras
 from typing import Optional, Tuple
 
+from dl_techniques.utils.masking.factory import MaskFactory
+
+
+def _lower_triangle(n: int):
+    """(n, n) bool, True on and below the diagonal: what keras.ops.tril of ones gives.
+
+    Built from the shared index comparison (``MaskFactory.create_causal_mask`` blocks
+    above the diagonal), not from ``keras.ops.tril``, whose TensorFlow implementation
+    branches on a Python bool through ``tf.cond`` and raises "pred must not be a
+    Python bool" as soon as the mask is traced, so ``fit`` could not run the model.
+    """
+    return keras.ops.logical_not(MaskFactory.create_causal_mask(n))
+
 
 def compute_enc_key_validity(obs_per_patch, attend_missing: bool):
     """(R, N) encoder key validity.
@@ -26,7 +39,7 @@ def enc_causal_mask(key_valid):
     """(R, L, L) causal encoder mask over valid keys, with diagonal always open."""
     n = int(keras.ops.shape(key_valid)[1])
     rows = int(keras.ops.shape(key_valid)[0])
-    causal = keras.ops.tril(keras.ops.ones((n, n), dtype="bool"))
+    causal = _lower_triangle(n)
     causal = keras.ops.broadcast_to(causal[None], (rows, n, n))
     eye = keras.ops.eye(n, dtype="bool")
     eye = keras.ops.broadcast_to(eye[None], (rows, n, n))
@@ -48,7 +61,7 @@ def build_forecast_time_mask(context_len: int, horizon: int, key_valid):
     dec_enc = keras.ops.broadcast_to(
         keras.ops.expand_dims(key_valid, axis=1), (rows, horizon, context_len)
     )
-    dec_dec = keras.ops.tril(keras.ops.ones((horizon, horizon), dtype="bool"))
+    dec_dec = _lower_triangle(horizon)
     dec_dec = keras.ops.broadcast_to(dec_dec[None], (rows, horizon, horizon))
     top = keras.ops.concatenate([enc, enc_dec], axis=2)
     bottom = keras.ops.concatenate([dec_enc, dec_dec], axis=2)
@@ -91,7 +104,7 @@ def build_two_stream_time_mask(
     """
     anchor, active = compute_block_layout(min_context, n_patches, block_size)
     rows, n = int(keras.ops.shape(active)[0]), int(keras.ops.shape(active)[1])
-    causal = keras.ops.tril(keras.ops.ones((n, n), dtype="bool"))
+    causal = _lower_triangle(n)
     causal = keras.ops.broadcast_to(causal[None], (rows, n, n))
     key_col = keras.ops.broadcast_to(
         keras.ops.expand_dims(key_valid, axis=1), (rows, n, n)

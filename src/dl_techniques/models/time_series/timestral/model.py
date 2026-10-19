@@ -476,21 +476,158 @@ class TimestralModel(keras.Model):
             refined = keras.ops.where(target_rows, refined, quantiles)
         return refined
 
-    def call(self, inputs, training=None):
-        """Standard Keras call for training: returns quantile predictions.
+    def _pack(self, values):
+        """(B, T, V) to packed (B * V, T) rows: values with NaN set to 0, and the mask."""
+        b, t, v = (int(d) if d is not None else None for d in values.shape)
+        if b is None:
+            raise ValueError(
+                "TimestralModel needs a static batch size: batch the dataset with "
+                "drop_remainder=True (masks and attention reshape by the row count)"
+            )
+        rows = keras.ops.reshape(keras.ops.transpose(values, (0, 2, 1)), (b * v, t))
+        observed = keras.ops.isfinite(rows)
+        return keras.ops.where(observed, rows, keras.ops.zeros_like(rows)), observed
 
-        This is a simplified path for training on fixed windows.
-        For autoregressive forecasting, use TimestralForecaster.
+    def _left_pad(self, rows, observed):
+        """Left-pad (R, T) to a whole number of patches with unobserved zeros."""
+        pad = -int(rows.shape[-1]) % self.config.patch_size
+        if pad == 0:
+            return rows, observed
+        return (keras.ops.pad(rows, ((0, 0), (pad, 0))),
+                keras.ops.pad(observed, ((0, 0), (pad, 0)), constant_values=False))
+
+    def call(self, inputs, training=None):
+        """One DHF decode block after each context: the forward that ``fit`` trains.
+
+        Each batch item is one series and its variates attend each other. The context
+        is packed one row per variate, left-padded to whole patches, and run through
+        the same context-only path as ``predict_block`` for
+        ``ceil(prediction_length / patch_size)`` forecast patches. The output is that
+        path's raw-space quantiles: every horizon patch in the frame of the last
+        context patch. ``TimestralForecaster`` moves later patches into their own
+        frames (``_refine_block``) and decodes past one block, so honest multi-patch
+        forecasts come from the forecaster.
+
+        Args:
+            inputs: (B, T) or (B, T, V) context, B static; NaN marks a missing value.
+            training: Unused; the network has no dropout or other train-only op.
+
+        Returns:
+            (B, H, Q) quantiles for 2-D inputs, (B, H, V, Q) for 3-D, with
+            H = ``config.prediction_length``, non-decreasing along Q.
+
+        Raises:
+            ValueError: If the batch size is not static.
         """
-        # Inputs: (B, T, F) or (B, T)
-        if inputs.ndim == 2:
-            inputs = keras.ops.expand_dims(inputs, -1)
-        # For training, we expect a fixed window and predict the full horizon
-        # This is a placeholder - the actual training uses predict_block directly
-        raise NotImplementedError(
-            "Use TimestralForecaster.forecast() for inference or "
-            "TimestralTrainer for training with DHF block decoding."
-        )
+        c = self.config
+        x = keras.ops.convert_to_tensor(inputs)
+        univariate = len(x.shape) == 2
+        if univariate:
+            x = keras.ops.expand_dims(x, -1)
+        rows, observed = self._left_pad(*self._pack(x))
+        b, v = int(x.shape[0]), int(x.shape[2])
+        group_ids = keras.ops.repeat(keras.ops.arange(b, dtype="int32"), v)
+        horizon = c.prediction_length
+        quantiles = self._predict_context_only(
+            rows, observed, group_ids, -(-horizon // c.patch_size))[:, :horizon]
+        quantiles = keras.ops.reshape(quantiles, (b, v, horizon, c.num_quantiles))
+        quantiles = keras.ops.transpose(quantiles, (0, 2, 1, 3))
+        return quantiles[:, :, 0] if univariate else quantiles
+
+    def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None, training=True):
+        """Pinball loss over the quantile levels, each horizon patch in its own frame.
+
+        The objective of the reference (Mistral AI's Timestral announcement: "a pinball
+        loss over 21 quantiles, a discrete approximation of CRPS") with the frame its
+        forecaster decodes in. Horizon patch ``j`` is scored in normalized space, with
+        the causal statistics of the true series up to the end of patch ``j - 1``
+        (context plus the first ``j`` target patches): the advancing refine frame with
+        perfect medians, as ``scaler.advancing_block_frames`` describes training.
+
+        - prediction: ``q = asinh((y_pred - loc_0) / scale_0)``, undoing the anchor
+          frame ``call`` returned (``loc_0``, ``scale_0`` of the last context patch).
+        - target: ``z = asinh((y - loc_j) / scale_j)``; without ``use_asinh`` both
+          skip the asinh.
+        - loss: mean over observed target steps and levels of
+          ``max(tau * (z - q), (tau - 1) * (z - q))``, steps weighted by their series'
+          ``sample_weight``; plus ``self.losses``.
+
+        Args:
+            x: The context ``call`` received, (B, T) or (B, T, V).
+            y: The horizon, (B, H) or (B, H, V); NaN marks a step left out of the loss.
+            y_pred: ``call(x)``; computed when None.
+            sample_weight: Optional (B,) weight per series.
+            training: Forwarded to ``call`` when ``y_pred`` is None.
+
+        Returns:
+            Scalar loss, float32 or wider.
+
+        Raises:
+            ValueError: If ``y`` is missing or its horizon is not
+                ``config.prediction_length``.
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-169
+        # WHAT NOT TO DO: do not move this into a keras.losses.Loss passed to
+        # compile(), and do not score the raw-space quantiles. The frame of horizon
+        # patch j needs the context (x) and the true earlier patches (y); a Loss sees
+        # only (y, y_pred). Raw-space pinball weights series by their scale and
+        # trains every patch in the anchor frame, which _refine_block would then
+        # misread. No custom train_step either (repo rule); stock fit() calls this.
+        # See decisions.md D-169.
+        if y is None:
+            raise ValueError("TimestralModel.compute_loss needs the horizon y")
+        if y_pred is None:
+            y_pred = self(x, training=training)
+        c = self.config
+        ps = c.patch_size
+        horizon = c.prediction_length
+        x = keras.ops.convert_to_tensor(x)
+        y = keras.ops.convert_to_tensor(y)
+        if len(x.shape) == 2:
+            x, y = keras.ops.expand_dims(x, -1), keras.ops.expand_dims(y, -1)
+            y_pred = keras.ops.expand_dims(y_pred, 2)
+        if int(y.shape[1]) != horizon:
+            raise ValueError(f"y covers {y.shape[1]} steps; prediction_length is {horizon}")
+        b, v = int(x.shape[0]), int(x.shape[2])
+        work = str(np.result_type(getattr(y_pred.dtype, "name", str(y_pred.dtype)), "float32").name)
+
+        context, context_obs = self._left_pad(*self._pack(keras.ops.cast(x, work)))
+        target, target_obs = self._pack(keras.ops.cast(y, work))
+        h = -(-horizon // ps)
+        tail = h * ps - horizon
+        window = keras.ops.concatenate(
+            [context, keras.ops.pad(target, ((0, 0), (0, tail)))], axis=-1)
+        window_obs = keras.ops.concatenate(
+            [context_obs, keras.ops.pad(target_obs, ((0, 0), (0, tail)), constant_values=False)],
+            axis=-1)
+        loc, scale = causal_patch_loc_scale(
+            window, window_obs, ps, c.minimum_scale, c.stabilize_with_global)
+        ll = int(context.shape[-1]) // ps
+        loc = keras.ops.reshape(loc, (b * v, -1, ps))[:, ll - 1:ll - 1 + h, 0]
+        scale = keras.ops.reshape(scale, (b * v, -1, ps))[:, ll - 1:ll - 1 + h, 0]
+        anchor_loc, anchor_scale = loc[:, :1, None], scale[:, :1, None]
+        loc = keras.ops.repeat(loc, ps, axis=1)[:, :horizon]
+        scale = keras.ops.repeat(scale, ps, axis=1)[:, :horizon]
+
+        pred = keras.ops.reshape(
+            keras.ops.transpose(keras.ops.cast(y_pred, work), (0, 2, 1, 3)),
+            (b * v, horizon, c.num_quantiles))
+        q = (pred - anchor_loc) / anchor_scale
+        z = (target - loc) / scale
+        if c.use_asinh:
+            q, z = keras.ops.arcsinh(q), keras.ops.arcsinh(z)
+        tau = keras.ops.cast(keras.ops.array(c.quantile_knots), work)
+        err = keras.ops.expand_dims(z, -1) - q
+        pinball = keras.ops.mean(keras.ops.maximum(tau * err, (tau - 1.0) * err), axis=-1)
+
+        weight = keras.ops.cast(target_obs, work)
+        if sample_weight is not None:
+            per_series = keras.ops.reshape(keras.ops.cast(sample_weight, work), (b,))
+            weight = weight * keras.ops.expand_dims(keras.ops.repeat(per_series, v), -1)
+        loss = keras.ops.sum(pinball * weight) / keras.ops.maximum(keras.ops.sum(weight), 1.0)
+        for extra in self.losses:
+            loss = loss + keras.ops.cast(extra, work)
+        return loss
 
     def get_config(self):
         config = super().get_config()
