@@ -17,14 +17,14 @@ Timestral is a patch-based transformer trained with Decoupled Horizon Forecastin
 
 ## Models
 
-Four model sizes are available, matching the Hugging Face Hub releases:
+Four model sizes are available. `TimestralModel.MODEL_VARIANTS` is read from the `config.json` of each Hugging Face Hub release; every other field is a `TimestralConfig` default there, except `quantile_width_factor`, which is 3.0 in all four. Each schedule repeats `(time, time, time, time_variate)`.
 
-| Variant | d_model | num_heads | layers | mlp_dim | params |
-|---------|---------|-----------|--------|---------|--------|
-| 5M | 256 | 8 | 8 | 1024 | ~5M |
-| 28M | 512 | 8 | 12 | 2048 | ~28M |
-| 123M | 768 | 12 | 24 | 3072 | ~123M |
-| 209M | 1024 | 16 | 24 | 4096 | ~209M |
+| Variant | d_model | num_heads | layers | mlp_dim | trainable params |
+|---------|---------|-----------|--------|---------|------------------|
+| 5M | 192 | 3 | 8 | 512 | 5,208,960 |
+| 28M | 384 | 6 | 12 | 1024 | 27,821,184 |
+| 123M | 640 | 10 | 20 | 1712 | 122,606,720 |
+| 209M | 768 | 12 | 24 | 2048 | 209,312,256 |
 
 ## Installation
 

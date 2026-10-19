@@ -54,54 +54,40 @@ ROLE_TARGET = 0
 ROLE_PAST_COV = 1
 ROLE_KNOWN_COV = 2
 
-# Variant configurations matching the Hugging Face models. config.py declares
+# Variant configurations of the four released checkpoints, read from each
+# Hugging Face repo's config.json (mistralai/Timestral-{5M,28M,123M,209M});
+# every other field is a TimestralConfig default there. config.py declares
 # TIMESTRAL_VARIANTS empty; it is filled here, where the table lives. A
 # read-only view, because TimestralModel.MODEL_VARIANTS is the same object.
+_RELEASED_UNIT = ("time", "time", "time", "time_variate")
 TIMESTRAL_VARIANTS = types.MappingProxyType({
     "5M": {
-        "d_model": 256,
-        "num_heads": 8,
-        "mlp_hidden_dim": 1024,
-        "block_schedule": (
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-        ),
+        "d_model": 192,
+        "num_heads": 3,
+        "mlp_hidden_dim": 512,
+        "block_schedule": _RELEASED_UNIT * 2,
+        "quantile_width_factor": 3.0,
     },
     "28M": {
-        "d_model": 512,
-        "num_heads": 8,
-        "mlp_hidden_dim": 2048,
-        "block_schedule": (
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-        ),
+        "d_model": 384,
+        "num_heads": 6,
+        "mlp_hidden_dim": 1024,
+        "block_schedule": _RELEASED_UNIT * 3,
+        "quantile_width_factor": 3.0,
     },
     "123M": {
-        "d_model": 768,
-        "num_heads": 12,
-        "mlp_hidden_dim": 3072,
-        "block_schedule": (
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-        ),
+        "d_model": 640,
+        "num_heads": 10,
+        "mlp_hidden_dim": 1712,
+        "block_schedule": _RELEASED_UNIT * 5,
+        "quantile_width_factor": 3.0,
     },
     "209M": {
-        "d_model": 1024,
-        "num_heads": 16,
-        "mlp_hidden_dim": 4096,
-        "block_schedule": (
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-            "time", "time_variate", "time", "time_variate",
-        ),
+        "d_model": 768,
+        "num_heads": 12,
+        "mlp_hidden_dim": 2048,
+        "block_schedule": _RELEASED_UNIT * 6,
+        "quantile_width_factor": 3.0,
     },
 })
 config_module.TIMESTRAL_VARIANTS = TIMESTRAL_VARIANTS
