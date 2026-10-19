@@ -151,3 +151,122 @@ class TestUniversalInvertedBottleneck:
 
         assert start_only.start_dw.kernel.shape[2] == C
         assert middle_only.dw1.kernel.shape[2] == C * expansion
+
+
+class TestDropPath:
+    """Stochastic-depth rate on the residual branch (MetaFormer MBConv need).
+
+    The reference blocks this layer is being used by (MetaFormer's conv stages)
+    schedule a drop-connect rate per block and apply it to the residual BRANCH
+    before the add. These tests pin the three load-bearing facts: no sublayer
+    at rate zero, inference identity, and training drops the branch — not the
+    shortcut, and not a sole output.
+    """
+
+    def test_zero_rate_creates_no_sublayer(self):
+        layer = UniversalInvertedBottleneck(filters=C, drop_path_rate=0.0)
+        with_drop = UniversalInvertedBottleneck(filters=C, drop_path_rate=0.25)
+        assert layer.drop_path is None
+        assert with_drop.drop_path is not None
+        assert with_drop.drop_path.drop_path_rate == 0.25
+
+    def test_invalid_rates_raise(self):
+        with pytest.raises(ValueError):
+            UniversalInvertedBottleneck(filters=C, drop_path_rate=1.0)
+        with pytest.raises(ValueError):
+            UniversalInvertedBottleneck(filters=C, drop_path_rate=-0.1)
+        with pytest.raises(TypeError):
+            UniversalInvertedBottleneck(filters=C, drop_path_rate="0.1")
+
+    def test_rate_survives_get_config_round_trip(self):
+        layer = UniversalInvertedBottleneck(
+            filters=C, dropout_rate=0.1, drop_path_rate=0.3
+        )
+        config = layer.get_config()
+        assert config["drop_path_rate"] == 0.3
+        rebuilt = UniversalInvertedBottleneck.from_config(config)
+        assert rebuilt.drop_path_rate == 0.3
+        assert rebuilt.drop_path is not None
+
+    def test_inference_with_rate_is_weight_identical_to_rate_zero(self, sample):
+        """At inference the layer must be a pure identity, not a rescale.
+
+        StochasticDepth's ``1 / keep_prob`` correction is training-only, so a
+        rate-0.5 block run with ``training=False`` must return exactly what a
+        rate-0 block with the SAME weights returns.
+        """
+        plain = UniversalInvertedBottleneck(filters=C, drop_path_rate=0.0)
+        steep = UniversalInvertedBottleneck(filters=C, drop_path_rate=0.5)
+        plain(sample)
+        steep(sample)
+        steep.set_weights(plain.get_weights())
+
+        y_plain = plain(sample, training=False)
+        y_steep = steep(sample, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_plain),
+            keras.ops.convert_to_numpy(y_steep),
+            rtol=0, atol=0,
+        )
+
+    def test_the_drop_path_drops_the_branch_not_the_shortcut(self, sample):
+        """A red proof recording: the guard below was RED against a mutant.
+
+        The mutant applied the drop-path to the shortcut instead of the branch
+        (``shortcut = drop_path(shortcut)``). Asserting only that ``some``
+        outputs changed cannot see that defect — with a rate of 0.99 most
+        samples change either way. What sees it, exactly, is the dropped
+        sample's output: with the branch dropped it is the identity
+        ``shortcut + 0``; with the shortcut dropped it is the branch term
+        ``0 + projection(x)``, equal to the input only by coincidence of the
+        projection being zero, which a block owned by this suite's B_*xH*W
+        forward pass never is.
+        """
+        keras.utils.set_random_seed(7)
+        batch = 128
+        rate = 0.99
+        inp = np.random.default_rng(0).standard_normal(
+            (batch, H, W, C)).astype("float32")
+
+        layer = UniversalInvertedBottleneck(
+            filters=C, drop_path_rate=rate
+        )
+        out = keras.ops.convert_to_numpy(layer(inp, training=True))
+        inp_np = keras.ops.convert_to_numpy(inp)
+
+        dropped = np.all(out == inp_np, axis=(1, 2, 3))
+        n_dropped = int(dropped.sum())
+        # rate 0.99 on 128 samples: the all-kept event has probability
+        # ~1e-258, so a floor FAR below the expectation is deterministic-safe
+        # in every direction — higher and the mask is being misread; lower,
+        # the layer is not dropping whole samples at this rate.
+        assert n_dropped >= 100, (
+            f"expected >= 100 of 128 fully-identity samples at rate {rate}, "
+            f"got {n_dropped}"
+        )
+        # And the kept minority must differ, i.e. the branch is live when not
+        # dropped. If the mutant dropped instead the SHORTCUT, kept samples
+        # (mask=0 on the addend) would read 0 + branch, and no sample would be
+        # the plain input at all — the exact failure mode the name records.
+        assert n_dropped < batch, "no sample kept: drop-path is not the branch"
+
+    def test_stride_two_block_never_enters_the_drop_path(self, sample):
+        """A stride-2 block has no residual, so rate must have zero effect."""
+        keras.utils.set_random_seed(11)
+        plain = UniversalInvertedBottleneck(
+            filters=C, stride=2, drop_path_rate=0.0
+        )
+        steep = UniversalInvertedBottleneck(
+            filters=C, stride=2, drop_path_rate=0.9
+        )
+        plain(sample)
+        steep(sample)
+        steep.set_weights(plain.get_weights())
+
+        y_plain = plain(sample, training=True)
+        y_steep = steep(sample, training=True)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_plain),
+            keras.ops.convert_to_numpy(y_steep),
+            rtol=0, atol=0,
+        )

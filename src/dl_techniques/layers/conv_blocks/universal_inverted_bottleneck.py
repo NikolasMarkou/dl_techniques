@@ -24,6 +24,7 @@ from typing import Tuple, Optional, Any, Dict, Union
 
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.layers.activations import create_activation_layer, ActivationType
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -71,6 +72,11 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         ├──────────────────────┤           │
         │  Project: Conv1x1    │           │
         │  → Norm              │           │
+        └──────┬───────────────┘           │
+               ▼                           │
+        ┌──────────────────────┐           │
+        │  Opt. drop_path      │           │
+        │  (branch only)       │           │
         └──────┬───────────────┘           │
                ▼                           ▼
         ┌──────────────────────────────────────────┐
@@ -122,6 +128,15 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     :type normalization_args: dict or None
     :param dropout_rate: Dropout rate after depthwise convolutions. Defaults to 0.0.
     :type dropout_rate: float
+    :param drop_path_rate: Stochastic depth (drop-path) rate applied to the
+        residual BRANCH before it is added to the shortcut — the whole branch
+        tensor is zeroed per sample with probability ``drop_path_rate`` and
+        survivors are scaled to keep the expectation, so a minibatch trains on
+        a different effective depth each step. Inference is a pure identity.
+        Applied only when a residual connection actually exists (stride 1 and
+        channel match); pervasive when drop-path is requested, not mandatory.
+        Defaults to 0.0.
+    :type drop_path_rate: float
     :param use_squeeze_excitation: Whether to add SE block. Defaults to False.
     :type use_squeeze_excitation: bool
     :param se_ratio: Reduction ratio for SE block. Defaults to 0.25.
@@ -162,6 +177,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             normalization_type: NormalizationType = 'batch_norm',
             normalization_args: Optional[Dict[str, Any]] = None,
             dropout_rate: float = 0.0,
+            drop_path_rate: float = 0.0,
             use_squeeze_excitation: bool = False,
             se_ratio: float = 0.25,
             se_activation: str = 'relu',
@@ -199,6 +215,16 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             raise ValueError(
                 f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}"
             )
+        if not isinstance(drop_path_rate, (int, float)):
+            raise TypeError("drop_path_rate must be a number")
+        # StochasticDepth itself only accepts [0, 1): a rate of exactly 1.0
+        # would make the residual branch of every surviving depth-zero
+        # configuration contribute nothing while still sharing a denominator
+        # of zero in its scaling.
+        if not 0.0 <= drop_path_rate < 1.0:
+            raise ValueError(
+                f"drop_path_rate must be in [0, 1), got {drop_path_rate}"
+            )
         if se_ratio <= 0:
             raise ValueError(f"se_ratio must be positive, got {se_ratio}")
         if padding not in ['same', 'valid', 'causal']:
@@ -221,6 +247,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.normalization_args = normalization_args or {}
         self.dropout_rate = dropout_rate
+        self.drop_path_rate = float(drop_path_rate)
         self.use_squeeze_excitation = use_squeeze_excitation
         self.se_ratio = se_ratio
         self.se_activation = deserialize_activation(se_activation)
@@ -353,6 +380,19 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             **self._conv_kwargs()
         )
         self.project_norm = self._create_normalization_layer('project_norm')
+
+        # Stochastic depth of the residual BRANCH. Built only when a rate is
+        # requested, mirroring how the conditional dropout layers above are
+        # created; a zero rate leaves no sublayer, so the weight tree is
+        # unchanged. The layer is applied in call() only on the residual path
+        # — a stride-2 or channel-changing block has no residual to drop, and
+        # drop-pathing a sole output would not be stochastic depth.
+        if self.drop_path_rate > 0.0:
+            self.drop_path = StochasticDepth(
+                self.drop_path_rate, name='drop_path'
+            )
+        else:
+            self.drop_path = None
 
     def _conv_kwargs(self) -> Dict[str, Any]:
         """Return fresh keyword arguments for one ``Conv2D`` sublayer.
@@ -547,8 +587,13 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         x = self.project_conv(x)
         x = self.project_norm(x, training=training)
 
-        # Residual connection
+        # Residual connection. Drop-path acts on the BRANCH tensor before the
+        # add, matching the reference drop-connect (e.g. EfficientNet /
+        # MetaFormer MBConv), which scales or zeroes the residual path after
+        # the projection norm.
         if self.stride == 1 and keras.ops.shape(inputs)[-1] == self.filters:
+            if self.drop_path is not None:
+                x = self.drop_path(x, training=training)
             return shortcut + x
         return x
 
@@ -586,6 +631,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "normalization_type": self.normalization_type,
             "normalization_args": self.normalization_args,
             "dropout_rate": self.dropout_rate,
+            "drop_path_rate": self.drop_path_rate,
             "use_squeeze_excitation": self.use_squeeze_excitation,
             "se_ratio": self.se_ratio,
             "se_activation": serialize_activation(self.se_activation),
