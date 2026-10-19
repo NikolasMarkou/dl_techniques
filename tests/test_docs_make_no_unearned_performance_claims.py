@@ -285,7 +285,9 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # BOTH halves were checked -- its README names `pretrained=True` solely
         # to say the call RAISES (the disclaimed form the window above accepts),
         # AND the package's own model module genuinely raises
-        # `NotImplementedError` on that path. Verified for every name below.
+        # `NotImplementedError` on that path. Verified for every name below
+        # except `depth_anything`, whose two halves differ and are stated, and
+        # checked, at its entry.
         # A README that advertises a working `pretrained=True` it does not have
         # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
         # not by this pin; this one only tracks WHO is in the conversation.
@@ -300,7 +302,21 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # test_the_token_decoder.py) and by the behavioural arm of
         # test_package_api_contract.py. Both halves checked.
         "bit_diffusion",
-        "colbert", "dino", "distilbert", "dit",
+        "colbert",
+        # depth_anything: the one package whose `pretrained=True` WORKS (plan
+        # -2026-10-14T062616-81938e81 step 1.7): it loads the official DINOv2
+        # encoder file the user downloads, strictly (tests/test_models/
+        # test_depth_anything/test_the_encoder_is_the_references_dinov2.py
+        # compares the loaded encoder against a numpy port of that file).
+        # Its README banner (inside BANNER_LINES) says no trained weights ship
+        # and a missing file is a hard error, and the latter really raises
+        # `FileNotFoundError`, verified by EXECUTING it in the same test file
+        # with the weights directory pointed at an empty path. The banner also
+        # cites what the start was measured to buy (D-140: held-out loss 0.57
+        # to 0.59 against a constant 1.0 and the average layout 1.045). Both
+        # halves checked (step 2.5, D-157).
+        "depth_anything",
+        "dino", "distilbert", "dit",
         # doc_res: README:215 says `pretrained=True` raises; model.py:707
         # really does `raise NotImplementedError`. Both halves checked.
         "doc_res",

@@ -19,7 +19,14 @@ Image sides must be multiples of 14 (the reference trains at 518, the default).
 `DepthAnything.from_variant('vit_s', pretrained=True)` (and `create_depth_anything(...,
 pretrained=True)`) load the official DINOv2 weights (`facebook/dinov2-{small,base,large}`, a local
 download, see "Pretrained encoder" below) into the encoder; the head starts from its
-initialization, as in the paper. The decoder is `DPTHead`, a port of the reference V1 head that fuses the encoder's
+initialization, as in the paper. No trained weights ship with this package: `pretrained=True`
+reads the encoder file you download yourself, and without it the call is a hard error
+(`FileNotFoundError`, naming the path, before anything is built). What that start buys was
+measured, not assumed: from the official DINOv2-small encoder, 3,000 steps on MegaDepth reach a
+held-out masked affine-invariant loss of 0.57 to 0.59 on three seeds, against 1.0 for a constant
+prediction and 1.045 for the average training layout, with a per-crop Pearson correlation of 0.80
+to 0.81 (the layout: 0.42). From a random encoder the same trainer only ties the average layout.
+The table and settings are in `src/train/depth_anything/README.md`, "Learning rate". The decoder is `DPTHead`, a port of the reference V1 head that fuses the encoder's
 last four layers, and it ends in a ReLU, as the reference heads do (see "DPT head" and "Output
 range" below). `train_step` dispatches to a
 clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
