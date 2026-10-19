@@ -53,7 +53,7 @@ Input (B, F_in)
    ├─► ...
    ├─► KANLinear  (layer N-1, forced to 'linear')
    │
-   └─► Activation (e.g. softmax)  ──►  Output (B, F_out)
+   └─► Activation (default linear)  ──►  Output (B, F_out)
 ```
 
 The last layer's `activation` is popped off and applied separately while the `KANLinear` itself is forced linear. Leaving it in place would apply the transform **twice** — a preset carrying `activation='softmax'` would softmax the edge outputs and then softmax their sum.
@@ -178,7 +178,7 @@ Both `KAN` and `create_kan_model` are exported from the package: `from dl_techni
 
 Grid resolution and width move together: a fine grid on a narrow layer tends to overfit, a coarse grid on a wide one wastes it.
 
-`from_variant` expands `hidden_features` into one layer config per width, each inheriting the preset's grid/order/activation, then appends an output layer of `output_features`. When `output_activation` is omitted it defaults to `softmax` for `output_features > 1` and `linear` otherwise. The preset dict is copied first, so the class table is never mutated for later callers.
+`from_variant` expands `hidden_features` into one layer config per width, each inheriting the preset's grid/order/activation, then appends an output layer of `output_features`. When `output_activation` is omitted it defaults to `linear` for every `output_features` (since 2026-10-17; it was `softmax` for `output_features > 1`): a classifier emits logits and compiles with `from_logits=True`. The preset dict is copied first, so the class table is never mutated for later callers.
 
 Override any preset field with `override_config`:
 
@@ -207,10 +207,10 @@ from dl_techniques.models.general_purpose.kan.model import create_kan_model
 x_train = x_train.reshape(-1, 784).astype("float32") / 255.0
 x_test = x_test.reshape(-1, 784).astype("float32") / 255.0
 
-model = create_kan_model("small", input_features=784, output_features=10,
-                         output_activation="softmax")
+model = create_kan_model("small", input_features=784, output_features=10)  # logits
 model.update_kan_grids(x_train[:1000])
-model.compile(optimizer="adam", loss="sparse_categorical_crossentropy",
+model.compile(optimizer="adam",
+              loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
               metrics=["accuracy"])
 model.fit(x_train, y_train, validation_data=(x_test, y_test), epochs=5)
 ```
@@ -224,7 +224,7 @@ layer_configs = [
     {"features": 64, "grid_size": 8, "spline_order": 3, "activation": "gelu"},
     {"features": 32, "grid_size": 5, "spline_order": 2, "activation": "gelu"},
     # The last entry's `activation` becomes the model's final Activation layer.
-    {"features": 10, "grid_size": 5, "activation": "softmax"},
+    {"features": 10, "grid_size": 5, "activation": "linear"},   # logits
 ]
 model = KAN(layer_configs=layer_configs, input_features=784)
 model.update_kan_grids(x_train[:500])
@@ -277,7 +277,7 @@ from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 x = keras.layers.Flatten()(conv_features)
 x = KANLinear(features=128, grid_size=8, activation="gelu")(x)
-outputs = keras.layers.Dense(10, activation="softmax")(x)
+outputs = keras.layers.Dense(10)(x)  # logits; compile with from_logits=True
 ```
 
 A hybrid model has no `update_kan_grids` method of its own — call `update_grid_from_samples(activations)` on each `KANLinear` with the activations it actually sees.

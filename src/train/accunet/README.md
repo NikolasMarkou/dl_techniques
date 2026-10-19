@@ -39,8 +39,16 @@ non-conforming `--image-size`.
 
 | Mode | Default loss | Default metrics | Default `--monitor` |
 |------|--------------|-----------------|----------------------|
-| Binary (`--num-classes 1`) | `combo` (BCE + Dice) | `binary_accuracy`, `dice` | `val_loss` |
-| Multi-class (`--num-classes N>=2`) | `combo` | `sparse_categorical_accuracy` | `val_loss` |
+| Binary (`--num-classes 1`) | `combo` (BCE + Dice) | `binary_accuracy` (logit > 0), `dice` | `val_loss` |
+| Multi-class (`--num-classes N>=2`) | `combo` | `categorical_accuracy` | `val_loss` |
+
+AccUNet emits logits (since 2026-10-17), so every loss is built with
+`LossConfig(..., from_logits=True)`: one channel is read through a sigmoid,
+more through a softmax, and cross-entropy in log space. Synthetic multi-class
+labels are one-hot `(N, H, W, N_classes)`, the layout the segmentation losses
+validate; before 2026-10-17 they were sparse ids and every multi-class run
+raised at its first step. Models saved before then hold a sigmoid or softmax
+layer and do not load.
 
 Alternative losses are exposed via `--loss`
 (`dice`, `focal`, `cross_entropy`, `focal_tversky`, `tversky`,

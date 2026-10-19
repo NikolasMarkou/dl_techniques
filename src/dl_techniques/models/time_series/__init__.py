@@ -5,8 +5,9 @@ A family of independent forecasting architectures, one subpackage each:
 RECURSIVE forecaster here, with trainable smoothing parameters),
 `deepar/` (autoregressive probabilistic), `mdn/` (mixture density heads),
 `nbeats/` (basis expansion, plus the exogenous `nbeatsx` variant),
-`prism/`, `tirex/` and `xlstm/` (extended LSTM, with a dedicated forecaster
-wrapper). They share the `ForecastMixin` in `forecast.py` but no backbone, so
+`prism/`, `tirex/`, `timestral/` (patch-based transformer with DHF decoding)
+and `xlstm/` (extended LSTM, with a dedicated forecaster wrapper).
+They share the `ForecastMixin` in `forecast.py` but no backbone, so
 there is no single variant table across the family.
 """
 from .adaptive_ema.model import (
@@ -20,6 +21,15 @@ from .nbeats.nbeats import NBeatsNet, create_nbeats_model
 from .nbeats.nbeatsx import NBeatsXNet, create_nbeatsx_model
 from .prism.model import PRISMModel, create_prism_model
 from .tirex.model import TiRexCore, create_tirex_by_variant, create_tirex_model
+from .timestral import (
+    TimestralConfig,
+    TimestralModel,
+    TimestralForecaster,
+    TimestralForecast,
+    create_timestral_model,
+    create_timestral_by_variant,
+    load_model,
+)
 from .xlstm.forecaster import xLSTMForecaster, create_xlstm_forecaster
 from .xlstm.model import xLSTM, create_xlstm
 
@@ -32,6 +42,10 @@ __all__ = [
     "NBeatsXNet",
     "PRISMModel",
     "TiRexCore",
+    "TimestralConfig",
+    "TimestralModel",
+    "TimestralForecaster",
+    "TimestralForecast",
     "create_adaptive_ema_slope_filter",
     "create_deepar",
     "create_ets",
@@ -41,8 +55,11 @@ __all__ = [
     "create_prism_model",
     "create_tirex_by_variant",
     "create_tirex_model",
+    "create_timestral_model",
+    "create_timestral_by_variant",
     "create_xlstm",
     "create_xlstm_forecaster",
+    "load_model",
     "xLSTM",
     "xLSTMForecaster",
 ]

@@ -13,6 +13,10 @@ The pair is what is asserted here. Either half alone is satisfiable by the
 defect: a linear output is fine, and a ``from_logits=False`` cross-entropy is
 fine -- together they are wrong.
 
+Since plan-2026-10-14T062616-81938e81 D-149 (2026-10-17) a softmax or sigmoid
+output is refused, so the pair can only be "linear output, loss on logits", for
+the default and for the binary factory alike.
+
 Also covered: ``from_variant`` did ``config.update(kwargs)`` and then
 unconditionally overwrote ``config["hidden_units"]``, silently discarding a
 caller-supplied value.
@@ -48,26 +52,10 @@ class TestTheDefaultLossMatchesTheDefaultOutput:
         )
         assert not _emits_probabilities(model)
 
-    def test_a_softmax_output_gets_a_probability_loss(self):
-        model = create_power_mlp(
-            hidden_units=[20, 16, 5], output_activation="softmax")
-
-        assert _emits_probabilities(model)
-        assert model.loss.from_logits is False, (
-            "ASSERT-LOSS-MATCHES-OUTPUT: a softmax output must NOT be read as "
-            "logits."
-        )
-
-    @pytest.mark.parametrize("activation", [None, "softmax"])
-    def test_the_pair_agrees_for_every_default_path(self, activation):
-        """The single invariant, stated once: loss direction tracks output."""
-        kwargs = {} if activation is None else {"output_activation": activation}
-        model = create_power_mlp(hidden_units=[20, 16, 5], **kwargs)
-
-        assert model.loss.from_logits is not _emits_probabilities(model), (
-            f"ASSERT-PAIR-AGREES: output_activation={activation!r} paired with "
-            f"from_logits={model.loss.from_logits}"
-        )
+    @pytest.mark.parametrize("activation", ["softmax", "sigmoid"])
+    def test_a_probability_output_is_refused_before_any_loss_is_derived(self, activation):
+        with pytest.raises(ValueError, match="logits"):
+            create_power_mlp(hidden_units=[20, 16, 5], output_activation=activation)
 
     def test_an_explicit_loss_still_wins(self):
         """Anti-vacuity: the override path is untouched."""
@@ -82,8 +70,22 @@ class TestTheDefaultLossMatchesTheDefaultOutput:
         assert regressor.output_activation is keras.activations.linear
 
         binary = create_power_mlp_binary_classifier(hidden_units=[10, 8, 1])
-        assert binary.loss == "binary_crossentropy"
-        assert binary.output_activation is keras.activations.sigmoid
+        assert isinstance(binary.loss, keras.losses.BinaryCrossentropy)
+        assert binary.loss.from_logits is True
+        assert binary.output_activation is keras.activations.linear
+
+    def test_the_binary_classifier_memorises_a_batch_on_logits(self):
+        """D-122 training bar for the binary factory: stock fit memorises one batch."""
+        keras.utils.set_random_seed(0)
+        model = create_power_mlp_binary_classifier(
+            hidden_units=[8, 32, 1], k=2, learning_rate=1e-2)
+        x = np.random.default_rng(0).normal(size=(32, 8)).astype("float32")
+        y = (np.arange(32) % 2).astype("float32")[:, None]
+        history = model.fit(x, y, batch_size=32, epochs=300, verbose=0)
+        assert history.history["loss"][-1] < 0.1 * np.log(2.0), history.history["loss"][-1]
+        assert history.history["accuracy"][-1] == 1.0
+        logits = keras.ops.convert_to_numpy(model(x))
+        assert ((logits > 0) == (y > 0.5)).all()
 
     def test_the_default_model_actually_trains(self):
         """End to end: the derived loss must be usable, not just correct."""

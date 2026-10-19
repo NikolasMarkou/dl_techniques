@@ -19,9 +19,10 @@ sequence rather than one layer that loops, since each layer's internal
 squeeze-excitation only runs once per layer. Input spatial dimensions must
 be divisible by 16: four stride-2 pools and four stride-2 transposed
 convolutions cannot round-trip an odd dimension, and a static shape that
-violates this raises at the first call. The head applies its own
-activation, sigmoid for one class and softmax otherwise, so the model
-emits probabilities and must be compiled with `from_logits=False`.
+violates this raises at the first call. The head is a linear 1x1
+convolution: the model emits logits (one channel for binary segmentation,
+`num_classes` channels otherwise) and is compiled with `from_logits=True`
+(`LossConfig(from_logits=True)` for the segmentation losses).
 
 References:
     - Ibtehaz & Kihara, 2023. ACC-UNet: A Completely Convolutional UNet Model
@@ -144,16 +145,14 @@ class AccUNet(keras.Model):
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  Conv 1×1 → num_classes              │
-        │  → sigmoid (num_classes == 1)        │
-        │  → softmax (num_classes  > 1)        │
+        │  Conv 1×1 → num_classes, linear      │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
         │  Output [B, H, W, num_classes]       │
-        │  probabilities, not logits           │
-        │  → compile with from_logits=False    │
+        │  logits                              │
+        │  → compile with from_logits=True     │
         └──────────────────────────────────────┘
 
     Per-level configuration:
@@ -179,8 +178,8 @@ class AccUNet(keras.Model):
         width from the channel count at construction.
     :type input_channels: int
     :param num_classes: Number of output classes for segmentation. Must be
-        positive. Also selects the head activation: 1 gives sigmoid, more than
-        1 gives softmax.
+        positive. One channel is a binary logit map (read through a sigmoid),
+        more are per-class logits (read through a softmax).
     :type num_classes: int
     :param base_filters: Base filter count. The five encoder levels use
         ``[base_filters, ×2, ×4, ×8, ×16]``. Must be positive. Defaults to 32.
@@ -211,8 +210,8 @@ class AccUNet(keras.Model):
         and left unchecked.
 
     Output shape:
-        4D tensor with shape ``(batch_size, height, width, num_classes)``,
-        already passed through sigmoid or softmax.
+        4D tensor with shape ``(batch_size, height, width, num_classes)``
+        of logits.
 
     :ivar encoder_blocks: Per encoder level, the two ``HANCBlock`` instances.
     :vartype encoder_blocks: List[List[HANCBlock]]
@@ -226,10 +225,8 @@ class AccUNet(keras.Model):
     :vartype res_paths: List[ResPath]
     :ivar mlfc_layers: The stacked ``MLFCLayer`` instances.
     :vartype mlfc_layers: List[MLFCLayer]
-    :ivar output_conv: Final 1x1 convolution to ``num_classes``.
+    :ivar output_conv: Final linear 1x1 convolution to ``num_classes`` logits.
     :vartype output_conv: keras.layers.Conv2D
-    :ivar output_activation: Final sigmoid or softmax.
-    :vartype output_activation: keras.layers.Layer
 
     Example:
         .. code-block:: python
@@ -251,13 +248,13 @@ class AccUNet(keras.Model):
 
             model.compile(
                 optimizer='adam',
-                loss='binary_crossentropy',
-                metrics=['accuracy']
+                loss=keras.losses.BinaryCrossentropy(from_logits=True),
+                metrics=[keras.metrics.BinaryAccuracy(threshold=0.0)]
             )
 
     Note:
-        The head applies its own activation, so the model emits PROBABILITIES,
-        not logits: compile with ``from_logits=False``.
+        The head is linear, so the model emits LOGITS: compile with
+        ``from_logits=True``.
 
         Following modern Keras 3 patterns, all sub-layers are created in
         ``__init__`` without helper methods, which keeps serialization and
@@ -451,7 +448,8 @@ class AccUNet(keras.Model):
             )
             self.mlfc_layers.append(mlfc)
 
-        # Output convolution and activation
+        # DECISION plan-2026-10-14T062616-81938e81/D-144: the head is this linear
+        # conv; the model emits logits, never a sigmoid or softmax layer after it.
         self.output_conv = keras.layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
@@ -460,13 +458,6 @@ class AccUNet(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name='output_conv'
         )
-
-        if self.num_classes == 1:
-            # Binary segmentation
-            self.output_activation = keras.layers.Activation("sigmoid", name='output_activation')
-        else:
-            # Multi-class segmentation
-            self.output_activation = keras.layers.Softmax(name='output_activation')
 
         # Create concatenation layers for decoder skip connections
         self.concat_layers: List[keras.layers.Layer] = []
@@ -511,8 +502,7 @@ class AccUNet(keras.Model):
         :param training: Whether the model is in training mode.
         :type training: Optional[bool]
         :return: Segmentation map of shape
-            ``(batch_size, height, width, num_classes)``, already activated
-            (sigmoid or softmax), i.e. probabilities rather than logits.
+            ``(batch_size, height, width, num_classes)``: logits.
             When ``include_top=False``, returns a dict with encoder features,
             bottleneck features, and processed skip connections for custom heads.
         :rtype: Union[keras.KerasTensor, Dict[str, Any]]
@@ -568,7 +558,6 @@ class AccUNet(keras.Model):
                 x = block(x, training=training)
 
         x = self.output_conv(x)
-        x = self.output_activation(x)
 
         return x
 
@@ -788,7 +777,7 @@ def create_acc_unet_binary(
         When False, returns encoder features for custom heads. Defaults to True.
     :type include_top: bool
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
-    :return: Functional model with a single sigmoid-activated output channel.
+    :return: Functional model with a single output channel of logits.
         Its type is :class:`AccUNetFunctional`, a ``keras.Model`` subclass that
         additionally forces ``jit_compile=False`` on every compile path.
     :rtype: Union[AccUNetFunctional, AccUNet]
@@ -805,8 +794,8 @@ def create_acc_unet_binary(
 
             model.compile(
                 optimizer='adam',
-                loss='binary_crossentropy',
-                metrics=['binary_accuracy', 'dice_coefficient']
+                loss=keras.losses.BinaryCrossentropy(from_logits=True),
+                metrics=[keras.metrics.BinaryAccuracy(threshold=0.0)]
             )
     """
     return create_acc_unet(
@@ -846,7 +835,7 @@ def create_acc_unet_multiclass(
         When False, returns encoder features for custom heads. Defaults to True.
     :type include_top: bool
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
-    :return: Functional model with a softmax-activated output. Its type is
+    :return: Functional model with a ``num_classes``-channel logits output. Its type is
         :class:`AccUNetFunctional`, a ``keras.Model`` subclass that additionally
         forces ``jit_compile=False`` on every compile path.
     :rtype: Union[AccUNetFunctional, AccUNet]
@@ -865,8 +854,8 @@ def create_acc_unet_multiclass(
 
             model.compile(
                 optimizer='adamw',
-                loss='sparse_categorical_crossentropy',
-                metrics=['sparse_categorical_accuracy', 'mean_iou']
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                metrics=['sparse_categorical_accuracy']
             )
     """
     if num_classes <= 1:

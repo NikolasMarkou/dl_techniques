@@ -161,10 +161,11 @@ model = SHGCNNodeClassifier(
     dropout_rate=0.5
 )
 
-# 2. Compile
+# 2. Compile. The classifier is linear (logits, since 2026-10-17), so the
+# loss takes from_logits=True.
 model.compile(
     optimizer="adam",
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 

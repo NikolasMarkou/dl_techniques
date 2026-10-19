@@ -916,9 +916,12 @@ class DocScannerSegmenter(keras.Model):
     The output contract: SEVEN maps
     -------------------------------
     ``call`` returns a ``list`` of seven tensors, each
-    ``(batch, height, width, output_channels)`` and each already through a
-    ``sigmoid``, in upstream's order ``[d0, d1, d2, d3, d4, d5, d6]``
-    (``seg.py:549-550``).
+    ``(batch, height, width, output_channels)`` and each a map of LOGITS, in
+    upstream's order ``[d0, d1, d2, d3, d4, d5, d6]`` (``seg.py:549-550``).
+    Upstream applies the sigmoid inside the model; this port returns the
+    pre-sigmoid maps (the repository's logits rule, D-146), trains them with
+    ``BinaryCrossentropy(from_logits=True)``, and :class:`DocScanner` applies
+    the sigmoid at its own seam, so the composite's mask is unchanged.
 
     * ``d0`` is the FUSION and the only one the pipeline consumes --
       ``inference.py:24`` unpacks ``msk, _1, ..., _6 = self.msk(x)`` and drops
@@ -963,8 +966,9 @@ class DocScannerSegmenter(keras.Model):
         .. code-block:: python
 
             model = DocScannerSegmenter.from_variant("docscanner-l")
-            maps = model(page, training=False)        # 7 x (B, 288, 288, 1)
-            mask = keras.ops.cast(maps[0] > 0.5, page.dtype)
+            maps = model(page, training=False)        # 7 x (B, 288, 288, 1) logits
+            confidence = keras.ops.sigmoid(maps[0])     # the fused map in [0, 1]
+            mask = keras.ops.cast(confidence > 0.5, page.dtype)
     """
 
     #: Derived from ``_VARIANT_SPEC``'s ``seg_*`` rows, never restated. See the
@@ -1082,7 +1086,7 @@ class DocScannerSegmenter(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> List[keras.KerasTensor]:
-        """Run the nested U and emit seven confidence maps.
+        """Run the nested U and emit seven confidence-map logits.
 
         :param inputs: ``(batch, height, width, channels)``, channels-last.
             Upstream feeds raw 3-channel RGB (``inference.py:20``); the
@@ -1094,8 +1098,9 @@ class DocScannerSegmenter(keras.Model):
             not for the rectifier.
         :type training: Optional[bool]
         :return: Seven tensors ``[d0, d1, ..., d6]``, each
-            ``(batch, height, width, output_channels)`` and each in ``[0, 1]``.
-            ``d0`` is the fusion; see the class docstring.
+            ``(batch, height, width, output_channels)`` of logits (a sigmoid
+            of each is its confidence in ``[0, 1]``). ``d0`` is the fusion;
+            see the class docstring.
         :rtype: List[keras.KerasTensor]
         """
         # Down: `hx1 .. hx6`, pooling between stages but not after the last.
@@ -1156,9 +1161,10 @@ class DocScannerSegmenter(keras.Model):
         # of any one of them: `outconv(cat((d1, ..., d6), 1))`, `seg.py:548`.
         fused = self.outconv(keras.ops.concatenate(resized_logits, axis=-1))
 
-        return [
-            keras.ops.sigmoid(logit) for logit in [fused] + resized_logits
-        ]
+        # DECISION plan-2026-10-14T062616-81938e81/D-146: the seven maps leave as
+        # LOGITS; the sigmoid upstream applies here is applied by DocScanner at
+        # its seam and by any reader that wants a confidence. Never a sigmoid here.
+        return [fused] + resized_logits
 
     def compute_output_shape(
             self,
@@ -1342,7 +1348,8 @@ class DocScanner(keras.Model):
 
     .. code-block:: text
 
-        msk, _1, ..., _6 = segmenter(x)      seven maps; only the first is used
+        msk, _1, ..., _6 = segmenter(x)      seven logit maps; only the first is used
+        msk              = sigmoid(msk)      the confidence (upstream: inside seg.py)
         msk              = (msk > 0.5)       BINARY, not soft
         x                = msk * x           MULTIPLICATIVE, not concatenated
         bm               = rectifier(x)      (B, H, W, 2), absolute pixel units
@@ -1495,7 +1502,10 @@ class DocScanner(keras.Model):
         # `inference.py:24`: `msk, _1,_2,_3,_4,_5,_6 = self.msk(x)`. Six of the
         # seven maps are DEEP-SUPERVISION outputs and are dropped here; `d0`,
         # the fusion, is the only one the pipeline consumes.
-        confidence = self.segmenter(inputs, training=training)[0]
+        # The segmenter emits logits (D-146); upstream's sigmoid (`seg.py:549`)
+        # is applied here, at the seam, so the thresholded mask is bit-identical
+        # to the one the in-model sigmoid gave.
+        confidence = keras.ops.sigmoid(self.segmenter(inputs, training=training)[0])
 
         # DECISION plan-2026-09-10T065432-05fcb6dd/D-025: `inference.py:25` is
         # `msk = (msk > 0.5).float()` and then `x = msk * x` -- a HARD threshold

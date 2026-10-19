@@ -44,8 +44,8 @@ The dense stack alternates complex dense, activation and complex dropout.
 
 The classifier head takes `ops.abs` of the final complex vector before a real
 `Dense`, so the phase learned through the network reaches the decision only
-through the magnitude it produces. That Dense applies `softmax` itself: the model
-emits probabilities, not logits, and must be compiled with `from_logits=False`.
+through the magnitude it produces. That Dense is linear: the model emits logits,
+and is compiled with `from_logits=True` (`GUIDE.md`, the logits rule).
 With `include_top=False` the model returns the `complex64` convolutional feature
 map instead, which most downstream real-valued Keras layers will refuse.
 
@@ -98,8 +98,8 @@ class CoShNet(keras.Model):
     first complex convolution, whose kernel is genuinely complex. The body is
     a stack of stride-2 :class:`ComplexConv2D` layers with split ReLU, then
     complex global average pooling (not flatten), then a complex dense stack
-    with complex dropout. The head takes ``ops.abs`` and applies a real softmax
-    ``Dense``, so the model emits probabilities, not logits.
+    with complex dropout. The head takes ``ops.abs`` and applies a real linear
+    ``Dense``, so the model emits logits.
 
     **Architecture Overview:**
 
@@ -161,13 +161,13 @@ class CoShNet(keras.Model):
         ┌──────────────────────────────────────┐
         │  ops.abs  (phase reaches the decision│
         │            only via its magnitude)   │
-        │  → Dense(num_classes, softmax)       │
+        │  → Dense(num_classes), linear        │
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
         │  Output [B, num_classes]             │
-        │  probabilities, not logits           │
-        │  → compile with from_logits=False    │
+        │  logits                              │
+        │  → compile with from_logits=True     │
         └──────────────────────────────────────┘
 
     **Complex multiplication (why this is not two real convolutions):**
@@ -278,7 +278,7 @@ class CoShNet(keras.Model):
 
     Output shape:
         - ``include_top=True``: 2D tensor ``(batch_size, num_classes)`` of
-          softmax probabilities.
+          logits.
         - ``include_top=False``: 4D ``complex64`` tensor
           ``(batch_size, H', W', conv_filters[-1])``.
 
@@ -299,13 +299,12 @@ class CoShNet(keras.Model):
 
             model.compile(
                 optimizer='adam',
-                loss='categorical_crossentropy',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=['accuracy']
             )
 
     Note:
-        The classifier applies softmax itself, so compile with
-        ``from_logits=False``.
+        The classifier is linear (logits), so compile with ``from_logits=True``.
     """
 
     # Model variant configurations
@@ -559,8 +558,8 @@ class CoShNet(keras.Model):
 
         :param inputs: Symbolic input tensor.
         :type inputs: keras.KerasTensor
-        :return: Symbolic output tensor: softmax probabilities with
-            ``include_top=True``, otherwise the ``complex64`` feature map.
+        :return: Symbolic output tensor: logits with ``include_top=True``,
+            otherwise the ``complex64`` feature map.
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -643,12 +642,11 @@ class CoShNet(keras.Model):
     def _build_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Build complex global pooling, the complex dense stack and the head.
 
-        The final ``Dense`` applies softmax itself, so the returned tensor holds
-        probabilities rather than logits.
+        The final ``Dense`` is linear, so the returned tensor holds logits.
 
         :param x: ``complex64`` feature tensor from the convolutional body.
         :type x: keras.KerasTensor
-        :return: Real-valued ``(batch_size, num_classes)`` probability tensor.
+        :return: Real-valued ``(batch_size, num_classes)`` logits tensor.
         :rtype: keras.KerasTensor
         """
         # Global Average Pooling (replaces flatten for efficiency)
@@ -688,9 +686,10 @@ class CoShNet(keras.Model):
             logger.debug(f"After dense layer {i}: {x.shape}")
 
         # Final real-valued classification layer
+        # DECISION plan-2026-10-14T062616-81938e81/D-142: linear, the model emits
+        # logits (the GUIDE logits rule); never a softmax activation here.
         self.classifier = layers.Dense(
             units=self.num_classes,
-            activation="softmax",
             kernel_regularizer=self.kernel_regularizer,
             kernel_initializer=self.kernel_initializer,
             name='classifier'

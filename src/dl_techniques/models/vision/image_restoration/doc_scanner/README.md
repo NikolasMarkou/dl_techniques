@@ -66,14 +66,19 @@ own 320-channel feature map at the current coordinates. Do not add one.
 
 | Class | Returns | Units |
 |---|---|---|
-| `DocScannerSegmenter` | a `list` of **seven** `(B, H, W, 1)` sigmoid maps `[d0, …, d6]` | confidence in `[0, 1]` |
+| `DocScannerSegmenter` | a `list` of **seven** `(B, H, W, 1)` logit maps `[d0, …, d6]` | logits; `sigmoid` gives the confidence in `[0, 1]` |
 | `DocScannerRectifier`, `training=False` | `(B, H, W, 2)` | **absolute full-resolution pixel coordinates** |
 | `DocScannerRectifier`, `training=True` | `(B, 12, H, W, 2)` — the whole refinement sequence | same |
 | `DocScanner` | `(B, H, W, 2)`, always | **calibrated** — `[-0.99, +0.99]` *only while the rectifier's raw map stays inside `[0, W-1]`* |
 
 Channel 0 is the **x** (column) coordinate, channel 1 is **y** (row) — the order
 `coords_grid` emits, matching the reference. Six of the segmenter's seven maps exist for
-deep supervision; `d0` is the fusion and the only one the pipeline consumes.
+deep supervision; `d0` is the fusion and the only one the pipeline consumes. Upstream applies
+the sigmoid inside the segmenter; this port returns the seven maps as logits (since
+2026-10-17, the repository's logits rule), the segmenter trainer compiles
+`BinaryCrossentropy(from_logits=True)`, and `DocScanner` applies the sigmoid before its
+`> 0.5` threshold, so the composite's mask is unchanged. Read a confidence as
+`keras.ops.sigmoid(maps[0])`.
 
 The rectifier's training-mode output rank differs on purpose: this repo forbids a custom
 `train_step`, so the twelve-iteration exponentially-weighted sequence loss can only reach
@@ -136,8 +141,8 @@ densifies renders out of it into the sidecar layout the pipeline reads.
         |  RSU4F RSU4 RSU5 RSU6 RSU7         |    five decoder stages
         |  side1..side6 -> resize -> 1x1     |    fusion
         +-----------------+------------------+
-                          |  d0  (B, H, W, 1)
-                     (> 0.5)  ->  msk
+                          |  d0  (B, H, W, 1)  logits
+            sigmoid, (> 0.5)  ->  msk
                           |
               masked = msk * page            MULTIPLICATIVE
                           |
@@ -222,7 +227,7 @@ segmenter = create_doc_scanner_segmenter("docscanner-l")
 rectifier = create_doc_scanner_rectifier("docscanner-l")
 
 sequence = rectifier(page, training=True)        # (1, 12, 288, 288, 2) for the loss
-maps = segmenter(page, training=True)            # 7 x (1, 288, 288, 1) for deep supervision
+maps = segmenter(page, training=True)            # 7 x (1, 288, 288, 1) logits for deep supervision
 ```
 
 Overrides are forwarded to the constructor unchanged; an unknown variant raises

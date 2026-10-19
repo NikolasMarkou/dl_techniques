@@ -72,13 +72,39 @@ class TestAccUNetConfigurations:
         expected_filters = [64, 128, 256, 512, 1024]
         assert model.filter_sizes == expected_filters
 
-    def test_activation_selection(self):
-        """Test that correct activation is selected based on num_classes."""
-        # Binary segmentation should use sigmoid
-        binary_model = AccUNet(input_channels=3, num_classes=1)
+    def test_the_head_is_a_linear_conv_for_every_class_count(self):
+        """The head emits logits (D-144): a linear 1x1 conv and no activation layer."""
+        for num_classes in (1, 5):
+            model = AccUNet(input_channels=3, num_classes=num_classes)
+            assert model.output_conv.activation is keras.activations.linear
+            assert not hasattr(model, "output_activation")
 
-        # Multi-class segmentation should use softmax
-        multiclass_model = AccUNet(input_channels=3, num_classes=5)
+
+
+def _inner_accunet(model: keras.Model) -> AccUNet:
+    """The ``AccUNet`` layer inside a factory-built functional model."""
+    (inner,) = [layer for layer in model.layers if isinstance(layer, AccUNet)]
+    return inner
+
+
+def _assert_the_output_is_logits(model: keras.Model, accunet: AccUNet, x) -> None:
+    """A linear head moves its output by exactly a shift of its bias (D-144).
+
+    A sigmoid or softmax tail cannot: its output is bounded, and a softmax is
+    invariant to a shift shared by every class. Bound: float32 rounding of
+    values of size |out| + 50.
+    """
+    out = keras.ops.convert_to_numpy(model(x, training=False))
+    shift = -50.0
+    bias = accunet.output_conv.bias
+    original = keras.ops.convert_to_numpy(bias)
+    try:
+        bias.assign(original + shift)
+        shifted = keras.ops.convert_to_numpy(model(x, training=False))
+    finally:
+        bias.assign(original)
+    bound = 8 * np.finfo(np.float32).eps * (np.abs(out).max() + abs(shift))
+    np.testing.assert_allclose(shifted - out, shift, rtol=0, atol=bound)
 
 
 class TestAccUNetInitialization:
@@ -195,9 +221,7 @@ class TestAccUNetForwardPass:
         expected_shape = (batch_size, height, width, 1)
         assert output.shape == expected_shape
 
-        # Check output range for sigmoid activation
-        assert ops.all(output >= 0.0)
-        assert ops.all(output <= 1.0)
+        _assert_the_output_is_logits(model, model, sample_inputs['rgb'])
 
     def test_forward_pass_multiclass_segmentation(self, sample_inputs):
         """Test forward pass for multi-class segmentation."""
@@ -211,14 +235,7 @@ class TestAccUNetForwardPass:
         expected_shape = (batch_size, height, width, num_classes)
         assert output.shape == expected_shape
 
-        # Check that softmax probabilities sum to 1
-        prob_sums = ops.sum(output, axis=-1)
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(prob_sums),
-            1.0,
-            rtol=1e-6, atol=1e-6,
-            err_msg="Softmax probabilities should sum to 1"
-        )
+        _assert_the_output_is_logits(model, model, sample_inputs['rgb'])
 
     @pytest.mark.parametrize("input_channels,num_classes", [
         (1, 1),  # Grayscale binary
@@ -507,9 +524,7 @@ class TestAccUNetFactoryFunctions:
         # Should be binary segmentation (1 class)
         assert output.shape == (2, 256, 256, 1)
 
-        # Should use sigmoid activation
-        assert ops.all(output >= 0.0)
-        assert ops.all(output <= 1.0)
+        _assert_the_output_is_logits(model, _inner_accunet(model), test_input)
 
     def test_create_acc_unet_multiclass(self):
         """Test create_acc_unet_multiclass factory function."""
@@ -526,13 +541,7 @@ class TestAccUNetFactoryFunctions:
         # Should have correct number of classes
         assert output.shape == (1, 224, 224, num_classes)
 
-        # Should use softmax activation (probabilities sum to 1)
-        prob_sums = ops.sum(output, axis=-1)
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(prob_sums),
-            1.0,
-            rtol=1e-6, atol=1e-6
-        )
+        _assert_the_output_is_logits(model, _inner_accunet(model), test_input)
 
     def test_create_acc_unet_multiclass_validation(self):
         """Test validation in create_acc_unet_multiclass."""

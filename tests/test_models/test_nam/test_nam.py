@@ -330,7 +330,8 @@ class TestNAM:
 
         assert outputs["result"].shape[0] == 3
         assert outputs["result"].shape[1] == 1
-        assert outputs["valid"].shape == (3, 1)
+        assert outputs["valid_logits"].shape == (3, 1)
+        assert "valid" not in outputs
         assert "q_halt_logits" in outputs
         assert "q_continue_logits" in outputs
 

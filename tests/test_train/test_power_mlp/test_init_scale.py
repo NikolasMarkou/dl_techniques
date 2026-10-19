@@ -129,14 +129,13 @@ def _build_model(
         k=k,
         dropout_rate=0.1,
         batch_normalization=batch_normalization,
-        output_activation="softmax",
         kernel_initializer=kernel_initializer,
         bias_initializer="zeros",
     )
     model.build((None, 784))
     model.compile(
         optimizer="adam",
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
     )
     return model
@@ -667,14 +666,15 @@ def test_the_baseline_pass_is_chunked_by_batch_statistics_and_row_weighted() -> 
     keras.utils.set_random_seed(0)
     model = tpm.PowerMLP(
         hidden_units=tpm.effective_hidden_units("mnist", "default", 784, 10), k=2,
-        dropout_rate=0.0, batch_normalization=True, output_activation="softmax",
+        dropout_rate=0.0, batch_normalization=True,
         kernel_initializer="lecun_normal", bias_initializer="zeros",
     )
     model.build((None, 784))
     before = model.get_weights()
     expected_loss, expected_correct = 0.0, 0
     for lo, hi in ((0, 1024), (1024, 1500)):
-        p = keras.ops.convert_to_numpy(model(x2[lo:hi], training=True))
+        p = keras.ops.convert_to_numpy(
+            keras.ops.softmax(model(x2[lo:hi], training=True), axis=-1))
         expected_loss += float(np.sum(-np.log(p[np.arange(hi - lo), y2[lo:hi]]), dtype=np.float64))
         expected_correct += int(np.sum(p.argmax(-1) == y2[lo:hi]))
     model.set_weights(before)

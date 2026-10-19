@@ -121,8 +121,8 @@ class AccUNetTrainingConfig:
 # `train.convunext.train_convunext.generate_synthetic_data`; that module was
 # DELETED on 2026-08-14 with the whole `src/train/convunext/` package, so the
 # provenance is history, not a place to look. This copy is now the only one, and
-# it emits (B, H, W, num_classes) labels for binary and (B, H, W) integer labels
-# for multi-class, matching the loss expectations here.
+# it emits (B, H, W, num_classes) labels: a {0, 1} map for binary and a one-hot
+# map for multi-class, the layout the segmentation losses require (D-145).
 # ---------------------------------------------------------------------
 
 
@@ -141,8 +141,8 @@ def generate_synthetic_segmentation_data(
         ``(N, H, W, 3)`` float32 in ``[0, 1]``.
     y : np.ndarray
         For ``num_classes == 1``: ``(N, H, W, 1)`` float32 in ``{0, 1}``.
-        For ``num_classes >= 2``: ``(N, H, W)`` int32 with class IDs in
-        ``[0, num_classes)``.
+        For ``num_classes >= 2``: ``(N, H, W, num_classes)`` float32 one-hot
+        over class IDs in ``[0, num_classes)``.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -185,7 +185,10 @@ def generate_synthetic_segmentation_data(
     if num_classes == 1:
         y = (y_int > 0).astype("float32")[..., np.newaxis]
     else:
-        y = y_int  # sparse integer labels
+        # DECISION plan-2026-10-14T062616-81938e81/D-145: one-hot, the layout every
+        # segmentation loss validates (y_true.shape == y_pred.shape); never the
+        # sparse (N, H, W) ids, which made every multi-class run raise at step 0.
+        y = np.eye(num_classes, dtype="float32")[y_int]
     return x, y
 
 
@@ -281,7 +284,8 @@ def load_oxford_pets_dataset(
 class BinaryDiceMetric(keras.metrics.Metric):
     """Differentiable / running Dice coefficient for binary segmentation.
 
-    Treats predictions in ``[0, 1]`` (post-sigmoid) and labels in ``{0, 1}``.
+    Reads the model's logits and labels in ``{0, 1}``: a pixel is predicted
+    foreground when its logit is above 0, i.e. its sigmoid is above 0.5.
     Aggregates intersection and union across batches for a stable epoch-level
     estimate (rather than averaging per-batch Dice values, which is noisy on
     small batches).
@@ -296,7 +300,7 @@ class BinaryDiceMetric(keras.metrics.Metric):
     def update_state(self, y_true, y_pred, sample_weight=None):
         y_true = keras.ops.cast(y_true, "float32")
         y_pred = keras.ops.cast(y_pred, "float32")
-        y_pred_b = keras.ops.cast(y_pred > 0.5, "float32")
+        y_pred_b = keras.ops.cast(y_pred > 0.0, "float32")
         inter = keras.ops.sum(y_true * y_pred_b)
         uni = keras.ops.sum(y_true) + keras.ops.sum(y_pred_b)
         self.intersection.assign_add(inter)
@@ -364,13 +368,15 @@ class SegmentationGridCallback(keras.callbacks.Callback):
             gt = self.val_y[i]
             if gt.ndim == 3 and gt.shape[-1] == 1:
                 gt = gt[..., 0]
+            elif gt.ndim == 3:
+                gt = np.argmax(gt, axis=-1)
             axes[i, 1].imshow(gt, cmap="gray", vmin=0, vmax=max(1, int(gt.max())))
             axes[i, 1].set_title("gt")
             axes[i, 1].axis("off")
 
             p = preds[i]
             if p.ndim == 3 and p.shape[-1] == 1:
-                p = p[..., 0]
+                p = 1.0 / (1.0 + np.exp(-p[..., 0]))  # logits -> probability
             elif p.ndim == 3:
                 p = np.argmax(p, axis=-1)
             axes[i, 2].imshow(p, cmap="gray", vmin=0, vmax=1 if p.dtype.kind == "f" else max(1, int(p.max())))
@@ -449,15 +455,20 @@ def compile_model(
         lr_schedule,
     )
 
+    # AccUNet emits logits (D-144): every loss reads them with from_logits=True,
+    # binary accuracy thresholds the logit at 0 (probability 0.5).
     loss_fn = create_loss_function(
         config.loss_name,
-        LossConfig(num_classes=config.num_classes),
+        LossConfig(num_classes=config.num_classes, from_logits=True),
     )
 
     if config.num_classes == 1:
-        metrics: List = ["binary_accuracy", BinaryDiceMetric(name="dice")]
+        metrics: List = [
+            keras.metrics.BinaryAccuracy(name="binary_accuracy", threshold=0.0),
+            BinaryDiceMetric(name="dice"),
+        ]
     else:
-        metrics = ["sparse_categorical_accuracy"]
+        metrics = ["categorical_accuracy"]
 
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics)
     logger.info(

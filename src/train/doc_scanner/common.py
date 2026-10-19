@@ -1612,9 +1612,10 @@ def build_loss(config: DocScannerTrainingConfig) -> keras.losses.Loss:
     :rtype: keras.losses.Loss
     """
     if config.stage == STAGE_SEGMENTER:
-        # The segmenter's heads are already sigmoid-activated (`seg.py` applies
-        # the sigmoid inside the model), so this reads PROBABILITIES.
-        return keras.losses.BinaryCrossentropy(from_logits=False)
+        # The segmenter's seven heads emit LOGITS (D-146; upstream `seg.py`
+        # applies the sigmoid inside its model, this port does not), so the
+        # BCE reads them with from_logits=True.
+        return keras.losses.BinaryCrossentropy(from_logits=True)
     return DocScannerRectifierObjective(iters=REFINE_ITERATIONS)
 
 

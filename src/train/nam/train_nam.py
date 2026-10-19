@@ -362,7 +362,7 @@ def _make_compiled_train_fn(
                 batch_data = outputs["batch"]
                 all_results.append(outputs["result"])
                 all_step_results.append(outputs["step_result"])
-                all_valids.append(outputs["valid"])
+                all_valids.append(outputs["valid_logits"])
                 all_q_halt.append(outputs["q_halt_logits"])
                 all_q_cont.append(outputs["q_continue_logits"])
                 all_op_logits.append(outputs["op_logits"])
@@ -400,11 +400,10 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # Validity BCE
-                clamped_valid = tf.clip_by_value(all_valids[i], 1e-7, 1.0 - 1e-7)
+                # Validity BCE on the head's logits (D-151): no probability clip.
                 L_valid += tf.reduce_mean(
                     keras.losses.binary_crossentropy(
-                        target_validity, clamped_valid
+                        target_validity, all_valids[i], from_logits=True
                     )
                 )
 
@@ -614,8 +613,8 @@ def train_step(
     step_acc_5pct = float(np.mean(per_sample_step_rel_error < 0.05))
     step_acc_10pct = float(np.mean(per_sample_step_rel_error < 0.10))
 
-    # Validity accuracy
-    pred_valid_binary = (pred_valid > 0.5).astype(np.float32)
+    # Validity accuracy: a logit above 0 is a probability above 0.5.
+    pred_valid_binary = (pred_valid > 0.0).astype(np.float32)
     valid_acc = float(np.mean(np.equal(pred_valid_binary, true_valid)))
 
     # Operator selection entropy
@@ -1082,7 +1081,7 @@ def main():
 
             for i in range(min(3, len(expressions))):
                 pred = float(sample_out["result"][i, 0].numpy())
-                val = float(sample_out["valid"][i, 0].numpy())
+                val = float(tf.sigmoid(sample_out["valid_logits"][i, 0]).numpy())
                 logger.info(
                     f"  {expressions[i]} = {targets[i, 0]:.4f} "
                     f"(pred={pred:.4f}, valid={val:.3f})"

@@ -98,7 +98,7 @@ class TestPowerMLPInitialization:
             dropout_rate=0.3,
             batch_normalization=True,
             kernel_regularizer='l2',
-            output_activation='softmax'
+            output_activation='tanh'
         )
 
         assert len(model.hidden_layers) == 4
@@ -207,20 +207,22 @@ class TestPowerMLPForwardPass:
 
         assert output_shape == (None, 5)
 
-    def test_forward_pass_with_softmax(self) -> None:
-        """Test forward pass with softmax output activation."""
-        model = PowerMLP(
-            hidden_units=[10, 8, 3],
-            output_activation='softmax'
-        )
-        x = keras.random.normal(shape=(4, 10))
-        output = model(x)
+    @pytest.mark.parametrize("activation", ["softmax", "sigmoid"])
+    def test_a_class_probability_output_is_refused(self, activation) -> None:
+        """A classifier emits logits (D-149): softmax and sigmoid raise, by name."""
+        with pytest.raises(ValueError, match="logits"):
+            PowerMLP(hidden_units=[10, 8, 3], output_activation=activation)
 
-        # Check softmax properties
-        output_np = ops.convert_to_numpy(output)
-        assert np.allclose(np.sum(output_np, axis=-1), 1.0, atol=1e-6)
-        assert np.all(output_np >= 0.0)
-        assert np.all(output_np <= 1.0)
+    def test_the_default_output_is_logits(self) -> None:
+        """A shift of the output bias moves the output by exactly the shift."""
+        model = PowerMLP(hidden_units=[10, 8, 3])
+        x = keras.random.normal(shape=(4, 10), seed=0)
+        out = ops.convert_to_numpy(model(x))
+        shift = -50.0
+        model.output_layer.bias.assign(model.output_layer.bias + shift)
+        moved = ops.convert_to_numpy(model(x))
+        bound = 8 * np.finfo(np.float32).eps * (np.abs(out).max() + abs(shift))
+        np.testing.assert_allclose(moved - out, shift, rtol=0, atol=bound)
 
     def test_forward_pass_with_dropout(self) -> None:
         """Test forward pass with dropout enabled."""
@@ -269,7 +271,7 @@ class TestPowerMLPSerialization:
             'k': 3,
             'dropout_rate': 0.2,
             'batch_normalization': True,
-            'output_activation': 'softmax',
+            'output_activation': 'tanh',
             'kernel_initializer': 'he_normal',
             'use_bias': True
         }
@@ -740,8 +742,9 @@ class TestPowerMLPHelperFunctions:
         assert model.compiled
         assert model.hidden_units[-1] == 1  # Binary output
 
-        # Check activation is sigmoid
-        assert model.output_layer.activation == keras.activations.sigmoid
+        # A linear one-unit logit, read by BCE from_logits=True (D-149)
+        assert model.output_layer.activation == keras.activations.linear
+        assert model.loss.from_logits is True
 
     def test_compiled_model_can_fit(self) -> None:
         """Test that compiled models can be trained."""
@@ -749,7 +752,7 @@ class TestPowerMLPHelperFunctions:
             hidden_units=[20, 16, 5],
             k=2,
             dropout_rate=0.1,
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         )
 
         # Create dummy data
@@ -770,11 +773,10 @@ class TestPowerMLPIntegration:
             hidden_units=[20, 16, 8, 3],
             k=3,
             dropout_rate=0.1,
-            output_activation='softmax'
         )
         model.compile(
             optimizer='adam',
-            loss='sparse_categorical_crossentropy',
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
 
@@ -802,17 +804,15 @@ class TestPowerMLPIntegration:
 
     def test_predict(self) -> None:
         """Test prediction functionality."""
-        model = PowerMLP(
-            hidden_units=[10, 8, 3],
-            output_activation='softmax'
-        )
+        model = PowerMLP(hidden_units=[10, 8, 3])
 
         x = keras.random.normal(shape=(5, 10))
         predictions = model.predict(x, verbose=0)
 
         assert predictions.shape == (5, 3)
-        # Check softmax properties
-        assert np.allclose(np.sum(predictions, axis=-1), 1.0, atol=1e-6)
+        # Logits: a softmax of them is a distribution.
+        probabilities = ops.convert_to_numpy(ops.softmax(predictions, axis=-1))
+        assert np.allclose(np.sum(probabilities, axis=-1), 1.0, atol=1e-6)
 
     def test_summary(self) -> None:
         """Test model summary generation."""

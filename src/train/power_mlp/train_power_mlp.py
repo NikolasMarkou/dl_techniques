@@ -445,7 +445,7 @@ def effective_hidden_units(
         dataset: ``"mnist"`` or ``"cifar10"``.
         architecture: A key of ``ARCHITECTURE_HIDDEN_WIDTHS``.
         input_dim: Flattened input width (entry 0; not a layer).
-        num_classes: Number of classes (last entry; the softmax head).
+        num_classes: Number of classes (last entry; the logits head).
 
     Returns:
         ``[input_dim, *hidden_widths, num_classes]``.
@@ -662,12 +662,13 @@ def _untrained_metrics(
     loss_sum, correct = 0.0, 0
     try:
         for start in range(0, len(x), batch_size):
-            probabilities = model(x[start:start + batch_size], training=True)
+            logits = model(x[start:start + batch_size], training=True)
             per_sample = keras.ops.convert_to_numpy(
-                keras.losses.sparse_categorical_crossentropy(y[start:start + batch_size], probabilities)
+                keras.losses.sparse_categorical_crossentropy(
+                    y[start:start + batch_size], logits, from_logits=True)
             )
             loss_sum += float(np.sum(per_sample, dtype=np.float64))
-            predicted = np.argmax(keras.ops.convert_to_numpy(probabilities), axis=-1)
+            predicted = np.argmax(keras.ops.convert_to_numpy(logits), axis=-1)
             correct += int(np.sum(predicted == y[start:start + batch_size]))
     finally:
         model.set_weights(snapshot)  # undo the moving-statistics update
@@ -780,14 +781,13 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             k=config.k,
             dropout_rate=config.dropout_rate,
             batch_normalization=config.batch_normalization,
-            output_activation="softmax",
             kernel_initializer=config.kernel_initializer,
             bias_initializer="zeros",
         )
         model.build((None, info["input_dim"]))
         model.compile(
             optimizer=create_optimizer(config.optimizer, config.learning_rate, config.weight_decay),
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
         )
         # Read off the BUILT model, not the config: the input width is the shape the
@@ -943,7 +943,9 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             str(final_path), sample, model.predict(sample, verbose=0)
         ))
 
-        probs = model.predict(x_test, batch_size=1024, verbose=0)
+        # The model emits LOGITS (D-149): every probability consumer gets a softmax.
+        logits = model.predict(x_test, batch_size=1024, verbose=0)
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
         visualizations = run_summary.write_classification_figures(
             vis_dir, x_test, y_test, probs,
             get_class_names(config.dataset, info["num_classes"]),

@@ -7,8 +7,7 @@ is re-implemented here.
 
 What IS written here is the set of claims specific to this assembly, every one
 of which is **shape-preserving**: a segmenter carrying any of these defects
-returns seven finite ``(B, H, W, 1)`` maps in ``[0, 1]``, trains, saves and
-reloads.
+returns seven finite ``(B, H, W, 1)`` logit maps, trains, saves and reloads.
 
 1. **``side6`` reads the ENCODER's ``hx6``, not a decoder output**
    (``seg.py:546``). Six side heads, five decoder stages. Feeding ``side6`` the
@@ -55,6 +54,7 @@ from dl_techniques.models.vision.image_restoration.doc_scanner.u2net_blocks impo
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
+    default_loss,
     gradient_report,
     stop_all_gradients,
 )
@@ -153,7 +153,7 @@ def built_model() -> DocScannerSegmenter:
 
 
 class TestTheSevenOutputContract:
-    """Seven sigmoid maps, all at the INPUT resolution."""
+    """Seven logit maps, all at the INPUT resolution (D-146)."""
 
     def test_it_returns_exactly_seven_maps(self, built_model):
         out = built_model(_inputs(), training=False)
@@ -167,17 +167,32 @@ class TestTheSevenOutputContract:
                 BATCH, HEIGHT, WIDTH, SEG_OUTPUT_CHANNELS), (
                 f"output {index} has shape {tuple(tensor.shape)}")
 
-    def test_every_map_is_a_probability(self, built_model):
-        """The sigmoid is asserted by its RANGE, and non-vacuously: a constant
-        0.5 map would also be in ``[0, 1]``, so the spread is checked too."""
-        out = [_as_numpy(t) for t in built_model(_inputs(), training=False)]
-        for index, array in enumerate(out):
+    def test_every_map_is_a_logit_map(self, built_model):
+        """Logits, asserted on the axis a sigmoid would bend (D-146).
+
+        A shift of a head's bias moves that head's map by exactly the shift:
+        ``d0`` through ``outconv``, ``d1..d6`` through their side convs (the
+        bilinear resize onto ``d1`` has weights summing to 1, so a constant
+        survives it). A sigmoid tail would squash a -50 shift to about -0.5
+        at most. Bound: float32 rounding at magnitude ``|map| + 50``.
+        """
+        x = _inputs()
+        base = [_as_numpy(t) for t in built_model(x, training=False)]
+        for array in base:
             assert_finite(array)
-            assert array.min() >= 0.0, (index, array.min())
-            assert array.max() <= 1.0, (index, array.max())
-            assert array.std() > 0.0, (
-                f"output {index} is CONSTANT; a sigmoid range assertion is "
-                f"satisfied by a degenerate map")
+        heads = [built_model.outconv] + list(built_model.side_convs)
+        shift = -50.0
+        for index, head in enumerate(heads):
+            original = keras.ops.convert_to_numpy(head.bias)
+            try:
+                head.bias.assign(original + shift)
+                moved = _as_numpy(built_model(x, training=False)[index])
+            finally:
+                head.bias.assign(original)
+            bound = 16 * np.finfo(np.float32).eps * (np.abs(base[index]).max() + abs(shift))
+            np.testing.assert_allclose(
+                moved - base[index], shift, rtol=0, atol=bound,
+                err_msg=f"output {index} did not move by its head's bias shift")
 
     def test_compute_output_shape_reports_all_seven(self, built_model):
         shapes = built_model.compute_output_shape(INPUT_SHAPE)
@@ -545,8 +560,8 @@ def _contract(output) -> None:
     for tensor in output:
         assert tuple(tensor.shape) == (
             BATCH, HEIGHT, WIDTH, SEG_OUTPUT_CHANNELS), tuple(tensor.shape)
-        array = keras.ops.convert_to_numpy(tensor)
-        assert array.min() >= 0.0 and array.max() <= 1.0
+        # Logits since D-146: finite, unbounded.
+        assert_finite(keras.ops.convert_to_numpy(tensor))
 
 
 class TestTheSharedOracleAdoptions:
@@ -665,7 +680,13 @@ class TestTheTrainingModeDeadBiasPopulationIsNamed:
         ``stage5d/rebnconv4`` at an identically-zero gradient.
         """
         keras.utils.set_random_seed(0)
-        return gradient_report(_built(), _inputs(), training=training)
+        # The loss reads the CONFIDENCE, sigmoid of each logit map: the
+        # quantity this population was measured on before the maps became
+        # logits (D-146), so the D-021 bounds below keep their measured
+        # meaning. sigmoid(logits) equals the old outputs bit for bit.
+        return gradient_report(
+            _built(), _inputs(), training=training,
+            loss_fn=lambda maps: default_loss([keras.ops.sigmoid(m) for m in maps]))
 
     @classmethod
     def _population(cls, report):

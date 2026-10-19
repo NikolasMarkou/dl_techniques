@@ -199,8 +199,11 @@ class PowerMLP(keras.Model):
         basis branch never uses one. Defaults to True.
     :type use_bias: bool
     :param output_activation: Activation for the final ``Dense``. ``None``
-        (default) gives a linear output for regression or for a loss consuming
-        logits; ``'softmax'`` for multi-class, ``'sigmoid'`` for binary.
+        (default) gives a linear output: regression values, or class logits for
+        a loss compiled with ``from_logits=True``. A non-class activation such
+        as ``'tanh'`` or ``'relu'`` is accepted for regression targets.
+        ``'softmax'`` and ``'sigmoid'`` are refused: a classifier emits logits
+        (the repository's logits rule, ``models/GUIDE.md``).
     :type output_activation: Optional[Union[str, callable]]
     :param dropout_rate: Dropout applied after each hidden layer, in
         ``[0, 1]``. 0.0 disables it. Defaults to 0.0.
@@ -214,8 +217,9 @@ class PowerMLP(keras.Model):
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If ``hidden_units`` has fewer than two elements or
-        contains a non-positive value, if ``k`` is not positive, or if
-        ``dropout_rate`` leaves ``[0, 1]``.
+        contains a non-positive value, if ``k`` is not positive, if
+        ``dropout_rate`` leaves ``[0, 1]``, or if ``output_activation`` is a
+        softmax or a sigmoid.
     :raises TypeError: If ``k`` is not an integer.
 
     Input shape:
@@ -244,11 +248,10 @@ class PowerMLP(keras.Model):
                 hidden_units=[784, 128, 64, 10],
                 k=3,
                 dropout_rate=0.2,
-                output_activation="softmax"
             )
             model.compile(
                 optimizer='adam',
-                loss='sparse_categorical_crossentropy',
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                 metrics=['accuracy']
             )
 
@@ -339,6 +342,13 @@ class PowerMLP(keras.Model):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.use_bias = use_bias
         self.output_activation = resolve_activation(output_activation)
+        # DECISION plan-2026-10-14T062616-81938e81/D-149: a class-probability output
+        # is refused; the classifier emits logits. Never re-allow softmax/sigmoid here.
+        if self.output_activation in (keras.activations.softmax, keras.activations.sigmoid):
+            raise ValueError(
+                f"output_activation={output_activation!r} makes a probability output; "
+                f"PowerMLP classifiers emit logits (models/GUIDE.md logits rule). Use "
+                f"output_activation=None and compile the loss with from_logits=True.")
         self.dropout_rate = dropout_rate
         self.batch_normalization = batch_normalization
 
@@ -772,12 +782,8 @@ def create_power_mlp(
 
     .. code-block:: text
 
-        loss=None  →  the loss follows output_activation:
-
-            output_activation=None (default)  →  CategoricalCrossentropy(
-                                                     from_logits=True)
-            output_activation='softmax'       →  CategoricalCrossentropy(
-            output_activation='sigmoid'              from_logits=False)
+        loss=None  →  CategoricalCrossentropy(from_logits=True): the output
+                      is linear (softmax and sigmoid are refused, D-149).
 
         a fixed `loss="categorical_crossentropy"` string would compile
         with from_logits=False against the linear default, feeding
@@ -796,10 +802,9 @@ def create_power_mlp(
     :param learning_rate: Learning rate, applied when ``optimizer`` is a
         string. Defaults to 0.001.
     :type learning_rate: float
-    :param loss: Loss name or instance. ``None`` (the default) derives a
-        categorical cross-entropy whose ``from_logits`` matches the model's
-        actual ``output_activation``: ``True`` for the default linear output,
-        ``False`` for softmax or sigmoid. Pass a value to override.
+    :param loss: Loss name or instance. ``None`` (the default) gives a
+        categorical cross-entropy on logits (``from_logits=True``): the output
+        is linear. Pass a value to override.
     :type loss: Optional[Union[str, keras.losses.Loss]]
     :param metrics: Metric names or instances. ``None`` resolves to
         ``['accuracy']``.
@@ -813,18 +818,10 @@ def create_power_mlp(
 
     Example:
         >>> # The documented default: linear output, cross-entropy on logits.
-        >>> model = create_power_mlp(hidden_units=[784, 128, 64, 10], k=3)
+        >>> model = create_power_mlp(hidden_units=[784, 128, 64, 10], k=3,
+        ...                          dropout_rate=0.2)
         >>> model.loss.from_logits
         True
-        >>>
-        >>> # Softmax output: the derived loss follows it.
-        >>> model = create_power_mlp(
-        ...     hidden_units=[784, 128, 64, 10],
-        ...     output_activation='softmax',
-        ...     dropout_rate=0.2,
-        ... )
-        >>> model.loss.from_logits
-        False
         >>> model.fit(x_train, y_train, epochs=10, validation_split=0.2)
     """
     model = PowerMLP(hidden_units=hidden_units, k=k, **kwargs)
@@ -832,19 +829,13 @@ def create_power_mlp(
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-053: a fixed string loss
     # compiles from_logits=False against the linear default and clips silently.
     # Derive it from output_activation instead. See decisions.md.
+    # DECISION plan-2026-10-14T062616-81938e81/D-149: PowerMLP refuses softmax and
+    # sigmoid outputs, so the derived loss always reads logits.
     if loss is None:
-        emits_probabilities = (
-            model.output_activation is keras.activations.softmax
-            or model.output_activation is keras.activations.sigmoid
-        )
-        loss = keras.losses.CategoricalCrossentropy(
-            from_logits=not emits_probabilities
-        )
+        loss = keras.losses.CategoricalCrossentropy(from_logits=True)
         logger.info(
-            f"create_power_mlp: no loss given; derived "
-            f"CategoricalCrossentropy(from_logits={not emits_probabilities}) "
-            f"from output_activation="
-            f"{keras.activations.serialize(model.output_activation)!r}."
+            "create_power_mlp: no loss given; CategoricalCrossentropy(from_logits=True) "
+            "on the linear output."
         )
 
     if isinstance(optimizer, str):
@@ -924,9 +915,10 @@ def create_power_mlp_binary_classifier(
 ) -> PowerMLP:
     """Create and compile a PowerMLP for binary classification.
 
-    Pins ``loss='binary_crossentropy'``, a sigmoid output and
-    accuracy/precision/recall metrics, so the default-loss derivation in
-    :func:`create_power_mlp` does not apply.
+    Pins a linear one-unit output (a logit), ``BinaryCrossentropy(from_logits=True)``
+    and accuracy/precision/recall metrics thresholded at the logit 0 (the
+    probability 0.5), so the default loss of :func:`create_power_mlp` does not
+    apply. Apply ``keras.ops.sigmoid`` to ``predict`` output for a probability.
 
     :param hidden_units: Layer sizes; the last element should be 1. A different
         value logs a warning rather than raising.
@@ -962,9 +954,13 @@ def create_power_mlp_binary_classifier(
         k=k,
         optimizer=optimizer,
         learning_rate=learning_rate,
-        loss="binary_crossentropy",
-        metrics=["accuracy", "precision", "recall"],
-        output_activation="sigmoid",
+        loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="accuracy", threshold=0.0),
+            keras.metrics.Precision(name="precision", thresholds=0.0),
+            keras.metrics.Recall(name="recall", thresholds=0.0),
+        ],
+        output_activation=None,
         **kwargs
     )
 
