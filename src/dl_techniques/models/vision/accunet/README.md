@@ -471,6 +471,12 @@ MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_accunet -q
 
 ## 15. Technical Details
 
+**Batch-norm statistics follow the reference.** Every batch norm is built with momentum 0.9
+and epsilon 1e-5, the `torch.nn.BatchNorm2d` defaults of the reference code (PyTorch momentum
+0.1 is Keras momentum 0.9), not Keras' 0.99 and 1e-3. With 0.99 the moving statistics lagged
+so far behind after a short run that the model predicted the majority class for every pixel in
+inference mode while training-mode accuracy was 0.998.
+
 **2D only.** Every layer is a 2D convolution or pooling op. The concepts carry over to 3D by
 substituting the 3D counterparts, but that is a source change, not a configuration one.
 

@@ -27,6 +27,7 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
 
 # ---------------------------------------------------------------------
 
@@ -160,7 +161,7 @@ class HANCLayer(keras.layers.Layer):
             name='fusion_conv'
         )
 
-        self.batch_norm = keras.layers.BatchNormalization(name='fusion_bn')
+        self.batch_norm = reference_batch_norm(name='fusion_bn')
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

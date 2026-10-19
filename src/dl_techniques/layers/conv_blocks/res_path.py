@@ -30,6 +30,7 @@ from typing import Optional, Union, Tuple, Any, List
 
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
 
 # ---------------------------------------------------------------------
 
@@ -119,7 +120,7 @@ class ResPath(keras.layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'conv_block_{i}'
             ))
-            self.bn_blocks.append(keras.layers.BatchNormalization(name=f'bn_block_{i}'))
+            self.bn_blocks.append(reference_batch_norm(name=f'bn_block_{i}'))
             self.se_blocks.append(SqueezeExcitation(
                 reduction_ratio=0.25,
                 kernel_initializer=self.kernel_initializer,
@@ -134,7 +135,7 @@ class ResPath(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='final_se'
         )
-        self.final_bn = keras.layers.BatchNormalization(name='final_bn')
+        self.final_bn = reference_batch_norm(name='final_bn')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all residual sub-layers.

@@ -25,6 +25,7 @@ from typing import Optional, Union, Tuple, List, Any, Dict
 
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
 
 # ---------------------------------------------------------------------
 
@@ -149,7 +150,7 @@ class MLFCLayer(keras.layers.Layer):
                 self.compilation_convs.append(comp_conv)
 
                 # Compilation batch normalization
-                comp_bn = keras.layers.BatchNormalization(
+                comp_bn = reference_batch_norm(
                     name=f'comp_bn_iter{iter_idx}_level{level_idx}'
                 )
                 self.batch_norms.append(comp_bn)
@@ -167,7 +168,7 @@ class MLFCLayer(keras.layers.Layer):
                 self.merge_convs.append(merge_conv)
 
                 # Merge batch normalization
-                merge_bn = keras.layers.BatchNormalization(
+                merge_bn = reference_batch_norm(
                     name=f'merge_bn_iter{iter_idx}_level{level_idx}'
                 )
                 self.merge_batch_norms.append(merge_bn)

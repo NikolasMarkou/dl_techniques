@@ -30,6 +30,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 
 from .hanc_layer import HANCLayer
@@ -180,7 +181,7 @@ class HANCBlock(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='expand_conv'
         )
-        self.expand_bn = keras.layers.BatchNormalization(name='expand_bn')
+        self.expand_bn = reference_batch_norm(name='expand_bn')
 
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=3,
@@ -190,7 +191,7 @@ class HANCBlock(keras.layers.Layer):
             depthwise_regularizer=self.kernel_regularizer,
             name='depthwise_conv'
         )
-        self.depthwise_bn = keras.layers.BatchNormalization(name='depthwise_bn')
+        self.depthwise_bn = reference_batch_norm(name='depthwise_bn')
 
         # HANC returns to input_channels so the skip tensor lines up unchanged.
         self.hanc_layer = HANCLayer(
@@ -203,7 +204,7 @@ class HANCBlock(keras.layers.Layer):
         )
 
         if self.use_residual:
-            self.residual_bn = keras.layers.BatchNormalization(name='residual_bn')
+            self.residual_bn = reference_batch_norm(name='residual_bn')
         else:
             self.residual_bn = None
 
@@ -216,7 +217,7 @@ class HANCBlock(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='output_conv'
         )
-        self.output_bn = keras.layers.BatchNormalization(name='output_bn')
+        self.output_bn = reference_batch_norm(name='output_bn')
 
         self.squeeze_excitation = SqueezeExcitation(
             reduction_ratio=0.25,
