@@ -11,6 +11,9 @@ the literal: derive it from the noise source, as `reassociation_atol` does", whi
 copy-the-reasoning instruction, i.e. the shape a shared helper exists to remove.
 """
 
+import contextlib
+from typing import Iterator
+
 import numpy as np
 
 
@@ -232,3 +235,43 @@ def matmul_precision_atol(scale: float) -> float:
     :rtype: float
     """
     return MATMUL_ULP_ALLOWANCE * matmul_unit_roundoff() * max(1.0, float(scale))
+
+
+# ---------------------------------------------------------------------
+# Scoping the arithmetic regime to TRUE float32
+# ---------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def true_float32_matmul() -> Iterator[None]:
+    """Run the block with TF32 tensor-core matmul and convolution OFF, then restore it.
+
+    For a measurement whose bound was derived in true float32 arithmetic and is NOT
+    expressible in TF32 ulps. Prefer :func:`matmul_precision_atol` when the bound can be
+    restated for the active regime; use this only when TF32 noise swamps the quantity
+    measured (plan-2026-10-14T062616-81938e81 D-158: on DocScanner's fixture the TF32
+    training-mode backward differs from float32 by a median 3x in the REBNCONV kernel
+    gradients, so no TF32 bound can separate a dead bias from a live one).
+
+    Interface contract: captures the prior setting (never assumes ``True``), disables TF32
+    for the block, restores the prior setting in ``finally`` even if the block raises, and
+    asserts the restoration. On CPU the flag is numerically inert, so this is a no-op
+    there; callers that need proof of the regime assert ``matmul_unit_roundoff()`` inside
+    the block. Same capture / restore / assert convention as ``tests/test_layers/
+    conftest.py::tf32_disabled``, which is a fixture and not importable outside that tree.
+
+    :yield: Nothing; TF32 is off inside the block.
+    :rtype: Iterator[None]
+    :raises AssertionError: If the prior setting fails to restore.
+    """
+    import tensorflow as tf  # local: this module is otherwise pure NumPy and imported very widely.
+
+    previous = tf.config.experimental.tensor_float_32_execution_enabled()
+    tf.config.experimental.enable_tensor_float_32_execution(False)
+    try:
+        yield
+    finally:
+        tf.config.experimental.enable_tensor_float_32_execution(previous)
+        assert (
+            tf.config.experimental.tensor_float_32_execution_enabled() == previous
+        ), "TF32 setting leaked out of true_float32_matmul"

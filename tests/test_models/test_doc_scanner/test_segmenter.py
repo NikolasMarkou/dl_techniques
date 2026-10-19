@@ -52,6 +52,8 @@ from dl_techniques.models.vision.image_restoration.doc_scanner.u2net_blocks impo
     RSU7,
 )
 
+from tests.numerics import matmul_unit_roundoff, true_float32_matmul
+
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
     default_loss,
@@ -662,6 +664,16 @@ class TestTheTrainingModeDeadBiasPopulationIsNamed:
     why the arm flaked. ``expect_zero`` therefore cannot express this
     population, and widening it to express it would break the one oracle that
     every model package in the repo shares.
+
+    **The regime.** Every bound below was measured in TRUE float32, and every
+    report is taken inside ``true_float32_matmul`` with the regime asserted
+    (plan-2026-10-14T062616-81938e81 D-158). Under the GPU's default TF32 the
+    convolutions round to a 10-bit mantissa and the training-mode backward on
+    this fixture is noise: measured on GPU 1, the REBNCONV kernel gradients
+    differ from float32 by a median 3x, the gradients reaching ``stage1`` are
+    28x larger, and the "dead" population reads up to 2.8e-05 against a live
+    minimum of 9.8e-05, so no separation can be stated in that regime. In
+    float32 on the same GPU: dead max 1.06e-06, live min 9.79e-05.
     """
 
     #: A REBNCONV is ``conv -> BatchNormalization -> relu``, so its bias is the
@@ -679,14 +691,19 @@ class TestTheTrainingModeDeadBiasPopulationIsNamed:
         measures everywhere else. Measured: sharing the model puts 4 weights of
         ``stage5d/rebnconv4`` at an identically-zero gradient.
         """
-        keras.utils.set_random_seed(0)
         # The loss reads the CONFIDENCE, sigmoid of each logit map: the
         # quantity this population was measured on before the maps became
         # logits (D-146), so the D-021 bounds below keep their measured
         # meaning. sigmoid(logits) equals the old outputs bit for bit.
-        return gradient_report(
-            _built(), _inputs(), training=training,
-            loss_fn=lambda maps: default_loss([keras.ops.sigmoid(m) for m in maps]))
+        # True float32 on every device (D-158; the class docstring).
+        with true_float32_matmul():
+            assert matmul_unit_roundoff() == np.finfo(np.float32).eps / 2, (
+                "the D-021 bounds were measured in true float32; this report "
+                "is running in a narrower matmul regime")
+            keras.utils.set_random_seed(0)
+            return gradient_report(
+                _built(), _inputs(), training=training,
+                loss_fn=lambda maps: default_loss([keras.ops.sigmoid(m) for m in maps]))
 
     @classmethod
     def _population(cls, report):
