@@ -1,6 +1,6 @@
 # `models/time_series/` — the forecasting family
 
-This file is the index and the shared-contract page, not a summary of the eight;
+This file is the index and the shared-contract page, not a summary of the nine;
 every subpackage has a README of its own.
 
 ## The subpackages
@@ -14,6 +14,7 @@ every subpackage has a README of its own.
 | `nbeats/` | N-BEATS basis expansion, plus the exogenous `nbeatsx` variant | [README](nbeats/README.md) |
 | `prism/` | Partitioned / wavelet-band forecasting with a soft router | [README](prism/README.md) |
 | `tirex/` | Mixed sequential (SSM + attention) forecaster | [README](tirex/README.md) |
+| `timestral/` | Patch-based transformer with DHF decoding, 21 quantiles, covariates | [README](timestral/README.md) |
 | `xlstm/` | Extended LSTM, with a dedicated `xLSTMForecaster` wrapper | [README](xlstm/README.md) |
 
 They are **independent architectures sharing no backbone**, so there is deliberately
@@ -59,10 +60,12 @@ from dl_techniques.models.time_series import (
     NBeatsXNet, create_nbeatsx_model,
     PRISMModel, create_prism_model,
     TiRexCore, create_tirex_model, create_tirex_by_variant,
+    TimestralConfig, TimestralModel, TimestralForecaster, TimestralForecast,
+    create_timestral_model, create_timestral_by_variant, load_model,
     xLSTM, create_xlstm,
     xLSTMForecaster, create_xlstm_forecaster,
 )
 ```
 
-`tirex/`, `prism/` and `deepar/` have empty `__init__.py` files, so import them
-through this root or through their `.model` submodule, not from the subpackage name.
+`tirex/`, `prism/`, `deepar/` and `timestral/` have `__init__.py` files with exports,
+so import them through this root or through their submodules.
