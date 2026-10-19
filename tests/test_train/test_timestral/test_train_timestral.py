@@ -22,6 +22,7 @@ import pytest
 
 import train.time_series.timestral.train_timestral as train_timestral
 from dl_techniques.models.time_series.timestral import TimestralModel
+from tests.numerics import true_float32_matmul
 
 TINY = ["--variant", "5M", "--input_length", "64", "--prediction_length", "16",
         "--patch_size", "8", "--epochs", "1", "--steps_per_epoch", "3", "--batch_size", "4",
@@ -122,10 +123,13 @@ def test_forecast_windows_runs_batch_size_windows_per_forecaster_call(monkeypatc
     monkeypatch.setattr(train_timestral.TimestralForecaster, "forecast", recording)
     config = train_timestral.TimestralTrainingConfig(
         variant="5M", input_length=64, prediction_length=16, patch_size=8, batch_size=4)
+    keras.utils.set_random_seed(0)
     model = TimestralModel.from_variant("5M", prediction_length=16, patch_size=8)
     context = np.cumsum(np.random.RandomState(0).randn(10, 64, 1), axis=1).astype("float32")
-    forecast = train_timestral.forecast_windows(model, context, config)
+    # TF32 would make the 4-row and 10-row matmuls round differently on a GPU.
+    with true_float32_matmul():
+        forecast = train_timestral.forecast_windows(model, context, config)
+        whole = real(train_timestral.TimestralForecaster(model), context[..., 0], 16)
     assert sizes == [4, 4, 2]
     assert forecast.quantiles.shape == (10, 1, 16, 21)
-    whole = real(train_timestral.TimestralForecaster(model), context[..., 0], 16)
     np.testing.assert_allclose(forecast.quantiles[:4], whole.quantiles[:4], rtol=1e-5, atol=1e-5)
