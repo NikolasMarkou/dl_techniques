@@ -97,12 +97,12 @@ def test_inference_mode_does_not_collapse_to_one_class(num_classes):
     assert accuracy > majority + 0.5 * (1.0 - majority), (accuracy, majority)
 
 
-def test_every_batch_norm_uses_the_reference_statistics():
-    """D-156: torch.nn.BatchNorm2d defaults, momentum 0.1 (Keras 0.9), eps 1e-5."""
+def test_every_batch_norm_uses_the_reference_momentum():
+    """D-156: torch.nn.BatchNorm2d momentum 0.1 (Keras 0.9); epsilon stays 1e-3 (D-160)."""
     model = create_acc_unet_binary(3, input_shape=(SIZE, SIZE), base_filters=8, mlfc_iterations=1)
     bns = [layer for layer in model._flatten_layers()
            if isinstance(layer, keras.layers.BatchNormalization)]
     assert len(bns) > 50, len(bns)
     off = [(b.name, b.momentum, b.epsilon) for b in bns
-           if (b.momentum, b.epsilon) != (0.9, 1e-5)]
+           if (b.momentum, b.epsilon) != (0.9, 1e-3)]
     assert not off, off
