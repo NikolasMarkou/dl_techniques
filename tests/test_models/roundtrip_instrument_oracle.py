@@ -203,10 +203,14 @@ def measure_roundtrip(
     :param make_inputs: Zero-argument DETERMINISTIC input factory.
     :param call_fn: ``(model, inputs, training) -> outputs``, for a model whose
         forward is not ``model(x)``. Same contract as ``precision_arm_oracle``.
+        If its forward does not go through ``model.call`` at all (Timestral's
+        ``call`` raises; ``predict_block`` is the forward), the function carries
+        ``forward_method = "<name>"`` and the call counter wraps that method.
     :param training: Forwarded to the call.
     :param seed: Seeds both the build and the perturbation.
     :return: A report dict; see the keys assembled at the end of this function.
     """
+    forward_method = getattr(call_fn, "forward_method", "call")
     keras.utils.set_random_seed(seed)
     model = build()
     inputs = make_inputs()
@@ -240,13 +244,13 @@ def measure_roundtrip(
         model.save(path)
         loaded = keras.models.load_model(path, compile=False)
 
-        original_call = loaded.call
+        original_call = getattr(loaded, forward_method)
 
         def _counting_call(*args: Any, **kwargs: Any):
             calls[0] += 1
             return original_call(*args, **kwargs)
 
-        loaded.call = _counting_call
+        setattr(loaded, forward_method, _counting_call)
         loaded_weights = weight_map(loaded)
         calls_before_read = calls[0]
         loaded_outputs = _as_arrays(

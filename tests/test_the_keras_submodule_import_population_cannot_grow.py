@@ -18,6 +18,11 @@ edited for another reason (decisions.md D-082).
 So this is a ceiling, not a ban. Converting a file lowers the measured value;
 lower the ceilings to match in the same commit. A new ``from keras import``
 anywhere raises the count and fails here.
+
+Re-measured at Step 2.6 of the same plan (D-162), after the user's
+``timestral`` port (6d757c6a6, 10 statements in 8 files) was converted:
+**538 statements in 516 files**. The old ceilings (543 / 521) were 5 above the
+population, so the port's 10 only showed up as 548 > 543.
 """
 
 import ast
@@ -30,14 +35,22 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("src", "tests")
 
 #: Measured ceilings (statements, files). Lower them when a file is converted.
-STATEMENT_CEILING = 543
-FILE_CEILING = 521
+STATEMENT_CEILING = 538
+FILE_CEILING = 516
 
 #: Files converted by name; they must stay clean whatever the totals do.
 CONVERTED = (
     "src/dl_techniques/layers/pooling/pixel_shuffle.py",
     "src/dl_techniques/layers/conv_blocks/universal_inverted_bottleneck.py",
     "tests/test_train/test_cliffordnet/test_train_clip_textlm.py",
+    "src/dl_techniques/models/time_series/timestral/covariate_encoding.py",
+    "src/dl_techniques/models/time_series/timestral/forecaster.py",
+    "src/dl_techniques/models/time_series/timestral/layers.py",
+    "src/dl_techniques/models/time_series/timestral/loading.py",
+    "src/dl_techniques/models/time_series/timestral/masks.py",
+    "src/dl_techniques/models/time_series/timestral/model.py",
+    "src/dl_techniques/models/time_series/timestral/scaler.py",
+    "tests/test_models/test_timestral/test_forecaster.py",
 )
 
 

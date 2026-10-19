@@ -1702,6 +1702,55 @@ _extra("siamfc", _b_siamfc,
        lambda: (_u01(2, 87, 87, 3), _u01(2, 103, 103, 3, seed=1)))
 
 
+def _b_timestral():
+    from dl_techniques.models.time_series.timestral import create_timestral_model
+    return create_timestral_model(
+        "5M", prediction_length=16, patch_size=8,
+        quantile_levels=(0.1, 0.5, 0.9), d_model=32, num_heads=4,
+        mlp_hidden_dim=64, block_schedule=("time", "time_variate"),
+        block_size=4, context_length=64)
+
+
+def _timestral_inputs():
+    """Three packed rows (two series) of 4 patches; row 2 is a known covariate."""
+    context = np.cumsum(_f32(3, 32), axis=-1)
+    observed = np.ones((3, 32), dtype=bool)
+    observed[0, :5] = False
+    known = np.zeros((3, 16), dtype="float32")
+    known[2] = np.arange(16, dtype="float32")
+    known_mask = np.zeros((3, 16), dtype=bool)
+    known_mask[2] = True
+    return {"context": context, "observed": observed,
+            "group_ids": np.array([0, 0, 1], dtype="int32"),
+            "role_ids": np.array([0, 1, 2], dtype="int32"),
+            "known_future": known, "known_future_mask": known_mask}
+
+
+def _timestral_call(model, inputs, training):
+    """``TimestralModel.call`` raises by design; the forward is ``predict_block``.
+
+    Both of its paths are judged: context-only, and the covariate window.
+    ``predict_block`` does not mark the model built, and ``.keras`` saving
+    restores weights only into a built model, so the adapter calls
+    ``model.build`` first, as a caller saving the model must.
+    """
+    if not model.built:
+        model.build((None, 32))
+    args = (inputs["context"], inputs["observed"], inputs["group_ids"])
+    context_only = model.predict_block(*args, horizon_patches=2)
+    with_covariates = model.predict_block(
+        *args, horizon_patches=2, role_ids=inputs["role_ids"],
+        known_future=inputs["known_future"],
+        known_future_mask=inputs["known_future_mask"])
+    return context_only, with_covariates
+
+
+# The R-073 call counter wraps this method on the loaded model (the oracle's
+# ``measure_roundtrip``); ``call`` is never reached, so counting it is vacuous.
+_timestral_call.forward_method = "predict_block"
+_extra("timestral", _b_timestral, _timestral_inputs, call_fn=_timestral_call)
+
+
 #: The one ``models/`` package with NO round-trip subject, and why. Its own
 #: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
 #: nothing for a model factory to build". ``PowerSampler`` is a sampling

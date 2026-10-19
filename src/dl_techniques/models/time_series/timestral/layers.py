@@ -9,14 +9,12 @@ variate attention runs per patch over the rows of the same series.
 from dataclasses import dataclass
 
 import keras
-from keras import ops
-from keras.layers import Layer
 from typing import Optional, Tuple
 
 from dl_techniques.models.time_series.timestral.config import LAYER_KIND_AXES
 
 
-class RMSNorm(Layer):
+class RMSNorm(keras.layers.Layer):
     """Root Mean Square Layer Normalization."""
 
     def __init__(self, dim: int, eps: float = 1e-6, **kwargs):
@@ -34,10 +32,10 @@ class RMSNorm(Layer):
         super().build(input_shape)
 
     def call(self, x):
-        x_f = ops.cast(x, "float32")
+        x_f = keras.ops.cast(x, "float32")
         # RMSNorm: x * rsqrt(mean(x^2) + eps) * scale
-        rms = ops.rsqrt(ops.mean(ops.square(x_f), axis=-1, keepdims=True) + self.eps)
-        out = ops.cast(x_f * rms, x.dtype)
+        rms = keras.ops.rsqrt(keras.ops.mean(keras.ops.square(x_f), axis=-1, keepdims=True) + self.eps)
+        out = keras.ops.cast(x_f * rms, x.dtype)
         return out * self.scale
 
     def get_config(self):
@@ -46,7 +44,7 @@ class RMSNorm(Layer):
         return config
 
 
-class ResidualBlock(Layer):
+class ResidualBlock(keras.layers.Layer):
     """Residual block: output(silu(hidden(x))) + residual(x).
 
     Used by the patch embedding and the quantile head.
@@ -83,6 +81,12 @@ class ResidualBlock(Layer):
             name="residual_layer",
         )
         self.activation = keras.activations.silu
+        # Sublayers are built here, in call order, so build() creates the full
+        # weight set and a .keras round trip restores every weight.
+        hidden_shape = tuple(input_shape[:-1]) + (self.hidden_dims,)
+        self.hidden_layer.build(input_shape)
+        self.output_layer.build(hidden_shape)
+        self.residual_layer.build(input_shape)
         super().build(input_shape)
 
     def call(self, x):
@@ -101,7 +105,7 @@ class ResidualBlock(Layer):
         return config
 
 
-class FusedSwiGLU(Layer):
+class FusedSwiGLU(keras.layers.Layer):
     """SwiGLU MLP with fused input projection: gate * silu(up)."""
 
     def __init__(self, embed_dim: int, hidden_dim: int, use_bias: bool = True, **kwargs):
@@ -121,12 +125,14 @@ class FusedSwiGLU(Layer):
             use_bias=self.use_bias,
             name="w3",
         )
+        self.w12.build(input_shape)
+        self.w3.build(tuple(input_shape[:-1]) + (self.hidden_dim,))
         super().build(input_shape)
 
     def call(self, x):
         gate_up = self.w12(x)
-        gate, up = ops.split(gate_up, 2, axis=-1)
-        return self.w3(gate * ops.silu(up))
+        gate, up = keras.ops.split(gate_up, 2, axis=-1)
+        return self.w3(gate * keras.ops.silu(up))
 
     def get_config(self):
         config = super().get_config()
@@ -138,7 +144,7 @@ class FusedSwiGLU(Layer):
         return config
 
 
-class SinCosRoPE(Layer):
+class SinCosRoPE(keras.layers.Layer):
     """Rotary Position Embedding (sin/cos concatenation) with partial rotation.
 
     Only the first `rotary_dim` dimensions of each head rotate. The inverse-
@@ -162,10 +168,10 @@ class SinCosRoPE(Layer):
 
     def build(self, input_shape):
         # inv_freq shape: (dim // 2,)
-        inv_freq = ops.zeros(self.dim // 2, dtype="float32")
-        idx = ops.arange(0, self.rotary_dim, 2, dtype="float32")
+        inv_freq = keras.ops.zeros(self.dim // 2, dtype="float32")
+        idx = keras.ops.arange(0, self.rotary_dim, 2, dtype="float32")
         # Only first rotary_dim//2 entries are non-zero
-        inv_freq = ops.slice_update(
+        inv_freq = keras.ops.slice_update(
             inv_freq,
             (0,),
             1.0 / (self.base ** (idx / self.rotary_dim)),
@@ -180,9 +186,9 @@ class SinCosRoPE(Layer):
 
     def rebuild_inv_freq(self):
         """Recompute the table on the current device (for device transfers)."""
-        inv_freq = ops.zeros(self.dim // 2, dtype="float32")
-        idx = ops.arange(0, self.rotary_dim, 2, dtype="float32")
-        inv_freq = ops.slice_update(
+        inv_freq = keras.ops.zeros(self.dim // 2, dtype="float32")
+        idx = keras.ops.arange(0, self.rotary_dim, 2, dtype="float32")
+        inv_freq = keras.ops.slice_update(
             inv_freq,
             (0,),
             1.0 / (self.base ** (idx / self.rotary_dim)),
@@ -198,21 +204,21 @@ class SinCosRoPE(Layer):
         """
         # position_ids: (R, N) -> (R, 1, N)
         # inv_freq: (dim//2,) -> (1, dim//2, 1)
-        inv_freq_expanded = ops.expand_dims(self.inv_freq, axis=0)  # (1, dim//2)
-        inv_freq_expanded = ops.expand_dims(inv_freq_expanded, axis=-1)  # (1, dim//2, 1)
-        pos_expanded = ops.expand_dims(position_ids, axis=1)  # (R, 1, N)
+        inv_freq_expanded = keras.ops.expand_dims(self.inv_freq, axis=0)  # (1, dim//2)
+        inv_freq_expanded = keras.ops.expand_dims(inv_freq_expanded, axis=-1)  # (1, dim//2, 1)
+        pos_expanded = keras.ops.expand_dims(position_ids, axis=1)  # (R, 1, N)
 
         # freqs: (R, dim//2, N)
-        freqs = ops.matmul(inv_freq_expanded, ops.cast(pos_expanded, "float32"))
+        freqs = keras.ops.matmul(inv_freq_expanded, keras.ops.cast(pos_expanded, "float32"))
         # Transpose to (R, N, dim//2)
-        freqs = ops.transpose(freqs, (0, 2, 1))
+        freqs = keras.ops.transpose(freqs, (0, 2, 1))
 
         # emb: (R, N, dim) - concatenate freqs with itself
-        emb = ops.concatenate([freqs, freqs], axis=-1)
-        cos = ops.cos(emb)
-        sin = ops.sin(emb)
+        emb = keras.ops.concatenate([freqs, freqs], axis=-1)
+        cos = keras.ops.cos(emb)
+        sin = keras.ops.sin(emb)
 
-        return ops.cast(cos, x.dtype), ops.cast(sin, x.dtype)
+        return keras.ops.cast(cos, x.dtype), keras.ops.cast(sin, x.dtype)
 
     def get_config(self):
         config = super().get_config()
@@ -228,14 +234,14 @@ def _rotate_half(x):
     """Rotate half the dimensions for RoPE."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
-    return ops.concatenate([-x2, x1], axis=-1)
+    return keras.ops.concatenate([-x2, x1], axis=-1)
 
 
 def _apply_rotary(q, k, cos, sin):
     """Apply rotary embeddings to q, k shaped (batch, seq, heads, head_dim)."""
     # cos, sin: (R, N, head_dim) -> broadcast over heads: (R, N, 1, head_dim)
-    cos = ops.expand_dims(cos, axis=2)
-    sin = ops.expand_dims(sin, axis=2)
+    cos = keras.ops.expand_dims(cos, axis=2)
+    sin = keras.ops.expand_dims(sin, axis=2)
     q_rot = (q * cos) + (_rotate_half(q) * sin)
     k_rot = (k * cos) + (_rotate_half(k) * sin)
     return q_rot, k_rot
@@ -257,19 +263,19 @@ def _sdpa(query, key, value, mask=None):
     """Scaled dot-product attention on (batch, seq, heads, head_dim) tensors.
 
     Scores (B, H, S, T); `mask` (B, 1, S, T) broadcasts over heads; True =
-    attend. Manual softmax path — `ops.attention` does not exist in this Keras.
+    attend. Manual softmax path — `keras.ops.attention` does not exist in this Keras.
     """
     head_dim = int(key.shape[-1])
-    scores = ops.einsum("bshd,bthd->bhst", query, key) * (1.0 / head_dim ** 0.5)
+    scores = keras.ops.einsum("bshd,bthd->bhst", query, key) * (1.0 / head_dim ** 0.5)
     if mask is not None:
-        mask_h = ops.broadcast_to(mask, ops.shape(scores))
-        scores = ops.where(mask_h, scores, -1e30 * ops.ones_like(scores))
-    attn = ops.exp(scores - ops.max(scores, axis=-1, keepdims=True))
-    attn = attn / ops.sum(attn, axis=-1, keepdims=True)
-    return ops.einsum("bhst,bthd->bshd", attn, value)
+        mask_h = keras.ops.broadcast_to(mask, keras.ops.shape(scores))
+        scores = keras.ops.where(mask_h, scores, -1e30 * keras.ops.ones_like(scores))
+    attn = keras.ops.exp(scores - keras.ops.max(scores, axis=-1, keepdims=True))
+    attn = attn / keras.ops.sum(attn, axis=-1, keepdims=True)
+    return keras.ops.einsum("bhst,bthd->bshd", attn, value)
 
 
-class Attention(Layer):
+class Attention(keras.layers.Layer):
     """Multi-head attention over time axis (is_time=True) or variate axis.
 
     Time attention applies RoPE; variate attention has no positional encoding.
@@ -312,23 +318,27 @@ class Attention(Layer):
             )
         else:
             self.gate = None
+        self.wqkv.build(input_shape)
+        if self.gate is not None:
+            self.gate.build(input_shape)
+        self.wo.build(input_shape)
         super().build(input_shape)
 
     def _qkv(self, x):
         """Split fused QKV projection. Weight layout: (qkv, head_dim, n_heads)."""
-        batch, seq = int(ops.shape(x)[0]), int(ops.shape(x)[1])
+        batch, seq = int(keras.ops.shape(x)[0]), int(keras.ops.shape(x)[1])
         qkv = self.wqkv(x)
-        qkv = ops.reshape(qkv, (batch, seq, 3, self.num_heads, self.head_dim))
+        qkv = keras.ops.reshape(qkv, (batch, seq, 3, self.num_heads, self.head_dim))
         # Permute to (3, batch, seq, heads, head_dim)
-        qkv = ops.transpose(qkv, (2, 0, 1, 3, 4))
-        q, k, v = ops.unstack(qkv, axis=0)
+        qkv = keras.ops.transpose(qkv, (2, 0, 1, 3, 4))
+        q, k, v = keras.ops.unstack(qkv, axis=0)
         return q, k, v
 
     def call(self, x, mask, cos, sin):
-        rows, num_patches, _ = ops.shape(x)
+        rows, num_patches, _ = keras.ops.shape(x)
 
         # Time attention: (R, N, D); Variate attention: (N, R, D)
-        inputs = x if self.is_time else ops.transpose(x, (1, 0, 2))
+        inputs = x if self.is_time else keras.ops.transpose(x, (1, 0, 2))
         q, k, v = self._qkv(inputs)
 
         if self.is_time:
@@ -342,18 +352,18 @@ class Attention(Layer):
             out_enc = _sdpa(q[:, :n], k[:, :n], v[:, :n], mask.mask[:, :, :n, :n])
             # Decoder queries: full attention over all keys
             out_dec = _sdpa(q[:, n:], k, v, mask.mask[:, :, n:, :])
-            out = ops.concatenate([out_enc, out_dec], axis=1)
+            out = keras.ops.concatenate([out_enc, out_dec], axis=1)
         else:
             out = _sdpa(q, k, v, mask)
 
         if self.is_time:
-            out = ops.reshape(out, ops.shape(inputs))
+            out = keras.ops.reshape(out, keras.ops.shape(inputs))
         else:
-            out = ops.reshape(out, (ops.shape(x)[1], ops.shape(x)[0], self.embed_dim))
-            out = ops.transpose(out, (1, 0, 2))
+            out = keras.ops.reshape(out, (keras.ops.shape(x)[1], keras.ops.shape(x)[0], self.embed_dim))
+            out = keras.ops.transpose(out, (1, 0, 2))
 
         if self.gate is not None:
-            out = out * ops.sigmoid(self.gate(x))
+            out = out * keras.ops.sigmoid(self.gate(x))
 
         return self.wo(out)
 
@@ -369,7 +379,7 @@ class Attention(Layer):
         return config
 
 
-class TransformerBlock(Layer):
+class TransformerBlock(keras.layers.Layer):
     """One layer kind: attention(s) in order, each pre-norm residual, then MLP."""
 
     def __init__(
@@ -420,6 +430,11 @@ class TransformerBlock(Layer):
             self.mlp_bias,
             name="mlp",
         )
+        for norm, attn in zip(self.attn_norms, self.attns):
+            norm.build(input_shape)
+            attn.build(input_shape)
+        self.mlp_norm.build(input_shape)
+        self.mlp.build(input_shape)
         super().build(input_shape)
 
     def call(self, x, time_mask=None, variate_mask=None, cos=None, sin=None):
@@ -449,7 +464,7 @@ class TransformerBlock(Layer):
         return config
 
 
-class Transformer(Layer):
+class Transformer(keras.layers.Layer):
     """Stack of TransformerBlocks with shared RoPE and output norm."""
 
     def __init__(
@@ -504,6 +519,10 @@ class Transformer(Layer):
             name="rope",
         )
         self.out_norm = RMSNorm(self.embed_dim, self.norm_eps, name="out_norm")
+        self.rope.build(input_shape)
+        for block in self.layers:
+            block.build(input_shape)
+        self.out_norm.build(input_shape)
         super().build(input_shape)
 
     def call(self, x, time_mask=None, variate_mask=None, positions=None):

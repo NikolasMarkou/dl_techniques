@@ -11,7 +11,6 @@ from typing import Any, Optional, Union
 
 import numpy as np
 import keras
-from keras import ops
 
 from dl_techniques.models.time_series.timestral.config import TimestralConfig
 from dl_techniques.models.time_series.timestral.model import TimestralModel
@@ -137,7 +136,7 @@ def load_model(
     missing = []
     for var in model.weights:
         if var.path in weights:
-            var.assign(ops.cast(weights[var.path], var.dtype))
+            var.assign(keras.ops.cast(weights[var.path], var.dtype))
             del weights[var.path]
         else:
             missing.append(var.path)

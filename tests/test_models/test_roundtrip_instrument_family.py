@@ -350,7 +350,12 @@ def test_every_model_package_has_a_roundtrip_subject():
     # re-derived with the command above. This test was red from at least
     # c39e444a3 on its FIRST assertion (11 packages with no subject), so the
     # count line below it was never reached and its 89 had gone stale.
-    assert len(on_disk) == 107, f"expected 107 packages, found {len(on_disk)}"
+    #
+    # 109 as of 2026-10-19 (plan-2026-10-14T062616-81938e81 step 2.6): the
+    # user's `timestral` (6d757c6a6, a real subject, `_b_timestral`) and the
+    # doc-only `metaformer` directory (087ee882a, see DOC_ONLY_PACKAGES in
+    # model_package_discovery). Re-derived with the command above.
+    assert len(on_disk) == 109, f"expected 109 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

@@ -170,6 +170,98 @@ class TestTimestralModel:
         assert model.config.median_index == 2
 
 
+def _tiny_model():
+    return create_timestral_model(
+        "5M", prediction_length=16, patch_size=8,
+        quantile_levels=(0.1, 0.5, 0.9), d_model=32, num_heads=4,
+        mlp_hidden_dim=64, block_schedule=("time", "time_variate"),
+        block_size=4, context_length=64,
+    )
+
+
+def _predict(model):
+    rng = np.random.RandomState(0)
+    context = np.cumsum(rng.randn(3, 32), axis=-1).astype("float32")
+    observed = np.ones((3, 32), dtype=bool)
+    group_ids = np.array([0, 0, 1], dtype="int32")
+    return keras.ops.convert_to_numpy(
+        model.predict_block(context, observed, group_ids, horizon_patches=2))
+
+
+def _relative_paths(model):
+    """Weight paths without the model's own prefix (an explicit build adds it)."""
+    return [w.path.split("/", 1)[1] if w.path.startswith(model.name + "/")
+            else w.path for w in model.weights]
+
+
+class TestTimestralBuildAndRoundTrip:
+    """``build()`` creates every weight, so a ``.keras`` round trip is exact.
+
+    Until 2026-10-19 (plan-2026-10-14T062616-81938e81 D-162) the sublayers
+    created their Dense layers in ``build()`` without building them, so
+    ``model.build`` materialized 1 of 30 weights and a saved model reloaded
+    with 29 of 30 weights fresh.
+    """
+
+    def test_build_creates_every_weight_a_forward_creates(self):
+        lazy = _tiny_model()
+        _predict(lazy)
+        built = _tiny_model()
+        built.build((None, 32))
+        assert len(lazy.weights) == 30
+        assert sorted(_relative_paths(built)) == sorted(_relative_paths(lazy))
+
+    def test_keras_round_trip_restores_every_weight_and_the_forecast(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        model = _tiny_model()
+        model.build((None, 32))
+        before = _predict(model)
+        path = tmp_path / "timestral.keras"
+        model.save(str(path))
+        loaded = keras.models.load_model(str(path), compile=False)
+        donor = dict(zip(_relative_paths(model), model.weights))
+        restored = dict(zip(_relative_paths(loaded), loaded.weights))
+        assert sorted(restored) == sorted(donor)
+        for name, weight in donor.items():
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(restored[name]),
+                keras.ops.convert_to_numpy(weight), err_msg=name)
+        np.testing.assert_array_equal(_predict(loaded), before)
+
+    @pytest.mark.parametrize("explicit_build, digest", [
+        (False, "61f1075e8f0eb4dd566432936e81ec042c8df1dd39c412af1ee4a17949ec31fe"),
+        (True, "5c798e9184d6ce7e3c491967f90e4ac81b238af3ec24226e6d2dd8c7098b222b"),
+    ])
+    def test_initial_weights_are_the_ports(self, explicit_build, digest):
+        """The build fix moved no initial weight, built lazily or explicitly.
+
+        Digests are sha256 over every weight in ``model.weights`` order at seed
+        1234, measured on the port as committed (6d757c6a6), identical on CPU and
+        GPU 1. Building in call order instead of head first changes the explicit
+        digest (D-162). A Keras/TF upgrade that changes initializer streams also
+        moves them; re-measure then, do not loosen.
+        """
+        import hashlib
+
+        keras.utils.set_random_seed(1234)
+        model = _tiny_model()
+        if explicit_build:
+            model.build((None, 32))
+        else:
+            _predict(model)
+        sha = hashlib.sha256()
+        for weight in model.weights:
+            sha.update(np.ascontiguousarray(
+                keras.ops.convert_to_numpy(weight), dtype="float32").tobytes())
+        assert sha.hexdigest() == digest
+
+    def test_the_factories_are_from_variant(self):
+        expected = TimestralModel.from_variant("5M", prediction_length=24).config
+        assert create_timestral_model("5M", prediction_length=24).config == expected
+        assert create_timestral_by_variant("5M", prediction_length=24).config == expected
+        assert TimestralModel.MODEL_VARIANTS["5M"]["d_model"] == expected.d_model
+
+
 class TestTimestralConfig:
     """Tests for TimestralConfig validation and serialization."""
 

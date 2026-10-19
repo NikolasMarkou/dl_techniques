@@ -12,7 +12,6 @@ horizon of a known covariate) resolves to the series mean.
 """
 
 import keras
-from keras import ops
 import numpy as np
 from typing import Optional, Tuple
 

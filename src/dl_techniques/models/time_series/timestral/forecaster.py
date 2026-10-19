@@ -25,7 +25,6 @@ from typing import Any, Optional, Tuple, Union
 import numpy as np
 
 import keras
-from keras import ops
 
 from dl_techniques.models.time_series.timestral.covariate_encoding import target_encode
 from dl_techniques.models.time_series.timestral.loading import load_model

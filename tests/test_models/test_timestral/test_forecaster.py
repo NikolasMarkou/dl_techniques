@@ -106,9 +106,6 @@ class TestTimestralForecaster:
         mask_t = keras.ops.convert_to_tensor(mask)
         target_rows_t = keras.ops.convert_to_tensor(target_rows)
 
-        import keras
-        from keras import ops
-
         refined = tiny_model._refine_block(quantiles_t, context_t, mask_t, target_rows_t)
         refined = np.asarray(refined)
         assert refined.shape == quantiles_t.shape

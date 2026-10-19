@@ -124,6 +124,13 @@ model = TimestralModel(config)
 # For training, use TimestralTrainer which calls model.predict_block directly
 ```
 
+`TimestralModel.from_variant(variant, prediction_length=96, patch_size=32, quantile_levels=None, **kwargs)`
+builds one of the four sizes in `TimestralModel.MODEL_VARIANTS`; both factories below delegate to it.
+
+`model.build(...)` creates every weight. `predict_block` does not mark the model built, so call
+`model.build(...)` on a fresh model before `model.save(...)`; the `.keras` round trip then restores
+every weight exactly.
+
 ### `TimestralForecaster.from_pretrained(repo_id)`
 
 High-level forecaster with block-autoregressive decoding and clampsym.

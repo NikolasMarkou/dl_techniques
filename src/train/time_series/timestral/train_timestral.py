@@ -7,7 +7,7 @@ encoded context. Supports past-only and known-future covariates, categorical cov
 and outputs 21 non-crossing quantiles per time step.
 
 References:
-    - Mistral AI, 2024. Timestral: Time Series Transformer for Probabilistic Forecasting.
+    - Mistral AI, 2026. Timestral: Mistral's time-series foundation models.
       (https://mistral.ai/news/timestral)
 """
 
