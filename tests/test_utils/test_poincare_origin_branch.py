@@ -13,13 +13,18 @@ the branch that must NOT be taken: with ``ops.tanh`` (resp. ``ops.arctanh``)
 returning ``nan``, the scaled path is ``0 * nan = nan``, so a finite result at
 the origin is possible only if the limiting branch fired.
 
-NOT tested here, and deliberately: an earlier review claimed NaN GRADIENTS from
-this function at the origin. That claim was WITHDRAWN after measurement (TF
-2.18's ``tf.norm`` backward returns 0, not NaN). Do not resurrect it.
+An earlier review claimed NaN GRADIENTS from this function at the origin. That
+claim was WITHDRAWN after measurement (TF 2.18's ``tf.norm`` backward returns 0,
+not NaN), and it holds off XLA only: under ``jit_compile=True`` sqrt's backward
+is ``0.5 * dy / y``, so ``dy = 0`` at ``y = 0`` is NaN, and every SHGCN model
+trained under XLA had a NaN loss from its second step
+(plan-2026-10-14T062616-81938e81 D-155). ``TestTheOriginGradientIsFiniteUnderXla``
+pins that, with a liveness arm showing the bare form really is NaN there.
 """
 
 import numpy as np
 import keras
+import tensorflow as tf
 from keras import ops
 import pytest
 
@@ -119,3 +124,47 @@ class TestForwardValuesAreUnchanged:
         zeros = np.zeros((3, 4), dtype="float32")
         np.testing.assert_array_equal(
             np.asarray(math_util.exp_map_0(zeros, 1.0)), zeros)
+
+
+class TestTheOriginGradientIsFiniteUnderXla:
+    """D-155: sqrt's backward at a zero vector is NaN under XLA, 0 eager.
+
+    A zero-initialised SHGCN bias sits at the origin on step 1, and the floor
+    and the ``where`` in front of the norm send ``dy = 0`` into sqrt's
+    backward. TF's SqrtGrad kernel returns 0 for ``dy == 0``; XLA computes
+    ``0.5 * 0 / 0 = nan``. The gradient must be finite, and exactly 0, in both
+    modes.
+    """
+
+    @staticmethod
+    def _gradient(fn, jit_compile):
+        def grad(x):
+            with tf.GradientTape() as tape:
+                tape.watch(x)
+                loss = tf.reduce_sum(fn(x))
+            return tape.gradient(loss, x)
+        return np.asarray(tf.function(grad, jit_compile=jit_compile)(
+            tf.zeros((3, 4), dtype="float32")))
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    @pytest.mark.parametrize("which", [
+        "raw_norm", "floored_norm", "exp_map_0", "log_map_0", "project"])
+    def test_the_gradient_at_the_origin_is_zero(
+            self, math_util, which, jit_compile):
+        fns = {
+            "raw_norm": lambda x: math_util.norm_and_floored_norm(x)[0],
+            "floored_norm": lambda x: math_util.norm_and_floored_norm(x)[1],
+            "exp_map_0": lambda x: math_util.exp_map_0(x, 1.0),
+            "log_map_0": lambda x: math_util.log_map_0(x, 1.0),
+            "project": lambda x: math_util.project(x, 1.0),
+        }
+        grad = self._gradient(fns[which], jit_compile)
+        assert np.all(np.isfinite(grad)), (which, jit_compile, grad)
+        if which in ("raw_norm", "floored_norm"):
+            np.testing.assert_array_equal(grad, np.zeros((3, 4), "float32"))
+
+    def test_the_bare_norm_really_is_nan_under_xla(self):
+        """Liveness: the instrument sees the defect the fix removes."""
+        bare = lambda x: ops.maximum(ops.norm(x, axis=-1), 1e-5)  # noqa: E731
+        assert np.all(self._gradient(bare, False) == 0.0)
+        assert np.all(np.isnan(self._gradient(bare, True)))

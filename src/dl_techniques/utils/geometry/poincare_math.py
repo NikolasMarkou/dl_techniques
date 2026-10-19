@@ -124,6 +124,9 @@ class PoincareMath:
     # WITHDRAWN after measurement -- TF 2.18's `tf.norm` backward returns 0, not
     # NaN, at the origin. The defect here is the dead branch, nothing else.
     # See decisions.md D-056.
+    # (Amended by plan-2026-10-14T062616-81938e81/D-155: that "returns 0" holds
+    # off XLA only. Under XLA the same backward IS NaN; see the D-155 anchor in
+    # the body below.)
     def norm_and_floored_norm(
             self,
             x: keras.KerasTensor,
@@ -145,7 +148,23 @@ class PoincareMath:
         Failure mode: none -- pure arithmetic, no raise, no state. Callers that
         need only the floored value should call :meth:`safe_norm`.
         """
-        norm = ops.norm(x, axis=axis, keepdims=keepdims)
+        # DECISION plan-2026-10-14T062616-81938e81/D-155
+        # The square root reads a SAFE argument, and `ops.norm` is NOT used. Do
+        # NOT go back to `ops.norm(x)` or a bare `ops.sqrt(sum(x**2))`: at a
+        # zero vector (every zero-initialised SHGCN bias, step 1) the floor and
+        # the `where` in front send an upstream gradient of 0 into sqrt's
+        # backward. TF's own SqrtGrad kernel returns 0 for dy == 0, but XLA
+        # lowers it as 0.5 * dy / y = 0 * inf = NaN (measured on CPU and GPU),
+        # so every SHGCN model trained under `jit_compile=True` (and `auto` on a
+        # GPU) had a NaN loss from its second step. The forward is unchanged:
+        # sqrt(1.0) is never selected where the squared norm is positive.
+        squared = ops.sum(ops.square(x), axis=axis, keepdims=keepdims)
+        positive = squared > 0.0
+        norm = ops.where(
+            positive,
+            ops.sqrt(ops.where(positive, squared, ops.ones_like(squared))),
+            ops.zeros_like(squared),
+        )
         return norm, ops.maximum(norm, self.eps)
 
     @staticmethod
@@ -362,8 +381,16 @@ class PoincareMath:
         # The same double-`where` as `exp_map_0`; the argument is identical and
         # `arctanh(u)/u` carries the same `1/u**2` in its derivative. See the
         # D-061 anchor above and decisions.md D-061.
+        # DECISION plan-2026-10-14T062616-81938e81/D-155
+        # The discarded value here is HALF THE BALL RADIUS, not `exp_map_0`'s
+        # 1.0. Do NOT copy the 1.0 back: `sqrt_c * 1.0 >= 1` whenever c >= 1
+        # (SHGCN's learnable curvature starts at softplus(0.54) = 0.9992, under
+        # 1 by 0.0008), and arctanh at or past 1 is inf/NaN with an infinite
+        # derivative, so the unselected branch poisoned the gradient at the
+        # origin (0 * NaN = NaN), in eager mode too. Half the radius gives
+        # arctanh(0.5): finite for every c.
         safe_norm_y = ops.where(
-            raw_norm_y < self.eps, ops.ones_like(norm_y), norm_y
+            raw_norm_y < self.eps, 0.5 * radius * ops.ones_like(norm_y), norm_y
         )
         scale = ops.arctanh(sqrt_c * safe_norm_y) / (sqrt_c * safe_norm_y)
         return ops.where(raw_norm_y < self.eps, y, y * scale)

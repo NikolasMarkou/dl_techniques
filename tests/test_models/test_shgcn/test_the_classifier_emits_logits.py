@@ -53,14 +53,12 @@ def test_fit_with_from_logits_memorises_one_graph():
     labels = np.arange(NUM_NODES) % NUM_CLASSES
     model = SHGCNNodeClassifier(
         num_classes=NUM_CLASSES, hidden_dims=[32], embedding_dim=16, dropout_rate=0.0)
-    # jit_compile=False: compiled with XLA (jit_compile=True on CPU, or "auto",
-    # which resolves to XLA on a GPU) this model's loss is NaN from the second
-    # step on, with the old softmax head too (measured 2026-10-19 at 44ea8be64
-    # and after; without XLA it is finite). That defect is reported
-    # separately; this arm measures the head.
+    # jit_compile=True on every device: until D-155 the loss under XLA was NaN
+    # from the second step on (sqrt's backward at the zero-initialised bias),
+    # so this arm trains through XLA on purpose.
     model.compile(optimizer=keras.optimizers.Adam(1e-2),
                   loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-                  metrics=["accuracy"], jit_compile=False)
+                  metrics=["accuracy"], jit_compile=True)
     history = model.fit([features[None], adjacency[None]], labels[None],
                         batch_size=1, epochs=300, verbose=0)
     chance = float(np.log(NUM_CLASSES))
