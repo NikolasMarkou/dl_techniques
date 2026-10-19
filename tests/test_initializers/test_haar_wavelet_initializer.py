@@ -38,7 +38,7 @@ import os
 from typing import Tuple, List
 from unittest.mock import patch
 
-from tests.numerics import reassociation_atol
+from tests.numerics import reassociation_atol, true_float32_matmul
 
 from dl_techniques.initializers.haar_wavelet_initializer import (
     HAAR_PATTERNS,
@@ -486,18 +486,10 @@ class TestCreateHaarDepthwiseConv2D:
         session (`tests/test_layers/conftest.py::tf32_disabled` does the same for
         modules under that tree, which this one is not).
         """
-        import tensorflow as tf
-
-        was_enabled = tf.config.experimental.tensor_float_32_execution_enabled()
-        tf.config.experimental.enable_tensor_float_32_execution(False)
-        try:
+        with true_float32_matmul():
             layer = create_haar_depthwise_conv2d(input_shape=(8, 8, 1))
             x = np.random.default_rng(3).normal(size=(4, 8, 8, 1)).astype('float32')
             y = np.asarray(layer(x))
-        finally:
-            tf.config.experimental.enable_tensor_float_32_execution(was_enabled)
-
-        assert tf.config.experimental.tensor_float_32_execution_enabled() is was_enabled
 
         input_energy = float((x ** 2).sum())
         atol = reassociation_atol(

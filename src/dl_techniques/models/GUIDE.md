@@ -177,7 +177,8 @@ That silence is the reason they are written down here.
   exactly 0. Run the block in the variable dtype rather than raising eps.
 - **TF32 is on by default on the GPU.** It changed an identical float64 comparison by up to
   1775x, and `tensor_float_32_execution_enabled()` returns `True` even with no GPU visible.
-  - Opt oracle tests into the `tf32_disabled` fixture.
+  - Opt oracle tests into the `tf32_disabled` fixture, or scope them with
+    `tests/numerics.py::true_float32_matmul()`; that module is the only TF32 writer in `tests/`.
   - Never toggle TF32 at module import time: it changes results by collection order.
   - Measure a tolerance in both regimes.
   - Derive bounds from `tests/numerics.py:reassociation_atol` rather than pasting literals.

@@ -25,7 +25,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.conv_blocks.dynamic_conv2d import DynamicConv2D
-from tests.numerics import reassociation_atol
+from tests.numerics import reassociation_atol, true_float32_matmul
 
 CHANNELS = 8
 SHAPE = (2, 16, 16, CHANNELS)
@@ -75,9 +75,7 @@ def test_each_expert_equals_its_grouped_convolution(groups, dilation, filters):
     layer = _layer(groups, dilation, filters)
     layer.build(SHAPE)
     x = np.random.default_rng(1).standard_normal(SHAPE).astype("float32")
-    tf32 = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         for expert in layer.conv_layers:
             got = np.asarray(layer._expert_output(expert, x))
             want = np.asarray(expert(x))
@@ -85,8 +83,6 @@ def test_each_expert_equals_its_grouped_convolution(groups, dilation, filters):
             terms = 9 * (CHANNELS // groups)
             atol = reassociation_atol([terms], 1, float(np.max(np.abs(want))))
             np.testing.assert_allclose(got, want, rtol=0.0, atol=atol)
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(tf32)
 
 
 def test_the_weights_are_still_the_grouped_conv_kernels():

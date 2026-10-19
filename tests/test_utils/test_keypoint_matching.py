@@ -13,6 +13,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils import keypoint_matching as km
+from tests.numerics import true_float32_matmul
 
 pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
@@ -21,13 +22,8 @@ SIZE = (200.0, 160.0)
 
 @pytest.fixture(scope="module")
 def tf32_disabled():
-    prev = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         yield False
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(prev)
-        assert tf.config.experimental.tensor_float_32_execution_enabled() == prev
 
 
 def _np(x):

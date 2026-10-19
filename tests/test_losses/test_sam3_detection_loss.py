@@ -20,6 +20,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
+from tests.numerics import tf32_execution
 from dl_techniques.losses.sam3_detection_loss import (
     INVALID_COST,
     VALID_COST_THRESHOLD,
@@ -511,9 +512,7 @@ class TestPrecisionRegimes:
         forced ON and forced OFF, because a process-global TF32 toggle elsewhere
         in the suite has swung an unrelated measurement by ~1,775x on this GPU.
         """
-        previous = tf.config.experimental.tensor_float_32_execution_enabled()
-        tf.config.experimental.enable_tensor_float_32_execution(tf32)
-        try:
+        with tf32_execution(tf32):
             logits, pred, tgt, valid = _sample(2, 6, 4,
                                                [[1, 1, 1, 0], [1, 1, 0, 0]])
             expected = _ref_cost_matrix(logits, pred, tgt, valid)
@@ -522,8 +521,6 @@ class TestPrecisionRegimes:
             finite = expected < VALID_COST_THRESHOLD
             np.testing.assert_allclose(actual[finite], expected[finite],
                                        rtol=2e-5, atol=2e-5)
-        finally:
-            tf.config.experimental.enable_tensor_float_32_execution(previous)
 
 
 # --------------------------------------------------------------------------
@@ -1749,9 +1746,7 @@ class TestLossPrecisionRegimes:
 
     @pytest.mark.parametrize("tf32", [True, False])
     def test_every_term_holds_its_tolerance_in_both_tf32_regimes(self, tf32):
-        previous = tf.config.experimental.tensor_float_32_execution_enabled()
-        tf.config.experimental.enable_tensor_float_32_execution(tf32)
-        try:
+        with tf32_execution(tf32):
             fields = _make_packed()
             y_true, y_pred = _pack(fields)
             actual = _terms(_loss(), y_true, y_pred)
@@ -1761,8 +1756,6 @@ class TestLossPrecisionRegimes:
                 np.testing.assert_allclose(actual[key], expected[key],
                                            rtol=2e-5, atol=2e-6,
                                            err_msg=f"{key} @ tf32={tf32}")
-        finally:
-            tf.config.experimental.enable_tensor_float_32_execution(previous)
 
 
 # --------------------------------------------------------------------------

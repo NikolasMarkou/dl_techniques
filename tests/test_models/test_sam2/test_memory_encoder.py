@@ -51,6 +51,7 @@ from dl_techniques.models.vision_language.sam.sam2.memory_encoder import (
     SAM2MemoryEncoder,
 )
 
+from tests.numerics import true_float32_matmul
 from ..test_sam.dead_component_oracle import zeroed_variables
 
 # ---------------------------------------------------------------------
@@ -136,14 +137,11 @@ def no_tf32() -> Iterator[None]:
     chosen under one regime is meaningless in the other, and the repo already
     records a test module that disables TF32 process-globally at import, so the
     ambient state depends on which files pytest collected. This fixture pins it
-    and restores the previous value.
+    and restores the previous value (``tests/numerics.py::true_float32_matmul``,
+    D-164).
     """
-    previous = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         yield
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(previous)
 
 # ---------------------------------------------------------------------
 # G5.1 -- the mask affine, by VALUE

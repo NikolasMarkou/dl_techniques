@@ -12,6 +12,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils import keypoint_extraction as ke
+from tests.numerics import true_float32_matmul
 from train.superpoint.homographic_adaptation import (
     grid_logits_to_heatmap,
     simple_nms,
@@ -22,13 +23,8 @@ pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
 @pytest.fixture(scope="module")
 def tf32_disabled():
-    prev = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         yield False
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(prev)
-        assert tf.config.experimental.tensor_float_32_execution_enabled() == prev
 
 
 def _np(x):

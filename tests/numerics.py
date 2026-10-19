@@ -243,6 +243,41 @@ def matmul_precision_atol(scale: float) -> float:
 
 
 @contextlib.contextmanager
+def tf32_execution(enabled: bool) -> Iterator[bool]:
+    """Run the block with TF32 tensor-core matmul and convolution set to ``enabled``.
+
+    The ONLY writer of TensorFlow's process-global TF32 flag under ``tests/``
+    (plan-2026-10-14T062616-81938e81 D-164; ``tests/test_the_tf32_flag_is_set_only_in_
+    numerics.py`` fails any other call site). Every scope, fixture and parametrized
+    regime in the suite routes through here, so the capture / restore / assert harness
+    exists once. Use :func:`true_float32_matmul` for the common "off" case.
+
+    Interface contract: captures the prior setting (never assumes ``True``), sets it to
+    ``enabled`` for the block, restores the prior setting in ``finally`` even if the block
+    raises, and asserts the restoration. On CPU the flag is numerically inert, so the
+    regime only changes on a TF32-capable GPU; assert ``matmul_unit_roundoff()`` inside
+    the block when the regime itself is the point.
+
+    :param enabled: The TF32 setting in force inside the block.
+    :type enabled: bool
+    :yield: ``enabled``.
+    :rtype: Iterator[bool]
+    :raises AssertionError: If the prior setting fails to restore.
+    """
+    import tensorflow as tf  # local: this module is otherwise pure NumPy and imported very widely.
+
+    previous = tf.config.experimental.tensor_float_32_execution_enabled()
+    tf.config.experimental.enable_tensor_float_32_execution(enabled)
+    try:
+        yield enabled
+    finally:
+        tf.config.experimental.enable_tensor_float_32_execution(previous)
+        assert (
+            tf.config.experimental.tensor_float_32_execution_enabled() == previous
+        ), "TF32 setting leaked out of tf32_execution"
+
+
+@contextlib.contextmanager
 def true_float32_matmul() -> Iterator[None]:
     """Run the block with TF32 tensor-core matmul and convolution OFF, then restore it.
 
@@ -257,21 +292,13 @@ def true_float32_matmul() -> Iterator[None]:
     for the block, restores the prior setting in ``finally`` even if the block raises, and
     asserts the restoration. On CPU the flag is numerically inert, so this is a no-op
     there; callers that need proof of the regime assert ``matmul_unit_roundoff()`` inside
-    the block. Same capture / restore / assert convention as ``tests/test_layers/
-    conftest.py::tf32_disabled``, which is a fixture and not importable outside that tree.
+    the block. It is :func:`tf32_execution` with ``enabled=False``; every TF32-off scope in
+    the suite (the ``tf32_disabled`` fixtures, the bias-free homogeneity probe, the inline
+    toggles) delegates here (D-164).
 
     :yield: Nothing; TF32 is off inside the block.
     :rtype: Iterator[None]
     :raises AssertionError: If the prior setting fails to restore.
     """
-    import tensorflow as tf  # local: this module is otherwise pure NumPy and imported very widely.
-
-    previous = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with tf32_execution(False):
         yield
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(previous)
-        assert (
-            tf.config.experimental.tensor_float_32_execution_enabled() == previous
-        ), "TF32 setting leaked out of true_float32_matmul"

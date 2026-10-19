@@ -13,6 +13,8 @@ import numpy as np
 import tensorflow as tf
 from typing import Tuple, Dict, Any
 
+from tests.numerics import tf32_execution
+
 from dl_techniques.models.vision.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     create_bfunet_variant,
@@ -25,7 +27,6 @@ from .conftest import (
     fit_one_step,
     homogeneity_error,
     homogeneity_error_raw,
-    tf32_disabled,
 )
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
@@ -561,15 +562,8 @@ class TestBiasFreeUNet:
         )
         fit_one_step(model)
 
-        previous = tf.config.experimental.tensor_float_32_execution_enabled()
-        tf.config.experimental.enable_tensor_float_32_execution(True)
-        try:
+        with tf32_execution(True):
             err_tf32 = homogeneity_error_raw(model, test_image_grayscale, 3.0)
-        finally:
-            tf.config.experimental.enable_tensor_float_32_execution(previous)
-            assert (
-                tf.config.experimental.tensor_float_32_execution_enabled() == previous
-            ), "TF32 setting leaked out of the diagnosis test"
 
         err_true_f32 = homogeneity_error(model, test_image_grayscale, 3.0)
 

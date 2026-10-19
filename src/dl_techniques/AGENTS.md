@@ -149,7 +149,10 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
 | autouse `results/` guard | forbids any test writing into the repo-root `results/` — it **asserts**, never cleans up |
 
 > **Never call `enable_tensor_float_32_execution` at module import.** It is process-global for the
-> session and swings precision measurements by ~1000x depending on collection order. And since
+> session and swings precision measurements by ~1000x depending on collection order. In `tests/`
+> it is called only by `tests/numerics.py::tf32_execution` (a census test enforces it); scope TF32
+> with `tests.numerics.true_float32_matmul()` or `tf32_execution(enabled)`; `tf32_disabled` delegates
+> to them. And since
 > `results/` is gitignored and untracked, deletion there is unrecoverable — route every config
 > through `tmp_path`.
 

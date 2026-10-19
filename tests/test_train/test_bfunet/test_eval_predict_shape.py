@@ -24,6 +24,7 @@ import pytest  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from train.bfunet import eval_psnr_vs_noise as ev  # noqa: E402
+from tests.numerics import true_float32_matmul  # noqa: E402
 
 SIZE = 8
 BATCH = 4
@@ -65,10 +66,8 @@ def _config() -> "ev.EvalConfig":
 def exact_float32():
     """TF32 convolutions pick their kernel by batch size and differ at 3e-4 between a batch of 1 and of 4
     on an Ampere or newer GPU (measured); turn them off for the numeric pin and restore the flag."""
-    enabled = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    yield
-    tf.config.experimental.enable_tensor_float_32_execution(enabled)
+    with true_float32_matmul():
+        yield
 
 
 class TestPredictTracesOncePerModel:

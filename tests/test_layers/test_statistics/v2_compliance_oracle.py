@@ -507,52 +507,6 @@ def assert_forward_is_finite(y: Any) -> None:
 # ---------------------------------------------------------------------
 
 
-class Tf32Scope:
-    """Turn TF32 matmuls off for the body, then ALWAYS restore the previous setting.
-
-    §13.6.1 calls TF32 "the default false model defect". On an Ampere-or-later GPU
-    TensorFlow silently runs float32 matmuls through TF32, whose ~10-bit mantissa gives
-    about 1e-3 relative accuracy. An eager-versus-XLA comparison then measures the TF32
-    rounding rather than the layer.
-
-    MEASURED in this worktree on the RTX 4090, ``assert_eager_matches_jit`` over the nine
-    statistics subjects: with TF32 ON, four subjects disagree, max-abs
-    ``5.42e-04`` / ``1.13e-03`` / ``1.03e-03`` / ``3.36e-03`` on outputs of order 1. With
-    TF32 OFF, all nine agree inside ``1e-4``. The same run on CPU agrees inside ``1e-4``
-    either way, which is why the failure appears only when the suite runs on a GPU.
-
-    TF32 is process-global, so per §13.7.4 it is owned by one scope that restores in
-    ``finally`` and ASSERTS the restoration -- leaving it off would silently change the
-    numerics of every test that runs afterwards in the same process.
-    """
-
-    def __init__(self, enabled: bool = False) -> None:
-        self.enabled = enabled
-        self._previous: Optional[bool] = None
-
-    def __enter__(self) -> bool:
-        self._previous = tf.config.experimental.tensor_float_32_execution_enabled()
-        tf.config.experimental.enable_tensor_float_32_execution(self.enabled)
-        return self.enabled
-
-    def __exit__(self, *exc: Any) -> None:
-        try:
-            tf.config.experimental.enable_tensor_float_32_execution(self._previous)
-        finally:
-            assert (
-                tf.config.experimental.tensor_float_32_execution_enabled()
-                == self._previous
-            ), "TF32 execution was not restored"
-
-
-@pytest.fixture
-def tf32_disabled():
-    """Fixture form of :class:`Tf32Scope`, for the XLA-equivalence arms."""
-    with Tf32Scope(False) as state:
-        yield state
-
-
-
 def assert_eager_matches_jit(
     layer: Any,
     sample_input: ArrayLike,

@@ -19,6 +19,8 @@ import keras
 import pytest
 import tensorflow as tf
 
+from tests.numerics import true_float32_matmul
+
 # ---------------------------------------------------------------------
 
 # The dtypes every Energy Transformer layer must survive. `mixed_float16` is the one that
@@ -101,29 +103,22 @@ def tf32_disabled():
 
     Opt in per module with `pytestmark = pytest.mark.usefixtures("tf32_disabled")`.
 
-    Same capture / restore-in-`finally` / ASSERT-the-restoration harness as
-    `test_transformers/test_gated_linear_attention_block.py`'s
-    `test_chunked_matches_sequential_float32_without_tf32` (~`:1705-1733`) — one
-    convention, not two. The prior value is CAPTURED, never assumed to be `True`,
-    because another module may already have disabled it.
+    The capture / restore-in-`finally` / ASSERT-the-restoration harness is
+    `tests/numerics.py::true_float32_matmul`, the suite's one TF32 writer (D-164).
+    The prior value is CAPTURED there, never assumed to be `True`, because another
+    module may already have disabled it.
 
     :yield: `False`, the TF32 state in force for the module's tests.
     :rtype: bool
     """
     global _TF32_SCOPED_OFF
-    previous = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    _TF32_SCOPED_OFF = True
-    try:
-        yield False
-    finally:
-        # Runs even if a test body raises. A leaked toggle silently changes every
-        # later float32 precision assertion in the session.
-        tf.config.experimental.enable_tensor_float_32_execution(previous)
-        _TF32_SCOPED_OFF = False
-        assert (
-            tf.config.experimental.tensor_float_32_execution_enabled() == previous
-        ), "TF32 setting leaked out of this module"
+    with true_float32_matmul():
+        _TF32_SCOPED_OFF = True
+        try:
+            yield False
+        finally:
+            # Runs even if a test body raises; the helper then restores and asserts.
+            _TF32_SCOPED_OFF = False
 
 
 @pytest.fixture(autouse=True)
@@ -138,11 +133,11 @@ def _tf32_leak_canary():
     asserts on the process-global FLAG (the coupling mechanism), not on any number
     the flag influences (the device-dependent consequence).
 
-    It is safe as an autouse over the whole tree because
-    `grep -rn tensor_float_32 tests/` shows exactly two mutation sites left, both
-    restore-safe: `tf32_disabled` above and the self-contained toggle in
-    `test_gated_linear_attention_block.py`. A new unrestored mutation anywhere
-    under `tests/test_layers/` is exactly what this is meant to turn RED.
+    It is safe as an autouse over the whole tree because the only TF32 writer under
+    `tests/` is `tests/numerics.py::tf32_execution`, which restores and asserts
+    (enforced by `tests/test_the_tf32_flag_is_set_only_in_numerics.py`, D-164). A
+    new unrestored mutation anywhere under `tests/test_layers/` is exactly what
+    this is meant to turn RED.
 
     # DECISION plan-2026-07-30T140922-8af1028f/D-038
     The canary asserts against the EXPECTED value for the current scope; it does

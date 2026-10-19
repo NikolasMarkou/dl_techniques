@@ -77,7 +77,8 @@ from typing import Callable, Iterator
 import keras
 import numpy as np
 import pytest
-import tensorflow as tf
+
+from tests.numerics import true_float32_matmul
 
 # See the module docstring for the derivation. Do not loosen this without re-measuring
 # both the float32 floor and the stock-BN defect on CPU.
@@ -138,21 +139,15 @@ def tf32_disabled() -> Iterator[None]:
     fixture, which is not importable from this tree.
 
     The previous value is CAPTURED, never assumed ``True``: another module may already have
-    disabled it. On CPU the flag is inert and this is a no-op.
+    disabled it. On CPU the flag is inert and this is a no-op. The harness itself is
+    ``tests/numerics.py::true_float32_matmul``, the suite's one TF32 writer (D-164).
 
     :yield: Nothing; TF32 is off inside the block.
     :rtype: Iterator[None]
     :raises AssertionError: If the prior setting fails to restore.
     """
-    previous = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         yield
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(previous)
-        assert (
-            tf.config.experimental.tensor_float_32_execution_enabled() == previous
-        ), "TF32 setting leaked out of the homogeneity probe"
 
 
 def homogeneity_error(model: keras.Model, x: np.ndarray, c: float) -> float:

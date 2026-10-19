@@ -14,6 +14,7 @@ from keras import layers, models, ops
 
 # Make sure to import the NEW, refactored GatedLinearAttentionBlock
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
+from tests.numerics import true_float32_matmul
 
 
 # --- Test Class ---
@@ -1714,11 +1715,9 @@ class TestChunkedScanEquivalence:
         (not assumed to be True, since another module may already have disabled
         it), restored in a `finally`, and the restoration is asserted.
         """
-        previous = tf.config.experimental.tensor_float_32_execution_enabled()
         worst = 0.0
         worst_case = None
-        try:
-            tf.config.experimental.enable_tensor_float_32_execution(False)
+        with true_float32_matmul():
             for seq_len, num_heads, head_dim in _EQUIV_GRID:
                 layer = GatedLinearAttentionBlock(
                     dim=num_heads * head_dim, num_heads=num_heads,
@@ -1735,14 +1734,6 @@ class TestChunkedScanEquivalence:
                 )
                 if rel > worst:
                     worst, worst_case = rel, (seq_len, num_heads, head_dim)
-        finally:
-            tf.config.experimental.enable_tensor_float_32_execution(previous)
-
-        # A leaked toggle would silently change every later precision assertion
-        # in the session, which is exactly the failure this repo has recorded.
-        assert (
-            tf.config.experimental.tensor_float_32_execution_enabled() == previous
-        ), "TF32 setting leaked out of this test"
 
         assert worst <= 1e-4, (
             f"chunked scan exceeds the plan's pre-committed float32 bound with "

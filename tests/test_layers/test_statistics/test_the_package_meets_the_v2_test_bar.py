@@ -45,11 +45,11 @@ from dl_techniques.layers.statistics.residual_acf import (
     ResidualACFLayer,
 )
 from dl_techniques.layers.statistics.scaler import UnifiedScaler
+from tests.numerics import true_float32_matmul
 
 from .v2_compliance_oracle import (
     DTYPE_POLICIES,
     DtypePolicyScope,
-    Tf32Scope,
     MethodAdapter,
     assert_build_parity,
     assert_eager_matches_jit,
@@ -431,17 +431,17 @@ class TestJitCompiledAgreesWithEager:
         MDNLayer 1.13e-03, AffineCouplingLayer 1.03e-03, NormalizingFlowLayer 3.36e-03 --
         while the identical run on CPU agrees inside 1e-4. Raising the tolerance to
         cover TF32 would have put the bound above a real defect signal; disabling TF32
-        removes the confound instead. `Tf32Scope` restores the process-global setting in
-        `finally` and asserts the restoration.
+        removes the confound instead. `true_float32_matmul` restores the process-global
+        setting in `finally` and asserts the restoration.
         """
-        with Tf32Scope(False):
+        with true_float32_matmul():
             assert_eager_matches_jit(subject.factory(), subject.make_input(), atol=1e-4)
 
     def test_the_tf32_scope_restores_the_setting_it_changed(self):
         """Anti-vacuity for the scope above: a scope that leaked would silently change
         the numerics of every test that ran after it in the same process."""
         before = __import__("tensorflow").config.experimental.tensor_float_32_execution_enabled()
-        with Tf32Scope(False):
+        with true_float32_matmul():
             pass
         after = __import__("tensorflow").config.experimental.tensor_float_32_execution_enabled()
         assert after == before

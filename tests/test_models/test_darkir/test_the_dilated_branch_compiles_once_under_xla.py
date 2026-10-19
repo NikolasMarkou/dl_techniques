@@ -32,7 +32,7 @@ from dl_techniques.models.vision.image_restoration.darkir.model import (
     DarkIRDecoderBlock,
     DilatedBranch,
 )
-from tests.numerics import reassociation_atol
+from tests.numerics import reassociation_atol, true_float32_matmul
 
 
 CHANNELS = 8
@@ -89,13 +89,9 @@ def test_the_branch_is_the_grouped_convolution_it_replaced(dilation):
     )
     x = np.random.default_rng(1).standard_normal(SHAPE).astype("float32")
     # The bound below is float32 rounding, so TF32 convolutions are off.
-    tf32 = tf.config.experimental.tensor_float_32_execution_enabled()
-    tf.config.experimental.enable_tensor_float_32_execution(False)
-    try:
+    with true_float32_matmul():
         got = np.asarray(branch(x))
         want = np.asarray(reference(x))
-    finally:
-        tf.config.experimental.enable_tensor_float_32_execution(tf32)
     # A 3x3 per-channel contraction (9 terms), one evaluation per side.
     atol = reassociation_atol([9], 1, float(np.max(np.abs(want))))
     np.testing.assert_allclose(got, want, rtol=0.0, atol=atol)
