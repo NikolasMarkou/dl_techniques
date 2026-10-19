@@ -83,3 +83,19 @@ def test_predict_block_matches_the_reference_with_covariates(model, reference):
         model.predict_block(cov_ctx, np.ones_like(cov_ctx, dtype=bool), reference["cov_groups"], 2,
                             reference["roles"], reference["known"], reference["known_mask"]),
         reference["block_cov_h2"])
+
+
+@pytest.mark.parametrize("clampsym", [False, True])
+def test_the_forecaster_matches_the_reference(model, reference, clampsym):
+    """Three decode blocks, two variates, NaNs: the refine frame and the block feedback.
+
+    Until 2026-10-19 (D-167) ``TimestralModel._refine_block`` applied sinh a second time to
+    the already sinh'd block, which moved this forecast by up to 2.4 (12% of its range).
+    """
+    from dl_techniques.models.time_series.timestral.forecaster import TimestralForecaster
+
+    forecast = TimestralForecaster(model).forecast(
+        reference["series"], prediction_length=70,
+        symmetric_averaging=clampsym, clip_nonnegative=clampsym)
+    _assert_matches(forecast.quantiles,
+                    reference["forecast_clampsym" if clampsym else "forecast_raw"])

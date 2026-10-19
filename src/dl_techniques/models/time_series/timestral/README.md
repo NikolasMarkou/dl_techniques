@@ -162,7 +162,8 @@ Weights are loaded from Hugging Face Hub (`mistralai/Timestral-{5M,28M,123M,209M
 - Loading is strict: a missing, unused or misshapen tensor raises.
 - `loading.save_checkpoint(model, directory)` writes the same format; `load_model` of its output restores every weight exactly.
 - `load_model` builds the model explicitly, so a loaded model is marked built and `model.save(...)` round-trips every weight.
-- On the released Timestral-5M weights, `predict_block` matches the reference PyTorch package to within 1e-4 (values up to 75). `tests/test_models/test_timestral/test_torch_reference.py` checks the same on a frozen reference fixture, without torch.
+- On the released Timestral-5M weights, run in true float32, the port matches the reference PyTorch package: `predict_block` to within 1e-4 (values up to 75), a 1200-step forecast with clampsym to within 2.2e-3 (values up to 370). `tests/test_models/test_timestral/test_torch_reference.py` checks `predict_block` and the multi-block forecaster against a frozen reference fixture, without torch.
+- On an NVIDIA GPU, TensorFlow runs float32 matmuls in TF32 by default. On the same 5M weights that moved a 512-step-context `predict_block` by 0.048 and the 1200-step forecast by 49, because each block's median is fed back as context. For reference-faithful long horizons on a GPU, turn TF32 off first: `tf.config.experimental.enable_tensor_float_32_execution(False)`. The forecaster does not change this process-wide flag for you.
 
 ## Training
 

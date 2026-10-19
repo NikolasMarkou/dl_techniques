@@ -110,18 +110,21 @@ class TestTimestralForecaster:
         refined = np.asarray(refined)
         assert refined.shape == quantiles_t.shape
 
-        # First horizon patch keeps the anchor frame: it must equal the manual
-        # asinh inverse of (q - loc0) / scale0 with the context's last stats.
+        # First horizon patch keeps the anchor frame, so it comes back unchanged:
+        # the reference computes sinh_norm * scale_j + loc_j with scale_0, loc_0
+        # the context's last stats. Until 2026-10-19 (D-167) this test pinned a
+        # second sinh applied to sinh_norm, the port's divergence.
         _, loc, scale = tiny_model.scale(context_t, mask_t)
         loc0 = np.asarray(loc)[:, -1:]
         scale0 = np.asarray(scale)[:, -1:]
         sinh_norm = (quantiles - loc0[..., None]) / scale0[..., None]
         expected_first = np.asarray(
-            invert_affine_asinh(sinh_norm[:, :8], loc0, scale0, use_asinh=True)
+            invert_affine_asinh(sinh_norm[:, :8], loc0, scale0, use_asinh=False)
         )
         np.testing.assert_allclose(
             refined[:, :8], expected_first, rtol=1e-5, atol=1e-5
         )
+        np.testing.assert_allclose(refined[:, :8], quantiles[:, :8], rtol=1e-5, atol=1e-5)
         # Further patches use the advancing frame (finite, reordered output).
         assert np.isfinite(refined[:, 8:]).all()
 

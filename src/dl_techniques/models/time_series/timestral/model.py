@@ -475,13 +475,15 @@ class TimestralModel(keras.Model):
         loc_j = keras.ops.repeat(loc_j, ps, axis=1)
         scale_j = keras.ops.repeat(scale_j, ps, axis=1)
 
+        # The block left predict_block as sinh(q) * scale0 + loc0, so this is
+        # sinh(q) with the asinh already undone.
         sinh_norm = (quantiles - keras.ops.expand_dims(loc0, -1)) / keras.ops.expand_dims(scale0, -1)
-        refined = denormalize_quantiles(
-            sinh_norm,
-            loc_j,
-            scale_j,
-            self.config.use_asinh,
-        )
+        # DECISION plan-2026-10-14T062616-81938e81/D-167
+        # WHAT NOT TO DO: do not pass self.config.use_asinh here. sinh_norm is
+        # already in sinh space; the reference computes
+        # sinh_norm * scale_j + loc_j, and a second sinh moved a three-block
+        # forecast by 12% of its range against the reference. See decisions.md D-167.
+        refined = denormalize_quantiles(sinh_norm, loc_j, scale_j, use_asinh=False)
 
         if target_rows is not None:
             target_rows = keras.ops.expand_dims(keras.ops.expand_dims(target_rows, -1), -1)
