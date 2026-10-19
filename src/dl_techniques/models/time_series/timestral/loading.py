@@ -230,7 +230,6 @@ def to_reference_layout(array: np.ndarray, layout: str, num_heads: int) -> np.nd
 
 def load_model(
     path_or_repo_id: Union[str, Path],
-    dtype: str = "float32",
     **hub_kwargs,
 ) -> TimestralModel:
     """Build the model from config.json and load model.safetensors.
@@ -239,10 +238,12 @@ def load_model(
     go to resolve_checkpoint. The model is built explicitly (so it is marked built
     and ``model.save`` keeps every weight), then every reference tensor is assigned
     through ``reference_weight_map``; a missing, unused or misshapen tensor raises.
-    Inference was validated in float32.
+    The model is float32, the precision inference was validated in; there is no
+    dtype argument (one was accepted and ignored until D-173).
 
     Raises:
         ValueError: If a tensor is missing, unused or has the wrong shape.
+        TypeError: If a keyword other than resolve_checkpoint's is passed.
     """
     path = resolve_checkpoint(path_or_repo_id, **hub_kwargs)
     config = TimestralConfig.load(path / CONFIG_FILE)

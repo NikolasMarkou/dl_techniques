@@ -160,3 +160,17 @@ def test_safetensors_round_trip(tmp_path):
     for key, value in tensors.items():
         assert back[key].dtype == value.dtype
         np.testing.assert_array_equal(back[key], value)
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float16", "bfloat16"])
+def test_load_model_has_no_dtype_knob(exported, dtype):
+    """Until 2026-10-20 (D-173) ``load_model(dtype=...)`` accepted a dtype and ignored it.
+
+    The sublayers take the global policy, not the model's, so honouring it would mean
+    threading a policy through every layer; the model was validated in float32 only.
+    The argument is gone: passing it raises, and a loaded model is float32.
+    """
+    _, directory = exported
+    with pytest.raises(TypeError, match="dtype"):
+        load_model(directory, dtype=dtype)
+    assert {w.dtype for w in load_model(directory).weights} == {"float32"}
