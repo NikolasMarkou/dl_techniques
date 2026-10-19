@@ -128,8 +128,9 @@ model = TimestralModel(config)
 builds one of the four sizes in `TimestralModel.MODEL_VARIANTS`; both factories below delegate to it.
 
 `model.build(...)` creates every weight. `predict_block` does not mark the model built, so call
-`model.build(...)` on a fresh model before `model.save(...)`; the `.keras` round trip then restores
-every weight exactly.
+`model.build(...)` on a fresh model before `model.save(...)` (it also completes a model that
+`predict_block` already built); the `.keras` round trip then restores every weight exactly. A model
+from `load_model` or `TimestralForecaster.from_pretrained` is already built.
 
 ### `TimestralForecaster.from_pretrained(repo_id)`
 
@@ -154,7 +155,14 @@ Alias for `create_timestral_model`.
 
 ## Weight Loading
 
-Weights are loaded from Hugging Face Hub (`mistralai/Timestral-{5M,28M,123M,209M}`) or local directories containing `config.json` and `model.safetensors`. The loading uses `safetensors` with `strict=True`.
+Weights are loaded from Hugging Face Hub (`mistralai/Timestral-{5M,28M,123M,209M}`) or local directories containing `config.json` and `model.safetensors`, read with a NumPy safetensors parser.
+
+- The weight file uses the reference PyTorch state-dict names and layouts, the format of the released checkpoints. `loading.reference_weight_map(model)` derives each name from the layer structure, never from `Variable.path`, so a lazily built, an explicitly built and a loaded model all map the same way.
+- Linear weights are transposed, and the fused QKV projection is reordered from the reference's `(qkv, head_dim, heads)` split to this port's `(qkv, heads, head_dim)`.
+- Loading is strict: a missing, unused or misshapen tensor raises.
+- `loading.save_checkpoint(model, directory)` writes the same format; `load_model` of its output restores every weight exactly.
+- `load_model` builds the model explicitly, so a loaded model is marked built and `model.save(...)` round-trips every weight.
+- On the released Timestral-5M weights, `predict_block` matches the reference PyTorch package to within 1e-4 (values up to 75). `tests/test_models/test_timestral/test_torch_reference.py` checks the same on a frozen reference fixture, without torch.
 
 ## Training
 

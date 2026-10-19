@@ -1,7 +1,8 @@
 """Transformer layers for Timestral inference in Keras 3.
 
-Parameter names match the released weights so they load with strict=True.
-All tensors use the packed layout: one row per variate of every series in
+Layer and parameter names follow the reference implementation; the released
+PyTorch state dict is mapped onto these variables by
+``loading.reference_weight_map``. All tensors use the packed layout: one row per variate of every series in
 the batch, (R, N, D) with N patches. Time attention runs per row over patches;
 variate attention runs per patch over the rows of the same series.
 """
@@ -325,7 +326,14 @@ class Attention(keras.layers.Layer):
         super().build(input_shape)
 
     def _qkv(self, x):
-        """Split fused QKV projection. Weight layout: (qkv, head_dim, n_heads)."""
+        """Split the fused QKV projection; its output is laid out (qkv, n_heads, head_dim)."""
+        # DECISION plan-2026-10-14T062616-81938e81/D-166
+        # WHAT NOT TO DO: do not "fix" this split to the reference's
+        # (qkv, head_dim, n_heads). The loader reorders the released wQKV
+        # (loading._qkv_order) into this layout instead, which keeps
+        # predict_block bit-identical for every existing Keras weight set.
+        # Changing both sides at once silently reshuffles the heads of every
+        # model already trained or saved here. See decisions.md D-166.
         batch, seq = int(keras.ops.shape(x)[0]), int(keras.ops.shape(x)[1])
         qkv = self.wqkv(x)
         qkv = keras.ops.reshape(qkv, (batch, seq, 3, self.num_heads, self.head_dim))

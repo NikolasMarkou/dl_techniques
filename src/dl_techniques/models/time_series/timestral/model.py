@@ -255,7 +255,9 @@ class TimestralModel(keras.Model):
 
         Variables are shape-independent in the time/row dimensions, so building
         with one patch and one row creates the complete weight set (every
-        sublayer's build() builds its own sublayers).
+        sublayer's build() builds its own sublayers). A sublayer that a forward
+        pass already built is left alone, so ``build`` also completes a model
+        that ``predict_block`` built lazily, and a second ``build`` is a no-op.
         """
         c = self.config
         emb = c.d_model
@@ -266,10 +268,13 @@ class TimestralModel(keras.Model):
         # been constructed first here; building the head first keeps an
         # explicitly built model's initial weights bit-identical to the port as
         # committed in 6d757c6a6. See decisions.md D-162.
-        self.head.build((1, 2, emb))
+        if not self.head.built:
+            self.head.build((1, 2, emb))
         # Representation feeds [values, missing] channels: last dim 2*patch_size.
-        self.representation.build((1, 2 * c.patch_size))
-        self.transformer.build((1, 2, emb))
+        if not self.representation.built:
+            self.representation.build((1, 2 * c.patch_size))
+        if not self.transformer.built:
+            self.transformer.build((1, 2, emb))
         super().build(input_shape)
 
     def scale(self, inputs, observed) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:

@@ -15,7 +15,7 @@ from dl_techniques.models.time_series.timestral.forecaster import (
     TimestralForecaster,
     TimestralForecast,
 )
-from dl_techniques.models.time_series.timestral.loading import load_model
+from dl_techniques.models.time_series.timestral.loading import load_model, save_checkpoint
 
 __all__ = [
     "TimestralConfig",
@@ -25,5 +25,6 @@ __all__ = [
     "create_timestral_model",
     "create_timestral_by_variant",
     "load_model",
+    "save_checkpoint",
 ]
 __version__ = "1.0.0"
