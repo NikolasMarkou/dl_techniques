@@ -33,6 +33,8 @@ from typing import Dict, List
 
 __all__ = [
     "MODELS_DIR",
+    "DOC_ONLY_PACKAGES",
+    "doc_only_violations",
     "leaf_packages",
     "package_names",
     "package_module",
@@ -101,3 +103,57 @@ def package_names(models_dir: Path | None = None) -> List[str]:
 def package_module(name: str, models_dir: Path | None = None) -> str:
     """Dotted module path for one leaf package's bare name."""
     return leaf_packages(models_dir)[name]
+
+
+#: Leaf packages that hold documentation and no model code, by bare name, with
+#: the reason. The package-API contract and the round-trip family exempt exactly
+#: these names; :func:`doc_only_violations` keeps each entry true.
+DOC_ONLY_PACKAGES: Dict[str, str] = {
+    "metaformer": (
+        "doc-only by the user's choice: model code removed, README and "
+        "architecture figures kept (plan-2026-10-14T062616-81938e81 D-161, D-163)"
+    ),
+}
+
+
+def doc_only_violations(
+    names: Dict[str, str] | None = None, models_dir: Path | None = None
+) -> Dict[str, List[str]]:
+    """Doc-only entries that no longer match the directory on disk.
+
+    Interface contract: ``names`` defaults to :data:`DOC_ONLY_PACKAGES` and
+    ``models_dir`` to the real tree (both are parameters so a fixture tree can
+    prove the check fires). Returns ``{name: [problem, ...]}`` for every entry
+    that is not a leaf package, holds a ``.py`` file other than its
+    ``__init__.py`` (searched recursively, ``__pycache__`` skipped), or whose
+    ``__init__.py`` imports or defines anything. An empty dict means every
+    exemption still describes reality. Never raises for a missing package; it
+    reports it.
+    """
+    import ast
+
+    names = DOC_ONLY_PACKAGES if names is None else names
+    root = MODELS_DIR if models_dir is None else models_dir
+    leaves = leaf_packages(root)
+    problems: Dict[str, List[str]] = {}
+    for name in sorted(names):
+        if name not in leaves:
+            problems[name] = ["not a leaf model package"]
+            continue
+        directory = root.joinpath(*leaves[name].split(".")[2:])
+        found = []
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            if path == directory / "__init__.py":
+                body = ast.parse(path.read_text(encoding="utf-8")).body
+                code = [node for node in body
+                        if not (isinstance(node, ast.Expr)
+                                and isinstance(node.value, ast.Constant))]
+                if code:
+                    found.append(f"__init__.py has code at line {code[0].lineno}")
+                continue
+            found.append(f"model code: {path.relative_to(directory).as_posix()}")
+        if found:
+            problems[name] = found
+    return problems

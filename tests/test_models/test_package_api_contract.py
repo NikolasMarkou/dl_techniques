@@ -36,7 +36,11 @@ import pytest
 
 from dl_techniques.utils.keras_registration import LEGACY_ALIAS_PREFIX
 
-from .model_package_discovery import leaf_packages
+from .model_package_discovery import (
+    DOC_ONLY_PACKAGES,
+    doc_only_violations,
+    leaf_packages,
+)
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "models"
 
@@ -3448,6 +3452,9 @@ _PACKAGES_WITHOUT_MAIN_MODULE = {
         "__init__.py, not by the leaf. Pre-existing; exposed 2026-08-25 by the "
         "leaf-package walk."
     ),
+    # Doc-only packages, exempt by exact name; TestDocOnlyPackagesHoldNoCode
+    # fails the entry the day the directory gains model code.
+    **DOC_ONLY_PACKAGES,
 }
 
 
@@ -3489,6 +3496,47 @@ def _write_package_fixture(tmp_path: Path, init_source: str, *files) -> Tuple[tu
     for name, source in files:
         (pkg / name).write_text(source)
     return (tmp_path / "models",), tmp_path
+
+
+class TestDocOnlyPackagesHoldNoCode:
+    """A doc-only exemption must still describe the directory it names.
+
+    ``DOC_ONLY_PACKAGES`` (``model_package_discovery``) exempts ``metaformer``
+    from the main-module, References and round-trip contracts because it holds
+    a README and figures and no model code (plan-2026-10-14T062616-81938e81
+    D-161, D-163). If a model module lands there, the exemption would hide it,
+    so the entry must fail and force the package back under the contracts.
+    """
+
+    def test_every_doc_only_package_holds_no_model_code(self):
+        problems = doc_only_violations()
+        assert not problems, (
+            "a DOC_ONLY_PACKAGES entry no longer matches its directory; delete "
+            f"the entry so the package is judged by the contracts: {problems}"
+        )
+
+    def test_the_exemption_is_exactly_the_named_set(self):
+        assert set(DOC_ONLY_PACKAGES) == {"metaformer"}
+        assert set(DOC_ONLY_PACKAGES) <= set(_PACKAGES_WITHOUT_MAIN_MODULE)
+
+    def test_the_check_fires_on_a_planted_model_module(self, tmp_path):
+        models = tmp_path / "models"
+        package = models / "vision" / "docpkg"
+        package.mkdir(parents=True)
+        (models / "vision" / "__init__.py").write_text("")
+        (package / "__init__.py").write_text("")
+        (package / "README.md").write_text("# docs\n")
+        names = {"docpkg": "doc-only fixture"}
+        assert doc_only_violations(names, models) == {}
+        (package / "model.py").write_text("class Model:\n    pass\n")
+        assert doc_only_violations(names, models) == {
+            "docpkg": ["model code: model.py"]}
+        (package / "model.py").unlink()
+        (package / "__init__.py").write_text("from .other import Model\n")
+        assert doc_only_violations(names, models) == {
+            "docpkg": ["__init__.py has code at line 1"]}
+        assert doc_only_violations({"absent": "x"}, models) == {
+            "absent": ["not a leaf model package"]}
 
 
 class TestMainModuleDocstringCitesReferences:

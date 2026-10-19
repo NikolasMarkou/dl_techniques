@@ -39,7 +39,7 @@ What the family found, rather than merely instrumented
 
 import pytest
 
-from .model_package_discovery import package_names
+from .model_package_discovery import DOC_ONLY_PACKAGES, package_names
 from .precision_arm_subjects import (
     NO_HEAD_SIBLINGS,
     ROUNDTRIP_NA,
@@ -320,6 +320,9 @@ def test_every_model_package_has_a_roundtrip_subject():
         {SUBJECT_KEY_IS_A_GROUP.get(key, key) for key in roundtrip_charged()}
         | set(ROUNDTRIP_NA)
         | set(ROUNDTRIP_NO_SUBJECT_YET)
+        # No model code, so nothing to round-trip; exact by name, and
+        # test_package_api_contract.TestDocOnlyPackagesHoldNoCode keeps it true.
+        | set(DOC_ONLY_PACKAGES)
     )
     assert sorted(on_disk - covered) == [], (
         f"models/ packages with no round-trip subject and no stated reason: "
