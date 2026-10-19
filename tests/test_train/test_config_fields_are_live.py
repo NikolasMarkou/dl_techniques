@@ -86,6 +86,7 @@ TESTS = REPO_ROOT / "tests"
 # dead-field sweep. Add a row when you fix a config; never delete a row.
 REGISTERED: List[Tuple[str, str]] = [
     ("train/time_series/tirex/train_tirex.py", "TiRexTrainingConfig"),
+    ("train/time_series/timestral/train_timestral.py", "TimestralTrainingConfig"),
     ("train/bert/wikipedia/pretrain.py", "PretrainConfig"),
     ("train/ntm/config.py", "CopyTaskConfig"),
     ("train/ntm/config.py", "AssociativeRecallConfig"),

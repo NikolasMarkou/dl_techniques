@@ -79,12 +79,16 @@ forecast = forecaster.forecast(
 ### Training
 
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m train.time_series.timestral.train_timestral \
-    --variant 28M \
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.time_series.timestral.train_timestral \
+    --variant 5M \
+    --input_length 1024 \
     --prediction_length 96 \
-    --epochs 100 \
-    --batch_size 32
+    --epochs 20 --steps_per_epoch 500 --batch_size 64 --learning_rate 3e-4 \
+    --no-deep-analysis \
+    --result_dir <run root>
 ```
+
+This trains from scratch on synthetic series. Fine-tuning released weights is not wired into the trainer.
 
 ## Architecture
 
@@ -173,13 +177,34 @@ Weights are loaded from Hugging Face Hub (`mistralai/Timestral-{5M,28M,123M,209M
 
 ## Training
 
-The training pipeline follows Pattern 2 (time-series / probabilistic) from the codebase conventions:
+The reference repository publishes inference code only. The training objective comes from the Mistral announcement: "The objective is a pinball loss over 21 quantiles, a discrete approximation of CRPS." The port implements it as follows (plan-2026-10-14T062616-81938e81 D-169):
 
-- Synthetic pattern generators from `dl_techniques.datasets.time_series`
-- `QuantileLoss` with configurable quantile levels
-- Warmup + cosine LR schedule
-- Per-epoch quantile band visualization
-- ONNX export support
+- `TimestralModel.call(context)` is the training forward. It runs one DHF decode block after each context, the context-only path of `predict_block`, with byte-identical output.
+- `TimestralModel.compute_loss` is the objective, and stock `fit` calls it. It scores the pinball loss over the model's quantile levels in normalized (asinh) space.
+- Each horizon patch is scored in its own frame: the causal statistics of the true series up to the end of the previous patch. This is the advancing refine frame the forecaster decodes in, with perfect medians.
+- `NaN` targets are left out, and `sample_weight` weights whole series.
+- Two choices are this port's own, because the reference does not publish them: scoring one block at the end of each context, and the asinh space.
+- `compile(optimizer=...)` needs no `loss=`. The batch size must be static.
+
+`train.time_series.timestral.train_timestral` trains it on the synthetic pattern generators from `dl_techniques.datasets.time_series`:
+
+- Warmup and cosine LR.
+- Held-out evaluation with `TimestralForecaster` on the test split. It records MAE, rMAE, MASE and coverage, and also the MAE of the naive (last value) and seasonal-naive forecasts of the same windows. The seasonal-naive period is chosen per series by a backtest on its own context.
+- Per-epoch forecast plots, drawn by the forecaster.
+
+Measured with `5M` from scratch, the command above, one run on GPU 1 (20 epochs x 500 steps). Training loss fell from 0.209 to 0.115 and validation loss from 0.179 to 0.117. All MAE values below are held out.
+
+| forecast | trainer's test split, 4416 windows | 256 fresh test-split windows, 69 patterns |
+|---|---|---|
+| Timestral, clampsym on | 6.63 | 2.41 |
+| Timestral, clampsym off | not measured | 2.17 |
+| naive (last value) | 17.71 | 3.31 |
+| seasonal naive | 7.94 | 3.16 |
+
+- On the fresh windows the model beats naive on 83% of windows and seasonal naive on 87.5%.
+- It loses to naive on the `industrial` and `regime` categories.
+- Coverage of the 0.01-0.99 band on the trainer's split is 0.971, against a nominal 0.98.
+- These numbers are for synthetic data only. They say nothing about the benchmark accuracy of the released checkpoints.
 
 ## Differences from Original PyTorch Implementation
 
@@ -187,6 +212,8 @@ The training pipeline follows Pattern 2 (time-series / probabilistic) from the c
 - Full `get_config()` / `from_config()` round-trip serialization
 - Registered with `@register_dl_technique("dl_techniques.models.timestral.model")`
 - Integrates with `dl_techniques` training infrastructure (`BaseTimeSeriesTrainer`)
+- Adds a training forward and objective (`call`, `compute_loss`); the reference ships inference only
+- The fused QKV projection splits as `(qkv, heads, head_dim)` here and `(qkv, head_dim, heads)` in the reference; the loader and `save_checkpoint` reorder it
 - Forecaster is pure Keras 3 + NumPy; checkpoints are read with a NumPy safetensors
   parser (no PyTorch anywhere in this package)
 

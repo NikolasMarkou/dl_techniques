@@ -250,6 +250,9 @@ class WindowedTimeSeriesProcessor:
         min_length_multiplier: Minimum series length is
             ``(context_len + horizon_len) * min_length_multiplier``.
         require_finite: When ``True`` skip non-finite series in the generators.
+        drop_remainder: Batch every split with ``drop_remainder=True``, so the batch
+            dimension is static (a model that reshapes by its batch size, such as
+            Timestral, needs it). The val/test splits hold whole batches either way.
     """
 
     def __init__(
@@ -268,6 +271,7 @@ class WindowedTimeSeriesProcessor:
             windows_per_pattern: int = 5,
             min_length_multiplier: int = 1,
             require_finite: bool = True,
+            drop_remainder: bool = False,
     ):
         self.config = config
         self.ts_generator = generator
@@ -282,6 +286,7 @@ class WindowedTimeSeriesProcessor:
         self.windows_per_pattern = windows_per_pattern
         self.min_length_multiplier = min_length_multiplier
         self.require_finite = require_finite
+        self.drop_remainder = drop_remainder
 
         # Always built (used by multi-task subclasses such as mdn; harmless otherwise).
         self.pattern_to_id = {name: i for i, name in enumerate(selected_patterns)}
@@ -481,18 +486,18 @@ class WindowedTimeSeriesProcessor:
 
         train_ds = tf.data.Dataset.from_generator(
             self._training_generator, output_signature=self.output_signature
-        ).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        ).batch(batch_size, drop_remainder=self.drop_remainder).prefetch(tf.data.AUTOTUNE)
 
         val_steps = max(50, len(self.selected_patterns))
         test_steps = max(20, len(self.selected_patterns))
 
         val_stacked = self._generate_fixed_dataset('val', val_steps * batch_size)
         val_ds = tf.data.Dataset.from_tensor_slices(val_stacked).batch(
-            batch_size).cache().prefetch(tf.data.AUTOTUNE)
+            batch_size, drop_remainder=self.drop_remainder).cache().prefetch(tf.data.AUTOTUNE)
 
         test_stacked = self._generate_fixed_dataset('test', test_steps * batch_size)
         test_ds = tf.data.Dataset.from_tensor_slices(test_stacked).batch(
-            batch_size).cache().prefetch(tf.data.AUTOTUNE)
+            batch_size, drop_remainder=self.drop_remainder).cache().prefetch(tf.data.AUTOTUNE)
 
         return {
             'train_ds': train_ds,

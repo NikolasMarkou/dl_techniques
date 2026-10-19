@@ -3,8 +3,15 @@ Training pipeline for the Timestral probabilistic forecasting framework.
 
 Timestral is a patch-based transformer trained with Decoupled Horizon Forecasting (DHF),
 where forecasts are generated from separate prediction tokens that read the causally
-encoded context. Supports past-only and known-future covariates, categorical covariates,
-and outputs 21 non-crossing quantiles per time step.
+encoded context, and outputs 21 non-crossing quantiles per time step.
+
+The model trains under stock ``compile``/``fit``: ``TimestralModel.call`` is one decode
+block after each context and ``TimestralModel.compute_loss`` is the objective, a pinball
+loss over the quantile levels with each horizon patch in its own causal frame (D-169).
+The synthetic windows carry no covariates, so this trainer trains the context-only path.
+Held-out evaluation runs ``TimestralForecaster`` (the refine frame and, by default,
+clampsym) on the test split and reports it against the naive last-value and the
+seasonal-naive forecasts of the same windows.
 
 References:
     - Mistral AI, 2026. Timestral: Mistral's time-series foundation models.
@@ -16,7 +23,7 @@ import sys
 import math
 import argparse
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -36,11 +43,10 @@ from train.common import (
     _prepare_viz_data_from_processor,
 )
 from train.common.args import build_generator_config
-from train.common.timeseries import _plot_ts_forecast
+from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.models.time_series.timestral import (
-    create_timestral_by_variant, TimestralModel, TimestralConfig
+    create_timestral_by_variant, TimestralModel, TimestralForecaster, TimestralForecast
 )
 from dl_techniques.datasets.time_series import TimeSeriesGenerator
 
@@ -69,14 +75,8 @@ class TimestralTrainingConfig(BaseTimeSeriesTrainingConfig):
         0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45,
         0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99
     ])
-    dropout_rate: float = 0.1
 
-    # Covariate support
-    use_past_covariates: bool = False
-    use_known_covariates: bool = False
-    use_categorical_covariates: bool = False
-
-    # Clampsym test-time augmentation (eval only)
+    # Clampsym test-time augmentation (held-out evaluation and plots only)
     symmetric_averaging: bool = True
     clip_nonnegative: bool = True
 
@@ -89,16 +89,16 @@ class TimestralTrainingConfig(BaseTimeSeriesTrainingConfig):
         if self.patch_size <= 0:
             raise ValueError("patch_size must be positive")
         if 0.5 not in self.quantile_levels:
-            logger.warning("Recommended to include 0.5 (median) in quantile_levels.")
+            raise ValueError("quantile_levels must contain 0.5 (TimestralConfig requires it)")
 
 
 class TimestralDataProcessor(WindowedTimeSeriesProcessor):
     """Timestral data processor: thin subclass of WindowedTimeSeriesProcessor.
 
     Key differences from the base:
-    1. normalize=False — the model handles normalization internally
-    2. Supports covariates (past, known-future, categorical)
-    3. Output signature includes covariate tensors when enabled
+    1. normalize=False: the model normalizes causally per patch itself.
+    2. drop_remainder=True: ``TimestralModel`` reshapes by its batch size, so every
+       split is batched with a static batch dimension.
     """
 
     def __init__(
@@ -118,29 +118,7 @@ class TimestralDataProcessor(WindowedTimeSeriesProcessor):
             horizon_len=config.prediction_length,
             num_features=num_features,
             normalize=False,  # Timestral handles normalization internally
-        )
-        self.use_past_covariates = config.use_past_covariates
-        self.use_known_covariates = config.use_known_covariates
-        self.use_categorical_covariates = config.use_categorical_covariates
-
-    def _make_sample(self, window: np.ndarray, pattern_name: str) -> Tuple[Any, Any]:
-        ctx = self.context_len
-        # Base input: context window
-        x = window[:ctx].reshape(-1, self.num_features).astype(np.float32)
-        y = window[ctx:ctx + self.horizon_len].reshape(-1, self.num_features).astype(np.float32)
-
-        # For now, we don't generate synthetic covariates in the generator
-        # This is a placeholder for future covariate support
-        # The generator would need to be extended to produce covariate data
-
-        return x, y
-
-    @property
-    def output_signature(self) -> Tuple[Any, Any]:
-        import tensorflow as tf
-        return (
-            tf.TensorSpec(shape=(self.context_len, self.num_features), dtype=tf.float32),
-            tf.TensorSpec(shape=(self.horizon_len, self.num_features), dtype=tf.float32),
+            drop_remainder=True,
         )
 
 
@@ -148,8 +126,9 @@ class TimestralPerformanceCallback(TimeSeriesPerformanceCallback):
     """Tracks and visualizes Timestral quantile forecast performance.
 
     Thin subclass of TimeSeriesPerformanceCallback. The base owns the
-    scaffolding. Timestral keeps only the model-specific pieces:
-    viz-data prep, quantile metrics tracking, and 3D-quantile prediction plots.
+    scaffolding. Timestral keeps only the model-specific pieces: viz-data prep,
+    LR tracking, and prediction plots drawn by ``TimestralForecaster`` (the
+    forecast a user gets, refine frame included), not by ``model(x)``.
     """
 
     def __init__(self, config: TimestralTrainingConfig, processor: TimestralDataProcessor,
@@ -163,8 +142,6 @@ class TimestralPerformanceCallback(TimeSeriesPerformanceCallback):
         return _prepare_viz_data_from_processor(self.processor, self.config.plot_top_k_patterns)
 
     def _extend_history(self, logs: dict) -> None:
-        self.training_history.setdefault('mae_median', []).append(logs.get('mae_of_median', 0))
-        self.training_history.setdefault('val_mae_median', []).append(logs.get('val_mae_of_median', 0))
         self._track_lr(logs)
 
     def _plot_predictions(self, epoch: int) -> None:
@@ -172,12 +149,10 @@ class TimestralPerformanceCallback(TimeSeriesPerformanceCallback):
         if len(test_x) == 0:
             return
 
-        preds = self.model(test_x, training=False)
-        if not isinstance(preds, np.ndarray):
-            preds = preds.numpy()
+        preds = forecast_windows(self.model, test_x, self.config).quantiles[:, 0]
 
         quantiles = self.config.quantile_levels
-        median_idx = quantiles.index(0.5) if 0.5 in quantiles else len(quantiles) // 2
+        median_idx = quantiles.index(0.5)
         low_idx, high_idx = 0, len(quantiles) - 1
 
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
@@ -210,12 +185,63 @@ class TimestralPerformanceCallback(TimeSeriesPerformanceCallback):
         plt.close()
 
 
+def forecast_windows(model: TimestralModel, context: np.ndarray,
+                     config: TimestralTrainingConfig) -> TimestralForecast:
+    """``TimestralForecaster`` over (B, T, 1) context windows, horizon ``prediction_length``.
+
+    Interface contract (shared by the plot callback and the held-out metrics): returns
+    one ``TimestralForecast`` (quantiles (B, 1, H, Q)), with clampsym as configured.
+    Windows are forecast ``config.batch_size`` at a time: the forecaster packs every
+    series of a call into one variate-attention row set, whose mask grows with the
+    square of the row count (4416 test windows asked for one 8.2 GB tensor).
+    """
+    forecaster = TimestralForecaster(model)
+    context = np.asarray(context)[..., 0]
+    chunks = [
+        forecaster.forecast(
+            context[i:i + config.batch_size], config.prediction_length,
+            symmetric_averaging=config.symmetric_averaging,
+            clip_nonnegative=config.clip_nonnegative,
+        ).quantiles
+        for i in range(0, len(context), config.batch_size)
+    ]
+    return TimestralForecast(np.concatenate(chunks), forecaster.quantile_levels)
+
+
+def seasonal_naive(context: np.ndarray, horizon: int, max_period: Optional[int] = None) -> np.ndarray:
+    """Seasonal-naive forecast of (B, T) contexts, the period chosen per series from its context.
+
+    Interface contract: for each series, every period m in [1, max_period] (default
+    T // 2; m = 1 is the naive last value) is backtested on the context's last
+    ``horizon`` steps, forecasting them from the ``horizon`` steps' own past; the period
+    with the lowest backtest MAE forecasts the horizon, ``y[t] = x[T - m + (t mod m)]``.
+    Only context values are read. Returns (B, horizon).
+    """
+    context = np.asarray(context, dtype=np.float64)
+    b, t = context.shape
+    max_period = max_period or t // 2
+    if t < horizon + max_period:
+        raise ValueError(f"context {t} is too short to backtest {max_period} periods over {horizon} steps")
+    steps = np.arange(horizon)
+    history, held = context[:, :t - horizon], context[:, t - horizon:]
+    best_err = np.full(b, np.inf)
+    best = np.zeros((b, horizon))
+    for m in range(1, max_period + 1):
+        backtest = history[:, history.shape[1] - m + steps % m]
+        err = np.abs(backtest - held).mean(axis=1)
+        better = err < best_err
+        best_err = np.where(better, err, best_err)
+        best[better] = context[better][:, t - m + steps % m]
+    return best
+
+
 class TimestralTrainer(BaseTimeSeriesTrainer):
-    """Orchestrates Timestral training with Quantile Loss.
+    """Orchestrates Timestral training under stock ``fit``.
 
     Thin subclass of BaseTimeSeriesTrainer. The base owns the skeleton.
     Timestral overrides only the genuine divergences: the processor, the model
-    build (+compile), the performance callback, and the model_type prefix.
+    build (+compile), the performance callback, the results prefix, and the
+    held-out metrics (the forecaster against naive and seasonal-naive).
     """
 
     MODEL_DISPLAY_NAME = "Timestral"
@@ -234,7 +260,13 @@ class TimestralTrainer(BaseTimeSeriesTrainer):
         return f"{self.config.experiment_name}_{self.config.variant}"
 
     def _build_model(self) -> TimestralModel:
-        """Create and compile the Timestral model."""
+        """Create, build and compile the Timestral model.
+
+        No ``loss=``: ``TimestralModel.compute_loss`` is the objective (D-169), and
+        stock ``fit`` calls it. No compiled metric either: ``model(x)`` keeps every
+        horizon patch in the anchor frame, so a metric on it would not score the
+        forecast; the held-out metrics run the forecaster instead.
+        """
         logger.info(f"Creating Timestral ({self.config.variant})")
 
         model = create_timestral_by_variant(
@@ -242,22 +274,41 @@ class TimestralTrainer(BaseTimeSeriesTrainer):
             prediction_length=self.config.prediction_length,
             patch_size=self.config.patch_size,
             quantile_levels=tuple(self.config.quantile_levels),
-            dropout_rate=self.config.dropout_rate
         )
-
-        optimizer = self._build_optimizer()
-
-        loss = QuantileLoss(quantiles=self.config.quantile_levels, normalize=True)
-        metrics = []
-        if 0.5 in self.config.quantile_levels:
-            median_idx = self.config.quantile_levels.index(0.5)
-            def mae_of_median(y_true, y_pred):
-                return keras.metrics.mean_absolute_error(y_true, y_pred[:, :, median_idx])
-            mae_of_median.__name__ = 'mae_of_median'
-            metrics.append(mae_of_median)
-
-        model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=True)
+        model.build((None, self.config.input_length))
+        model.compile(optimizer=self._build_optimizer(), jit_compile=True)
         return model
+
+    def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
+        """Held-out forecaster metrics, with the naive and seasonal-naive baselines.
+
+        The base block (MAE, RMSE, sMAPE, rMAE against the naive last value, MASE,
+        coverage, sharpness) on ``TimestralForecaster``'s median and quantiles, plus
+        ``MAE_naive``, ``MAE_seasonal_naive`` and ``beats_naive`` /
+        ``beats_seasonal_naive`` (1.0 or 0.0), all on the same test windows. Non-fatal,
+        like the base block: a failure logs a warning and yields ``{}``.
+        """
+        try:
+            context, y_true = data_pipeline['test_data_raw']
+            forecast = forecast_windows(self.model, context, self.config)
+            point = forecast.median[:, 0][..., None]
+            metrics = compute_post_hoc_forecast_metrics(
+                y_true, point, backcast=context,
+                quantiles=forecast.quantiles[:, 0][:, :, None, :],
+                quantile_levels=list(forecast.quantile_levels),
+            )
+            horizon = self.config.prediction_length
+            naive = np.repeat(context[:, -1:, 0], horizon, axis=1)
+            seasonal = seasonal_naive(context[..., 0], horizon)
+            metrics['MAE_naive'] = float(np.abs(y_true[..., 0] - naive).mean())
+            metrics['MAE_seasonal_naive'] = float(np.abs(y_true[..., 0] - seasonal).mean())
+            metrics['beats_naive'] = float(metrics['MAE'] < metrics['MAE_naive'])
+            metrics['beats_seasonal_naive'] = float(metrics['MAE'] < metrics['MAE_seasonal_naive'])
+            logger.info(f"Held-out forecaster vs baselines: {metrics}")
+            return metrics
+        except Exception as e:
+            logger.warning(f"post_hoc_metrics computation failed: {e}")
+            return {}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -275,12 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input_length", type=int, default=1024)
     parser.add_argument("--prediction_length", type=int, default=96)
     parser.add_argument("--patch_size", type=int, default=32)
-    parser.add_argument("--use_past_covariates", action="store_true")
-    parser.add_argument("--use_known_covariates", action="store_true")
-    parser.add_argument("--use_categorical_covariates", action="store_true")
-    parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
-    parser.set_defaults(export_onnx=False)
-    parser.add_argument("--onnx_opset_version", type=int, default=17)
+    parser.add_argument("--no-symmetric-averaging", dest="symmetric_averaging",
+                        action="store_false",
+                        help="Held-out evaluation without clampsym's symmetric averaging")
+    parser.add_argument("--no-clip-nonnegative", dest="clip_nonnegative",
+                        action="store_false",
+                        help="Held-out evaluation without clampsym's non-negative clipping")
     return parser
 
 
@@ -295,6 +346,7 @@ def main() -> None:
 
     config = TimestralTrainingConfig(
         seed=args.seed,
+        result_dir=args.result_dir,
         experiment_name=args.experiment_name,
         variant=args.variant,
         input_length=args.input_length,
@@ -315,11 +367,8 @@ def main() -> None:
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch,
-        export_onnx=args.export_onnx,
-        onnx_opset_version=args.onnx_opset_version,
-        use_past_covariates=args.use_past_covariates,
-        use_known_covariates=args.use_known_covariates,
-        use_categorical_covariates=args.use_categorical_covariates,
+        symmetric_averaging=args.symmetric_averaging,
+        clip_nonnegative=args.clip_nonnegative,
     )
 
     generator_config = build_generator_config(args)
