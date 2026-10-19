@@ -33,7 +33,10 @@ precision.
 - ``self_bleu(texts, n=4)`` -- mean self-BLEU over a small list of probe
   outputs. Pure-Python n-gram overlap with the corpus-BLEU brevity
   penalty omitted for stability on very short generations. Returns a
-  scalar in ``[0.0, 1.0]``; high means repetitive.
+  scalar in ``[0.0, 1.0]``; high means repetitive. NOTE that this is a
+  DIVERSITY diagnostic, not corpus BLEU: it treats the other probe outputs
+  as references and never applies a brevity penalty or smoothing. For
+  candidate-vs-reference BLEU see ``dl_techniques.metrics.generation_metrics``.
 - ``distinct_n(texts, n=2)`` -- fraction of distinct n-grams across the
   concatenated probe outputs. Returns a scalar in ``[0.0, 1.0]``; high
   means lexically diverse.
@@ -44,6 +47,10 @@ precision.
 
 The helpers are deliberately deps-free: NLTK is **not** in this project's
 dependency set.
+
+The tokenizer and the n-gram extractor they build on live in
+``dl_techniques.metrics.generation_metrics`` and are imported here under
+their old private names (see the D-003 note above).
 
 ## Mathematical notes
 
@@ -78,7 +85,7 @@ Example::
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 import keras
 
@@ -300,18 +307,28 @@ class BitsPerCharacter(keras.metrics.Metric):
 # Probe-time helpers (pure Python, NLTK-free).
 # ---------------------------------------------------------------------
 
-def _whitespace_tokenize(text: str) -> List[str]:
-    """Split on whitespace -- adequate for diversity-style metrics over
-    short probe outputs. Avoids importing tiktoken into the helpers."""
-    if not text:
-        return []
-    return text.split()
-
-
-def _ngrams(tokens: Sequence[str], n: int) -> List[tuple]:
-    if n <= 0 or len(tokens) < n:
-        return []
-    return [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+# DECISION <gen-metrics-2026-10-18>/D-003
+# The tokenizer and the n-gram extractor moved to `generation_metrics`, which
+# owns them as the public `whitespace_tokenize` / `ngrams`, and the two names
+# below are now aliases rather than a second implementation. Two copies of an
+# n-gram counter in one package is the same-hand-oracle smell the authoring
+# guide warns about: a fix to one silently fails to apply to the other, and
+# `self_bleu` would keep reporting pre-fix numbers forever with no test
+# anywhere able to see it.
+#
+# The aliases are kept rather than the call sites renamed, because
+# `train/common/nlp.py` imports `aggregate_probe_metrics` from this module by
+# name and a rename here would be a wider change than the deduplication is
+# worth. `self_bleu`'s VALUES are unchanged and are pinned by
+# `tests/test_metrics/test_llm_metrics.py::TestSelfBleu`.
+#
+# One behaviour difference is inherited and is safe: `ngrams` RAISES on
+# `n <= 0` where this module's old `_ngrams` returned `[]`. `self_bleu` already
+# rejects `n <= 0` before reaching either, so no caller can observe it.
+from dl_techniques.metrics.generation_metrics import (  # noqa: E402
+    ngrams as _ngrams,
+    whitespace_tokenize as _whitespace_tokenize,
+)
 
 
 def self_bleu(texts: List[str], n: int = 4) -> float:

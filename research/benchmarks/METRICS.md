@@ -1439,6 +1439,27 @@ where `c` is candidate length, `r` is effective reference length, and `w_n = 1/4
 
 **Typical reporting**: BLEU * 100. Higher is better. Default on WMT, IWSLT.
 
+**In this repository**: `dl_techniques.metrics.generation_metrics.corpus_bleu`
+(plus `sentence_bleu` / `bleu`). **Not SacreBLEU-compatible** — only the
+smoothing is pinned; the tokenizer is whitespace and no signature string is
+produced, so a value from it is not comparable to a published WMT figure.
+Smoothing methods match SacreBLEU's four (`none`, `exp` = NIST/mteval-v13a,
+`floor`, `add_k`). Corpus BLEU is **not** the mean of sentence BLEU; the
+implementation pools statistics, and the two differ by a measured 0.251 on a
+3-sentence fixture.
+
+**A candidate shorter than `max_order` tokens scores 0.0.** This is the
+reference's behaviour and it is the trap in short-sentence evaluation: a
+three-token candidate has no 4-grams, so order 4 has a *total* of zero rather
+than a zero precision, and the reference's loop stops there. Smoothing rescues
+a zero precision, not a missing order. Measured: `corpus_bleu(['a b c'],
+[['a b c']])` scores **0.0** with precisions `[1.0, 1.0, 1.0, 0.0]`, while
+`chrf` on the same pair scores **1.0** because it averages only over the orders
+the candidate has. Use SacreBLEU's `effective_order` (not implemented here) or
+lower `max_order` for short-sentence corpora. `add_k` is the one method that
+rescues a missing order, and it does so by manufacturing a perfect precision —
+`total == 0` plus `k` leaves the ratio at exactly 1.
+
 ### ROUGE-1, ROUGE-2
 
 **What it measures**: N-gram recall / F1 of system summaries against reference summaries. ROUGE-N looks at n-grams of length `n`. Recall variants weight recall; F1 variants are the harmonic mean.
@@ -1457,6 +1478,12 @@ F1 combines precision and recall analogously.
 - Lin's original implementation differed from the now-standard `rouge-score` (Google) and `pyrouge` (Perl).
 
 **Typical reporting**: F1 percentage. Higher is better. Default on CNN/DailyMail, XSum, MEETING.
+
+**In this repository**: `generation_metrics.rouge_n` (one pair) and
+`corpus_rouge_n` (pooled over a corpus). Clipped overlap, reported as
+`precision` / `recall` / `fmeasure`, with `score=` selecting which of the three
+lands in `score`. No stemming, no stop-word removal. Single-reference: it uses
+the **first** reference of each group.
 
 ### ROUGE-L
 
@@ -1477,6 +1504,32 @@ Lin's original used `beta -> inf` (effectively recall); modern implementations r
 - ROUGE-L vs ROUGE-Lsum can differ by several points; specify which.
 
 **Typical reporting**: F1 percentage. Higher is better.
+
+**In this repository**: `generation_metrics.rouge_l` / `corpus_rouge_l`
+(single pair / pooled) and `rouge_lsum` (union-LCS over reference sentences
+under a global hit budget). `rouge_lsum` is **sentence-order-insensitive** while
+`rouge_l` is not: on `"a . b ."` against `"b . a ."` L gives **0.5** and Lsum
+gives **1.0**, because whole-string LCS must be monotone across the sequence
+while Lsum's per-sentence union ignores order. Specify which one you report.
+
+ROUGE-Lsum is a transcription of `rouge_score`'s `_summary_level_lcs`, and all
+three of its structural details are load-bearing: the outer loop is over
+**reference** sentences, the union is over **reference** positions, and a
+**global hit budget** caps how many times a token may be credited across the
+whole example. That budget is what keeps the hit count inside
+`[0, min(len(cand), len(ref))]`; an implementation without it returns
+F-measures **above 1.0** — measured at 9.8% of random multi-sentence cases, with
+`"b . b ."` against `"b ."` returning `F = 1.333` on a two-token reference.
+Because the union is over positions rather than lengths, the LCS **tie-break**
+matters too; `rouge_score` steps left only on a strictly greater neighbour,
+which selects a different (equally long) alignment than a length-only aligner.
+
+`rouge_lsum`'s sentence splitter is a regex over terminal punctuation, does NOT
+handle abbreviations, so it disagrees with `rouge_score` on "Dr. Smith arrived.";
+pass `sentence_splitter` if that matters. (`rouge_score` itself splits on
+NEWLINE unless `split_summaries` is set — a third convention again.) Exact LCS is
+`O(mn)`: measured 0.33 s / 33 MB at 2000 tokens, so that is the practical
+ceiling.
 
 ### METEOR
 
@@ -1499,6 +1552,32 @@ METEOR  = F_mean * (1 - Penalty)
 
 **Typical reporting**: Decimal. Higher is better.
 
+**In this repository**: `generation_metrics.meteor`. Two departures from the
+reference, both deliberate and both measured:
+
+- **Exact-match alignment only** by default. The reference stages Porter
+  stemming and WordNet synonyms after exact matching; NLTK is not a project
+  dependency, so pass `match_fn` to recover that. Measured gap on
+  `"the dog barked"` vs `"a dog is barking"`: 1 match and **0.1282** exact,
+  versus 2 matches and **0.2564** with a 3-character-prefix matcher. **Not
+  comparable to published METEOR numbers.**
+- **A perfect match is not 1.0.** The penalty `gamma * (chunks/matches)**beta`
+  is not normalised by length, so a perfect n-token match scores
+  `1 - 0.5/n**3`: **0.9815** at n = 3 and **0.5** at n = 1. This is the
+  reference behaviour, and a metric that returned 1.0 would be wrong.
+
+Also note the fragmentation rule, which is stricter than it looks: two matches
+form one chunk only when adjacent in BOTH sequences, so `"a x b"` vs `"a b"` is
+**two** chunks. `beta` is exposed, not `alpha` — the reference's `alpha = 0.9`
+IS this F-measure at `beta = 3` (`alpha = beta**2/(1 + beta**2)`), so they are
+not independent parameters.
+
+METEOR is a **per-sentence** metric: its penalty is applied to each sentence
+before averaging, so a corpus value is the MEAN of per-sentence scores and there
+is nothing to pool. That is unlike BLEU/chrF/ROUGE/CIDEr here, which pool their
+sufficient statistics. With several references the score is the **best** one, not
+the mean.
+
 ### chrF / chrF++
 
 **What it measures**: Character n-gram F-score, optionally augmented with word n-grams (chrF++). Robust to morphology; performs well on agglutinative and morphologically rich languages where BLEU is weak.
@@ -1517,6 +1596,25 @@ chrF_beta = (1 + beta^2) * chrP * chrR / (beta^2 * chrP + chrR)
 - Source: Popovic 2015.
 
 **Typical reporting**: chrF * 100. Higher is better. WMT modern default alongside BLEU.
+
+**In this repository**: `generation_metrics.chrf`, `word_order=0` for plain
+chrF and `word_order=2` for chrF++. Two rules that decide most of the number:
+
+- **Only orders the candidate actually has are averaged.** A five-character
+  exact match scores **1.0**, not the 0.3333 a plain mean over all six orders
+  gives. This is what makes chrF usable on short strings at all, which is most
+  captioning.
+- **The word half is folded into the SAME average**, not combined as a second
+  F-score. chrF++ is chrF over eight orders rather than six, not an average of
+  two finished scores.
+
+Statistics pool over the corpus, and several references are resolved per
+segment **before** pooling (the reference with the best chrF wins) — the
+opposite of BLEU's per-n-gram max. For **chrF++** the selection uses the
+**joint** character+word score, as the reference does, so switching
+`word_order` from 0 to 2 can change which reference wins; selecting on the
+character half alone is a divergence that fires on roughly 3 in 20,000 random
+cases and scores a candidate 17% below the reference on those.
 
 ### TER (Translation Edit Rate)
 
@@ -1553,6 +1651,64 @@ F_BERT = 2 * P_BERT * R_BERT / (P_BERT + R_BERT)
 - Default rescaling against random baseline shifts scores; specify whether `rescale_with_baseline=True`.
 
 **Typical reporting**: F1 in [0, 1]. Higher is better. Source: Zhang et al., arXiv:1904.09675.
+
+### CIDEr / CIDEr-D
+
+**What it measures**: Consensus-based caption evaluation. A TF-IDF-weighted
+cosine between candidate and reference n-gram vectors, penalised by a Gaussian
+on length difference. Unlike every metric above it weights RARE n-grams above
+common ones, so an n-gram appearing in every reference contributes nothing.
+
+**Formula**:
+
+```
+idf(g)     = log(N / max(1, df(g)))          # N = number of EXAMPLES, not n-grams
+weight(g)  = tf(g) * idf(g)
+similarity = sum_{g in hyp} min(w_hyp(g), w_ref(g)) * w_ref(g) / (||w_hyp|| * ||w_ref||)
+                                          # note the CLIP
+g_n(s)     = (1/m) * sum_j  similarity(s, ref_ij) * exp(-(len(ref_ij) - len(s))**2 / (2*sigma**2))
+
+CIDEr   = 10 * mean_n g_n(s)
+CIDEr-D = CIDEr with an extra  exp(-(len(s) - delta)**2 / (2*sigma**2))
+                        where delta = the corpus MEAN reference length
+```
+
+**Edge cases / pitfalls**:
+
+- **CIDEr is 0.0 on a one-example corpus.** `idf(g) = log(N/max(1,df))` is
+  `log(1/1) = 0` for every n-gram, so every weight vanishes. Any corpus where
+  every candidate's n-grams appear in every reference has the same problem —
+  universal n-grams get weight exactly zero, which is IDF working correctly and
+  still leaves nothing to measure. It needs enough examples *and* enough
+  vocabulary contrast for the term to mean anything.
+- **The dot product is clipped**, so a candidate repeating an n-gram is not paid
+  for the repetition — but the sum runs over the *candidate's* n-grams, so the
+  expression is not symmetric.
+- **Orders the candidates cannot have still count in the mean.** Three-token
+  captions at the default `n = 4` top out at **7.5**, not 10.0, on a perfect
+  match.
+- Plain CIDEr and CIDEr-D are different metrics under one name; CIDEr-D is
+  always the lower of the two.
+- This is a captioning metric. On a corpus whose references share a small
+  vocabulary the IDF term is close to meaningless, and it still returns a
+  confident number.
+
+**Typical reporting**: Decimal on `[0, 10]` (the `10 *` factor is part of the
+metric). Higher is better. Default on MS-COCO captioning.
+
+**In this repository**: `generation_metrics.cider`, `variant="d"` (default) or
+`"c"`. Note the scale is `[0, 10]`, not `[0, 1]` — the one function in
+`generation_metrics` that is not normalized, and `generation_report` does not
+rescale it.
+
+There is deliberately **no runtime check that `df <= N`**: the counting loop
+runs exactly `N` times and increments each n-gram at most once per pass, so the
+bound is structural. (The reference implementation *can* assert it, because its
+`CiderScorer` accumulates corpora through `__iadd__` across separately-scored
+segments; this port has no such path.) The observable consequence is that a
+corpus whose every n-gram is shared by every example scores exactly `0.0` — the
+same degenerate result as a one-example corpus, reached by a different route:
+no contrast to be had, rather than too few examples to have it.
 
 ### BLEURT
 
