@@ -450,7 +450,7 @@ class SHGCNNodeClassifier(keras.Model):
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNLinkPredictor(keras.Model):
-    """sHGCN backbone paired with a Fermi-Dirac edge-probability decoder.
+    """sHGCN backbone paired with a Fermi-Dirac decoder that returns edge logits.
 
     Architecture:
 
@@ -472,7 +472,7 @@ class SHGCNLinkPredictor(keras.Model):
             │ Fermi-Dirac decoder│
             └──────┬─────────────┘
                    ▼
-            edge probabilities [E]
+            edge logits [E]
 
     :param hidden_dims: Per-layer hidden dimensions for the sHGCN backbone.
     :type hidden_dims: List[int]
@@ -497,7 +497,9 @@ class SHGCNLinkPredictor(keras.Model):
         per row.
 
     Output shape:
-        ``(num_edges,)``, values in ``[0, 1]``.
+        ``(num_edges,)``, edge logits (D-159); ``sigmoid`` of them is the
+        Fermi-Dirac edge probability, and an edge is predicted where the
+        logit is above 0.
 
     Example:
         .. code-block:: python
@@ -507,8 +509,9 @@ class SHGCNLinkPredictor(keras.Model):
             )
             model.compile(
                 optimizer='adam',
-                loss='binary_crossentropy',
-                metrics=['accuracy', keras.metrics.AUC()],
+                loss=keras.losses.BinaryCrossentropy(from_logits=True),
+                metrics=[keras.metrics.BinaryAccuracy(threshold=0.0),
+                         keras.metrics.AUC(from_logits=True)],
             )
             pos_edges = np.array([[0, 1], [1, 2], [2, 3]])
             neg_edges = np.array([[0, 5], [1, 7], [3, 9]])
@@ -516,7 +519,8 @@ class SHGCNLinkPredictor(keras.Model):
             labels = np.array([1, 1, 1, 0, 0, 0])
             for _ in range(100):
                 model.train_on_batch([features, adj, edge_pairs], labels)
-            probs = model.predict_on_batch([features, adj, test_pairs])
+            probs = keras.ops.sigmoid(
+                model.predict_on_batch([features, adj, test_pairs]))
 
     Note:
         Training needs both positive and negative edge samples. Use
@@ -599,13 +603,13 @@ class SHGCNLinkPredictor(keras.Model):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Embed nodes, gather edge endpoints, and decode edge probability.
+        """Embed nodes, gather edge endpoints, and decode the edge logit.
 
         :param inputs: ``[features, adjacency, edge_pairs]``.
         :type inputs: List[keras.KerasTensor]
         :param training: Whether dropout is active.
         :type training: Optional[bool]
-        :return: Edge probabilities, shape ``[num_edges]``.
+        :return: Edge logits, shape ``[num_edges]``.
         :rtype: keras.KerasTensor
         """
         features, adjacency, edge_pairs = inputs
@@ -618,9 +622,7 @@ class SHGCNLinkPredictor(keras.Model):
         src_embeddings = keras.ops.take(embeddings, src_indices, axis=0)
         tgt_embeddings = keras.ops.take(embeddings, tgt_indices, axis=0)
 
-        probabilities = self.decoder([src_embeddings, tgt_embeddings])
-
-        return probabilities
+        return self.decoder([src_embeddings, tgt_embeddings])
 
     def get_config(self) -> dict:
         """Return the config needed to reconstruct this model.
@@ -763,7 +765,7 @@ def create_shgcn_link_predictor(
     :type use_curvature: bool
     :param kwargs: Forwarded to the model constructor.
     :return: A configured model, called with
-        ``[features, adjacency, edge_pairs]``; returns edge probabilities.
+        ``[features, adjacency, edge_pairs]``; returns edge logits.
     :rtype: SHGCNLinkPredictor
     :raises ValueError: If any argument is outside its valid range.
     """

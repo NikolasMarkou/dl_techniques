@@ -118,7 +118,9 @@ Input Features (Euclidean)
 
 For link prediction, simple dot products don't work well with this geometry. We use a **Fermi-Dirac Decoder** which models the probability of an edge based on distance:
 $$ P(edge) \propto \frac{1}{1 + e^{(dist^2 - r)/t}} $$
-This effectively learns a "radius of interaction" ($r$) and a "softness" ($t$).
+This effectively learns a "radius of interaction" ($r$) and a "softness" ($t$). The decoder returns
+the logit of that probability, $(r - dist^2)/t$, so the link predictor trains with
+`BinaryCrossentropy(from_logits=True)` and predicts an edge where the logit is above 0.
 
 ---
 
@@ -132,13 +134,13 @@ The core compute unit.
 ### 4.2 `SHGCNNodeClassifier`
 A wrapper for node classification.
 *   **Backbone**: Stack of `SHGCNLayer`s.
-*   **Head**: Standard Softmax Dense layer.
+*   **Head**: a linear `Dense` layer; the output is class logits.
 *   **Use Case**: Predicting paper subjects, protein functions.
 
 ### 4.3 `SHGCNLinkPredictor`
 A wrapper for edge prediction.
 *   **Backbone**: Stack of `SHGCNLayer`s.
-*   **Head**: `FermiDiracDecoder`.
+*   **Head**: `FermiDiracDecoder`; the output is edge logits.
 *   **Use Case**: Recommendation systems, knowledge graph completion.
 
 ---
@@ -227,13 +229,14 @@ model = SHGCNModel(
 
 ### 6.2 `FermiDiracDecoder`
 
-**Purpose**: Calculates probability of edges based on node embeddings.
+**Purpose**: Scores edges from node embeddings. Returns logits; `sigmoid` of them is the edge probability.
 
 ```python
 from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
 
 decoder = FermiDiracDecoder()
-probs = decoder([node_embeddings_u, node_embeddings_v])
+logits = decoder([node_embeddings_u, node_embeddings_v])
+probs = keras.ops.sigmoid(logits)
 ```
 
 ---
@@ -262,7 +265,12 @@ from dl_techniques.models.graph.shgcn.model import SHGCNLinkPredictor
 
 # 1. Setup
 model = SHGCNLinkPredictor(hidden_dims=[32], embedding_dim=16)
-model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["auc"])
+# The output is edge logits: the loss and the AUC take from_logits=True.
+model.compile(
+    optimizer="adam",
+    loss=keras.losses.BinaryCrossentropy(from_logits=True),
+    metrics=[keras.metrics.AUC(from_logits=True)],
+)
 
 # 2. Data
 # Edge pairs: [Num_Edges, 2] containing node indices
@@ -272,8 +280,10 @@ edge_pairs = np.vstack([pos_edges, neg_edges])
 labels = np.array([1, 1, 0, 0])
 
 # 3. Train
-# Input: [Features, Adjacency, EdgePairs]
-model.fit([features, adj, edge_pairs], labels, epochs=50)
+# Input: [Features, Adjacency, EdgePairs]. Whole-graph inputs: use
+# train_on_batch, not fit, which would slice features and adj along axis 0.
+for _ in range(50):
+    model.train_on_batch([features, adj, edge_pairs], labels)
 ```
 
 ### Example 2: Analyzing Learned Curvature

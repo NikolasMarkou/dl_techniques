@@ -234,11 +234,13 @@ That silence is the reason they are written down here.
   CliffordNet, BEiT, Swin, FractalNet, FastVLM), BEiT's own mean-pooling head, the NLP and VLM
   class-score heads, SqueezeNet V1/V2 (the paper's `conv10` head: a ReLU sits before the pool, so
   their logits are never negative), CoShNet, AccUNet, the DocScanner segmenter (its composite
-  applies the sigmoid before its `> 0.5` threshold), SHGCN's node classifier, RelGT, PowerMLP
+  applies the sigmoid before its `> 0.5` threshold), SHGCN's node classifier and link predictor
+  (its shared `FermiDiracDecoder` returns the edge logit), RelGT, PowerMLP
   (`output_activation='softmax'`/`'sigmoid'` raise), KAN's default output and NAM's
   `valid_logits`. A sigmoid or softmax that maps to a range (boxes, pixels, gates, attention) is
   not a class score. `tests/test_models/test_every_classifier_output_is_logits_or_a_named_exception.py`
-  is the AST census that holds this, and it reads the list below. The exceptions are exactly
+  is the AST census that holds this (it also scans a shared layer outside `models/` whose output
+  a model returns, listed in its `SHARED_OUTPUT_LAYERS`), and it reads the list below. The exceptions are exactly
   these, each a probability that is the model's documented product:
   - `CapsNet`: capsule lengths (Sabour et al. 2017, Eq. 1 squash), read by the margin loss.
   - `CapsNetV2`: the same capsule lengths, in `(0, 1)`.

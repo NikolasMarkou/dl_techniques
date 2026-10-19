@@ -25,7 +25,14 @@ classified exactly once:
   reason is checked against the built model.
 
 A census site no table names fails, and so does a table entry the census no
-longer finds. Three exceptions enter without any softmax/sigmoid token (capsule
+longer finds.
+
+A model can return a SHARED layer's output, from outside ``models/``:
+``SHGCNLinkPredictor`` returns ``FermiDiracDecoder``'s edge score. Each such
+layer module is listed in :data:`SHARED_OUTPUT_LAYERS` with the model module
+that returns it, is scanned by the same census (keyed by its path under
+``src/dl_techniques/``, prefixed ``src:``), and the model module must still
+import the layer, so a stale row fails (D-159). Three exceptions enter without any softmax/sigmoid token (capsule
 lengths, a normalized RBF), so their rows hold no census key; their reason is
 checked by building the model.
 """
@@ -40,7 +47,8 @@ import numpy as np
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODELS_ROOT = os.path.join(REPO_ROOT, "src", "dl_techniques", "models")
+SRC_ROOT = os.path.join(REPO_ROOT, "src", "dl_techniques")
+MODELS_ROOT = os.path.join(SRC_ROOT, "models")
 GUIDE = os.path.join(MODELS_ROOT, "GUIDE.md")
 
 Key = Tuple[str, str, str]
@@ -48,63 +56,76 @@ _ACTIVATIONS = ("softmax", "sigmoid")
 _OP_ROOTS = ("keras", "ops", "tf", "K", "activations")
 
 
+#: Shared layers outside ``models/`` whose output a model returns as its own:
+#: layer module (under ``src/dl_techniques/``) -> (model module under
+#: ``models/`` that returns it, the layer class it imports).
+SHARED_OUTPUT_LAYERS: Dict[str, Tuple[str, str]] = {
+    "layers/graphs/fermi_diract_decoder.py": ("graph/shgcn/model.py", "FermiDiracDecoder"),
+}
+
+
 def census(root: str = MODELS_ROOT) -> Set[Key]:
     """Every softmax/sigmoid site under ``root``, keyed ``(relpath, scope, token)``.
 
     Interface contract (callers: the tests in this file, including the planted
     positive control): ``root`` is a directory of Python sources; returns the
-    set of keys described in the module docstring. A file that does not parse
-    raises ``SyntaxError`` (a silent skip would shrink the census).
+    set of keys described in the module docstring. For the default root the
+    :data:`SHARED_OUTPUT_LAYERS` modules are scanned too, keyed
+    ``src:<path under src/dl_techniques>``. A file that does not parse raises
+    ``SyntaxError`` (a silent skip would shrink the census).
     """
-    keys: Set[Key] = set()
+    files = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         for filename in sorted(filenames):
-            if not filename.endswith(".py"):
+            if filename.endswith(".py"):
+                path = os.path.join(dirpath, filename)
+                files.append((path, os.path.relpath(path, root).replace(os.sep, "/")))
+    if root == MODELS_ROOT:
+        files += [(os.path.join(SRC_ROOT, rel), f"src:{rel}") for rel in SHARED_OUTPUT_LAYERS]
+    keys: Set[Key] = set()
+    for path, rel in files:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def scope(node: ast.AST) -> str:
+            names = []
+            while id(node) in parents:
+                node = parents[id(node)]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names.append(node.name)
+            return ".".join(reversed(names)) or "<module>"
+
+        counted = set()
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                    and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)):
+                counted.add(id(body[0].value))  # a docstring is prose, not code
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            path = os.path.join(dirpath, filename)
-            rel = os.path.relpath(path, root).replace(os.sep, "/")
-            with open(path, encoding="utf-8") as handle:
-                tree = ast.parse(handle.read(), filename=path)
-            parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-
-            def scope(node: ast.AST) -> str:
-                names = []
-                while id(node) in parents:
-                    node = parents[id(node)]
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        names.append(node.name)
-                return ".".join(reversed(names)) or "<module>"
-
-            counted = set()
-            for node in ast.walk(tree):
-                body = getattr(node, "body", None)
-                if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-                        and body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)):
-                    counted.add(id(body[0].value))  # a docstring is prose, not code
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = ast.unparse(node.func)
-                last = func.split(".")[-1]
-                for keyword in node.keywords:
-                    value = keyword.value
-                    if (keyword.arg == "activation" and isinstance(value, ast.Constant)
-                            and value.value in _ACTIVATIONS):
-                        keys.add((rel, scope(node), f"activation={value.value}"))
-                        counted.add(id(value))
-                if last == "Softmax":
-                    keys.add((rel, scope(node), "Softmax()"))
-                if (last == "Activation" and node.args and isinstance(node.args[0], ast.Constant)
-                        and node.args[0].value in _ACTIVATIONS):
-                    keys.add((rel, scope(node), f"Activation({node.args[0].value})"))
-                    counted.add(id(node.args[0]))
-                if last in _ACTIVATIONS and func.split(".")[0] in _OP_ROOTS:
-                    keys.add((rel, scope(node), f"{last}()"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Constant) and node.value in _ACTIVATIONS and id(node) not in counted:
-                    keys.add((rel, scope(node), f"'{node.value}'"))
+            func = ast.unparse(node.func)
+            last = func.split(".")[-1]
+            for keyword in node.keywords:
+                value = keyword.value
+                if (keyword.arg == "activation" and isinstance(value, ast.Constant)
+                        and value.value in _ACTIVATIONS):
+                    keys.add((rel, scope(node), f"activation={value.value}"))
+                    counted.add(id(value))
+            if last == "Softmax":
+                keys.add((rel, scope(node), "Softmax()"))
+            if (last == "Activation" and node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in _ACTIVATIONS):
+                keys.add((rel, scope(node), f"Activation({node.args[0].value})"))
+                counted.add(id(node.args[0]))
+            if last in _ACTIVATIONS and func.split(".")[0] in _OP_ROOTS:
+                keys.add((rel, scope(node), f"{last}()"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in _ACTIVATIONS and id(node) not in counted:
+                keys.add((rel, scope(node), f"'{node.value}'"))
     return keys
 
 
@@ -302,3 +323,17 @@ def test_a_planted_softmax_head_is_found(tmp_path):
         ("planted/model.py", "Planted.__init__", "activation=softmax"),
         ("planted/model.py", "Planted.__init__", "'sigmoid'"),
     }
+
+
+def test_every_shared_output_layer_is_scanned_and_still_returned():
+    """D-159: each shared layer row is scanned and its model still imports it."""
+    found = census()
+    for rel, (model_rel, class_name) in SHARED_OUTPUT_LAYERS.items():
+        assert os.path.isfile(os.path.join(SRC_ROOT, rel)), rel
+        with open(os.path.join(MODELS_ROOT, model_rel), encoding="utf-8") as handle:
+            source = handle.read()
+        assert re.search(rf"^from dl_techniques\.{rel[:-3].replace('/', '.')} import .*\b{class_name}\b",
+                         source, re.MULTILINE), (
+            f"{model_rel} no longer imports {class_name} from {rel}; remove or update the row")
+    shared = {key for key in found if key[0].startswith("src:")}
+    assert all(key[0][4:] in SHARED_OUTPUT_LAYERS for key in shared), shared

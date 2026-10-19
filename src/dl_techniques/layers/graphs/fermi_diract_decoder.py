@@ -21,15 +21,20 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.graphs.fermi_diract_decoder")
 class FermiDiracDecoder(keras.layers.Layer):
-    """Fermi-Dirac decoder for edge probability prediction.
+    """Fermi-Dirac decoder for link prediction; returns the edge LOGIT.
 
-    Computes the probability of an edge between two nodes from the Euclidean
-    distance of their embeddings, inspired by the Fermi-Dirac distribution.
-    Given embeddings u, v in R^D the probability is
+    Scores an edge between two nodes from the Euclidean distance of their
+    embeddings, inspired by the Fermi-Dirac distribution. Given embeddings
+    u, v in R^D the edge probability of Eq. 30 (Arevalo et al.) is
     p = sigmoid(-(d^2 - r) / t) where d^2 = ||u - v||^2, *r* is a learnable
     threshold and *t* is a learnable temperature controlling transition
-    sharpness. When d^2 < r the probability tends to 1 (likely edge);
-    when d^2 > r it tends to 0 (Eq. 30, Arevalo et al.).
+    sharpness. When d^2 < r the probability tends to 1 (likely edge); when
+    d^2 > r it tends to 0.
+
+    The layer returns the logit of that probability, ``-(d^2 - r) / t``, not
+    the probability (the repository's logits rule, D-159): train it with
+    ``BinaryCrossentropy(from_logits=True)``, threshold it at 0, and apply
+    ``keras.ops.sigmoid`` where the probability itself is wanted.
 
     **Architecture Overview:**
 
@@ -51,11 +56,12 @@ class FermiDiracDecoder(keras.layers.Layer):
                └──────────┬──────────┘
                           ▼
                ┌─────────────────────┐
-               │  p = sigmoid(-s)    │
+               │  logit = -s         │
                └──────────┬──────────┘
                           ▼
                ┌─────────────────────┐
                │  Output  [B]        │
+               │  (p = sigmoid(-s))  │
                └─────────────────────┘
 
     :param r_initializer: Initializer for threshold *r*.
@@ -128,13 +134,14 @@ class FermiDiracDecoder(keras.layers.Layer):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Compute edge probabilities from embedding pairs.
+        """Compute edge logits from embedding pairs.
 
         :param inputs: List of ``[u_embeddings, v_embeddings]``, both shape ``(batch, dim)``.
         :type inputs: List[keras.KerasTensor]
         :param training: Whether in training mode (unused, kept for API consistency).
         :type training: Optional[bool]
-        :return: Edge probabilities of shape ``(batch,)`` in ``[0, 1]``.
+        :return: Edge logits of shape ``(batch,)``; ``sigmoid`` of them is the
+            Fermi-Dirac edge probability.
         :rtype: keras.KerasTensor
         """
         u, v = inputs
@@ -149,13 +156,16 @@ class FermiDiracDecoder(keras.layers.Layer):
         # Shape: [batch,]
         scores = (dist_squared - self.r) / self.t
 
-        # Apply sigmoid: p = 1 / (1 + exp(s)) = sigmoid(-s)
-        # When d² < r: scores < 0 -> sigmoid(-scores) -> 1 (likely edge)
-        # When d² > r: scores > 0 -> sigmoid(-scores) -> 0 (unlikely edge)
+        # DECISION plan-2026-10-14T062616-81938e81/D-159
+        # Return the LOGIT -s, not sigmoid(-s). Do NOT put the sigmoid back:
+        # this is SHGCNLinkPredictor's returned output, a binary classifier
+        # trained with BCE, and the repository's logits rule applies to it
+        # (models/GUIDE.md). sigmoid(-s) is the Fermi-Dirac probability
+        # (1 / (1 + exp(s))): d² < r gives a positive logit (likely edge).
         # Shape: [batch,]
-        probabilities = keras.ops.sigmoid(-scores)
+        logits = -scores
 
-        return probabilities
+        return logits
 
     def compute_output_shape(
             self,

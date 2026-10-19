@@ -35,13 +35,21 @@ class TestFermiDiracDecoder:
         with pytest.raises(ValueError):
             layer.build([(None, 8), (None, 8), (None, 8)])  # not a 2-element list
 
-    def test_forward_pass(self, sample_inputs):
+    def test_forward_pass_returns_the_edge_logit(self, sample_inputs):
+        """D-159: the output is ``(r - d^2) / t``, the logit of Eq. 30's probability."""
         u, v = sample_inputs
         layer = FermiDiracDecoder()
         out = layer([u, v])
         assert tuple(out.shape) == (B,)
-        probs = keras.ops.convert_to_numpy(out)
-        assert np.all((probs >= 0.0) & (probs <= 1.0))
+        logits = keras.ops.convert_to_numpy(out)
+        d2 = np.sum(np.square(u - v), axis=-1)
+        r, t = float(layer.r.numpy()), float(layer.t.numpy())
+        expected = (r - d2) / t
+        np.testing.assert_allclose(logits, expected, rtol=0,
+                                   atol=4 * np.finfo(np.float32).eps * (np.abs(expected).max() + r))
+        # Unbounded on the axis a sigmoid would squash: the d^2 of these
+        # standard-normal pairs is ~2 D = 16, so the logit sits near -14.
+        assert logits.min() < -1.0, logits
 
     def test_compute_output_shape(self):
         layer = FermiDiracDecoder()
