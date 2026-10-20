@@ -132,14 +132,16 @@ this package merge) still resolve.
   `create_multi_task_vlm_head(...)`. **No model, trainer or application
   constructs a VLM head today**; the callers are `layers/heads` and the tests
   (`vlm/README.md` § 1 has the grep).
-- `validation.py` — the two checks the domains share: `positive_int(value,
+- `validation.py` — the three checks the domains share: `positive_int(value,
   name, owner)` (every vision count, `VQAHead.num_heads`, the
   `VLMTaskConfig` and `NLPTaskConfig` counts, the NLP heads' `input_dim` and
   `intermediate_size`) and `static_rank(x, name, owner)` (a head that
   branches on rank reads it once, from the input's static shape, and refuses
   an unknown rank by name; the VLM and NLP heads use it, and
   `test_the_heads_read_a_static_rank.py` keeps `len(ops.shape(...))` out of
-  all three factories).
+  all three factories), and `resolve_stage_knobs(owner, table, flags, given)`
+  (an attention/FFN knob resolves to its default with its stage on and is
+  refused with it off; the vision and NLP bases, D-210/D-211).
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
   `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
   `VLMTaskConfig`, `TaskConfiguration`, `parse_task_list`,
@@ -229,11 +231,12 @@ this package merge) still resolve.
   refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage its
   `call` never runs, e.g. `TextClassificationHead` pools to rank 2 first, so it
   refuses task attention; each stage is built at the width `call` feeds it).
-  The `BaseVisionHead` attention/FFN settings follow the same rule (D-210):
-  `attention_type`, `ffn_type` and `ffn_expansion_factor` default to `None`,
-  resolve to `'multi_head'`/`'mlp'`/4 when their stage is on, and raise when
-  it is off; the presets and `build_model_vision_head` drop a preset knob
-  whose stage ends up off. The NLP `pooling_type` of a head that never pools
+  The `BaseVisionHead` and `BaseNLPHead` attention/FFN settings follow the
+  same rule (D-210, D-211; one resolver, `validation.resolve_stage_knobs`,
+  one table per domain): `attention_type`, `ffn_type` and
+  `ffn_expansion_factor` default to `None`, resolve to `'multi_head'`/`'mlp'`/4
+  when their stage is on, and raise when it is off; the vision presets and
+  `build_model_vision_head` drop a preset knob whose stage ends up off. The NLP `pooling_type` of a head that never pools
   (validated, not read; a language model passes its default pooling to every
   head) is the flag-gated exception: accepted, read only when the stage runs. Check it by calling: count each
   sub-layer's `call` over one forward

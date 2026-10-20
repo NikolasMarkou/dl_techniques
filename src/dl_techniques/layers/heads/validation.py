@@ -1,6 +1,6 @@
 """Argument and input checks shared by the head domains.
 
-Two helpers, each with one rule that more than one head domain needs:
+Three helpers, each with one rule that more than one head domain needs:
 
 * :func:`positive_int` -- a count argument (``num_classes``, ``num_heads``,
   ``hidden_size``, ...) must be a positive integer. The vision heads and the
@@ -10,14 +10,18 @@ Two helpers, each with one rule that more than one head domain needs:
 * :func:`static_rank` -- a head that branches on an input's rank reads that
   rank once, statically, and refuses an input whose rank is unknown. The VLM
   and NLP heads call it.
+* :func:`resolve_stage_knobs` -- a knob that configures an optional stage
+  (attention, FFN) is refused when that stage is off, and resolves to its
+  default when the stage is on and the knob was not given (D-030's rule,
+  D-210). The vision and NLP heads call it, each with its own table.
 
-Neither builds a layer. Both raise ``ValueError`` naming the head (``owner``)
-and the argument or input (``name``), so the refusal points at the caller's
-mistake rather than at whatever layer would have failed later.
+None builds a layer. Each raises ``ValueError`` naming the head (``owner``)
+and the argument or input, so the refusal points at the caller's mistake
+rather than at whatever layer would have failed later.
 """
 
 import numbers
-from typing import Any
+from typing import Any, Dict
 
 import keras
 
@@ -76,3 +80,55 @@ def static_rank(x: Any, name: str, owner: str) -> int:
             f"{rank!r}. Trace the head with a known-rank input signature."
         )
     return int(rank)
+
+
+def resolve_stage_knobs(
+        owner: str,
+        table: Dict[str, Dict[str, Any]],
+        flags: Dict[str, bool],
+        given: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Resolve the knobs of each optional stage against the flag that gates it.
+
+    Interface contract, shared by ``BaseVisionHead`` and ``BaseNLPHead``
+    (each passes its own ``table``):
+
+    * ``table`` maps each stage flag's name to ``{knob: default}``;
+      ``flags`` maps each of those flag names to the caller's value;
+      ``given`` maps every knob to the caller's value, ``None`` when not
+      given.
+    * For a stage that is on, a ``None`` knob takes its default and a given
+      one is kept. For a stage that is off, every knob resolves to ``None``,
+      and a given value raises ``ValueError`` naming ``owner``, the knob and
+      the flag (a default given explicitly counts: stored, it would still be
+      dead).
+    * Returns a new dict of every knob; nothing is mutated.
+
+    :param owner: Head class name, for the message.
+    :type owner: str
+    :param table: Stage flag name to that stage's ``{knob: default}``.
+    :type table: Dict[str, Dict[str, Any]]
+    :param flags: Each stage flag's value.
+    :type flags: Dict[str, bool]
+    :param given: Each knob's caller value, or ``None``.
+    :type given: Dict[str, Any]
+    :return: Each knob's resolved value.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If a knob is given for a stage that is off.
+    """
+    resolved = {}
+    for flag, defaults in table.items():
+        if flags[flag]:
+            for knob, default in defaults.items():
+                resolved[knob] = default if given[knob] is None else given[knob]
+            continue
+        dead = {knob: given[knob] for knob in defaults if given[knob] is not None}
+        if dead:
+            raise ValueError(
+                f"{owner}: {dead} only configure the stage {flag}=True builds, "
+                f"and {flag} is off, so no layer would read them. Pass "
+                f"{flag}=True, or leave {sorted(dead)} unset."
+            )
+        resolved.update(dict.fromkeys(defaults))
+    return resolved

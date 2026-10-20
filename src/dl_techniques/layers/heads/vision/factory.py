@@ -103,7 +103,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
 )
 from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
-from ..validation import positive_int
+from ..validation import positive_int, resolve_stage_knobs
 from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -113,55 +113,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: The base stage knobs each flag gates, with the value a knob takes when its
 #: stage is on and the caller gave ``None``. Read by
-#: :func:`_resolve_stage_knobs` (the heads) and :func:`_drop_off_stage_knobs`
-#: (the presets and ``build_model_vision_head``).
+#: :func:`~dl_techniques.layers.heads.validation.resolve_stage_knobs` (the
+#: heads) and :func:`_drop_off_stage_knobs` (the presets and
+#: ``build_model_vision_head``).
 STAGE_KNOB_DEFAULTS: Dict[str, Dict[str, Any]] = {
     'use_attention': {'attention_type': 'multi_head'},
     'use_ffn': {'ffn_type': 'mlp', 'ffn_expansion_factor': 4},
 }
-
-
-def _resolve_stage_knobs(
-        owner: str,
-        flags: Dict[str, bool],
-        given: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    Resolve the base stage knobs against the flags that gate them.
-
-    Interface contract, called once by :class:`BaseVisionHead`'s
-    ``__init__``: ``flags`` maps each key of :data:`STAGE_KNOB_DEFAULTS` to
-    the caller's flag, ``given`` maps every knob to the caller's value
-    (``None`` when not given). For a stage that is on, a ``None`` knob takes
-    its default; for a stage that is off, every knob becomes ``None``, and a
-    given value raises ``ValueError`` naming ``owner``, the knob and the
-    flag. Returns a new dict of every knob; nothing is mutated.
-
-    :param owner: Class name, for the message.
-    :type owner: str
-    :param flags: Each stage flag's value.
-    :type flags: Dict[str, bool]
-    :param given: Each knob's caller value, or ``None``.
-    :type given: Dict[str, Any]
-    :return: Each knob's resolved value.
-    :rtype: Dict[str, Any]
-    :raises ValueError: If a knob is given for a stage that is off.
-    """
-    resolved = {}
-    for flag, defaults in STAGE_KNOB_DEFAULTS.items():
-        if flags[flag]:
-            for knob, default in defaults.items():
-                resolved[knob] = default if given[knob] is None else given[knob]
-            continue
-        dead = {knob: given[knob] for knob in defaults if given[knob] is not None}
-        if dead:
-            raise ValueError(
-                f"{owner}: {dead} only configure the stage {flag}=True builds, "
-                f"and {flag} is off, so no layer would read them. Pass "
-                f"{flag}=True, or leave {sorted(dead)} unset."
-            )
-        resolved.update(dict.fromkeys(defaults))
-    return resolved
 
 
 def _drop_off_stage_knobs(
@@ -688,8 +646,9 @@ class BaseVisionHead(keras.layers.Layer):
         # Do NOT refuse only a non-default value: the default would still be
         # stored and written to get_config for a layer that does not exist.
         # See decisions.md D-210 (D-030's rule).
-        knobs = _resolve_stage_knobs(
+        knobs = resolve_stage_knobs(
             type(self).__name__,
+            STAGE_KNOB_DEFAULTS,
             {'use_attention': use_attention, 'use_ffn': use_ffn},
             {'attention_type': attention_type, 'ffn_type': ffn_type,
              'ffn_expansion_factor': ffn_expansion_factor},

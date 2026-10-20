@@ -64,7 +64,7 @@ from ...attention.factory import (
 from ...norms import create_normalization_layer, NormalizationType
 from ...sequence_pooling import SequencePooling
 
-from ..validation import positive_int, static_rank
+from ..validation import positive_int, resolve_stage_knobs, static_rank
 from .task_types import NLP_HEAD_DISPATCH, NLPTaskConfig, NLPTaskType
 from dl_techniques.utils.dtype_policy import mask_sentinel, stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -150,6 +150,15 @@ def _apply_per_row(layer: keras.layers.Layer, x: Any, training: Optional[bool]) 
 # ---------------------------------------------------------------------
 # Base NLP Head Class
 # ---------------------------------------------------------------------
+
+#: The task-attention and FFN knobs each flag gates, with the value a knob
+#: takes when its stage is on and the caller gave ``None`` (D-210; the vision
+#: heads' table is ``vision.factory.STAGE_KNOB_DEFAULTS``).
+NLP_STAGE_KNOB_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    'use_task_attention': {'attention_type': 'multi_head'},
+    'use_ffn': {'ffn_type': 'mlp', 'ffn_expansion_factor': 4},
+}
+
 
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class BaseNLPHead(keras.layers.Layer):
@@ -275,14 +284,21 @@ class BaseNLPHead(keras.layers.Layer):
         layer. Four subclasses refuse it; see above.
     :type use_task_attention: bool
     :param attention_type: Which registered attention type to build.
-    :type attention_type: AttentionType
+        ``None`` (the default) means ``'multi_head'`` when
+        ``use_task_attention`` is on; with it off, any value raises
+        ``ValueError`` and ``None`` is stored (D-211).
+    :type attention_type: Optional[AttentionType]
     :param use_ffn: Whether to build an FFN block.
     :type use_ffn: bool
-    :param ffn_type: Which registered FFN type to build.
-    :type ffn_type: FFNType
+    :param ffn_type: Which registered FFN type to build. ``None`` (the
+        default) means ``'mlp'`` when ``use_ffn`` is on; with it off, any
+        value raises and ``None`` is stored.
+    :type ffn_type: Optional[FFNType]
     :param ffn_expansion_factor: The FFN's inner width is
-        ``hidden_size * ffn_expansion_factor``.
-    :type ffn_expansion_factor: int
+        ``hidden_size * ffn_expansion_factor``. ``None`` (the default) means
+        4 when ``use_ffn`` is on; with it off, any value raises and ``None``
+        is stored.
+    :type ffn_expansion_factor: Optional[int]
     :param initializer_range: Standard deviation of the truncated normal
         initializer used by every Dense layer in this package.
     :type initializer_range: float
@@ -310,8 +326,9 @@ class BaseNLPHead(keras.layers.Layer):
 
     :raises ValueError: From ``__init__``: ``input_dim`` or
         ``intermediate_size`` not a positive integer, ``pooling_type`` not one
-        of the five supported values, or a flag for a stage the subclass never
-        runs; each names the head and the argument.
+        of the five supported values, a flag for a stage the subclass never
+        runs, or an attention/FFN knob for a stage that is off; each names
+        the head and the argument.
     """
 
     def __init__(
@@ -325,10 +342,10 @@ class BaseNLPHead(keras.layers.Layer):
             use_intermediate: bool = True,
             intermediate_size: Optional[int] = None,
             use_task_attention: bool = False,
-            attention_type: AttentionType = 'multi_head',
+            attention_type: Optional[AttentionType] = None,
             use_ffn: bool = False,
-            ffn_type: FFNType = 'mlp',
-            ffn_expansion_factor: int = 4,
+            ffn_type: Optional[FFNType] = None,
+            ffn_expansion_factor: Optional[int] = None,
             initializer_range: float = 0.02,
             **kwargs: Any
     ) -> None:
@@ -358,14 +375,18 @@ class BaseNLPHead(keras.layers.Layer):
         :type intermediate_size: Optional[int]
         :param use_task_attention: Whether to build task attention.
         :type use_task_attention: bool
-        :param attention_type: Which registered attention type to build.
-        :type attention_type: AttentionType
+        :param attention_type: Which registered attention type to build;
+            ``None`` means ``'multi_head'`` with the stage on. Refused with
+            the stage off.
+        :type attention_type: Optional[AttentionType]
         :param use_ffn: Whether to build an FFN block.
         :type use_ffn: bool
-        :param ffn_type: Which registered FFN type to build.
-        :type ffn_type: FFNType
-        :param ffn_expansion_factor: FFN inner-width multiplier.
-        :type ffn_expansion_factor: int
+        :param ffn_type: Which registered FFN type to build; ``None`` means
+            ``'mlp'`` with the stage on. Refused with the stage off.
+        :type ffn_type: Optional[FFNType]
+        :param ffn_expansion_factor: FFN inner-width multiplier; ``None``
+            means 4 with the stage on. Refused with the stage off.
+        :type ffn_expansion_factor: Optional[int]
         :param initializer_range: Truncated normal standard deviation.
         :type initializer_range: float
         :param kwargs: Additional arguments for the base Layer class.
@@ -403,10 +424,22 @@ class BaseNLPHead(keras.layers.Layer):
         self.use_intermediate = use_intermediate
         self.intermediate_size = intermediate_size or input_dim
         self.use_task_attention = use_task_attention
-        self.attention_type = attention_type
         self.use_ffn = use_ffn
-        self.ffn_type = ffn_type
-        self.ffn_expansion_factor = ffn_expansion_factor
+        # DECISION plan-2026-10-14T062616-81938e81/D-211
+        # A stage knob for a stage that is off raises and is stored as None,
+        # as on the vision heads (D-210). Do NOT go back to storing the
+        # defaults: they were written to get_config for a layer that does not
+        # exist. See decisions.md D-211.
+        knobs = resolve_stage_knobs(
+            owner,
+            NLP_STAGE_KNOB_DEFAULTS,
+            {'use_task_attention': use_task_attention, 'use_ffn': use_ffn},
+            {'attention_type': attention_type, 'ffn_type': ffn_type,
+             'ffn_expansion_factor': ffn_expansion_factor},
+        )
+        self.attention_type = knobs['attention_type']
+        self.ffn_type = knobs['ffn_type']
+        self.ffn_expansion_factor = knobs['ffn_expansion_factor']
         self.initializer_range = initializer_range
 
         # Set hidden size from config or use intermediate size

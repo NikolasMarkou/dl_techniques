@@ -182,9 +182,10 @@ These options apply to almost all head types.
 | `use_intermediate`| `bool`| `True` | Adds a Dense block (to `hidden_size`) before the final task projection. |
 | `intermediate_size` | `int` | `input_dim` | Size of the intermediate dense block when `task_config.hidden_size` is unset. |
 | `use_task_attention`| `bool`| `False` | Adds a self-attention layer specific to this task. Only the token and QA heads run one; the other four raise. |
-| `attention_type` | `Literal[str]` | `'multi_head'`| Type of task attention. Options include:<br>`'multi_head'`, `'cbam'`, `'differential'`, `'group_query'`, `'perceiver'`, `'window'`, etc. |
+| `attention_type` | `Optional[Literal[str]]` | `None`| Type of task attention; `None` means `'multi_head'` with `use_task_attention` on. With it off, any value raises `ValueError` and `None` is stored (D-211). Options include:<br>`'multi_head'`, `'cbam'`, `'differential'`, `'group_query'`, `'perceiver'`, `'window'`, etc. |
 | `use_ffn` | `bool`| `False` | Adds a Transformer-style FFN block to the head (emits `hidden_size`). The QA and multiple-choice heads run none and raise. |
-| `ffn_type` | `Literal[str]` | `'mlp'` | Type of FFN. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, `'swin_mlp'`, etc. |
+| `ffn_type` | `Optional[Literal[str]]` | `None` | Type of FFN; `None` means `'mlp'` with `use_ffn` on. With it off, any value raises `ValueError` and `None` is stored. Options include:<br>`'mlp'`, `'swiglu'`, `'geglu'`, `'gated_mlp'`, `'differential'`, `'residual'`, `'swin_mlp'`, etc. |
+| `ffn_expansion_factor` | `Optional[int]` | `None` | FFN inner width is `hidden_size * ffn_expansion_factor`; `None` means 4 with `use_ffn` on. With it off, any value raises and `None` is stored. |
 
 **Widths.** Task attention and the FFN run at the width the features have when they arrive:
 `hidden_size` after the intermediate block, `input_dim` without it. The output layer is built at the
