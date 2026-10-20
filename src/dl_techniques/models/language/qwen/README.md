@@ -191,8 +191,7 @@ with MoE layers, saved before 2026-10-13 has the old feed-forward shapes (an exp
 
 ```python
 import numpy as np
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, TASK_HEAD_NAME
 from dl_techniques.models.language.qwen import Qwen3
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 

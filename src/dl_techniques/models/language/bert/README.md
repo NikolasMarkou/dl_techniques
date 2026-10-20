@@ -265,7 +265,7 @@ when sizing a model built with `include_top=True`.
 import keras
 
 from dl_techniques.models.language.bert import create_bert
-from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
     name="ner",

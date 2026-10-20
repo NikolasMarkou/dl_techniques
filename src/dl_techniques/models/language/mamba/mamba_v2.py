@@ -42,15 +42,13 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
-from dl_techniques.layers.heads.nlp.model_head import (
-    head_output_shape,
-    ids_shape_of,
-)
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
+    head_output_shape,
+    ids_shape_of,
     task_config_to_dict,
     validate_task_head_knobs,
 )

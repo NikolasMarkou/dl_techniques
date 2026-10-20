@@ -201,7 +201,7 @@ Two contracts worth reading before you debug anything:
 | **`FNet`** | `...models.language.fnet.model.FNet` | The foundation encoder. Outputs `{"last_hidden_state", "attention_mask"}`; with `include_top=True`, the task head's output. |
 | **`FNetEncoderBlock`** | `dl_techniques.layers.fnet_encoder_block` | The encoder block, usable outside the standard FNet topology. |
 | **`create_fnet`** | `...models.language.fnet.model` | Module-level wrapper around `FNet.from_variant`, with or without a head. |
-| **`build_model_task_head`** | `...layers.heads.nlp.model_head` | Builds the in-model `task_head` (via `create_nlp_head`). |
+| **`build_model_task_head`** | `...layers.heads.nlp` | Builds the in-model `task_head` (via `create_nlp_head`). |
 
 ```python
 from dl_techniques.models.language.fnet.model import FNet

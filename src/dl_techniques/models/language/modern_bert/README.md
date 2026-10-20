@@ -173,7 +173,7 @@ print(outputs["last_hidden_state"].shape)
 | **`create_modern_bert`** | `...models.language.modern_bert.model` | Module-level wrapper around `ModernBERT.from_variant`, with or without a head. |
 | **`ModernBertEmbeddings`** | `...layers.embedding.modern_bert_embeddings` | Token and token-type embedding, normalization, dropout. |
 | **`TransformerLayer`** | `...layers.transformers` | The configurable block powering the encoder. |
-| **`build_model_task_head`** | `...layers.heads.nlp.model_head` | Builds the in-model `task_head` (via `create_nlp_head`). |
+| **`build_model_task_head`** | `...layers.heads.nlp` | Builds the in-model `task_head` (via `create_nlp_head`). |
 
 ---
 

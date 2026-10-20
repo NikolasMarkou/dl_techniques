@@ -42,16 +42,14 @@ from typing import Optional, Union, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
+    TASK_HEAD_NAME,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
-    task_config_to_dict,
-    validate_task_head_knobs,
-)
-from dl_techniques.layers.heads.nlp.model_head import (
-    TASK_HEAD_NAME,
     head_output_shape,
     ids_shape_of,
+    task_config_to_dict,
+    validate_task_head_knobs,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.weight_transfer import (

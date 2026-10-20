@@ -329,8 +329,7 @@ unchanged, by layer name:
 
 ```python
 import numpy as np
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, TASK_HEAD_NAME
 from dl_techniques.models.language.gemma import Gemma3
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 

@@ -27,9 +27,9 @@ from dl_techniques.models.common.masked_language_model import (
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     NLPTaskType,
+    TASK_HEAD_NAME,
     task_config_to_dict,
 )
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.utils.weight_transfer import read_checkpoint_config

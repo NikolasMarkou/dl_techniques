@@ -72,15 +72,13 @@ from dl_techniques.utils.weight_transfer import (
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
+    TASK_HEAD_NAME,
     build_model_task_head,
     finalize_head_outputs,
-    task_config_to_dict,
-    validate_task_head_knobs,
-)
-from dl_techniques.layers.heads.nlp.model_head import (
-    TASK_HEAD_NAME,
     head_output_shape,
     ids_shape_of,
+    task_config_to_dict,
+    validate_task_head_knobs,
 )
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
 from dl_techniques.utils.keras_registration import register_dl_technique

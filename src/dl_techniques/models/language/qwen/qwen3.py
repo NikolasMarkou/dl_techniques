@@ -83,18 +83,16 @@ from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
     pretrained_path_or_raise,
 )
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.heads.nlp.model_head import (
-    head_output_shape,
-    ids_shape_of,
-)
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
+    TASK_HEAD_NAME,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
+    head_output_shape,
+    ids_shape_of,
     task_config_to_dict,
     validate_task_head_knobs,
 )

@@ -69,13 +69,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
+    TASK_HEAD_NAME,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
     task_config_to_dict,
     validate_task_head_knobs,
 )
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 
 # ---------------------------------------------------------------------
 

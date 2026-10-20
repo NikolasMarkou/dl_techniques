@@ -59,12 +59,12 @@ from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
+    TASK_HEAD_NAME,
     build_model_task_head,
     finalize_head_outputs,
     task_config_to_dict,
     validate_task_head_knobs,
 )
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

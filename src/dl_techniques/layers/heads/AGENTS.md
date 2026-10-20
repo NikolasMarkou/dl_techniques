@@ -104,8 +104,11 @@ this package merge) still resolve.
   `head_output_shape(task_head, input_shape, hidden_size)` plus
   `ids_shape_of(input_shape)` (the shapes `finalize_head_outputs` would give,
   from shapes alone, so a headed model's `compute_output_shape` reports what
-  `call` returns). Both shape helpers are shared by the 15 language models but
-  not exported from `nlp/__init__.py`; import them from `nlp.model_head`.
+  `call` returns). All eight helpers, `TASK_HEAD_NAME` (`"task_head"`, the
+  head's layer name) included, are exported from `nlp/__init__.py` (20 names),
+  and that is the one surface the 15 language models and `train/common/nlp.py`
+  import them from; nothing in `src/` imports `nlp.model_head` directly
+  (`tests/test_models/test_the_language_models_import_one_head_surface.py`).
   **Migration of stored archives (since 2026-10-11).** The vocabulary check
   also runs when a language model is rebuilt from its config, so a `.keras`
   archive saved earlier with a generation-type `task_config` whose stored

@@ -2,8 +2,11 @@
 
 This package merges the former ``nlp_heads``, ``vision_heads`` and
 ``vlm_heads`` packages into one import surface. It re-exports the full public
-API of all three domain sub-packages. It also exports :func:`create_head`, a
-dispatcher that routes to the per-domain single-head factory.
+API of all three domain sub-packages except the eight NLP in-model helpers
+(``TASK_HEAD_NAME``, ``build_model_task_head`` and the rest), which a language
+model imports from :mod:`~dl_techniques.layers.heads.nlp` itself. It also
+exports :func:`create_head`, a dispatcher that routes to the per-domain
+single-head factory.
 
 Domains
 -------
