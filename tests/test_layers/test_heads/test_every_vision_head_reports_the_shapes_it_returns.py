@@ -1,10 +1,9 @@
 """Every vision head's ``compute_output_shape`` equals the shape ``call`` returns.
 
 Guard for plan-2026-10-14T062616-81938e81 step 7 (decisions D-027, D-028). At
-``84438bee6`` the DPT ``DepthEstimationHead`` reported ``'confidence'`` as
-``(B, sH, sW, output_channels)`` while ``call`` returned the last decoder
-stage's features, ``(B, sH, sW, dpt_dims[-1])``: measured 1 against 32 channels
-at the defaults. Every other head agreed. The check is eager ``call`` against
+``84438bee6`` the DPT mode of ``DepthEstimationHead`` reported ``'confidence'``
+with the wrong width (measured 1 against 32 channels); that mode was deleted
+in step 8 (D-222). The check is eager ``call`` against
 ``compute_output_shape`` on a non-square input, per head and per mode.
 
 ``SegmentationHead``'s ``upsampling_factor`` is also pinned to mean what it
@@ -65,10 +64,6 @@ _SUBJECTS = (
         num_classes=5, hidden_dim=HIDDEN_DIM, input_format="sequence",
         patch_grid_size=(3, 4)), SEQUENCE),
     ("depth_progressive", lambda: DepthEstimationHead(hidden_dim=HIDDEN_DIM), SPATIAL),
-    ("depth_dpt_defaults", lambda: DepthEstimationHead(decoder_style="dpt"), SPATIAL),
-    ("depth_dpt_narrow", lambda: DepthEstimationHead(
-        decoder_style="dpt", dpt_dims=[16, 8],
-        dpt_upsample_factor=4, output_channels=2), SPATIAL),
     ("enhancement", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM), SPATIAL),
     ("enhancement_x2", lambda: EnhancementHead(hidden_dim=HIDDEN_DIM, scale_factor=2), SPATIAL),
     ("surface_normals", lambda: SurfaceNormalsHead(hidden_dim=HIDDEN_DIM), SPATIAL),
@@ -102,15 +97,6 @@ def test_compute_output_shape_matches_the_eager_call(label, builder, shape) -> N
     assert reported == returned, (
         f"{label}: compute_output_shape reports {reported}, call returns {returned}"
     )
-
-
-def test_the_dpt_confidence_is_the_last_decoder_stage() -> None:
-    """Pin WHAT 'confidence' is in DPT mode, not only that the shapes agree."""
-    head = DepthEstimationHead(decoder_style="dpt", dpt_dims=[16, 8],
-                               dpt_upsample_factor=4)
-    out = head(np.random.default_rng(6).normal(size=SPATIAL).astype("float32"))
-    assert tuple(out["confidence"].shape) == (2, 24, 40, 8)
-    assert tuple(out["depth"].shape) == (2, 24, 40, 1)
 
 
 @pytest.mark.parametrize("factor", [1, 2, 4, 8, 16])

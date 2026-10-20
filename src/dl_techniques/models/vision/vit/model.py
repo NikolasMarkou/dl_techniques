@@ -45,7 +45,7 @@ References:
 
 import os
 import keras
-from typing import Optional, Tuple, Dict, Any, List, Union, Literal
+from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -746,8 +746,16 @@ class ViT(keras.Model):
             normalized sequence ``(batch, max_seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        # 1-3. Patch embeddings, CLS token, learned positional embeddings
-        x = self._embed_tokens(inputs, training=training)
+        # 1. Convert image to a sequence of patch embeddings
+        x = self.patch_embed(inputs, training=training)
+
+        # 2. Prepend the CLS token
+        batch_size = keras.ops.shape(x)[0]
+        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)
+
+        # 3. Add learned positional embeddings
+        x = self.pos_embed(x, training=training)
 
         # 4. Process through the Transformer layers
         for layer in self.transformer_layers:
@@ -771,62 +779,6 @@ class ViT(keras.Model):
                 return self.pool(x_norm)
             # pooling is None -> return the full, normalized sequence
             return x_norm
-
-    def _embed_tokens(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Patch-embed ``inputs``, prepend the CLS token, add positions.
-
-        :param inputs: Images ``(batch_size, height, width, channels)``.
-        :type inputs: keras.KerasTensor
-        :param training: Whether the model is in training mode.
-        :type training: Optional[bool]
-        :return: The token sequence ``(batch, max_seq_len, embed_dim)`` the
-            first transformer layer reads.
-        :rtype: keras.KerasTensor
-        """
-        x = self.patch_embed(inputs, training=training)
-        batch_size = keras.ops.shape(x)[0]
-        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = keras.ops.concatenate([cls_tokens, x], axis=1)
-        return self.pos_embed(x, training=training)
-
-    def get_intermediate_layers(
-            self,
-            inputs: keras.KerasTensor,
-            n: int = 1,
-            training: Optional[bool] = None
-    ) -> List[keras.KerasTensor]:
-        """The patch tokens of the last ``n`` transformer layers, each normalized.
-
-        DINOv2's ``get_intermediate_layers(x, n)`` with an int ``n`` and its
-        default ``norm=True``, the call Depth Anything V1's DPT head makes
-        (``depth_anything/dpt.py``): the outputs of the last ``n`` blocks in
-        order, each passed through the final norm, the CLS token dropped. The
-        model must be built (``build`` or one call) first.
-
-        :param inputs: Images ``(batch_size, height, width, channels)``.
-        :type inputs: keras.KerasTensor
-        :param n: How many of the last layers to return, ``1..num_layers``.
-        :type n: int
-        :param training: Whether the model is in training mode.
-        :type training: Optional[bool]
-        :return: ``n`` tensors ``(batch, num_patches, embed_dim)``, shallowest
-            first.
-        :rtype: List[keras.KerasTensor]
-        :raises ValueError: If ``n`` is not an int in ``1..num_layers``.
-        """
-        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= self.num_layers:
-            raise ValueError(f"n must be an int in 1..{self.num_layers}, got {n!r}")
-        x = self._embed_tokens(inputs, training=training)
-        outputs = []
-        for i, layer in enumerate(self.transformer_layers):
-            x = layer(x, training=training)
-            if i >= self.num_layers - n:
-                outputs.append(self.norm(x, training=training)[:, 1:, :])
-        return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape for a given input shape.

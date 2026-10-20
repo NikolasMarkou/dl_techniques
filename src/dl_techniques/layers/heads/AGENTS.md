@@ -219,12 +219,12 @@ this package merge) still resolve.
   `call` never reaches is not created, and an argument `call` can never read
   is refused with `ValueError`: the vision heads (D-020: no common
   norm/Dropout, `ClassificationHead` refuses `use_ffn`, `EnhancementHead`
-  refuses attention/FFN/dropout), `DepthEstimationHead`'s two decoders, each of
-  which refuses the other's arguments (D-030), the arguments no layer of a
-  given mode reads (D-074: `DetectionHead(use_regression=False)` refuses
-  `bbox_dims`, the DPT decoder and the explicit `SegmentationHead` refuse
-  `hidden_dim` unless the attention or FFN stage reads it; each stores
-  `None`), and the VLM heads (D-032:
+  refuses attention/FFN/dropout), the arguments no layer of a given mode
+  reads (D-074: `DetectionHead(use_regression=False)` refuses `bbox_dims`,
+  the explicit `SegmentationHead` refuses `hidden_dim` unless the attention
+  or FFN stage reads it; each stores `None`; `DepthEstimationHead`'s second,
+  DPT decoder, whose arguments the first refused under D-030, was deleted
+  under D-222), and the VLM heads (D-032:
   `BaseVLMHead` owns only `fusion`; the post-fusion norm and FFN and their four
   arguments live on `ImageTextMatchingHead`; no
   `vision_dim`/`text_dim`/`activation_type`), and the NLP heads (D-062: a head

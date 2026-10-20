@@ -14,8 +14,8 @@ Classes
 * :class:`DetectionHead` -- class scores and box offsets, per anchor.
 * :class:`SegmentationHead` -- one map of per-pixel class logits, upsampled
   towards input size. The only head here that returns a bare tensor.
-* :class:`DepthEstimationHead` -- one depth map, plus the tensor it was
-  scaled from (progressive decoder) or the last decoder features (DPT).
+* :class:`DepthEstimationHead` -- one depth map, plus the sigmoid map it
+  was scaled from.
 * :class:`ClassificationHead` -- one label for the whole image. Returns
   pre-softmax ``'logits'`` and their softmax under ``'probabilities'``.
 * :class:`InstanceSegmentationHead` -- detection outputs plus per-instance
@@ -31,10 +31,9 @@ Classes
 No head applies an activation to a class score. The class map, the instance
 masks and the detection scores are logits; compile with ``from_logits=True``
 or apply ``softmax``/``sigmoid`` yourself. The one output squashed inside a
-head is the progressive :class:`DepthEstimationHead`'s sigmoid, a range map
-that the depth is scaled from, not a class score. Its DPT decoder applies
-``dpt_output_activation`` instead (``'linear'`` by default). The normals are
-unit vectors and the flow is unbounded and signed.
+head is :class:`DepthEstimationHead`'s sigmoid, a range map that the depth
+is scaled from, not a class score. The normals are unit vectors and the flow
+is unbounded and signed.
 
 Every count argument (``hidden_dim``, ``num_classes``, ``num_anchors``,
 ``bbox_dims``, ``num_instances``, ``output_channels``, ``scale_factor``) is
@@ -98,10 +97,6 @@ from ...attention.factory import (
 )
 from ...norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers import clone_initializer
-from dl_techniques.utils.activation_serialization import (
-    deserialize_activation,
-    serialize_activation,
-)
 from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
 from ..validation import positive_int, resolve_stage_knobs
 from .task_types import VisionTaskType, TaskConfiguration
@@ -902,9 +897,10 @@ class BaseVisionHead(keras.layers.Layer):
         """
         Refuse, and store ``None`` for, a ``hidden_dim`` no layer reads.
 
-        Interface contract, shared by the head modes whose task layers are
-        sized by other arguments (:class:`DepthEstimationHead` in DPT mode,
-        :class:`SegmentationHead` in explicit mode): call it after
+        Interface contract, for a head mode whose task layers are sized by
+        other arguments (:class:`SegmentationHead` in explicit mode, its one
+        caller since the DPT mode of :class:`DepthEstimationHead` was
+        deleted, D-222): call it after
         ``BaseVisionHead.__init__`` with the caller's ``hidden_dim`` (``None``
         when not given; pop a ``None`` from ``kwargs`` before ``__init__`` so
         the base validates its default). With the attention or FFN stage on,
@@ -1123,7 +1119,7 @@ class DetectionHead(BaseVisionHead):
         # bbox_dims to 4 again for a head without a regression branch: it was
         # stored, written to the config and never read, and any value passed
         # in silence (SuperPoint passed 4 "not used"). The same rule covers
-        # hidden_dim in the DPT and explicit-segmentation modes
+        # hidden_dim in the explicit-segmentation mode
         # (_drop_unread_hidden_dim). See decisions.md D-074.
         if use_regression:
             self.bbox_dims = positive_int(
@@ -1913,44 +1909,14 @@ class SegmentationHead(BaseVisionHead):
 # Depth Estimation Head
 # ---------------------------------------------------------------------
 
-#: Defaults of the knobs only the progressive depth decoder reads. A
-#: ``DepthEstimationHead`` argument left at ``None`` takes this value in
-#: progressive mode; the DPT mode refuses any value for these keys.
-_PROGRESSIVE_DECODER_DEFAULTS: Dict[str, Any] = {
-    'min_depth': 0.1,
-    'max_depth': 100.0,
-    'use_log_depth': True,
-}
-
-#: The two ``BaseVisionHead`` arguments only the progressive depth decoder
-#: reads (its ``ConvBlock`` s take them); the DPT mode refuses a value for
-#: either and stores ``None``. Their defaults stay in ``BaseVisionHead``.
-_PROGRESSIVE_ONLY_BASE_KNOBS: Tuple[str, ...] = (
-    'normalization_type', 'activation_type')
-
-#: Defaults of the knobs only the DPT depth decoder reads, under the same
-#: rule mirrored: progressive mode refuses any value for these keys.
-_DPT_DECODER_DEFAULTS: Dict[str, Any] = {
-    'dpt_dims': (256, 128, 64, 32),
-    'dpt_use_bias': False,
-    'dpt_activation': 'relu',
-    'dpt_output_activation': 'linear',
-    'dpt_upsample_factor': 16,
-    'dpt_kernel_initializer': 'he_normal',
-    'dpt_kernel_regularizer': None,
-}
-
-
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DepthEstimationHead(BaseVisionHead):
     """
-    A depth map, at eight times the input resolution by default.
+    A depth map, at eight times the input resolution.
 
-    With the default ``decoder_style='progressive'``, three stages each
-    refine the features and then double height and width, so the output is
-    ``8H`` by ``8W``. A sigmoid conv produces a normalized map, which is then
-    scaled into ``[min_depth, max_depth]``. The diagram below is this mode.
-    ``decoder_style='dpt'`` is a different decoder, described after it.
+    Three stages each refine the features and then double height and width,
+    so the output is ``8H`` by ``8W``. A sigmoid conv produces a normalized
+    map, which is then scaled into ``[min_depth, max_depth]``.
 
     **Architecture Overview:**
 
@@ -2002,56 +1968,36 @@ class DepthEstimationHead(BaseVisionHead):
     :class:`SurfaceNormalsHead` and :class:`OpticalFlowHead`: they share
     this progressive decoder, but neither output is a depth range.
 
-    Neither decoder applies dropout (the DPT/MiDaS depth head has none), so
+    The decoder applies no dropout (the DPT/MiDaS depth head has none), so
     ``dropout_rate`` defaults to 0.0 here and a positive rate is refused
     unless ``use_attention`` or ``use_ffn`` is on, where it is that stage's
     dropout.
 
-    ``decoder_style='dpt'`` (no in-tree model builds it since 2026-10-17) runs one
-    ``Conv2D -> BatchNormalization -> activation`` stage per ``dpt_dims``
-    entry, with a 2x bilinear upsample after each of the first
-    ``log2(dpt_upsample_factor)`` stages, then ``dpt_output_conv``. Its
-    ``'depth'`` is that conv's output under ``dpt_output_activation``
-    (``'linear'`` by default, so no sigmoid and no range scaling).
-    ``'confidence'`` is the last stage's features, ``dpt_dims[-1]`` channels
-    wide, not a map shaped like ``'depth'``.
-
-    The two decoders share no decoder knob. ``min_depth``, ``max_depth`` and
-    ``use_log_depth`` belong to the progressive decoder, and every ``dpt_*``
-    argument to the DPT decoder. Each defaults to ``None``, which means its
-    documented default in its own mode; a value given to the mode that never
-    reads it raises ``ValueError``, and that mode stores ``None`` for it. The
-    DPT mode also refuses the base ``normalization_type`` and
-    ``activation_type``, which only the progressive ``ConvBlock`` s read, and
-    ``hidden_dim`` unless the attention or FFN stage is on (its stages are
-    sized by ``dpt_dims``); a refused base argument is stored as ``None``.
+    A ``decoder_style='dpt'`` mode (Conv-BatchNorm-ReLU stages over one
+    feature map) existed until 2026-10-20; it was deleted with every
+    ``dpt_*`` argument when its last consumer, DepthAnything, moved to the
+    reference DPT head in ``models/vision/depth_anything`` (D-222 of
+    plan-2026-10-14T062616-81938e81). Keras refuses either keyword now
+    (``ValueError``, an unrecognized keyword argument).
 
     Input shape:
         ``(batch, height, width, channels)``.
 
     Output shape:
-        Progressive: ``{'depth': (batch, 8 * height, 8 * width,
-        output_channels), 'confidence': the same shape}``. DPT, with
-        ``s = dpt_upsample_factor``: ``{'depth': (batch, s * height,
-        s * width, output_channels), 'confidence': (batch, s * height,
-        s * width, dpt_dims[-1])}``.
+        ``{'depth': (batch, 8 * height, 8 * width, output_channels),
+        'confidence': the same shape}``.
 
     :param output_channels: Channel count of the output map. 1 for depth.
     :type output_channels: int
-    :param min_depth: Lower end of the output range. Progressive only;
-        ``None`` means 0.1.
-    :type min_depth: Optional[float]
-    :param max_depth: Upper end of the output range. Progressive only;
-        ``None`` means 100.0.
-    :type max_depth: Optional[float]
+    :param min_depth: Lower end of the output range.
+    :type min_depth: float
+    :param max_depth: Upper end of the output range.
+    :type max_depth: float
     :param use_log_depth: Scale in log space instead of linearly.
-        Progressive only; ``None`` means ``True``.
-    :type use_log_depth: Optional[bool]
-    :param kwargs: Arguments for :class:`BaseVisionHead`, and the ``dpt_*``
-        arguments listed on ``__init__``.
+    :type use_log_depth: bool
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
 
-    :ivar depth_conv_blocks: The three refinement ``ConvBlock`` s
-        (progressive decoder).
+    :ivar depth_conv_blocks: The three refinement ``ConvBlock`` s.
     :vartype depth_conv_blocks: List[ConvBlock]
     :ivar depth_upsamples: The three stride-2 ``Conv2DTranspose`` layers,
         each applied after the ``ConvBlock`` of the same index.
@@ -2063,252 +2009,52 @@ class DepthEstimationHead(BaseVisionHead):
     def __init__(
             self,
             output_channels: int = 1,
-            min_depth: Optional[float] = None,
-            max_depth: Optional[float] = None,
-            use_log_depth: Optional[bool] = None,
-            decoder_style: Literal["progressive", "dpt"] = "progressive",
-            dpt_dims: Optional[List[int]] = None,
-            dpt_use_bias: Optional[bool] = None,
-            dpt_activation: Optional[Union[str, callable]] = None,
-            dpt_output_activation: Optional[Union[str, callable]] = None,
-            dpt_upsample_factor: Optional[int] = None,
-            dpt_kernel_initializer: Optional[
-                Union[str, keras.initializers.Initializer]] = None,
-            dpt_kernel_regularizer: Optional[
-                Union[str, keras.regularizers.Regularizer]] = None,
+            min_depth: float = 0.1,
+            max_depth: float = 100.0,
+            use_log_depth: bool = True,
             **kwargs: Any
     ) -> None:
         """
         Store the configuration, then build the depth layers.
 
-        Every mode-specific argument defaults to ``None``, which resolves to
-        the default in ``_PROGRESSIVE_DECODER_DEFAULTS`` or
-        ``_DPT_DECODER_DEFAULTS`` for the mode that reads it.
-
         :param output_channels: Channel count of the output map.
         :type output_channels: int
-        :param min_depth: Lower end of the output range (progressive).
-        :type min_depth: Optional[float]
-        :param max_depth: Upper end of the output range (progressive).
-        :type max_depth: Optional[float]
-        :param use_log_depth: Scale in log space instead of linearly
-            (progressive).
-        :type use_log_depth: Optional[bool]
-        :param decoder_style: ``"progressive"`` (default, 3x ConvBlock+Conv2DTranspose)
-            or ``"dpt"`` (DPTDecoder-compatible: Conv2D+BN+UpSampling2D).
-        :type decoder_style: Literal["progressive", "dpt"]
-        :param dpt_dims: Channel dimensions per DPT decoder stage.
-            Defaults to ``[256, 128, 64, 32]``.
-        :type dpt_dims: Optional[List[int]]
-        :param dpt_use_bias: Whether the stage convs use a bias (DPT;
-            default ``False``).
-        :type dpt_use_bias: Optional[bool]
-        :param dpt_activation: Activation for the DPT stages (default
-            ``'relu'``).
-        :type dpt_activation: Optional[Union[str, callable]]
-        :param dpt_output_activation: Activation of ``dpt_output_conv``
-            (default ``'linear'``).
-        :type dpt_output_activation: Optional[Union[str, callable]]
-        :param dpt_upsample_factor: Total upsampling factor of the DPT
-            decoder, a power of 2 (default 16).
-        :type dpt_upsample_factor: Optional[int]
-        :param dpt_kernel_initializer: Initializer for every DPT conv kernel,
-            each conv taking its own ``clone_initializer`` copy (default
-            ``'he_normal'``).
-        :type dpt_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
-        :param dpt_kernel_regularizer: Regularizer for every DPT conv kernel
-            (default none).
-        :type dpt_kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param min_depth: Lower end of the output range.
+        :type min_depth: float
+        :param max_depth: Upper end of the output range.
+        :type max_depth: float
+        :param use_log_depth: Scale in log space instead of linearly.
+        :type use_log_depth: bool
         :param kwargs: Arguments for :class:`BaseVisionHead`.
-        :raises ValueError: If ``decoder_style`` is unknown, or a
-            mode-specific argument is given to the mode that never reads it.
         :return: None.
         :rtype: None
         """
-        if decoder_style not in ("progressive", "dpt"):
-            raise ValueError(f"decoder_style must be 'progressive' or 'dpt', got {decoder_style}")
-
-        # DECISION plan-2026-10-14T062616-81938e81/D-030
-        # Each decoder reads only its own knobs, so a knob given to the other
-        # mode is refused and stored as None. Do NOT go back to concrete
-        # defaults that both modes store: the DPT decoder kept min_depth,
-        # max_depth and use_log_depth and never applied them (DepthAnything
-        # passed all three for nothing), and the progressive decoder ignored
-        # every dpt_* value the same way. See decisions.md D-030.
-        given = {
-            'min_depth': min_depth, 'max_depth': max_depth,
-            'use_log_depth': use_log_depth, 'dpt_dims': dpt_dims,
-            'dpt_use_bias': dpt_use_bias, 'dpt_activation': dpt_activation,
-            'dpt_output_activation': dpt_output_activation,
-            'dpt_upsample_factor': dpt_upsample_factor,
-            'dpt_kernel_initializer': dpt_kernel_initializer,
-            'dpt_kernel_regularizer': dpt_kernel_regularizer,
-        }
-        own, other = (
-            (_PROGRESSIVE_DECODER_DEFAULTS, _DPT_DECODER_DEFAULTS)
-            if decoder_style == "progressive"
-            else (_DPT_DECODER_DEFAULTS, _PROGRESSIVE_DECODER_DEFAULTS)
-        )
-        refused = sorted(key for key in other if given[key] is not None)
-        # The DPT stages use BatchNormalization and dpt_activation, so the
-        # base normalization_type and activation_type (read by the
-        # progressive ConvBlocks) are never read in DPT mode either.
-        if decoder_style == "dpt":
-            refused += sorted(
-                key for key in _PROGRESSIVE_ONLY_BASE_KNOBS
-                if kwargs.get(key) is not None)
-        if refused:
-            raise ValueError(
-                f"DepthEstimationHead(decoder_style={decoder_style!r}) never "
-                f"reads {refused}; they belong to the other decoder_style."
-            )
-
         # Set defaults for DepthEstimationHead before calling parent constructor
         kwargs.setdefault('use_attention', False)
         kwargs.setdefault('use_ffn', False)
         _refuse_dropout_no_layer_applies(kwargs, type(self).__name__)
-        given_hidden_dim = kwargs.get('hidden_dim')
-        if given_hidden_dim is None:
-            kwargs.pop('hidden_dim', None)
         super().__init__(**kwargs)
         self.output_channels = positive_int(
             output_channels, 'output_channels', type(self).__name__)
-        self.decoder_style = decoder_style
-        if decoder_style == "dpt":
-            for key in _PROGRESSIVE_ONLY_BASE_KNOBS:
-                setattr(self, key, None)
-            # The DPT stages are sized by dpt_dims; hidden_dim is read only
-            # by the attention and FFN stages.
-            self._drop_unread_hidden_dim(
-                given_hidden_dim,
-                "decoder_style='dpt' sizes its stages from dpt_dims")
+        self.min_depth = min_depth
+        self.max_depth = max_depth
+        self.use_log_depth = use_log_depth
 
-        for key, default in own.items():
-            value = default if given[key] is None else given[key]
-            setattr(self, key, list(value) if key == 'dpt_dims' else value)
-        for key in other:
-            setattr(self, key, None)
-        if decoder_style == "dpt":
-            # A string stays a string: clone_initializer turns it into one
-            # fresh initializer per conv, which draws exactly as the
-            # Conv2D(kernel_initializer='he_normal') calls did before this
-            # argument existed, so the default init is unchanged at a fixed
-            # seed. A config dict is deserialized once here.
-            if not isinstance(self.dpt_kernel_initializer, str):
-                self.dpt_kernel_initializer = keras.initializers.get(
-                    self.dpt_kernel_initializer)
-            self.dpt_kernel_regularizer = keras.regularizers.get(
-                self.dpt_kernel_regularizer)
+        # Progressive upsampling with refinement: the shared decoder, named
+        # depth_conv_{i} / depth_upsample_{i} (two flat lists).
+        self.depth_conv_blocks, self.depth_upsamples = (
+            _create_progressive_decoder(self, 'depth'))
 
-        self._create_depth_layers()
-
-    def _create_depth_layers(self) -> None:
-        """
-        Build the refinement stack and the depth conv.
-
-        Two architectures based on decoder_style:
-        - "progressive": Three ``[ConvBlock, Conv2DTranspose]`` pairs.
-        - "dpt": DPTDecoder-compatible conv+bn+upsample stages.
-
-        :return: None.
-        :rtype: None
-        """
-
-        if self.decoder_style == "progressive":
-            # Progressive upsampling with refinement: the shared decoder,
-            # named depth_conv_{i} / depth_upsample_{i} (two flat lists).
-            self.depth_conv_blocks, self.depth_upsamples = (
-                _create_progressive_decoder(self, 'depth'))
-
-            # Depth prediction layer
-            self.depth_head = keras.layers.Conv2D(
-                filters=self.output_channels,
-                kernel_size=3,
-                padding='same',
-                # Sigmoid keeps the output in [0, 1]. call() then scales it into
-                # the [min_depth, max_depth] range.
-                activation='sigmoid',
-                name='depth_head'
-            )
-        else:
-            # DPTDecoder-compatible architecture
-            self.dpt_activation = deserialize_activation(self.dpt_activation)
-            self.dpt_output_activation = deserialize_activation(self.dpt_output_activation)
-
-            # Validate upsample_factor: must be a power of 2 and <= 2**len(dims).
-            if self.dpt_upsample_factor < 1 or (self.dpt_upsample_factor & (self.dpt_upsample_factor - 1)) != 0:
-                raise ValueError(
-                    f"dpt_upsample_factor must be a positive power of 2, got {self.dpt_upsample_factor}"
-                )
-            # Number of 2x upsamples to insert.
-            self._num_dpt_upsamples = 0
-            uf = self.dpt_upsample_factor
-            while uf > 1:
-                uf //= 2
-                self._num_dpt_upsamples += 1
-            if self._num_dpt_upsamples > len(self.dpt_dims):
-                raise ValueError(
-                    f"dpt_upsample_factor=2**{self._num_dpt_upsamples} requires at least "
-                    f"{self._num_dpt_upsamples} decoder stages, but len(dpt_dims)={len(self.dpt_dims)}"
-                )
-
-            # All sublayer dims are shape-independent, so create them here in
-            # __init__ for stable layer tracking across (de)serialization.
-            self.dpt_conv_layers: List[keras.layers.Conv2D] = []
-            self.dpt_bn_layers: List[keras.layers.BatchNormalization] = []
-            self.dpt_act_layers: List[keras.layers.Layer] = []
-            self.dpt_up_layers: List[Optional[keras.layers.Layer]] = []
-
-            # Create convolutional layers for each dimension
-            for i, dim in enumerate(self.dpt_dims):
-                # Convolutional layer
-                conv = keras.layers.Conv2D(
-                    filters=dim,
-                    kernel_size=3,
-                    padding='same',
-                    kernel_initializer=clone_initializer(
-                        self.dpt_kernel_initializer),
-                    kernel_regularizer=self.dpt_kernel_regularizer,
-                    use_bias=self.dpt_use_bias,
-                    name=f'dpt_conv_{i}'
-                )
-                self.dpt_conv_layers.append(conv)
-
-                # Batch normalization layer
-                # Use epsilon=1e-5 to match torch reference (DPTDecoder default)
-                bn = keras.layers.BatchNormalization(
-                    epsilon=1e-5, name=f'dpt_bn_{i}'
-                )
-                self.dpt_bn_layers.append(bn)
-
-                # Activation layer
-                activation_layer = keras.layers.Activation(
-                    self.dpt_activation,
-                    name=f'dpt_act_{i}'
-                )
-                self.dpt_act_layers.append(activation_layer)
-
-                # Upsample after the first _num_dpt_upsamples stages (one 2x per stage).
-                if i < self._num_dpt_upsamples:
-                    up = keras.layers.UpSampling2D(
-                        size=(2, 2), interpolation='bilinear', name=f'dpt_upsample_{i}'
-                    )
-                else:
-                    up = None
-                self.dpt_up_layers.append(up)
-
-            # Final output layer
-            self.dpt_output_conv = keras.layers.Conv2D(
-                filters=self.output_channels,
-                kernel_size=3,
-                padding='same',
-                kernel_initializer=clone_initializer(
-                    self.dpt_kernel_initializer),
-                kernel_regularizer=self.dpt_kernel_regularizer,
-                activation=self.dpt_output_activation,
-                use_bias=True,
-                name='dpt_output_conv'
-            )
+        # Depth prediction layer
+        self.depth_head = keras.layers.Conv2D(
+            filters=self.output_channels,
+            kernel_size=3,
+            padding='same',
+            # Sigmoid keeps the output in [0, 1]. call() then scales it into
+            # the [min_depth, max_depth] range.
+            activation='sigmoid',
+            name='depth_head'
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -2319,27 +2065,10 @@ class DepthEstimationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         """
-        if self.decoder_style == "progressive":
-            shape = _build_progressive_decoder(
-                self.depth_conv_blocks, self.depth_upsamples,
-                self._common_processed_shape(input_shape))
-            self.depth_head.build(shape)
-        else:
-            # DPT style: build all dpt layers
-            shape = self._common_processed_shape(input_shape)
-            for conv, bn, act, up in zip(
-                    self.dpt_conv_layers,
-                    self.dpt_bn_layers,
-                    self.dpt_act_layers,
-                    self.dpt_up_layers,
-            ):
-                conv.build(shape)
-                shape = conv.compute_output_shape(shape)
-                bn.build(shape)
-                act.build(shape)
-                if up is not None:
-                    shape = up.compute_output_shape(shape)
-            self.dpt_output_conv.build(shape)
+        shape = _build_progressive_decoder(
+            self.depth_conv_blocks, self.depth_upsamples,
+            self._common_processed_shape(input_shape))
+        self.depth_head.build(shape)
 
         # The common attention and ffn, on the raw input shape.
         super().build(input_shape)
@@ -2358,8 +2087,7 @@ class DepthEstimationHead(BaseVisionHead):
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
         :return: Dict with ``'depth'`` and ``'confidence'``, where
-            ``'confidence'`` is the unscaled sigmoid output (progressive)
-            or the pre-activation output (dpt).
+            ``'confidence'`` is the unscaled sigmoid output.
         :rtype: Dict[str, keras.KerasTensor]
         """
 
@@ -2371,51 +2099,29 @@ class DepthEstimationHead(BaseVisionHead):
         if self.use_ffn:
             x = self.ffn(x, training=training)
 
-        if self.decoder_style == "progressive":
-            # Progressive refinement and upsampling
-            x = _run_progressive_decoder(
-                self.depth_conv_blocks, self.depth_upsamples, x, training)
+        # Progressive refinement and upsampling
+        x = _run_progressive_decoder(
+            self.depth_conv_blocks, self.depth_upsamples, x, training)
 
-            # Predict normalized depth
-            depth_normalized = self.depth_head(x)
+        # Predict normalized depth
+        depth_normalized = self.depth_head(x)
 
-            # Scale to actual depth range
-            if self.use_log_depth:
-                # Convert from log space
-                log_min = keras.ops.log(self.min_depth)
-                log_max = keras.ops.log(self.max_depth)
-                depth = keras.ops.exp(depth_normalized * (log_max - log_min) + log_min)
-            else:
-                # Linear scaling
-                depth = depth_normalized * (self.max_depth - self.min_depth) + self.min_depth
-
-            return {
-                'depth': depth,
-                # This is the sigmoid output the depth was scaled from, not a
-                # separate estimate. Read the class docstring before using it.
-                'confidence': depth_normalized
-            }
+        # Scale to actual depth range
+        if self.use_log_depth:
+            # Convert from log space
+            log_min = keras.ops.log(self.min_depth)
+            log_max = keras.ops.log(self.max_depth)
+            depth = keras.ops.exp(depth_normalized * (log_max - log_min) + log_min)
         else:
-            # DPT style: conv -> bn -> act -> upsample
-            for conv, bn, act, up in zip(
-                    self.dpt_conv_layers,
-                    self.dpt_bn_layers,
-                    self.dpt_act_layers,
-                    self.dpt_up_layers,
-            ):
-                x = conv(x)
-                x = bn(x, training=training)
-                x = act(x)
-                if up is not None:
-                    x = up(x)
+            # Linear scaling
+            depth = depth_normalized * (self.max_depth - self.min_depth) + self.min_depth
 
-            # Final output conv (no sigmoid, activation handled by dpt_output_activation)
-            depth = self.dpt_output_conv(x)
-
-            return {
-                'depth': depth,
-                'confidence': x  # Pre-output features as confidence proxy
-            }
+        return {
+            'depth': depth,
+            # This is the sigmoid output the depth was scaled from, not a
+            # separate estimate. Read the class docstring before using it.
+            'confidence': depth_normalized
+        }
 
     def compute_output_shape(
             self,
@@ -2430,33 +2136,20 @@ class DepthEstimationHead(BaseVisionHead):
         :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
-
-        if self.decoder_style == "progressive":
-            # Three transposed-conv upsamples, stride 2 each.
-            scale = 8
-        else:
-            # DPT style: upsample_factor determines scale
-            scale = self.dpt_upsample_factor
-
+        # Three transposed-conv upsamples, stride 2 each.
+        scale = 8
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
         shape = (batch, out_height, out_width, self.output_channels)
-        if self.decoder_style == "progressive":
-            return {'depth': shape, 'confidence': shape}
-        # DPT's 'confidence' is the last decoder stage's features, so it has
-        # that stage's width, not output_channels.
-        return {
-            'depth': shape,
-            'confidence': (batch, out_height, out_width, self.dpt_dims[-1]),
-        }
+        return {'depth': shape, 'confidence': shape}
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the constructor arguments for serialization.
 
-        :return: Config dict carrying ``output_channels``,
-            ``decoder_style`` and every mode-specific argument, on top of the
-            base configuration. The other mode's arguments are ``None``.
+        :return: Config dict carrying ``output_channels``, ``min_depth``,
+            ``max_depth`` and ``use_log_depth`` on top of the base
+            configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -2465,25 +2158,6 @@ class DepthEstimationHead(BaseVisionHead):
             'min_depth': self.min_depth,
             'max_depth': self.max_depth,
             'use_log_depth': self.use_log_depth,
-            'decoder_style': self.decoder_style,
-            'dpt_dims': self.dpt_dims,
-            'dpt_use_bias': self.dpt_use_bias,
-            # The DPT mode holds deserialized activations; a raw callable
-            # in the config would fail at load for an unregistered one.
-            'dpt_activation': serialize_activation(self.dpt_activation),
-            'dpt_output_activation': serialize_activation(
-                self.dpt_output_activation),
-            'dpt_upsample_factor': self.dpt_upsample_factor,
-            'dpt_kernel_initializer': (
-                self.dpt_kernel_initializer
-                if self.dpt_kernel_initializer is None
-                or isinstance(self.dpt_kernel_initializer, str)
-                else keras.initializers.serialize(self.dpt_kernel_initializer)
-            ),
-            'dpt_kernel_regularizer': (
-                None if self.dpt_kernel_regularizer is None
-                else keras.regularizers.serialize(self.dpt_kernel_regularizer)
-            ),
         })
         return config
 

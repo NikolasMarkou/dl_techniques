@@ -6,15 +6,13 @@ Step 11.1 report listed (D-054). Measured at ``56b696fe2``:
 * ``DetectionHead(use_regression=False)`` stored ``bbox_dims=4`` and wrote it
   to its config although no regression branch exists to read it, and took any
   other value in silence.
-* ``DepthEstimationHead(decoder_style='dpt')`` stored ``hidden_dim=256``. The
-  DPT stages are sized by ``dpt_dims``; ``hidden_dim`` is read only by the
-  attention and FFN stages, which DPT mode leaves off by default.
+* ``DepthEstimationHead(decoder_style='dpt')`` stored ``hidden_dim=256``
+  (that mode was deleted in step 8, D-222).
 * ``SegmentationHead(skip_channel_mode='explicit')`` created its upsample
   convs at a ``hidden_dim // 8`` placeholder and overwrote ``filters`` in
   ``build``, so ``hidden_dim < 8`` was refused for a width no layer used. In
   explicit mode the refine widths come from ``explicit_skip_channels`` too,
-  so ``hidden_dim`` is read only by the attention and FFN stages, as in DPT
-  mode.
+  so ``hidden_dim`` is read only by the attention and FFN stages.
 
 The rule is D-030's: a value for an argument the head never reads is refused
 with ``ValueError`` and the head stores ``None``, which round-trips. When the
@@ -26,7 +24,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.vision.factory import (
-    DepthEstimationHead, DetectionHead, SegmentationHead, VisionTaskType, create_vision_head)
+    DetectionHead, SegmentationHead, VisionTaskType, create_vision_head)
 
 _X = np.random.default_rng(17).normal(size=(2, 4, 6, 16)).astype("float32")
 
@@ -76,13 +74,8 @@ def test_a_box_detection_head_keeps_its_default_bbox_dims() -> None:
 
 
 # ---------------------------------------------------------------------
-# hidden_dim in the DPT decoder and the explicit segmentation mode
+# hidden_dim in the explicit segmentation mode
 # ---------------------------------------------------------------------
-
-def _dpt(**kwargs):
-    return DepthEstimationHead(decoder_style="dpt", dpt_dims=[8, 8], dpt_upsample_factor=4,
-                               **kwargs)
-
 
 def _explicit(**kwargs):
     return SegmentationHead(num_classes=3, skip_channel_mode="explicit",
@@ -90,7 +83,6 @@ def _explicit(**kwargs):
 
 
 _UNREAD = {
-    "dpt": lambda **kw: _dpt(**kw),
     "explicit_segmentation": lambda **kw: _explicit(use_ffn=False, **kw),
 }
 
@@ -106,18 +98,6 @@ def test_an_unread_hidden_dim_is_stored_as_none(make) -> None:
     head = make()
     assert head.hidden_dim is None and head.get_config()["hidden_dim"] is None
     assert _round_trip(head).hidden_dim is None
-
-
-@pytest.mark.parametrize("stage", ["use_ffn", "use_attention"])
-def test_a_dpt_head_reads_hidden_dim_when_a_stage_runs(stage) -> None:
-    kwargs = {stage: True}
-    if stage == "use_attention":
-        kwargs["attention_type"] = "cbam"
-    head = _dpt(hidden_dim=16, **kwargs)
-    assert head.hidden_dim == 16
-    out = head(_X, training=False)
-    assert tuple(out["depth"].shape) == (2, 16, 24, 1)
-    assert _round_trip(head).hidden_dim == 16
 
 
 # ---------------------------------------------------------------------

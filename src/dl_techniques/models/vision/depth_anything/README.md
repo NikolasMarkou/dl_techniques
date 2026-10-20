@@ -69,11 +69,10 @@ range parameters. This is what the reference does, re-derived from the paper and
   `metric_depth/depth_anything_v2/dpt.py` ends in `nn.Sigmoid()` and multiplies by `max_depth`
   (20 indoor, 80 outdoor), and V1's metric models are ZoeDepth with metric bins.
 
-The decoder used to be linear and received `min_depth=0.1`, `max_depth=100.0` and
-`use_log_depth=True`, which the DPT decoder stored and never applied; the decoder now refuses them.
-A `.keras` archive saved before 2026-10-15 still loads, with every weight restored, and its output
-is then the ReLU of what it returned before (measured: max difference 0.0 against the old output
-clamped at zero). Nothing marks such an archive, so the change is silent.
+Until 2026-10-15 the decoder was linear and received `min_depth=0.1`, `max_depth=100.0` and
+`use_log_depth=True`, which the shared head's DPT mode stored and never applied. That decoder was
+replaced by `DPTHead` on 2026-10-17 (no archive saved before then loads, see "DPT head"), and the
+shared head's DPT mode was deleted on 2026-10-20.
 
 The trainer (`src/train/depth_anything/`) supervises the paper's target and loss: per-map normalized
 MegaDepth disparity in `[0, 1]` and the masked affine-invariant MAE (`AffineInvariantLoss(masked=True)`).
@@ -116,7 +115,8 @@ to the DINOv2 width of `encoder_type`) feeds all four paths. Guard:
 
 Until 2026-10-17 the decoder was the shared `DepthEstimationHead(decoder_style='dpt')`: one
 feature map through `Conv3x3 -> BN -> ReLU` stages and `decoder_dims` (removed, no alias). A
-`.keras` archive saved before that does not load into this model.
+`.keras` archive saved before that does not load into this model. That mode had no other consumer
+and was deleted from the shared head on 2026-10-20.
 
 It is composed of three sub-networks:
 

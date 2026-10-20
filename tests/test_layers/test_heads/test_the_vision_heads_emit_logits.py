@@ -33,18 +33,12 @@ refuses the common-layer flags its ``call`` never applies:
 ``ClassificationHead(use_ffn=True)`` and ``EnhancementHead(use_attention=True
 or use_ffn=True)`` raise ``ValueError``.
 
-Step 7.1 (decision D-030) applies the same rule to the two depth decoders. The
-DPT decoder stored ``min_depth``, ``max_depth`` and ``use_log_depth`` and never
-applied them (MEASURED at c39e444a3: the DPT depth was bit-identical with
-``min_depth=3, max_depth=7, use_log_depth=False``), and the progressive
-decoder ignored every ``dpt_*`` value the same way. Each mode now refuses the
-other's knobs (the DPT mode also refuses the base ``normalization_type`` and
-``activation_type``, which only the progressive ConvBlocks read), and the DPT
-convs take ``dpt_kernel_initializer`` and
-``dpt_kernel_regularizer``, which DepthAnything forwards from its own
-``kernel_initializer``/``kernel_regularizer`` (they never reached the decoder:
-its convs read ``self.kernel_initializer`` behind a ``hasattr`` that was always
-false).
+Step 7.1 (decision D-030) applied the same rule to the two depth decoders:
+the DPT decoder stored ``min_depth``, ``max_depth`` and ``use_log_depth`` and
+never applied them, and the progressive decoder ignored every ``dpt_*`` value
+the same way. Step 8 (D-222) deleted the DPT mode once DepthAnything, its last
+consumer, moved to the reference DPT head; the head has one decoder, and every
+``decoder_style`` / ``dpt_*`` keyword is refused as unrecognized.
 """
 
 from typing import Dict, Tuple
@@ -55,9 +49,6 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.heads.vision.factory import (
-    _DPT_DECODER_DEFAULTS,
-    _PROGRESSIVE_DECODER_DEFAULTS,
-    _PROGRESSIVE_ONLY_BASE_KNOBS,
     PRESET_FIXED_KEYS,
     RESERVED_HEAD_OVERRIDE_KEYS,
     ClassificationHead,
@@ -754,114 +745,31 @@ def test_the_depth_head_keeps_its_sigmoid_range_map(use_log_depth: bool) -> None
         atol=reassociation_atol([2], 1, float(np.abs(expected).max())))
 
 
-#: A non-None value for every mode-specific DepthEstimationHead knob. Pinned
-#: here rather than read off the defaults dicts, so a key dropped from a dict
-#: (and with it its refusal) fails the key-set check below.
-_PROGRESSIVE_ONLY_VALUES = {
-    "min_depth": 0.5, "max_depth": 20.0, "use_log_depth": False,
-}
-#: The base-class arguments only the progressive ConvBlocks read.
-_PROGRESSIVE_ONLY_BASE_VALUES = {
-    "normalization_type": "batch_norm", "activation_type": "relu",
-}
-_DPT_ONLY_VALUES = {
-    "dpt_dims": [8], "dpt_use_bias": False, "dpt_activation": "relu",
-    "dpt_output_activation": "linear", "dpt_upsample_factor": 2,
-    "dpt_kernel_initializer": "zeros", "dpt_kernel_regularizer": "l2",
+#: Every keyword of the DPT mode deleted in step 8 (D-222), with a value it
+#: used to take.
+_DELETED_DPT_KEYWORDS = {
+    "decoder_style": "dpt", "dpt_dims": [8], "dpt_use_bias": False,
+    "dpt_activation": "relu", "dpt_output_activation": "linear",
+    "dpt_upsample_factor": 2, "dpt_kernel_initializer": "zeros",
+    "dpt_kernel_regularizer": "l2",
 }
 
 
-def test_the_depth_knob_sets_are_the_pinned_ones() -> None:
-    assert set(_PROGRESSIVE_DECODER_DEFAULTS) == set(_PROGRESSIVE_ONLY_VALUES)
-    assert set(_DPT_DECODER_DEFAULTS) == set(_DPT_ONLY_VALUES)
-    assert set(_PROGRESSIVE_ONLY_BASE_KNOBS) == set(_PROGRESSIVE_ONLY_BASE_VALUES)
-
-
-@pytest.mark.parametrize(
-    "style,key,value",
-    [("dpt", k, v) for k, v in _PROGRESSIVE_ONLY_VALUES.items()]
-    + [("dpt", k, v) for k, v in _PROGRESSIVE_ONLY_BASE_VALUES.items()]
-    + [("progressive", k, v) for k, v in _DPT_ONLY_VALUES.items()],
-    ids=lambda v: str(v))
-def test_each_depth_decoder_refuses_the_other_decoders_knobs(
-        style: str, key: str, value) -> None:
-    """A value equal to the other mode's default is refused too: the mode in
-    hand never reads it, whatever it is."""
+@pytest.mark.parametrize("key,value", list(_DELETED_DPT_KEYWORDS.items()),
+                         ids=list(_DELETED_DPT_KEYWORDS))
+def test_the_deleted_dpt_mode_keywords_are_refused(key: str, value) -> None:
     with pytest.raises(ValueError, match=key):
-        DepthEstimationHead(decoder_style=style, **{key: value})
+        DepthEstimationHead(**{key: value})
 
 
-@pytest.mark.parametrize("style", ["progressive", "dpt"])
-def test_each_depth_decoder_stores_only_its_own_knobs(style: str) -> None:
-    own, other = ((_PROGRESSIVE_DECODER_DEFAULTS, _DPT_DECODER_DEFAULTS)
-                  if style == "progressive"
-                  else (_DPT_DECODER_DEFAULTS, _PROGRESSIVE_DECODER_DEFAULTS))
-    head = DepthEstimationHead(decoder_style=style)
+def test_the_depth_head_has_one_decoder_and_round_trips() -> None:
+    head = DepthEstimationHead()
     config = head.get_config()
-    for key in other:
-        assert getattr(head, key) is None and config[key] is None, key
-    for key in _PROGRESSIVE_ONLY_BASE_KNOBS:
-        assert (config[key] is None) == (style == "dpt"), key
-    for key in own:
-        assert config[key] is not None or own[key] is None, key
-    # The DPT defaults are the documented ones, and a config round-trips.
-    if style == "dpt":
-        assert head.dpt_dims == [256, 128, 64, 32]
-        assert head.dpt_upsample_factor == 16
-        assert config["dpt_kernel_initializer"] == "he_normal"
-    else:
-        assert (head.min_depth, head.max_depth, head.use_log_depth) == (
-            0.1, 100.0, True)
+    assert not [k for k in config if k.startswith("dpt_") or k == "decoder_style"]
+    assert not [n for n in vars(head) if n.startswith("dpt_")]
+    assert (head.min_depth, head.max_depth, head.use_log_depth) == (0.1, 100.0, True)
     rebuilt = DepthEstimationHead.from_config(config)
     assert rebuilt.get_config() == config
-
-
-def test_the_dpt_activations_serialize_when_given_as_callables() -> None:
-    """``get_config`` serializes both DPT activations; a raw callable in the
-    config is not JSON and fails at load when unregistered."""
-    import json
-    head = DepthEstimationHead(
-        decoder_style="dpt", dpt_dims=[4], dpt_upsample_factor=2,
-        dpt_activation=keras.activations.gelu,
-        dpt_output_activation=keras.activations.softplus)
-    config = json.loads(json.dumps(head.get_config()))
-    rebuilt = DepthEstimationHead.from_config(config)
-    x = _inputs((2, 3, 5, 4))
-    head(x)
-    rebuilt(x)
-    rebuilt.set_weights(head.get_weights())
-    np.testing.assert_array_equal(
-        keras.ops.convert_to_numpy(rebuilt(x)["depth"]),
-        keras.ops.convert_to_numpy(head(x)["depth"]))
-
-
-def test_the_dpt_kernel_initializer_and_regularizer_reach_every_conv() -> None:
-    """Every DPT conv kernel (the stages and the output conv) takes the
-    initializer and the regularizer; a seedless initializer is cloned per
-    conv, so two same-shaped kernels do not replay one draw."""
-    dims = [4, 4, 4]
-    head = DepthEstimationHead(
-        decoder_style="dpt", dpt_dims=dims, dpt_upsample_factor=2,
-        dpt_kernel_initializer=keras.initializers.Constant(0.25),
-        dpt_kernel_regularizer=keras.regularizers.L2(1e-3))
-    head(_inputs((2, 3, 5, 4)))
-    convs = head.dpt_conv_layers + [head.dpt_output_conv]
-    for conv in convs:
-        kernel = keras.ops.convert_to_numpy(conv.kernel)
-        assert np.all(kernel == 0.25), conv.name
-    assert len(head.losses) == len(convs)
-    config = head.get_config()
-    assert config["dpt_kernel_initializer"]["class_name"] == "Constant"
-    assert config["dpt_kernel_regularizer"]["class_name"] == "L2"
-
-    keras.utils.set_random_seed(3)
-    seeded = DepthEstimationHead(
-        decoder_style="dpt", dpt_dims=dims, dpt_upsample_factor=2,
-        dpt_kernel_initializer=keras.initializers.HeNormal())
-    seeded(_inputs((2, 3, 5, 4)))
-    k1, k2 = (keras.ops.convert_to_numpy(c.kernel)
-              for c in seeded.dpt_conv_layers[1:3])
-    assert k1.shape == k2.shape and not np.array_equal(k1, k2)
 
 
 def test_classification_head_refuses_use_ffn() -> None:

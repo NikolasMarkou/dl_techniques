@@ -390,12 +390,12 @@ class DepthAnything(keras.Model):
         # min_depth/max_depth/use_log_depth: no reference maps this output
         # into a [min, max] or log range (only V2's metric head does
         # sigmoid * max_depth, which this relative-depth model does not
-        # claim), and the DPT decoder refuses them. See decisions.md D-031.
+        # claim), and DPTHead takes none of them. See decisions.md D-031.
         # Without the head, call() returns before the decoder, so none is
         # created: an unrun, unbuilt decoder is a sub-layer with no weights.
         # DECISION plan-2026-10-14T062616-81938e81/D-128
-        # Do NOT go back to the shared DepthEstimationHead's dpt mode here: it
-        # decodes ONE feature map through Conv-BN-ReLU stages, while the
+        # Do NOT bring back a decoder like the shared head's dpt mode (deleted,
+        # D-222): it decoded ONE feature map through Conv-BN-ReLU stages, while the
         # reference head (Depth-Anything DPTHead, use_bn=False) fuses four
         # encoder layers through refinenet4..1 and has no BatchNorm. The BN
         # was where the old decoder's train/inference gap sat (step-150 loss
@@ -622,13 +622,13 @@ class DepthAnything(keras.Model):
             name='initial_conv'
         )(inputs)
         # DECISION plan-2026-08-17T183311-79c63e38/D-028: pass epsilon explicitly on all three placeholder BatchNorms.
-        # Justification is consistency with the downstream DPT head's 1e-5, not reference fidelity (this stack has no reference). See decisions.md.
+        # Justification is consistency with the repo's DPTDecoder BatchNorm 1e-5 (REFERENCE_BN_EPSILON; DPTHead has no BN since D-128 of plan-2026-10-14T062616-81938e81), not reference fidelity (this stack has no reference). See decisions.md.
         x = keras.layers.BatchNormalization(
             epsilon=REFERENCE_BN_EPSILON, name='initial_bn'
         )(x)
         x = keras.layers.ReLU(name='initial_relu')(x)
         # Note: removed legacy stride-2 'initial_pool' to keep placeholder
-        # encoder stride at 16 (matches 4-stage DPT decoder upsample).
+        # encoder stride at 16 (DPTHead reads it as a patch-16 grid).
 
         # Progressive feature extraction blocks
         dims = [64, 128, 256, 512]

@@ -96,10 +96,9 @@ multiple-choice and generation logits, detection `'classifications'`, the segmen
 matching `'match_score'`. Compile with `from_logits=True`, or apply `softmax`/`sigmoid` yourself.
 Where a head also returns `'probabilities'` (NLP and vision classification, NLP multiple choice), it
 is `softmax('logits')`, computed in the head's compute dtype. Two outputs are squashed by design,
-because they are range maps for regression targets, not class scores: the progressive
-`DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid (the DPT depth decoder applies
-its `dpt_output_activation`, `'linear'` by default). Surface normals are L2-normalized to unit length and optical flow is linear and
-signed. The per-domain READMEs give each head's keys.
+because they are range maps for regression targets, not class scores: the
+`DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid. Surface normals are
+L2-normalized to unit length and optical flow is linear and signed. The per-domain READMEs give each head's keys.
 
 Every head owns only the sub-layers its `call` runs. Arguments that a head's `call`
 can never read are refused with `ValueError`: the VLM heads take no `vision_dim`/`text_dim` (widths
