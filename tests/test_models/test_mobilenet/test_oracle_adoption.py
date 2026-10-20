@@ -44,17 +44,16 @@ BatchNorm removes it exactly. Exactly four weights read ``0.0``, and they are
 exactly the four blocks at 1x1. At 64/128/224 the dead set is EMPTY. The V2 arm
 above therefore runs at 64x64, and the 32x32 reading is pinned as a geometry
 artifact rather than silently avoided.
-THE THIRD TRAP: MobileNetV3's SQUEEZE-EXCITE ReLU CAN DIE ON A DRAW
---------------------------------------------------------------------
-At ``width_multiplier=0.25`` MobileNetV3's ``block_0`` squeeze-excite
-bottleneck is **2 channels wide**. On roughly one initialisation in eight its
-pre-ReLU is negative in every channel and every batch row, the ReLU output is
-EXACTLY zero, and both SE kernels report an identically-zero gradient.
-Unseeded, this file measured ``1 failed / 18 passed`` in **2 of 5** consecutive
-runs. Every build here is therefore seeded (:data:`BUILD_SEED`), and
-``TestTheSqueezeExciteReLUCanDieOnADraw`` pins both sides -- dead at seed 0 with
-the ReLU output measured all-zero, live at the build seed -- so the reading is a
-draw rather than a disconnected module, and a later reader cannot re-file it.
+THE THIRD TRAP WAS A DEFECT, AND IS FIXED
+-----------------------------------------
+Until plan-2026-10-14T062616-81938e81 step 9.3 MobileNetV3's squeeze-excite
+bottleneck was ``int(expanded * 0.25)``, 2 channels on Small's first SE block
+at ``width_multiplier=0.25``, and its ReLU died on about one draw in eight
+(seeds 0 and 10 of 0..15). This file pinned that two-sided as a draw. The
+reference rounds to a multiple of 8 (at least 8); with it the SE path is live
+at every seed 0..15, Small and Large, which
+``test_the_v3_squeeze_excite_widths_are_the_references.py`` asserts, so the
+dead-draw pin is gone.
 
 """
 
@@ -164,18 +163,10 @@ def _v4(**o) -> MobileNetV4:
     return MobileNetV4(**kwargs)
 
 
-#: Build seed. NOT decoration: MobileNetV3's squeeze-excite bottleneck is 2
-#: channels wide at ``width_multiplier=0.25``, and on roughly one draw in eight
-#: its pre-ReLU is negative in EVERY channel and EVERY batch row, so the ReLU
-#: output is EXACTLY zero and both SE kernels report an identically-zero
-#: gradient. Measured unseeded: 1 failed / 18 passed in 2 of 5 consecutive runs
-#: of this file. An unseeded gradient report on this package reports the DRAW,
-#: not the model -- exactly the hazard that made a BeiT arm in batch A flaky 1
-#: in 4. ``BUILD_SEED`` is a seed at which the SE path is live;
-#: ``TestTheSqueezeExciteReLUCanDieOnADraw`` pins the other side at ``0``.
-#: Re-derived 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): cloning each
-#: conv's initializer moved every draw, and seed 0 became a dead draw (seeds
-#: 0..15: dead at 0 and 10, live elsewhere), so the build seed moved to 1.
+#: Build seed. Every build here is seeded so a gradient report describes one
+#: fixed draw. Until step 9.3 this was load-bearing: MobileNetV3's 2-wide SE
+#: bottleneck died on seeds 0 and 10 (see the module docstring); the seed
+#: stays 1 so the other arms keep their measured draw.
 BUILD_SEED = 1
 
 
@@ -281,82 +272,6 @@ class TestMobileNetV2GeometryArtifact:
             assert value is not None and value > 0.0, (
                 f"{path} is still dead at 64x64; the 32x32 reading is then NOT "
                 f"a geometry artifact and this whole explanation is wrong"
-            )
-
-
-class TestTheSqueezeExciteReLUCanDieOnADraw:
-    """The third false-CRITICAL candidate, pinned two-sided.
-
-    A future reader who measures ``block_0/se_reduce/kernel`` and
-    ``block_0/se_expand/kernel`` dead on MobileNetV3 has this test to tell them
-    it is a dying ReLU at a 2-channel bottleneck on an unlucky INITIALISATION,
-    not a disconnected squeeze-excite module. It is also why every build in this
-    file is seeded.
-    """
-
-    #: A seed at which the SE ReLU is fully dead. Measured 2026-08-21: of seeds
-    #: 0..7 exactly seed 6, matching the 2-in-5 unseeded failure rate.
-    #: Re-measured 2026-10-16 after D-076 (per-conv initializer clones): of
-    #: seeds 0..15 exactly 0 and 10, the same one-in-eight rate.
-    DEAD_SEED = 0
-
-    @staticmethod
-    def _se_block(model):
-        return {l.name: l for l in model._flatten_layers(include_self=False)}[
-            "block_0"]
-
-    def test_the_se_bottleneck_is_only_two_channels_wide(self):
-        """The premise: a 2-wide ReLU is a plausible thing to lose entirely."""
-        model = _built(_v3)
-        assert self._se_block(model).se_reduce.filters == 2
-
-    def test_at_the_unlucky_seed_the_se_relu_output_is_exactly_zero(self):
-        model = _built(_v3, seed=self.DEAD_SEED)
-        block = self._se_block(model)
-        seen = {}
-        original = block.se_activation1.call
-
-        def spy(inputs, *args, **kwargs):
-            result = original(inputs, *args, **kwargs)
-            seen["post"] = keras.ops.convert_to_numpy(result)
-            seen["pre"] = keras.ops.convert_to_numpy(inputs)
-            return result
-
-        block.se_activation1.call = spy
-        try:
-            model(_images(), training=True)
-        finally:
-            block.se_activation1.call = original
-
-        assert seen["pre"].max() < 0.0, (
-            f"the SE pre-activation is not entirely negative "
-            f"({seen['pre'].min()} .. {seen['pre'].max()}); the explanation "
-            f"below does not apply at this seed"
-        )
-        assert np.all(seen["post"] == 0.0), "the SE ReLU output is not all zero"
-
-    def test_at_that_seed_exactly_the_two_se_kernels_read_zero(self):
-        model = _built(_v3, seed=self.DEAD_SEED)
-        x = _images()
-        _one_adam_step(model, x)
-        report = gradient_report(model, x, loss_fn=ramp_loss)
-        dead = {p for p, v in report.items() if v is None or v == 0.0}
-        assert {p.split("/", 1)[1] for p in dead} == {
-            "block_0/se_reduce/kernel", "block_0/se_expand/kernel"}, (
-            f"expected exactly the two SE kernels, got {sorted(dead)}"
-        )
-
-    def test_at_the_build_seed_they_are_live(self):
-        """The discriminating half: the SE module is NOT disconnected."""
-        model = _built(_v3, seed=BUILD_SEED)
-        x = _images()
-        _one_adam_step(model, x)
-        report = gradient_report(model, x, loss_fn=ramp_loss)
-        for suffix in ("block_0/se_reduce/kernel", "block_0/se_expand/kernel"):
-            path = next(p for p in report if p.endswith(suffix))
-            assert report[path] is not None and report[path] > 0.0, (
-                f"{suffix} is dead at the build seed too; the draw explanation "
-                f"is then wrong and this IS a disconnected module"
             )
 
 

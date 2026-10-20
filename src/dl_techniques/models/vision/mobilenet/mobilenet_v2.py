@@ -8,7 +8,7 @@ need to persist between blocks. The final projection of every block has
 no activation, since a ReLU there would collapse the low-dimensional
 representation the projection produces.
 
-Channel counts round through `_make_divisible` (nearest multiple of 8, no
+Channel counts round through `utils.tensors.make_divisible` (nearest multiple of 8, no
 more than 10% below `width_multiplier * c`), so `width_multiplier=0.75`
 does not give exactly `0.75 * c`. The final 1280-channel convolution is
 not scaled down for `width_multiplier <= 1.0`, only widened above it. The
@@ -40,6 +40,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
@@ -159,16 +160,9 @@ class MobileNetV2(keras.Model):
 
         self._build_model_layers()
 
-    def _make_divisible(self, v: float, divisor: int = 8) -> int:
-        """Round `v` to the nearest multiple of `divisor`, without dropping more than 10% below it."""
-        new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
-        if new_v < 0.9 * v:
-            new_v += divisor
-        return new_v
-
     def _build_model_layers(self) -> None:
         """Create every sub-layer from the stored configuration."""
-        first_channels = self._make_divisible(32 * self.width_multiplier)
+        first_channels = make_divisible(32 * self.width_multiplier)
         self.initial_conv = layers.Conv2D(
             first_channels, 3, strides=2, padding='same', use_bias=False,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -184,7 +178,7 @@ class MobileNetV2(keras.Model):
         self.blocks = []
         block_id = 0
         for t, c, n, s in self.ARCHITECTURE:
-            output_channels = self._make_divisible(c * self.width_multiplier)
+            output_channels = make_divisible(c * self.width_multiplier)
             for i in range(n):
                 stride = s if i == 0 else 1
                 self.blocks.append(UniversalInvertedBottleneck(
@@ -208,7 +202,7 @@ class MobileNetV2(keras.Model):
 
         # Matches the paper: the last convolution's channels are not scaled down for width_multiplier <= 1.0.
         if self.width_multiplier > 1.0:
-            last_channels = self._make_divisible(1280 * self.width_multiplier)
+            last_channels = make_divisible(1280 * self.width_multiplier)
         else:
             last_channels = 1280
         self.last_conv = layers.Conv2D(

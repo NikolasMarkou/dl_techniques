@@ -7,7 +7,7 @@ it squeezes each channel's spatial extent down to one number with global
 average pooling, passes that channel vector through a small bottleneck MLP
 (1x1 convolutions) to produce a sigmoid weight per channel, then rescales the
 original input by those weights. The bottleneck width is controlled by
-``reduction_ratio``. The layer accepts 2D, 3D or 4D input, internally
+``reduction_ratio`` and rounded per ``divisor``. The layer accepts 2D, 3D or 4D input, internally
 expanding to 4D for the convolutional gate and squeezing back afterward.
 
 References:
@@ -22,6 +22,7 @@ from typing import Dict, Optional, Tuple, Union, Callable, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
@@ -69,6 +70,13 @@ class SqueezeExcitation(keras.layers.Layer):
     :param reduction_ratio: Float in ``(0, 1]`` determining the bottleneck width.
         Defaults to 0.25.
     :type reduction_ratio: float
+    :param divisor: How the bottleneck width ``C * reduction_ratio`` is rounded.
+        ``1`` (default): to the nearest integer, at least 1
+        (``max(1, round(C * reduction_ratio))``). Above 1: the MobileNet
+        reference rule, :func:`dl_techniques.utils.tensors.make_divisible`
+        (nearest multiple of ``divisor``, at least ``divisor``), which
+        MobileNetV3 uses with 8. A positive ``int``.
+    :type divisor: int
     :param activation: Activation function for the reduction layer. String identifier
         or callable. Final activation is always sigmoid. Defaults to ``'relu'``.
     :type activation: str or callable
@@ -90,6 +98,7 @@ class SqueezeExcitation(keras.layers.Layer):
     def __init__(
         self,
         reduction_ratio: float = 0.25,
+        divisor: int = 1,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'relu',
         use_bias: bool = False,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_normal',
@@ -105,7 +114,11 @@ class SqueezeExcitation(keras.layers.Layer):
                 f"reduction_ratio must be in range (0, 1], got {reduction_ratio}"
             )
 
+        if isinstance(divisor, bool) or not isinstance(divisor, int) or divisor < 1:
+            raise ValueError(f"divisor must be a positive int, got {divisor!r}")
+
         self.reduction_ratio = reduction_ratio
+        self.divisor = divisor
         self.activation = activation
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -140,9 +153,15 @@ class SqueezeExcitation(keras.layers.Layer):
         if self.input_channels is None:
             raise ValueError("Last dimension (channels) of input must be defined")
 
-        self.bottleneck_channels = max(1, int(round(
-            self.input_channels * self.reduction_ratio
-        )))
+        width = self.input_channels * self.reduction_ratio
+        # DECISION plan-2026-10-14T062616-81938e81/D-226: divisor 1 keeps
+        # max(1, round(...)) exactly; do NOT fold it into make_divisible(width, 1),
+        # which differs at .5 ties and below 5 (1.4 -> 2) and would move every
+        # existing consumer's bottleneck. See decisions.md.
+        if self.divisor == 1:
+            self.bottleneck_channels = max(1, int(round(width)))
+        else:
+            self.bottleneck_channels = make_divisible(width, self.divisor)
 
         logger.info(
             f"Building SqueezeExcitation: input_channels={self.input_channels}, "
@@ -292,6 +311,7 @@ class SqueezeExcitation(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'reduction_ratio': self.reduction_ratio,
+            'divisor': self.divisor,
             'activation': serialize_activation(self.reduction_activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),

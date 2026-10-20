@@ -41,6 +41,32 @@ def is_power_of_two(n: int) -> bool:
     """
     return n >= 1 and (n & (n - 1)) == 0
 
+
+def make_divisible(value: float, divisor: int = 8) -> int:
+    """Round a channel width to the nearest multiple of ``divisor``, MobileNet style.
+
+    The reference rule (torchvision ``models/_utils._make_divisible``, Keras
+    Applications ``mobilenet_v3._depth``, both with ``min_value=divisor``):
+    nearest multiple of ``divisor``, at least ``divisor``, and one more step
+    when that rounding fell more than 10% below ``value``.
+
+    Interface contract (callers: ``MobileNetV2``, ``MobileNetV3`` channel widths,
+    ``SqueezeExcitation(divisor > 1)`` bottleneck width): pure, deterministic,
+    no keras op; returns a Python ``int`` >= ``divisor``. Does not validate
+    ``divisor`` (callers that take it from a user check it themselves).
+
+    :param value: The unrounded width (any non-negative real).
+    :type value: float
+    :param divisor: The multiple to round to. Defaults to 8.
+    :type divisor: int
+    :return: The rounded width.
+    :rtype: int
+    """
+    new_value = max(divisor, int(value + divisor / 2) // divisor * divisor)
+    if new_value < 0.9 * value:
+        new_value += divisor
+    return new_value
+
 # ---------------------------------------------------------------------
 
 

@@ -42,6 +42,7 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.layers.activations.hard_swish import HardSwish
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.models.vision.mobilenet.common import (
@@ -202,13 +203,6 @@ class MobileNetV3(keras.Model):
 
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        def make_divisible(value: float, divisor: int = 8) -> int:
-            """Round `value` to the nearest multiple of `divisor`, without dropping more than 10% below it."""
-            new_value = max(divisor, int(value + divisor / 2) // divisor * divisor)
-            if new_value < 0.9 * value:
-                new_value += divisor
-            return new_value
-
         # The head's hidden width ("last point"): widened only above
         # width_multiplier 1.0, as Keras Applications MobileNetV3 does.
         self.last_point_filters = (
@@ -256,6 +250,9 @@ class MobileNetV3(keras.Model):
                 use_dw1=True,
                 use_dw2=False,
                 se_ratio=0.25,
+                # The reference SE width: Keras Applications _depth(c * 0.25) and
+                # torchvision _make_divisible(c // 4, 8), equal here (c % 8 == 0).
+                se_divisor=8,
                 se_activation='relu',
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,

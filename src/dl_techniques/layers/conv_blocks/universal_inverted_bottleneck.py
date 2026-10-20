@@ -25,6 +25,7 @@ from typing import Tuple, Optional, Any, Dict, Union
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.layers.activations import create_activation_layer, ActivationType
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -139,8 +140,13 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     :type drop_path_rate: float
     :param use_squeeze_excitation: Whether to add SE block. Defaults to False.
     :type use_squeeze_excitation: bool
-    :param se_ratio: Reduction ratio for SE block. Defaults to 0.25.
+    :param se_ratio: Reduction ratio for SE block, in ``(0, 1]``. Defaults to 0.25.
     :type se_ratio: float
+    :param se_divisor: Rounding of the SE bottleneck width, passed to
+        :class:`SqueezeExcitation` as ``divisor``: 1 (default) rounds
+        ``expanded * se_ratio`` to the nearest integer, 8 applies the
+        MobileNet reference rule (MobileNetV3 passes 8).
+    :type se_divisor: int
     :param se_activation: Activation for SE block. Defaults to ``'relu'``.
     :type se_activation: str
     :param use_bias: Whether to use bias in convolutions. Defaults to False.
@@ -180,6 +186,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             drop_path_rate: float = 0.0,
             use_squeeze_excitation: bool = False,
             se_ratio: float = 0.25,
+            se_divisor: int = 1,
             se_activation: str = 'relu',
             use_bias: bool = False,
             padding: str = 'same',
@@ -250,6 +257,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.drop_path_rate = float(drop_path_rate)
         self.use_squeeze_excitation = use_squeeze_excitation
         self.se_ratio = se_ratio
+        self.se_divisor = se_divisor
         self.se_activation = deserialize_activation(se_activation)
         self.use_bias = use_bias
         self.padding = padding
@@ -345,26 +353,20 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw2_activation = None
             self.dw2_dropout = None
 
-        # Squeeze-and-Excitation block
+        # Squeeze-and-Excitation block: the shared layer, built in build()
+        # once the post-depthwise width is known.
         if self.use_squeeze_excitation:
-            self.se_squeeze = keras.layers.GlobalAveragePooling2D(
-                keepdims=True, name='se_squeeze'
-            )
-            # SE layers will be created in build() since they need channel info
-            self.se_reduce = None
-            self.se_expand = None
-            self.se_activation1 = create_activation_layer(
-                self.se_activation, name='se_activation1'
-            )
-            self.se_activation2 = keras.layers.Activation(
-                'sigmoid', name='se_activation2'
+            self.se = SqueezeExcitation(
+                reduction_ratio=self.se_ratio,
+                divisor=self.se_divisor,
+                activation=self.se_activation,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name='se',
             )
         else:
-            self.se_squeeze = None
-            self.se_reduce = None
-            self.se_expand = None
-            self.se_activation1 = None
-            self.se_activation2 = None
+            self.se = None
 
         # Projection phase. This is the stride's fallback owner: when neither
         # depthwise conv exists (the FFN structure) a strided 1x1 projection is
@@ -500,33 +502,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             # Activation doesn't change shape
             # Dropout doesn't change shape
 
-        # Squeeze-and-Excitation block
-        if self.use_squeeze_excitation:
-            expanded_filters_se = current_shape[-1]
-            se_filters = max(1, int(expanded_filters_se * self.se_ratio))
-
-            # Create SE layers with proper channel dimensions
-            self.se_reduce = keras.layers.Conv2D(
-                filters=se_filters,
-                kernel_size=1,
-                activation=None,
-                name='se_reduce',
-                **self._conv_kwargs()
-            )
-
-            self.se_expand = keras.layers.Conv2D(
-                filters=expanded_filters_se,
-                kernel_size=1,
-                activation=None,
-                name='se_expand',
-                **self._conv_kwargs()
-            )
-
-            # Build SE layers
-            se_shape = (current_shape[0], 1, 1, expanded_filters_se)
-            self.se_reduce.build(se_shape)
-            se_reduced_shape = self.se_reduce.compute_output_shape(se_shape)
-            self.se_expand.build(se_reduced_shape)
+        if self.se is not None:
+            self.se.build(current_shape)
 
         # Projection phase
         self.project_conv.build(current_shape)
@@ -574,14 +551,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             if self.dw2_dropout is not None:
                 x = self.dw2_dropout(x, training=training)
 
-        # Squeeze-and-Excitation block
-        if self.use_squeeze_excitation:
-            se = self.se_squeeze(x)
-            se = self.se_reduce(se)
-            se = self.se_activation1(se)
-            se = self.se_expand(se)
-            se = self.se_activation2(se)
-            x = x * se
+        if self.se is not None:
+            x = self.se(x, training=training)
 
         # Projection phase
         x = self.project_conv(x)
@@ -634,6 +605,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
             "use_squeeze_excitation": self.use_squeeze_excitation,
             "se_ratio": self.se_ratio,
+            "se_divisor": self.se_divisor,
             "se_activation": serialize_activation(self.se_activation),
             "use_bias": self.use_bias,
             "padding": self.padding,

@@ -378,10 +378,14 @@ class TestMobileNetV3:
         extra projection), not the head. MEASURED 2026-10-14
         (plan-2026-10-14T062616-81938e81 step 3) on CPU; the two-DenseBlock
         head of 2026-10-09..14 had been pinned at ~1.24M / ~3.4M.
+        Step 9.3 (D-226): the SE bottleneck rounds as the reference does
+        (``make_divisible(expanded / 4, 8)``), +5,600 (small) and +1,824
+        (large), the hand sum ``2 * expanded * (new - old)`` over the SE
+        blocks in ``test_the_v3_squeeze_excite_widths_are_the_references.py``.
         """
         expected = {
-            'small': 2_546_800,
-            'large': 5_500_848,
+            'small': 2_552_400,
+            'large': 5_502_672,
         }
         for variant, count in expected.items():
             model = MobileNetV3.from_variant(variant, num_classes=1000)
