@@ -222,6 +222,27 @@ class TestMegaDepthPinholeDatasetSynthetic:
         assert valid_mask.shape == (4, 16, 16, 1)
         assert k.shape == (4, 4)
 
+    def test_a_batch_in_which_no_pair_loads_raises(self, tmp_path):
+        """D-188 (the D-130 pattern): no all-zero stand-in batch reaches training."""
+        rgb_paths = [str(tmp_path / f"rgb_{i}.jpg") for i in range(3)]
+        depth_paths = [str(tmp_path / f"depth_{i}.h5") for i in range(3)]
+        ds = MegaDepthPinholeDataset(
+            rgb_paths, depth_paths, batch_size=2, patch_size=16, is_training=False, workers=1,
+        )
+        with pytest.raises(RuntimeError, match="no MegaDepth pair loaded") as raised:
+            ds[0]
+        assert "rgb_0.jpg" in str(raised.value)
+
+    def test_a_batch_with_one_bad_pair_still_loads(self, tmp_path):
+        """Control: a single unloadable pair is skipped, as before."""
+        rgb_paths, depth_paths, _ = _make_synthetic_megadepth_tree(tmp_path, num_pairs=4)
+        ds = MegaDepthPinholeDataset(
+            [str(tmp_path / "nope.jpg")] + rgb_paths, [str(tmp_path / "nope.h5")] + depth_paths,
+            batch_size=4, patch_size=16, is_training=False, workers=1,
+        )
+        rgb, _depth, _mask, _k = ds[0]
+        assert rgb.shape == (4, 16, 16, 3)
+
 
 # =====================================================================
 # CombinedOmniPointDataset -- synthetic (fast, deterministic) mixing + shape checks

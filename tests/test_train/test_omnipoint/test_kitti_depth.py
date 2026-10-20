@@ -253,6 +253,16 @@ class TestKittiDepthDatasetSynthetic:
         with pytest.raises(ValueError):
             KittiDepthDataset([], batch_size=4, patch_size=32)
 
+    def test_a_batch_in_which_no_pair_loads_raises(self, tmp_path):
+        """D-188 (the D-130 pattern): no all-zero stand-in batch reaches training."""
+        broken = [(str(tmp_path / f"rgb_{i}.png"), str(tmp_path / f"depth_{i}.png"))
+                  for i in range(3)]
+        ds = KittiDepthDataset(broken, batch_size=2, patch_size=32, is_training=False,
+                               workers=1)
+        with pytest.raises(RuntimeError, match="no KITTI pair loaded") as raised:
+            ds[0]
+        assert "rgb_0.png" in str(raised.value)
+
 
 @pytest.mark.skipif(
     not Path(KITTI_DEPTH_ROOT).exists(),

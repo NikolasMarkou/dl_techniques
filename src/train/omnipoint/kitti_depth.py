@@ -381,14 +381,16 @@ class KittiDepthDataset(keras.utils.PyDataset):
             batch_k.append(k)
 
         if not batch_rgb:
-            # Every candidate in this batch slot failed to load -- pad with a single
-            # all-invalid zero sample rather than raising mid-epoch (Failure Modes
-            # table: skip and log, never crash).
-            ps = self.patch_size
-            batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
-            batch_depth = [np.zeros((ps, ps, 1), dtype=np.float32)]
-            batch_mask = [np.zeros((ps, ps, 1), dtype=np.float32)]
-            batch_k = [derive_pinhole_intrinsics(ps, ps, self.horizontal_fov_deg)]
+            # DECISION plan-2026-10-14T062616-81938e81/D-188: every candidate failed to
+            # load, so the batch raises (the D-130 rule; one bad pair is still skipped
+            # and logged). Do NOT pad with an all-zero sample: a black image with an
+            # all-invalid mask still took an optimizer step.
+            tried = [self.pairs[self.indices[(idx * self.batch_size + n) % self.n_pairs]][0]
+                     for n in range(attempts)]
+            raise RuntimeError(
+                f"KittiDepthDataset batch {idx}: no KITTI pair loaded in {attempts} "
+                f"attempts (each failure is logged above); tried {tried}"
+            )
 
         return (
             np.stack(batch_rgb),

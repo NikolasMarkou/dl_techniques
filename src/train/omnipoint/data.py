@@ -167,7 +167,7 @@ class MegaDepthPinholeDataset(keras.utils.PyDataset):
     """Single-process-friendly MegaDepth loader in OmniPoint's ``(rgb, depth, valid_mask, K)`` shape.
 
     Mirrors :class:`train.omnipoint.kitti_depth.KittiDepthDataset`'s internal batching loop
-    (skip-and-log on a bad sample, zero-sample padding if an entire batch slot fails) so both
+    (skip-and-log on a bad sample, a ``RuntimeError`` if no sample of a batch loads) so both
     can be driven identically by :class:`CombinedOmniPointDataset`.
 
     :param rgb_paths: List of RGB image file paths, e.g. from
@@ -245,11 +245,16 @@ class MegaDepthPinholeDataset(keras.utils.PyDataset):
             batch_k.append(k)
 
         if not batch_rgb:
-            ps = self.patch_size
-            batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
-            batch_depth = [np.zeros((ps, ps, 1), dtype=np.float32)]
-            batch_mask = [np.zeros((ps, ps, 1), dtype=np.float32)]
-            batch_k = [derive_pinhole_intrinsics(ps, ps, self.horizontal_fov_deg)]
+            # DECISION plan-2026-10-14T062616-81938e81/D-188: every candidate failed to
+            # load, so the batch raises (the D-130 rule). Do NOT pad with an all-zero
+            # sample: a black image with an all-invalid mask still took an optimizer
+            # step, and a dataset that does not load trained on nothing, exit 0.
+            tried = [self.rgb_paths[self.indices[(idx * self.batch_size + n) % self.n_pairs]]
+                     for n in range(attempts)]
+            raise RuntimeError(
+                f"MegaDepthPinholeDataset batch {idx}: no MegaDepth pair loaded in "
+                f"{attempts} attempts (each failure is logged above); tried {tried}"
+            )
 
         return (
             np.stack(batch_rgb),
