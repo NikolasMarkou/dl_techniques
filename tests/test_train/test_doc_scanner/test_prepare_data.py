@@ -93,12 +93,27 @@ class _FakeResponse:
 
 
 @pytest.fixture
-def server(monkeypatch, good_zip: bytes) -> Dict[str, Any]:
+def ample_disk(monkeypatch):
+    """Pin the free space ``prep`` reads to 10 TiB.
+
+    The disk check budgets the real UVDoc size, not a fixture's few-hundred-byte
+    body, so unpinned the staging tests pass or fail with the host's free space
+    (17 failures with 20 GB free; plan-2026-10-14T062616-81938e81 D-179). A test
+    about the floor pins its own reading after this fixture.
+    """
+    tib = 1024 ** 4
+    monkeypatch.setattr(prep, "read_disk_state",
+                        lambda path: prep.DiskState(20 * tib, 10 * tib, 10 * tib))
+
+
+@pytest.fixture
+def server(monkeypatch, good_zip: bytes, ample_disk) -> Dict[str, Any]:
     """A fake ranged HTTP server, plus a record of every request it saw.
 
     Mutable knobs: ``body`` (what a full GET returns), ``ranges`` (whether the
     host honours ``Range``), ``cut`` (truncate the served body to N bytes, i.e.
-    an interrupted transfer) and ``status`` (HEAD status code).
+    an interrupted transfer) and ``status`` (HEAD status code). Depends on
+    ``ample_disk``.
     """
     state: Dict[str, Any] = {
         "body": good_zip,
@@ -326,7 +341,7 @@ class TestTheIdempotentNoOp:
         assert _snapshot(tmp_path) == before, "the no-op modified a file"
 
     def test_the_landmine_fixture_can_actually_fire(
-        self, tmp_path, network_is_a_landmine
+        self, tmp_path, network_is_a_landmine, ample_disk
     ):
         """The no-op assertion DISCRIMINATES: an unstaged root does fetch."""
         with pytest.raises(AssertionError, match="reached the network"):

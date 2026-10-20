@@ -43,6 +43,24 @@ def network_is_a_landmine(monkeypatch):
 
 
 @pytest.fixture
+def ample_disk(monkeypatch):
+    """Pin the free space ``prep`` reads to 10 TiB, far above the 100 GB floor.
+
+    The CLI tests below run ``main`` with the default ``--min-free-gb 100``
+    against the filesystem that holds ``tmp_path``. Unpinned, they pass or fail
+    with the host's free space: below 100 GB the dry run's README write is
+    refused and ``main`` returns 1 (9 failures in one batch run of this
+    directory, plan-2026-10-14T062616-81938e81 D-179), and the fetch tests,
+    which need the gated corpus's 28.5 GB budget, fail below that. The
+    disk-budget tests further down read the real disk and set their own floor
+    relative to it.
+    """
+    tib = 1024 ** 4
+    monkeypatch.setattr(prep, "read_disk_state",
+                        lambda path: prep.DiskState(20 * tib, 10 * tib, 10 * tib))
+
+
+@pytest.fixture
 def fake_hub(monkeypatch):
     """Serve a two-file fake snapshot and count the transfers performed."""
     calls = {"download": 0}
@@ -111,7 +129,7 @@ def test_help_does_not_create_the_staging_tree(tmp_path, network_is_a_landmine):
 
 
 def test_dry_run_writes_nothing_outside_the_slot_readme(
-    tmp_path, network_is_a_landmine
+    tmp_path, network_is_a_landmine, ample_disk
 ):
     """The ONLY byte a dry run writes is the GATED slot's own README."""
     code = prep.main(["--dry-run", "--dataset-root", str(tmp_path)])
@@ -120,14 +138,14 @@ def test_dry_run_writes_nothing_outside_the_slot_readme(
 
 
 def test_a_dry_run_leaves_the_staged_corpus_directory_untouched(
-    tmp_path, network_is_a_landmine
+    tmp_path, network_is_a_landmine, ample_disk
 ):
     """The already-staged Wikipedia slot gets no directory and no file.
 
     Its tree predates this port; writing our README into it would restructure
     a corpus this script does not own.
     """
-    prep.main(["--dry-run", "--dataset-root", str(tmp_path)])
+    assert prep.main(["--dry-run", "--dataset-root", str(tmp_path)]) == 0
     assert not (tmp_path / "wikipedia").exists()
 
 
@@ -140,7 +158,7 @@ def test_a_staged_slot_readme_is_refused_by_name(tmp_path):
 
 
 def test_dry_run_overrides_download_and_fetches_nothing(
-    tmp_path, network_is_a_landmine
+    tmp_path, network_is_a_landmine, ample_disk
 ):
     """``--dry-run --download`` must NOT transfer.
 
@@ -175,7 +193,7 @@ def test_dry_run_overrides_download_and_fetches_nothing(
     ],
 )
 def test_no_argv_without_a_bare_download_flag_can_transfer(
-    argv, tmp_path, network_is_a_landmine
+    argv, tmp_path, network_is_a_landmine, ample_disk
 ):
     """Every command line that is not exactly an opt-in leaves the seam cold.
 
@@ -310,7 +328,7 @@ def test_the_repo_ssd_is_refused_as_a_staging_root(tmp_path):
 
 
 def test_a_completed_fetch_writes_the_payload_and_then_the_marker(
-    tmp_path, gated, fake_hub
+    tmp_path, gated, fake_hub, ample_disk
 ):
     """The happy path: payload at its final name, marker beside the slot."""
     status = prep.fetch_dataset(
@@ -329,7 +347,7 @@ def test_a_completed_fetch_writes_the_payload_and_then_the_marker(
 
 
 def test_an_interrupted_fetch_never_looks_complete(
-    tmp_path, gated, fake_hub, monkeypatch
+    tmp_path, gated, fake_hub, monkeypatch, ample_disk
 ):
     """Crash after the download, before the promotion: NO marker exists.
 
@@ -354,7 +372,7 @@ def test_an_interrupted_fetch_never_looks_complete(
 
 
 def test_a_second_run_over_a_complete_corpus_downloads_nothing(
-    tmp_path, gated, fake_hub
+    tmp_path, gated, fake_hub, ample_disk
 ):
     """Idempotent short-circuit on the marker, before any network call."""
     prep.fetch_dataset(tmp_path, gated, allow_download=True, min_free_bytes=0)
@@ -367,7 +385,7 @@ def test_a_second_run_over_a_complete_corpus_downloads_nothing(
 
 
 def test_the_marker_lives_outside_the_slot_so_a_gated_slot_holds_one_file(
-    tmp_path, network_is_a_landmine, gated
+    tmp_path, network_is_a_landmine, gated, ample_disk
 ):
     """A GATED slot contains exactly one file and ``du`` equals its size."""
     prep.main(["--dry-run", "--dataset-root", str(tmp_path)])
@@ -392,7 +410,7 @@ def test_atomic_write_leaves_no_part_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_the_slot_readme_states_the_reason(tmp_path, network_is_a_landmine):
+def test_the_slot_readme_states_the_reason(tmp_path, network_is_a_landmine, ample_disk):
     """Assert on the TEXT, not on the file's existence.
 
     An empty directory with an empty README is exactly the silent absence this
