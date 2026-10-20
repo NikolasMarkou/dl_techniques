@@ -295,7 +295,10 @@ def _parse_single_op(
     :param expression: Single-operator expression string (e.g., ``"6 + 8"``).
     :param token_ids: Token IDs from the tokenizer for this expression.
     :return: Dict with keys: left_operand, right_operand, operator_index,
-        operator_position. Returns None values if parsing fails.
+        operator_position. With no operator token, every label is 0 (0.0
+        operands, operator index and position 0); with an operator but
+        operands that do not parse, the operands are 0.0. Never None: the
+        callers stack these values into float32 and int32 label arrays.
     """
     # Token IDs for operators: + = 14, - = 15, * = 16, / = 17
     operator_token_ids = {14, 15, 16, 17}
