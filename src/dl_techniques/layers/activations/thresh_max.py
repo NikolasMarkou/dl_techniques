@@ -308,9 +308,7 @@ class ThreshMax(keras.layers.Layer):
             self,
             x: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Run the whole ThreshMax computation.
-
-        Softmax, gate on the deviation from ``1/N``, multiply, renormalize.
+        """Run :func:`_threshmax` with this layer's axis, slope weight and epsilon.
 
         :param x: Logits.
         :type x: keras.KerasTensor
@@ -318,25 +316,7 @@ class ThreshMax(keras.layers.Layer):
             not zeroed, below ``1/N``.
         :rtype: keras.KerasTensor
         """
-        y_soft = keras.activations.softmax(x, axis=self.axis)
-
-        # N is read from the tensor, so it can vary between calls.
-        num_classes = keras.ops.shape(x)[self.axis]
-        uniform_prob = 1.0 / keras.ops.cast(num_classes, x.dtype)
-        confidence_diff = y_soft - uniform_prob
-
-        gate = self._differentiable_step(confidence_diff, slope=self.slope_weight, shift=0.0)
-
-        # Multiplicative, not a hard mask: the gate is increasing in p, so
-        # class ORDER survives. Ratios between classes do not.
-        y_stepped = y_soft * gate
-
-        # No degenerate-case branch needed. The gated sum's floor depends on
-        # slope: measured 0.500000 at slope=10 (uniform input) and 0.34528 at
-        # slope=50, the top of the default constraint. Both are far above the
-        # default epsilon=1e-12. See the module docstring for the sweeps.
-        total_sum = keras.ops.sum(y_stepped, axis=self.axis, keepdims=True)
-        return y_stepped / (total_sum + self.epsilon)
+        return _threshmax(x, self.axis, self.slope_weight, self.epsilon)
 
     def call(
             self,
@@ -409,23 +389,68 @@ class ThreshMax(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
+def _threshmax(
+        x: keras.KerasTensor,
+        axis: int,
+        slope: Union[float, keras.KerasTensor],
+        epsilon: float,
+) -> keras.KerasTensor:
+    """
+    The ThreshMax computation, in ``x``'s dtype: softmax, gate on the
+    deviation from ``1/N``, multiply, renormalize.
+
+    Shared by :meth:`ThreshMax.call` (``slope`` is its slope weight) and by
+    :func:`thresh_max` (``slope`` is a Python float), so the function builds
+    no layer, holds no variable and keeps a float64 input in float64.
+
+    :param x: Logits.
+    :type x: keras.KerasTensor
+    :param axis: Axis to normalize and gate over.
+    :type axis: int
+    :param slope: Gate steepness, a float or a tensor in ``x``'s dtype.
+    :type slope: Union[float, keras.KerasTensor]
+    :param epsilon: Added to the renormalization denominator.
+    :type epsilon: float
+    :return: Probabilities summing to 1 over ``axis``.
+    :rtype: keras.KerasTensor
+    """
+    y_soft = keras.activations.softmax(x, axis=axis)
+
+    # N is read from the tensor, so it can vary between calls.
+    num_classes = keras.ops.shape(x)[axis]
+    uniform_prob = 1.0 / keras.ops.cast(num_classes, x.dtype)
+    confidence_diff = y_soft - uniform_prob
+
+    gate = ThreshMax._differentiable_step(confidence_diff, slope=slope, shift=0.0)
+
+    # Multiplicative, not a hard mask: the gate is increasing in p, so
+    # class ORDER survives. Ratios between classes do not.
+    y_stepped = y_soft * gate
+
+    # No degenerate-case branch needed. The gated sum's floor depends on
+    # slope: measured 0.500000 at slope=10 (uniform input) and 0.34528 at
+    # slope=50, the top of the default constraint. Both are far above the
+    # default epsilon=1e-12. See the module docstring for the sweeps.
+    total_sum = keras.ops.sum(y_stepped, axis=axis, keepdims=True)
+    return y_stepped / (total_sum + epsilon)
+
+
 def thresh_max(
         x: keras.KerasTensor,
         axis: int = -1,
         slope: Union[float, keras.KerasTensor] = 10.0,
         epsilon: float = 1e-12
 ) -> keras.KerasTensor:
-    """Apply ThreshMax without holding on to a layer.
+    """Apply ThreshMax without a layer: a fixed slope, no variable.
 
-    Builds a fresh, non-trainable :class:`ThreshMax` and calls it. Convenient
-    for a one-off; not a fast path. Every call constructs a layer and emits
-    the constructor's INFO log line, so do not call this inside a loop that
-    runs per step -- build one :class:`ThreshMax` and reuse it.
+    Runs the same computation as :class:`ThreshMax` (:func:`_threshmax`) in
+    ``x``'s dtype. It used to build a fresh float32 ``ThreshMax`` per call,
+    which narrowed a float64 input to float32 and created a variable inside
+    any ``tf.function`` that called it (D-218).
 
     ``slope`` may be an eager scalar tensor as well as a float. It may not be
-    a symbolic ``KerasTensor``: ``ThreshMax.__init__`` compares it against 0
-    and converts it with ``float()``, and a symbolic tensor raises
-    ``TypeError: A symbolic KerasTensor cannot be used as a boolean``.
+    a symbolic ``KerasTensor``: it is converted with ``float()``, which a
+    symbolic tensor refuses with a ``TypeError``.
 
     :param x: Logits.
     :type x: keras.KerasTensor
@@ -438,16 +463,13 @@ def thresh_max(
     :type epsilon: float
     :return: Probabilities of the same shape as ``x``.
     :rtype: keras.KerasTensor
-    :raises ValueError: If ``epsilon`` is not positive, or if ``slope`` is a
-        Python number that is not positive. A non-numeric ``slope`` skips
-        the check here and is validated by ``ThreshMax.__init__``.
+    :raises ValueError: If ``epsilon`` or ``slope`` is not positive.
     """
     if epsilon <= 0:
         raise ValueError(f"epsilon must be positive, got {epsilon}")
-    if isinstance(slope, (int, float)) and slope <= 0:
+    slope = float(slope)
+    if slope <= 0:
         raise ValueError(f"slope must be positive, got {slope}")
-
-    layer = ThreshMax(axis=axis, slope=slope, epsilon=epsilon, trainable_slope=False)
-    return layer(x)
+    return _threshmax(x, axis, slope, epsilon)
 
 # ---------------------------------------------------------------------

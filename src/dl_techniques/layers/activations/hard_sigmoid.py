@@ -96,7 +96,12 @@ class HardSigmoid(keras.layers.Layer):
         # re_lu_2 across constructions and a reloaded model's sub-layer names
         # do not match the saved ones. ReLU is stateless, so nothing depends
         # on the name today; this keeps a stable serialized path anyway.
-        self.activation = keras.layers.ReLU(max_value=6.0, name="relu6")
+        # It takes this layer's dtype policy: on the default float32 policy it
+        # narrowed a float64 input to float32 (D-218 of
+        # plan-2026-10-14T062616-81938e81).
+        self.activation = keras.layers.ReLU(
+            max_value=6.0, name="relu6", dtype=self.dtype_policy
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the wrapped ReLU6 sub-layer.

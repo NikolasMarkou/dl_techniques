@@ -216,9 +216,10 @@ class ProbabilityOutput(keras.layers.Layer):
         """Build the delegate named by ``self._probability_type``.
 
         Every branch forwards ``self._type_config`` verbatim, so an unknown
-        key raises from the strategy's own constructor, not from here. The
-        ``softmax`` branch is the exception: it reads only ``axis`` and
-        ignores the rest.
+        key raises from the strategy's own constructor, not from here, and
+        adds this layer's dtype policy unless the config names a ``dtype``.
+        The ``softmax`` branch is the exception: it reads only ``axis`` and
+        the dtype and ignores the rest.
 
         :return: The strategy layer.
         :rtype: keras.layers.Layer
@@ -227,36 +228,41 @@ class ProbabilityOutput(keras.layers.Layer):
             kept so a new key added to ``_SUPPORTED_TYPES`` without a branch
             here fails loudly instead of returning ``None``.
         """
+        # The strategy runs on this layer's dtype policy unless type_config
+        # names one: on the default float32 policy it narrowed a float64 input
+        # to float32 (D-218 of plan-2026-10-14T062616-81938e81).
+        config = {"dtype": self.dtype_policy, **self._type_config}
+
         if self._probability_type == "softmax":
             axis = self._type_config.get("axis", -1)
-            return keras.layers.Softmax(axis=axis, name="softmax")
+            return keras.layers.Softmax(axis=axis, name="softmax", dtype=config["dtype"])
 
         elif self._probability_type == "sparsemax":
-            return Sparsemax(name="sparsemax", **self._type_config)
+            return Sparsemax(name="sparsemax", **config)
 
         elif self._probability_type in ("threshmax", "thresh_max"):
-            return ThreshMax(name="threshmax", **self._type_config)
+            return ThreshMax(name="threshmax", **config)
 
         elif self._probability_type in ("adaptive", "adaptive_softmax"):
             return AdaptiveTemperatureSoftmax(
                 name="adaptive_softmax",
-                **self._type_config
+                **config
             )
 
         elif self._probability_type == "harmax":
-            return HarMax(name="harmax", **self._type_config)
+            return HarMax(name="harmax", **config)
 
         elif self._probability_type in ("routing", "deterministic_routing"):
             return RoutingProbabilitiesLayer(
                 name="routing_probs",
-                **self._type_config
+                **config
             )
 
         elif self._probability_type in ("hierarchical", "hierarchical_routing"):
             return RoutingProbabilitiesLayer(
                 name="hierarchical_routing",
                 mode="trainable",
-                **self._type_config
+                **config
             )
 
         raise ValueError(f"Unhandled probability_type: {self._probability_type}")

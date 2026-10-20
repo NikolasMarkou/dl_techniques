@@ -53,9 +53,10 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     """Tanh-approximate GELU.
 
-    Computes ``0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3)))``. It
-    delegates to ``keras.ops.gelu(x, approximate=True)``, which is the
-    backend's own implementation of that expression.
+    Computes ``0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3)))``,
+    written out with the same operations and constants as the TensorFlow
+    backend's ``keras.ops.gelu(x, approximate=True)``, so a float32 input
+    gives the backend's result bit for bit.
 
     The decorator registers this function under its own name, which is what
     makes it survive a ``.keras`` round-trip. Do not replace a use of it with
@@ -69,7 +70,16 @@ def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: Tensor of the same shape with the tanh-approximate GELU applied.
     :rtype: keras.KerasTensor
     """
-    return keras.ops.gelu(x, approximate=True)
+    # DECISION plan-2026-10-14T062616-81938e81/D-218
+    # Do NOT delegate to keras.ops.gelu(x, approximate=True): TensorFlow builds
+    # its 0.044715 as a float32 constant cast up (math_ops.cast of a Python
+    # float), so a float64 input came back off by 9.0e-10. Python floats here
+    # are converted in x's dtype. See decisions.md D-218.
+    return 0.5 * x * (
+        1.0 + keras.ops.tanh(
+            0.7978845608028654 * (x + 0.044715 * keras.ops.power(x, 3))
+        )
+    )
 
 
 # ---------------------------------------------------------------------

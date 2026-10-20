@@ -299,13 +299,16 @@ class SaturatedMish(keras.layers.Layer):
         self.alpha = float(alpha)
         self.beta = float(beta)
 
-        # mish(alpha) is a constant, so compute it once here in numpy rather
-        # than rebuilding it in the graph on every call. float32 is used so
-        # the stored value matches what the float32 forward path would give.
-        alpha_np = np.float32(self.alpha)
-        softplus_alpha = np.log(1.0 + np.exp(alpha_np))
-        tanh_softplus_alpha = np.tanh(softplus_alpha)
-        self.mish_at_alpha = float(alpha_np * tanh_softplus_alpha)
+        # DECISION plan-2026-10-14T062616-81938e81/D-218
+        # mish(alpha) is a constant, so compute it once here rather than per
+        # call, and compute it in float64: a Python float reaches the graph in
+        # the input's dtype, so a float32 layer gets the correctly rounded
+        # value and a float64 layer the exact one. Do NOT go back to numpy
+        # float32 here: that saturated a float64 layer toward a float32
+        # number (output off by 6.7e-8 at the defaults). See decisions.md.
+        self.mish_at_alpha = float(
+            self.alpha * np.tanh(np.log1p(np.exp(np.float64(self.alpha))))
+        )
 
     def call(
             self,

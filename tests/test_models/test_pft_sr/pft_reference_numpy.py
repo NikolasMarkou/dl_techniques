@@ -39,11 +39,13 @@ RGB_MEAN = np.array([0.4488, 0.4371, 0.4040])
 #: tensor is float64 (measured 2026-10-20, TF 2.18 / Keras 3.8):
 #: ``tf.nn.gelu(approximate=False)`` divides by ``cast(1.4142135623730951)``,
 #: a float32 constant cast up, and ``LeakyRelu``'s ``alpha`` is a float32
-#: attribute. At float64 that moves a GELU by up to 5e-9 and a negative
-#: LeakyReLU input by 2.2e-10 relative, above float64 reassociation noise and
-#: far below anything a structural error moves. The oracle uses the same two
-#: roundings so the guards can hold the port to float64 noise;
-#: ``test_pft_reference_numpy.py`` pins that the framework still rounds them.
+#: attribute. At float64 that moves a GELU by up to 5e-9 and the 0.01 slope by
+#: 2.2e-10 (2.2e-8 relative; 0.2 moves by 3.0e-9, 1.5e-8 relative), above
+#: float64 reassociation noise and far below anything a structural error
+#: moves. The oracle uses the same two roundings so the guards can hold the
+#: port to float64 noise; ``test_pft_reference_numpy.py`` pins that the
+#: framework still rounds them. Both are TensorFlow-internal and stay (step
+#: 7.1, D-218): the port calls ``keras.ops.gelu`` and ``keras.layers.LeakyReLU``.
 TF_SQRT2 = float(np.float32(np.sqrt(2.0)))
 
 
