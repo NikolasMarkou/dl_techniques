@@ -75,6 +75,18 @@ model-specific arguments on top of it.
 > decays the parameter again. Use `AdamW(weight_decay=...)` alone (preferred, matches most paper
 > recipes) or `Adam` + `kernel_regularizer=L2(...)`, never both.
 
+> **A failed run does not exit 0, and that includes a failure one call below `main`.** A broad
+> `except` (bare, `Exception`, `BaseException`) anywhere under `src/train` re-raises, exits
+> non-zero, or records the failure and fails the run after the rows and the report are written
+> (D-095). Two kinds may log and go on: a handler around an optional artifact (a figure, a log
+> line, a best-effort extra), which must log the exception and must not guard `fit`, `evaluate`,
+> a model save or load, `export` or a `run_io` writer; and a named exemption with a reason (a
+> fallback value, a cleanup, an optional import). Both are listed in
+> `tests/test_train/test_a_broad_handler_outside_main_is_classified.py`; an unlisted handler
+> fails that census. Handlers inside a `main` are censused by
+> `tests/test_train/test_a_failed_trainer_run_does_not_exit_zero.py` (D-176, D-183, D-184 of
+> plan-2026-10-14T062616-81938e81).
+
 ### `train.common.nlp` API
 
 | Function | Purpose |

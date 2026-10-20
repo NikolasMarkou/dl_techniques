@@ -1238,7 +1238,8 @@ class BaseTimeSeriesTrainer:
             onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
         except Exception as exc:
             logger.error(f"ONNX export failed: {exc}", exc_info=True)
-            onnx_path, export_error = None, f"{type(exc).__name__}: {exc}"
+            onnx_path = None
+            export_error = f"{type(exc).__name__}: {exc}"
         if self.config.save_results:
             self._save_results(training_results, self.exp_dir,
                                extra_fields={'onnx_path': onnx_path})
