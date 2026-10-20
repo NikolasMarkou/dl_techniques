@@ -286,9 +286,10 @@ class MoEConfig:
     .. note::
         The capacity-based dispatch these two flags were once described as
         "reserved for" is **not** planned. ``capacity_factor`` (``GatingConfig``)
-        and ``routing_dtype`` (``MoEConfig``) were removed for that reason. They
-        are **not** tolerated as legacy keys: a payload still naming either one
-        raises ``TypeError`` at construction.
+        and ``routing_dtype`` (``MoEConfig``) were removed for that reason, as
+        were the older ``train_capacity_factor`` / ``eval_capacity_factor``.
+        None is tolerated as a legacy key: a payload still naming one raises
+        ``TypeError`` at construction and in :meth:`from_dict`.
     """
     num_experts: int = 8
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
@@ -375,10 +376,6 @@ class MoEConfig:
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'MoEConfig':
         """Create configuration from dictionary (does not mutate input)."""
         config_dict = dict(config_dict)  # shallow copy to avoid mutating caller's dict
-
-        # Drop legacy keys that were removed (kept for backward-compat reads).
-        for legacy_key in ('train_capacity_factor', 'eval_capacity_factor'):
-            config_dict.pop(legacy_key, None)
 
         # Deserialize ExpertConfig, handling serialized Keras objects
         expert_raw = config_dict.pop('expert_config', {})

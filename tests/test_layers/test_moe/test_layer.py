@@ -1202,17 +1202,20 @@ class TestReviewFixes:
         assert not np.allclose(dispatch, combine, atol=1e-4)
 
     def test_capacity_factor_fields_removed_from_config(self):
-        """B4: train/eval_capacity_factor are gone; from_dict ignores them."""
+        """B4: train/eval_capacity_factor are gone; the constructor and
+        from_dict refuse them (from_dict dropped them in silence until
+        plan-2026-10-14T062616-81938e81 step 10.2)."""
         cfg = MoEConfig(num_experts=2)
         assert not hasattr(cfg, 'train_capacity_factor')
         assert not hasattr(cfg, 'eval_capacity_factor')
 
-        # Round-trip with legacy keys still works (they're silently dropped).
-        legacy = cfg.to_dict()
-        legacy['train_capacity_factor'] = 2.0
-        legacy['eval_capacity_factor'] = 1.0
-        restored = MoEConfig.from_dict(legacy)
-        assert restored.num_experts == 2
+        for key in ('train_capacity_factor', 'eval_capacity_factor'):
+            with pytest.raises(TypeError, match=key):
+                MoEConfig(num_experts=2, **{key: 1.0})
+            legacy = cfg.to_dict()
+            legacy[key] = 2.0
+            with pytest.raises(TypeError, match=key):
+                MoEConfig.from_dict(legacy)
 
     # --- C1 (F-6): routing_dtype / capacity_factor removed ----------------
 

@@ -239,14 +239,14 @@ class TestRemovedFieldsAreNotTolerated:
     @pytest.mark.parametrize(
         "legacy_key", ['train_capacity_factor', 'eval_capacity_factor']
     )
-    def test_the_two_declared_legacy_keys_are_still_dropped(self, legacy_key):
-        """These two, and only these two, are silently dropped -- an explicit,
-        pre-existing precedent in ``from_dict``, unchanged by this plan."""
+    def test_the_two_old_capacity_keys_are_refused_like_the_rest(self, legacy_key):
+        """Until plan-2026-10-14T062616-81938e81 step 10.2 ``from_dict`` dropped
+        these two in silence, the one exception to the refusal above; the
+        no-legacy directive removed the exception."""
         payload = _make_config().to_dict()
         payload[legacy_key] = 2.0
-        restored = MoEConfig.from_dict(payload)
-        assert restored.num_experts == NON_DEFAULT_MOE['num_experts']
-        assert not hasattr(restored, legacy_key)
+        with pytest.raises(TypeError, match=legacy_key):
+            MoEConfig.from_dict(payload)
 
 
 class TestExpertConfigValidation:

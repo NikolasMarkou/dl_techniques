@@ -137,10 +137,11 @@ with open('moe_config.json') as f:
     moe = MixtureOfExperts(MoEConfig.from_dict(json.load(f)))
 ```
 
-**A config payload from an older version must have `capacity_factor` and `routing_dtype` stripped**
-before it loads: both fields are removed outright with no compatibility shim, and passing either to
-a constructor or to `MoEConfig.from_dict` raises `TypeError`. The older `train_capacity_factor` /
-`eval_capacity_factor` keys are unaffected and stay silently ignored by `from_dict`.
+**A config payload from an older version must have `capacity_factor`, `routing_dtype`,
+`train_capacity_factor` and `eval_capacity_factor` stripped** before it loads: all four fields are
+removed outright with no compatibility shim, and passing any of them to a constructor or to
+`MoEConfig.from_dict` raises `TypeError`. (Until 2026-10-20 `from_dict` dropped the last two in
+silence; that exception is gone.)
 
 ## Gotchas
 
