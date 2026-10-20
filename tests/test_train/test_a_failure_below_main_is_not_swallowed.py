@@ -404,3 +404,62 @@ def test_a_doc_res_staging_that_failed_returns_1(monkeypatch, tmp_path):
     assert _doc_res_main(monkeypatch, tmp_path, [DatasetReport(
         dataset=name, task="t", status="staged", archives=(staged,))]) == 0
 
+
+# ---------------------------------------------------------------------
+# The multi-seed sweep launchers
+# ---------------------------------------------------------------------
+
+def _run(status):
+    return lambda spec, timeout_s, env: {"status": status, "wall_s": 0.0, "stderr_tail": ""}
+
+
+def test_a_logic_multiseed_sweep_with_a_failed_seed_raises_after_its_summary(
+        monkeypatch, tmp_path):
+    from train.logic import multiseed_sweep as module
+
+    monkeypatch.setattr(module, "run_one", _run("exit_1"))
+    monkeypatch.setattr("sys.argv", ["multiseed_sweep", "--seeds", "0", "--experiments",
+                                     "e1", "--out-dir", str(tmp_path)])
+    with pytest.raises(RuntimeError, match="seed_0: exit_1"):
+        module.main()
+    assert list(tmp_path.glob("*.md")), "the summary was not written"
+
+
+def test_a_logic_multiseed_sweep_whose_seeds_all_pass_returns_0(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from train.logic import multiseed_sweep as module
+
+    monkeypatch.setattr(module, "run_one", _run("ok"))
+    monkeypatch.setattr(module, "collect_csvs", lambda specs, experiment, unreadable: pd.DataFrame())
+    monkeypatch.setattr("sys.argv", ["multiseed_sweep", "--seeds", "0", "--experiments",
+                                     "e1", "--out-dir", str(tmp_path)])
+    assert module.main() == 0
+
+
+def test_a_mothnet_multiseed_sweep_with_a_failed_seed_raises_after_its_summary(
+        monkeypatch, tmp_path):
+    from train.mothnet import multiseed_sweep as module
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)  # its --gpu 1 default
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)  # it writes under REPO_ROOT/results
+    monkeypatch.setattr(module, "run_one", _run("exit_1"))
+    with pytest.raises(RuntimeError, match="seed_1: run exit_1"):
+        module.main(["--seeds", "1"])
+    (summary_dir,) = (tmp_path / "results").glob("mothnet_mb_units_sweep_*")
+    assert (summary_dir / "raw_results.csv").is_file()
+
+
+def test_a_mothnet_multiseed_sweep_whose_seeds_all_pass_returns_0(monkeypatch, tmp_path):
+    from train.mothnet import multiseed_sweep as module
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "run_one", _run("ok"))
+    for spec in module.build_run_specs(seeds=[1, 2], mb_units_baseline=4000,
+                                       mb_units_candidate=8000):
+        log = tmp_path / "results" / spec.experiment_name / "training_log.csv"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("epoch,val_accuracy\n0,0.5\n")
+    assert module.main(["--seeds", "1,2", "--mb-units-baseline", "4000",
+                        "--mb-units-candidate", "8000"]) == 0

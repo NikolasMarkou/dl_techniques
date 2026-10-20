@@ -223,9 +223,13 @@ def run_one(spec: RunSpec, timeout_s: float, env: Dict[str, str]) -> Dict[str, o
 # ---------------------------------------------------------------------------
 
 def collect_csvs(
-    specs: Sequence[RunSpec], experiment: str
+    specs: Sequence[RunSpec], experiment: str, unreadable: List[str],
 ) -> pd.DataFrame:
-    """Glob this experiment's per-seed CSVs into one DataFrame with ``seed`` column."""
+    """Glob this experiment's per-seed CSVs into one DataFrame with ``seed`` column.
+
+    A missing or unreadable CSV is logged, appended to ``unreadable`` and left out
+    of the frame; ``main`` raises after the summary when the list is not empty.
+    """
     frames: List[pd.DataFrame] = []
     for spec in specs:
         if spec.experiment != experiment:
@@ -235,11 +239,13 @@ def collect_csvs(
             logger.warning(
                 f"[agg] missing CSV {csv_path} (exp={experiment} seed={spec.seed})"
             )
+            unreadable.append(f"{csv_path} (missing)")
             continue
         try:
             df = pd.read_csv(csv_path)
         except Exception as e:
             logger.warning(f"[agg] failed to read {csv_path}: {e}")
+            unreadable.append(f"{csv_path} ({type(e).__name__}: {e})")
             continue
         df["seed"] = spec.seed
         if spec.sub_label:
@@ -654,9 +660,10 @@ def main() -> int:
         })
 
     # Aggregation
-    e1_df = collect_csvs(specs, "e1")
-    e3_df = collect_csvs(specs, "e3")
-    e5_df = collect_csvs(specs, "e5")
+    unreadable: List[str] = []
+    e1_df = collect_csvs(specs, "e1", unreadable)
+    e3_df = collect_csvs(specs, "e3", unreadable)
+    e5_df = collect_csvs(specs, "e5", unreadable)
     if not e1_df.empty:
         e1_df.to_csv(os.path.join(sweep_root, "e1_multiseed.csv"), index=False)
     if not e3_df.empty:
@@ -670,6 +677,15 @@ def main() -> int:
         run_log=run_log, seeds=seeds, rng_seed=args.rng_seed_bootstrap,
     )
     logger.info(f"DONE. Outputs in {sweep_root}")
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: a seed whose run did not
+    # end "ok", or whose CSV is missing or unreadable, is in the summary, and
+    # then the sweep raises naming it. Do NOT return 0 after the summary: a sweep
+    # whose seeds all failed exited 0. See decisions.md D-183.
+    failed = [f"{r['experiment']}/{r['sub_label'] or '-'}/seed_{r['seed']}: {r['status']}"
+              for r in run_log if r["status"] != "ok"]
+    failed += [f"CSV {item}" for item in unreadable]
+    if failed:
+        raise RuntimeError(f"{len(failed)} sweep failure(s): {'; '.join(failed)}")
     return 0
 
 

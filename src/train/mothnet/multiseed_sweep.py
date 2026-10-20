@@ -461,6 +461,16 @@ def main(argv=None) -> int:
         perm=perm, rng_seed=args.rng_seed_bootstrap,
     )
     logger.info(f"DONE. Outputs in {sweep_root}")
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: a seed whose run did not
+    # end "ok", or whose CSV gave no val_accuracy, is in the summary, and then
+    # the sweep raises naming it. Do NOT return 0 after the summary: a sweep
+    # whose seeds all failed exited 0. See decisions.md D-183.
+    failed = [f"{r['arm']}/seed_{r['seed']}: run {r['status']}"
+              for r in run_log if r["status"] != "ok"]
+    failed += [f"{row.arm}/seed_{row.seed}: no val_accuracy"
+               for row in df.itertuples() if row.status != "ok"]
+    if failed:
+        raise RuntimeError(f"{len(failed)} sweep failure(s): {'; '.join(failed)}")
     return 0
 
 
