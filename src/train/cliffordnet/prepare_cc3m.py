@@ -32,6 +32,17 @@ is written to a temporary name and renamed, so a file at an image's path is
 complete; one that exists is not written again (the same id holds the same
 pair).
 
+**Dedupe** (``--dedupe``, a dry run unless ``--apply``): an extraction made
+before D-187 can hold a partly extracted shard's captions twice, the second copy
+under new ids, and an image file kept from an earlier run at one of those ids.
+:func:`dedupe` removes those lines and nothing else (D-196): every line of a
+replayed block. Pairs the source itself holds twice are reported and kept. With
+``--apply`` it first copies each caption JSONL it rewrites into a new backup
+directory next to ``--dst`` (with ``SHA256SUMS``), then rewrites the JSONL and
+moves each removed line's image into the backup, listed in
+``removed_images.txt``. Nothing is deleted outright; restoring is copying the
+JSONL back and moving the images back.
+
 Set ``HF_HOME`` or ``HF_HUB_CACHE`` to a large-disk location *if* you
 want ``huggingface_hub`` to cache any downloaded metadata off of ``~``.
 The main tar data is streamed, not cached, so normally no large cache
@@ -43,17 +54,25 @@ Example::
       --dst /media/arxwn/data0_4tb/datasets/cc3m \\
       --splits train validation \\
       --progress-every 5000
+
+    # Report the duplicates (reads only), then remove them.
+    python -m train.cliffordnet.prepare_cc3m --dst /media/arxwn/data0_4tb/datasets/cc3m --dedupe
+    python -m train.cliffordnet.prepare_cc3m --dst /media/arxwn/data0_4tb/datasets/cc3m --dedupe --apply
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
 import tarfile
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -342,8 +361,12 @@ def _extract_split(
     _roll_back_unfinished(jsonl_path, state, split)
     global_idx = 0
     if os.path.exists(jsonl_path):
-        with open(jsonl_path) as f:
-            global_idx = sum(1 for _ in f)
+        # DECISION plan-2026-10-14T062616-81938e81/D-196: the next id is one past
+        # the last id in the JSONL, which is the line count until a dedupe removes
+        # lines. Do NOT go back to counting lines: after a dedupe that count is an
+        # id already in use, and its existing image file would be kept for a new
+        # caption.
+        global_idx = _next_id(jsonl_path)
         print(
             f"[{split}] resuming from {global_idx:,} already-written pairs",
             flush=True,
@@ -438,6 +461,214 @@ def _extract_split(
 
 
 # ---------------------------------------------------------------------------
+# Dedupe (D-196)
+# ---------------------------------------------------------------------------
+
+#: A replayed block is at least this many consecutive lines whose captions repeat
+#: an earlier run of consecutive lines in order. Measured on the real train JSONL
+#: (2,911,459 lines): the two replays are 925 and 4,580 lines long, and the
+#: longest run that is not a replay is 2 lines (325 such pairs of common captions).
+_REPLAY_MIN_RUN = 8
+
+
+def _next_id(jsonl_path: str) -> int:
+    """One past the largest numeric id in a caption JSONL (0 when it is empty).
+
+    :raises ValueError: If a line's id does not end in its 8-digit number.
+    """
+    next_id = 0
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            next_id = max(next_id, int(json.loads(line)["id"][-8:]) + 1)
+    return next_id
+
+
+@dataclass
+class DuplicateReport:
+    """What :func:`audit_duplicates` found in one split's caption JSONL.
+
+    Line numbers are 0-based positions in the JSONL, sorted. ``replayed`` are
+    the lines an old resume extracted a second time; they are ``remove``.
+    ``content`` are the lines whose caption and image bytes repeat an earlier
+    line's; ``source_repeats`` are those outside a replayed block, pairs that the
+    source itself holds twice, which a clean extraction also has and which stay.
+    """
+
+    lines: int
+    replayed: List[int]
+    content: List[int]
+    source_repeats: List[int]
+
+    @property
+    def remove(self) -> List[int]:
+        return self.replayed
+
+
+def _read_records(jsonl_path: str) -> List[Dict[str, Any]]:
+    with open(jsonl_path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def _image_path(dst_root: str, split: str, image_id: str) -> str:
+    return os.path.join(dst_root, split, _shard_of(image_id), f"{image_id}.jpg")
+
+
+def _replayed_lines(captions: List[str]) -> List[int]:
+    """Lines inside a run of at least ``_REPLAY_MIN_RUN`` captions repeating an earlier run."""
+    k = _REPLAY_MIN_RUN
+    first: Dict[Tuple[str, ...], int] = {}
+    replayed = set()
+    for i in range(len(captions) - k + 1):
+        window = tuple(captions[i:i + k])
+        j = first.get(window)
+        if j is None:
+            first[window] = i
+        elif j + k <= i:
+            replayed.update(range(i, i + k))
+    return sorted(replayed)
+
+
+def _content_duplicates(dst_root: str, split: str, records: List[Dict[str, Any]]) -> List[int]:
+    """Lines whose caption and image bytes both equal an earlier line's.
+
+    Only lines that share a caption are compared: their image sizes come from one
+    directory-order scan of the split, and only equal sizes are read and hashed.
+    """
+    by_caption: Dict[str, List[int]] = defaultdict(list)
+    for n, record in enumerate(records):
+        by_caption[record["caption"]].append(n)
+    candidates = [lines for lines in by_caption.values() if len(lines) > 1]
+    if not candidates:
+        return []
+    sizes: Dict[str, int] = {}
+    split_root = os.path.join(dst_root, split)
+    for shard in sorted(os.listdir(split_root)):
+        with os.scandir(os.path.join(split_root, shard)) as entries:
+            for entry in entries:
+                if entry.name.endswith(".jpg"):
+                    sizes[entry.name[:-4]] = entry.stat().st_size
+    duplicates = []
+    for lines in candidates:
+        by_size: Dict[int, List[int]] = defaultdict(list)
+        for n in lines:
+            by_size[sizes[records[n]["id"]]].append(n)
+        for same_size in by_size.values():
+            if len(same_size) < 2:
+                continue
+            seen = set()
+            for n in same_size:
+                with open(_image_path(dst_root, split, records[n]["id"]), "rb") as f:
+                    digest = hashlib.sha256(f.read()).hexdigest()
+                if digest in seen:
+                    duplicates.append(n)
+                seen.add(digest)
+    return sorted(duplicates)
+
+
+def audit_duplicates(dst_root: str, split: str) -> DuplicateReport:
+    """Find the caption lines an old resume duplicated. Reads only.
+
+    Interface contract: returns a :class:`DuplicateReport` for
+    ``<dst_root>/<split>_captions.jsonl``. A line is removed when it lies in a
+    replayed block: the old resume re-extracted a partly extracted shard from its
+    first pair, so the replay repeats a run of consecutive captions. Its image
+    bytes are not required to match: an image file that already existed at a
+    replayed id was kept even when it belonged to another pair (two such lines in
+    the real data). Lines whose caption and image bytes repeat an earlier line
+    outside a replayed block are reported and stay: the source holds those pairs
+    twice, and the extraction is to equal one uninterrupted run (D-187). Raises
+    ``KeyError`` if a line's image file is missing.
+    """
+    records = _read_records(os.path.join(dst_root, f"{split}_captions.jsonl"))
+    content = _content_duplicates(dst_root, split, records)
+    replayed = _replayed_lines([record["caption"] for record in records])
+    return DuplicateReport(lines=len(records), replayed=replayed, content=content,
+                           source_repeats=sorted(set(content) - set(replayed)))
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def dedupe(
+    dst_root: str,
+    splits: List[str],
+    apply: bool = False,
+    backup_dir: Optional[str] = None,
+) -> Dict[str, DuplicateReport]:
+    """Report, and with ``apply`` remove, the duplicated caption lines of each split.
+
+    A dry run (the default) reads only. ``apply`` first creates ``backup_dir``
+    (default: ``<parent of dst_root>/<name>_dedupe_backup_<UTC time>``, on the same
+    disk) and refuses one that exists. For each split with lines to remove it
+    copies the caption JSONL into it byte for byte and records its sha256 in
+    ``SHA256SUMS``, writes the kept lines to a temporary file and renames it over
+    the JSONL, and moves each removed line's image (referenced by no kept line:
+    ids are unique) to ``<backup_dir>/images/<split>/<shard>/``, listing its old
+    path in ``removed_images.txt``. The state file and the other splits are not
+    touched. Returns the report of each split, from before the change.
+    """
+    reports = {split: audit_duplicates(dst_root, split) for split in splits}
+    for split, report in reports.items():
+        replay_matches = len(set(report.replayed) & set(report.content))
+        print(f"[{split}] {report.lines:,} caption lines: {len(report.replayed):,} in "
+              f"replayed blocks ({replay_matches:,} of them with the original's image "
+              f"bytes) are removed, {report.lines - len(report.remove):,} kept; "
+              f"{len(report.source_repeats):,} kept lines repeat an earlier pair's "
+              f"caption and image outside a replay (the source's own repeats)",
+              flush=True)
+    if not apply or not any(report.remove for report in reports.values()):
+        return reports
+
+    if backup_dir is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        root = os.path.abspath(dst_root)
+        backup_dir = f"{root}_dedupe_backup_{stamp}"
+    os.makedirs(backup_dir)  # raises if it exists: never mix two backups
+    with open(os.path.join(backup_dir, "SHA256SUMS"), "w") as sums, \
+            open(os.path.join(backup_dir, "removed_images.txt"), "w") as manifest:
+        for split, report in reports.items():
+            if not report.remove:
+                continue
+            name = f"{split}_captions.jsonl"
+            jsonl_path = os.path.join(dst_root, name)
+            backup_path = os.path.join(backup_dir, name)
+            shutil.copyfile(jsonl_path, backup_path)
+            digest = _sha256(backup_path)
+            if digest != _sha256(jsonl_path):
+                raise RuntimeError(f"backup of {jsonl_path} does not match it")
+            sums.write(f"{digest}  {name}\n")
+            sums.flush()
+
+            removed = set(report.remove)
+            records = _read_records(jsonl_path)
+            tmp_path = jsonl_path + ".dedupe.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as out:
+                for n, record in enumerate(records):
+                    if n not in removed:
+                        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, jsonl_path)
+
+            for n in report.remove:
+                source = _image_path(dst_root, split, records[n]["id"])
+                target = os.path.join(backup_dir, "images", os.path.relpath(source, dst_root))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.rename(source, target)
+                manifest.write(source + "\n")
+            manifest.flush()
+            print(f"[{split}] removed {len(removed):,} lines; JSONL backed up to "
+                  f"{backup_path} (sha256 {digest})", flush=True)
+    print(f"Backup and manifest: {backup_dir}", flush=True)
+    return reports
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -474,7 +705,22 @@ def main() -> None:
         "--progress-every", type=int, default=5000,
         help="Print progress every N successful writes. 0 disables.",
     )
+    parser.add_argument(
+        "--dedupe", action="store_true",
+        help=("Report the caption lines an old resume duplicated (reads only; "
+              "no extraction). Add --apply to remove them (D-196)."),
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help=("With --dedupe: back up each JSONL it rewrites next to --dst, then "
+              "remove the duplicated lines and move their images into the backup."),
+    )
     args = parser.parse_args()
+    if args.apply and not args.dedupe:
+        parser.error("--apply only applies to --dedupe")
+    if args.dedupe:
+        dedupe(args.dst, list(args.splits), apply=args.apply)
+        return
 
     os.makedirs(args.dst, exist_ok=True)
     state_path = os.path.join(args.dst, _STATE_FILENAME)

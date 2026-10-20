@@ -16,7 +16,7 @@ image-text contrastive learning.
 | `infer_cliffordnet_nlp.py` | `CliffordNetLM` | Generation: nucleus, MCMC power sampling, max-swap. |
 | `eval_clip_retrieval.py` | `CliffordCLIP` | COCO 2017 zero-shot retrieval, R@1/5/10 both directions. |
 | `filter_cc3m_clipscore.py` | `CliffordCLIP` | CLIP-score caption filter; writes a drop-in CC3M manifest. |
-| `prepare_cc3m.py` | — | Resumable CC3M extractor from HF Hub tar shards. |
+| `prepare_cc3m.py` | — | Resumable CC3M extractor from HF Hub tar shards. `--dedupe` reports the shards an extraction from before 2026-10-20 holds twice (reads only); `--dedupe --apply` backs up the JSONL next to the dataset and removes them (D-196). |
 | `resize_cc3m_to_ssd.py` | — | One-time resumable downscaled CC3M copy onto SSD. |
 
 Companion note: `VARIATIONS_COMPARISON.md` (architecture-variation results).
