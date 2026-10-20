@@ -5,7 +5,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 from pathlib import Path
-from typing import Any, Callable, Dict, Tuple, List, Optional, Set
+from typing import Any, Callable, Dict, Tuple, List, Optional, Sequence, Set
 
 from dl_techniques.utils.logger import logger
 
@@ -865,3 +865,67 @@ def build_raw_image_dataset(
 
     ds = ds.prefetch(prefetch_buffer)
     return ds, num_examples, DATASET_NUM_CLASSES[dataset]
+
+
+# ---------------------------------------------------------------------
+# Batch filling for index-addressed PyDatasets
+# ---------------------------------------------------------------------
+
+def fill_batch(
+        owner: str,
+        idx: int,
+        batch_size: int,
+        indices: Sequence[int],
+        load_one: Callable[[int], Optional[Any]],
+        describe: Callable[[int], str],
+        failure: str,
+) -> List[Any]:
+    """The samples of batch ``idx``: the next window of files, a skipped file refilled.
+
+    Interface contract (2 callers: ``train.omnipoint.data.MegaDepthPinholeDataset``
+    and ``train.omnipoint.kitti_depth.KittiDepthDataset``). Attempt ``a`` (from
+    0, at most ``3 * batch_size``) reads file ``indices[(idx * batch_size + a)
+    % len(indices)]`` through ``load_one(file_index)``; a ``None`` result is
+    skipped, and filling stops when ``batch_size`` results are kept. When every
+    file loads, batch ``i`` holds exactly files ``i*B .. i*B+B-1`` of
+    ``indices``, so the batches of an epoch are disjoint and read each file
+    once. A skipped file is refilled from the files after the window, which
+    the next batch reads again (the D-126 trade-off).
+
+    Args:
+        owner: The dataset class name, for the error message.
+        idx: The batch index.
+        batch_size: The number of samples wanted.
+        indices: The epoch's file order (shuffled or not).
+        load_one: Loads one file by its index; ``None`` skips it.
+        describe: Names a file by its index, for the error message.
+        failure: Completes ``"no <failure> in N attempts"``, for example
+            ``"KITTI pair loaded"``.
+
+    Returns:
+        Between 1 and ``batch_size`` results of ``load_one``, in reading order.
+
+    Raises:
+        RuntimeError: When no file of the attempts gives a result. The message
+            names the batch and every file tried.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-193
+    # Do NOT add the number of kept samples to this offset: the attempt count
+    # already counts every read, kept or skipped, so the sum advanced by 2 per
+    # sample. Consecutive batches overlapped by half and the files at odd
+    # offsets were never read (D-126, then again in both OmniPoint loaders).
+    kept: List[Any] = []
+    tried: List[int] = []
+    for attempt in range(batch_size * 3):
+        if len(kept) == batch_size:
+            break
+        file_index = int(indices[(idx * batch_size + attempt) % len(indices)])
+        tried.append(file_index)
+        result = load_one(file_index)
+        if result is not None:
+            kept.append(result)
+    if not kept:
+        raise RuntimeError(
+            f"{owner} batch {idx}: no {failure} in {len(tried)} attempts; tried "
+            f"{[describe(i) for i in tried]}")
+    return kept

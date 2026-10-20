@@ -52,6 +52,7 @@ import numpy as np
 from dl_techniques.utils.camera_models import pinhole_ray_map
 from dl_techniques.utils.logger import logger
 
+from train.common.datasets import fill_batch
 from train.common.megadepth import discover_megadepth_pairs
 from train.omnipoint.kitti_depth import (
     KITTI_DEFAULT_HORIZONTAL_FOV_DEG,
@@ -225,42 +226,24 @@ class MegaDepthPinholeDataset(keras.utils.PyDataset):
         return max(1, self.n_pairs // self.batch_size)
 
     def __getitem__(self, idx: int):
-        batch_rgb, batch_depth, batch_mask, batch_k = [], [], [], []
-
-        attempts = 0
-        while len(batch_rgb) < self.batch_size and attempts < self.batch_size * 3:
-            sample_idx = (idx * self.batch_size + len(batch_rgb) + attempts) % self.n_pairs
-            i = self.indices[sample_idx]
-            attempts += 1
-
-            result = load_megadepth_pair_for_omnipoint(
-                self.rgb_paths[i], self.depth_paths[i], self.patch_size, self.horizontal_fov_deg
-            )
-            if result is None:
-                continue
-            rgb, depth, valid_mask, k = result
-            batch_rgb.append(rgb)
-            batch_depth.append(depth)
-            batch_mask.append(valid_mask)
-            batch_k.append(k)
-
-        if not batch_rgb:
-            # DECISION plan-2026-10-14T062616-81938e81/D-188: every candidate failed to
-            # load, so the batch raises (the D-130 rule). Do NOT pad with an all-zero
-            # sample: a black image with an all-invalid mask still took an optimizer
-            # step, and a dataset that does not load trained on nothing, exit 0.
-            tried = [self.rgb_paths[self.indices[(idx * self.batch_size + n) % self.n_pairs]]
-                     for n in range(attempts)]
-            raise RuntimeError(
-                f"MegaDepthPinholeDataset batch {idx}: no MegaDepth pair loaded in "
-                f"{attempts} attempts (each failure is logged above); tried {tried}"
-            )
-
+        # DECISION plan-2026-10-14T062616-81938e81/D-188: every candidate failed to
+        # load, so the batch raises (the D-130 rule). Do NOT pad with an all-zero
+        # sample: a black image with an all-invalid mask still took an optimizer
+        # step, and a dataset that does not load trained on nothing, exit 0.
+        samples = fill_batch(
+            "MegaDepthPinholeDataset", idx, self.batch_size, self.indices,
+            lambda i: load_megadepth_pair_for_omnipoint(
+                self.rgb_paths[i], self.depth_paths[i], self.patch_size,
+                self.horizontal_fov_deg),
+            lambda i: self.rgb_paths[i],
+            "MegaDepth pair loaded (each failure is logged above)",
+        )
+        rgb, depth, valid_mask, k = zip(*samples)
         return (
-            np.stack(batch_rgb),
-            np.stack(batch_depth),
-            np.stack(batch_mask),
-            np.asarray(batch_k, dtype=np.float32),
+            np.stack(rgb),
+            np.stack(depth),
+            np.stack(valid_mask),
+            np.asarray(k, dtype=np.float32),
         )
 
     def on_epoch_end(self) -> None:
