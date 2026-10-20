@@ -149,6 +149,14 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     :type se_divisor: int
     :param se_activation: Activation for SE block. Defaults to ``'relu'``.
     :type se_activation: str
+    :param se_use_bias: Whether the SE block's two 1x1 convs carry a bias,
+        independently of ``use_bias`` (the references' SE convs are biased
+        while every other conv is followed by a BatchNorm). Defaults to False.
+    :type se_use_bias: bool
+    :param se_gate_activation: The SE gate, passed to
+        :class:`SqueezeExcitation` as ``gate_activation``. Defaults to
+        ``'sigmoid'``; MobileNetV3 passes ``'hard_sigmoid'``.
+    :type se_gate_activation: str
     :param use_bias: Whether to use bias in convolutions. Defaults to False.
     :type use_bias: bool
     :param padding: Padding type. Defaults to ``'same'``.
@@ -188,6 +196,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             se_ratio: float = 0.25,
             se_divisor: int = 1,
             se_activation: str = 'relu',
+            se_use_bias: bool = False,
+            se_gate_activation: str = 'sigmoid',
             use_bias: bool = False,
             padding: str = 'same',
             block_type: str = 'UIB',
@@ -259,6 +269,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.se_ratio = se_ratio
         self.se_divisor = se_divisor
         self.se_activation = deserialize_activation(se_activation)
+        self.se_use_bias = se_use_bias
+        self.se_gate_activation = deserialize_activation(se_gate_activation)
         self.use_bias = use_bias
         self.padding = padding
         self.block_type = block_type
@@ -360,7 +372,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 reduction_ratio=self.se_ratio,
                 divisor=self.se_divisor,
                 activation=self.se_activation,
-                use_bias=self.use_bias,
+                gate_activation=self.se_gate_activation,
+                use_bias=self.se_use_bias,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name='se',
@@ -607,6 +620,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "se_ratio": self.se_ratio,
             "se_divisor": self.se_divisor,
             "se_activation": serialize_activation(self.se_activation),
+            "se_use_bias": self.se_use_bias,
+            "se_gate_activation": serialize_activation(self.se_gate_activation),
             "use_bias": self.use_bias,
             "padding": self.padding,
             "block_type": self.block_type,

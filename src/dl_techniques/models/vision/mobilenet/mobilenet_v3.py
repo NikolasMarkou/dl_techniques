@@ -12,10 +12,14 @@ network, where its lower per-position cost matters most. The head pools
 first, then runs the wide projection on a `1x1` tensor, instead of
 projecting at full spatial resolution before pooling.
 
-The squeeze-and-excitation gate here is a plain sigmoid; the paper
-specifies hard-sigmoid. The shared universal block always builds its
-expansion convolution, so Large's first row (expansion 16 into 16
-channels, no expansion in the paper) carries an extra `C -> C` projection.
+The squeeze-and-excitation gate is the reference's: biased 1x1 convs, a
+bottleneck of `make_divisible(expanded / 4, 8)` and a hard-sigmoid gate
+(Keras Applications `_se_block`, torchvision `SqueezeExcitation`). The
+shared universal block always builds its expansion convolution, so the
+first row of both variants (expansion 16 into 16 channels, no expansion in
+the paper or the references) carries an extra `C -> C` projection and its
+BatchNorm: 320 parameters, the only count difference from Keras
+Applications at `width_multiplier=1.0`.
 The classifier is linear, so this model outputs logits: compile with
 `from_logits=True`. No pretrained checkpoints ship with this package;
 `pretrained=True` raises `NotImplementedError`.
@@ -254,6 +258,11 @@ class MobileNetV3(keras.Model):
                 # torchvision _make_divisible(c // 4, 8), equal here (c % 8 == 0).
                 se_divisor=8,
                 se_activation='relu',
+                # Keras Applications' SE convs keep Conv2D's default bias and
+                # gate with hard_sigmoid; torchvision: nn.Conv2d (bias) and
+                # nn.Hardsigmoid; the paper (Sec. 5.2): hard-sigmoid.
+                se_use_bias=True,
+                se_gate_activation='hard_sigmoid',
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"block_{i}"

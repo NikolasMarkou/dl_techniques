@@ -382,10 +382,13 @@ class TestMobileNetV3:
         (``make_divisible(expanded / 4, 8)``), +5,600 (small) and +1,824
         (large), the hand sum ``2 * expanded * (new - old)`` over the SE
         blocks in ``test_the_v3_squeeze_excite_widths_are_the_references.py``.
+        Step 9.3.1 (D-227): the SE convs carry biases, +2,888 (small) and
+        +5,080 (large); the totals are now ``keras.applications`` plus the
+        first row's 320 (``test_the_v3_squeeze_excite_gate_is_the_references.py``).
         """
         expected = {
-            'small': 2_552_400,
-            'large': 5_502_672,
+            'small': 2_555_288,
+            'large': 5_507_752,
         }
         for variant, count in expected.items():
             model = MobileNetV3.from_variant(variant, num_classes=1000)

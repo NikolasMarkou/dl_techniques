@@ -152,9 +152,11 @@ COUNT_BEFORE = {("small", 1.0): 2_546_800, ("small", 0.25): 1_252_320,
 @pytest.mark.parametrize("variant,width", sorted(COUNT_BEFORE))
 def test_the_parameter_count_moves_by_the_hand_sum(variant, width):
     """Each SE block's two 1x1 kernels are ``expanded x bottleneck``: the count
-    moves by ``2 * expanded * (new - old)`` per block, nothing else."""
+    moves by ``2 * expanded * (new - old)`` per block, plus, since step 9.3.1,
+    the two bias vectors ``bottleneck + expanded``; nothing else."""
     model = _model(variant, width)
     delta = sum(2 * expanded * (bottleneck - int(expanded * 0.25))
+                + bottleneck + expanded
                 for _, expanded, bottleneck in _se_kernels(model))
     assert model.count_params() == COUNT_BEFORE[(variant, width)] + delta
     assert delta > 0

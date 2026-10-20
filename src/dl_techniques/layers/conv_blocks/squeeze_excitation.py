@@ -58,7 +58,7 @@ class SqueezeExcitation(keras.layers.Layer):
         ┌────────────────────────────────────┐
         │  Excitation:                       │
         │    Conv1x1(C→C*r) → Activation     │
-        │    Conv1x1(C*r→C) → Sigmoid        │
+        │    Conv1x1(C*r→C) → gate (sigmoid) │
         │    → attention weights [B,1,1,C]   │
         └──────────────┬─────────────────────┘
                        ▼
@@ -78,8 +78,12 @@ class SqueezeExcitation(keras.layers.Layer):
         MobileNetV3 uses with 8. A positive ``int``.
     :type divisor: int
     :param activation: Activation function for the reduction layer. String identifier
-        or callable. Final activation is always sigmoid. Defaults to ``'relu'``.
+        or callable. Defaults to ``'relu'``.
     :type activation: str or callable
+    :param gate_activation: The gate on the restored channels. Defaults to
+        ``'sigmoid'`` (Hu et al. 2018). MobileNetV3 passes ``'hard_sigmoid'``,
+        ``relu6(z + 3) / 6`` (Howard et al. 2019, Section 5.2).
+    :type gate_activation: str or callable
     :param use_bias: Whether convolution layers use bias vectors. Defaults to False.
     :type use_bias: bool
     :param kernel_initializer: Initializer for convolution kernel weights.
@@ -100,6 +104,7 @@ class SqueezeExcitation(keras.layers.Layer):
         reduction_ratio: float = 0.25,
         divisor: int = 1,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'relu',
+        gate_activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'sigmoid',
         use_bias: bool = False,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -127,6 +132,7 @@ class SqueezeExcitation(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self.reduction_activation = resolve_activation(activation)
+        self.gate_activation = resolve_activation(gate_activation)
 
         # Set in build(), since they depend on input_shape.
         self.input_channels: Optional[int] = None
@@ -279,7 +285,7 @@ class SqueezeExcitation(keras.layers.Layer):
         excited = self.conv_reduce(squeezed, training=training)
         excited = self.reduction_activation(excited)
         excited = self.conv_restore(excited, training=training)
-        attention_weights = keras.activations.sigmoid(excited)
+        attention_weights = self.gate_activation(excited)
 
         output = keras.ops.multiply(x, attention_weights)
 
@@ -313,6 +319,7 @@ class SqueezeExcitation(keras.layers.Layer):
             'reduction_ratio': self.reduction_ratio,
             'divisor': self.divisor,
             'activation': serialize_activation(self.reduction_activation),
+            'gate_activation': serialize_activation(self.gate_activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
