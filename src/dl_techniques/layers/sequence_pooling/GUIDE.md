@@ -38,8 +38,10 @@ return info['class'](**params)
   `SequencePooling` all follow this `__init__`/`build`/`call`/`get_config` split,
   and every leaf layer also implements `compute_output_shape`.
 - **Backend agnostic:** use `keras.ops` for all tensor manipulation (the existing
-  layers use `ops.softmax`, `ops.einsum`, `ops.take_along_axis`, etc.). Never call
-  `tf.*` or `torch.*` directly.
+  layers use `keras.ops.softmax`, `keras.ops.einsum`, `keras.ops.where`,
+  `keras.ops.take`, etc.; `keras.ops.take_along_axis` is avoided on purpose, see the
+  D-020 note in `SequencePooling._take_positions`). Import `keras` only and qualify at
+  the call site; never `from keras import ops`. Never call `tf.*` or `torch.*` directly.
 - **Serialization decorator (CRITICAL):** every layer is decorated with
   `@register_dl_technique("dl_techniques.layers.sequence_pooling.<module>")`, imported
   from `dl_techniques.utils.keras_registration`. Measured 2026-08-29 with
@@ -90,21 +92,27 @@ Use the canonical parameter names already established across the package:
 | :--- | :--- | :--- |
 | Attention hidden width | `hidden_dim` | `AttentionPooling`; the facade exposes it as `attention_hidden_dim`. |
 | Head count | `num_heads` | `AttentionPooling`; facade exposes `attention_num_heads`. |
-| Dropout rate | `dropout_rate` | `0.0` disables dropout (no `Dropout` sub-layer is created). |
-| Softmax temperature | `temperature` | Positive float; scores are divided by it before softmax. |
+| Dropout rate | `dropout_rate` | In `[0, 1)`; `0.0` disables dropout (no `Dropout` sub-layer is created). |
+| Softmax temperature | `temperature` | Positive finite float, checked by `utils.validation.positive_float`; scores are divided by it before softmax. |
 | Bias toggle | `use_bias` | Standard Keras meaning. |
-| Kernel initializer | `kernel_initializer` | Passed through `initializers.get(...)`. |
+| Kernel initializer | `kernel_initializer` | Passed through `keras.initializers.get(...)`, then cloned once per weight with `initializers.clone_initializer` (a shared seedless instance replays one draw). |
+| Bias initializer / regularizer | `bias_initializer`, `bias_regularizer` | `AttentionPooling`'s projection bias. `WeightedPooling` and the aggregation weights have no bias. |
 | Kernel regularizer | `kernel_regularizer` | `None` means no regularizer. |
-| Max positions | `max_seq_len` | `WeightedPooling`; facade exposes `weighted_max_seq_len`. |
+| Max positions | `max_seq_len` | `WeightedPooling`; facade exposes `weighted_max_seq_len`. A count: checked by `utils.validation.positive_int`, like `hidden_dim`, `num_heads` and `top_k`. |
 
 **Masking convention:** `call(inputs, mask=None, training=None)`. `mask` is a
-boolean/0-1 tensor of shape `(batch, seq_len)`. Statistical strategies apply the
-mask numerically (additive `-1e9` for `max`, multiplicative for `mean`/`sum`).
+boolean/0-1 tensor of shape `(batch, seq_len)`. A reduction that must not see a
+masked value SELECTS a sentinel with `keras.ops.where(keep, x, sentinel)`, where
+`sentinel = utils.dtype_policy.mask_sentinel(self.compute_dtype)` (negated for
+`min`): that covers `max`, `min`, `top_k_*` and the softmax logits of the two
+learnable poolers. `mean`/`sum`/`mean_std` weight by the 0/1 mask. Never write an
+additive mask such as `x + (1 - mask) * -1e9`: under `mixed_float16` the constant
+is `-inf` and `0 * -inf` turns every KEPT position into NaN.
 Of the positional strategies, `last` and `middle` ARE mask-aware — the last
 KEPT position and the middle of the KEPT positions respectively; `cls`/`first`
 return index 0 BY INTENT and ignore the mask; `none`/`flatten` return the
-sequence, so the mask does not apply. `exclude_positions` is honoured by every
-strategy except `none`/`flatten`, positional ones included. Per-mode semantics
+sequence with every masked position zeroed. `exclude_positions` is honoured by
+every strategy except `none`/`flatten`, positional ones included. Per-mode semantics
 and the fully-masked degeneration are stated once, in `SequencePooling`'s class
 docstring.
 
@@ -150,16 +158,19 @@ leaves import nothing intra-package; the facade and factory import the leaves.
 
 A facade owns dispatch and composition, not novel math. `SequencePooling`:
 
-1. Normalises `strategy` to a list in `__init__` and creates any required leaf
-   poolers into `self.learnable_components`.
+1. Checks `strategy` and `aggregation_method` with `check_strategy_config` (the
+   same helper the factory runs, so both refuse the same configurations), keeps the
+   list form in `self.strategy`, and creates any required leaf poolers into
+   `self.learnable_components`.
 2. In `build()`, explicitly builds each learnable component and, only when there
    are multiple strategies **and** `aggregation_method == 'weighted_sum'`, creates
    the `aggregation_weights` variable.
 3. In `call()`, runs each strategy via `_apply_single_strategy`, then combines the
    outputs per `aggregation_method` (`concat` / `add` / `multiply` / `weighted_sum`).
-4. `compute_output_shape` mirrors the dispatch so shape inference stays exact
-   (e.g. `mean_max` → `2 * dim`, `mean_max_min` → `3 * dim`, `flatten` →
-   `seq_len * dim`).
+4. `compute_output_shape` reads the same width table as the refusal rules
+   (`_WIDTH_MULTIPLE`: `mean_max` → `2 * dim`, `mean_max_min` → `3 * dim`;
+   `flatten` → `seq_len * dim`, `None` when `seq_len` is unknown), and is pinned
+   equal to the `call` shape for every strategy pair and aggregation.
 
 Add a new **strategy** to the facade by extending the `PoolingStrategy` literal,
 adding a branch in `_apply_single_strategy`, and updating `compute_output_shape`
@@ -171,41 +182,53 @@ A leaf layer implements one pooling mechanism from scratch with `keras.ops`:
 
 ```python
 import keras
-from keras import ops, layers, initializers, regularizers
 
-
+from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.validation import positive_float, positive_int
 
 
 @register_dl_technique("dl_techniques.layers.sequence_pooling.my_pooling")
 class MyPooling(keras.layers.Layer):
-    def __init__(self, hidden_dim: int = 256, temperature: float = 1.0, **kwargs):
+    def __init__(self, hidden_dim: int = 256, temperature: float = 1.0,
+                 kernel_initializer='glorot_uniform', **kwargs):
         super().__init__(**kwargs)
-        self.hidden_dim = hidden_dim
-        self.temperature = temperature
-        # create sub-layers here (unbuilt)
-        self.transform = layers.Dense(hidden_dim, activation='tanh', name='transform')
+        self.hidden_dim = positive_int(hidden_dim, 'hidden_dim', 'MyPooling')
+        self.temperature = positive_float(temperature, 'temperature', 'MyPooling')
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # create sub-layers here (unbuilt); one initializer clone per weight
+        self.transform = keras.layers.Dense(
+            hidden_dim, activation='tanh', name='transform',
+            kernel_initializer=clone_initializer(self.kernel_initializer))
 
     def build(self, input_shape):
-        super().build(input_shape)
         self.transform.build(input_shape)                 # build sub-layers explicitly
-        self.context = self.add_weight(name='context', shape=(self.hidden_dim,),
-                                       initializer='glorot_uniform', trainable=True)
+        self.context = self.add_weight(
+            name='context', shape=(self.hidden_dim,), trainable=True,
+            initializer=clone_initializer(self.kernel_initializer))
+        super().build(input_shape)
 
     def call(self, inputs, mask=None, training=None):
         h = self.transform(inputs)
-        scores = ops.einsum('bsh,h->bs', h, self.context) / self.temperature
+        scores = keras.ops.einsum('bsh,h->bs', h, self.context) / self.temperature
         if mask is not None:
-            scores = scores + (1.0 - ops.cast(mask, scores.dtype)) * (-1e9)
-        weights = ops.softmax(scores, axis=1)
-        return ops.einsum('bs,bsd->bd', weights, inputs)  # (batch, dim)
+            # SELECT the dtype's sentinel; never add (1 - mask) * a constant.
+            sentinel = keras.ops.cast(mask_sentinel(self.compute_dtype), scores.dtype)
+            scores = keras.ops.where(keras.ops.cast(mask, 'bool'), scores, sentinel)
+        weights = keras.ops.softmax(scores, axis=1)
+        return keras.ops.einsum('bs,bsd->bd', weights, inputs)  # (batch, dim)
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], input_shape[-1])
 
     def get_config(self):
         config = super().get_config()
-        config.update({'hidden_dim': self.hidden_dim, 'temperature': self.temperature})
+        config.update({
+            'hidden_dim': self.hidden_dim,
+            'temperature': self.temperature,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+        })
         return config
 ```
 
@@ -249,7 +272,7 @@ the `PoolingStrategy` literal and `_apply_single_strategy` (Pattern A) as well.
    resolving — which is the breakage this section warned about before 2026-08-29.
 2. **Object-based `__all__`.** Use **string** names in `__all__`
    (`"SequencePooling"`, not `SequencePooling`). Object-based `__all__` breaks
-   `from ... import *` and confuses linters (a known bug in `ffn/__init__.py`).
+   `from ... import *` and confuses linters.
 3. **Forgetting to re-export a type alias.** `PoolingStrategy` (and
    `AggregationMethod`) must stay exported from `__init__.py` — both transformer
    encoders do `from ..sequence_pooling import SequencePooling, PoolingStrategy`,
@@ -258,12 +281,13 @@ the `PoolingStrategy` literal and `_apply_single_strategy` (Pattern A) as well.
    facade it must mirror the strategy/aggregation dispatch so shape inference is
    exact (combined strategies multiply the width).
 5. **Mutating the registry returned by `get_sequence_pooling_info()`.** It returns
-   shallow copies of each entry; do not rely on mutating it to change global
-   behaviour, and do not mutate `SEQUENCE_POOLING_REGISTRY` directly at runtime.
-6. **Registry defaults drifting from `__init__`.** A misspelled key in
-   `optional_params` is silently filtered out by `valid_param_names`, dropping the
-   user's value to the class default. Cross-read the registry against the live
-   `__init__` signature whenever either changes.
+   deep copies of each entry, so mutating the result changes nothing; do not
+   mutate `SEQUENCE_POOLING_REGISTRY` directly at runtime either.
+6. **Registry defaults drifting from `__init__`.** A constructor parameter missing
+   from `optional_params` is refused by the factory as an undeclared keyword, so a
+   caller cannot set it through the factory at all.
+   `tests/test_layers/test_factory_registry_drift.py` compares the registry with the
+   live `__init__` signature; keep both in the same commit.
 
 ---
 

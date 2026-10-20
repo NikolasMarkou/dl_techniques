@@ -178,7 +178,7 @@ These options apply to almost all head types.
 | `normalization_type`| `Literal[str]`| `'layer_norm'`| Normalization layer. Options include:<br>`'layer_norm'`, `'rms_norm'`, `'batch_norm'`, `'zero_centered_rms_norm'`, `'band_rms'`, `'logit_norm'`, etc. |
 | `activation_type` | `Literal[str]`| `'gelu'` | Activation function for intermediate layers. Options include:<br>`'gelu'`, `'relu'`, `'silu'`, `'swish'`, `'mish'`, etc. |
 | `use_pooling` | `bool`| `True` (`False` for token, QA, generation) | Whether to pool the sequence into a single vector. The three heads that never pool refuse `True`. |
-| `pooling_type` | `Literal[str]` | `'cls'` | Strategy if pooling is enabled. Options:<br>`'cls'`, `'mean'`, `'max'`, `'last'` (the last unmasked position; the choice for a causal backbone), `'attention'`. Anything else raises at construction, for every head. |
+| `pooling_type` | `Literal[str]` | `'cls'` | Strategy if pooling is enabled. Options:<br>`'cls'`, `'mean'`, `'max'`, `'last'` (the last unmasked position; the choice for a causal backbone), `'attention'`. Anything else raises at construction, for every head. `'attention'` is the head's own inline `Dense(1, tanh)` scorer, not `SequencePooling('attention')` (a different mechanism and weight set). |
 | `use_intermediate`| `bool`| `True` | Adds a Dense block (to `hidden_size`) before the final task projection. |
 | `intermediate_size` | `int` | `input_dim` | Size of the intermediate dense block when `task_config.hidden_size` is unset. |
 | `use_task_attention`| `bool`| `False` | Adds a self-attention layer specific to this task. Only the token and QA heads run one; the other four raise. |

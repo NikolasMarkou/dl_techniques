@@ -38,6 +38,10 @@ concatenated strategies).
 | `weighted` | `WeightedPooling` | Learnable, content-agnostic per-position pooling. A scalar learnable weight per position (up to `max_seq_len`) is softmax-normalised and used for a weighted sum, capturing positional importance. | Fixed-length or positionally-structured sequences where token position carries a consistent importance signal. |
 | `sequence` | `SequencePooling` | Unified facade exposing 18 strategies (positional, statistical, learnable, top-k, special) and 4 aggregation methods. Composes `AttentionPooling`/`WeightedPooling` for learnable modes. | The default choice for bridging a sequence encoder to a fixed-size head, and for experimenting with or combining multiple pooling strategies. |
 
+The NLP heads' `pooling_type='attention'` (`layers/heads/nlp`) is not
+`AttentionPooling` or `SequencePooling('attention')`: it is the head's own inline
+`Dense(1, tanh)` scorer, a different mechanism with its own weights.
+
 ## Factory Interface
 
 ### Basic Usage
@@ -211,6 +215,23 @@ pool = create_sequence_pooling_layer(
     exclude_positions=[0],     # e.g. skip a CLS token during statistical pooling
 )
 ```
+
+#### Shared knobs
+
+`SequencePooling` builds its learnable strategies from one set of knobs, so one
+value can reach more than one sub-layer:
+
+| Knob | Reaches | Note |
+|------|---------|------|
+| `temperature` | every `AttentionPooling` and the `WeightedPooling` | One value for all learnable strategies; a positive finite number. |
+| `attention_dropout_rate` | every `AttentionPooling` and the `WeightedPooling` | Despite the name it is also the `weighted` pooler's dropout. |
+| `attention_hidden_dim` | every `AttentionPooling` | |
+| `attention_num_heads` | the `multi_head_attention` pooler | `attention` always has one head. |
+| `use_bias`, `bias_initializer`, `bias_regularizer` | every `AttentionPooling`'s projection | `weighted` and the `weighted_sum` aggregation weights have no bias. |
+| `kernel_initializer` | every `AttentionPooling`'s projection kernel and context vector | One clone per weight. `weighted` and the aggregation weights always start at `'ones'` (a plain mean). |
+| `kernel_regularizer` | every `AttentionPooling`'s kernel and context vector, the `weighted` position weights, the `weighted_sum` aggregation weights | The last two have only this one weight each. |
+| `weighted_max_seq_len` | the `WeightedPooling`'s `max_seq_len` | |
+| `top_k` | `top_k_mean`, `top_k_max` | A positive int. |
 
 `exclude_positions` takes distinct non-negative ints (a negative position, a
 repeat, a bool or a non-integer raises; there is no negative indexing, so `[-1]`
