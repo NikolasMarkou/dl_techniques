@@ -14,18 +14,23 @@ Output layout::
       validation/XX/cc3m_validation_NNNNNNNN.jpg
       train_captions.jsonl                     <- {"id","caption","split"}
       validation_captions.jsonl
-      _prepare_cc3m_state.json                 <- processed tar names
+      _prepare_cc3m_state.json                 <- processed tars + the one in progress
 
 Each WebDataset tar contains grouped ``{basename}.jpg`` / ``{basename}.txt``
 / ``{basename}.json`` triples. We stream the tar over HTTP (no local tar
 file persisted), walk its members in order, pair ``.jpg`` + ``.txt`` by
 basename, and flush each completed pair immediately.
 
-**Resumable**: the script stores the set of already-processed tar names
-in ``_prepare_cc3m_state.json`` and skips them on restart. Caption
-JSONL files are opened in append mode so completed tars keep their
-captions across restarts. JPEG files that already exist on disk are
-also skipped, giving a second layer of resume safety.
+**Resumable, and idempotent**: the script stores the set of already-processed
+tar names in ``_prepare_cc3m_state.json`` and skips them on restart. Before a
+shard starts, the state records it as in progress with the caption JSONL's byte
+length. A shard that does not finish (a failed read, a ``--max-samples`` cut or
+a killed process) stops the split; the next run cuts the JSONL back to that
+length and extracts the shard again, so its captions get the same ids as in an
+uninterrupted run, once (D-187). Ids are assigned in shard-list order. An image
+is written to a temporary name and renamed, so a file at an image's path is
+complete; one that exists is not written again (the same id holds the same
+pair).
 
 Set ``HF_HOME`` or ``HF_HUB_CACHE`` to a large-disk location *if* you
 want ``huggingface_hub`` to cache any downloaded metadata off of ``~``.
@@ -48,7 +53,7 @@ import os
 import sys
 import tarfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -66,6 +71,8 @@ _STATE_FILENAME = "_prepare_cc3m_state.json"
 @dataclass
 class _State:
     processed_tars: dict  # {split: [tar_filename, ...]}
+    # {split: {"tar": tar_filename, "jsonl_bytes": caption JSONL length before it}}
+    in_progress: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str) -> "_State":
@@ -74,20 +81,54 @@ class _State:
         if os.path.exists(path):
             with open(path) as f:
                 raw = json.load(f)
-            return cls(processed_tars=raw.get("processed_tars", {}))
+            return cls(processed_tars=raw.get("processed_tars", {}),
+                       in_progress=raw.get("in_progress", {}))
         return cls(processed_tars={})
 
     def save(self, path: str) -> None:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"processed_tars": self.processed_tars}, f)
+            json.dump({"processed_tars": self.processed_tars,
+                       "in_progress": self.in_progress}, f)
         os.replace(tmp, path)
 
     def is_done(self, split: str, tar_name: str) -> bool:
         return tar_name in self.processed_tars.get(split, [])
 
+    def begin(self, split: str, tar_name: str, jsonl_bytes: int) -> None:
+        self.in_progress[split] = {"tar": tar_name, "jsonl_bytes": jsonl_bytes}
+
     def mark_done(self, split: str, tar_name: str) -> None:
         self.processed_tars.setdefault(split, []).append(tar_name)
+        self.in_progress.pop(split, None)
+
+
+def _roll_back_unfinished(jsonl_path: str, state: _State, split: str) -> None:
+    """Cut the caption JSONL back to where the unfinished shard of ``split`` began.
+
+    The shard is then extracted again from its first pair, under the same ids.
+
+    :raises RuntimeError: If the JSONL is shorter than the recorded length (the
+        state and the captions disagree; truncating would pad the file).
+    """
+    unfinished = state.in_progress.get(split)
+    if unfinished is None or not os.path.exists(jsonl_path):
+        return
+    size = os.path.getsize(jsonl_path)
+    keep = unfinished["jsonl_bytes"]
+    if size < keep:
+        raise RuntimeError(
+            f"{jsonl_path} has {size} bytes but the state recorded {keep} before "
+            f"{unfinished['tar']} began; the state and the captions disagree"
+        )
+    if size > keep:
+        with open(jsonl_path, "r+") as f:
+            f.truncate(keep)
+        print(
+            f"[{split}] {unfinished['tar']} did not finish last run; its "
+            f"{size - keep:,} caption bytes are removed and it is extracted again",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +285,11 @@ def _write_pair(
             )
             return False
         os.makedirs(shard_dir, exist_ok=True)
-        im.save(img_path, "JPEG", quality=jpeg_quality, optimize=False)
+        # Written under a temporary name, then renamed: a killed save leaves no
+        # partial file at img_path for a resume to skip as done (D-187).
+        part_path = img_path + ".part"
+        im.save(part_path, "JPEG", quality=jpeg_quality, optimize=False)
+        os.replace(part_path, img_path)
 
     jsonl_fh.write(
         json.dumps(
@@ -270,11 +315,13 @@ def _extract_split(
     jpeg_quality: int,
     progress_every: int,
 ) -> Tuple[int, int]:
-    """Extract one split. Resumable at the tar-shard boundary.
+    """Extract one split. Resumable at the tar-shard boundary, and idempotent.
 
-    Returns ``(pairs written this run, shards that failed)``. A failed shard is
-    reported and not marked done, so a rerun retries it; ``main`` raises after
-    every split when any shard failed.
+    Returns ``(pairs written this run, shards that failed)``. A shard that does
+    not finish (it fails to open or read, or ``max_samples`` cuts it) is left in
+    progress and the split stops there; the next run cuts its captions out of
+    the JSONL and extracts it again under the same ids (D-187). ``main`` raises
+    after every split when any shard failed.
     """
     img_root = os.path.join(dst_root, split)
     os.makedirs(img_root, exist_ok=True)
@@ -285,16 +332,15 @@ def _extract_split(
     print(f"[{split}] {len(shards)} shards total", flush=True)
 
     start_time = time.time()
-    # Track global index across the whole split so filenames are
-    # deterministic and the same index always lands on the same shard.
-    global_idx = sum(
-        # Estimate from already-processed tars: each tar has ~N samples.
-        # Actual count is recovered by scanning the jsonl at startup.
-        0
-        for _ in state.processed_tars.get(split, [])
-    )
-
-    # More robust: count existing jsonl lines to seed global_idx.
+    # DECISION plan-2026-10-14T062616-81938e81/D-187: ids are the JSONL line count,
+    # assigned in shard-list order. A shard that did not finish is cut out of the
+    # JSONL here and extracted again, and a run stops a split at its first
+    # unfinished shard. Do NOT go on to the next shard after a failure, and do NOT
+    # resume without the roll-back: either one gives a shard's captions ids that
+    # depend on when the run was interrupted, and the roll-back-free resume
+    # appended a partial shard's captions a second time under new ids.
+    _roll_back_unfinished(jsonl_path, state, split)
+    global_idx = 0
     if os.path.exists(jsonl_path):
         with open(jsonl_path) as f:
             global_idx = sum(1 for _ in f)
@@ -311,18 +357,23 @@ def _extract_split(
             if state.is_done(split, tar_name):
                 continue
 
+            jsonl_fh.flush()
+            state.begin(split, tar_name, os.fstat(jsonl_fh.fileno()).st_size)
+            state.save(state_path)
             try:
                 tar = _open_tar_stream(tar_name)
             except Exception as exc:  # noqa: BLE001
                 errors += 1
                 print(
                     f"[warn] {tar_name}: HTTP open failed "
-                    f"({type(exc).__name__}: {exc}); skipping shard",
+                    f"({type(exc).__name__}: {exc}); the split stops here and "
+                    f"a rerun starts from this shard",
                     file=sys.stderr,
                 )
-                continue
+                break
 
             shard_written = 0
+            finished = True
             try:
                 for jpg_bytes, caption in _iter_pairs_in_tar(tar):
                     if not caption.strip():
@@ -351,16 +402,17 @@ def _extract_split(
                                 flush=True,
                             )
                         if max_samples is not None and written >= max_samples:
+                            finished = False
                             break
             except Exception as exc:  # noqa: BLE001
                 errors += 1
+                finished = False
                 print(
                     f"[warn] {tar_name}: tar read failed "
-                    f"({type(exc).__name__}: {exc}); "
-                    f"shard partially written ({shard_written} pairs)",
+                    f"({type(exc).__name__}: {exc}) after {shard_written} pairs; "
+                    f"the split stops here and a rerun extracts this shard again",
                     file=sys.stderr,
                 )
-                continue
             finally:
                 try:
                     tar.close()
@@ -371,11 +423,10 @@ def _extract_split(
                 jsonl_fh.flush()
                 os.fsync(jsonl_fh.fileno())
 
+            if not finished:
+                break
             state.mark_done(split, tar_name)
             state.save(state_path)
-
-            if max_samples is not None and written >= max_samples:
-                break
 
     elapsed = time.time() - start_time
     print(
