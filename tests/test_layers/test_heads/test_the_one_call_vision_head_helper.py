@@ -84,12 +84,15 @@ def test_no_model_spells_out_the_four_step_sequence() -> None:
     assert not offenders, offenders
 
 
-def test_the_helper_census_is_nineteen_sites() -> None:
-    """The count is the census at the migration; a new consumer raises it,
-    and must be added here on purpose rather than by a fifth copy of the
-    sequence."""
+def test_the_helper_census_is_twenty_one_sites() -> None:
+    """The count is the census at the migration (19), plus FFTNet's detection
+    and segmentation heads (iteration 2 step 6.6, D-210: they used to call
+    ``create_vision_head`` with four override keys read by hand and the rest
+    dropped in silence); a new consumer raises it, and must be added here on
+    purpose rather than by a fifth copy of the sequence."""
     calls = {str(p.relative_to(MODELS_ROOT)): len(re.findall(
         r"\bbuild_model_vision_head\(", p.read_text())) for p in _model_sources()}
     calls = {k: v for k, v in calls.items() if v}
-    assert sum(calls.values()) == 19, calls
+    assert sum(calls.values()) == 21, calls
     assert calls["vision/resnet/model.py"] == 2
+    assert calls["vision/fftnet/model.py"] == 2

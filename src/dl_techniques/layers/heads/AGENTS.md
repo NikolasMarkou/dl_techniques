@@ -125,7 +125,8 @@ this package merge) still resolve.
   `HeadConfiguration` (presets for the 10 task types with a head; the rest
   raise), `merge_head_config_overrides(...)` and
   `build_model_vision_head(task_type, head_config, head_config_overrides)`,
-  the one call every vision model builds its head with (19 sites).
+  the one call every preset-based vision head is built with (21 sites;
+  DETR, MambaLCT and SuperPoint call `create_vision_head` with full configs).
 - `vlm/factory.py` — `VLM_HEAD_DISPATCH` (the one task-type to head-class
   table, 4 rows), `create_vlm_head(task_config, ...)`,
   `create_multi_task_vlm_head(...)`. **No model, trainer or application
@@ -228,10 +229,13 @@ this package merge) still resolve.
   refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage its
   `call` never runs, e.g. `TextClassificationHead` pools to rank 2 first, so it
   refuses task attention; each stage is built at the width `call` feeds it).
-  The `BaseVisionHead` attention/FFN settings and the NLP `pooling_type` of a
-  head that never pools (validated, not read; a language model passes its
-  default pooling to every head) are the flag-gated exceptions: accepted,
-  read only when the stage runs. Check it by calling: count each
+  The `BaseVisionHead` attention/FFN settings follow the same rule (D-210):
+  `attention_type`, `ffn_type` and `ffn_expansion_factor` default to `None`,
+  resolve to `'multi_head'`/`'mlp'`/4 when their stage is on, and raise when
+  it is off; the presets and `build_model_vision_head` drop a preset knob
+  whose stage ends up off. The NLP `pooling_type` of a head that never pools
+  (validated, not read; a language model passes its default pooling to every
+  head) is the flag-gated exception: accepted, read only when the stage runs. Check it by calling: count each
   sub-layer's `call` over one forward
   (`test_vlm.py::TestEveryVLMHeadOwnsOnlyWhatItRuns`). Do not check it by
   weights: a sub-layer created and never called is never built and holds none.

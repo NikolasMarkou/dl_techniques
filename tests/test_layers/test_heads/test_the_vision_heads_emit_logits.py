@@ -250,8 +250,10 @@ def test_the_head_builds_no_norm_ffn_or_dropout() -> None:
 def test_every_trainable_weight_receives_a_gradient(use_attention: bool) -> None:
     # 'multi_head' attention takes a 3D sequence at width hidden_dim, so this
     # runs the CLS-token path on a (batch, seq_len, hidden_dim) input.
-    head = _head(use_attention=use_attention, attention_type="multi_head",
-                 pooling_type="cls_token", dropout_rate=0.0)
+    # attention_type only with the stage on: a head refuses it otherwise (D-210).
+    stage = {"attention_type": "multi_head"} if use_attention else {}
+    head = _head(use_attention=use_attention, pooling_type="cls_token",
+                 dropout_rate=0.0, **stage)
     x = keras.ops.convert_to_tensor(_inputs(SEQUENCE_SHAPE[:-1] + (HIDDEN_DIM,)))
     labels = keras.ops.convert_to_tensor(np.arange(SEQUENCE_SHAPE[0]) % NUM_CLASSES)
     with tf.GradientTape() as tape:

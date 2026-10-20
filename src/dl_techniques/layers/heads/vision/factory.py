@@ -108,6 +108,94 @@ from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+# Flag-gated base stage knobs
+# ---------------------------------------------------------------------
+
+#: The base stage knobs each flag gates, with the value a knob takes when its
+#: stage is on and the caller gave ``None``. Read by
+#: :func:`_resolve_stage_knobs` (the heads) and :func:`_drop_off_stage_knobs`
+#: (the presets and ``build_model_vision_head``).
+STAGE_KNOB_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    'use_attention': {'attention_type': 'multi_head'},
+    'use_ffn': {'ffn_type': 'mlp', 'ffn_expansion_factor': 4},
+}
+
+
+def _resolve_stage_knobs(
+        owner: str,
+        flags: Dict[str, bool],
+        given: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Resolve the base stage knobs against the flags that gate them.
+
+    Interface contract, called once by :class:`BaseVisionHead`'s
+    ``__init__``: ``flags`` maps each key of :data:`STAGE_KNOB_DEFAULTS` to
+    the caller's flag, ``given`` maps every knob to the caller's value
+    (``None`` when not given). For a stage that is on, a ``None`` knob takes
+    its default; for a stage that is off, every knob becomes ``None``, and a
+    given value raises ``ValueError`` naming ``owner``, the knob and the
+    flag. Returns a new dict of every knob; nothing is mutated.
+
+    :param owner: Class name, for the message.
+    :type owner: str
+    :param flags: Each stage flag's value.
+    :type flags: Dict[str, bool]
+    :param given: Each knob's caller value, or ``None``.
+    :type given: Dict[str, Any]
+    :return: Each knob's resolved value.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If a knob is given for a stage that is off.
+    """
+    resolved = {}
+    for flag, defaults in STAGE_KNOB_DEFAULTS.items():
+        if flags[flag]:
+            for knob, default in defaults.items():
+                resolved[knob] = default if given[knob] is None else given[knob]
+            continue
+        dead = {knob: given[knob] for knob in defaults if given[knob] is not None}
+        if dead:
+            raise ValueError(
+                f"{owner}: {dead} only configure the stage {flag}=True builds, "
+                f"and {flag} is off, so no layer would read them. Pass "
+                f"{flag}=True, or leave {sorted(dead)} unset."
+            )
+        resolved.update(dict.fromkeys(defaults))
+    return resolved
+
+
+def _drop_off_stage_knobs(
+        config: Dict[str, Any],
+        keep: Tuple[Dict[str, Any], ...] = ()
+) -> Dict[str, Any]:
+    """
+    Remove the knobs of every stage ``config`` turns off, unless set in ``keep``.
+
+    Interface contract, shared by the :class:`HeadConfiguration` presets
+    and :func:`build_model_vision_head`: returns a new dict; a knob whose
+    gating flag is ``False`` in ``config`` (absent counts as the base
+    default, on) is dropped, except when one of the ``keep`` dicts names it,
+    so a value the model or the caller set explicitly still reaches the head
+    and is refused there.
+
+    :param config: A head config.
+    :type config: Dict[str, Any]
+    :param keep: Dicts whose knobs must not be dropped.
+    :type keep: Tuple[Dict[str, Any], ...]
+    :return: The config without the dead knobs.
+    :rtype: Dict[str, Any]
+    """
+    out = dict(config)
+    for flag, defaults in STAGE_KNOB_DEFAULTS.items():
+        if out.get(flag, True):
+            continue
+        for knob in defaults:
+            if not any(knob in source for source in keep):
+                out.pop(knob, None)
+    return out
+
+
+# ---------------------------------------------------------------------
 # Common-layer flag refusal
 # ---------------------------------------------------------------------
 
@@ -508,16 +596,23 @@ class BaseVisionHead(keras.layers.Layer):
     :param use_attention: Whether to build an attention layer.
     :type use_attention: bool
     :param attention_type: Which registered attention type to build.
-    :type attention_type: AttentionType
+        ``None`` (the default) means ``'multi_head'`` when ``use_attention``
+        is on; with it off, any value raises ``ValueError`` and ``None`` is
+        stored (D-030's rule).
+    :type attention_type: Optional[AttentionType]
     :param use_ffn: Whether to build an FFN block. It defaults to ``True``
         here; :class:`ClassificationHead` and :class:`EnhancementHead`
         default it to ``False`` and refuse ``True``.
     :type use_ffn: bool
-    :param ffn_type: Which registered FFN type to build.
-    :type ffn_type: FFNType
+    :param ffn_type: Which registered FFN type to build. ``None`` (the
+        default) means ``'mlp'`` when ``use_ffn`` is on; with it off, any
+        value raises and ``None`` is stored.
+    :type ffn_type: Optional[FFNType]
     :param ffn_expansion_factor: The FFN inner width is
-        ``hidden_dim * ffn_expansion_factor``.
-    :type ffn_expansion_factor: int
+        ``hidden_dim * ffn_expansion_factor``. ``None`` (the default) means
+        4 when ``use_ffn`` is on; with it off, any value raises and ``None``
+        is stored.
+    :type ffn_expansion_factor: Optional[int]
     :param kwargs: Additional arguments for the base Layer class.
 
     :ivar attention: Attention layer, built when ``use_attention`` is set.
@@ -539,10 +634,10 @@ class BaseVisionHead(keras.layers.Layer):
             activation_type: ActivationType = 'gelu',
             dropout_rate: float = 0.1,
             use_attention: bool = False,
-            attention_type: AttentionType = 'multi_head',
+            attention_type: Optional[AttentionType] = None,
             use_ffn: bool = True,
-            ffn_type: FFNType = 'mlp',
-            ffn_expansion_factor: int = 4,
+            ffn_type: Optional[FFNType] = None,
+            ffn_expansion_factor: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -561,17 +656,22 @@ class BaseVisionHead(keras.layers.Layer):
         :type dropout_rate: float
         :param use_attention: Whether to build an attention layer.
         :type use_attention: bool
-        :param attention_type: Which registered attention type to build.
-        :type attention_type: AttentionType
+        :param attention_type: Which registered attention type to build;
+            ``None`` means ``'multi_head'`` with the stage on. Refused with
+            the stage off.
+        :type attention_type: Optional[AttentionType]
         :param use_ffn: Whether to build an FFN block.
         :type use_ffn: bool
-        :param ffn_type: Which registered FFN type to build.
-        :type ffn_type: FFNType
-        :param ffn_expansion_factor: FFN inner-width multiplier.
-        :type ffn_expansion_factor: int
+        :param ffn_type: Which registered FFN type to build; ``None`` means
+            ``'mlp'`` with the stage on. Refused with the stage off.
+        :type ffn_type: Optional[FFNType]
+        :param ffn_expansion_factor: FFN inner-width multiplier; ``None``
+            means 4 with the stage on. Refused with the stage off.
+        :type ffn_expansion_factor: Optional[int]
         :param kwargs: Additional arguments for the base Layer class.
         :return: None.
         :rtype: None
+        :raises ValueError: If a stage knob is given for a stage that is off.
         """
         super().__init__(**kwargs)
 
@@ -582,10 +682,21 @@ class BaseVisionHead(keras.layers.Layer):
         self.activation_type = activation_type
         self.dropout_rate = dropout_rate
         self.use_attention = use_attention
-        self.attention_type = attention_type
         self.use_ffn = use_ffn
-        self.ffn_type = ffn_type
-        self.ffn_expansion_factor = ffn_expansion_factor
+        # DECISION plan-2026-10-14T062616-81938e81/D-210
+        # A stage knob for a stage that is off raises and is stored as None.
+        # Do NOT refuse only a non-default value: the default would still be
+        # stored and written to get_config for a layer that does not exist.
+        # See decisions.md D-210 (D-030's rule).
+        knobs = _resolve_stage_knobs(
+            type(self).__name__,
+            {'use_attention': use_attention, 'use_ffn': use_ffn},
+            {'attention_type': attention_type, 'ffn_type': ffn_type,
+             'ffn_expansion_factor': ffn_expansion_factor},
+        )
+        self.attention_type = knobs['attention_type']
+        self.ffn_type = knobs['ffn_type']
+        self.ffn_expansion_factor = knobs['ffn_expansion_factor']
 
         # DECISION plan-2026-10-14T062616-81938e81/D-089: refuse a type the
         # head can build but never run, here, naming the reason. Do not let it
@@ -4388,7 +4499,10 @@ class HeadConfiguration:
         overrides 6 keys
                   │
                   ▼
-        both presets, last: the PRESET_FIXED_KEYS entry for the task
+        both presets: the PRESET_FIXED_KEYS entry for the task
+                  │
+                  ▼
+        both presets, last: drop the knobs of every stage left off
 
     ``get_efficient_config`` calls ``get_default_config`` first, so it
     inherits the task-specific keys and then overrides the shared ones.
@@ -4397,8 +4511,10 @@ class HeadConfiguration:
     last, so no preset asks a head for a layer its ``call`` never runs:
     classification gets ``use_ffn=False`` and the two enhancement tasks get
     ``use_attention=False``, ``use_ffn=False`` and ``dropout_rate=0.0``.
-    Those heads refuse the other values. For them the FFN keys
-    (``ffn_type``, ``ffn_expansion_factor``) are inert.
+    Those heads refuse the other values. Each preset then drops the knobs
+    of every stage it leaves off (``attention_type`` without attention,
+    ``ffn_type`` and ``ffn_expansion_factor`` without the FFN), because a
+    head refuses a knob for a stage that is off (D-210).
 
     Example:
         >>> cfg = HeadConfiguration.get_default_config(
@@ -4412,11 +4528,12 @@ class HeadConfiguration:
         """
         Get the default preset for a task type.
 
-        Seven shared keys are always returned. Eight task types add their
+        Seven shared keys are the starting point. Eight task types add their
         own keys on top: every dispatched type but the two enhancement
         tasks. Then the task's :data:`PRESET_FIXED_KEYS` entry is applied,
         which turns off the common layers classification and the two
-        enhancement tasks never run.
+        enhancement tasks never run, and last the knobs of every stage left
+        off are dropped (a head refuses them, D-210).
 
         :param task_type: Task the preset is for, as an enum member or its
             string value.
@@ -4499,7 +4616,7 @@ class HeadConfiguration:
             config.update(task_specific[task_type])
         config.update(PRESET_FIXED_KEYS.get(task_type, {}))
 
-        return config
+        return _drop_off_stage_knobs(config)
 
     @staticmethod
     def get_efficient_config(task_type: VisionTaskType) -> Dict[str, Any]:
@@ -4530,7 +4647,7 @@ class HeadConfiguration:
             'ffn_expansion_factor': 2
         })
         config.update(PRESET_FIXED_KEYS.get(task_type, {}))
-        return config
+        return _drop_off_stage_knobs(config)
 
 
 # ---------------------------------------------------------------------
@@ -4600,7 +4717,8 @@ def build_model_vision_head(
     keys, then the caller's overrides.
 
     Interface contract, shared by every vision model that owns a task head
-    (19 construction sites in ``models/vision`` and FastVLM):
+    (21 construction sites in ``models/vision`` and FastVLM; FFTNet's two
+    since D-210):
 
     * Starts from :meth:`HeadConfiguration.get_default_config` for
       ``task_type`` (so a task type with no head raises ``ValueError`` here).
@@ -4611,6 +4729,10 @@ def build_model_vision_head(
       argument) is merged last through :func:`merge_head_config_overrides`,
       which refuses ``name``, ``num_classes`` and ``task_type``. ``None``
       merges nothing.
+    * A preset knob of a stage the merged config turns off
+      (``attention_type``; ``ffn_type``, ``ffn_expansion_factor``) is
+      dropped, unless ``head_config`` or the overrides set it: then it
+      reaches the head, which refuses it (D-210).
     * Returns ``create_vision_head(task_type, **merged)``; an unknown key is
       refused by the head constructor.
 
@@ -4639,4 +4761,8 @@ def build_model_vision_head(
     config = HeadConfiguration.get_default_config(task_type)
     config.update(head_config)
     config = merge_head_config_overrides(config, head_config_overrides)
+    # A preset knob for a stage the model or the caller turned off is dropped
+    # with the stage; one they set themselves reaches the head and is refused.
+    config = _drop_off_stage_knobs(
+        config, keep=(head_config, head_config_overrides or {}))
     return create_vision_head(task_type, **config)

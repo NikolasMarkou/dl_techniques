@@ -19,8 +19,9 @@ package; import them from `.task_types`. Nor are three names in `.factory`:
 refusing `name`, `num_classes` and `task_type`, which the model owns), and
 `build_model_vision_head(task_type, head_config, head_config_overrides=None)`, the one call a vision
 model builds its head with: the `HeadConfiguration` default preset, then the model's own keys, then
-the merged overrides, then `create_vision_head`. Every vision model with a head (19 sites, FastVLM
-included) uses it; a new one should too.
+the merged overrides, then `create_vision_head`. Every model that builds its head from the preset
+uses it (21 sites, FastVLM and FFTNet's detection and segmentation heads included); DETR, MambaLCT
+and SuperPoint call `create_vision_head` with a full config of their own. A new model should use it.
 
 ## Head dispatch: 10 of 37 task types reach a head
 
@@ -84,16 +85,19 @@ Every head also takes the shared `BaseVisionHead` options:
 | `activation_type` | `'gelu'` | Any `activations/` factory key. |
 | `dropout_rate` | `0.1` | Reaches the class-score blocks and the attention/FFN. `0.0` and refused above 0 in `EnhancementHead`, which applies no dropout. `0.0` in the depth, normals and flow heads, whose decoders take none (as in DPT, RAFT, PWC-Net), and refused above 0 there unless `use_attention` or `use_ffn` is on. The instance-mask branch takes none either (Mask R-CNN); there it reaches the detection branch. |
 | `use_attention` | `False` | The stage runs in the layout its type takes, whatever the head holds (see the gotchas). |
-| `attention_type` | `'multi_head'` | Any `ATTENTION_REGISTRY` key. |
+| `attention_type` | `None` | Any `ATTENTION_REGISTRY` key; `None` means `'multi_head'` with `use_attention` on. With it off, any value raises `ValueError` and `None` is stored (D-210). |
 | `use_ffn` | `True` | `False` and refused in `ClassificationHead` and `EnhancementHead`. |
-| `ffn_type` | `'mlp'` | Any `FFN_REGISTRY` key. |
-| `ffn_expansion_factor` | `4` | |
+| `ffn_type` | `None` | Any `FFN_REGISTRY` key; `None` means `'mlp'` with `use_ffn` on. With it off, any value raises `ValueError` and `None` is stored. |
+| `ffn_expansion_factor` | `None` | `None` means `4` with `use_ffn` on; with it off, any value raises and `None` is stored. |
 
 `HeadConfiguration` supplies presets for those: `get_default_config(task)` and
 `get_efficient_config(task)`, each returning a plain dict you can splat into a head, for each of the
 10 task types with a head (a task with no head raises `ValueError`). Both apply
-`PRESET_FIXED_KEYS` last, so a classification preset carries `use_ffn=False` and a denoising or
-super-resolution preset `use_attention=False, use_ffn=False, dropout_rate=0.0`. A third preset,
+`PRESET_FIXED_KEYS`, so a classification preset carries `use_ffn=False` and a denoising or
+super-resolution preset `use_attention=False, use_ffn=False, dropout_rate=0.0`, and last drop the
+knobs of every stage they leave off. `build_model_vision_head` drops a preset knob the same way when
+the model or the caller turns its stage off, but passes on one they set themselves, which the head
+refuses. A third preset,
 `get_high_performance_config`, was deleted on 2026-10-14: its `attention_type='differential'`
 needs `num_heads` and `head_dim`, which the heads never pass, so it raised `ValueError` for every
 task type.

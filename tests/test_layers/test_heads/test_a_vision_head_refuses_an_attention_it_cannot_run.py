@@ -7,8 +7,9 @@ its attention stage with the features alone, on one stream, so no split
 exists. Measured at d6995a932: every head constructed with it and then failed
 inside ``call`` (``TypeError`` on the missing ``split_sizes``), far from the
 argument that caused it. The head now refuses it in ``__init__``, naming the
-reason; with ``use_attention=False`` the type is never built and stays
-accepted, as any other unread ``attention_type`` is.
+reason. With ``use_attention=False`` the type is never built; since D-210
+(iteration 2 step 6.6) any ``attention_type`` given with the stage off is
+refused as well, so this one is too.
 """
 
 import numpy as np
@@ -41,10 +42,12 @@ def test_the_head_refuses_it_at_construction(name):
 
 
 @pytest.mark.parametrize("name", sorted(_HEADS))
-def test_an_unbuilt_attention_stage_still_accepts_it(name):
-    head = _HEADS[name](hidden_dim=C, use_attention=False,
-                        attention_type="shared_weights_cross")
-    head(X4)
+def test_an_unbuilt_attention_stage_refuses_any_attention_type(name):
+    # It used to accept and store the type for a stage that does not exist;
+    # since D-210 any attention_type with use_attention=False is refused.
+    with pytest.raises(ValueError, match="attention_type"):
+        _HEADS[name](hidden_dim=C, use_attention=False,
+                     attention_type="shared_weights_cross")
 
 
 @pytest.mark.parametrize("name", sorted(_HEADS))

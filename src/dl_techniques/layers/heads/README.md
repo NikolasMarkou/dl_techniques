@@ -106,10 +106,11 @@ can never read are refused with `ValueError`: the VLM heads take no `vision_dim`
 come from the inputs) and no `activation_type`, the post-fusion options belong to
 `ImageTextMatchingHead` alone, `DepthEstimationHead`'s two decoders each refuse the other's
 arguments, and an NLP head refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage
-its `call` never runs (`nlp/README.md` § 4.1 has the table). The vision heads' attention and FFN settings (`attention_type`, `ffn_type`, ...) are
-still accepted when `use_attention`/`use_ffn` is off, and are read only when it is on. The
-exception is `dropout_rate` on the depth, normals and flow heads, whose decoders take no dropout:
-there it defaults to 0.0 and a positive rate is refused unless attention or the FFN is on.
+its `call` never runs (`nlp/README.md` § 4.1 has the table). A vision head refuses an attention
+or FFN setting (`attention_type`; `ffn_type`, `ffn_expansion_factor`) when `use_attention` or
+`use_ffn` is off, and stores `None` (D-210); `dropout_rate` on the depth, normals and flow heads,
+whose decoders take no dropout, defaults to 0.0 and a positive rate is refused unless attention or
+the FFN is on.
 
 ## Notes
 

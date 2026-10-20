@@ -55,7 +55,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
-from dl_techniques.layers.heads.vision import create_vision_head
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -1108,7 +1108,12 @@ def create_fftnet_with_head(
         variant's encoder configuration.
     :type fftnet_config_overrides: Optional[Dict[str, Any]]
     :param head_config_overrides: Optional dictionary overriding the head
-        configuration; ``dropout_rate`` is the recognized key.
+        configuration. Classification takes ``dropout_rate`` only (its head
+        is a dropout and one ``Dense``); any other key raises ``ValueError``.
+        Detection and segmentation take any keyword of their vision head,
+        applied last by ``build_model_vision_head`` (which refuses ``name``,
+        ``num_classes`` and ``task_type``); a key the head does not take is
+        refused by the head.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :return: A complete ``keras.Model`` whose output depends on task:
         - classification: one ``(batch, num_classes)`` tensor of class logits
@@ -1171,6 +1176,13 @@ def create_fftnet_with_head(
         # then one linear Dense. No identity placeholder at rate 0: a
         # Lambda(lambda x: x) there made the model's .keras archive need
         # safe_mode=False to load.
+        unread = sorted(set(head_config_overrides) - {"dropout_rate"})
+        if unread:
+            raise ValueError(
+                f"head_config_overrides {unread} have no reader: the FFTNet "
+                f"classification head is a dropout and one Dense, configured "
+                f"by 'dropout_rate' only."
+            )
         head_dropout_rate = head_config_overrides.get("dropout_rate", 0.0)
         head_layers = []
         if head_dropout_rate > 0:
@@ -1210,18 +1222,22 @@ def create_fftnet_with_head(
             raise ValueError("num_classes must be provided for detection tasks")
 
         # Detection head from vision heads factory
-        detection_head = create_vision_head(
+        # The house builder: preset, these keys, then every override key (it
+        # used to read four override keys and drop the rest in silence).
+        # attention_type defaults to 'multi_head' in the head.
+        detection_head = build_model_vision_head(
             VisionTaskType.DETECTION,
-            num_classes=num_classes,
-            hidden_dim=hidden_dim,
-            num_anchors=head_config_overrides.get("num_anchors", 9),
-            bbox_dims=4,
-            use_attention=head_config_overrides.get("use_attention", True),
-            attention_type=head_config_overrides.get("attention_type", "multi_head"),
-            use_ffn=head_config_overrides.get("use_ffn", False),
-            input_format="sequence",
-            patch_grid_size=(num_patches_h, num_patches_w),
-            name="detection_head"
+            {
+                "num_classes": num_classes,
+                "hidden_dim": hidden_dim,
+                "num_anchors": 9,
+                "use_attention": True,
+                "use_ffn": False,
+                "input_format": "sequence",
+                "patch_grid_size": (num_patches_h, num_patches_w),
+                "name": "detection_head",
+            },
+            head_config_overrides,
         )
 
         # Build end-to-end model
@@ -1251,18 +1267,22 @@ def create_fftnet_with_head(
         # convs take the patch grid back to image size (16 -> 4 convs, 14x14
         # patches to 224x224). The head refuses a patch_size that is not a
         # power of two.
-        seg_head = create_vision_head(
+        # The segmentation preset's attention is 'cbam'; the builder drops it
+        # when an override turns attention off.
+        seg_head = build_model_vision_head(
             VisionTaskType.SEGMENTATION,
-            num_classes=num_classes,
-            hidden_dim=hidden_dim,
-            upsampling_factor=patch_size,  # 16x upsampling from patch grid to image
-            use_skip_connections=False,  # single-scale from ViT
-            use_attention=head_config_overrides.get("use_attention", True),
-            attention_type=head_config_overrides.get("attention_type", "cbam"),
-            use_ffn=head_config_overrides.get("use_ffn", False),
-            input_format="sequence",
-            patch_grid_size=(num_patches_h, num_patches_w),
-            name="segmentation_head"
+            {
+                "num_classes": num_classes,
+                "hidden_dim": hidden_dim,
+                "upsampling_factor": patch_size,  # 16x upsampling from patch grid to image
+                "use_skip_connections": False,  # single-scale from ViT
+                "use_attention": True,
+                "use_ffn": False,
+                "input_format": "sequence",
+                "patch_grid_size": (num_patches_h, num_patches_w),
+                "name": "segmentation_head",
+            },
+            head_config_overrides,
         )
 
         # Build end-to-end model
