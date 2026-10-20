@@ -43,6 +43,11 @@ from dl_techniques.layers.activations.common import resolve_activation, serializ
 
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
+#: Output modes that read the CLS token on purpose (``cls``/``first``) or return
+#: the whole sequence (``none``/``flatten``). Every other mode reduces the patch
+#: tokens and excludes the CLS token (D-205).
+_READS_THE_WHOLE_SEQUENCE_OR_CLS = frozenset({'cls', 'first', 'none', 'flatten'})
+
 # DECISION plan-2026-07-31T132403-b3f540cb/D-003: no mask-incompatible-mode
 # allowlist here (supersedes plan-2026-07-31T042809-ddc92265/D-013)
 # -- masked-patch isolation
@@ -120,7 +125,10 @@ class VisionEncoder(keras.layers.Layer):
     :type ffn_type: FFNType
     :param use_cls_token: Prepend a CLS token. Default: True.
     :type use_cls_token: bool
-    :param output_mode: Pooling strategy. Default: ``'cls'``.
+    :param output_mode: Pooling strategy. Default: ``'cls'``. With a CLS
+        token, every mode but ``'cls'``, ``'first'``, ``'none'`` and
+        ``'flatten'`` pools the patch tokens only (the CLS token is excluded,
+        as timm's ViT pooling does).
     :type output_mode: PoolingStrategy
     :param dropout_rate: General dropout. Default: 0.0.
     :type dropout_rate: float
@@ -329,9 +337,17 @@ class VisionEncoder(keras.layers.Layer):
                 **self.norm_args
             )
 
-        # Create pooling layer using SequencePooling
-        # For mean and max pooling with CLS token, we exclude position 0
-        exclude_positions = [0] if (use_cls_token and output_mode in ['mean', 'max']) else []
+        # DECISION plan-2026-10-14T062616-81938e81/D-205: with a CLS token,
+        # every strategy that reduces the patch tokens excludes position 0, as
+        # timm's global_pool_nlc does for avg/max/avgmax and its 'map' pool by
+        # default (pool_include_prefix=False). Only cls/first read it, by
+        # intent, and none/flatten return the whole sequence. Do NOT narrow
+        # this back to mean/max: min, sum, the composites, the learnable and
+        # the top-k strategies averaged the CLS token in.
+        exclude_positions = (
+            [0] if use_cls_token and output_mode not in _READS_THE_WHOLE_SEQUENCE_OR_CLS
+            else []
+        )
 
         self.pooling_layer = SequencePooling(
             strategy=output_mode,
@@ -631,8 +647,9 @@ class VisionEncoder(keras.layers.Layer):
         Acceptance is NOT a blanket promise of isolation. Two modes are
         exempt BY DEFINITION and one is exempt BY INTENT:
 
-        * ``'none'`` and ``'flatten'`` return the per-token sequence, so a
-          masked token's own row is present by definition.
+        * ``'none'`` and ``'flatten'`` return the per-token sequence; a
+          masked token's row comes back as zeros, so its content does not
+          reach the output.
         * ``'cls'`` and ``'first'`` return the token at index 0 BY INTENT,
           mask or no mask. With ``use_cls_token=True`` index 0 is the CLS
           token, which is never masked (see :meth:`_extend_mask_for_cls`), so

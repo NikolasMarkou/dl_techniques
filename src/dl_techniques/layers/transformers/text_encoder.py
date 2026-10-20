@@ -41,6 +41,9 @@ from .transformer import TransformerLayer, AttentionType, NormalizationPositionT
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
+#: Pooling modes that own weights: only the one built at construction exists.
+_LEARNABLE_POOLING_MODES = frozenset({'attention', 'multi_head_attention', 'weighted'})
+
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
@@ -606,6 +609,28 @@ class TextEncoder(keras.layers.Layer):
         :return: Output features (shape depends on ``output_mode``).
         :rtype: keras.KerasTensor
         """
+        x, pooling_mask = self._encode(
+            inputs, token_type_ids, attention_mask, training
+        )
+        return self.pooling_layer(x, mask=pooling_mask, training=training)
+
+    def _encode(
+            self,
+            inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+            token_type_ids: Optional[keras.KerasTensor],
+            attention_mask: Optional[keras.KerasTensor],
+            training: Optional[bool],
+    ) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
+        """Run everything up to pooling.
+
+        Shared by :meth:`call` and the two feature helpers, so none of them
+        has to change the pooling layer to reach the sequence.
+
+        :return: ``(sequence, pooling_mask)``: the final hidden states
+            ``(B, seq_len, embed_dim)`` (CLS included when configured) and the
+            ``(B, seq_len)`` keep-mask for pooling, or ``None`` without a mask.
+        :rtype: Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]
+        """
         # Extract input_ids and optional token_type_ids from inputs
         if isinstance(inputs, dict):
             input_ids = inputs['input_ids']
@@ -635,6 +660,13 @@ class TextEncoder(keras.layers.Layer):
 
         # Add CLS token if configured
         if self.use_cls_token:
+            if attention_mask is not None and len(attention_mask.shape) == 3:
+                raise ValueError(
+                    "TextEncoder: a 3D (batch, query, key) attention_mask is not "
+                    "supported with use_cls_token=True (the CLS row and column "
+                    "would have to be invented); pass a 2D (batch, seq_len) "
+                    "padding mask, or build the encoder without a CLS token."
+                )
             cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
             x = ops.concatenate([cls_tokens, x], axis=1)
             # Update attention mask to account for CLS token
@@ -679,22 +711,31 @@ class TextEncoder(keras.layers.Layer):
         if self.final_norm is not None:
             x = self.final_norm(x, training=training)
 
-        # Apply pooling using SequencePooling layer
-        # Convert attention mask to format expected by SequencePooling (batch, seq_len)
+        # The pooling keep-mask (batch, seq_len). A 2D mask is one already.
+        # DECISION plan-2026-10-14T062616-81938e81/D-205: from a 3D
+        # (batch, query, key) mask, a position is kept when ANY query may
+        # attend to it. Do NOT read one row: the first row of a causal mask
+        # keeps position 0 alone, so every reducing strategy pooled token 0
+        # (mean == x[:, 0], measured) and 'none' zeroed the rest.
         pooling_mask = None
         if attention_mask is not None:
-            # If attention_mask is 2D (batch, seq_len), use as is
-            # If attention_mask is 3D (batch, seq_len, seq_len), take diagonal or first row
             if len(ops.shape(attention_mask)) == 2:
                 pooling_mask = attention_mask
             elif len(ops.shape(attention_mask)) == 3:
-                # Use the first row which indicates which positions are valid
-                pooling_mask = attention_mask[:, 0, :]
+                pooling_mask = keras.ops.any(
+                    keras.ops.cast(attention_mask, 'bool'), axis=1
+                )
 
-        # Apply pooling
-        output = self.pooling_layer(x, mask=pooling_mask, training=training)
+        return x, pooling_mask
 
-        return output
+    def _ensure_built(
+            self,
+            inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+    ) -> None:
+        """Build from the token-id shape when a helper runs before any call."""
+        if not self.built:
+            input_ids = inputs['input_ids'] if isinstance(inputs, dict) else inputs
+            self.build(tuple(keras.ops.shape(input_ids)))
 
     def get_sequence_features(
             self,
@@ -704,6 +745,9 @@ class TextEncoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Get full sequence features regardless of output_mode.
+
+        With an attention mask, every padded position comes back as zeros
+        (``SequencePooling('none')``). The pooling layer is not touched.
 
         :param inputs: Input tensor(s).
         :type inputs: Union[keras.KerasTensor, Dict]
@@ -716,21 +760,16 @@ class TextEncoder(keras.layers.Layer):
         :return: Sequence features ``(B, seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        # Temporarily save original pooling strategy and set to 'none'
-        original_strategy = self.pooling_layer.strategy
-        self.pooling_layer.strategy = ['none']
-
-        try:
-            features = self(
-                inputs=inputs,
-                token_type_ids=token_type_ids,
-                attention_mask=attention_mask,
-                training=training
-            )
-            return features
-        finally:
-            # Restore original pooling strategy
-            self.pooling_layer.strategy = original_strategy
+        # DECISION plan-2026-10-14T062616-81938e81/D-205: never reassign
+        # self.pooling_layer.strategy. Swapping it for the call and restoring
+        # it raised KeyError for a learnable mode the layer never built, made
+        # runtime differ from config, and is not trace-safe. A throwaway
+        # weightless SequencePooling('none') draws no seed (D-087).
+        self._ensure_built(inputs)
+        x, pooling_mask = self._encode(
+            inputs, token_type_ids, attention_mask, training
+        )
+        return SequencePooling(strategy='none')(x, mask=pooling_mask)
 
     def get_pooled_features(
             self,
@@ -741,6 +780,13 @@ class TextEncoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Get pooled features with a specified pooling strategy.
+
+        ``pooling_mode == output_mode`` returns the encoder's own output. Any
+        other weightless strategy pools the sequence with a fresh
+        ``SequencePooling``. A learnable one (``attention``,
+        ``multi_head_attention``, ``weighted``) exists only if it was built at
+        construction, so asking for another raises ``ValueError``; so does
+        ``'cls'`` without a CLS token, as at construction.
 
         :param inputs: Input tensor(s).
         :type inputs: Union[keras.KerasTensor, Dict]
@@ -754,22 +800,37 @@ class TextEncoder(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Pooled features ``(B, embed_dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: For an unknown mode, a learnable mode other than
+            ``output_mode``, or ``'cls'`` without a CLS token.
         """
-        # Temporarily save original pooling strategy and set to requested mode
-        original_strategy = self.pooling_layer.strategy
-        self.pooling_layer.strategy = [pooling_mode]
-
-        try:
-            features = self(
+        if pooling_mode == self.output_mode:
+            return self(
                 inputs=inputs,
                 token_type_ids=token_type_ids,
                 attention_mask=attention_mask,
                 training=training
             )
-            return features
-        finally:
-            # Restore original pooling strategy
-            self.pooling_layer.strategy = original_strategy
+        if pooling_mode not in get_args(PoolingStrategy):
+            raise ValueError(
+                f"pooling_mode must be one of {list(get_args(PoolingStrategy))}, "
+                f"got {pooling_mode!r}"
+            )
+        if pooling_mode in _LEARNABLE_POOLING_MODES:
+            raise ValueError(
+                f"pooling_mode={pooling_mode!r} is learnable, and this encoder "
+                f"was built with output_mode={self.output_mode!r}, so it owns no "
+                f"trained {pooling_mode!r} pooler. Build the encoder with "
+                f"output_mode={pooling_mode!r} to pool this way."
+            )
+        if pooling_mode == 'cls' and not self.use_cls_token:
+            raise ValueError("pooling_mode='cls' requires use_cls_token=True")
+        self._ensure_built(inputs)
+        x, pooling_mask = self._encode(
+            inputs, token_type_ids, attention_mask, training
+        )
+        return SequencePooling(strategy=pooling_mode)(
+            x, mask=pooling_mask, training=training
+        )
 
     def compute_output_shape(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]], Dict[str, Any]]) -> \
     Tuple[Optional[int], ...]:

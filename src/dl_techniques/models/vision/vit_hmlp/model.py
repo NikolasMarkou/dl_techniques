@@ -113,7 +113,7 @@ class ViTHMLP(keras.Model):
         │ x[:, 0]       │   │ pooling='cls'  → x[:, 0]   │
         │ [Dropout]     │   │ pooling='mean' → mean over │
         │ Dense(classes)│   │ pooling='max'  → max  over │
-        │               │   │   the whole sequence       │
+        │               │   │   the patch tokens         │
         │ → [B, classes]│   │ pooling=None → [B,N+1,D]   │
         └───────────────┘   └────────────────────────────┘
 
@@ -152,9 +152,8 @@ class ViTHMLP(keras.Model):
 
         pooling='cls' reads x[:, 0] alone
 
-        pooling='mean'/'max' pool the whole sequence, CLS token
-        included (no exclude_positions; this differs from the
-        sibling vit package, which excludes the CLS token)
+        pooling='mean'/'max' pool the patch tokens only
+        (exclude_positions=[0]), as the sibling vit package does
 
     :param input_shape: Input image shape ``(height, width, channels)``. Must
         have positive dimensions divisible by ``patch_size``. Defaults to
@@ -173,9 +172,9 @@ class ViTHMLP(keras.Model):
         False the model is a feature extractor. Defaults to True.
     :type include_top: bool
     :param pooling: Pooling strategy, used only when ``include_top=False``:
-        ``'cls'`` reads the CLS token, ``'mean'``/``'max'`` pool the whole
-        sequence including the CLS token, ``None`` returns the full
-        sequence. Defaults to None.
+        ``'cls'`` reads the CLS token, ``'mean'``/``'max'`` pool the patch
+        tokens (the CLS token excluded, as in ``vit``), ``None`` returns the
+        full sequence. Defaults to None.
     :type pooling: Optional[PoolingMode]
     :param dropout_rate: General dropout rate, applied in the transformer
         layers and before the classification head. Defaults to 0.0.
@@ -536,13 +535,18 @@ class ViTHMLP(keras.Model):
             )
 
         # Feature-extraction pooling via the shared SequencePooling layer.
-        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling with the CLS
-        # token included in mean/max (no exclude_positions); adding it would drop CLS from the output. See decisions.md.
+        # DECISION plan-2026-10-14T062616-81938e81/D-205: mean/max pool the
+        # patch tokens only (exclude_positions=[0]), as the ViT references do
+        # (timm global_pool_nlc; deit's hMLP reference
+        # reads x[:, 0] only). Do NOT include the CLS token again: the
+        # old rule had no recorded reason beyond keeping the numbers unchanged.
         self.pool = None
         if self.pooling == "cls":
             self.pool = SequencePooling(strategy="cls", name="seq_pool")
         elif self.pooling in ("mean", "max"):
-            self.pool = SequencePooling(strategy=self.pooling, name="seq_pool")
+            self.pool = SequencePooling(
+                strategy=self.pooling, exclude_positions=[0], name="seq_pool"
+            )
 
         # CLS token weight (created in build())
         self.cls_token = None

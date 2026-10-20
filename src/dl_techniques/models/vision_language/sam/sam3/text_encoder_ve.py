@@ -115,6 +115,9 @@ class Sam3TextEncoder(keras.layers.Layer):
         # DECISION plan-2026-08-04T044628-4c240b4c/D-101: use output_mode='none',
         # never get_sequence_features().
         # That method mutates self.pooling_layer.strategy and re-invokes self(...) -- not trace-safe inside call(). See decisions.md.
+        # Superseded in part by plan-2026-10-14T062616-81938e81/D-205: the method
+        # no longer reassigns the strategy. output_mode='none' stays: one forward
+        # through the layer call, and no throwaway pooler per call.
         #
         # DECISION plan-2026-08-04T044628-4c240b4c/D-102: normalization_position
         # ='pre' and zero dropout are required, not stylistic defaults.

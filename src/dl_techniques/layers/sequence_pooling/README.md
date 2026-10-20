@@ -346,12 +346,15 @@ self.pooling_layer = SequencePooling(
 )
 ```
 
-`VisionEncoder` additionally uses `exclude_positions` to skip the CLS token when
-statistically pooling the patch tokens:
+`VisionEncoder` additionally uses `exclude_positions` to skip the CLS token
+whenever it reduces the patch tokens:
 
 ```python
 # Inside VisionEncoder __init__ (vision_encoder.py)
-exclude_positions = [0] if (use_cls_token and output_mode in ['mean', 'max']) else []
+exclude_positions = (
+    [0] if use_cls_token and output_mode not in _READS_THE_WHOLE_SEQUENCE_OR_CLS
+    else []
+)   # _READS_THE_WHOLE_SEQUENCE_OR_CLS = {'cls', 'first', 'none', 'flatten'}
 
 self.pooling_layer = SequencePooling(
     strategy=output_mode,
@@ -359,6 +362,25 @@ self.pooling_layer = SequencePooling(
     name='output_pooling',
 )
 ```
+
+#### Which consumers pool the CLS token
+
+Each consumer follows its own reference rather than one package-wide rule.
+`cls`/`first` always read the CLS token, and `none`/`flatten` return the whole
+sequence.
+
+| Consumer | Reductions over the sequence | Reference |
+|----------|-----------------------------|-----------|
+| `layers/transformers/VisionEncoder` | exclude the CLS token (every strategy but `cls`, `first`, `none`, `flatten`) | timm `global_pool_nlc` reduces `x[:, num_prefix_tokens:]`; its `map` pool drops prefix tokens by default |
+| `models/vision/vit` (`mean`, `max`) | exclude | timm `global_pool_nlc` |
+| `models/vision/vit_siglip` (`mean`, `max`) | exclude | big_vision SigLIP tower: `gap` averages patch tokens, no CLS token |
+| `models/vision/vit_hmlp` (`mean`, `max`) | exclude | deit hMLP reference reads `x[:, 0]` only; timm convention for reductions |
+| `models/vision/beit` (`use_mean_pooling`) | exclude | unilm BEiT `x[:, 1:, :].mean(1)` |
+| `layers/transformers/TextEncoder` | include (every strategy) | sentence-transformers `Pooling` averages every token the attention mask keeps, `[CLS]` included |
+
+Each row is pinned by a test that perturbs position 0 of the sequence the
+consumer pools: `tests/test_layers/test_transformers/test_the_encoders_pool_the_cls_token_as_their_reference_does.py`
+and `tests/test_models/test_the_vit_family_pools_the_cls_token_as_its_reference_does.py`.
 
 This is the canonical pattern: pass the pooling mode straight through as
 `strategy`, and let `SequencePooling` own the dispatch, masking, and exclusions.

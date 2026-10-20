@@ -168,9 +168,9 @@ class ViT(keras.Model):
               (SequencePooling(exclude_positions=[0]))
 
         averaging the CLS token into the patch statistics would
-        mix a summary vector into the thing it summarizes.
-        vit_siglip and vit_hmlp include it; here exclude_positions
-        marks the difference explicitly.
+        mix a summary vector into the thing it summarizes (timm's
+        global_pool_nlc reduces x[:, num_prefix_tokens:]).
+        vit_siglip and vit_hmlp do the same.
 
     **Normalization position (default diverges from the paper):**
 

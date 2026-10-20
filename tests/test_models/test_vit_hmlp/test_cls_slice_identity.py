@@ -1,19 +1,21 @@
-"""F-29 RED proof: pin ViTHMLP's CLS slice and its pooling inclusion by IDENTITY.
+"""F-29 RED proof: pin ViTHMLP's CLS slice and its pooling exclusion by IDENTITY.
 
 The sibling file is ``tests/test_models/test_vit/test_cls_slice_identity.py``;
-its module docstring carries the measurement and the method. The reason this
-package needs its own copy is that ``vit_hmlp`` INTENTIONALLY differs from
-``vit`` on the pooling half — it pools the CLS token IN, where ``vit`` excludes
-it — and that divergence is load-bearing, deliberate and documented at both
-sites. Pinning it in both packages is what makes "harmonising" the two
-impossible to do silently.
+its module docstring carries the measurement and the method. Until
+plan-2026-10-14T062616-81938e81 D-205 this file pinned the opposite: that
+``vit_hmlp`` pooled the CLS token IN, unlike ``vit``. That divergence had no
+recorded reason beyond keeping the numbers unchanged (its anchor's plan
+directory is gone), and the references exclude it: deit's hMLP reference reads
+``x[:, 0]`` only and timm's ``global_pool_nlc`` reduces
+``x[:, num_prefix_tokens:]``. The pooling class below is re-derived from that
+reading (mean/max over ``sequence[:, 1:]``), not from the current code.
 
 RED, measured at ``38c7493c6`` (3 tests in this file):
 
 | injection | result |
 |---|---|
 | ``x[:, 0, :]`` -> ``x[:, -1, :]`` | 1 failed |
-| ``exclude_positions=[0]`` ADDED (the forbidden harmonisation) | 2 failed |
+| ``exclude_positions=[0]`` ADDED (then forbidden; now the rule) | 2 failed |
 | ``SequencePooling`` DELETED (dead component) | 2 failed |
 """
 
@@ -41,17 +43,11 @@ def _np(t) -> np.ndarray:
     return keras.ops.convert_to_numpy(t)
 
 
-class TestViTHmlpPoolingIncludesCls:
-    """``vit_hmlp`` INTENTIONALLY differs from ``vit``: CLS is pooled in.
-
-    This is not an oversight — the D-001 anchor in ``vit_hmlp/model.py`` says
-    "Do NOT add exclude_positions=[0] here (would drop the CLS token and change
-    outputs)". The divergence is pinned in both packages so that "harmonising"
-    them silently is impossible.
-    """
+class TestViTHmlpPoolingExcludesCls:
+    """``vit_hmlp`` pools the patch tokens only, as ``vit`` and timm do (D-205)."""
 
     @pytest.mark.parametrize("strategy", ["mean", "max"])
-    def test_pooling_includes_position_zero(self, strategy):
+    def test_pooling_excludes_position_zero(self, strategy):
         model = ViTHMLP(
             input_shape=INPUT_SHAPE,
             patch_size=PATCH,
@@ -76,9 +72,9 @@ class TestViTHmlpPoolingIncludesCls:
             "control is vacuous on this input"
         )
         np.testing.assert_allclose(
-            pooled, including_cls, rtol=0, atol=1e-6,
-            err_msg="vit_hmlp pooling started excluding the CLS token; the "
-                    "deliberate divergence from vit was erased",
+            pooled, excluding_cls, rtol=0, atol=1e-6,
+            err_msg="vit_hmlp pooling reads the CLS token again; the ViT "
+                    "references reduce the patch tokens only (D-205)",
         )
 
 

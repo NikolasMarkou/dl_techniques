@@ -20,9 +20,10 @@ reach that `Dense`. `head_config_overrides` reshapes the head (for example
 `ValueError`.
 
 With `include_top=False`, `pooling` selects the output: `'cls'`, `'mean'` or `'max'` return
-`(batch, embed_dim)`, and `None` returns the full normalized sequence. Unlike `vit`, `mean` and
-`max` pool over the CLS token too; that difference is deliberate and pinned by
-`tests/test_models/test_vit_hmlp/test_cls_slice_identity.py`.
+`(batch, embed_dim)`, and `None` returns the full normalized sequence. As in `vit`, `mean` and
+`max` pool the patch tokens only (the CLS token is excluded, as timm's ViT pooling does); pinned
+by `tests/test_models/test_vit_hmlp/test_cls_slice_identity.py`. Until 2026-10-20 they pooled the
+CLS token in.
 
 The `return_dict` and `head_config_preset` arguments were removed on 2026-10-14. Archives saved
 before that date (a dict output, or the two-`DenseBlock` head) do not load and are not supported.

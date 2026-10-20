@@ -287,8 +287,9 @@ class TestNoPooling:
         assert tiny_encoder.encoder.output_mode == "none"
 
     def test_call_does_not_mutate_the_pooling_strategy(self, tiny_encoder):
-        # `get_sequence_features()` reaches the same tensor by mutating this
-        # attribute and re-invoking the layer. Nothing in `call()` may do that.
+        # `get_sequence_features()` used to reach the same tensor by mutating
+        # this attribute and re-invoking the layer (removed by D-205 of
+        # plan-2026-10-14T062616-81938e81). Nothing in `call()` may do that.
         before = list(tiny_encoder.encoder.pooling_layer.strategy)
         _forward(tiny_encoder, _ids())
         assert list(tiny_encoder.encoder.pooling_layer.strategy) == before
