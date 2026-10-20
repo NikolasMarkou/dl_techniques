@@ -21,6 +21,8 @@ Key Features:
     - Complete compatibility with Keras 3 serialization.
 """
 
+import copy
+
 import keras
 from typing import Any, Dict, List, Literal, Optional
 
@@ -29,6 +31,7 @@ from typing import Any, Dict, List, Literal, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.validation import positive_float, positive_int
 from .weighted_pooling import WeightedPooling
 from .sequence_pooling import SequencePooling, check_strategy_config
 from .attention_pooling import AttentionPooling
@@ -181,11 +184,12 @@ def get_sequence_pooling_info() -> Dict[str, Dict[str, Any]]:
 
     Returns:
         A dictionary mapping each pooling type to its metadata (description,
-        required_params, optional_params, use_case). Each entry is a shallow
-        copy so callers cannot mutate the registry.
+        required_params, optional_params, use_case). Each entry is a deep
+        copy (the layer class itself is shared), so callers cannot mutate the
+        registry.
     """
     return {
-        pool_type: info.copy()
+        pool_type: copy.deepcopy(info)
         for pool_type, info in SEQUENCE_POOLING_REGISTRY.items()
     }
 
@@ -248,22 +252,18 @@ def validate_sequence_pooling_config(
             f"Required: {required}, Provided: {list(kwargs.keys())}"
         )
 
-    # Validate positive-integer parameters
+    # The layers' own rules (utils/validation.py), so the factory refuses
+    # exactly what the constructors refuse.
     positive_int_params = [
         'hidden_dim', 'num_heads', 'max_seq_len', 'attention_hidden_dim',
         'attention_num_heads', 'weighted_max_seq_len', 'top_k'
     ]
     for param in positive_int_params:
-        if param in kwargs and kwargs[param] <= 0:
-            raise ValueError(
-                f"Parameter '{param}' must be positive, got {kwargs[param]}"
-            )
-
-    # Validate positive-float parameters
-    if 'temperature' in kwargs and kwargs['temperature'] <= 0:
-        raise ValueError(
-            f"Parameter 'temperature' must be positive, "
-            f"got {kwargs['temperature']}"
+        if param in kwargs:
+            positive_int(kwargs[param], param, f"sequence pooling '{pooling_type}'")
+    if 'temperature' in kwargs:
+        positive_float(
+            kwargs['temperature'], 'temperature', f"sequence pooling '{pooling_type}'"
         )
 
     # Validate probability/rate parameters (0.0 to 1.0)

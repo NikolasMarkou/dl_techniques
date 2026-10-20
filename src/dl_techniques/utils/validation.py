@@ -1,11 +1,15 @@
 """Argument checks shared across packages.
 
-One helper today, :func:`positive_int`, the single rule for a count argument.
-It replaced three private copies with three different refusal sets
-(``layers/adapters/factory.py``, ``layers/moe/config.py`` and
-``layers/heads/validation.py``; plan-2026-10-14T062616-81938e81 D-061, D-088).
+Two helpers: :func:`positive_int`, the single rule for a count argument, and
+:func:`positive_float`, its sibling for a scale argument such as a softmax
+temperature. ``positive_int`` replaced three private copies with three
+different refusal sets (``layers/adapters/factory.py``, ``layers/moe/config.py``
+and ``layers/heads/validation.py``; plan-2026-10-14T062616-81938e81 D-061,
+D-088). ``positive_float`` replaced three missing checks in
+``layers/sequence_pooling`` (D-203).
 """
 
+import math
 import numbers
 from typing import Any, Optional
 
@@ -79,4 +83,45 @@ def positive_int(value: Any, name: str, owner: Optional[str] = None) -> int:
             f"{who}{name} must be <= {MAX_TENSOR_DIM} (the int32 "
             f"tensor-dimension ceiling), got {value}"
         )
+    return value
+
+
+def positive_float(value: Any, name: str, owner: Optional[str] = None) -> float:
+    """
+    Check that a scale argument is a positive finite number, and return it as one.
+
+    Interface contract (callers: ``AttentionPooling``, ``WeightedPooling`` and
+    ``SequencePooling`` in ``layers/sequence_pooling``, for ``temperature``):
+
+    * An ``int``, ``float`` or numpy real number that is finite and ``> 0`` is
+      returned as a plain Python ``float`` (so ``get_config`` stays JSON-safe).
+    * Anything else raises ``ValueError`` naming ``owner`` (when given) and
+      ``name``, in the message family of :func:`positive_int`: ``bool`` and
+      ``np.bool_``, a string, ``None``, NaN, an infinity, ``0`` and negatives.
+      A temperature of 0 divides the logits by zero (all NaN), and a negative
+      one silently inverts the weighting.
+
+    :param value: The caller's value.
+    :type value: Any
+    :param name: Argument name, for the error message.
+    :type name: str
+    :param owner: Class or function name, for the error message.
+    :type owner: Optional[str]
+    :return: ``value`` as a Python ``float``.
+    :rtype: float
+    :raises ValueError: If ``value`` is not a positive finite number.
+    """
+    who = f"{owner}: " if owner else ""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{who}{name} must be a positive number, got bool ({value!r})."
+        )
+    if not isinstance(value, numbers.Real):
+        raise ValueError(
+            f"{who}{name} must be a positive number, got "
+            f"{type(value).__name__} ({value!r})"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{who}{name} must be a positive finite number, got {value}")
     return value

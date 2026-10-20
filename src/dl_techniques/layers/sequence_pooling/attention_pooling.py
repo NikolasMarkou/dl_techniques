@@ -22,7 +22,9 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.validation import positive_float, positive_int
 
 # ---------------------------------------------------------------------
 
@@ -95,12 +97,16 @@ class AttentionPooling(keras.layers.Layer):
         """Initialise the attention pooling layer."""
         super().__init__(**kwargs)
 
-        # Store all configuration
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
+        # Store all configuration (checked here, not first at call time)
+        self.hidden_dim = positive_int(hidden_dim, 'hidden_dim', 'AttentionPooling')
+        self.num_heads = positive_int(num_heads, 'num_heads', 'AttentionPooling')
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(
+                f"AttentionPooling: dropout_rate must be in [0, 1), got {dropout_rate!r}"
+            )
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.temperature = temperature
+        self.temperature = positive_float(temperature, 'temperature', 'AttentionPooling')
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
@@ -163,7 +169,14 @@ class AttentionPooling(keras.layers.Layer):
 
         Args:
             inputs: Input sequence ``(batch, seq_len, embed_dim)``.
-            mask: Optional boolean mask ``(batch, seq_len)``.
+            mask: Optional boolean mask ``(batch, seq_len)``, 1/True = keep.
+                A masked position contributes exactly zero to the output while
+                every kept logit is above the dtype's mask sentinel
+                (``utils.dtype_policy.mask_sentinel``: -1e9 in float32, -1e4
+                in float16). A fully-masked row is not rescued: every logit
+                becomes the same sentinel, so the softmax is uniform and the
+                result is the plain mean over the sequence (finite, never NaN).
+                The sibling ``WeightedPooling`` behaves the same way.
             training: Whether in training mode.
 
         Returns:
@@ -187,11 +200,14 @@ class AttentionPooling(keras.layers.Layer):
 
         # Apply mask if provided
         if mask is not None:
-            # dtype-safe mask sentinel (ops.where, finite -1e4) —
-            # a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens;
-            # do NOT revert to an additive -1e9/-inf mask.
+            # DECISION plan-2026-10-14T062616-81938e81/D-203: select the
+            # dtype's mask_sentinel with ops.where. The old float32 literal
+            # -1e4 let a masked position take all the weight once the kept
+            # logits fell below -1e4 (a small temperature). Do NOT revert to a
+            # literal, and do NOT use an additive -1e9 mask (-inf under fp16,
+            # and 0 * -inf = NaN poisons the kept tokens).
             mask_bool = keras.ops.expand_dims(keras.ops.cast(mask, "bool"), -1)
-            neg = keras.ops.cast(-1e4, scores.dtype)
+            neg = keras.ops.cast(mask_sentinel(self.compute_dtype), scores.dtype)
             scores = keras.ops.where(mask_bool, scores, neg)
 
         # Compute attention weights

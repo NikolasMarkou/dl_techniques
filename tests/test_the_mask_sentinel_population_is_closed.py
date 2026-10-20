@@ -439,27 +439,6 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "filter can stay simple rather than grow a special case."
     ),
     # -- Verified safe: already the where-form with a float16-representable value.
-    (
-        "dl_techniques/layers/sequence_pooling/attention_pooling.py",
-        "AttentionPooling.call",
-    ): (
-        "already the target idiom: ops.where with a cast -1e4, plus its own "
-        "anchor forbidding a revert to the additive -1e9 form."
-    ),
-    (
-        "dl_techniques/layers/sequence_pooling/weighted_pooling.py",
-        "WeightedPooling.call",
-    ): (
-        "already the target idiom: ops.where with a cast -1e4 over a "
-        "broadcast-to-mask-shape weight vector."
-    ),
-    (
-        "dl_techniques/layers/sequence_pooling/sequence_pooling.py",
-        "SequencePooling._select_top_k",
-    ): (
-        "already the target idiom: ops.where with a cast -1e4 on the top-k norm "
-        "scores."
-    ),
     ("dl_techniques/models/language/colbert/components.py", "<module>"): (
         "DEFAULT_MAXSIM_MASK_VALUE = -1e4 is exactly representable in float16 "
         "(binary16 spacing at 1e4 is 8, and 10000 / 8 = 1250), is consumed via "
@@ -473,41 +452,12 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "-1e4 under float16 AND selection rather than multiplication. Safe on "
         "both counts."
     ),
-    # -- Sites this plan fixed. The constants are gone from the ADDITIVE form at
-    #    each of them, but the enclosing symbols still hold a where-form literal
-    #    or a neighbouring one, so the entries stay and name their history.
-    ("dl_techniques/layers/heads/nlp/factory.py", "BaseNLPHead._pool_sequence"): (
-        "ADDITIVE-FORM DEFECT, converted by step 4 of "
-        "plan-2026-08-31T134711-6271592d. Allowlisted for the population "
-        "predicate only; TestTheAdditiveMaskBiasFormIsExtinct has no allowlist "
-        "and failed on this site until the conversion landed."
-    ),
-    ("dl_techniques/layers/heads/nlp/factory.py", "QuestionAnsweringHead.call"): (
-        "ADDITIVE-FORM DEFECT (start and end logits), converted by step 4. Same "
-        "accounting as above. The head is NOT dead code: it is bound in the "
-        "factory dispatch table for QUESTION_ANSWERING and SPAN_EXTRACTION."
-    ),
-    (
-        "dl_techniques/layers/sequence_pooling/sequence_pooling.py",
-        "SequencePooling._apply_single_strategy",
-    ): (
-        "ADDITIVE-FORM DEFECT in the 'max' and 'min' strategies, converted by "
-        "step 5. The 'min' strategy needs the POSITIVE sentinel. The same "
-        "symbol also holds an already-correct where-form -1e4 in the "
-        "'top_k_max' branch, which is why this entry survives step 5."
-    ),
-    (
-        "dl_techniques/models/language/tree_transformer/components.py",
-        "TreeMHA.call",
-    ): (
-        "ADDITIVE-FORM DEFECT, converted by step 6. Was dtype-guarded to -1e4 "
-        "under float16 and therefore safe in practice; converted for "
-        "defect-class closure, not because it was broken."
-    ),
-    ("dl_techniques/models/neural_computer/nam/cell.py", "NAMCell.call"): (
-        "ADDITIVE-FORM DEFECT, converted by step 6. Same dtype guard and same "
-        "reasoning as TreeMHA.call above."
-    ),
+    # -- The additive-form sites plan-2026-08-31T134711-6271592d fixed (the NLP
+    #    head pooling and QA logits, the sequence pooling max/min, TreeMHA,
+    #    NAMCell) and the three sequence pooling `-1e4` sites moved to
+    #    `mask_sentinel` hold no literal any more. Their entries were deleted by
+    #    plan-2026-10-14T062616-81938e81 D-203; a literal reappearing in one of
+    #    those symbols needs a new written reason.
     # -- Outside the library. Added by completion fix 3.1, when the walk widened
     #    from `src/dl_techniques/` to `src/`. None of these is a masked forward
     #    path under a mixed-precision policy; each says why.
@@ -563,6 +513,17 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "separately and for a different reason."
     ),
 }
+
+
+#: Allowlist entries that hold no literal today, on purpose: each one's reason
+#: says why the permission is kept ahead of any literal (a canonical constant
+#: now routed through `mask_sentinel`, and two `finfo.min` sites listed so a
+#: rename trips the rot check). Every other entry must mark a live site.
+_KEPT_WITHOUT_A_LITERAL = frozenset({
+    ("dl_techniques/layers/attention/common.py", "<module>"),
+    ("dl_techniques/models/vision_language/sd3_mmdit/text_encoders.py", "<module>"),
+    ("dl_techniques/layers/attention/non_local_attention.py", "<module>"),
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1507,6 +1468,24 @@ class TestTheAllowlistItselfIsWellFormed:
             f"allowlist reasons too short to explain anything: {list(too_short)}"
         )
 
+    def test_every_entry_marks_a_live_site_unless_kept_on_purpose(self) -> None:
+        """A permission whose literal is gone is a stale, silent exemption.
+
+        Measured at d793ea4a1: 7 of 34 entries matched no site, 4 of them with
+        reasons claiming a literal that no longer existed; step 5.4 of
+        plan-2026-10-14T062616-81938e81 emptied 4 more (D-203).
+        """
+        sites, _ = _census(find_large_negative_constants)
+        live = {(site.path, site.symbol) for site in sites}
+        unused = {key for key in SENTINEL_ALLOWLIST if key not in live}
+        assert unused == _KEPT_WITHOUT_A_LITERAL, (
+            f"allowlist entries that mark no site: "
+            f"{sorted(unused - _KEPT_WITHOUT_A_LITERAL)}; delete them, or add "
+            f"them to _KEPT_WITHOUT_A_LITERAL with a reason saying why the "
+            f"permission is kept. Kept entries that now hold a literal: "
+            f"{sorted(_KEPT_WITHOUT_A_LITERAL - unused)}"
+        )
+
     def test_every_allowlisted_file_still_exists(self) -> None:
         """Rot check: a rename must surface as a failure, not as silence."""
         missing = sorted(
@@ -1552,7 +1531,9 @@ class TestTheAllowlistItselfIsWellFormed:
         library_keys = [
             path for path, _ in SENTINEL_ALLOWLIST if path.startswith(LIBRARY_PREFIX)
         ]
-        assert len(library_keys) >= 20, (
+        # 18 since plan-2026-10-14T062616-81938e81 D-203 deleted 8 library
+        # entries whose literals were gone; was 26.
+        assert len(library_keys) >= 18, (
             f"only {len(library_keys)} allowlist keys are library-relative; the "
             f"census walks src/ and every library key needs the "
             f"{LIBRARY_PREFIX!r} prefix"

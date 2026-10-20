@@ -98,8 +98,9 @@ print(f"Required: {seq_info['required_params']}")               # []
 print(f"Optional: {list(seq_info['optional_params'].keys())}")
 ```
 
-`get_sequence_pooling_info()` returns shallow copies of each registry entry, so
-mutating the result does not corrupt the global `SEQUENCE_POOLING_REGISTRY`.
+`get_sequence_pooling_info()` returns a deep copy of each registry entry (the
+layer class itself is shared), so mutating the result, nested
+`optional_params` included, does not change `SEQUENCE_POOLING_REGISTRY`.
 
 ### Validation
 
@@ -211,7 +212,9 @@ pool = create_sequence_pooling_layer(
 )
 ```
 
-`exclude_positions` is honoured by **every** strategy except `none`/`flatten`
+`exclude_positions` takes distinct non-negative ints (a negative position, a
+repeat, a bool or a non-integer raises; there is no negative indexing, so `[-1]`
+cannot silently do nothing). It is honoured by **every** strategy except `none`/`flatten`
 (which return the sequence, so there is no index to move and no reduction to
 exclude from). It used to be a silent no-op for the four positional strategies;
 it is not any more. Unlike a keep-mask it is an EXPLICIT caller instruction, so
@@ -244,8 +247,8 @@ fully-masked row.
 | Learnable | `weighted` | `dim` | `WeightedPooling` (per-position learnable weights). |
 | Top-k | `top_k_mean` | `dim` | Mean over the `top_k` tokens by squared L2 norm. |
 | Top-k | `top_k_max` | `dim` | Max over the `top_k` tokens by squared L2 norm. |
-| Special | `none` | `(seq_len, dim)` | Pass-through; returns the sequence unchanged. |
-| Special | `flatten` | `seq_len * dim` | Flattens the sequence to a single vector. |
+| Special | `none` | `(seq_len, dim)` | Pass-through; returns the sequence, with every masked position zeroed when a mask is given. |
+| Special | `flatten` | `seq_len * dim` | Flattens the sequence to a single vector; masked positions are zeroed first, so padding content never reaches it. |
 
 #### Aggregation methods (`AggregationMethod`)
 
@@ -382,7 +385,7 @@ class MyProjectClassificationHead(keras.layers.Layer):
   existence, declared keywords, required-parameter completeness, value ranges and
   the `'sequence'` strategy and aggregation names. Raises `ValueError`.
 - **`get_sequence_pooling_info()`** — Returns a dict mapping each pooling type to a
-  shallow copy of its metadata (`description`, `required_params`, `optional_params`,
+  deep copy of its metadata (`description`, `required_params`, `optional_params`,
   `use_case`).
 - **`list_sequence_pooling_types()`** — Returns an alphabetically sorted list of the
   registered pooling-type strings.

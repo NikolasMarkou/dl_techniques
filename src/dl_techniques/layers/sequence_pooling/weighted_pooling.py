@@ -20,7 +20,9 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.validation import positive_float, positive_int
 
 # ---------------------------------------------------------------------
 
@@ -83,10 +85,14 @@ class WeightedPooling(keras.layers.Layer):
         """Initialise the weighted pooling layer."""
         super().__init__(**kwargs)
 
-        # Store all configuration
-        self.max_seq_len = max_seq_len
+        # Store all configuration (checked here, not first at call time)
+        self.max_seq_len = positive_int(max_seq_len, 'max_seq_len', 'WeightedPooling')
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(
+                f"WeightedPooling: dropout_rate must be in [0, 1), got {dropout_rate!r}"
+            )
         self.dropout_rate = dropout_rate
-        self.temperature = temperature
+        self.temperature = positive_float(temperature, 'temperature', 'WeightedPooling')
         self.initializer = keras.initializers.get(initializer)
         self.regularizer = keras.regularizers.get(regularizer) if regularizer else None
 
@@ -184,9 +190,13 @@ class WeightedPooling(keras.layers.Layer):
             # (`# DECISION plan-2026-07-15T114613-5add9baa/D-001`).
             # The broadcast is load-bearing: `position_weights` is ONE vector
             # shared by the whole batch, while the mask is per-batch-row.
+            # Superseded in part by plan-2026-10-14T062616-81938e81/D-203: the
+            # sentinel is now mask_sentinel(compute_dtype) (-1e4 in float16 as
+            # before, -1e9 in float32), so kept logits below -1e4 no longer
+            # lose to a masked position in float32.
             weights = keras.ops.broadcast_to(weights, keras.ops.shape(mask))
             keep = keras.ops.cast(mask, "bool")
-            neg = keras.ops.cast(-1e4, weights.dtype)
+            neg = keras.ops.cast(mask_sentinel(self.compute_dtype), weights.dtype)
             weights = keras.ops.where(keep, weights, neg)
 
         # Normalize weights

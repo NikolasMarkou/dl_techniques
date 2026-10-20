@@ -1,4 +1,4 @@
-"""One positive-integer rule, imported by the adapters, the MoE config and the heads.
+"""One positive-integer rule, imported by the adapters, the MoE config, the heads and the poolers.
 
 Guard for plan-2026-10-14T062616-81938e81 step 12 Part F item 11 (D-061,
 D-088). Measured at d6995a932, three private copies refused different sets:
@@ -6,7 +6,9 @@ D-088). Measured at d6995a932, three private copies refused different sets:
 ``2**31`` (a width no int32 tensor dimension holds), ``layers/moe/config.py``
 refused it, and only the MoE copy named ``np.bool_``. Each package now binds
 ``dl_techniques.utils.validation.positive_int`` and the refusal table below
-holds through each package's own entry point.
+holds through each package's own entry point. The sequence poolers joined in
+step 5.4 (D-203); their entry points are pinned by
+``tests/test_layers/test_the_pooling_layers_refuse_bad_arguments_early.py``.
 """
 
 import numpy as np
@@ -16,6 +18,12 @@ from dl_techniques.layers.adapters import factory as adapters_factory
 from dl_techniques.layers.heads import validation as heads_validation
 from dl_techniques.layers.heads.vlm.task_types import VLMTaskConfig, VLMTaskType
 from dl_techniques.layers.moe import config as moe_config
+from dl_techniques.layers.sequence_pooling import (
+    attention_pooling,
+    factory as pooling_factory,
+    sequence_pooling,
+    weighted_pooling,
+)
 from dl_techniques.utils import validation
 
 ACCEPTED = [(1, 1), (7, 7), (np.int64(4), 4), (np.uint8(3), 3),
@@ -24,8 +32,13 @@ REFUSED = [True, False, np.bool_(True), 0, -3, 2.0, 2.5, "4", None, 2 ** 31,
            np.int64(2 ** 31)]
 
 
-@pytest.mark.parametrize("module", [adapters_factory, heads_validation, moe_config],
-                         ids=["adapters", "heads", "moe"])
+@pytest.mark.parametrize(
+    "module",
+    [adapters_factory, heads_validation, moe_config, attention_pooling,
+     weighted_pooling, sequence_pooling, pooling_factory],
+    ids=["adapters", "heads", "moe", "attention_pooling", "weighted_pooling",
+         "sequence_pooling", "pooling_factory"],
+)
 def test_each_package_binds_the_one_helper(module):
     assert module.positive_int is validation.positive_int
 

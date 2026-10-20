@@ -74,16 +74,23 @@ References:
         methods, highlighting that the optimal strategy is task-dependent.
 """
 
+import numbers
 import typing
 
 import keras
+import numpy as np
 from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.dtype_policy import mask_sentinel
+from dl_techniques.utils.dtype_policy import (
+    accumulation_dtype,
+    mask_sentinel,
+    stability_floor,
+)
+from dl_techniques.utils.validation import positive_float, positive_int
 from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -217,6 +224,44 @@ def check_strategy_config(
                 )
     return strategies
 
+
+def _check_exclude_positions(exclude_positions: Optional[List[int]]) -> List[int]:
+    """Return ``exclude_positions`` as a list of distinct non-negative ints.
+
+    ``None`` gives ``[]``. A bool, a non-integer, a negative or a repeated
+    position raises ``ValueError``: a negative index never matched any
+    position (``arange(seq_len) != -1`` is always true, so ``[-1]`` was a
+    silent no-op), and negative indexing is refused rather than widened
+    (plan-2026-10-14T062616-81938e81 D-123, D-203). Numpy integers are
+    accepted and returned as Python ints.
+    """
+    if exclude_positions is None:
+        return []
+    if not isinstance(exclude_positions, (list, tuple)):
+        raise ValueError(
+            f"SequencePooling: exclude_positions must be a list of ints, got "
+            f"{type(exclude_positions).__name__} ({exclude_positions!r})."
+        )
+    checked: List[int] = []
+    for pos in exclude_positions:
+        if isinstance(pos, (bool, np.bool_)) or not isinstance(pos, numbers.Integral):
+            raise ValueError(
+                f"SequencePooling: exclude_positions holds {pos!r} "
+                f"({type(pos).__name__}); every position must be an int."
+            )
+        if pos < 0:
+            raise ValueError(
+                f"SequencePooling: exclude_positions holds {pos}; negative "
+                f"positions are refused (no negative indexing)."
+            )
+        if int(pos) in checked:
+            raise ValueError(
+                f"SequencePooling: exclude_positions names position {pos} more "
+                f"than once."
+            )
+        checked.append(int(pos))
+    return checked
+
 # ---------------------------------------------------------------------
 # Main Configurable Pooling Layer
 # ---------------------------------------------------------------------
@@ -345,16 +390,22 @@ class SequencePooling(keras.layers.Layer):
         """Initialise the sequence pooling layer."""
         super().__init__(**kwargs)
 
-        # Store ALL configuration (critical for get_config)
+        # Store ALL configuration (critical for get_config). `strategy` is kept
+        # exactly as given for get_config; `self.strategy` is the list form.
+        self._strategy_arg = strategy
         self.strategy = check_strategy_config(strategy, aggregation_method)
-        self.exclude_positions = exclude_positions or []
+        self.exclude_positions = _check_exclude_positions(exclude_positions)
         self.aggregation_method = aggregation_method
-        self.attention_hidden_dim = attention_hidden_dim
-        self.attention_num_heads = attention_num_heads
+        owner = 'SequencePooling'
+        self.attention_hidden_dim = positive_int(
+            attention_hidden_dim, 'attention_hidden_dim', owner)
+        self.attention_num_heads = positive_int(
+            attention_num_heads, 'attention_num_heads', owner)
         self.attention_dropout_rate = attention_dropout_rate
-        self.weighted_max_seq_len = weighted_max_seq_len
-        self.top_k = top_k
-        self.temperature = temperature
+        self.weighted_max_seq_len = positive_int(
+            weighted_max_seq_len, 'weighted_max_seq_len', owner)
+        self.top_k = positive_int(top_k, 'top_k', owner)
+        self.temperature = positive_float(temperature, 'temperature', owner)
         self.use_bias = use_bias
         # DECISION plan-2026-10-14T062616-81938e81/D-087: resolve the kernel
         # initializer only when a strategy reads it. A seedless Keras random
@@ -517,10 +568,14 @@ class SequencePooling(keras.layers.Layer):
         else:
             masked_inputs = inputs
 
+        # Superseded in part by plan-2026-10-14T062616-81938e81/D-203: the
+        # ranking sentinel is mask_sentinel(compute_dtype), finite in float16
+        # (-1e4) and -1e9 in float32; still below every norm (norms are >= 0).
+        sentinel = mask_sentinel(self.compute_dtype)
         norms = keras.ops.sum(masked_inputs ** 2, axis=-1)
         if mask is not None:
             norms = keras.ops.where(
-                keras.ops.cast(mask, "bool"), norms, keras.ops.cast(-1e4, norms.dtype)
+                keras.ops.cast(mask, "bool"), norms, keras.ops.cast(sentinel, norms.dtype)
             )
 
         if inputs.shape[1] is not None:
@@ -542,10 +597,12 @@ class SequencePooling(keras.layers.Layer):
         # sentinel, finite under float16) and is never valid, so it is
         # selected only when `seq_len < top_k`, and is then excluded by the
         # validity the caller already applies.
+        # D-203: the pad value is twice the mask sentinel (-2e4 in float16 as
+        # before), so a padded position still ranks below every masked one.
         pad = self.top_k
         padded = keras.ops.pad(inputs, [[0, 0], [0, pad], [0, 0]])
         padded_norms = keras.ops.pad(
-            norms, [[0, 0], [0, pad]], constant_values=-2e4
+            norms, [[0, 0], [0, pad]], constant_values=2.0 * sentinel
         )
         _, top_k_indices = keras.ops.top_k(padded_norms, k=self.top_k)
         top_k_embeds = self._take_positions(padded, top_k_indices)
@@ -819,18 +876,31 @@ class SequencePooling(keras.layers.Layer):
 
         elif strategy == 'mean_std':
             mean_pool = self._apply_single_strategy('mean', inputs, mask, training)
+            # DECISION plan-2026-10-14T062616-81938e81/D-203: one floor for
+            # both paths, sqrt(maximum(variance, floor)), with the variance in
+            # the accumulation dtype. The masked path added a literal 1e-6
+            # (subnormal in float16) and the unmasked ops.std had no floor, so
+            # a constant sequence gave std 0.001 masked and 0.0 unmasked, with
+            # a NaN gradient unmasked. Population variance (ddof 0) in both.
+            accum = accumulation_dtype(self.compute_dtype)
+            values = keras.ops.cast(inputs, accum)
             if mask is not None:
-                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
-                masked_inputs = inputs * mask_expanded
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, accum), -1)
+                masked_inputs = values * mask_expanded
                 variance = keras.ops.sum(
-                    (masked_inputs - keras.ops.expand_dims(mean_pool, 1)) ** 2 * mask_expanded,
+                    (masked_inputs - keras.ops.expand_dims(
+                        keras.ops.cast(mean_pool, accum), 1)) ** 2 * mask_expanded,
                     axis=1
                 )
                 lengths = keras.ops.sum(mask_expanded, axis=1)
                 lengths = keras.ops.maximum(lengths, 1.0)
-                std_pool = keras.ops.sqrt(variance / lengths + 1e-6)
+                variance = variance / lengths
             else:
-                std_pool = keras.ops.std(inputs, axis=1)
+                variance = keras.ops.var(values, axis=1)
+            std_pool = keras.ops.sqrt(
+                keras.ops.maximum(variance, stability_floor(accum, 1e-6))
+            )
+            std_pool = keras.ops.cast(std_pool, inputs.dtype)
             return keras.ops.concatenate([mean_pool, std_pool], axis=-1)
 
         elif strategy == 'mean_max_min':
@@ -873,10 +943,8 @@ class SequencePooling(keras.layers.Layer):
             # Bias the INVALID SELECTED embeddings below every real value before
             # the max, in the `ops.where` SELECTION form: the additive
             # `+ (1 - mask) * -1e9` is `0 * -inf = NaN` once `-1e9` overflows
-            # to `-inf` under `mixed_float16`. The `max` strategy above now
-            # uses the same selection form; it differs only in taking its
-            # magnitude from `utils.dtype_policy.mask_sentinel` rather than
-            # from this local `-1e4` literal, which is pinned by
+            # to `-inf` under `mixed_float16`. Same sentinel as the `max`
+            # strategy (`utils.dtype_policy.mask_sentinel`, D-203), pinned by
             # `test_fully_masked_row_is_finite_and_documented`.
             # A fully-masked row therefore returns the sentinel itself; it is
             # deliberately NOT rescued (the `max` strategy likewise returns its
@@ -885,15 +953,23 @@ class SequencePooling(keras.layers.Layer):
             biased = keras.ops.where(
                 keras.ops.cast(validity_expanded, "bool"),
                 top_k_embeds,
-                keras.ops.cast(-1e4, top_k_embeds.dtype)
+                keras.ops.cast(mask_sentinel(self.compute_dtype), top_k_embeds.dtype)
             )
             return keras.ops.max(biased, axis=1)
 
-        # Special strategies
-        elif strategy == 'none':
-            return inputs
-
-        elif strategy == 'flatten':
+        # Special strategies. DECISION plan-2026-10-14T062616-81938e81/D-203:
+        # with a mask, 'none' and 'flatten' return the padded positions as
+        # zeros, so padding never reaches a pooled output (GUIDE 10.1). They
+        # still ignore exclude_positions (D-005). Select with ops.where, not a
+        # multiply: a NaN or inf in a padded position must not survive.
+        elif strategy in ('none', 'flatten'):
+            if mask is not None:
+                keep = keras.ops.expand_dims(keras.ops.cast(mask, 'bool'), -1)
+                inputs = keras.ops.where(
+                    keep, inputs, keras.ops.zeros_like(inputs)
+                )
+            if strategy == 'none':
+                return inputs
             return keras.ops.reshape(inputs, (batch_size, -1))
 
         else:
@@ -909,7 +985,10 @@ class SequencePooling(keras.layers.Layer):
 
         Args:
             inputs: Input tensor ``(batch, seq_len, hidden_dim)``.
-            mask: Optional boolean mask ``(batch, seq_len)``.
+            mask: Optional boolean mask ``(batch, seq_len)``, 1/True = keep.
+                Every strategy reads it. ``'none'`` and ``'flatten'`` return
+                each masked position as zeros, so padding content never
+                reaches their output.
             training: Whether in training mode.
 
         Returns:
@@ -983,7 +1062,11 @@ class SequencePooling(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            'strategy': self.strategy,
+            # As given: a string stays a string (D-123 item d). A list comes
+            # back as a plain list (Keras tracks the attribute as TrackedList).
+            'strategy': (
+                self._strategy_arg if isinstance(self._strategy_arg, str)
+                else list(self._strategy_arg)),
             'exclude_positions': self.exclude_positions,
             'aggregation_method': self.aggregation_method,
             'attention_hidden_dim': self.attention_hidden_dim,

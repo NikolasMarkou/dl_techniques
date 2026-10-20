@@ -1323,12 +1323,14 @@ class TestMaskedPositionIsolation:
         source docstrings); the sibling `AttentionPooling` has no rescue path
         either, so NOT adding one here keeps the package consistent:
 
-        * `weighted`   — every logit is the same `-1e4` sentinel, so the softmax
+        * `weighted`   — every logit is the same sentinel, so the softmax
           is uniform and the output is the plain mean over the sequence.
         * `top_k_mean` — no selected position is valid, the denominator floors
           at 1 and the output is exactly zero.
-        * `top_k_max`  — every selected embedding is replaced by the `-1e4`
-          sentinel, so the output is that sentinel.
+        * `top_k_max`  — every selected embedding is replaced by
+          `utils.dtype_policy.mask_sentinel`, so the output is that sentinel
+          (`-1e9` at float32; it was a local `-1e4` literal until
+          plan-2026-10-14T062616-81938e81 D-203 unified the sentinels).
         * `max`        — every position is replaced by
           `utils.dtype_policy.mask_sentinel`, so the output is that sentinel
           (`-1e9` at the float32 policy this test runs under).
@@ -1358,8 +1360,7 @@ class TestMaskedPositionIsolation:
             np.testing.assert_allclose(row, np.zeros_like(row), rtol=0, atol=0)
         elif strategy == 'max':
             # `max` takes its sentinel from `utils.dtype_policy.mask_sentinel`,
-            # which is -1e9 at the float32 policy this test runs under (the
-            # `top_k_max` branch below keeps its own local -1e4 literal).
+            # which is -1e9 at the float32 policy this test runs under.
             np.testing.assert_allclose(row, np.full_like(row, -1e9), rtol=1e-6, atol=0)
         elif strategy == 'min':
             # The MIRROR: a min-reduction needs the sentinel ABOVE every real
@@ -1368,7 +1369,9 @@ class TestMaskedPositionIsolation:
             # shape and finiteness assertion in this file green.
             np.testing.assert_allclose(row, np.full_like(row, +1e9), rtol=1e-6, atol=0)
         else:
-            np.testing.assert_allclose(row, np.full_like(row, -1e4), rtol=1e-6, atol=0)
+            # `top_k_max`: the same `mask_sentinel` as `max` (D-203), so the
+            # value is mask_sentinel's documented float32 entry, -1e9.
+            np.testing.assert_allclose(row, np.full_like(row, -1e9), rtol=1e-6, atol=0)
 
     @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
     def test_isolation_holds_under_every_dtype_policy(
