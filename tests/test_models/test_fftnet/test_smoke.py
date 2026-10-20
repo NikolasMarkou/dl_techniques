@@ -38,7 +38,8 @@ def _build():
     from dl_techniques.models.vision.fftnet.model import create_fftnet
 
     # Smallest variant; tiny image so num_patches stays small.
-    return create_fftnet(variant="tiny", image_size=IMAGE_SIZE, patch_size=PATCH_SIZE)
+    return create_fftnet(variant="tiny", image_size=IMAGE_SIZE, patch_size=PATCH_SIZE,
+                         include_top=False)
 
 
 def _inputs():

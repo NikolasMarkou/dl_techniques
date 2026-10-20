@@ -20,7 +20,7 @@ refusing `name`, `num_classes` and `task_type`, which the model owns), and
 `build_model_vision_head(task_type, head_config, head_config_overrides=None)`, the one call a vision
 model builds its head with: the `HeadConfiguration` default preset, then the model's own keys, then
 the merged overrides, then `create_vision_head`. Every model that builds its head from the preset
-uses it (21 sites, FastVLM and FFTNet's detection and segmentation heads included); DETR, MambaLCT
+uses it (22 sites, FastVLM and FFTNet's three task heads included); DETR, MambaLCT
 and SuperPoint call `create_vision_head` with a full config of their own. A new model should use it.
 
 ## Head dispatch: 10 of 37 task types reach a head

@@ -41,6 +41,8 @@ MODEL_CONFIG = dict(
     mlp_hidden_dim=8,
     ffn_ratio=2,
     dropout_rate=0.0,
+    # The encoder: these arms read ``last_hidden_state``.
+    include_top=False,
 )
 
 
@@ -118,7 +120,8 @@ class TestUseBiasInModreluReachesTheMixer:
     def test_the_knob_is_reachable_through_create_fftnet(self):
         # The public factory is the entry point the defect made unreachable.
         model = create_fftnet(
-            "tiny", use_bias_in_modrelu=False, image_size=32, patch_size=8
+            "tiny", use_bias_in_modrelu=False, image_size=32, patch_size=8,
+            include_top=False,
         )
         model.build((None, 32, 32, 3))
         assert model.blocks[0].fft_mixer.modrelu_bias is None

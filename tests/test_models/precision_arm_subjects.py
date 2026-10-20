@@ -1188,6 +1188,9 @@ _extra("doc_res", _b_doc_res, lambda: _f32(1, 32, 32, 6))
 
 
 def _b_fftnet():
+    # The default build, headed since step 10.1 (D-229): the round-trip arms
+    # see the classification head, its sibling below the encoder.
+    # ``test_fftnet/test_precision_arm.py`` measures the encoder on purpose.
     from dl_techniques.models.vision.fftnet.model import create_fftnet
     return create_fftnet("tiny", image_size=32, patch_size=16)
 
@@ -1824,7 +1827,9 @@ def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], 
 # unfiltered, so ``-k <package>`` runs never saw it. Since
 # plan-2026-10-14T062616-81938e81 step 6.1 all 31 have one: ``fftnet`` left the
 # set (its ``include_top`` built and returned the same thing either way, a dead
-# knob, deleted) and the other five gained a sibling below.
+# knob, deleted) and the other five gained a sibling below. Step 10.1 (D-229)
+# gave FFTNet a real ``include_top`` (the task head), so it is back, with a
+# sibling.
 
 NO_HEAD_SIBLINGS: Dict[str, Callable[[], Any]] = {}
 
@@ -1874,6 +1879,12 @@ def _no_head(name: str):
         NO_HEAD_SIBLINGS[name] = fn
         return fn
     return register
+
+
+@_no_head("fftnet")
+def _b_fftnet_no_head():
+    from dl_techniques.models.vision.fftnet.model import create_fftnet
+    return create_fftnet("tiny", image_size=32, patch_size=16, include_top=False)
 
 
 @_no_head("cbam")

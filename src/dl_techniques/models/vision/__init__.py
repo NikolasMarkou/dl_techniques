@@ -28,7 +28,7 @@ this bullet's edit, which only adds `fftnet/`.)
   plus the DDPM sampler it needs
 - `energy_transformer/` — Energy Transformer (masked image completion + classifier)
 - `fastvit/` — FastViT MCi image backbone, the assembled tower over `layers/fastvit/`
-- `fftnet/` — FFTNet (adaptive spectral filtering vision encoder; ViT-shaped,
+- `fftnet/` — FFTNet (adaptive spectral filtering vision model with a task head; ViT-shaped,
   `image_size`/`patch_size` in, no `vocab_size` — moved here from `models/language/`)
 - `fractalnet/` — FractalNet
 - `image_restoration/darkir/` — DarkIR image restoration

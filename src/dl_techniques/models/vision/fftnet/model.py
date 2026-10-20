@@ -23,12 +23,13 @@ for, unlike attention. `FFTMixer.call` uses `tf.signal.fft` / `ifft` directly
 on a complex64 tensor, since `keras.ops` has no `ifft`; this is the one raw-TF
 exception in this file.
 
-`FFTNet` is a pure encoder with no pooling or classification layer. It embeds
-patches, prepends a CLS token, adds a learned positional embedding, runs the
-block stack, and returns ``last_hidden_state``, ``cls_token`` and
-``patch_features`` together, so a classification head and a dense-prediction
-head can both read from the same encoder output. Heads attach externally
-through ``create_fftnet_with_head``.
+`FFTNet` embeds patches, prepends a CLS token, adds a learned positional
+embedding and runs the block stack. With ``include_top=True`` (the default) it
+applies one task head, chosen by ``task_type`` (``classification``,
+``detection`` or ``segmentation``) and built in ``__init__`` through the vision
+head factory, and returns that head's logits. With ``include_top=False`` it is
+the encoder and returns ``last_hidden_state``, ``cls_token`` and
+``patch_features`` together. ``create_fftnet`` delegates to ``from_variant``.
 
 References:
     - Fein-Ashley, 2025. The FFT Strikes Back: An Efficient Alternative to
@@ -45,7 +46,7 @@ References:
 
 import keras
 import tensorflow as tf
-from typing import Optional, Dict, Any, Tuple, Literal
+from typing import Optional, Dict, Any, Tuple, Literal, Union
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -552,17 +553,26 @@ class FFTNetBlock(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.fftnet.model")
 class FFTNet(keras.Model):
-    """FFTNet: a pure vision encoder built on adaptive spectral filtering.
+    """FFTNet: a vision model built on adaptive spectral filtering.
 
     A ViT-shaped backbone in which every attention sublayer is an
     :class:`FFTMixer`. It embeds patches, prepends a CLS token, adds a learned
     positional embedding, runs ``num_layers`` :class:`FFTNetBlock` instances and
-    normalizes. The model holds NO pooling and NO classification layer, and it
-    returns all three of ``last_hidden_state``, ``cls_token`` and
-    ``patch_features`` UNCONDITIONALLY rather than switching its return type on
-    a flag: a classification head reads the CLS token, a dense-prediction head
-    reads the patch features, and neither needs the encoder reconfigured. Heads
-    attach externally through :func:`create_fftnet_with_head`.
+    normalizes. With ``include_top=True`` one task head, selected by
+    ``task_type`` and built in ``__init__`` through
+    :func:`~dl_techniques.layers.heads.vision.factory.build_model_vision_head`,
+    reads the encoder output and its logits are the model's output:
+
+    - ``classification``: a ``ClassificationHead`` on the final-norm CLS token
+      (``pooling_type='cls_token'``, ``block_dims=()``: an optional dropout and
+      one linear ``Dense``), ``(batch, num_classes)`` logits;
+    - ``detection``: a sequence-format ``DetectionHead`` on the patch features,
+      ``{"classifications": (B, H/p, W/p, 9*C), "regressions": (B, H/p, W/p, 36)}``;
+    - ``segmentation``: a sequence-format ``SegmentationHead`` on the patch
+      features, upsampled by ``patch_size``, ``(B, H, W, num_classes)`` logits.
+
+    With ``include_top=False`` no head is built and the encoder's three outputs
+    are returned together.
 
     Architecture:
 
@@ -603,10 +613,14 @@ class FFTNet(keras.Model):
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────────┐
-        │  Output dict, ALL THREE always           │
+        │  include_top=False: the encoder dict     │
         │    "last_hidden_state"  [B, N+1, D]      │
         │    "cls_token"          [B, D]    x[:,0] │
         │    "patch_features"     [B, N, D] x[:,1:]│
+        │  include_top=True: the task head on it   │
+        │    classification  CLS token → logits    │
+        │    detection       patches → dict        │
+        │    segmentation    patches → pixel logits│
         └──────────────────────────────────────────┘
 
         FIXED RESOLUTION: each mixer's W_base is sized by N+1,
@@ -653,17 +667,33 @@ class FFTNet(keras.Model):
         learnable bias in modReLU. Defaults to True (:class:`FFTMixer`'s own
         default).
     :type use_bias_in_modrelu: bool
+    :param include_top: Whether to build and apply the task head. Defaults to
+        True.
+    :type include_top: bool
+    :param task_type: The head's task: ``'classification'`` (default),
+        ``'detection'`` or ``'segmentation'``. Read only with ``include_top``.
+    :type task_type: str
+    :param num_classes: Number of classes of the head. Defaults to 1000.
+    :type num_classes: int
+    :param head_config_overrides: Optional head keywords applied last by
+        ``build_model_vision_head`` (``name``, ``num_classes`` and
+        ``task_type`` raise ``ValueError``; a key the head does not take is
+        refused by the head). Given with ``include_top=False`` it raises.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If ``image_size`` or ``patch_size`` is not positive, if
         ``image_size`` is not divisible by ``patch_size``, if ``embed_dim`` or
-        ``num_layers`` is not positive, or if ``dropout_rate`` leaves ``[0, 1]``.
+        ``num_layers`` is not positive, if ``dropout_rate`` leaves ``[0, 1]``,
+        if ``task_type`` is not one of the three tasks, if ``num_classes`` is
+        not positive, or if ``head_config_overrides`` is given without a head.
 
     Input shape:
         4D tensor ``(batch_size, image_size, image_size, 3)``.
 
     Output shape:
-        A mapping with:
+        ``include_top=True``: the task head's output (see above).
+        ``include_top=False``, a mapping with:
 
         - ``last_hidden_state``: ``(batch, num_patches + 1, embed_dim)``
         - ``cls_token``: ``(batch, embed_dim)``
@@ -680,15 +710,16 @@ class FFTNet(keras.Model):
     :vartype blocks: list[FFTNetBlock]
 
     Example:
-        >>> # Create FFTNet-Base foundation model
-        >>> model = FFTNet.from_variant("base")
-        >>>
-        >>> # Use as feature extractor
-        >>> images = keras.random.normal((4, 224, 224, 3))
-        >>> outputs = model(images)
-        >>> print(outputs['cls_token'].shape)  # (4, 768)
-        >>> print(outputs['last_hidden_state'].shape)  # (4, 197, 768)
+        >>> classifier = FFTNet.from_variant("base", num_classes=10)
+        >>> classifier(keras.random.normal((4, 224, 224, 3))).shape  # (4, 10)
+        >>> segmenter = FFTNet.from_variant("tiny", task_type="segmentation",
+        ...                                 num_classes=21, image_size=64)
+        >>> encoder = FFTNet.from_variant("base", include_top=False)
+        >>> encoder(keras.random.normal((4, 224, 224, 3)))["cls_token"].shape  # (4, 768)
     """
+
+    #: The tasks a head can be built for.
+    TASK_TYPES = ("classification", "detection", "segmentation")
 
     # Model variant configurations matching paper Table 2
     MODEL_VARIANTS = {
@@ -746,9 +777,13 @@ class FFTNet(keras.Model):
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             use_bias_in_modrelu: bool = True,
+            include_top: bool = True,
+            task_type: Union[str, VisionTaskType] = "classification",
+            num_classes: int = 1000,
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the encoder and build its architecture.
+        """Initialize the encoder, its task head, and build the architecture.
 
         :param image_size: Input image size (square).
         :type image_size: int
@@ -770,6 +805,15 @@ class FFTNet(keras.Model):
         :type normalization_type: str
         :param use_bias_in_modrelu: Whether modReLU carries a learnable bias.
         :type use_bias_in_modrelu: bool
+        :param include_top: Whether to build and apply the task head.
+        :type include_top: bool
+        :param task_type: ``'classification'``, ``'detection'`` or
+            ``'segmentation'``.
+        :type task_type: Union[str, VisionTaskType]
+        :param num_classes: Number of classes of the head.
+        :type num_classes: int
+        :param head_config_overrides: Head keywords applied last.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any configuration value is invalid.
         """
@@ -779,6 +823,19 @@ class FFTNet(keras.Model):
         self._validate_config(
             image_size, patch_size, embed_dim, num_layers, dropout_rate
         )
+        task_type = (task_type.value if isinstance(task_type, VisionTaskType)
+                     else task_type)
+        if task_type not in self.TASK_TYPES:
+            raise ValueError(
+                f"task_type must be one of {self.TASK_TYPES}, got {task_type!r}")
+        if isinstance(num_classes, bool) or not isinstance(num_classes, int) \
+                or num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be a positive int, got {num_classes!r}")
+        if head_config_overrides and not include_top:
+            raise ValueError(
+                "head_config_overrides has no reader with include_top=False: "
+                "no head is built.")
 
         # Store configuration
         self.image_size = image_size
@@ -791,6 +848,11 @@ class FFTNet(keras.Model):
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.use_bias_in_modrelu = use_bias_in_modrelu
+        self.include_top = include_top
+        self.task_type = task_type
+        self.num_classes = num_classes
+        self._head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides else None)
 
         # Calculate number of patches
         self.num_patches = (image_size // patch_size) ** 2
@@ -799,8 +861,9 @@ class FFTNet(keras.Model):
         self._build_architecture()
 
         logger.info(
-            f"Created FFTNet foundation model: {self.num_layers} layers, "
-            f"embed_dim={self.embed_dim}, patches={self.num_patches}"
+            f"Created FFTNet: {self.num_layers} layers, "
+            f"embed_dim={self.embed_dim}, patches={self.num_patches}, "
+            f"head={self.task_type if self.include_top else None}"
         )
 
     def _validate_config(
@@ -882,6 +945,70 @@ class FFTNet(keras.Model):
         # Final normalization
         self.norm = create_normalization_layer(self.normalization_type, name='norm')
 
+        self.head = self._build_head() if self.include_top else None
+
+    def _build_head(self) -> keras.layers.Layer:
+        """Build the ``task_type`` head through the vision head factory.
+
+        :return: The head layer, named ``<task_type>_head``.
+        :rtype: keras.layers.Layer
+        """
+        grid = self.image_size // self.patch_size
+        name = f"{self.task_type}_head"
+        # One literal task per call: the logits census reads the task of every
+        # build_model_vision_head call from its source.
+        if self.task_type == "classification":
+            # The ViT fine-tuning head (Dosovitskiy et al. 2020, Sec. 3.1) on
+            # the final-norm CLS token: an optional dropout, one linear Dense.
+            return build_model_vision_head(
+                VisionTaskType.CLASSIFICATION,
+                {
+                    "num_classes": self.num_classes,
+                    "use_global_pooling": True,
+                    "pooling_type": "cls_token",
+                    "use_attention": False,
+                    "block_dims": (),
+                    "classifier_dropout_rate": 0.0,
+                    "dropout_rate": 0.0,
+                    "kernel_initializer": keras.initializers.TruncatedNormal(stddev=0.02),
+                    "name": name,
+                },
+                self._head_config_overrides,
+            )
+        if self.task_type == "detection":
+            return build_model_vision_head(
+                VisionTaskType.DETECTION,
+                {
+                    "num_classes": self.num_classes,
+                    "hidden_dim": self.embed_dim,
+                    "num_anchors": 9,
+                    "use_attention": True,
+                    "use_ffn": False,
+                    "input_format": "sequence",
+                    "patch_grid_size": (grid, grid),
+                    "name": name,
+                },
+                self._head_config_overrides,
+            )
+        # upsampling_factor=patch_size: log2(patch_size) stride-2 transposed
+        # convs take the patch grid back to the image size; the head refuses a
+        # patch_size that is not a power of two.
+        return build_model_vision_head(
+            VisionTaskType.SEGMENTATION,
+            {
+                "num_classes": self.num_classes,
+                "hidden_dim": self.embed_dim,
+                "upsampling_factor": self.patch_size,
+                "use_skip_connections": False,
+                "use_attention": True,
+                "use_ffn": False,
+                "input_format": "sequence",
+                "patch_grid_size": (grid, grid),
+                "name": name,
+            },
+            self._head_config_overrides,
+        )
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the CLS token and positional table, and build every sub-layer.
 
@@ -914,6 +1041,10 @@ class FFTNet(keras.Model):
         for block in self.blocks:
             block.build(seq_shape)
         self.norm.build(seq_shape)
+        if self.head is not None:
+            self.head.build(
+                seq_shape if self.task_type == "classification"
+                else (input_shape[0], self.num_patches, self.embed_dim))
 
         super().build(input_shape)
 
@@ -921,15 +1052,18 @@ class FFTNet(keras.Model):
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass of the FFTNet foundation model.
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+        """Forward pass: the encoder, then the task head when there is one.
 
         :param inputs: Input images of shape
             ``(batch_size, height, width, channels)``.
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode.
         :type training: Optional[bool]
-        :return: A dictionary with the following keys:
+        :return: With ``include_top``, the head's logits: a tensor for
+            classification ``(batch, num_classes)`` and segmentation
+            ``(batch, H, W, num_classes)``, the ``classifications`` /
+            ``regressions`` dict for detection. Without, a dictionary with:
 
             - ``last_hidden_state``: the final layer's full sequence, shape
               ``(batch, num_patches + 1, embed_dim)``.
@@ -937,10 +1071,7 @@ class FFTNet(keras.Model):
             - ``patch_features``: the patch features excluding CLS, shape
               ``(batch, num_patches, embed_dim)``.
 
-            FFTNet is an encoder: it has no task head and no ``include_top``.
-            A task head is attached by :func:`create_fftnet_with_head`.
-
-        :rtype: Dict[str, keras.KerasTensor]
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         """
         batch_size = keras.ops.shape(inputs)[0]
 
@@ -962,7 +1093,13 @@ class FFTNet(keras.Model):
         # 5. Final normalization
         x = self.norm(x)
 
-        # 6. Extract features
+        # 6. The task head, when there is one
+        if self.head is not None:
+            if self.task_type == "classification":
+                return self.head(x, training=training)["logits"]
+            return self.head(x[:, 1:], training=training)
+
+        # 7. Extract features
         cls_token_output = x[:, 0]  # (B, D)
         patch_features = x[:, 1:]  # (B, N, D)
 
@@ -973,18 +1110,35 @@ class FFTNet(keras.Model):
         }
 
     @classmethod
-    def from_variant(cls, variant: str, **kwargs: Any) -> "FFTNet":
+    def from_variant(
+            cls,
+            variant: str,
+            pretrained: Union[bool, str] = False,
+            **kwargs: Any
+    ) -> "FFTNet":
         """Create an FFTNet model from a predefined variant.
 
         :param variant: One of ``"base"``, ``"large"``, ``"huge"``,
             ``"small"``, ``"tiny"``.
         :type variant: str
-        :param kwargs: Additional arguments overriding the variant's defaults.
+        :param pretrained: Must be ``False``: no FFTNet weights are
+            distributed. A local ``.keras`` archive loads with
+            ``keras.models.load_model(path)``.
+        :type pretrained: Union[bool, str]
+        :param kwargs: Constructor arguments laid over the variant's entry
+            (``include_top``, ``task_type``, ``num_classes``, ``image_size``,
+            ``head_config_overrides``, ...).
         :type kwargs: Any
         :return: An FFTNet model instance.
         :rtype: FFTNet
         :raises ValueError: If the variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is not ``False``.
         """
+        if pretrained:
+            raise NotImplementedError(
+                f"No pretrained FFTNet weights are distributed (pretrained="
+                f"{pretrained!r}). Load a local archive with "
+                f"keras.models.load_model(path).")
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
@@ -1020,6 +1174,10 @@ class FFTNet(keras.Model):
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
             "use_bias_in_modrelu": self.use_bias_in_modrelu,
+            "include_top": self.include_top,
+            "task_type": self.task_type,
+            "num_classes": self.num_classes,
+            "head_config_overrides": self._head_config_overrides,
         })
         return config
 
@@ -1051,359 +1209,33 @@ class FFTNet(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Integration with Vision Task Heads
-# ---------------------------------------------------------------------
-
-def create_fftnet_with_head(
-        fftnet_variant: str,
-        task_type: Literal["classification", "detection", "segmentation"] = "classification",
-        num_classes: Optional[int] = None,
-        image_size: int = 224,
-        patch_size: int = 16,
-        fftnet_config_overrides: Optional[Dict[str, Any]] = None,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Factory function to create a complete FFTNet model with a task head.
-
-    This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational :class:`FFTNet` encoder.
-    2. Create a task-specific head from ``dl_techniques.layers.heads.vision``.
-    3. Combine them into a single, end-to-end ``keras.Model``.
-
-    Head integration:
-
-    .. code-block:: text
-
-        ┌──────────────────────────────────────┐
-        │  keras.Input [B, I, I, 3]  "images"  │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  FFTNet encoder                      │
-        │  → last_hidden_state / cls_token /   │
-        │    patch_features                    │
-        └───────────────┬──────────────────────┘
-                        │
-          ┌─────────────┼─────────────┐
-          ▼             ▼             ▼
-    ┌───────────┐ ┌───────────┐ ┌───────────┐
-    │ cls_token │ │patch_feats│ │patch_feats│  → reshape to spatial
-    │(classify) │ │(detect)   │ │(segment)  │     (B, H/p, W/p, D)
-    └───────────┘ └───────────┘ └───────────┘
-
-    :param fftnet_variant: The FFTNet variant to use (e.g. ``"base"``,
-        ``"large"``).
-    :type fftnet_variant: str
-    :param task_type: The vision task: ``"classification"``, ``"detection"`` or
-        ``"segmentation"``. All three are now implemented. Defaults to
-        ``"classification"``.
-    :type task_type: Literal["classification", "detection", "segmentation"]
-    :param num_classes: Number of classes; REQUIRED for all tasks.
-    :type num_classes: Optional[int]
-    :param image_size: Input image size. Defaults to 224.
-    :type image_size: int
-    :param patch_size: Patch size. Defaults to 16.
-    :type patch_size: int
-    :param fftnet_config_overrides: Optional dictionary overriding the chosen
-        variant's encoder configuration.
-    :type fftnet_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary overriding the head
-        configuration. Classification takes ``dropout_rate`` only (its head
-        is a dropout and one ``Dense``); any other key raises ``ValueError``.
-        Detection and segmentation take any keyword of their vision head,
-        applied last by ``build_model_vision_head`` (which refuses ``name``,
-        ``num_classes`` and ``task_type``); a key the head does not take is
-        refused by the head.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete ``keras.Model`` whose output depends on task:
-        - classification: one ``(batch, num_classes)`` tensor of class logits
-          (no softmax; compile with ``from_logits=True``)
-        - detection: ``{"classifications": (B, H, W, A*C), "regressions": (B, H, W, A*4)}``,
-          class logits and raw box offsets
-        - segmentation: one ``(batch, out_H, out_W, num_classes)`` tensor of
-          per-pixel class logits (no softmax; compile with
-          ``from_logits=True``)
-    :rtype: keras.Model
-    :raises ValueError: If ``num_classes`` is omitted, or if ``task_type`` is unrecognized.
-
-    Example:
-        >>> # Create classification model
-        >>> model = create_fftnet_with_head(
-        ...     fftnet_variant="base",
-        ...     task_type="classification",
-        ...     num_classes=1000
-        ... )
-        >>> model.summary()
-        >>>
-        >>> # Create detection model
-        >>> model = create_fftnet_with_head(
-        ...     fftnet_variant="base",
-        ...     task_type="detection",
-        ...     num_classes=80
-        ... )
-        >>>
-        >>> # Create segmentation model
-        >>> model = create_fftnet_with_head(
-        ...     fftnet_variant="base",
-        ...     task_type="segmentation",
-        ...     num_classes=21
-        ... )
-    """
-    fftnet_config_overrides = fftnet_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(f"Creating FFTNet-{fftnet_variant} with '{task_type}' head.")
-
-    # 1. Create the foundational FFTNet encoder
-    fftnet_encoder = FFTNet.from_variant(
-        fftnet_variant,
-        image_size=image_size,
-        patch_size=patch_size,
-        **fftnet_config_overrides
-    )
-
-    # Calculate patch grid dimensions
-    num_patches_h = image_size // patch_size
-    num_patches_w = image_size // patch_size
-    hidden_dim = fftnet_encoder.embed_dim
-
-    # 2. Create the task head based on task type
-    if task_type == "classification":
-        if num_classes is None:
-            raise ValueError("num_classes must be provided for classification tasks")
-
-        # Simple classification head (uses CLS token): an optional dropout,
-        # then one linear Dense. No identity placeholder at rate 0: a
-        # Lambda(lambda x: x) there made the model's .keras archive need
-        # safe_mode=False to load.
-        unread = sorted(set(head_config_overrides) - {"dropout_rate"})
-        if unread:
-            raise ValueError(
-                f"head_config_overrides {unread} have no reader: the FFTNet "
-                f"classification head is a dropout and one Dense, configured "
-                f"by 'dropout_rate' only."
-            )
-        head_dropout_rate = head_config_overrides.get("dropout_rate", 0.0)
-        head_layers = []
-        if head_dropout_rate > 0:
-            head_layers.append(
-                keras.layers.Dropout(head_dropout_rate, name="classifier_dropout"))
-        head_layers.append(
-            keras.layers.Dense(
-                num_classes,
-                kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
-                name="classifier"
-            )
-        )
-        classification_head = keras.Sequential(head_layers, name="classification_head")
-
-        # 3. Build the end-to-end model
-        inputs = keras.Input(
-            shape=(image_size, image_size, 3),
-            name="images"
-        )
-
-        # Get features from encoder
-        encoder_outputs = fftnet_encoder(inputs)
-
-        # Use CLS token for classification
-        logits = classification_head(encoder_outputs["cls_token"])
-
-        # The bare logits tensor, the language-model pattern: a stock
-        # compile(loss=SparseCategoricalCrossentropy(from_logits=True)) fits it.
-        model = keras.Model(
-            inputs=inputs,
-            outputs=logits,
-            name=f"fftnet_{fftnet_variant}_classifier"
-        )
-
-    elif task_type == "detection":
-        if num_classes is None:
-            raise ValueError("num_classes must be provided for detection tasks")
-
-        # Detection head from vision heads factory
-        # The house builder: preset, these keys, then every override key (it
-        # used to read four override keys and drop the rest in silence).
-        # attention_type defaults to 'multi_head' in the head.
-        detection_head = build_model_vision_head(
-            VisionTaskType.DETECTION,
-            {
-                "num_classes": num_classes,
-                "hidden_dim": hidden_dim,
-                "num_anchors": 9,
-                "use_attention": True,
-                "use_ffn": False,
-                "input_format": "sequence",
-                "patch_grid_size": (num_patches_h, num_patches_w),
-                "name": "detection_head",
-            },
-            head_config_overrides,
-        )
-
-        # Build end-to-end model
-        inputs = keras.Input(
-            shape=(image_size, image_size, 3),
-            name="images"
-        )
-
-        encoder_outputs = fftnet_encoder(inputs)
-        patch_features = encoder_outputs["patch_features"]  # (B, N, D)
-
-        # Detection head handles sequence->spatial reshape internally
-        det_outputs = detection_head(patch_features)
-
-        model = keras.Model(
-            inputs=inputs,
-            outputs=det_outputs,
-            name=f"fftnet_{fftnet_variant}_detector"
-        )
-
-    elif task_type == "segmentation":
-        if num_classes is None:
-            raise ValueError("num_classes must be provided for segmentation tasks")
-
-        # Segmentation head from vision heads factory
-        # upsampling_factor=patch_size: log2(patch_size) stride-2 transposed
-        # convs take the patch grid back to image size (16 -> 4 convs, 14x14
-        # patches to 224x224). The head refuses a patch_size that is not a
-        # power of two.
-        # The segmentation preset's attention is 'cbam'; the builder drops it
-        # when an override turns attention off.
-        seg_head = build_model_vision_head(
-            VisionTaskType.SEGMENTATION,
-            {
-                "num_classes": num_classes,
-                "hidden_dim": hidden_dim,
-                "upsampling_factor": patch_size,  # 16x upsampling from patch grid to image
-                "use_skip_connections": False,  # single-scale from ViT
-                "use_attention": True,
-                "use_ffn": False,
-                "input_format": "sequence",
-                "patch_grid_size": (num_patches_h, num_patches_w),
-                "name": "segmentation_head",
-            },
-            head_config_overrides,
-        )
-
-        # Build end-to-end model
-        inputs = keras.Input(
-            shape=(image_size, image_size, 3),
-            name="images"
-        )
-
-        encoder_outputs = fftnet_encoder(inputs)
-        patch_features = encoder_outputs["patch_features"]  # (B, N, D)
-
-        # Segmentation head handles sequence->spatial reshape internally
-        seg_output = seg_head(patch_features)
-
-        model = keras.Model(
-            inputs=inputs,
-            outputs=seg_output,
-            name=f"fftnet_{fftnet_variant}_segmenter"
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown task_type '{task_type}'. "
-            f"Available: 'classification', 'detection', 'segmentation'"
-        )
-
-    logger.info(f"Successfully created model with {model.count_params():,} parameters.")
-    return model
-
-
-# ---------------------------------------------------------------------
-# Factories
+# Factory
 # ---------------------------------------------------------------------
 
 def create_fftnet(
         variant: Literal["base", "large", "huge", "small", "tiny"] = "base",
-        image_size: int = 224,
-        patch_size: int = 16,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> FFTNet:
-    """Create an FFTNet foundation model from a preset configuration.
+    """Create an FFTNet from a preset: delegates to :meth:`FFTNet.from_variant`.
 
-    :param variant: Model variant: ``'base'``, ``'large'``, ``'huge'``,
-        ``'small'`` or ``'tiny'``.
+    :param variant: ``'base'``, ``'large'``, ``'huge'``, ``'small'`` or
+        ``'tiny'``.
     :type variant: Literal["base", "large", "huge", "small", "tiny"]
-    :param image_size: Input image size. Defaults to 224.
-    :type image_size: int
-    :param patch_size: Patch size. Defaults to 16.
-    :type patch_size: int
-    :param kwargs: Additional keyword arguments overriding the preset.
+    :param pretrained: Must be ``False`` (no weights are distributed).
+    :type pretrained: Union[bool, str]
+    :param kwargs: Constructor arguments laid over the preset, e.g.
+        ``image_size``, ``patch_size``, ``include_top``, ``task_type``,
+        ``num_classes``, ``head_config_overrides``.
     :type kwargs: Any
-    :return: Configured FFTNet foundation model.
+    :return: The configured model.
     :rtype: FFTNet
     :raises ValueError: If the variant is not recognized.
+    :raises NotImplementedError: If ``pretrained`` is not ``False``.
 
     Example:
-        >>> # Create base foundation model
-        >>> model = create_fftnet('base')
-        >>>
-        >>> # Create large model with custom settings
-        >>> model = create_fftnet(
-        ...     'large',
-        ...     dropout_rate=0.2,
-        ...     ffn_type='swiglu'
-        ... )
+        >>> classifier = create_fftnet("small", num_classes=10, image_size=32)
+        >>> detector = create_fftnet("tiny", task_type="detection", num_classes=80)
+        >>> encoder = create_fftnet("base", include_top=False)
     """
-    return FFTNet.from_variant(
-        variant,
-        image_size=image_size,
-        patch_size=patch_size,
-        **kwargs
-    )
-
-# ---------------------------------------------------------------------
-
-def create_fftnet_classifier(
-        variant: Literal["base", "large", "huge", "small", "tiny"] = "base",
-        num_classes: int = 1000,
-        image_size: int = 224,
-        patch_size: int = 16,
-        **kwargs: Any
-) -> keras.Model:
-    """Convenience function to create an FFTNet classification model.
-
-    Note that ``kwargs`` are forwarded as ENCODER overrides
-    (``fftnet_config_overrides``), not head overrides.
-
-    :param variant: Model variant.
-    :type variant: Literal["base", "large", "huge", "small", "tiny"]
-    :param num_classes: Number of output classes. Defaults to 1000.
-    :type num_classes: int
-    :param image_size: Input image size. Defaults to 224.
-    :type image_size: int
-    :param patch_size: Patch size. Defaults to 16.
-    :type patch_size: int
-    :param kwargs: Additional encoder configuration overrides.
-    :type kwargs: Any
-    :return: Complete classification model whose output is one
-        ``(batch, num_classes)`` tensor of class logits; compile with
-        ``from_logits=True``.
-    :rtype: keras.Model
-
-    Example:
-        >>> # Create ImageNet classifier
-        >>> model = create_fftnet_classifier('base', num_classes=1000)
-        >>>
-        >>> # Create CIFAR-10 classifier
-        >>> model = create_fftnet_classifier(
-        ...     'small',
-        ...     num_classes=10,
-        ...     image_size=32,
-        ...     dropout_rate=0.3
-        ... )
-    """
-    return create_fftnet_with_head(
-        fftnet_variant=variant,
-        task_type="classification",
-        num_classes=num_classes,
-        image_size=image_size,
-        patch_size=patch_size,
-        fftnet_config_overrides=kwargs
-    )
-
-# ---------------------------------------------------------------------
+    return FFTNet.from_variant(variant, pretrained=pretrained, **kwargs)

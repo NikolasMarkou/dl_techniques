@@ -45,7 +45,7 @@ from dl_techniques.layers.heads.vision import factory as vision_factory
 from dl_techniques.layers.heads.vision.factory import (
     ClassificationHead, DepthEstimationHead, DetectionHead, InstanceSegmentationHead,
     OpticalFlowHead, SegmentationHead, SurfaceNormalsHead)
-from dl_techniques.models.vision.fftnet.model import create_fftnet_with_head
+from dl_techniques.models.vision.fftnet.model import FFTNet, create_fftnet
 
 C = 32
 H, W = 4, 6
@@ -142,9 +142,10 @@ def test_the_spatial_type_table_matches_what_each_layer_accepts() -> None:
     ("detection", "cbam"), ("detection", "multi_head"),
     ("segmentation", "multi_head"), ("segmentation", "cbam")])
 def test_fftnet_heads_run_either_attention_type(task_type, attention_type) -> None:
-    model = create_fftnet_with_head(
+    model = create_fftnet(
         "tiny", task_type=task_type, num_classes=4, image_size=32, patch_size=16,
         head_config_overrides={"attention_type": attention_type})
+    assert type(model) is FFTNet and model.head.attention_type == attention_type
     out = model(np.zeros((2, 32, 32, 3), "float32"), training=False)
     if task_type == "detection":
         assert _shapes(out) == {"classifications": (2, 2, 2, 36), "regressions": (2, 2, 2, 36)}

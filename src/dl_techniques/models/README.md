@@ -72,7 +72,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `dit/` | DiT, the class-conditional latent Diffusion Transformer of Peebles & Xie: adaLN-Zero blocks over VAE latents, the twelve published variants, and the DDPM sampler (ancestral + DDIM, respacing, classifier-free guidance) |
 | `energy_transformer/` | Energy Transformer — masked image completion, plus classifier |
 | `fastvit/` | FastViT MCi image backbone, the assembled tower over `layers/fastvit/` |
-| `fftnet/` | FFTNet — adaptive spectral filtering ViT-shaped patch encoder (`image_size`/`patch_size` in, `last_hidden_state`/`cls_token`/`patch_features` dict out, no `vocab_size`); moved here from `models/language/` |
+| `fftnet/` | FFTNet — adaptive spectral filtering ViT-shaped model (`image_size`/`patch_size` in, no `vocab_size`): `include_top` with a `task_type` head (classification, detection, segmentation logits), or the encoder's `last_hidden_state`/`cls_token`/`patch_features` dict with `include_top=False`; moved here from `models/language/` |
 | `fractalnet/` | FractalNet |
 | `image_restoration/darkir/` | DarkIR low-light restoration |
 | `image_restoration/doc_res/` | DocRes — one Restormer backbone for five document tasks; the task is carried by 3 classical-CV prompt channels stacked onto RGB, so the input is 6 channels and nothing in the network is task-conditioned |

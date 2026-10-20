@@ -16,7 +16,8 @@ from dl_techniques.models.vision.fftnet.model import FFTNet, create_fftnet
 
 
 def _model():
-    return create_fftnet(variant="tiny", image_size=32, patch_size=16)
+    return create_fftnet(variant="tiny", image_size=32, patch_size=16,
+                         include_top=False)
 
 
 def _images(batch=2):
@@ -133,31 +134,31 @@ class TestFFTNetGradientFlow:
 # The task models emit logits (plan-2026-10-14T062616-81938e81 step 6)
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.vision.fftnet.model import (  # noqa: E402
-    create_fftnet_classifier,
-    create_fftnet_with_head,
-)
 from tests.numerics import reassociation_atol  # noqa: E402
 
 
 class TestTheTaskModelsEmitLogits:
-    """``create_fftnet_with_head`` classification returned ``{"logits": ...}``
-    and segmentation a softmax map before step 6. Both are now one tensor of
-    logits; the census row in ``test_a_vision_classifier_emits_logits.py``
+    """The classifier returned ``{"logits": ...}`` and the segmenter a softmax
+    map before step 6. Both are one tensor of logits; since step 10.1 they are
+    ``FFTNet(include_top=True, task_type=...)`` rather than functional
+    wrappers. The census row in ``test_a_vision_classifier_emits_logits.py``
     covers the classifier's fit step."""
 
     def test_the_classifier_returns_bare_logits_and_round_trips(self, tmp_path):
         keras.utils.set_random_seed(0)
-        model = create_fftnet_classifier("tiny", num_classes=5, image_size=32,
-                                         patch_size=16)
+        model = create_fftnet("tiny", num_classes=5, image_size=32,
+                              patch_size=16)
         x = _images(3)
         out = model(x, training=False)
         assert not isinstance(out, dict), type(out)
         logits = np.asarray(out)
         assert logits.shape == (3, 5)
-        # A softmax row sums to 1 within this float32 rounding bound.
+        # A softmax row sums to 1 within this float32 rounding bound. (No
+        # "some logit is negative" check: its sign is a draw at this init
+        # scale; all 15 came out positive at seed 0 after step 10.1. The exact
+        # linear-head check is test_one_class_carries_its_task_head.py.)
         atol = reassociation_atol([5], 1, 1.0)
-        assert (logits < 0).any() and np.abs(logits.sum(axis=-1) - 1.0).max() > atol
+        assert np.abs(logits.sum(axis=-1) - 1.0).max() > atol
 
         path = os.path.join(tmp_path, "fftnet_classifier.keras")
         model.save(path)
@@ -167,7 +168,7 @@ class TestTheTaskModelsEmitLogits:
 
     def test_the_segmenter_returns_per_pixel_logits(self):
         keras.utils.set_random_seed(0)
-        model = create_fftnet_with_head("tiny", task_type="segmentation",
+        model = create_fftnet("tiny", task_type="segmentation",
                                         num_classes=4, image_size=32,
                                         patch_size=16)
         out = np.asarray(model(_images(2), training=False)).astype(np.float64)
@@ -186,7 +187,7 @@ class TestTheTaskModelsEmitLogits:
         x = _images(2)
         with keras.device(golden_reference_device):
             keras.utils.set_random_seed(0)
-            model = create_fftnet_with_head("tiny", task_type="segmentation",
+            model = create_fftnet("tiny", task_type="segmentation",
                                             num_classes=4, image_size=32,
                                             patch_size=16)
             out = np.asarray(model(x, training=False))
@@ -201,7 +202,7 @@ class TestTheTaskModelsEmitLogits:
         so a patch-8 segmenter returned a 16x16 map for a 32x32 image."""
         for patch_size in (8, 16):
             keras.utils.set_random_seed(0)
-            model = create_fftnet_with_head("tiny", task_type="segmentation",
+            model = create_fftnet("tiny", task_type="segmentation",
                                             num_classes=4, image_size=32,
                                             patch_size=patch_size)
             out = model(_images(1), training=False)

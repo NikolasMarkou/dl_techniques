@@ -4350,8 +4350,8 @@ def build_model_vision_head(
     keys, then the caller's overrides.
 
     Interface contract, shared by every vision model that owns a task head
-    (21 construction sites in ``models/vision`` and FastVLM; FFTNet's two
-    since D-210):
+    (22 construction sites in ``models/vision`` and FastVLM; FFTNet's three,
+    one per task, since D-229):
 
     * Starts from :meth:`HeadConfiguration.get_default_config` for
       ``task_type`` (so a task type with no head raises ``ValueError`` here).

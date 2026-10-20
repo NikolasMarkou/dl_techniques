@@ -16,7 +16,8 @@ from ..precision_arm_oracle import assert_precision_arm
 
 def _build():
     from dl_techniques.models.vision.fftnet.model import create_fftnet
-    return create_fftnet("tiny", image_size=32, patch_size=16)
+    # The encoder, where the D-054 mixer defect lives (its three outputs).
+    return create_fftnet("tiny", image_size=32, patch_size=16, include_top=False)
 
 
 def _inputs():

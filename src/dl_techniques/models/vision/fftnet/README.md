@@ -1,4 +1,4 @@
-# FFTNet — an adaptive spectral-filtering vision encoder
+# FFTNet — an adaptive spectral-filtering vision model
 
 `model.py`'s module docstring is the long-form reference; this README is the
 orientation layer.
@@ -45,12 +45,26 @@ untouched.
     backend-agnostic complex forward+inverse transform is not expressible. Documented
     exception to the keras.ops-only forward-path rule.
 
-## The encoder contract
+## One class, with or without its task head
 
-`FFTNet` is a **pure encoder**: no pooling layer, no classification head. It embeds
-patches, prepends a CLS token, adds a learned positional embedding, runs the block
-stack, and returns all three of these unconditionally rather than switching return
-type on a flag:
+`FFTNet` follows the models GUIDE section 1 shape: one class, a task head built in
+`__init__` through the vision head factory (`build_model_vision_head`) and applied in
+`call`, `FFTNet.from_variant`, and `create_fftnet(variant, pretrained=False, **kwargs)`,
+which only delegates to it. `pretrained` must be `False`: no weights are distributed.
+
+`include_top=True` (the default) applies one head, chosen by `task_type`. Every
+class-score output is a logit, with no activation inside the model:
+
+| `task_type` | head | output |
+|:---|:---|:---|
+| `classification` (default) | `ClassificationHead` on the final-norm CLS token, `block_dims=()`: an optional dropout (`classifier_dropout_rate`, 0.0) and one linear `Dense`, kernel `TruncatedNormal(0.02)` | one `(B, num_classes)` tensor of class logits |
+| `detection` | sequence-format `DetectionHead` on the patch features, 9 anchors, `multi_head` attention | `{"classifications": (B, H/p, W/p, 9*C), "regressions": (B, H/p, W/p, 36)}`, class logits and raw box offsets |
+| `segmentation` | sequence-format `SegmentationHead` on the patch features, upsampled by `patch_size` (a power of two), `cbam` attention | one `(B, H, W, num_classes)` tensor of per-pixel class logits |
+
+`head_config_overrides` is applied last, by the factory: every key reaches the head
+or the head refuses it, and `name`, `num_classes`, `task_type` raise `ValueError`.
+
+`include_top=False` builds no head and returns the encoder's three outputs together:
 
 | key | shape |
 |:---|:---|
@@ -58,25 +72,18 @@ type on a flag:
 | `cls_token` | `(B, embed_dim)` |
 | `patch_features` | `(B, num_patches, embed_dim)` |
 
-For `create_fftnet("tiny", image_size=32, patch_size=16)` (4 patches + CLS,
-`embed_dim=384`) these are `(2, 5, 384)` / `(2, 384)` / `(2, 4, 384)`, at
-5,336,832 parameters.
-
-Heads are attached externally, via `create_fftnet_with_head` or
-`create_fftnet_classifier`. Every class-score output they produce is a logit,
-with no activation inside the model:
-
-| `task_type` | output |
-|:---|:---|
-| `classification` | one `(B, num_classes)` tensor of class logits (a dropout and one linear `Dense` on the CLS token) |
-| `detection` | `{"classifications": (B, H/p, W/p, A*C), "regressions": (B, H/p, W/p, A*4)}`, class logits and raw box offsets from `DetectionHead` |
-| `segmentation` | one `(B, out_H, out_W, num_classes)` tensor of per-pixel class logits from `SegmentationHead`; `out_H = (H/p) * 2**int(sqrt(p))`, which is `H` at the default `p=16` |
+For `create_fftnet("tiny", image_size=32, patch_size=16, include_top=False)`
+(4 patches + CLS, `embed_dim=384`) these are `(2, 5, 384)` / `(2, 384)` / `(2, 4, 384)`,
+at 5,336,832 parameters.
 
 Compile a classifier or segmenter with `from_logits=True`
 (`SparseCategoricalCrossentropy(from_logits=True)` works on both) and apply
-`keras.ops.softmax` to read probabilities. Before 2026-10-14 the classifier
-returned a `{"logits": ...}` dict and the segmenter a softmax map; archives saved
-before that date do not load and are not supported.
+`keras.ops.softmax` to read probabilities. Before 2026-10-14 the classifier returned a
+`{"logits": ...}` dict and the segmenter a softmax map. Until 2026-10-20 the heads were
+attached by `create_fftnet_with_head` / `create_fftnet_classifier`, functional
+`keras.Model` wrappers around the encoder; both are deleted, and `create_fftnet` now
+returns the classifier by default (pass `include_top=False` for the encoder). Archives
+saved by either wrapper do not load and are not supported.
 
 ## Variants
 
@@ -92,10 +99,19 @@ other resolution, since `W_base` scales with the token count.
 import numpy as np
 from dl_techniques.models.vision.fftnet import create_fftnet
 
-model = create_fftnet("tiny", image_size=32, patch_size=16)
-out = model(np.random.rand(2, 32, 32, 3).astype("float32"), training=False)
-cls = out["cls_token"]            # (2, 384) -- for a classification head
-patches = out["patch_features"]   # (2, 4, 384) -- for a dense-prediction head
+x = np.random.rand(2, 32, 32, 3).astype("float32")
+
+classifier = create_fftnet("tiny", num_classes=10, image_size=32, patch_size=16)
+logits = classifier(x, training=False)            # (2, 10)
+
+segmenter = create_fftnet("tiny", task_type="segmentation", num_classes=4,
+                          image_size=32, patch_size=16)
+masks = segmenter(x, training=False)              # (2, 32, 32, 4)
+
+encoder = create_fftnet("tiny", image_size=32, patch_size=16, include_top=False)
+out = encoder(x, training=False)
+cls = out["cls_token"]            # (2, 384)
+patches = out["patch_features"]   # (2, 4, 384)
 ```
 
 ## References
