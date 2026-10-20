@@ -83,6 +83,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.dtype_policy import mask_sentinel
 from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
@@ -250,11 +251,23 @@ class SequencePooling(keras.layers.Layer):
         weighted_max_seq_len: Maximum sequence length for weighted pooling.
         top_k: Number of top elements for top-k pooling.
         temperature: Temperature for softmax in learnable strategies.
-        use_bias: Whether to use bias in learnable components.
-        kernel_initializer: Initializer for kernels.
-        bias_initializer: Initializer for biases.
-        kernel_regularizer: Optional regularizer for kernels.
-        bias_regularizer: Optional regularizer for biases.
+        use_bias: Whether each attention pooler's ``tanh`` projection has a
+            bias.
+        kernel_initializer: Initializer for each attention pooler's projection
+            kernel and context vector (``attention``,
+            ``multi_head_attention``). Every pooler gets its own clone, and so
+            does every weight inside it. ``weighted`` and the ``weighted_sum``
+            aggregation weights do not read it: both start at ``'ones'`` on
+            purpose, so they begin as a plain mean (uniform softmax).
+        bias_initializer: Initializer for each attention pooler's projection
+            bias, cloned per pooler. ``weighted`` and the aggregation weights
+            have no bias.
+        kernel_regularizer: Optional regularizer for the attention kernels and
+            context vectors, the ``weighted`` position weights and the
+            ``weighted_sum`` aggregation weights (the only weights of the
+            latter two, so they take the kernel regularizer).
+        bias_regularizer: Optional regularizer for each attention pooler's
+            projection bias.
     """
 
     def __init__(
@@ -300,7 +313,12 @@ class SequencePooling(keras.layers.Layer):
             self.kernel_initializer = keras.initializers.get(kernel_initializer)
         else:
             self.kernel_initializer = kernel_initializer
-        self.bias_initializer = keras.initializers.get(bias_initializer)
+        # The bias initializer follows the same rule: only an attention pooler
+        # reads it (D-201).
+        if _KERNEL_STRATEGIES.intersection(self.strategy):
+            self.bias_initializer = keras.initializers.get(bias_initializer)
+        else:
+            self.bias_initializer = bias_initializer
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
         self.bias_regularizer = keras.regularizers.get(bias_regularizer) if bias_regularizer else None
 
@@ -316,8 +334,13 @@ class SequencePooling(keras.layers.Layer):
                     dropout_rate=self.attention_dropout_rate,
                     use_bias=self.use_bias,
                     temperature=self.temperature,
-                    kernel_initializer=self.kernel_initializer,
+                    # DECISION plan-2026-10-14T062616-81938e81/D-201: a fresh
+                    # clone per pooler. One shared seedless instance tied the
+                    # 'attention' and 'multi_head_attention' weights (r = 1.0).
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
+                    bias_initializer=clone_initializer(self.bias_initializer),
                     kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
                     name=f'{strat}_pooling'
                 )
             elif strat == 'weighted':
@@ -943,7 +966,10 @@ class SequencePooling(keras.layers.Layer):
                 keras.initializers.serialize(self.kernel_initializer)
                 if isinstance(self.kernel_initializer, keras.initializers.Initializer)
                 else self.kernel_initializer),
-            'bias_initializer':keras.initializers.serialize(self.bias_initializer),
+            'bias_initializer':(
+                keras.initializers.serialize(self.bias_initializer)
+                if isinstance(self.bias_initializer, keras.initializers.Initializer)
+                else self.bias_initializer),
             'kernel_regularizer':keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer':keras.regularizers.serialize(self.bias_regularizer),
         })

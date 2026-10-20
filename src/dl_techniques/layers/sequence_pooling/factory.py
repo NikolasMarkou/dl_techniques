@@ -67,7 +67,9 @@ SEQUENCE_POOLING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'use_bias': True,
             'temperature': 1.0,
             'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
             'kernel_regularizer': None,
+            'bias_regularizer': None,
         },
         'use_case': (
             'Collapsing a sequence into a single summary vector when relevance '

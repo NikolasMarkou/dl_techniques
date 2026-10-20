@@ -21,6 +21,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -66,10 +67,16 @@ class AttentionPooling(keras.layers.Layer):
         hidden_dim: Hidden dimension for attention computation.
         num_heads: Number of attention heads.
         dropout_rate: Dropout rate for attention weights.
-        use_bias: Whether to use bias in attention layers.
+        use_bias: Whether the ``tanh`` projection has a bias.
         temperature: Temperature for attention softmax.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
+        kernel_initializer: Initializer for the projection kernel and the
+            context vector. Each of the two weights gets its own clone, so a
+            seedless initializer draws them independently.
+        bias_initializer: Initializer for the projection bias (read only when
+            ``use_bias`` is True).
+        kernel_regularizer: Optional regularizer for the projection kernel and
+            the context vector.
+        bias_regularizer: Optional regularizer for the projection bias.
     """
 
     def __init__(
@@ -80,7 +87,9 @@ class AttentionPooling(keras.layers.Layer):
         use_bias: bool = True,
         temperature: float = 1.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Initialise the attention pooling layer."""
@@ -93,15 +102,23 @@ class AttentionPooling(keras.layers.Layer):
         self.use_bias = use_bias
         self.temperature = temperature
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer) if bias_regularizer else None
 
-        # Create sub-layers in __init__ (Golden Rule)
+        # DECISION plan-2026-10-14T062616-81938e81/D-201: one clone of the
+        # kernel initializer per weight (the Dense kernel here, context_vector
+        # in build). A seedless instance shared by both replayed one sample:
+        # context_vector was the kernel's leading values (r = 1.0). Do NOT
+        # hand self.kernel_initializer to either site directly.
         self.attention_dense = keras.layers.Dense(
             self.hidden_dim * self.num_heads,
             activation='tanh',
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name='attention_transform'
         )
 
@@ -123,7 +140,7 @@ class AttentionPooling(keras.layers.Layer):
         self.context_vector = self.add_weight(
             name='context_vector',
             shape=(self.num_heads, self.hidden_dim),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True
         )
@@ -224,7 +241,9 @@ class AttentionPooling(keras.layers.Layer):
             'use_bias': self.use_bias,
             'temperature': self.temperature,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 

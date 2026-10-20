@@ -150,7 +150,8 @@ argument has a default, so each type can be created with zero kwargs.
 **Optional:** `hidden_dim` (default: 256), `num_heads` (default: 1),
 `dropout_rate` (default: 0.0), `use_bias` (default: True),
 `temperature` (default: 1.0), `kernel_initializer` (default: `'glorot_uniform'`),
-`kernel_regularizer` (default: None)
+`bias_initializer` (default: `'zeros'`), `kernel_regularizer` (default: None),
+`bias_regularizer` (default: None)
 
 ```python
 attn = create_sequence_pooling_layer(
@@ -164,6 +165,11 @@ attn = create_sequence_pooling_layer(
 
 With `num_heads > 1` the per-head weighted sums are averaged; with `num_heads == 1`
 the single head's output is returned directly.
+
+The projection kernel and the context vector each get their own clone of
+`kernel_initializer`, so a seedless initializer draws them independently (one
+shared instance used to make the context vector a copy of the kernel's leading
+values). The bias knobs act on the `tanh` projection's bias when `use_bias=True`.
 
 ### `weighted`
 **Required:** None
