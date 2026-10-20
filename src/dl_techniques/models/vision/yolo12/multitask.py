@@ -51,7 +51,8 @@ from dl_techniques.layers.heads.vision.task_types import (
 from dl_techniques.layers.yolo12.yolo12_heads import (
     YOLOv12DetectionHead,
     YOLOv12SegmentationHead,
-    YOLOv12ClassificationHead
+    YOLOv12ClassificationHead,
+    refuse_tasks_without_a_yolov12_head,
 )
 from .feature_extractor import YOLOv12FeatureExtractor
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -104,6 +105,8 @@ class YOLOv12MultiTask(keras.Model):
     :type reg_max: int
     :param task_config: Which tasks to enable — a `TaskConfiguration`, a list of
         `VisionTaskType`, a list of strings, a single `VisionTaskType`, or a single string.
+        Only detection, segmentation and classification have a YOLOv12 head;
+        any other task raises ``ValueError`` (use ``create_vision_head`` for those).
     :type task_config: Union[TaskConfiguration, List[VisionTaskType], List[str], VisionTaskType, str]
     :param segmentation_filters: Decoder filter sizes for the segmentation head.
     :type segmentation_filters: Optional[List[int]]
@@ -174,7 +177,8 @@ class YOLOv12MultiTask(keras.Model):
         :type scale: str
         :param reg_max: Maximum value for DFL regression.
         :type reg_max: int
-        :param task_config: Which tasks to enable.
+        :param task_config: Which tasks to enable: detection, segmentation
+            and/or classification. Any other task raises ``ValueError``.
         :type task_config: Union[TaskConfiguration, List[VisionTaskType], List[str], VisionTaskType, str]
         :param segmentation_filters: Decoder filter sizes for the segmentation head.
         :type segmentation_filters: Optional[List[int]]
@@ -217,6 +221,7 @@ class YOLOv12MultiTask(keras.Model):
 
         # Parse task configuration
         self.task_config = parse_task_list(task_config)
+        refuse_tasks_without_a_yolov12_head(self.task_config, type(self).__name__)
 
         # Configure class counts for each task
         self.num_detection_classes = num_detection_classes if num_detection_classes is not None else num_classes

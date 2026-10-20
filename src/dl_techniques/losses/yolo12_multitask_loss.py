@@ -41,6 +41,7 @@ from dl_techniques.layers.heads.vision.task_types import (
     TaskConfiguration,
     parse_task_list
 )
+from dl_techniques.layers.yolo12.yolo12_heads import refuse_tasks_without_a_yolov12_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -876,11 +877,13 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         - 2D tensors: Classification (batch, classes)
 
     Args:
-        tasks: Task configuration specifying which tasks to enable.
+        tasks: Task configuration specifying which tasks to enable. Only
+            detection, segmentation and classification have a sub-loss; any
+            other task raises ``ValueError``.
         num_detection_classes: Number of classes for detection task.
         num_segmentation_classes: Number of classes for segmentation task.
         num_classification_classes: Number of classes for classification task.
-        num_classes: Fallback for backward compatibility.
+        num_classes: Fallback class count for any task whose own count is not given.
         input_shape: Input image dimensions as (height, width).
         use_uncertainty_weighting: Whether to use learnable uncertainty weighting.
         detection_weight: Static weight for detection loss (ignored if uncertainty weighting is used).
@@ -898,7 +901,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         num_detection_classes: Optional[int] = None,
         num_segmentation_classes: Optional[int] = None,
         num_classification_classes: Optional[int] = None,
-        # Backward compatibility
+        # Fallback for any task whose own count is not given
         num_classes: int = 80,
         input_shape: Tuple[int, int] = (640, 640),
         use_uncertainty_weighting: bool = False,
@@ -913,6 +916,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Parse and store task configuration
         self.task_config = parse_task_list(tasks)
+        refuse_tasks_without_a_yolov12_head(self.task_config, type(self).__name__)
 
         # Configure class counts
         self.num_detection_classes = num_detection_classes if num_detection_classes is not None else num_classes
@@ -920,7 +924,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         self.num_classification_classes = num_classification_classes if num_classification_classes is not None else num_classes
 
         # Store other configuration
-        self.num_classes = num_classes  # Backward compatibility
+        self.num_classes = num_classes  # serialized: the fallback of the three counts above
         self.input_shape = input_shape
         self.use_uncertainty_weighting = use_uncertainty_weighting
         self.detection_weight = detection_weight
@@ -1138,7 +1142,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             "num_detection_classes": self.num_detection_classes,
             "num_segmentation_classes": self.num_segmentation_classes,
             "num_classification_classes": self.num_classification_classes,
-            # Backward compatibility
+            # The fallback of the three counts above
             "num_classes": self.num_classes,
             "input_shape": self.input_shape,
             "use_uncertainty_weighting": self.use_uncertainty_weighting,
@@ -1172,7 +1176,7 @@ def create_yolov12_multitask_loss(
     num_detection_classes: Optional[int] = None,
     num_segmentation_classes: Optional[int] = None,
     num_classification_classes: Optional[int] = None,
-    num_classes: int = 80,  # Backward compatibility
+    num_classes: int = 80,  # fallback for any task whose own count is not given
     input_shape: Tuple[int, int] = (640, 640),
     **kwargs
 ) -> YOLOv12MultiTaskLoss:
@@ -1188,7 +1192,7 @@ def create_yolov12_multitask_loss(
         num_detection_classes: Number of classes for detection task.
         num_segmentation_classes: Number of classes for segmentation task.
         num_classification_classes: Number of classes for classification task.
-        num_classes: Fallback class count for backward compatibility.
+        num_classes: Fallback class count for any task whose own count is not given.
         input_shape: Input image dimensions as (height, width).
         **kwargs: Additional keyword arguments passed to YOLOv12MultiTaskLoss.
 

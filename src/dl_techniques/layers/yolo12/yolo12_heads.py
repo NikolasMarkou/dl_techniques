@@ -26,6 +26,58 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.yolo12.yolo12_blocks import yolo12_conv_block
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.heads.vision.task_types import (
+    VisionTaskType,
+    TaskConfiguration,
+)
+
+# ---------------------------------------------------------------------
+
+#: The tasks a YOLOv12 head exists for. ``YOLOv12MultiTask`` builds one head
+#: per task and ``YOLOv12MultiTaskLoss`` one sub-loss per task; both refuse
+#: any other task through :func:`refuse_tasks_without_a_yolov12_head`.
+YOLOV12_HEAD_TASKS = frozenset({
+    VisionTaskType.DETECTION,
+    VisionTaskType.SEGMENTATION,
+    VisionTaskType.CLASSIFICATION,
+})
+
+
+def refuse_tasks_without_a_yolov12_head(
+        task_config: TaskConfiguration, owner: str
+) -> None:
+    """Raise if ``task_config`` enables a task no YOLOv12 head serves.
+
+    Interface contract, shared by ``YOLOv12MultiTask`` and
+    ``YOLOv12MultiTaskLoss``: call it on the parsed configuration before
+    anything is built. It returns ``None`` when every enabled task is in
+    :data:`YOLOV12_HEAD_TASKS`, and otherwise raises ``ValueError`` naming
+    ``owner``, each unsupported task value, and ``create_vision_head`` (the
+    generic, anchor-based heads, which cover the other task types). It reads
+    nothing but ``task_config.get_enabled_tasks()``.
+
+    :param task_config: The parsed task configuration.
+    :type task_config: TaskConfiguration
+    :param owner: Class name to put in the message.
+    :type owner: str
+    :raises ValueError: If any enabled task has no YOLOv12 head.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-206
+    # Refuse, do NOT route the other task types to create_vision_head from
+    # inside YOLOv12MultiTask: the generic heads are anchor-based and
+    # YOLOv12MultiTaskLoss has no sub-loss for them, so a mixed model would
+    # train a head nothing supervises. See decisions.md D-206.
+    unsupported = sorted(
+        task.value for task in task_config.get_enabled_tasks()
+        if task not in YOLOV12_HEAD_TASKS
+    )
+    if unsupported:
+        supported = sorted(task.value for task in YOLOV12_HEAD_TASKS)
+        raise ValueError(
+            f"{owner} has no head for task(s) {unsupported}; it builds only "
+            f"{supported}. For any other vision task use "
+            f"dl_techniques.layers.heads.vision.create_vision_head."
+        )
 
 # ---------------------------------------------------------------------
 
