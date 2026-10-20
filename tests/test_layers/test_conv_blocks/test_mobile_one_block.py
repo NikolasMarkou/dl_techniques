@@ -1125,12 +1125,22 @@ class TestMobileOneBlockNormEpsilonAndPadding:
                         f"size={size} stride={stride} k={k}: "
                         f"got {got[1:3]}, expected {expected}")
 
-    def test_reference_mode_stride_one_odd_kernel_is_value_identical(self):
+    def test_reference_mode_stride_one_odd_kernel_is_value_identical(
+            self, golden_reference_device):
         """At stride 1 with an odd kernel the two modes agree ELEMENTWISE.
 
         This is the measurement that justifies applying ``'reference'`` uniformly
         at every FastViT site instead of only where ``stride > 1``.
+
+        Exact equality is a claim about the arithmetic, so it runs on the CPU
+        golden device. On GPU 1 the two paths (``same`` conv vs explicit pad +
+        ``valid`` conv) reach different cuDNN algorithms and differed by up to
+        1.9e-6 in 7 of 8 solo runs (measured 2026-10-20; also red at fa7499206).
         """
+        with keras.device(golden_reference_device):
+            self._assert_reference_mode_equals_same()
+
+    def _assert_reference_mode_equals_same(self):
         rng = np.random.default_rng(99)
         x = rng.standard_normal((2, 11, 11, 6)).astype('float32')
 
