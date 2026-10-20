@@ -885,13 +885,14 @@ def fill_batch(
     Interface contract (3 callers: ``train.common.megadepth.MegaDepthDataset``,
     ``train.omnipoint.data.MegaDepthPinholeDataset`` and
     ``train.omnipoint.kitti_depth.KittiDepthDataset``). Attempt ``a`` (from
-    0, at most ``3 * batch_size``) reads file ``indices[(idx * batch_size + a)
+    0, at most ``3 * batch_size`` and at most ``len(indices)``) reads file ``indices[(idx * batch_size + a)
     % len(indices)]`` through ``load_one(file_index)``; a ``None`` result is
     skipped, and filling stops when ``batch_size`` results are kept. When every
     file loads, batch ``i`` holds exactly files ``i*B .. i*B+B-1`` of
     ``indices``, so the batches of an epoch are disjoint and read each file
     once. A skipped file is refilled from the files after the window, which
-    the next batch reads again (the D-126 trade-off).
+    the next batch reads again (the D-126 trade-off). No batch reads a file
+    twice: with fewer files than ``batch_size`` it holds each once (D-199).
 
     Args:
         owner: The dataset class name, for the error message.
@@ -917,7 +918,7 @@ def fill_batch(
     # offsets were never read (D-126, then again in both OmniPoint loaders).
     kept: List[Any] = []
     tried: List[int] = []
-    for attempt in range(batch_size * 3):
+    for attempt in range(min(batch_size * 3, len(indices))):
         if len(kept) == batch_size:
             break
         file_index = int(indices[(idx * batch_size + attempt) % len(indices)])
