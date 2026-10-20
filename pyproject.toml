@@ -59,7 +59,9 @@ apps = [
 # datasets/document_rectification/uvdoc.py (h5py — UVDoc ships MATLAB v7.3
 # ground truth, which is HDF5 and which scipy.io.loadmat refuses);
 # models/vision/dino/official_weights.py (safetensors — reads the published
-# DINOv2 checkpoints that DINOv2 and Depth Anything load for pretrained=True). The core
+# DINOv2 checkpoints that DINOv2 and Depth Anything load for pretrained=True);
+# models/time_series/timestral/loading.py (huggingface_hub — downloads a Hub
+# checkpoint for load_model). The core
 # install does not need them; importing one of those specific modules without
 # this extra raises ModuleNotFoundError. Every one of these imports is INSIDE
 # the function that needs it, so the surrounding module still imports on a core
@@ -71,7 +73,8 @@ data = [
     "Pillow",
     "requests",
     "h5py",
-    "safetensors"
+    "safetensors",
+    "huggingface_hub"
 ]
 
 [tool.setuptools]

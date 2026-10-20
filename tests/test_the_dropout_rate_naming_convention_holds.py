@@ -46,11 +46,13 @@ on purpose: a line pin goes stale on the next unrelated edit above it, and a
 guard that cries wolf gets deleted. The failure message reports live line
 numbers so a real violation is still one click away.
 
-Two of the 19 entries are NOT stock Keras. They are
-``tests/test_layers/test_embedding/test_embedding_factory.py``'s deliberate
-NEGATIVE tests, which pass ``create_embedding_layer(dropout=0.5)`` precisely to
-prove the factory REJECTS the wrong spelling. Renaming them would delete the
-test's subject.
+Two of the 15 entries are NOT stock Keras. They are deliberate NEGATIVE
+tests: ``tests/test_layers/test_embedding/test_embedding_factory.py`` passes
+``create_embedding_layer(dropout=0.5)`` and
+``tests/test_layers/test_the_sequence_pooling_factory_refuses_an_unknown_keyword.py``
+passes ``create_sequence_pooling_layer(..., dropout=0.5)`` (plan-2026-10-14T062616-81938e81
+D-200), each precisely to prove the factory REJECTS the wrong spelling.
+Renaming them would delete the test's subject.
 
 RED-PROOF
 ---------
@@ -139,6 +141,8 @@ EXEMPT_KEYWORD_CALLS: Set[Tuple[str, str, str]] = {
     ("src/dl_techniques/models/time_series/deepar/model.py", "LSTM", "recurrent_dropout"),
     # --- deliberate NEGATIVE tests: the factory must REJECT this spelling ---
     ("tests/test_layers/test_embedding/test_embedding_factory.py", "create_embedding_layer", "dropout"),
+    ("tests/test_layers/test_the_sequence_pooling_factory_refuses_an_unknown_keyword.py",
+     "create_sequence_pooling_layer", "dropout"),
 }
 
 # ---------------------------------------------------------------------

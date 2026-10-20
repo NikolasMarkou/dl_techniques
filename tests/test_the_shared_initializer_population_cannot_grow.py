@@ -307,7 +307,14 @@ def _loop_carried_sites() -> List[Tuple[str, int, str, str, str]]:
 #: census must not encode a per-site verdict it cannot re-derive.
 #: Ratcheted 2026-10-16 (plan-2026-10-14T062616-81938e81 D-076): 99 at
 #: fb905f29b, 96 after MobileNet's conv blocks and models cloned per site.
-_LOOP_CARRIED_SITE_CEILING = 96
+#: 97 since step 5.2 (69b68fe5a): ``SequencePooling`` hands its
+#: ``bias_initializer`` to each ``AttentionPooling`` it builds in a loop. That
+#: site was built seeded and measured: ``AttentionPooling`` clones the
+#: initializer per weight, so no two poolers replay one draw (D-201; guard
+#: ``tests/test_layers/test_no_two_pooling_weights_replay_one_draw.py``). The
+#: ceiling was not raised in that step, so this census was red from 69b68fe5a
+#: until step 7.1 (D-219).
+_LOOP_CARRIED_SITE_CEILING = 97
 
 
 @pytest.fixture(scope="module")

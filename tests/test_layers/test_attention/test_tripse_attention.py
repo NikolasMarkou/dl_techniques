@@ -674,6 +674,18 @@ class StrictTrainingActivation(keras.layers.Layer):
 class _DeadChild(keras.layers.Layer):
     """A sub-layer that exists only to be called with an explicit `training`."""
 
+    def __init__(self, **kwargs):
+        # Keras derives a default name from the class, "_dead_child". A name
+        # with a leading underscore is not a valid ROOT tf.name_scope, so when
+        # the parent is auto-built in a scratch FuncGraph, the child's scope
+        # push raises after Keras appended it, the parent's exit pops the
+        # child's entry, and the PARENT's scope stays on the global stack for
+        # the rest of the process (measured: every later weight path gained an
+        # "outer/" prefix and two test_transformers order guards went red;
+        # D-219 of plan-2026-10-14T062616-81938e81).
+        kwargs.setdefault("name", "dead_child")
+        super().__init__(**kwargs)
+
     def call(self, inputs, training=None):
         return inputs
 
@@ -688,6 +700,7 @@ class _ContextPoisoner(keras.layers.Layer):
     """
 
     def __init__(self, inner, **kwargs):
+        kwargs.setdefault("name", "context_poisoner")  # see _DeadChild.__init__
         super().__init__(**kwargs)
         self.inner = inner
         self.dead_child = _DeadChild()

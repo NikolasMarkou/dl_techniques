@@ -51,6 +51,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.utils.dtype_policy import accumulation_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -248,13 +249,6 @@ def topk_mask(scores: keras.KerasTensor, k: int) -> keras.KerasTensor:
     return keras.ops.reshape(hits > 0.5, keras.ops.shape(scores))
 
 
-def _attention_dtype(compute_dtype: str) -> str:
-    """The dtype the softmax, the PFA product and the top-k run in: the compute
-    dtype, raised to float32 under a half-precision policy (``PFA_EPSILON``
-    is 0 in float16, and a top-k over underflowed zeros would pick dropped
-    keys)."""
-    return "float32" if compute_dtype in ("float16", "bfloat16") else compute_dtype
-
 # ---------------------------------------------------------------------
 
 
@@ -433,7 +427,10 @@ class PFTLayer(keras.layers.Layer):
         bias = keras.ops.take(self.relative_position_bias_table, self._rpi, axis=0)
         bias = keras.ops.transpose(keras.ops.reshape(bias, (n, n, self.bias_columns)),
                                    (2, 0, 1))
-        work = _attention_dtype(keras.backend.standardize_dtype(logits.dtype))
+        # The softmax, the PFA product and the top-k run in the compute dtype,
+        # raised to float32 under a half-precision policy (PFA_EPSILON is 0 in
+        # float16, and a top-k over underflowed zeros would pick dropped keys).
+        work = accumulation_dtype(logits.dtype)
         logits = keras.ops.cast(logits + keras.ops.cast(bias[None], logits.dtype), work)
 
         # DECISION plan-2026-10-14T062616-81938e81/D-212: the official sparse

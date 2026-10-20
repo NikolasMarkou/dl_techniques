@@ -314,15 +314,28 @@ class TestOneSidedMode:
 
 class TestDegenerateInterval:
 
-    def test_lo_equals_hi_gives_a_constant_and_warns(self, caplog) -> None:
+    def test_lo_equals_hi_gives_a_constant(self) -> None:
         x = np.linspace(-5.0, 5.0, 101).astype("float32")
-        with caplog.at_level("WARNING", logger="dl"):
-            y = _np(soft_value_range(x, 2.0, 2.0, sharpness=50.0))
+        y = _np(soft_value_range(x, 2.0, 2.0, sharpness=50.0))
         assert np.all(np.isfinite(y))
         np.testing.assert_allclose(y, np.full_like(x, 2.0), rtol=0.0, atol=0.0)
-        assert any(record.levelname == "WARNING" for record in caplog.records), (
-            "the degenerate hi == lo case must log a warning"
-        )
+
+    def test_the_layer_warns_once_at_construction(self, caplog) -> None:
+        """The warning is the LAYER's, at construction (R-033): the function is a
+        forward-path helper, so it does not log. This test used to expect a
+        warning from the function and was red alone at 1e6497747 (D-219 of
+        plan-2026-10-14T062616-81938e81); only records from the ``dl`` logger
+        count, so an unrelated framework warning cannot satisfy it."""
+        def dl_warnings():
+            return [r for r in caplog.records if r.name == "dl" and r.levelname == "WARNING"]
+
+        with caplog.at_level("WARNING", logger="dl"):
+            layer = SoftValueRange(min_value=2.0, max_value=2.0)
+            assert len(dl_warnings()) == 1
+            y = _np(layer(np.linspace(-5.0, 5.0, 101).astype("float32")))
+            soft_value_range(np.zeros(3, "float32"), 2.0, 2.0)
+        assert len(dl_warnings()) == 1
+        np.testing.assert_array_equal(y, np.full(101, 2.0, "float32"))
 
 
 # ---------------------------------------------------------------------

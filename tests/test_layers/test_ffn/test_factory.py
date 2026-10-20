@@ -878,24 +878,37 @@ class TestFactoryPerformance:
     """Performance and efficiency tests for FFN factory."""
 
     def test_factory_overhead(self):
-        """Test that factory doesn't add significant overhead."""
+        """The factory's dispatch and validation cost less than a second build.
 
+        Timed with the ``dl`` logger disabled, after one warm-up of each path,
+        as the best of five interleaved trials. The factory logs about ten INFO
+        lines per call, and what a log record costs depends on whatever handlers
+        the process has attached by then: the old single cold sample measured
+        1.19 s against 0.197 s direct in a 7,400-test run and passed alone
+        (plan-2026-10-14T062616-81938e81 D-219).
+        """
         import time
 
-        # Time factory creation
-        start_time = time.time()
-        for _ in range(100):
-            layer = create_ffn_layer('mlp', hidden_dim=256, output_dim=128)
-        factory_time = time.time() - start_time
+        def best_of_five(build):
+            build()
+            best = float("inf")
+            for _ in range(5):
+                start = time.perf_counter()
+                for _ in range(100):
+                    build()
+                best = min(best, time.perf_counter() - start)
+            return best
 
-        # Time direct creation
-        start_time = time.time()
-        for _ in range(100):
-            layer = MLPBlock(hidden_dim=256, output_dim=128)
-        direct_time = time.time() - start_time
+        was_disabled = logger.disabled
+        logger.disabled = True
+        try:
+            factory_time = best_of_five(
+                lambda: create_ffn_layer('mlp', hidden_dim=256, output_dim=128))
+            direct_time = best_of_five(lambda: MLPBlock(hidden_dim=256, output_dim=128))
+        finally:
+            logger.disabled = was_disabled
 
-        # Factory should not be more than 2x slower than direct
-        assert factory_time < direct_time * 2.0
+        assert factory_time < direct_time * 2.0, (factory_time, direct_time)
 
     def test_memory_usage_consistency(self):
         """Test memory usage is consistent between factory and direct creation."""
