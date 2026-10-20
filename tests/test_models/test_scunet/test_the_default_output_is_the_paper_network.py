@@ -13,7 +13,7 @@ the model applies the long skip, and ``include_top=False`` returns the
 
 ``test_golden_values.py`` pins the external evidence: the default model
 reproduces, at ``atol=1e-8``, the values that file pinned before 3b281907a.
-This file pins the mechanism, at 64 px (no reflect pad, so no crop):
+This file pins the mechanism, at 64 px (no pad, so no crop):
 
 * the headed output is the head's single bias-free conv applied to the
   headless features, exactly;

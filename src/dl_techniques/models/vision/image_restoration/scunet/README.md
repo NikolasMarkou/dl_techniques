@@ -413,13 +413,19 @@ the long skip and the tail conv: the default model was not SCUNet, only
 Archives saved with the 2026-10-10 head do not load into this model; that head
 is gone, not kept for compatibility.
 
-### Known difference from the official code
+### Input padding
 
-The official forward pads the input to a multiple of 64 with
-`nn.ReplicationPad2d` (edge replication); this port uses a reflect pad
-(`keras.ops.pad(..., mode="REFLECT")`), which is why it refuses heights or
-widths below 33. On inputs that are already a multiple of 64 the two agree; on
-others the cropped output differs near the bottom and right borders.
+The forward pads the input at the bottom and right to a multiple of 64 by
+repeating the last row and column, as the official `nn.ReplicationPad2d` does,
+and crops the output back. Every size down to 1 x 1 is accepted, including
+under `keras.Input((None, None, 3))`. Guard: `test_the_pad_replicates_the_edge.py`
+(the output on an `H x W` input equals the output on `np.pad(x, mode='edge')`
+cropped back, exactly, at 5x7, 33x40, 64x64, 1x1 and 16x16, and through a
+dynamic-shape trace). Until 2026-10-20 this port used a reflect pad, refused
+heights or widths below 33, and differed from the reference on every other
+size that is not a multiple of 64. The difference is not confined to the
+borders: the bottleneck sees the whole padded image, and at 33 x 40 every
+output element moved (7920 of 7920 in the guard's anti-vacuity probe).
 
 ---
 

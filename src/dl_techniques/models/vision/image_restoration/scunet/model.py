@@ -6,13 +6,13 @@ restoration tasks, and the ``create_scunet`` factory. Each stage stacks
 a windowed-attention transformer branch, alternating plain and shifted windows
 for cross-window connectivity. The encoder-decoder is symmetric: 3 down stages,
 a bottleneck and 3 up stages, joined by additive rather than concatenating skip
-connections, with a stride product of 8. Inputs are reflect-padded to a
-multiple of 64 and cropped back on output, 64 being the stride product times
-the default window size of 8, so every stage's feature map divides by the
-window. That makes ``SCUNet()(keras.Input((None, None, 3)))`` one model that
-serves every concrete size. The pad target is a hardcoded 64 rather than a
-function of ``window_size``. A reflect pad must be strictly smaller than the
-extent it pads, so heights or widths below 33 raise, and no pretrained weights
+connections, with a stride product of 8. Inputs are padded at the bottom and
+right to a multiple of 64 by repeating the last row and column, as the official
+``nn.ReplicationPad2d`` does, and cropped back on output, 64 being the stride
+product times the default window size of 8, so every stage's feature map
+divides by the window. That makes ``SCUNet()(keras.Input((None, None, 3)))``
+one model that serves every concrete size, down to 1 x 1. The pad target is a
+hardcoded 64 rather than a function of ``window_size``. No pretrained weights
 ship with this port.
 
 The :class:`SCUNet` class supports an ``include_top`` parameter. When ``True``
@@ -45,6 +45,36 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
+
+def _replicate_bottom_right(
+        x: keras.KerasTensor,
+        padding_bottom: Any,
+        padding_right: Any,
+) -> keras.KerasTensor:
+    """Pad ``(B, H, W, C)`` at the bottom and right by repeating the edge.
+
+    The official forward's ``nn.ReplicationPad2d((0, right, 0, bottom))``, i.e.
+    ``np.pad(mode='edge')`` on those two sides. A pad of 0 appends nothing.
+
+    :param x: Input tensor ``(B, H, W, C)``, ``H`` and ``W`` at least 1.
+    :type x: keras.KerasTensor
+    :param padding_bottom: Rows to append; a Python int or a scalar tensor.
+    :param padding_right: Columns to append; a Python int or a scalar tensor.
+    :return: ``(B, H + padding_bottom, W + padding_right, C)``.
+    :rtype: keras.KerasTensor
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-224: concatenate the last
+    # row/column tiled, NOT keras.ops.pad(mode="edge") (the TensorFlow backend
+    # refuses EDGE: only CONSTANT/REFLECT/SYMMETRIC), NOT REFLECT (not the
+    # reference, and it refuses extents below 33), NOT a gather of clamped
+    # indices (an index tensor built from a dynamic shape retraces under XLA).
+    # See decisions.md.
+    x = keras.ops.concatenate(
+        [x, keras.ops.tile(x[:, -1:, :, :], [1, padding_bottom, 1, 1])], axis=1)
+    return keras.ops.concatenate(
+        [x, keras.ops.tile(x[:, :, -1:, :], [1, 1, padding_right, 1])], axis=2)
+
+
 @register_dl_technique("dl_techniques.models.scunet.model")
 class SCUNet(keras.Model):
     """Restore an image through a Swin-Conv U-Net.
@@ -60,7 +90,7 @@ class SCUNet(keras.Model):
         input [B, H, W, C_in]
               │
               ▼
-        reflect pad to a multiple of 64
+        edge pad to a multiple of 64
               │
               ▼
         ┌──────────────────────────────┐
@@ -164,7 +194,7 @@ class SCUNet(keras.Model):
 
         H = 33   pad 31   ──►  64   ──►  /8  ──►  8, divides the window
         H = 64   pad  0   ──►  64
-        H = 32   pad 32   ──►  rejected, pad not smaller than H
+        H = 5    pad 59   ──►  64, rows 5..63 repeat row 4
 
     :param in_nc: Number of input channels, and of output channels. Defaults
         to 3.
@@ -629,30 +659,7 @@ class SCUNet(keras.Model):
             ``include_top``, else the features ``(B, H, W, dim)``; the same
             spatial size as the input either way.
         :rtype: keras.KerasTensor
-
-        :raises ValueError: If a statically-known spatial extent is so small that
-            the reflect pad up to the next multiple of 64 would be at least
-            as large as the extent itself, which is every extent below 33. A
-            dynamic extent is not checked here.
         """
-        # DECISION plan-2026-07-31T210633-b63a35aa/D-004: check statically, since
-        # MirrorPad needs every pad amount below its own dimension; a fallback
-        # would invent pad content and a runtime check breaks the symbolic build.
-        # See decisions.md.
-        for axis_name, extent in (("height", x.shape[1]), ("width", x.shape[2])):
-            if extent is None:
-                continue
-            pad_amount = (-extent) % 64
-            if pad_amount >= extent:
-                raise ValueError(
-                    f"SCUNet reflect-pads {axis_name} up to the next multiple of "
-                    f"64, but a reflect pad must be strictly smaller than the "
-                    f"extent it pads: {axis_name}={extent} needs a pad of "
-                    f"{pad_amount}, which is not less than {extent}. The "
-                    f"smallest {axis_name} SCUNet accepts is 33. Pass a larger "
-                    f"input, or pad it yourself before calling."
-                )
-
         # Captured before the pad, so the crop below restores the input size.
         h, w = keras.ops.shape(x)[1], keras.ops.shape(x)[2]
 
@@ -662,8 +669,7 @@ class SCUNet(keras.Model):
         padding_bottom = (-h) % 64
         padding_right = (-w) % 64
 
-        paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
-        x = keras.ops.pad(x, paddings, mode="REFLECT")
+        x = _replicate_bottom_right(x, padding_bottom, padding_right)
 
         x1 = self.m_head(x)
         x2 = self.m_down1(x1, training=training)

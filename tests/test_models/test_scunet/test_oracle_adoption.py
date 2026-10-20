@@ -20,15 +20,13 @@ reassociation noise between a static and a dynamic trace -- and this directory
 owns two of the six. Nothing in this file touches them, and a failure of either
 after this commit is the SAME pre-existing red, not a regression.
 
-THE INPUT FLOOR IS 33, NOT A ROUND NUMBER
--------------------------------------------
-SCUNet reflect-pads its input up to the next multiple of 64, and a reflect pad
-must be strictly smaller than the extent it pads. At ``height=32`` the required
-pad is exactly 32, which is not less than 32, so the model REFUSES with a named
-message rather than emitting garbage. This file therefore runs at 64 px and
-asserts the refusal at 32 px rather than quietly avoiding it -- the refusal is
-the model's contract, and a test suite that only ever passes it legal sizes
-would not notice if it were removed.
+NO INPUT FLOOR
+--------------
+Until plan-2026-10-14T062616-81938e81 step 9.1 SCUNet reflect-padded its input
+and refused heights or widths below 33; it now repeats the edge, as the
+official ``nn.ReplicationPad2d`` does, and accepts every size down to 1 x 1.
+The by-value guard is ``test_the_pad_replicates_the_edge.py``; the smoke
+contract below asserts the two ends of the old refusal now run.
 
 Measured 2026-08-21, one Adam step, ramp loss, at
 ``config=[1]*7 / dim=16 / head_dim=8 / window_size=4`` on a ``(1, 64, 64, 3)``
@@ -72,8 +70,6 @@ from ..smoke_contract_oracle import (
 )
 
 SHAPE = (64, 64, 3)
-#: The smallest height/width SCUNet accepts -- see the module docstring.
-MIN_EXTENT = 33
 BUILD_SEED = 0
 
 #: Measured 2026-08-21, one Adam step, ramp loss: 148, the paper's network.
@@ -292,18 +288,14 @@ class TestSCUNetSmokeContract:
             "collapse_to_scalar", "slice_leading_axis", "append_trailing_axis",
         }
 
-    def test_an_input_below_the_reflect_pad_floor_is_refused_with_a_reason(self):
-        """The contract, asserted at the boundary from BOTH sides.
-
-        32 px must raise and 33 px must not. A one-sided test would pass on a
-        model that refused everything.
-        """
+    def test_inputs_below_the_old_reflect_pad_floor_run(self):
+        """1 px and 32 px, which the reflect pad refused, restore to their
+        own size. Values: ``test_the_pad_replicates_the_edge.py``."""
         model = _built()
-        with pytest.raises(ValueError, match="reflect"):
-            model(_images(batch=1, shape=(32, 32, 3)), training=False)
-        out = model(_images(batch=1, shape=(MIN_EXTENT, MIN_EXTENT, 3)),
-                    training=False)
-        assert tuple(out.shape) == (1, MIN_EXTENT, MIN_EXTENT, 3)
+        for side in (1, 32):
+            out = model(_images(batch=1, shape=(side, side, 3)), training=False)
+            assert tuple(out.shape) == (1, side, side, 3)
+            assert_finite(out)
 
     def test_the_output_is_not_the_input(self):
         """A restoration network whose residual path was severed would return
