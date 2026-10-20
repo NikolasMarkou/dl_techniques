@@ -26,7 +26,7 @@ The step CSV takes its field names from the first logged row and pads any key
 that appears later. Its readers (``step_plots.plot_step_metrics``) need only
 the ``step`` column (D-195).
 
-``_global_step`` (internal-counter mode) persists across multiple ``fit()``
+The internal step counter (``_internal_step``) persists across multiple ``fit()``
 calls because it is an instance attribute seeded once from ``initial_step`` and
 never reset in :meth:`on_train_begin` — this is what makes resume work and what
 lets the CLIP trainer drive two stages through one continuous timeline.
@@ -171,12 +171,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         if self._counter is not None:
             return self._counter.value
         return self._internal_step
-
-    # Back-compat: several call sites and the routing variant referenced
-    # ``_global_step``; keep it as an alias of the public property.
-    @property
-    def _global_step(self) -> int:
-        return self.global_step
 
     def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         # Advance the internal counter only when we own it.
