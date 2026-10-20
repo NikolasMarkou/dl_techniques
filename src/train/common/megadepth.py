@@ -568,12 +568,19 @@ class MegaDepthDataset(keras.utils.PyDataset):
             labeled-image augmentation of the reference). Defaults to ``True``.
         is_training: If ``True``, shuffles indices each epoch and crops at
             random; if ``False``, each file's crop is fixed for the run
-            (seeded by its index).
+            (seeded by its index), and the constructor loads every file once
+            to keep only those whose crop qualifies, so each validation batch
+            holds the next ``batch_size`` of them and scores each once.
         workers: Number of multiprocessing workers.
         imagenet_standardize: If ``True``, the RGB batch is
             :func:`standardize_imagenet`'d (the official DINOv2 input);
             otherwise it stays in ``[-1, +1]``. Defaults to ``False``.
         **kwargs: Passed to :class:`keras.utils.PyDataset`.
+
+    Raises:
+        RuntimeError: If ``is_training`` is ``False`` and no file's crop
+            qualifies, or (from :meth:`__getitem__`) if no crop qualifies in
+            a training batch's ``3 * batch_size`` attempts.
     """
 
     def __init__(
@@ -604,9 +611,39 @@ class MegaDepthDataset(keras.utils.PyDataset):
         self.indices = np.arange(self.n_pairs)
         if is_training:
             np.random.shuffle(self.indices)
+        else:
+            # DECISION plan-2026-10-14T062616-81938e81/D-197
+            # Do NOT let a validation batch refill a rejected file from the
+            # next window: 24.3% of the default validation files are rejected,
+            # so about a quarter of the files were scored twice in val_loss and
+            # one in four not at all. A validation file's crop is fixed, so
+            # whether it qualifies is fixed too: keep the files that qualify.
+            self.indices = self._qualifying_files(max(1, int(workers)))
+
+    def _qualifying_files(self, threads: int) -> np.ndarray:
+        """The indices of the files whose fixed crop qualifies, in order.
+
+        Loads every file once (``threads`` at a time). Raises ``RuntimeError``
+        naming the files when none qualifies.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            accepted = list(pool.map(
+                lambda i: self._load_one(i) is not None, range(self.n_pairs)))
+        kept = np.flatnonzero(accepted)
+        logger.info(
+            f"MegaDepthDataset: {len(kept)} of {self.n_pairs} validation files "
+            f"give a qualifying crop")
+        if not len(kept):
+            raise RuntimeError(
+                f"MegaDepthDataset: no MegaDepth crop qualified (enough valid "
+                f"pixels, depth with spread) in any of the {self.n_pairs} "
+                f"validation files; tried {list(self.rgb_paths)}")
+        return kept
 
     def __len__(self) -> int:
-        return max(1, self.n_pairs // self.batch_size)
+        return max(1, len(self.indices) // self.batch_size)
 
     def __getitem__(self, idx: int):
         # DECISION plan-2026-10-14T062616-81938e81/D-126

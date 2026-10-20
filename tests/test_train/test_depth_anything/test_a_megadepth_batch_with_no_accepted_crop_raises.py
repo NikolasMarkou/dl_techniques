@@ -36,11 +36,12 @@ def _ordinal():
 
 @pytest.mark.parametrize("is_training", [False, True])
 def test_a_batch_in_which_no_crop_qualifies_raises(tmp_path, is_training):
+    """A validation set raises when it is built (D-197), a training batch when read."""
     pairs = [_write(tmp_path / f"ordinal_{i}", _ordinal()) for i in range(4)]
-    data = megadepth.MegaDepthDataset(
-        [p[0] for p in pairs], [p[1] for p in pairs], batch_size=2, patch_size=SIZE,
-        augment=False, is_training=is_training, workers=0)
     with pytest.raises(RuntimeError, match="no MegaDepth crop qualified") as raised:
+        data = megadepth.MegaDepthDataset(
+            [p[0] for p in pairs], [p[1] for p in pairs], batch_size=2, patch_size=SIZE,
+            augment=False, is_training=is_training, workers=0)
         data[0]
     assert "ordinal_" in str(raised.value)
 

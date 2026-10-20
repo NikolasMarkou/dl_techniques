@@ -71,6 +71,14 @@ machine.
     mostly such maps (60 of 94 in scene `0001`).
   - Batch `i` reads files `i*B .. i*B+B-1` once each. Before the fix, a batch read
     every other file and overlapped the next batch by half (D-126).
+  - At the defaults (518 px crops, `--min-valid-ratio 0.1`) 18.9% of training draws
+    and 24.3% of validation files have no qualifying crop. A training batch refills
+    a rejected file from the files after its window. Validation keeps only the
+    files whose fixed crop qualifies (the constructor loads each once, 757 of the
+    default 1000), so each is scored once per evaluation; before 2026-10-20 about a
+    quarter of the validation files were scored twice (D-197). A batch in which no
+    crop qualifies raises with the file names; it used to be one all-zero sample
+    (D-194).
 - Splits MegaDepth by scene with `split_megadepth_pairs`: `round(n_scenes * (1 -
   --train-split))` scenes, spread evenly over the sorted scene list, are validation
   scenes, the rest training scenes, and no scene is in both. `--max-train-files` and
