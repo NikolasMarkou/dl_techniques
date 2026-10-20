@@ -1050,6 +1050,25 @@ def test_the_lowdata_mux_sweep_with_a_failed_cell_raises_after_the_rest(
     assert (out_dir / "learning_curve.png").is_file()
 
 
+def test_a_lowdata_mux_sweep_where_every_cell_fails_writes_its_report_then_raises(
+        monkeypatch, tmp_path):
+    """Every cell failed: the CSV, the report and the plot are still written,
+    and the run raises naming every cell (the plot crashed on all-NaN data)."""
+    from train.logic import train_e4_lowdata_mux as module
+
+    monkeypatch.setattr(module, "run_cell", _crash)
+    monkeypatch.setattr(sys, "argv", [
+        "train_e4_lowdata_mux", "--seeds", "0,1", "--n-values", "32,64",
+        "--models", "circuit", "--out-dir", str(tmp_path / "mux")])
+    with pytest.raises(RuntimeError, match="4 cells failed: N=32 model=circuit seed=0"):
+        module.main()
+    (out_dir,) = tmp_path.glob("mux_*")
+    assert len((out_dir / "mux_results.csv").read_text().splitlines()) == 5
+    report = (out_dir / "report.md").read_text()
+    assert "circuit=nan" in report and "Verdict" in report
+    assert (out_dir / "learning_curve.png").is_file()
+
+
 def _clevr(monkeypatch, tmp_path, argv):
     from train.logic import train_e5_clevr_hans as module
 

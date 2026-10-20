@@ -136,6 +136,7 @@ def plot_learning_curve(rows: List[Dict[str, Any]], path: str) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     colors = {"circuit": "tab:blue", "mlp_matched": "tab:orange", "xgboost": "tab:green"}
     markers = {"circuit": "o", "mlp_matched": "s", "xgboost": "^"}
+    drawn = False
     for m in MODEL_NAMES:
         ns = sorted({r["N"] for r in rows if r["model"] == m})
         means, stds = [], []
@@ -146,8 +147,15 @@ def plot_learning_curve(rows: List[Dict[str, Any]], path: str) -> None:
             stds.append(sd)
         means = np.array(means)
         stds = np.array(stds)
+        if not np.isfinite(means).any():
+            # Every cell of this model failed: there is no point to draw, and an
+            # all-NaN line left the log axis with no positive data (ValueError).
+            continue
         ax.plot(ns, means, marker=markers[m], color=colors[m], label=m, linewidth=2)
         ax.fill_between(ns, means - stds, means + stds, color=colors[m], alpha=0.2)
+        drawn = True
+    if not drawn:
+        ax.set_xlim(min(N_VALUES) / 1.5, max(N_VALUES) * 1.5)
     ax.set_xscale("log", base=2)
     ax.set_xticks(N_VALUES)
     ax.set_xticklabels([str(n) for n in N_VALUES])
@@ -155,7 +163,8 @@ def plot_learning_curve(rows: List[Dict[str, Any]], path: str) -> None:
     ax.set_ylabel("Test accuracy (2048-example held-out)")
     ax.set_title("E4 — 11-bit MUX learning curves (mean ± std over 3 seeds)")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="lower right")
+    if drawn:
+        ax.legend(loc="lower right")
     ax.set_ylim(0.4, 1.02)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
@@ -248,8 +257,9 @@ def main() -> int:
 
     csv_path = os.path.join(out_dir, "mux_results.csv")
     write_csv(rows, csv_path)
-    plot_learning_curve(rows, os.path.join(out_dir, "learning_curve.png"))
+    # The report before the figure: a figure that fails must not cost the report.
     write_report(rows, os.path.join(out_dir, "report.md"))
+    plot_learning_curve(rows, os.path.join(out_dir, "learning_curve.png"))
     if failed:
         raise RuntimeError(f"{len(failed)} cells failed: {'; '.join(failed)}")
     return 0
