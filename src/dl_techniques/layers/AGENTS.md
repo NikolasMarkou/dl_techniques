@@ -25,7 +25,7 @@ see § Naming traps.
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer` (differentiable K-means), `GMMLayer` (differentiable GMM with isometric-kernel regularization) |
 | `sequence_pooling/` | Y | `(B, T, D)` → `(B, D)`. `SequencePooling` covers 18 strategies (positional `cls`/`first`/`last`/`middle`, statistical, composite, learnable `attention`/`multi_head_attention`/`weighted`, top-k, `none`/`flatten`); four are reused by `heads/nlp/`. Plus `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
 | `ssm/` | Y | Selective SSM (S6 scan, plus paper-named alias), Mamba-2 SSD scan, temporal ContextMamba mixer, and both residual wrappers, built via `create_ssm_layer()` (residual blocks are direct-import only) |
-| `transformers/` | — | Standard transformer, Swin block / conv block, perceiver, EoMT, free transformer, text encoder/decoder, vision encoder, `PatchCausalTransformer`, `EnergyTransformer` + `HopfieldNetwork`, `GatedLinearAttentionBlock`, `AreaAttentionBlock`, plus the shared `causal_stack.py` skeleton |
+| `transformers/` | Y | Standard transformer, Swin block / conv block, perceiver, EoMT, free transformer, text encoder/decoder, vision encoder, `PatchCausalTransformer`, `EnergyTransformer` + `HopfieldNetwork`, `GatedLinearAttentionBlock`, `AreaAttentionBlock`, plus the shared `causal_stack.py` skeleton |
 | `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/`. Curated `__init__`, no factory; train-time multi-branch form only, no reparameterization path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
@@ -159,7 +159,7 @@ public surface, 18 export nothing — so neither shape is the default and you ha
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (18) | `activations` (35 names), `adapters` (13), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (35) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (18) | `activations` (35 names), `adapters` (13), `attention` (44), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (34) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
 All 36 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
@@ -214,9 +214,9 @@ Check in this precedence order; proceed to the next step only when nothing fits.
    | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | 3 (RBF / KMeans / GMM) |
    | Memory | `create_mann()` / `create_som_2d()` in `memory/factory.py` | n/a |
    | Task heads | `create_head(domain, ...)` in `heads/factory.py` (NLP / vision / VLM) | n/a |
-   | Transformer blocks | `TransformerLayer` in `transformers/transformer.py` (direct import) | n/a |
+   | Transformer blocks | `create_transformer_block(config)` in `transformers/factory.py` | 12 |
 
-   > **Transformer blocks have no `create_*_layer` factory.** Use `TransformerLayer` directly — its config selects attention / FFN / normalization types and normalization position, and it composes the domain factories internally, so it covers most cases without a custom block. Higher-level `create_*_encoder` builders live in `transformers/vision_encoder.py` and `transformers/text_encoder.py`.
+   > **Most code imports `TransformerLayer` directly** — its config selects attention / FFN / normalization types and normalization position, and it composes the domain factories internally, so it covers most cases without a custom block. `create_transformer_block({"type": ..., ...})` is the config-driven door to the 12 registered blocks; unlike the other registries, `TRANSFORMER_BLOCK_REGISTRY` maps a key to its class only, and the accepted and required keys are read from that class's `__init__` (D-217 of plan-2026-10-14T062616-81938e81: a hand-kept key list left 11 of 12 keys unbuildable). Higher-level `create_*_encoder` builders live in `transformers/vision_encoder.py` and `transformers/text_encoder.py`.
 
 2. **An existing standalone layer** — search the subpackages and the standalone list above before writing your own. The reuse surface is broad; a close match often already exists.
 
@@ -225,7 +225,7 @@ Check in this precedence order; proceed to the next step only when nothing fits.
 ### The factory contract
 
 **1. Every factory RAISES `ValueError` on an undeclared keyword.** Attention, ffn, norms,
-activations, embedding, logic, ssm, adapters, sampling and sequence_pooling each reject a
+activations, embedding, logic, ssm, adapters, sampling, sequence_pooling and transformers each reject a
 `bogus_key=1`; a new factory, or any new registry-backed dispatch, does the same. The one recorded
 exception is `mixtures/factory.py`, which logs a warning naming the key and builds (a cross-plan
 ruling, pinned by `tests/test_layers/test_mixtures/test_factory.py`). **Never filter-and-drop** —
@@ -239,7 +239,10 @@ each of these was silent, and passed its tests:
 
 **2. A registry's key set, `Literal` aliases and each entry's `required_params` / `optional_params`
 are public API** — consumed by config-driven callers and asserted by
-`tests/test_layers/test_factory_registry_drift.py`. Adding, renaming or removing one is a breaking
+`tests/test_layers/test_factory_registry_drift.py`. `transformers/factory.py` declares no key lists:
+it reads them from each block's `__init__`, and
+`tests/test_layers/test_transformers/test_the_block_factory_builds_every_registered_block.py` builds
+every key. Adding, renaming or removing one is a breaking
 change. `attention/factory.py`'s module docstring is the exemplar for declaring this, including why
 two of its keys deliberately map to functions rather than classes, and why two more configurations
 are deliberately NOT registered.

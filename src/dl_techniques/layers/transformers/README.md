@@ -3,11 +3,17 @@
 Assembled transformer blocks and complete modality stacks. Each block composes the `attention/`,
 `ffn/` and `norms/` factories, so an architecture is mostly a choice of type strings.
 
-**This package deliberately has no factory of its own.** There is no `create_transformer_block(type)`
-and no registry: blocks are imported by class from `dl_techniques.layers.transformers` (or from their
-own module) and constructed directly. The type strings you pass *into* them are the attention / FFN /
+Blocks are usually imported by class from `dl_techniques.layers.transformers` (or from their own
+module) and constructed directly. The type strings you pass *into* them are the attention / FFN /
 normalization registry keys, which are documented in the sibling packages and in
 `src/dl_techniques/layers/AGENTS.md`.
+
+For config-driven construction, `create_transformer_block({"type": key, **kwargs})` builds any of the
+12 blocks in `TRANSFORMER_BLOCK_REGISTRY` (`factory.py`). The registry maps a key to its class and
+nothing else: the accepted keys are the class's own `__init__` keywords plus `name`, `dtype` and
+`trainable`, the required ones are the `__init__` parameters without a default, and a key outside
+that set, or a missing required one, raises `ValueError` naming it. The keys are the block names in
+snake case (`transformer_layer`, `swin_conv_block`, `energy_transformer`, ...).
 
 ## What is in here
 

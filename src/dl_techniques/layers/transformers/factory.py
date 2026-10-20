@@ -2,7 +2,7 @@
 
 This module provides a config-driven construction function for the transformer
 blocks in this package. The factory validates the configuration against each
-block's declared parameter schema and rejects unrecognized keys.
+block's constructor signature and rejects unrecognized keys.
 
 Registered block types:
 - ``"transformer_layer"``: :class:`TransformerLayer`
@@ -18,14 +18,17 @@ Registered block types:
 - ``"energy_transformer"``: :class:`EnergyTransformer`
 - ``"hopfield_network"``: :class:`HopfieldNetwork`
 
-Each entry declares its ``required_params`` and ``optional_params``. A
-``ValueError`` is raised if the config contains a key not in the union of the
-two sets.
+The accepted keys of each type are its block's own ``__init__`` keywords plus
+the Keras base-layer keywords ``name``, ``dtype`` and ``trainable``; the
+required keys are the ``__init__`` parameters without a default. Both are read
+off the constructor, so the factory cannot drift from the class. A
+``ValueError`` names an unrecognized or a missing key.
 
 The public entry point is :func:`create_transformer_block`.
 """
 
-from typing import Any, Dict, Optional
+import inspect
+from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -53,358 +56,54 @@ from .energy_transformer import EnergyTransformer, HopfieldNetwork
 # Registry
 # ---------------------------------------------------------------------
 
-# Each entry must have:
-# - "cls": the class to instantiate
-# - "required_params": list of required config keys (strings)
-# - "optional_params": list of optional config keys (strings)
-# The union of required + optional is the accepted key set.
-# Keys not in this union raise ValueError at construction time.
-
-TRANSFORMER_BLOCK_REGISTRY = {
-    "transformer_layer": {
-        "cls": TransformerLayer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "max_seq_len",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "normalization_position",
-            "norm_args",
-            "attention_norm_args",
-            "ffn_norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "transformer_decoder_layer": {
-        "cls": TransformerDecoderLayer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "max_seq_len",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "cross_attention_type",
-            "cross_attention_args",
-            "normalization_type",
-            "normalization_position",
-            "norm_args",
-            "attention_norm_args",
-            "ffn_norm_args",
-            "cross_attention_norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "swin_transformer_block": {
-        "cls": SwinTransformerBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "window_size",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "shift_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "swin_conv_block": {
-        "cls": SwinConvBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "window_size",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "shift_size",
-            "conv_kernel_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "perceiver_transformer_layer": {
-        "cls": PerceiverTransformerLayer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "num_latents",
-            "latent_dim",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "eomt_transformer": {
-        "cls": EomtTransformer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "num_object_queries",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-            "use_masked_attention",
-        ],
-    },
-    "adaln_zero_conditional_block": {
-        "cls": AdaLNZeroConditionalBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "cond_dim",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "free_transformer_layer": {
-        "cls": FreeTransformerLayer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "max_seq_len",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-            "num_register_tokens",
-            "use_bias_free_attention",
-        ],
-    },
-    "gated_linear_attention_block": {
-        "cls": GatedLinearAttentionBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "max_seq_len",
-        ],
-        "optional_params": [
-            "head_dim",
-            "conv_kernel_size",
-            "dropout_rate",
-            "activation",
-            "normalization_type",
-            "q_norm_args",
-            "k_norm_args",
-            "v_norm_args",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "chunk_size",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-        ],
-    },
-    "area_attention_block": {
-        "cls": AreaAttentionBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-        ],
-    },
-    "energy_transformer": {
-        "cls": EnergyTransformer,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "energy_steps",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-            "energy_lr",
-            "energy_init_scale",
-        ],
-    },
-    "hopfield_network": {
-        "cls": HopfieldNetwork,
-        "required_params": [
-            "dim",
-            "num_heads",
-            "beta",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-            "update_steps",
-            "energy_lr",
-        ],
-    },
+# DECISION plan-2026-10-14T062616-81938e81/D-217
+# The registry maps a type to its class and nothing else. Do NOT bring back a
+# hand-written required/optional key list per entry: that is what this module
+# shipped with, nothing compared it to the constructors, and 11 of its 12 keys
+# could not build their block (``transformer_layer`` demanded ``dim`` and
+# ``max_seq_len``, which ``TransformerLayer`` does not take). The key sets are
+# read from each ``__init__`` by ``_constructor_keywords``. See decisions.md D-217.
+TRANSFORMER_BLOCK_REGISTRY: Dict[str, type] = {
+    "transformer_layer": TransformerLayer,
+    "transformer_decoder_layer": TransformerDecoderLayer,
+    "swin_transformer_block": SwinTransformerBlock,
+    "swin_conv_block": SwinConvBlock,
+    "perceiver_transformer_layer": PerceiverTransformerLayer,
+    "eomt_transformer": EomtTransformer,
+    "adaln_zero_conditional_block": AdaLNZeroConditionalBlock,
+    "free_transformer_layer": FreeTransformerLayer,
+    "gated_linear_attention_block": GatedLinearAttentionBlock,
+    "area_attention_block": AreaAttentionBlock,
+    "energy_transformer": EnergyTransformer,
+    "hopfield_network": HopfieldNetwork,
 }
+
+#: Keras base-layer keywords every block forwards to ``keras.layers.Layer``
+#: through ``**kwargs``.
+_LAYER_BASE_KEYWORDS = frozenset({"name", "dtype", "trainable"})
+
+
+def _constructor_keywords(cls: type) -> Tuple[FrozenSet[str], Tuple[str, ...]]:
+    """
+    The keywords ``cls.__init__`` names, and those of them without a default.
+
+    :param cls: A block class from :data:`TRANSFORMER_BLOCK_REGISTRY`.
+    :type cls: type
+    :return: ``(accepted, required)``: every positional-or-keyword and
+        keyword-only parameter except ``self``, and the subset with no default,
+        in signature order.
+    :rtype: Tuple[FrozenSet[str], Tuple[str, ...]]
+    """
+    kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    params = [
+        param for name, param in inspect.signature(cls.__init__).parameters.items()
+        if name != "self" and param.kind in kinds
+    ]
+    accepted = frozenset(param.name for param in params)
+    required = tuple(
+        param.name for param in params if param.default is inspect.Parameter.empty
+    )
+    return accepted, required
 
 
 # ---------------------------------------------------------------------
@@ -422,9 +121,9 @@ def create_transformer_block(
     registered block types in ``TRANSFORMER_BLOCK_REGISTRY``. All other keys
     are passed as constructor arguments to the corresponding class.
 
-    Unrecognized keys (not in the union of ``required_params`` and
-    ``optional_params`` for the selected type) raise ``ValueError`` naming
-    the offending key.
+    A key that is neither one of the class's ``__init__`` keywords nor
+    ``name``/``dtype``/``trainable`` raises ``ValueError`` naming it, and so
+    does a missing ``__init__`` parameter that has no default.
 
     :param config: Configuration dictionary with a ``"type"`` key and
         constructor arguments for the selected block type.
@@ -434,8 +133,8 @@ def create_transformer_block(
     :type name: Optional[str]
     :return: An instance of the requested transformer block class.
     :rtype: keras.layers.Layer
-    :raises ValueError: If ``"type"`` is missing, unknown, or if ``config``
-        contains unrecognized keys.
+    :raises ValueError: If ``"type"`` is missing or unknown, if ``config``
+        contains an unrecognized key, or if it lacks a required one.
     """
     if "type" not in config:
         raise ValueError(
@@ -444,15 +143,15 @@ def create_transformer_block(
         )
 
     block_type = config["type"]
-    info = TRANSFORMER_BLOCK_REGISTRY.get(block_type)
-    if info is None:
+    cls = TRANSFORMER_BLOCK_REGISTRY.get(block_type)
+    if cls is None:
         raise ValueError(
             f"Unknown transformer block type '{block_type}'. "
             f"Available: {sorted(TRANSFORMER_BLOCK_REGISTRY)}"
         )
 
-    cls = info["cls"]
-    valid_keys = set(info["required_params"]) | set(info["optional_params"]) | {"type", "name"}
+    accepted, required = _constructor_keywords(cls)
+    valid_keys = accepted | _LAYER_BASE_KEYWORDS | {"type"}
 
     for key in config:
         if key not in valid_keys:
@@ -461,12 +160,11 @@ def create_transformer_block(
                 f"Valid keys: {sorted(valid_keys)}"
             )
 
-    # Check required params are present
-    for req in info["required_params"]:
+    for req in required:
         if req not in config:
             raise ValueError(
                 f"Missing required parameter '{req}' for transformer block type '{block_type}'. "
-                f"Required: {info['required_params']}"
+                f"Required: {list(required)}"
             )
 
     kwargs = {k: v for k, v in config.items() if k not in ("type", "name")}

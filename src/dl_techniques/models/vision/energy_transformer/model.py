@@ -49,8 +49,9 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 
-# The ET block has no factory home; direct import is the sanctioned path here
-# (D-004 of plan_2026-07-13_57c9833e). See decisions.md.
+# The ET block is imported directly, the sanctioned path here (D-004 of
+# plan_2026-07-13_57c9833e, ruled when the block had no factory home; the
+# transformers factory's 'energy_transformer' key builds the same class).
 from dl_techniques.layers.transformers.energy_transformer import EnergyTransformer
 from dl_techniques.utils.keras_registration import register_dl_technique
 

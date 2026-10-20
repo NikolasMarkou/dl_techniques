@@ -110,10 +110,11 @@ style.
 | `ANYLOSS_REGISTRY` | `src/dl_techniques/losses/any_loss.py` | dispatched by the `AnyLoss` class |
 | `EMBEDDING_REGISTRY` | `src/dl_techniques/layers/embedding/factory.py` | `create_embedding_layer` |
 | `LOGIC_REGISTRY` | `src/dl_techniques/layers/logic/factory.py` | `create_logic_layer` |
-| `SAMPLING_REGISTRY` | `src/dl_techniques/layers/sampling.py` | `create_sampling_layer` |
+| `SAMPLING_REGISTRY` | `src/dl_techniques/layers/generative/sampling.py` | `create_sampling_layer` |
 | `MIXTURE_REGISTRY` | `src/dl_techniques/layers/mixtures/factory.py` | `create_mixture_layer` |
 | `ADAPTER_REGISTRY` | `src/dl_techniques/layers/adapters/factory.py` | `create_adapter_layer` |
 | `SEQUENCE_POOLING_REGISTRY` | `src/dl_techniques/layers/sequence_pooling/factory.py` | `create_sequence_pooling_layer` |
+| `TRANSFORMER_BLOCK_REGISTRY` | `src/dl_techniques/layers/transformers/factory.py` | `create_transformer_block` |
 
 **Grepping for `_REGISTRY` will not find all of the surface.** Three variants exist under
 other shapes:
@@ -138,16 +139,17 @@ with no payoff; the shipped precedent for this shape is `layers/blt/`. Tested by
 `tests/test_layers/test_dynamic_chunking/` and `tests/test_models/test_hnet/`, and the
 package init carries the reasoning as a `# DECISION` anchor.
 
-And: **`src/dl_techniques/layers/transformers/` has no factory module
-and no registry** — transformer blocks are direct-imported by class, by design. Do not
-"fix" the absence by adding a registry. It is not factory-free, though:
-`transformers/vision_encoder.py` and `transformers/text_encoder.py` each define a family of
-`create_*_encoder` helpers, all re-exported from the package init. Those are preset
-constructors for two composite encoders, not a keyed dispatcher, and they are the only
-`create_*` the package *defines*.
+And: **`src/dl_techniques/layers/transformers/` is mostly direct-imported by class**, but it
+does have a keyed dispatcher: `transformers/factory.py` defines `TRANSFORMER_BLOCK_REGISTRY` and
+`create_transformer_block(config)` over 12 blocks (added by the author in 2c2694d91). Unlike every
+other registry here, it maps a key to its class only and reads the accepted and required keys from
+the class's `__init__`; its first form held hand-written key lists that left 11 of 12 keys
+unbuildable (plan-2026-10-14T062616-81938e81 D-217). `transformers/vision_encoder.py` and
+`transformers/text_encoder.py` also define a family of `create_*_encoder` helpers, all
+re-exported from the package init; those are preset constructors for two composite encoders,
+not a keyed dispatcher.
 
-The absence is about what the package **publishes**. Internally the blocks are
-registry-*driven*: modules here import a sibling dispatcher (`create_attention_layer`,
+Internally the blocks are registry-*driven*: modules here import a sibling dispatcher (`create_attention_layer`,
 `create_ffn_layer`, `create_normalization_layer`, the `*_from_config` variants) and select
 by string key, so `ATTENTION_REGISTRY` / `FFN_REGISTRY` keys are the vocabulary of a
 transformer block's constructor arguments.
