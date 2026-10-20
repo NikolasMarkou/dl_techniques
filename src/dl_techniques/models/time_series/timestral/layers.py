@@ -14,6 +14,12 @@ from typing import Optional, Tuple
 
 from dl_techniques.models.time_series.timestral.config import LAYER_KIND_AXES
 
+# DECISION plan-2026-10-14T062616-81938e81/D-178: every sublayer is constructed
+# with its parent's dtype_policy, so TimestralModel(config, dtype=X) builds and
+# computes in X all the way down. Do NOT drop a dtype=self.dtype_policy below: that
+# sublayer silently takes the GLOBAL policy instead (the model built float32
+# weights for every dtype until D-178). See decisions.md D-178.
+
 
 class RMSNorm(keras.layers.Layer):
     """Root Mean Square Layer Normalization."""
@@ -70,16 +76,19 @@ class ResidualBlock(keras.layers.Layer):
             self.hidden_dims,
             use_bias=self.use_bias,
             name="hidden_layer",
+            dtype=self.dtype_policy,
         )
         self.output_layer = keras.layers.Dense(
             self.output_dims,
             use_bias=self.use_bias,
             name="output_layer",
+            dtype=self.dtype_policy,
         )
         self.residual_layer = keras.layers.Dense(
             self.output_dims,
             use_bias=self.use_bias,
             name="residual_layer",
+            dtype=self.dtype_policy,
         )
         self.activation = keras.activations.silu
         # Sublayers are built here, in call order, so build() creates the full
@@ -120,11 +129,13 @@ class FusedSwiGLU(keras.layers.Layer):
             2 * self.hidden_dim,
             use_bias=self.use_bias,
             name="w12",
+            dtype=self.dtype_policy,
         )
         self.w3 = keras.layers.Dense(
             self.embed_dim,
             use_bias=self.use_bias,
             name="w3",
+            dtype=self.dtype_policy,
         )
         self.w12.build(input_shape)
         self.w3.build(tuple(input_shape[:-1]) + (self.hidden_dim,))
@@ -305,17 +316,20 @@ class Attention(keras.layers.Layer):
             3 * self.embed_dim,
             use_bias=self.use_bias,
             name="wqkv",
+            dtype=self.dtype_policy,
         )
         self.wo = keras.layers.Dense(
             self.embed_dim,
             use_bias=self.use_bias,
             name="wo",
+            dtype=self.dtype_policy,
         )
         if self.gate_type == "sdpa_sigmoid":
             self.gate = keras.layers.Dense(
                 self.embed_dim,
                 use_bias=self.use_bias,
                 name="gate",
+                dtype=self.dtype_policy,
             )
         else:
             self.gate = None
@@ -419,7 +433,8 @@ class TransformerBlock(keras.layers.Layer):
         self.attn_norms = []
         self.attns = []
         for i, is_time in enumerate(axes):
-            norm = RMSNorm(self.embed_dim, self.norm_eps, name=f"attn_norm_{i}")
+            norm = RMSNorm(self.embed_dim, self.norm_eps, name=f"attn_norm_{i}",
+                           dtype=self.dtype_policy)
             attn = Attention(
                 self.embed_dim,
                 self.num_heads,
@@ -427,16 +442,19 @@ class TransformerBlock(keras.layers.Layer):
                 self.attn_bias,
                 self.time_attn_gate if is_time else self.variate_attn_gate,
                 name=f"attn_{i}",
+                dtype=self.dtype_policy,
             )
             self.attn_norms.append(norm)
             self.attns.append(attn)
 
-        self.mlp_norm = RMSNorm(self.embed_dim, self.norm_eps, name="mlp_norm")
+        self.mlp_norm = RMSNorm(self.embed_dim, self.norm_eps, name="mlp_norm",
+                                dtype=self.dtype_policy)
         self.mlp = FusedSwiGLU(
             self.embed_dim,
             self.mlp_hidden_dim,
             self.mlp_bias,
             name="mlp",
+            dtype=self.dtype_policy,
         )
         for norm, attn in zip(self.attn_norms, self.attns):
             norm.build(input_shape)
@@ -517,6 +535,7 @@ class Transformer(keras.layers.Layer):
                 time_attn_gate=self.time_attn_gate,
                 variate_attn_gate=self.variate_attn_gate,
                 name=f"block_{i}",
+                dtype=self.dtype_policy,
             )
             self.layers.append(block)
 
@@ -525,8 +544,10 @@ class Transformer(keras.layers.Layer):
             base=self.rope_theta,
             rotary_dim=self.rope_dim,
             name="rope",
+            dtype=self.dtype_policy,
         )
-        self.out_norm = RMSNorm(self.embed_dim, self.norm_eps, name="out_norm")
+        self.out_norm = RMSNorm(self.embed_dim, self.norm_eps, name="out_norm",
+                                dtype=self.dtype_policy)
         self.rope.build(input_shape)
         for block in self.layers:
             block.build(input_shape)

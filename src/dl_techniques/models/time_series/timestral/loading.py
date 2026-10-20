@@ -238,8 +238,9 @@ def load_model(
     go to resolve_checkpoint. The model is built explicitly (so it is marked built
     and ``model.save`` keeps every weight), then every reference tensor is assigned
     through ``reference_weight_map``; a missing, unused or misshapen tensor raises.
-    The model is float32, the precision inference was validated in; there is no
-    dtype argument (one was accepted and ignored until D-173).
+    The model takes the global dtype policy, float32 unless the caller changed
+    it (bfloat16 works; a float16 policy raises, D-178); there is no dtype
+    argument (one was accepted and ignored until D-173).
 
     Raises:
         ValueError: If a tensor is missing, unused or has the wrong shape.

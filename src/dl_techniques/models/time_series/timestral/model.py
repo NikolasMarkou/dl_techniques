@@ -102,6 +102,7 @@ class PatchRepresentation(keras.layers.Layer):
         self.d_model = d_model
         self.patch_proj = ResidualBlock(
             2 * patch_size, 4 * d_model, d_model, use_bias=True, name="patch_proj",
+            dtype=self.dtype_policy,
         )
         self.forecast_query = None  # Created in build
 
@@ -181,6 +182,7 @@ class QuantileHead(keras.layers.Layer):
             config.patch_size * config.num_quantiles,
             use_bias=False,
             name="projection",
+            dtype=self.dtype_policy,
         )
 
     def build(self, input_shape):
@@ -210,16 +212,32 @@ class TimestralModel(keras.Model):
     A patch-based transformer with Decoupled Horizon Forecasting (DHF), trained
     to output 21 non-crossing quantiles per time step with support for past-only
     and known-future covariates.
+
+    The ``dtype`` keyword (or, without it, the global policy) reaches every
+    sublayer. A float16 compute dtype raises ``ValueError`` (D-178).
     """
 
     MODEL_VARIANTS = TIMESTRAL_VARIANTS
 
     def __init__(self, config: TimestralConfig, **kwargs):
         super().__init__(**kwargs)
+        # DECISION plan-2026-10-14T062616-81938e81/D-178: a float16 compute dtype
+        # is refused (the model's own, or the global policy it defaults to). On
+        # the released 5M weights a float16 forecast stayed finite but was 62x
+        # worse than float32; bfloat16 matched float32's error. Do NOT allow
+        # float16 without re-measuring. See decisions.md D-178.
+        if self.dtype_policy.compute_dtype == "float16":
+            raise ValueError(
+                f"TimestralModel does not compute in float16 (dtype policy "
+                f"{self.dtype_policy.name!r}): measured on the released weights, a "
+                f"float16 forecast is 62x worse than float32. Use float32, bfloat16 "
+                f"or mixed_bfloat16.")
         self.config = config
         c = config
 
-        self.representation = PatchRepresentation(c.patch_size, c.d_model, name="representation")
+        # Each sublayer takes this model's policy (D-178, see layers.py).
+        self.representation = PatchRepresentation(
+            c.patch_size, c.d_model, name="representation", dtype=self.dtype_policy)
         self.transformer = Transformer(
             block_schedule=c.block_schedule,
             embed_dim=c.d_model,
@@ -233,8 +251,9 @@ class TimestralModel(keras.Model):
             time_attn_gate=c.time_attn_gate,
             variate_attn_gate=c.variate_attn_gate,
             name="transformer",
+            dtype=self.dtype_policy,
         )
-        self.head = QuantileHead(c, name="quantile_head")
+        self.head = QuantileHead(c, name="quantile_head", dtype=self.dtype_policy)
 
     def build(self, input_shape):
         """Build all sublayers with representative (static-oriented) shapes.
