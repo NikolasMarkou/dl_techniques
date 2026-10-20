@@ -1235,8 +1235,15 @@ _TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
 #: ``gin_epsilon == [0.7, 0.7]`` while ``norm_layers[i].epsilon == 1e-06``.
 #: PROVEN RED: forwarding ``epsilon=self.epsilon`` at both call sites turns 4
 #: arms there red (2 of them the pre-existing D-004 house-epsilon arms).
+#:
+#: The fourth is the ViT-family shape again: ``PFTSR`` stores ``self.scale``, the
+#: upsampling factor (the official ``upscale``, an int), and builds its patch-embed
+#: and final LayerNorms through the factory since plan-2026-10-14T062616-81938e81
+#: step 7 (D-212). Asserted by execution in
+#: ``tests/test_models/test_pft_sr/test_model.py::test_the_upsampling_scale_is_not_a_norm_knob``.
 _NORM_NAME_COLLISIONS = {
     ("models/vision/vit_siglip/model.py", "SigLIPVisionTransformer", "layer_norm", "scale"),
+    ("models/vision/super_resolution/pft_sr/model.py", "PFTSR", "layer_norm", "scale"),
     ("layers/graphs/graph_neural_network.py", "GraphNeuralNetworkLayer", "layer_norm", "epsilon"),
     ("layers/graphs/graph_neural_network.py", "GraphNeuralNetworkLayer", "batch_norm", "epsilon"),
 }

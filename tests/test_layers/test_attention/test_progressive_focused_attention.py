@@ -131,8 +131,9 @@ class TestForwardPass:
         """SW-MSA must work for general H,W (nW>1), not just H=W=2*ws.
 
         Regression for S2: _compute_attention_mask is parametrized by actual
-        (H,W); production callers (pft_sr/thera/swin) use maps larger than
-        2*window_size. Each geometry below has nW = (H/ws)*(W/ws) windows.
+        (H,W); callers use maps larger than 2*window_size. (PFT-SR, the
+        caller this was written for, builds the official layer since
+        plan-2026-10-14T062616-81938e81 step 7.) Each geometry below has nW = (H/ws)*(W/ws) windows.
         """
         for h, w in [(8, 8), (16, 8), (16, 16), (8, 16)]:
             layer = ProgressiveFocusedAttention(

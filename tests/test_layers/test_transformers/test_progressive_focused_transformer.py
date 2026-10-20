@@ -70,9 +70,12 @@ class TestStochasticDepthKwarg:
     `StochasticDepth.__init__` only accepts `drop_path_rate`, so `drop_rate`
     fell through to `keras.layers.Layer.__init__`, which rejects unknown
     kwargs. Every `drop_path_rate > 0.0` therefore died at CONSTRUCTION -- the
-    whole point of the parameter. `models/vision/super_resolution/pft_sr/model.py` schedules
+    whole point of the parameter. `models/vision/super_resolution/pft_sr/model.py` scheduled
     `linspace(0, drop_path_rate, total_blocks)` across its blocks, so the model
-    was dead on arrival for any non-zero rate too.
+    was dead on arrival for any non-zero rate too. (Since
+    plan-2026-10-14T062616-81938e81 step 7, D-212, PFT-SR builds the official
+    layer, `pft_sr/blocks.PFTLayer`, and no model uses `PFTBlock`; its
+    drop-path schedule is tested in `tests/test_models/test_pft_sr/`.)
 
     RED at HEAD (`9ee28342`):
     ``ValueError: Unrecognized keyword arguments passed to StochasticDepth:
@@ -164,31 +167,3 @@ class TestStochasticDepthKwarg:
         assert float(np.max(np.abs(y0))) > 1e-3, "round-trip compared all-zero values"
         np.testing.assert_allclose(y0, y1, rtol=0, atol=0)
         assert loaded.layers[-1]._drop_path.drop_path_rate == pytest.approx(0.1)
-
-
-class TestPftSrConsumerSmoke:
-    """`models/vision/super_resolution/pft_sr/model.py` is the live `PFTBlock` consumer (blast radius
-    derived by grep, not assumed). It schedules a `linspace` of rates across
-    every block, so it was dead on arrival for any `drop_path_rate > 0`."""
-
-    def test_pft_sr_builds_and_runs_at_nonzero_drop_path_rate(self) -> None:
-        from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
-        model = PFTSR(
-            scale=2, in_channels=3, embed_dim=16, num_blocks=[1, 1],
-            num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.1,
-        )
-        x = np.random.default_rng(5).standard_normal((1, 16, 16, 3)).astype("float32")
-        out = ops.convert_to_numpy(model(x, training=True))
-        assert out.shape == (1, 32, 32, 3)
-        assert np.all(np.isfinite(out))
-
-    def test_pft_sr_schedules_distinct_rates_across_blocks(self) -> None:
-        """The linspace schedule must actually reach the blocks."""
-        from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
-        model = PFTSR(
-            scale=2, in_channels=3, embed_dim=16, num_blocks=[2, 2],
-            num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.4,
-        )
-        rates = sorted(set(model.dpr))
-        assert len(rates) > 1, f"every block got the same rate: {model.dpr}"
-        assert max(rates) == pytest.approx(0.4)

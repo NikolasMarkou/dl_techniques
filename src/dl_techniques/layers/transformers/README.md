@@ -26,7 +26,7 @@ normalization registry keys, which are documented in the sibling packages and in
 | `AdaLNZeroConditionalBlock` | DiT-style adaptive LayerNorm-zero conditional block. | Diffusion transformers and other conditioned stacks. |
 | `AreaAttentionBlock` | The YOLOv12 attention stage over a 4D feature map: `AreaAttention` + a 1x1-conv MLP, each in a plain residual. | YOLOv12-style detection backbones. |
 | `GatedLinearAttentionBlock` | Recurrent sequence mixing with one `(head_dim, head_dim)` state per head; linear, not quadratic, in sequence length. | Long-sequence causal mixing (Qwen3-Next uses it 3x per block). |
-| `PFTBlock` | Progressive Focused Transformer block (PFT-SR, CVPR 2025). | Single-image super-resolution. |
+| `PFTBlock` | A block inspired by the Progressive Focused Transformer (PFT-SR, CVPR 2025): score-domain focusing, per-window LePE, factory FFN. Not the official layer, which is `models/vision/super_resolution/pft_sr/blocks.PFTLayer`; no model builds this one. | Experiments with inherited attention maps. |
 | `FreeTransformerLayer` / `BinaryMapper` | FREE latent-variable transformer: a causal block with an optional encoder path inferring a discrete latent, and the straight-through binary latent mapper. | Research on latent-variable transformers only — see the gotcha below. |
 | `EnergyTransformer` / `HopfieldNetwork` | Energy Transformer block (Hoover et al., NeurIPS 2023): `T` steps of gradient descent on one scalar energy, and its associative-memory sub-layer. | Energy-based / Lyapunov-descent residual streams. |
 

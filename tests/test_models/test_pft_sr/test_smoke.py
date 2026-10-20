@@ -9,7 +9,7 @@ asserted only finiteness -- so a forward returning the scalar `0.0` passed. It
 now asserts the upsampled image's shape, which for a super-resolution model is
 the whole point of the model.
 
-`create_pft_sr(scale, variant)` verified from source. Permuted self-attention
+`create_pft_sr(scale, variant)` verified from source. Progressive Focused Transformer
 super-resolution model; the paper-sourced ``light``/``base`` variants carry
 ``window_size=32`` in ``MODEL_VARIANTS`` (D-463), so input H/W are kept divisible
 by 32 (32x32 -- one window).

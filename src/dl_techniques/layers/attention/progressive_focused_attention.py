@@ -18,6 +18,15 @@ documented stub: construction raises ``NotImplementedError`` for any mode
 other than ``'none'``. ``shift_size > 0`` (SW-MSA) requires a statically
 known height and width; ``build()`` raises otherwise.
 
+This is a variant inspired by the paper, not the official layer. The official
+``WindowAttention`` (CVL-UESTC/PFT-SR ``basicsr/archs/pft_arch.py``) multiplies
+the POST-softmax map by the previous map and renormalises, adds a learned
+relative position bias, adds its LePE (a depthwise conv over the whole map,
+plus GELU) to ``attn @ v`` rather than to V, and narrows the keys per layer by
+a top-k schedule. The faithful port is
+``dl_techniques.models.vision.super_resolution.pft_sr.blocks.PFTLayer``; no
+model in this tree builds this layer (plan-2026-10-14T062616-81938e81 D-212).
+
 References:
     - Long et al., 2025. Progressive Focused Transformer for Single Image
       Super-Resolution. (CVPR)

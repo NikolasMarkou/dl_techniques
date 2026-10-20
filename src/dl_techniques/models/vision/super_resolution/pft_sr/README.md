@@ -7,7 +7,7 @@
 
 An implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al., who report state-of-the-art performance for the PFT-SR architecture on single image super-resolution benchmarks. This port has not been independently trained or benchmarked, and no performance claim is made for it.
 
-The architecture's core innovation is the **Progressive Focused Attention (PFA)** mechanism, which allows attention maps to be inherited and refined across layers. This enables the network to progressively focus on informative features while suppressing redundancy, leading to better reconstruction quality and computational efficiency.
+The architecture's core innovation is the **Progressive Focused Attention (PFA)** mechanism, which allows attention maps to be inherited and refined across layers. The paper reports that this lets the network focus on informative features while suppressing redundancy, improving reconstruction quality and computational efficiency.
 
 ---
 
@@ -38,11 +38,11 @@ The architecture's core innovation is the **Progressive Focused Attention (PFA)*
 
 **PFT-SR** is a Vision Transformer designed specifically for the task of Single Image Super-Resolution (SISR). Unlike standard ViTs that treat every layer's attention calculation independently, PFT-SR introduces a temporal-like connection between layers in the depth dimension.
 
-It utilizes **Progressive Focused Attention (PFA)** to multiply the current layer's attention map with the attention map from the previous layer. This creates a "focusing" effect, where consistent patterns are amplified and irrelevant background noise is progressively suppressed as the signal moves deeper into the network.
+It utilizes **Progressive Focused Attention (PFA)** to multiply the current layer's attention map with the attention map an earlier layer produced, and to keep fewer keys per query as depth grows (a per-layer top-k). This creates a "focusing" effect, where consistent patterns are amplified and irrelevant tokens are dropped as the signal moves deeper into the network.
 
 ### Key Innovations of this Implementation
 
-1.  **The official reconstruction tail**: the default output ends in the tail of the official code ([CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/PFT-SR), `basicsr/archs/pft_arch.py`), chosen by `upsampler` exactly as there (§4.2). The body is a simplified port; §4.3 lists every difference.
+1.  **The official network**: body and tail are ported from the official code ([CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/PFT-SR), `basicsr/archs/pft_arch.py`): the mean shift, the mirror pad, the patch-embed and final LayerNorms, each stage's conv and residual, the relative position bias, the LePE, the ConvFFN, the two inherited attention chains and the `num_topk` schedule. The top-k runs as a dense map under an inherited boolean mask instead of the official CUDA sparse kernels (same numbers, §4.1). §4.3 lists what still differs.
 2.  **Keras 3 Native**: a `keras.Model` subclass built from `keras.ops`.
 3.  **The official upsamplers**: `pixelshuffle` (the PFT config), `pixelshuffledirect` (the PFT_light config) and `nearest+conv` (x4 only).
 4.  **Factory**: `create_pft_sr` with the variants `light`, `base` and `repo_medium`, each carrying its official upsampler.
@@ -60,9 +60,11 @@ Model: Standard Window Attention
 **PFT-SR Solution**:
 ```
 Model: Progressive Focused Transformer
-  1. Attention maps are inherited: Attn_i = Softmax(Q K^T) * Attn_{i-1}.
-  2. Salient features (edges, textures) are tracked and enhanced across layers.
-  3. Acts as a progressive filter, sharpening the network's focus on details 
+  1. Attention maps are inherited: A_l = normalize(Softmax(Q K^T / sqrt(d) + B) * A_prev),
+     A_prev the map of the previous layer with the same window shift.
+  2. A per-layer top-k drops all but the strongest keys; later layers attend
+     only inside the keys an earlier layer kept.
+  3. Acts as a progressive filter, sharpening the network's focus on details
      essential for high-quality reconstruction.
 ```
 
@@ -107,18 +109,18 @@ PFT-SR follows a classic SR network design (Feature Extraction -> Deep Nonlinear
 ┌──────────────────────────────────────────────────────────────────┐
 │                    PFT-SR Architecture                           │
 │                                                                  │
-│  Input (LR) ───►┌───────────────┐                                │
-│                 │ Shallow Feat  │ (Conv2D 3x3)                   │
+│  Input (LR) ───►┌───────────────┐ (mirror pad, minus RGB mean)   │
+│                 │ Shallow Feat  │ (Conv2D 3x3, then LayerNorm)   │
 │                 └───────┬───────┘                                │
 │                         │                                        │
 │                 ┌───────▼───────┐                                │
-│                 │  PFT Stage 1  │ (Shifted Window PFA)           │
+│                 │  PFT Stage 1  │ (PFA layers, conv, + residual) │
 │                 └───────┬───────┘                                │
 │                         │                                        │
 │                       .....  (Multiple Stages)                   │
 │                         │                                        │
 │                 ┌───────▼───────┐                                │
-│                 │ Reconstruction│ (Conv + Global Residual)       │
+│                 │ Reconstruction│ (LN, Conv + Global Residual)   │
 │                 └───────┬───────┘                                │
 │                         │                                        │
 │                 ┌───────▼───────┐                                │
@@ -126,7 +128,7 @@ PFT-SR follows a classic SR network design (Feature Extraction -> Deep Nonlinear
 │                 └───────┬───────┘                                │
 │                         │                                        │
 │                 ┌───────▼───────┐                                │
-│                 │  Output (HR)  │                                │
+│                 │  Output (HR)  │ (plus RGB mean, cropped)       │
 │                 └───────────────┘                                │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -140,62 +142,84 @@ The unique aspect is the passing of `attn_map` alongside the feature tensor `x`.
 │                       PFT Block Data Flow                               │
 └─────────────────────────────────────────────────────────────────────────┘
 
-Input Tuple (Features x, Previous Map M_prev)
+Input: features x, and the chain's previous map M_prev and kept keys K_prev
     │
     ▼
-1. NORM & WINDOWING
-   Partition x into non-overlapping windows
+1. NORM, QKV, LePE (whole map)
+   Q, K, V = Linear(LayerNorm(x)); lepe = GELU(DepthwiseConv_k(V))
+   cyclic shift (odd layers of a stage), partition into windows
     │
     ▼
 2. PROGRESSIVE FOCUSED ATTENTION (PFA)
-   ├─► Compute Q, K, V
-   ├─► Apply LePE to V (Depthwise Conv)
-   ├─► Raw Scores = Softmax(Q @ K)
-   │
-   ├─► MERGE: M_curr = Raw Scores * M_prev  <-- The Core Magic
-   │
-   └─► Output = M_curr @ V
+   ├─► A = Softmax(Q K^T / sqrt(d) + B [+ shift mask])   (over K_prev only, if any)
+   ├─► MERGE: A = (A * M_prev + eps) / (sum(A * M_prev) + eps)   <-- the core
+   ├─► TOP-K: keep the num_topk[l] largest per query (if below the width)
+   └─► Output = Linear(A @ V + lepe)
     │
     ▼
-3. FEED FORWARD NETWORK
-   Standard MLP with expansion ratio
+3. CONVFFN
+   u = GELU(fc1(LayerNorm(x))); x = x + fc2(u + GELU(DepthwiseConv_k(u)))
     │
     ▼
-Output Tuple (Features x_out, Current Map M_curr)
+Output: features x_out, the map M_curr and the kept keys K_curr
 ```
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `PFTBlock`
+### 4.1 `PFTLayer` (`blocks.py`)
 
-The fundamental building block.
--   **Window Attention**: Uses shifted windows (like Swin Transformer) to allow cross-window information exchange. Even numbered blocks use regular windows; odd numbered blocks use shifted windows.
--   **LePE (Locally-Enhanced Positional Encoding)**: Instead of adding absolute position embeddings, positional information is injected via a depthwise convolution on the Value (V) vector within the attention mechanism.
--   **Attention Inheritance**: Takes a tuple `(x, mask)` and returns a tuple `(x, new_mask)`.
+One official `PFTransformerLayer` with its `WindowAttention`.
+-   **Window Attention**: shifted windows (like Swin Transformer) for cross-window exchange. Even layers of a stage use plain windows, odd layers shifted ones (shift `window_size // 2`), with the official -100 mask between shifted regions. A learned relative position bias is added to the scores: one column per head when `embed_dim > 100`, one shared column otherwise, as in the official code.
+-   **LePE**: a depthwise conv (kernel `convffn_kernel_size`) plus GELU on V over the whole map, added to `attn @ v`.
+-   **Attention inheritance**: called as `y, values, mask = layer(x, prev_values=..., prev_mask=...)`. The model threads two chains through every stage, one for the plain-window layers and one for the shifted ones (the official `pfa_values[shift]`), so each layer inherits from the previous layer of its chain.
+-   **Top-k as a mask**: the official code stores the kept keys as indices and multiplies with custom CUDA kernels (`smm_cuda`). This port keeps the dense `(windows, heads, n, n)` map and a boolean mask of the kept keys: the softmax runs over the kept keys only, dropped keys hold exactly 0, and each top-k ranks the kept keys only. The numbers are the same (pinned at float64 against a numpy transcription of the sparse code); the memory is that of dense attention, which the port had before.
+-   **ConvFFN**: `fc1`, GELU, `u + GELU(depthwise(u))`, `fc2`.
 
 ### 4.2 `PFTSR` (The Model)
 
 A Keras `Model` subclass that orchestrates the stages.
--   **Stages**: The model is divided into stages. Each stage contains a defined number of PFT Blocks.
+-   **Input**: mirror-padded to a multiple of `window_size` (the official `cat([x, flip(x)])`, so a side must be at least half its padded size), shifted by the DIV2K RGB mean `(0.4488, 0.4371, 0.4040)` (3 channels only) and scaled by `img_range`; the output is divided by `img_range`, shifted back and cropped to `scale` times the input size.
+-   **Stages**: `conv_first`, a patch-embed LayerNorm, then each stage (the official `PFTB`): its `PFTLayer`s, a 3x3 conv and a residual around the stage; then a final LayerNorm and `conv_after_body` plus the shallow features. LayerNorm epsilon is torch's 1e-5.
+-   **`num_topk`**: one entry per layer. A layer whose entry is below its chain's current width keeps that many keys per query; otherwise it keeps the width. `None` keeps every key (focusing without sparsification).
 -   **Tail** (`include_top=True`, the default), the official `PFT.forward` branches with `num_feat = F = 64`. A biased 3x3 conv is written `conv(i -> o)`:
     -   `pixelshuffle` (scale a power of two, or 3): `conv_before_upsample` `conv(embed_dim -> F)` + LeakyReLU(0.01), then `conv(F -> 4F)` + pixel shuffle 2 per factor of two (or `conv(F -> 9F)` + pixel shuffle 3), then `conv_last` `conv(F -> 3)`.
     -   `pixelshuffledirect` (any scale): `conv(embed_dim -> scale^2 * 3)` + pixel shuffle `scale`, nothing after it.
     -   `nearest+conv` (x4 only, as the official `assert`): `conv_before_upsample` + LeakyReLU(0.01), two stages of nearest 2x + `conv(F -> F)` + LeakyReLU(0.2), `conv_hr` + LeakyReLU(0.2), `conv_last`.
 
     The 0.01 is torch `nn.LeakyReLU()`'s default, passed explicitly (Keras' default is 0.3). The model builds this tail itself rather than through the shared `EnhancementHead`, whose super-resolution path is a stride-`scale` transposed conv that none of the official tails use (the SqueezeNet precedent: a reference head the shared head cannot express is model-owned).
--   **`include_top=False`**: no tail is built, and the model returns the features the tail reads, `conv_after_body(body(x)) + x`, `(B, H, W, embed_dim)`.
+-   **`include_top=False`**: no tail is built, and the model returns the features the tail reads, `conv_after_body(body(x)) + x`, cropped to `(B, H, W, embed_dim)` (no mean added back).
 
 ### 4.3 Differences from the official code
 
-The tail above is the official one, layer for layer (pinned by a hand sum and a
-hand-composed forward in `tests/test_models/test_pft_sr/test_model.py`). The
-rest is a simplified port, and these differences are deliberate scope, not
-oversights to rely on:
+Body and tail follow the official `PFT` layer for layer. Pinned by
+`tests/test_models/test_pft_sr/`: a parameter hand sum over the official module
+list (light and base), a float64 forward equal to a numpy transcription of the
+official sparse code (one layer, a chain of layers, and the whole model on a
+non-square input that needs padding), the inherited top-k masks, and the mean
+shift and mirror pad by value. What still differs, each labelled:
 
-| Official `PFT` | This port |
-|:---|:---|
+| Official `PFT` | This port | Label |
+|:---|:---|:---|
+| Top-k via index tensors and the `smm_cuda` sparse kernels | A dense map under an inherited boolean mask | Same numbers, different memory: the dense map costs `(windows, heads, n, n)` per layer, as plain window attention does; the official kernels cost `(windows, heads, n, k)` |
+| `torch.topk(..., sorted=False)`: tie order unspecified | TensorFlow `top_k`: ties to the lower index | Identical away from exact ties; on a tie (a flat map) the two can keep different keys |
+| torch `PixelShuffle` channel order `(c, i, j)` | `PixelShuffle2D`'s `(i, j, c)` | A fixed permutation of the preceding conv's output channels: same function class, matters only when porting torch weights |
+| Conv weights: torch's default init (`kaiming_uniform_(a=sqrt(5))`, uniform bias) | Keras' default (`glorot_uniform`, zero bias) | Initialisation only. Linear layers and the bias table do follow the official `N(0, 0.02)` |
+| `upsampler=''` (denoising branch), `resi_connection='3conv'`, `ape=True` | Not built | Not used by either released config |
+| No stochastic depth | `drop_path_rate` (SwinIR placement), 0 by default | A repo addition, off by default |
+| One input size at a time, computed per call | Static height and width per traced call | The shifted-window mask is built from the static size |
+
+The `repo_medium` variant is this repository's own (no released config, so no
+top-k schedule: `num_topk=None`).
+
+Before 2026-10-20 the body was a simplified port: no mean shift, no patch-embed
+or final LayerNorm, no per-stage conv or residual, no relative position bias, a
+3x3 per-window LePE added to V, focusing that multiplied the pre-softmax scores
+of the previous layer (not of the same-shift layer), no top-k, an MLP for the
+ConvFFN, and no padding. Archives saved before that do not load into this model.
+
+---|:---|
 | Subtracts the DIV2K RGB mean `(0.4488, 0.4371, 0.4040)` at the input and adds it back at the output (`img_range = 1`) | No mean shift; `conv_first`'s and the tail's biases are free to absorb it |
 | `PatchEmbed` LayerNorm after `conv_first`, and a final LayerNorm before `conv_after_body` | Neither |
 | Each stage (`PFTB`) ends in its own `conv(dim -> dim)` and a residual around the stage | No per-stage conv or residual; one `conv_after_body` and one long skip |
@@ -220,7 +244,7 @@ from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft
 model = create_pft_sr(scale=4, variant='base')
 
 # 2. Generate dummy low-res data (Batch, H, W, C)
-# Height/Width must be divisible by the variant's window_size (32 for 'base')
+# Any static size with sides >= 16: the model mirror-pads to its window (32 for 'base')
 lr_image = keras.random.normal((1, 64, 64, 3))
 
 # 3. Inference
@@ -271,14 +295,16 @@ the official training YAMLs in [CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/P
 The third is this repository's own and is named so it does not read as a published
 size: the official repo ships exactly two configs, PFT and PFT_light.
 
-| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Upsampler | Params, `include_top=True` (4x) | Params, `include_top=False` |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | `pixelshuffledirect` | 462,692 | 440,180 |
-| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | `pixelshuffle` | 14,936,019 | 14,500,560 |
-| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | `pixelshuffle` | 2,624,179 | 2,280,880 |
+| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Kernel | `num_topk` | Upsampler | Params, `include_top=True` (4x) | Params, `include_top=False` |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 7 | 1024 x2, 256 x4, 128 x6, 64 x6, 32 x6 | `pixelshuffledirect` | 792,416 | 769,904 |
+| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 7 | 1024 x4, 256 x4, 128 x4, 64 x6, 32 x6, 16 x6 | `pixelshuffle` | 19,771,239 | 19,335,780 |
+| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 7 | `None` (every key) | `pixelshuffle` | 3,450,429 | 3,107,130 |
 
-Measured 2026-10-15 at `scale=4` on a `(1, 32, 32, 3)` input, every weight
-trainable (`count_params()` equals the trainable count):
+Kernel is `convffn_kernel_size`. Measured 2026-10-20 at `scale=4` on a
+`(1, 32, 32, 3)` input, every weight trainable (`count_params()` equals the
+trainable count), and equal to the official hand sum in
+`tests/test_models/test_pft_sr/test_the_parameter_count_is_the_official_hand_sum.py`:
 
 ```python
 m = create_pft_sr(4, variant, include_top=top); m(keras.ops.zeros((1, 32, 32, 3)))
@@ -288,7 +314,7 @@ sum(int(np.prod(w.shape)) for w in m.trainable_weights)
 The difference between the two columns is the official tail's hand sum at
 `scale=4` (`c(i, o) = 9*i*o + o`, `F = 64`): light `c(52, 48)` = 22,512; base
 `c(240, F) + 2*c(F, 4F) + c(F, 3)` = 435,459; repo_medium `c(80, F) + 2*c(F, 4F)
-+ c(F, 3)` = 343,299. The body is unchanged from the step-6 measurement.
++ c(F, 3)` = 343,299.
 
 From 2026-10-10 to 2026-10-15 `include_top=True` ended in an `EnhancementHead`
 (three `ConvBlock`s at `embed_dim`, then a stride-`scale` transposed conv) in
@@ -347,8 +373,8 @@ def super_resolve(image_path, model):
     x = x / 255.0
     x = keras.ops.expand_dims(x, 0) # Add batch dim
     
-    # Pad if necessary (dimensions must be divisible by window_size)
-    # Note: A robust production pipeline should implement reflection padding here
+    # No padding needed: the model mirror-pads to a multiple of window_size
+    # and crops the output (sides must be at least half the padded size)
     
     # Inference
     out = model(x, training=False)
@@ -382,6 +408,10 @@ model = PFTSR(
 )
 ```
 
+The official PFT has no stochastic depth; `drop_path_rate` is this repository's
+addition (SwinIR placement, rates rising linearly over the layers) and is 0 by
+default.
+
 ### Pattern 2: Another Official Upsampler
 
 Each variant carries its official upsampler; any `PFTSR` argument overrides it.
@@ -400,7 +430,9 @@ model = create_pft_sr(scale=4, variant='base', upsampler='nearest+conv')
 
 ### Mixed Precision Policy
 
-PFT-SR benefits significantly from mixed precision on modern GPUs (Volta/Ampere/Hopper).
+The model builds under a `mixed_float16` policy; the softmax, the focusing
+product and the top-k then run in float32 (in float16 the official `eps = 1e-20`
+is 0). No speed or quality measurement has been made here.
 
 ```python
 keras.mixed_precision.set_global_policy('mixed_float16')
@@ -409,7 +441,7 @@ model = create_pft_sr(scale=4, variant='repo_medium')
 
 ### XLA Compilation
 
-Enable JIT compilation for graph optimization, especially beneficial for the window partitioning logic.
+The forward compiles under XLA (`jit_compile=True`); no speed measurement has been made here.
 
 ```python
 model.compile(optimizer="adamw", loss="mae", jit_compile=True)
@@ -444,7 +476,7 @@ model.save('pft_sr_x4.keras')
 loaded_model = keras.models.load_model('pft_sr_x4.keras')
 ```
 
-**Note**: The model inputs must be divisible by `window_size` (default 8). When deploying, ensure input tensors are padded to multiples of 8.
+**Note**: The model pads its input to a multiple of `window_size` itself (the official mirror pad) and crops the output, so any size works whose sides are at least half their padded size. Height and width must be static per traced call.
 
 ---
 
@@ -460,7 +492,7 @@ def test_pft_sr_shapes():
     scale = 4
     model = PFTSR(scale=scale, embed_dim=48, num_blocks=[2, 2])
     
-    # Input: 64x64 (divisible by window_size 8)
+    # Input: 64x64 (padded internally to a multiple of window_size if needed)
     x = keras.random.normal((1, 64, 64, 3))
     y = model(x)
     
@@ -480,8 +512,8 @@ test_pft_sr_shapes()
 *   **Solution**: 1) Train on smaller patches (e.g., 48x48 LR). 2) Reduce batch size. 3) Use mixed precision.
 
 **Issue 2: Input shape errors.**
-*   **Cause**: Input height/width is not divisible by `window_size`.
-*   **Solution**: Pad inputs. `h_new = ceil(h / window_size) * window_size`.
+*   **Cause**: A side shorter than half of its padded size (the official mirror pad flips the image once), or a height or width unknown at trace time.
+*   **Solution**: Use inputs with sides of at least `window_size / 2` (at least 16 for the 32-window variants) and static shapes.
 
 **Issue 3: Checkerboard artifacts.**
 *   **Cause**: Can happen with `pixelshuffledirect`, the light variant's official tail.
@@ -493,17 +525,19 @@ test_pft_sr_shapes()
 
 ### Progressive Focused Attention Math
 
-For layer $l$ and head $h$:
+For layer $l$ and head $h$, with $p(l)$ the previous layer of the same window shift and $\mathcal{K}_{p(l)}$ the keys it kept:
 
-1.  **Standard Attention**:
-    $$ \text{Score}_l = \text{Softmax}(Q_l K_l^T / \sqrt{d}) $$
+1.  **Attention over the kept keys**:
+    $$ S_l = \text{Softmax}_{\mathcal{K}_{p(l)}}(Q_l K_l^T / \sqrt{d} + B_l [+ M]) $$
+    *($B_l$ the relative position bias; $M$ the -100 shifted-region mask, added only while the chain is dense)*
 2.  **Inheritance**:
-    $$ \text{FocusedScore}_l = \text{Score}_l \odot \text{FocusedScore}_{l-1} $$
+    $$ A_l = \frac{S_l \odot A_{p(l)} + \epsilon}{\sum S_l \odot A_{p(l)} + \epsilon}, \quad \epsilon = 10^{-20} $$
     *(where $\odot$ is the Hadamard/element-wise product)*
-3.  **Output**:
-    $$ \text{Output}_l = \text{FocusedScore}_l \times V_l + \text{LePE}(V_l) $$
+3.  **Top-k**: if $k_l = \text{num\_topk}[l]$ is below $|\mathcal{K}_{p(l)}|$, keep the $k_l$ largest entries of $A_l$ per query; $\mathcal{K}_l \subseteq \mathcal{K}_{p(l)}$.
+4.  **Output**:
+    $$ \text{Output}_l = \text{Linear}(A_l V_l + \text{GELU}(\text{DWConv}(V_l))) $$
 
-This formulation ensures that if the attention weight for a token pair was near zero in layer $l-1$, it remains suppressed in layer $l$, effectively pruning the search space for the attention mechanism.
+A key an earlier layer of the chain dropped is never attended again, and a weight near zero in $A_{p(l)}$ stays near zero in $A_l$, which is what prunes the search space.
 
 ---
 

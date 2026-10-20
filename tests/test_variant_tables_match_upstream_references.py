@@ -163,6 +163,13 @@ UPSTREAM_PINS = [
     ("pft_sr", "light", "mlp_ratio", 1.0, _PFT_LIGHT_URL),
     ("pft_sr", "light", "window_size", 32, _PFT_LIGHT_URL),
     ("pft_sr", "light", "upsampler", "pixelshuffledirect", _PFT_LIGHT_URL),
+    # Since the body port (plan-2026-10-14T062616-81938e81 step 7, D-212).
+    ("pft_sr", "base", "convffn_kernel_size", 7, _PFT_BASE_URL),
+    ("pft_sr", "base", "num_topk",
+     [1024] * 4 + [256] * 4 + [128] * 4 + [64] * 6 + [32] * 6 + [16] * 6, _PFT_BASE_URL),
+    ("pft_sr", "light", "convffn_kernel_size", 7, _PFT_LIGHT_URL),
+    ("pft_sr", "light", "num_topk",
+     [1024] * 2 + [256] * 4 + [128] * 6 + [64] * 6 + [32] * 6, _PFT_LIGHT_URL),
 
     # snap-stanford/relgt argparse defaults. Name mapping: channels ->
     # embedding_dim, num_centroids -> num_global_centroids, num_layers ->

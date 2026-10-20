@@ -1,5 +1,5 @@
 """
-Test suite for PFTSR (permuted self-attention super-resolution).
+Test suite for PFTSR (Progressive Focused Transformer super-resolution).
 
 create_pft_sr(scale, variant) builds the model; the paper-sourced variants use
 window_size=32 (repo_medium keeps 8), so input H/W are
@@ -96,6 +96,42 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
+class TestTheDropPathScheduleReachesTheLayers:
+    """Moved from ``test_progressive_focused_transformer.py`` (its
+    ``TestPftSrConsumerSmoke``) when PFT-SR stopped building ``PFTBlock``
+    (plan-2026-10-14T062616-81938e81 step 7, D-212). The official PFT has no
+    stochastic depth; this port keeps it as an opt-in, zero by default."""
+
+    def test_a_nonzero_rate_builds_and_runs_in_training(self):
+        model = PFTSR(scale=2, in_channels=3, embed_dim=16, num_blocks=[1, 1],
+                      num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.1)
+        x = np.random.default_rng(5).standard_normal((1, 16, 16, 3)).astype("float32")
+        out = keras.ops.convert_to_numpy(model(x, training=True))
+        assert out.shape == (1, 32, 32, 3)
+        assert np.all(np.isfinite(out))
+
+    def test_each_layer_gets_its_linear_rate(self):
+        model = PFTSR(scale=2, in_channels=3, embed_dim=16, num_blocks=[2, 2],
+                      num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.4)
+        rates = [layer.drop_path_rate for layer in model.pft_layers]
+        # linear_drop_path_rates returns float32-rounded floats.
+        assert rates == pytest.approx([0.0, 0.4 / 3, 0.8 / 3, 0.4], abs=1e-6)
+        assert model.pft_layers[0].drop_path is None
+        assert all(layer.drop_path is not None for layer in model.pft_layers[1:])
+        assert all(layer.drop_path is None
+                   for layer in PFTSR(scale=2, embed_dim=16, num_blocks=[2, 2], num_heads=4,
+                                      window_size=8).pft_layers)
+
+
+def test_the_upsampling_scale_is_not_a_norm_knob():
+    """``PFTSR.scale`` is the upsampling factor; the LayerNorm ``scale`` (a bool,
+    the learned gamma) is a different thing that only shares the name, which is
+    why ``test_package_api_contract._NORM_NAME_COLLISIONS`` waives it."""
+    model = PFTSR(scale=4, embed_dim=16, num_blocks=[1], num_heads=2, window_size=8)
+    assert model.scale == 4
+    assert model.patch_norm.scale is True and model.norm.scale is True
+
+
 class TestNearestUpsamplerScaleValidation:
     """``'nearest+conv'`` is the official real-world tail, and it is x4 only.
 
@@ -162,7 +198,7 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 class TestPFTSRGradientFlow:
     """Every trainable weight must be on the backward graph.
 
-    Hundreds of trainable weights across permuted-attention blocks and the
+    Hundreds of trainable weights across progressive-focused attention layers and the
     ``include_top`` upsampler tail. This is the size at which an AGGREGATE
     gradient-norm assertion stops meaning anything -- one dead attention
     projection among hundreds of live tensors moves a global norm by nothing
@@ -252,11 +288,19 @@ class TestPFTSRGradientFlow:
 #   repo_medium c(80, F)  + 2*c(F, 4F) + c(F, 3)    = 343_299 -> 2_624_179
 # Measured by the command below and by summing np.prod over model.weights
 # (scratchpad step61/probes/pft_counts.py), both agreeing.
+#
+# 2026-10-20 (plan-2026-10-14T062616-81938e81 step 7, D-212): the body is the
+# official one, and every count is the official hand sum of
+# test_the_parameter_count_is_the_official_hand_sum.py, measured equal:
+# patch-embed and final LayerNorm, a 3x3 conv per stage, per layer a
+# relative-position bias table, a kernel-7 LePE and a ConvFFN with its kernel-7
+# depthwise conv. Bodies: light 769_904, base 19_335_780, repo_medium 3_107_130;
+# the tails are unchanged (22_512 / 435_459 / 343_299).
 # ---------------------------------------------------------------------------
 _PFT_VARIANT_PARAMS = {
-    "light": 462_692,
-    "base": 14_936_019,
-    "repo_medium": 2_624_179,
+    "light": 792_416,
+    "base": 19_771_239,
+    "repo_medium": 3_450_429,
 }
 
 
@@ -273,8 +317,10 @@ def test_the_variant_parameter_counts_did_not_move(variant, expected_params):
     # 32x32-window model, so MODEL_VARIANTS["base"] supplies window_size (D-463).
     ("window_size", 16, 32),
     ("upsampler", "pixelshuffledirect", "pixelshuffle"),
-    ("norm_type", "rms_norm", "layer_norm"),
-    ("use_lepe", False, True),
+    ("convffn_kernel_size", 5, 7),
+    ("num_topk", None, [1024] * 4 + [256] * 4 + [128] * 4 + [64] * 6 + [32] * 6 + [16] * 6),
+    ("img_range", 255.0, 1.0),
+    ("qkv_bias", False, True),
     ("drop_path_rate", 0.2, 0.0),
 ])
 def test_every_constructor_knob_is_reachable_through_the_factory(key, value, default):
@@ -295,9 +341,20 @@ def test_a_factory_override_does_not_write_back_into_the_variant_table():
     unfixed source (measured). The table entry itself is what needed guarding.
     """
     before = list(PFTSR.MODEL_VARIANTS["base"]["num_blocks"])
-    create_pft_sr(4, "base", num_blocks=[1, 1])
+    topk_before = list(PFTSR.MODEL_VARIANTS["base"]["num_topk"])
+    create_pft_sr(4, "base", num_blocks=[1, 1], num_topk=[1024, 256])
     assert PFTSR.MODEL_VARIANTS["base"]["num_blocks"] == before
+    assert PFTSR.MODEL_VARIANTS["base"]["num_topk"] == topk_before
     assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 240
+
+
+def test_a_depth_override_without_its_own_schedule_is_refused():
+    """``num_topk`` holds one entry per layer: the released variant's 30-entry
+    schedule does not describe a 2-layer body, so the override must bring its
+    own (or ``None``) instead of the model guessing which entries to drop."""
+    with pytest.raises(ValueError, match="one positive integer per layer"):
+        create_pft_sr(4, "base", num_blocks=[1, 1])
+    assert create_pft_sr(4, "base", num_blocks=[1, 1], num_topk=None).num_topk is None
 
 
 # ---------------------------------------------------------------------
@@ -386,6 +443,8 @@ class TestTheOfficialTail:
             def lrelu(t, slope):
                 return keras.ops.where(t >= 0, t, slope * t)
 
+            # D-212: the official forward adds the RGB mean back after the tail.
+            mean = np.array([0.4488, 0.4371, 0.4040], dtype="float32")
             if upsampler == "pixelshuffledirect":
                 ref = shuffle(conv("upsample_conv", f), scale)
             elif upsampler == "pixelshuffle":
@@ -399,7 +458,7 @@ class TestTheOfficialTail:
                     t = keras.ops.repeat(keras.ops.repeat(t, 2, axis=1), 2, axis=2)
                     t = lrelu(conv(f"conv_up{i}", t), 0.2)
                 ref = conv("conv_last", lrelu(conv("conv_hr", t), 0.2))
-            ref = keras.ops.convert_to_numpy(ref)
+            ref = keras.ops.convert_to_numpy(ref) + mean
         assert y.shape == (1, 16 * scale, 16 * scale, 3)
         assert float(np.abs(y).max()) > 1e-3
         np.testing.assert_array_equal(y, ref)

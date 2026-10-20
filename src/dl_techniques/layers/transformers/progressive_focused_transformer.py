@@ -14,6 +14,14 @@ via factory arguments.
 ``x' = x + DropPath(PFA(Norm1(x), prev_attn_map))``
 ``y  = x' + DropPath(FFN(Norm2(x')))``
 
+A variant inspired by the paper, not the official layer: its attention is
+:class:`~dl_techniques.layers.attention.progressive_focused_attention.ProgressiveFocusedAttention`
+(see that module for how it differs) and its FFN is a factory FFN, where the
+official ``PFTransformerLayer`` uses a ConvFFN with a depthwise conv. The
+faithful port is
+``dl_techniques.models.vision.super_resolution.pft_sr.blocks.PFTLayer``; no
+model in this tree builds this block (plan-2026-10-14T062616-81938e81 D-212).
+
 References:
     - Long et al., 2025. Progressive Focused Transformer for Single Image
       Super-Resolution. (CVPR)
