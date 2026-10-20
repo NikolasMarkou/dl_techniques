@@ -220,11 +220,8 @@ def train_one_with_band_checkpoint(
     band_acc = band_cb.band_value if band_entered else None
     band_epoch = band_cb.band_epoch if band_entered else None
     if save_path and band_entered:
-        try:
-            model.save(save_path)
-            logger.info(f"Saved band checkpoint to {save_path}")
-        except Exception as e:
-            logger.warning(f"Could not save band checkpoint: {e}")
+        model.save(save_path)
+        logger.info(f"Saved band checkpoint to {save_path}")
     return {
         "wall_s": wall_s,
         "epochs_used": epochs_used,

@@ -409,11 +409,10 @@ def train_model(args):
     best_path = os.path.join(results_dir, 'best_model.keras')
     best_model = model
     if os.path.exists(best_path):
-        try:
-            best_model = keras.models.load_model(best_path, custom_objects=CUSTOM_OBJECTS)
-            logger.info("Loaded best checkpoint")
-        except Exception as e:
-            logger.warning(f"Could not load best model: {e}")
+        # A best checkpoint that exists but does not load raises (D-183); the old
+        # fallback scored the last-epoch weights under the best checkpoint's name.
+        best_model = keras.models.load_model(best_path, custom_objects=CUSTOM_OBJECTS)
+        logger.info("Loaded best checkpoint")
 
     test_results = best_model.evaluate(x_test, batch_size=args.batch_size, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")

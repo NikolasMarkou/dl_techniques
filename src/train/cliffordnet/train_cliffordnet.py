@@ -572,11 +572,10 @@ def train_model(args) -> None:
     best_path = os.path.join(results_dir, "best_model.keras")
     best_model = model
     if os.path.exists(best_path):
-        try:
-            best_model = keras.models.load_model(best_path, custom_objects=custom_objects)
-            logger.info("Loaded best checkpoint for final evaluation")
-        except Exception as exc:
-            logger.warning(f"Could not load best checkpoint ({exc}); using EarlyStopping-restored weights")
+        # A best checkpoint that exists but does not load raises (D-183); the old
+        # fallback scored the last-epoch weights under the best checkpoint's name.
+        best_model = keras.models.load_model(best_path, custom_objects=custom_objects)
+        logger.info("Loaded best checkpoint for final evaluation")
 
     test_results = best_model.evaluate(val_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")

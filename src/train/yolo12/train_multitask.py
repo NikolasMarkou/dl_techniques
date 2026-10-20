@@ -671,7 +671,12 @@ def train_model(args: argparse.Namespace) -> None:
             )
         raise
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: a failed requested test
+    # evaluation is recorded, the model and results are saved, and then the run
+    # raises. Do NOT log and finish: the run reported success with no test numbers.
+    # See decisions.md D-183.
     test_results = None
+    test_error = None
     if args.evaluate and test_dataset.annotations:
         logger.info("Evaluating on test set...")
         try:
@@ -683,13 +688,18 @@ def train_model(args: argparse.Namespace) -> None:
             test_results = {'test_loss': float(test_loss)}
             logger.info(f"Test Loss: {test_loss:.6f}")
         except Exception as e:
-            logger.error(f"Test evaluation failed: {e}")
+            logger.error(f"Test evaluation failed: {e}", exc_info=True)
+            test_error = f"{type(e).__name__}: {e}"
 
     save_training_results(
         model=model, history=history, results_dir=results_dir, args=args,
         task_config=task_config, train_info=train_info, val_info=val_info,
         test_info=test_info, test_results=test_results, callbacks=callbacks
     )
+    if test_error is not None:
+        raise RuntimeError(
+            f"Test evaluation failed ({test_error}); the model and results were saved"
+        )
     logger.info("Training completed successfully!")
 
 
@@ -771,16 +781,13 @@ def save_training_results(
     with open(os.path.join(results_dir, 'training_config.json'), 'w') as f:
         json.dump(config, f, indent=2)
 
-    try:
-        final_model_path = os.path.join(model_dir, 'final_model.keras')
-        model.save(final_model_path)
-        logger.info(f"Final model saved to: {final_model_path}")
+    final_model_path = os.path.join(model_dir, 'final_model.keras')
+    model.save(final_model_path)
+    logger.info(f"Final model saved to: {final_model_path}")
 
-        saved_model_path = os.path.join(model_dir, 'saved_model')
-        model.export(saved_model_path)
-        logger.info(f"SavedModel exported to: {saved_model_path}")
-    except Exception as e:
-        logger.error(f"Failed to save model: {e}")
+    saved_model_path = os.path.join(model_dir, 'saved_model')
+    model.export(saved_model_path)
+    logger.info(f"SavedModel exported to: {saved_model_path}")
 
     create_training_summary(results_dir, config, history, task_config)
     logger.info(f"All results saved to: {results_dir}")

@@ -261,13 +261,10 @@ def train_magicpoint(config: MagicPointConfig) -> keras.Model:
     )
     logger.info(f"Training completed in {time.time() - start_time:.2f} seconds")
 
-    # Save final model + history.
-    try:
-        model_path = output_dir / "final_model.keras"
-        model.save(model_path)
-        logger.info(f"Final model saved to: {model_path}")
-    except Exception as e:
-        logger.error(f"Failed to save final model: {e}")
+    # Save final model + history. A failed save raises (D-183).
+    model_path = output_dir / "final_model.keras"
+    model.save(model_path)
+    logger.info(f"Final model saved to: {model_path}")
 
     save_training_history_json(history, output_dir)
 

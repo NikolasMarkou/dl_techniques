@@ -1235,12 +1235,9 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
     logger.info(f"Training completed in {time.time() - start_time:.2f} seconds")
 
     # Save the final SuperPoint backbone (the reusable artifact).
-    try:
-        model_path = output_dir / "final_model.keras"
-        backbone.save(model_path)
-        logger.info(f"Final model saved to: {model_path}")
-    except Exception as e:
-        logger.error(f"Failed to save final model: {e}")
+    model_path = output_dir / "final_model.keras"
+    backbone.save(model_path)
+    logger.info(f"Final model saved to: {model_path}")
 
     save_training_history_json(history, output_dir)
 
