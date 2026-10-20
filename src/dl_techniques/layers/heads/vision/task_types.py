@@ -18,7 +18,7 @@ The table in :class:`VisionTaskType` lists both groups.
 """
 
 from enum import Enum, unique
-from typing import List, Set, Dict, Optional
+from typing import Dict, List, Optional, Sequence, Set, Union
 
 
 # ---------------------------------------------------------------------
@@ -426,6 +426,32 @@ class VisionTaskType(Enum):
         raise ValueError(
             f"Invalid task type: '{task_str}'. "
             f"Valid options are: {valid_tasks}"
+        )
+
+    @classmethod
+    def coerce(cls, value: Union["VisionTaskType", str]) -> "VisionTaskType":
+        """
+        Return the member for a member or its string value.
+
+        Interface contract, shared by :func:`parse_task_list` and
+        ``create_multi_task_head``: a member is returned unchanged, a string
+        goes through :meth:`from_string` (so an unknown name raises there),
+        and anything else raises ``ValueError``. Each entry of a sequence is
+        coerced on its own, so a sequence may mix members and strings.
+
+        :param value: A member or its string value.
+        :type value: Union[VisionTaskType, str]
+        :return: The member.
+        :rtype: VisionTaskType
+        :raises ValueError: If ``value`` is neither, or names no task.
+        """
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls.from_string(value)
+        raise ValueError(
+            f"A task must be a VisionTaskType member or its string value, "
+            f"got {value!r}."
         )
 
     @classmethod
@@ -1114,28 +1140,30 @@ class CommonTaskConfigurations:
 # ---------------------------------------------------------------------
 
 # Utility functions
-def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfiguration:
+def parse_task_list(
+        tasks: Union[TaskConfiguration, VisionTaskType, str,
+                     Sequence[Union[VisionTaskType, str]]],
+        validate_compatibility: bool = True,
+) -> TaskConfiguration:
     """
     Normalize any accepted task spelling into a TaskConfiguration.
 
-    Five input forms are accepted. They are an existing configuration, a
-    single enum member, a single task name, a list of enum members, and a list
-    of names. An existing configuration is returned unchanged, so
-    ``validate_compatibility`` is ignored in that case.
-
-    A mixed list is not supported. Only the first element decides how the
-    whole list is read. A list that starts with an enum but holds a string is
-    stored as given. It raises nothing here, and fails wherever the string is
-    later used as a task.
+    Four input forms are accepted. They are an existing configuration, a
+    single enum member, a single task name, and a list or tuple whose entries
+    are each an enum member or a task name (a sequence may mix the two; each
+    entry goes through :meth:`VisionTaskType.coerce`). An existing
+    configuration is returned unchanged, so ``validate_compatibility`` is
+    ignored in that case.
 
     :param tasks: Task specification in any supported format.
     :type tasks: Union[TaskConfiguration, VisionTaskType, str,
-        List[VisionTaskType], List[str]]
+        Sequence[Union[VisionTaskType, str]]]
     :param validate_compatibility: Whether to validate task compatibility.
     :type validate_compatibility: bool
     :return: TaskConfiguration instance.
     :rtype: TaskConfiguration
-    :raises ValueError: If the task format is invalid or the task list is empty.
+    :raises ValueError: If the task format is invalid, an entry is not a
+        task, or the task list is empty.
     """
     if isinstance(tasks, TaskConfiguration):
         return tasks
@@ -1146,14 +1174,10 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
     elif isinstance(tasks, (list, tuple)):
         if not tasks:
             raise ValueError("Task list cannot be empty")
-
-        # Check if first element is string or VisionTaskType
-        if isinstance(tasks[0], str):
-            return TaskConfiguration.from_strings(list(tasks), validate_compatibility=validate_compatibility)
-        elif isinstance(tasks[0], VisionTaskType):
-            return TaskConfiguration(list(tasks), validate_compatibility=validate_compatibility)
-        else:
-            raise ValueError(f"Invalid task type in list: {type(tasks[0])}")
+        return TaskConfiguration(
+            [VisionTaskType.coerce(task) for task in tasks],
+            validate_compatibility=validate_compatibility,
+        )
     else:
         raise ValueError(f"Invalid tasks format: {type(tasks)}")
 

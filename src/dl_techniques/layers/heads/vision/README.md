@@ -205,14 +205,16 @@ cheap_det = create_vision_head('detection', **cfg)
   attention on; with the layout rule above that runs on a 4D map too (it failed there before
   2026-10-15). An `EnhancementHead` task still refuses attention, so pass
   `use_task_specific_attention=False` when the tasks include denoising or super-resolution.
-- **`create_multi_task_head`'s list and `TaskConfiguration` forms take each task's options as a
+- **`create_multi_task_head`'s list, tuple and `TaskConfiguration` forms take each task's options as a
   keyword dict named after the task's value**, e.g.
   `create_multi_task_head([VisionTaskType.DETECTION, 'classification'], detection={'num_classes': 80},
   classification={'num_classes': 10}, use_task_specific_attention=False)`. Each such dict is
   consumed; the remaining keywords go to `MultiTaskHead`. A detection, segmentation or
   classification task given no `num_classes` raises `TypeError`. (Until 2026-10-15 the per-task
   dicts were also forwarded to `MultiTaskHead`, which refused them, so these forms built only
-  depth tasks.)
+  depth tasks.) A list and a tuple mean the same; a task named twice is refused (the heads are
+  keyed by task, so one would be dropped), an empty task set is refused, and any type other than
+  `TaskConfiguration`, list, tuple or dict raises `ValueError` (D-207).
 - **`MultiTaskHead` accepts `task_type` as a `VisionTaskType` member or its string value**, and
   `get_config` stores the string, so a model holding it survives a `.keras` round trip. It builds
   each head through `create_vision_head`, so it serves the same 10 task types; another raises

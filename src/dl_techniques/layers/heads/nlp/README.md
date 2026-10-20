@@ -243,7 +243,8 @@ outputs = multi_head(inputs, task_name='ner') # Runs ONLY 'ner' task, returns di
 
 `task_name` is keyword-only (the second positional slot is `training`), and the symbolic call and
 `compute_output_shape(..., task_name=...)` follow it. An empty task set is refused, and so is a
-list with two configs of one name. The wrapper and its heads keep their own copies of the task
+list or tuple (the two mean the same) with two configs of one name; any type other than a list,
+tuple or dict raises `ValueError`. The wrapper and its heads keep their own copies of the task
 configs, and `get_config` holds every field of each.
 
 It also supports `use_task_specific_projections=True`, which adds a dedicated Dense layer for each task *before* the main head logic, allowing standard-sized foundation models to adapt to tasks requiring different feature dimensions.

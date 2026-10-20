@@ -47,7 +47,7 @@ Example
 import inspect
 
 import keras
-from typing import Dict, List, Optional, Union, Tuple, Any, Literal
+from typing import Dict, List, Optional, Sequence, Union, Tuple, Any, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -2714,7 +2714,7 @@ def create_nlp_head(
 
 
 def create_multi_task_nlp_head(
-        task_configs: Union[List[Union[NLPTaskConfig, Dict[str, Any]]],
+        task_configs: Union[Sequence[Union[NLPTaskConfig, Dict[str, Any]]],
                             Dict[str, Union[NLPTaskConfig, Dict[str, Any]]]],
         input_dim: int,
         **kwargs: Any
@@ -2722,33 +2722,41 @@ def create_multi_task_nlp_head(
     """
     Build a :class:`MultiTaskNLPHead` from several task configs.
 
-    A list is turned into a dict keyed by each config's ``name``; two configs
-    with one name are refused, because keying would keep only the last. Pass a
-    dict directly to choose the keys yourself. Either form may hold dicts of
-    config fields. An empty list or dict is refused.
+    A list or a tuple (the same semantics) is turned into a dict keyed by each
+    config's ``name``; two configs with one name are refused, because keying
+    would keep only the last. Pass a dict directly to choose the keys
+    yourself. Either form may hold dicts of config fields. An empty sequence
+    or dict is refused, and so is any other type.
 
-    :param task_configs: A list of configs, or a dict of task name to config.
-    :type task_configs: Union[List[...], Dict[str, ...]]
+    :param task_configs: A list or tuple of configs, or a dict of task name
+        to config.
+    :type task_configs: Union[Sequence[...], Dict[str, ...]]
     :param input_dim: Width of the shared features. Becomes the head's
         ``shared_input_dim``.
     :type input_dim: int
     :param kwargs: Extra keyword arguments for :class:`MultiTaskNLPHead`.
     :return: The configured multi-task head.
     :rtype: MultiTaskNLPHead
-    :raises ValueError: If the list repeats a name, the set is empty, or any
-        task type has no implemented head.
+    :raises ValueError: If ``task_configs`` is not a list, tuple or dict, the
+        sequence repeats a name, the set is empty, or any task type has no
+        implemented head.
     """
-    if isinstance(task_configs, list):
+    if isinstance(task_configs, (list, tuple)):
         configs = [NLPTaskConfig.coerce(c) for c in task_configs]
         names = [c.name for c in configs]
         repeated = sorted({n for n in names if names.count(n) > 1})
         if repeated:
             raise ValueError(
                 f"create_multi_task_nlp_head: task names {repeated} appear more "
-                "than once; a list is keyed by name, so all but the last would "
-                "be dropped. Give each config its own name, or pass a dict."
+                "than once; a sequence is keyed by name, so all but the last "
+                "would be dropped. Give each config its own name, or pass a dict."
             )
         task_configs = {c.name: c for c in configs}
+    elif not isinstance(task_configs, dict):
+        raise ValueError(
+            "create_multi_task_nlp_head: task_configs must be one of: list, "
+            f"tuple, dict; got {type(task_configs).__name__}."
+        )
 
     return MultiTaskNLPHead(
         task_configs=task_configs,

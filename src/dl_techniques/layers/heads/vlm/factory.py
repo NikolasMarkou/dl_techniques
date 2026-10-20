@@ -374,14 +374,26 @@ def _deserialize_task_config(
 ) -> VLMTaskConfig:
     """Reconstruct a ``VLMTaskConfig`` from a serialized dict.
 
+    Interface contract, shared by ``create_vlm_head``, the multi-task factory,
+    ``MultiTaskVLMHead.__init__`` and the heads' ``from_config``: an instance
+    is returned unchanged, a dict of its fields is passed to the constructor
+    (which parses a string ``task_type``; the dict is not modified), and
+    anything else raises ``TypeError``.
+
     :param config: Serialized config dict (or an existing ``VLMTaskConfig``,
         returned unchanged).
     :type config: Union[VLMTaskConfig, Dict[str, Any]]
     :return: A ``VLMTaskConfig`` instance.
     :rtype: VLMTaskConfig
+    :raises TypeError: If ``config`` is neither a ``VLMTaskConfig`` nor a dict.
     """
     if isinstance(config, VLMTaskConfig):
         return config
+    if not isinstance(config, dict):
+        raise TypeError(
+            "A VLM task config must be a VLMTaskConfig or a dict of its "
+            f"fields, got {type(config).__name__}."
+        )
     # VLMTaskConfig parses the string task type itself.
     return VLMTaskConfig(**dict(config))
 
@@ -492,7 +504,8 @@ class BaseVLMHead(keras.layers.Layer):
                 "ImageTextMatchingHead and has no call(); construct one of "
                 "those, or create_vlm_head() for a task type."
             )
-        super().__init__(name=f"{task_config.name}_head", **kwargs)
+        kwargs.setdefault("name", f"{task_config.name}_head")
+        super().__init__(**kwargs)
 
         # Store configuration
         self.task_config = task_config
@@ -563,10 +576,24 @@ class BaseVLMHead(keras.layers.Layer):
         :type squeeze_axis: Optional[int]
         :return: The fusion output shape, after the squeeze.
         :rtype: Tuple[Optional[int], ...]
-        :raises ValueError: If the fusion strategy returns one shape per
-            modality, or if it does not preserve rank.
+        :raises ValueError: If the fusion layer refuses the input shapes (the
+            message names this head and the shapes), the fusion strategy
+            returns one shape per modality, or it does not preserve rank.
         """
-        self.fusion.build(fusion_input_shapes)
+        # DECISION plan-2026-10-14T062616-81938e81/D-207
+        # Re-raise the fusion layer's own refusal with the head's name. Do
+        # NOT pre-check the widths against hidden_dim here: which widths a
+        # fusion accepts is the strategy's rule, and a copy of it in the head
+        # would drift. See decisions.md D-207.
+        try:
+            self.fusion.build(fusion_input_shapes)
+        except ValueError as error:
+            raise ValueError(
+                f"{type(self).__name__} ({self.name!r}): "
+                f"fusion_strategy={self.fusion_strategy!r} at hidden_size="
+                f"{self.hidden_dim} cannot fuse vision/text inputs of shapes "
+                f"{[tuple(s) for s in fusion_input_shapes]}: {error}"
+            ) from error
         fused_shape = self.fusion.compute_output_shape(fusion_input_shapes)
 
         # Two strategies are rejected here, for two different reasons.
@@ -650,8 +677,8 @@ class BaseVLMHead(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> "BaseVLMHead":
         """Reconstruct the head, deserializing the ``task_config`` dataclass.
 
-        The layer name is regenerated from ``task_config.name`` in ``__init__``,
-        so the stored ``name`` is dropped to avoid a duplicate-keyword conflict.
+        The stored ``name`` is passed on, so a custom name survives; the
+        default is ``<task_config.name>_head``.
 
         :param config: Serialized layer configuration.
         :type config: Dict[str, Any]
@@ -659,7 +686,6 @@ class BaseVLMHead(keras.layers.Layer):
         :rtype: BaseVLMHead
         """
         config = dict(config)
-        config.pop("name", None)
         config["task_config"] = _deserialize_task_config(config["task_config"])
         return cls(**config)
 
@@ -865,7 +891,8 @@ class ImageCaptioningHead(keras.layers.Layer):
         """
         _check_task_config_fields(
             task_config, "ImageCaptioningHead", required=("vocab_size",))
-        super().__init__(name=f"{task_config.name}_head", **kwargs)
+        kwargs.setdefault("name", f"{task_config.name}_head")
+        super().__init__(**kwargs)
         self.task_config = task_config
         # D-014: dead fallback removed (see BaseVLMHead.__init__).
         self.hidden_dim = task_config.hidden_size
@@ -1159,9 +1186,8 @@ class ImageCaptioningHead(keras.layers.Layer):
         """
         Reconstruct the head, deserializing the ``task_config`` dataclass.
 
-        The layer name is regenerated from ``task_config.name`` in
-        ``__init__``, so the stored ``name`` is dropped to avoid a duplicate
-        keyword.
+        The stored ``name`` is passed on, so a custom name survives; the
+        default is ``<task_config.name>_head``.
 
         :param config: Serialized layer configuration.
         :type config: Dict[str, Any]
@@ -1169,7 +1195,6 @@ class ImageCaptioningHead(keras.layers.Layer):
         :rtype: ImageCaptioningHead
         """
         config = dict(config)
-        config.pop("name", None)
         config["task_config"] = _deserialize_task_config(config["task_config"])
         return cls(**config)
 
@@ -1354,7 +1379,8 @@ class VQAHead(keras.layers.Layer):
                 f"pooling_strategy='attention'; pooling_strategy="
                 f"{pooling_strategy!r} runs no attention. Leave it unset."
             )
-        super().__init__(name=f"{task_config.name}_head", **kwargs)
+        kwargs.setdefault("name", f"{task_config.name}_head")
+        super().__init__(**kwargs)
 
         # Store configuration
         self.task_config = task_config
@@ -1561,9 +1587,8 @@ class VQAHead(keras.layers.Layer):
         """
         Reconstruct the head, deserializing the ``task_config`` dataclass.
 
-        The layer name is regenerated from ``task_config.name`` in
-        ``__init__``, so the stored ``name`` is dropped to avoid a duplicate
-        keyword.
+        The stored ``name`` is passed on, so a custom name survives; the
+        default is ``<task_config.name>_head``.
 
         :param config: Serialized layer configuration.
         :type config: Dict[str, Any]
@@ -1571,7 +1596,6 @@ class VQAHead(keras.layers.Layer):
         :rtype: VQAHead
         """
         config = dict(config)
-        config.pop("name", None)
         config["task_config"] = _deserialize_task_config(config["task_config"])
         return cls(**config)
 
@@ -1603,9 +1627,10 @@ class VisualGroundingHead(BaseVLMHead):
 
     Both inputs must also be ``hidden_dim`` wide. ``D_txt`` and ``D_vis`` are
     not independent, despite the separate symbols on the diagram edges below.
-    With ``hidden_size=64``, a 32-wide text stream raises ``ValueError:
-    Modality 1 dimension 32 doesn't match expected dim 64`` from the fusion
-    layer. Project both streams to one width before this head.
+    With ``hidden_size=64``, a 32-wide text stream raises a ``ValueError``
+    naming this head and the shapes, around the fusion layer's own "Modality
+    1 dimension 32 doesn't match expected dim 64". Project both streams to
+    one width before this head.
 
     The two outputs are treated differently, and the diagram says which is
     which. ``confidence_scorer`` is a linear ``Dense(1)``, so ``'confidence'``
@@ -2426,9 +2451,9 @@ class MultiTaskVLMHead(keras.layers.Layer):
         With ``task_name``, that head's own output. Without it, a dict mapping
         each task name to that head's output.
 
-    :param task_configs: Mapping of task name to its ``VLMTaskConfig``. One
-        head is built per entry. At least one entry.
-    :type task_configs: Dict[str, VLMTaskConfig]
+    :param task_configs: Mapping of task name to its ``VLMTaskConfig`` (or a
+        dict of its fields). One head is built per entry. At least one entry.
+    :type task_configs: Dict[str, Union[VLMTaskConfig, Dict[str, Any]]]
     :param task_specific_kwargs: Per-task constructor overrides, keyed by the
         same task names as ``task_configs``. Merged over the shared keywords,
         so a per-task value wins.
@@ -2452,8 +2477,9 @@ class MultiTaskVLMHead(keras.layers.Layer):
     ) -> None:
         """Build one head per task, from shared settings plus per-task overrides.
 
-        :param task_configs: Mapping of task name to its ``VLMTaskConfig``.
-        :type task_configs: Dict[str, VLMTaskConfig]
+        :param task_configs: Mapping of task name to its ``VLMTaskConfig``, or
+            to a dict of its fields.
+        :type task_configs: Dict[str, Union[VLMTaskConfig, Dict[str, Any]]]
         :param task_specific_kwargs: Per-task constructor overrides, keyed by the
             same task names as ``task_configs`` -- e.g.
             ``{"cap": {"num_heads": 4, "num_layers": 1}}``. Merged over the
@@ -2483,18 +2509,32 @@ class MultiTaskVLMHead(keras.layers.Layer):
             NO head raises. Partial application is reported via
             ``logger.info``. Use ``task_specific_kwargs`` to target one head
             exactly. Those ARE validated strictly, since they name a head.
-        :raises ValueError: If ``task_configs`` is empty, or
+        :raises ValueError: If ``task_configs`` is not a dict or is empty, or
             ``task_specific_kwargs`` names a task absent from ``task_configs``.
+        :raises TypeError: If a value is neither a ``VLMTaskConfig`` nor a dict.
         """
+        if not isinstance(task_configs, dict):
+            raise ValueError(
+                "MultiTaskVLMHead: task_configs must be a dict of task name to "
+                f"VLMTaskConfig, got {type(task_configs).__name__}; "
+                "create_multi_task_vlm_head also takes a list or tuple."
+            )
         if not task_configs:
             raise ValueError(
                 "MultiTaskVLMHead needs at least one task in task_configs; an "
                 "empty wrapper returns {} for any input."
             )
         # Keras base arguments belong to THIS layer; everything else is intended
-        # for the per-task heads. Forwarding `name` into a head raises (each head
-        # sets its own `name=f"{task_config.name}_head"`), and forwarding
-        # `trainable`/`dtype` silently reconfigures the children.
+        # for the per-task heads. Forwarding `name` into a head would give every
+        # head this wrapper's name (each head defaults to
+        # `f"{task_config.name}_head"`), and forwarding `trainable`/`dtype`
+        # silently reconfigures the children.
+        #
+        # DECISION plan-2026-07-30T081929-1645aa52/D-012
+        # Keep and forward the Keras base kwargs. Do NOT re-add a ``config.pop``
+        # loop for them: it discarded the values, so a head saved with
+        # ``name='mt'``/``trainable=False`` reloaded as
+        # ``name='multi_task_vlm_head'``/``trainable=True``. See decisions.md D-012.
         base_kwargs = {
             k: v for k, v in kwargs.items() if k in _KERAS_BASE_LAYER_KWARGS
         }
@@ -2503,6 +2543,12 @@ class MultiTaskVLMHead(keras.layers.Layer):
         }
         super().__init__(**base_kwargs)
 
+        # A dict of config fields is accepted as create_vlm_head accepts it;
+        # this is also the deserialization from_config relies on.
+        task_configs = {
+            name: _deserialize_task_config(config)
+            for name, config in task_configs.items()
+        }
         self.task_configs = task_configs
         self.shared_head_kwargs = shared_head_kwargs
         self.task_specific_kwargs = dict(task_specific_kwargs or {})
@@ -2749,35 +2795,6 @@ class MultiTaskVLMHead(keras.layers.Layer):
         config.update(self.shared_head_kwargs)
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MultiTaskVLMHead":
-        """Reconstruct the multi-task head, deserializing each ``task_config``.
-
-        This used to pop ``name``, ``trainable`` and ``dtype``, so that they
-        could not leak into per-task head construction. ``__init__`` already
-        stops that leak: it partitions ``**kwargs`` on
-        ``_KERAS_BASE_LAYER_KWARGS`` and passes the base ones to
-        ``super().__init__`` only, never to a sub-head. The pop prevented
-        nothing and discarded the values instead.
-
-        # DECISION plan-2026-07-30T081929-1645aa52/D-012
-        Keep and forward the Keras base kwargs. Do NOT re-add a ``config.pop``
-        loop for them: it discarded the values, so a head saved with
-        ``name='mt'``/``trainable=False`` reloaded as
-        ``name='multi_task_vlm_head'``/``trainable=True``. See decisions.md D-012.
-
-        :param config: Serialized layer configuration.
-        :type config: Dict[str, Any]
-        :return: A reconstructed multi-task head.
-        :rtype: MultiTaskVLMHead
-        """
-        config = dict(config)
-        config["task_configs"] = {
-            name: _deserialize_task_config(tc)
-            for name, tc in config["task_configs"].items()
-        }
-        return cls(**config)
-
 
 # ---------------------------------------------------------------------
 # Factory Functions
@@ -2863,18 +2880,25 @@ def create_vlm_head(
 
 
 def create_multi_task_vlm_head(
-    task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]],
+    task_configs: Union[
+        Sequence[Union[VLMTaskConfig, Dict[str, Any]]],
+        Dict[str, Union[VLMTaskConfig, Dict[str, Any]]],
+    ],
     **kwargs: Any,
 ) -> MultiTaskVLMHead:
     """
     Build a :class:`MultiTaskVLMHead` from task configurations.
 
-    A list is keyed by each configuration's ``name``, and two configurations
-    with one name are refused (keying would keep only the last). A dict is
-    used as it is. An empty list or dict is refused.
+    A list or a tuple (the same semantics) is keyed by each configuration's
+    ``name``, and two configurations with one name are refused (keying would
+    keep only the last). A dict is used as it is. Either form may hold
+    ``VLMTaskConfig`` objects or dicts of their fields (``task_type`` may be
+    its string value), as ``create_vlm_head`` accepts. An empty sequence or
+    dict is refused, and so is any other type.
 
-    :param task_configs: List or dict of VLMTaskConfig objects.
-    :type task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]]
+    :param task_configs: A list or tuple of configs, or a dict of task name to
+        config; each config a ``VLMTaskConfig`` or a dict of its fields.
+    :type task_configs: Union[Sequence[...], Dict[str, ...]]
     :param kwargs: Shared per-head configuration, plus this wrapper's own Keras
         base kwargs. No head takes a declared ``vision_dim`` / ``text_dim``,
         so passing either raises (no head accepts it).
@@ -2899,20 +2923,27 @@ def create_multi_task_vlm_head(
         keys. Duplicating the same tensor under both is fine.
     :return: Configured multi-task VLM head instance.
     :rtype: MultiTaskVLMHead
-    :raises ValueError: If ``task_configs`` is empty or a list repeats a
-        name, or a keyword is wrapper-owned, is accepted by no head, or names
-        a task absent from ``task_configs``.
+    :raises ValueError: If ``task_configs`` is not a list, tuple or dict, is
+        empty, or a sequence repeats a name, or a keyword is wrapper-owned, is
+        accepted by no head, or names a task absent from ``task_configs``.
+    :raises TypeError: If an entry is neither a ``VLMTaskConfig`` nor a dict.
     """
-    if isinstance(task_configs, list):
+    if isinstance(task_configs, (list, tuple)):
+        task_configs = [_deserialize_task_config(c) for c in task_configs]
         names = [config.name for config in task_configs]
         repeated = sorted({n for n in names if names.count(n) > 1})
         if repeated:
             raise ValueError(
                 f"Duplicate task name(s) {', '.join(repr(n) for n in repeated)} "
-                f"in task_configs: a list is keyed by each config's name, so "
+                f"in task_configs: a sequence is keyed by each config's name, so "
                 f"all but the last would be dropped. Give each task its own "
                 f"name."
             )
         task_configs = {config.name: config for config in task_configs}
+    elif not isinstance(task_configs, dict):
+        raise ValueError(
+            "create_multi_task_vlm_head: task_configs must be one of: list, "
+            f"tuple, dict; got {type(task_configs).__name__}."
+        )
 
     return MultiTaskVLMHead(task_configs=task_configs, **kwargs)

@@ -3860,7 +3860,8 @@ class MultiTaskHead(keras.layers.Layer):
         head is named ``'<task name>_head'`` unless its config sets ``name``.
     :vartype task_heads: Dict[str, keras.layers.Layer]
 
-    :raises ValueError: From ``_create_task_heads``, when a config names a
+    :raises ValueError: From ``__init__``, when ``task_configs`` is empty;
+        from ``_create_task_heads``, when a config names a
         task type with no head; from ``build``, ``call`` and
         ``compute_output_shape``, when a dict input has neither the task's
         name nor ``'shared'``.
@@ -3888,8 +3889,14 @@ class MultiTaskHead(keras.layers.Layer):
         :param kwargs: Additional arguments for the base Layer class.
         :return: None.
         :rtype: None
-        :raises ValueError: If a config names a task type with no head.
+        :raises ValueError: If ``task_configs`` is empty, or a config names a
+            task type with no head.
         """
+        if not task_configs:
+            raise ValueError(
+                "MultiTaskHead needs at least one task in task_configs; an "
+                "empty wrapper returns {} for any input."
+            )
         super().__init__(**kwargs)
 
         # Not an alias of the caller's dict: Keras' attribute tracking stores
@@ -4262,63 +4269,68 @@ def create_enhancement_head(
 
 
 def create_multi_task_head(
-        task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]],
+        task_configuration: Union[
+            TaskConfiguration, Sequence[Union[VisionTaskType, str]], Dict[str, Dict]],
         **kwargs: Any
 ) -> MultiTaskHead:
     """
-    Build a :class:`MultiTaskHead` from any of three configuration formats.
+    Build a :class:`MultiTaskHead` from a task configuration.
 
-    A :class:`TaskConfiguration` contributes its enabled tasks. A list
-    contributes its entries, parsing any string through
-    ``VisionTaskType.from_string``. A dict is used as the task-config mapping
-    unchanged. In the first two cases each task's own options are taken from
-    the ``kwargs`` entry named after the task's value (``detection={'num_classes':
-    80}``), and that entry is removed from ``kwargs``.
+    A :class:`TaskConfiguration` contributes its enabled tasks. A list or a
+    tuple (the same semantics) contributes its entries, each a
+    :class:`VisionTaskType` member or its string value; a task named twice is
+    refused, because the heads are keyed by task and one would be dropped. A
+    dict is used as the task-config mapping unchanged. In the first two cases
+    each task's own options are taken from the ``kwargs`` entry named after
+    the task's value (``detection={'num_classes': 80}``), and that entry is
+    removed from ``kwargs``.
 
     The remaining ``kwargs`` go to :class:`MultiTaskHead`.
 
-    :param task_configuration: A :class:`TaskConfiguration`, a list of
-        :class:`VisionTaskType` members or strings, or a dict mapping task
+    :param task_configuration: A :class:`TaskConfiguration`, a list or tuple
+        of :class:`VisionTaskType` members or strings, or a dict mapping task
         names to config dicts.
-    :type task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]]
-    :param kwargs: Per-task option dicts, keyed by task value (list and
+    :type task_configuration: Union[TaskConfiguration, Sequence[Union[VisionTaskType, str]], Dict[str, Dict]]
+    :param kwargs: Per-task option dicts, keyed by task value (sequence and
         :class:`TaskConfiguration` forms only), plus any argument for
         :class:`MultiTaskHead`.
     :return: Configured multi-task head.
     :rtype: MultiTaskHead
-    :raises ValueError: If ``task_configuration`` is none of the three
-        accepted types.
+    :raises ValueError: If ``task_configuration`` is none of the accepted
+        types, a sequence entry is not a task, a sequence names a task twice,
+        or (from :class:`MultiTaskHead`) the task set is empty.
     """
 
     if isinstance(task_configuration, TaskConfiguration):
-        # Convert TaskConfiguration to dict
-        task_configs = {}
-        for task in task_configuration.get_enabled_tasks():
-            task_configs[task.value] = {
-                'task_type': task,
-                **kwargs.pop(task.value, {})
-            }
-
-    elif isinstance(task_configuration, list):
-        # List of TaskTypes
-        task_configs = {}
-        for task in task_configuration:
-            if isinstance(task, str):
-                task = VisionTaskType.from_string(task)
-            # pop, not get: a per-task dict left in kwargs would also reach
-            # MultiTaskHead(**kwargs), which refuses it as an unknown
-            # keyword, so this form could never take a per-task option.
-            task_configs[task.value] = {
-                'task_type': task,
-                **kwargs.pop(task.value, {})
-            }
-
+        tasks = task_configuration.get_enabled_tasks()
+    elif isinstance(task_configuration, (list, tuple)):
+        tasks = [VisionTaskType.coerce(task) for task in task_configuration]
+        values = [task.value for task in tasks]
+        repeated = sorted({v for v in values if values.count(v) > 1})
+        if repeated:
+            raise ValueError(
+                f"create_multi_task_head: task(s) {repeated} appear more than "
+                "once; the heads are keyed by task, so all but one would be "
+                "dropped. Name each task once."
+            )
     elif isinstance(task_configuration, dict):
-        # Already a configuration dict
+        tasks = None
         task_configs = task_configuration
-
     else:
-        raise ValueError(f"Invalid task_configuration type: {type(task_configuration)}")
+        raise ValueError(
+            "create_multi_task_head: task_configuration must be a "
+            "TaskConfiguration or one of: list, tuple, dict; got "
+            f"{type(task_configuration).__name__}."
+        )
+
+    if tasks is not None:
+        # pop, not get: a per-task dict left in kwargs would also reach
+        # MultiTaskHead(**kwargs), which refuses it as an unknown keyword, so
+        # these forms could never take a per-task option.
+        task_configs = {
+            task.value: {'task_type': task, **kwargs.pop(task.value, {})}
+            for task in tasks
+        }
 
     return MultiTaskHead(task_configs=task_configs, **kwargs)
 
