@@ -9,10 +9,11 @@ nothing here computes a metric of its own.
 The suite contains benchmarks with different input signatures (copy task,
 associative recall, SCAN, bAbI, ...), so a model built for one of them will
 fail the others. ``BenchmarkHarness.run_full_suite`` contains each failure to
-its own benchmark and keeps going; use ``--benchmarks`` to run only the ones a
-given checkpoint is shaped for, and ``--quiet`` only when you do not need those
-failures reported (it is the harness's ``verbose`` flag, which also gates the
-per-benchmark error log).
+its own benchmark and keeps going; the report is written, and then the run
+raises naming every benchmark that produced no result, so the exit code is
+non-zero (D-186). Use ``--benchmarks`` to run only the ones a given checkpoint
+is shaped for, and ``--quiet`` only when you do not need the per-benchmark
+error log (it is the harness's ``verbose`` flag).
 
 Usage:
     python -m train.ntm.run_benchmark_suite --help
@@ -56,12 +57,13 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "therefore CANNOT accept the others, and model.predict raises. That "
             "is the design, not a bug: run_full_suite contains each failure to "
             "its own benchmark, logs it, and keeps going, so a copy-task "
-            "checkpoint legitimately produces ~4 tracebacks and still writes a "
-            "report covering the 2 benchmarks it could run -- and the report's "
-            "summary says so, under benchmarks_requested / benchmarks_completed "
-            "/ benchmarks_errored / errored_benchmarks. Pass --benchmarks to "
-            "run only the ones your checkpoint is shaped for; an unrecognised "
-            "name is refused, never skipped."
+            "checkpoint produces ~4 tracebacks and still writes a report "
+            "covering the 2 benchmarks it could run -- the report's summary "
+            "says so, under benchmarks_requested / benchmarks_completed / "
+            "benchmarks_errored / errored_benchmarks -- and then the run exits "
+            "non-zero, because the report is short of what was requested. Pass "
+            "--benchmarks to run only the ones your checkpoint is shaped for; "
+            "an unrecognised name is refused, never skipped."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -101,6 +103,8 @@ def run_suite(
     :param verbose: Passed to ``BenchmarkSuiteConfig.verbose``; gates the
         harness's per-benchmark progress and error logging.
     :return: Path of the written report.
+    :raises RuntimeError: If any requested benchmark raised; the report (with
+        ``errored_benchmarks``) is written first.
     """
     if model_name is None:
         model_name = os.path.splitext(os.path.basename(checkpoint))[0]
@@ -131,6 +135,17 @@ def run_suite(
     )
     for name, error in summary["errored_benchmarks"].items():
         logger.warning(f"Benchmark '{name}' produced no result: {error}")
+    # DECISION plan-2026-10-14T062616-81938e81/D-186: a benchmark that raised fails the
+    # run, AFTER the report is written. Do NOT return normally here: a report short of
+    # what was requested must not exit 0. Run only the benchmarks a checkpoint is
+    # shaped for with --benchmarks.
+    if summary["errored_benchmarks"]:
+        raise RuntimeError(
+            f"{summary['benchmarks_errored']} of {summary['benchmarks_requested']} "
+            f"benchmark(s) produced no result (report: {report_path}): "
+            + "; ".join(f"{name}: {error}" for name, error
+                        in summary["errored_benchmarks"].items())
+        )
     return report_path
 
 

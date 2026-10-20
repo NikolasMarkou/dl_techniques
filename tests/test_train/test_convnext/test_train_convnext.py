@@ -308,6 +308,24 @@ def test_no_model_analysis_skips_the_analyzer_and_records_it(monkeypatch, tmp_pa
     assert _strict((tmp_path / "skipped" / "config.json").read_text())["model_analysis"] is False
 
 
+def test_a_best_checkpoint_that_does_not_load_writes_the_summary_then_fails(
+        monkeypatch, tmp_path) -> None:
+    """D-186: the load error is in ``results_summary.json`` and the run raises after it."""
+    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(run_summary, "load_best_metrics",
+                        lambda run_dir, evaluate: (None, "OSError: planted unreadable checkpoint"))
+    config = _config(tmp_path, "best_unreadable", epochs=1, max_samples=64, model_analysis=False)
+
+    with pytest.raises(RuntimeError, match="planted unreadable checkpoint"):
+        common.train(config)
+
+    run_dir = tmp_path / "best_unreadable"
+    assert (run_dir / "final_model.keras").is_file()
+    saved = _strict((run_dir / "results_summary.json").read_text())
+    assert saved["best_checkpoint_load_error"] == "OSError: planted unreadable checkpoint"
+    assert saved["test_metrics_best"] is None
+
+
 def test_the_constant_schedule_branch_trains_and_records_the_plateau_reductions(
         monkeypatch, tmp_path) -> None:
     """N6: the first end-to-end run of ``--lr-schedule constant``, the branch that adds

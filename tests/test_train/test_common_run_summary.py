@@ -576,6 +576,19 @@ def test_load_best_metrics_reports_an_evaluation_error_instead_of_raising(tmp_pa
     assert run_summary.load_best_metrics(tmp_path, evaluate) == (None, "RuntimeError: bad eval")
 
 
+def test_fail_on_best_load_error_raises_naming_the_checkpoint_and_the_error(tmp_path) -> None:
+    """D-186: the callers write the summary, then this fails the run."""
+    with pytest.raises(RuntimeError) as raised:
+        run_summary.fail_on_best_load_error(tmp_path, "OSError: unreadable")
+    text = str(raised.value)
+    assert best_checkpoint_path(str(tmp_path)) in text and "OSError: unreadable" in text
+    assert "results_summary.json" in text
+
+
+def test_fail_on_best_load_error_is_silent_without_an_error(tmp_path) -> None:
+    assert run_summary.fail_on_best_load_error(tmp_path, None) is None
+
+
 # ---------------------------------------------------------------------
 # iter-1/step-8: describe_devices, promoted from the ConvNeXt trainer (second call site)
 # ---------------------------------------------------------------------

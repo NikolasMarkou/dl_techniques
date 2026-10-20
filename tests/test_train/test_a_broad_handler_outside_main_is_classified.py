@@ -241,7 +241,7 @@ _OPTIONAL_OUTPUT = {
 _EXEMPT = {
     'train/bfunet/common.py': [
         ('_run_test_eval', 'Held-out test evaluation failed', 'block = _evaluate_held_out(config, final_mode',
-         "plan-2026-09-19T131351-b8d39688/D-009: recorded as the test_eval block's status error in results_summary.json and logged at ERROR, after the final save"),
+         "recorded as the test_eval block's status error and logged at ERROR; train writes the summary, then raises on it (D-186)"),
         ('_train_in_run_dir', 'Round-trip pre-save capture skipped:', 'in_shape = model.input_shape',
          "the round-trip check's input; a failed capture records model_loading_validated as null in the summary"),
         ('build_self_iterate_pool', 'continue', 'patch = load_and_preprocess_image(tf.constant',
@@ -305,7 +305,7 @@ _EXEMPT = {
     ],
     'train/common/run_summary.py': [
         ('load_best_metrics', 'Could not evaluate best checkpoint', 'return (evaluate(keras.models.load_model(path',
-         "reported, not fatal: the trainers record the error as the summary's best-checkpoint load error (pinned by test_common_run_summary.py)"),
+         "returns the error; the three callers record it as the summary's best_checkpoint_load_error, then fail_on_best_load_error raises (D-186)"),
         ('read_analysis_status', 'Could not read analyzer status from', 'with open(path) as f:',
          "recorded as the analysis block's error in the summary"),
         ('read_data_free_analysis_status', 'unreadable', 'with open(path) as f:',
@@ -351,10 +351,6 @@ _EXEMPT = {
         ('stage_uvdoc', 'B are kept in', 'written, on_disk = _download(url, part, timeo',
          'an incomplete StageResult; main returns 1'),
     ],
-    'train/embeddings_experimental/train_embeddings.py': [
-        ('run_study_cell', 'embedding evaluation failed', 'from .evaluate_embeddings import EvalConfig, ',
-         "eval_ok False and the error are first-class fields of the cell's results, counted by the sweep report"),
-    ],
     'train/logic/multiseed_sweep.py': [
         ('run_one', 'UNEXPECTED error', 'cp = subprocess.run(cmd, check=False, timeout',
          'returns an error status; main raises after the summary (D-183)'),
@@ -397,7 +393,7 @@ _EXEMPT = {
     ],
     'train/ntm/harness.py': [
         ('run_full_suite', "Benchmark '", 'getattr(self, self.BENCHMARK_METHODS[benchmar',
-         "plan-2026-08-03T161943-02be1d7e/D-014: recorded in the suite report's failures"),
+         "recorded in the suite report's errored_benchmarks (02be1d7e/D-014); run_benchmark_suite.run_suite writes the report, then raises (D-186)"),
     ],
     'train/omnipoint/data.py': [
         ('load_megadepth_pair_for_omnipoint', 'Skipping MegaDepth pair (rgb=', "with h5py.File(depth_path, 'r') as f:",
@@ -572,10 +568,10 @@ def test_the_census_counts_are_pinned():
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
-    assert counts == {"raises": 8, "exits": 4, "records": 3,
-                      "optional": 60, "exempt": 63, None: 0}
+    assert counts == {"raises": 8, "exits": 4, "records": 4,
+                      "optional": 60, "exempt": 62, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 60
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 63
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 62
 
 
 _PLANTED = '''

@@ -1031,3 +1031,51 @@ class TestCopyTaskGeneratorLayout:
 
         # The sequence is not degenerate, so the equality above is informative.
         assert presented.min() == 0.0 and presented.max() == 1.0
+
+
+# ---------------------------------------------------------------------
+# run_suite: a benchmark that raised fails the run, after the report
+# ---------------------------------------------------------------------
+
+class TestASuiteWithAFailedBenchmarkFails:
+    """D-186 (amends 02be1d7e/D-014): the report names the failure, the exit code too."""
+
+    @staticmethod
+    def _checkpoint(tmp_path) -> str:
+        import keras
+
+        model = keras.Sequential([keras.layers.Input((3,)), keras.layers.Dense(2)])
+        path = str(tmp_path / "probe.keras")
+        model.save(path)
+        return path
+
+    def test_a_benchmark_that_raises_writes_the_report_then_fails(self, tmp_path, monkeypatch):
+        import json
+
+        from train.ntm.harness import BenchmarkHarness
+
+        def boom(self, model):
+            raise ValueError("input signature mismatch")
+
+        monkeypatch.setattr(BenchmarkHarness, "run_copy_task_benchmark", lambda self, model: None)
+        monkeypatch.setattr(BenchmarkHarness, "run_scan_benchmark", boom)
+        out = tmp_path / "out"
+        with pytest.raises(RuntimeError, match="scan") as excinfo:
+            run_benchmark_suite.run_suite(
+                self._checkpoint(tmp_path), str(out), benchmarks=["copy_task", "scan"],
+                verbose=False)
+        assert "input signature mismatch" in str(excinfo.value)
+        (report,) = list(out.glob("benchmark_report_probe_*.json"))
+        summary = json.loads(report.read_text())["summary"]
+        assert summary["benchmarks_errored"] == 1
+        assert list(summary["errored_benchmarks"]) == ["scan"]
+
+    def test_a_clean_suite_returns_its_report_path(self, tmp_path, monkeypatch):
+        """Control: nothing raised, nothing fails."""
+        from train.ntm.harness import BenchmarkHarness
+
+        monkeypatch.setattr(BenchmarkHarness, "run_copy_task_benchmark", lambda self, model: None)
+        path = run_benchmark_suite.run_suite(
+            self._checkpoint(tmp_path), str(tmp_path / "out"), benchmarks=["copy_task"],
+            verbose=False)
+        assert path.endswith(".json") and (tmp_path / "out").is_dir()

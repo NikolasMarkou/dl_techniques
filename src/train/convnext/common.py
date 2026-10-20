@@ -1290,7 +1290,9 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "clock (dashboard redraws, checkpoint saves, train-end restore)",
             ],
         }
-        return write_summary_json(run_dir, summary)
+        written = write_summary_json(run_dir, summary)
+        run_summary.fail_on_best_load_error(run_dir, best_load_error)
+        return written
 
 
 # ---------------------------------------------------------------------

@@ -350,8 +350,9 @@ final_reused_best, datasets, seconds}`; when the last epoch is the best (`final_
 `status` is `ok` (at least one set scored), `skipped` (with a `reason`: `disabled` under
 `--no-test-eval`, or no set directory holds an image; a single missing set is recorded as
 `skipped` inside `datasets` with a WARNING and does not stop the other), or `error` (with the
-exception in `message`, logged at ERROR). An evaluation failure never fails a run that already
-trained and saved.
+exception in `message`, logged at ERROR). An evaluation failure fails the run: both models and
+`results_summary.json` (with the `error` block) are written first, then the run raises, so the
+exit code is non-zero. A skip does not fail the run.
 
 ## Learning rate
 

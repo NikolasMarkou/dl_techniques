@@ -1241,7 +1241,9 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
                 *_analyzer_notes(config.model_analysis),
             ],
         }
-        return write_summary_json(run_dir, summary)
+        written = write_summary_json(run_dir, summary)
+        run_summary.fail_on_best_load_error(run_dir, best_load_error)
+        return written
 
 
 # ---------------------------------------------------------------------

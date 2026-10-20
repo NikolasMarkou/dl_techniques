@@ -460,6 +460,8 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
     :type config: ExperimentConfig
     :return: A results dictionary, also written to ``results.json``.
     :rtype: dict[str, Any]
+    :raises RuntimeError: If the embedding evaluation failed; ``results.json``
+        (with ``eval_ok`` False and ``eval_error``) is written first.
     """
     set_seeds(config.seed)
     if config.mixed_bfloat16:
@@ -510,11 +512,13 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
     # After both stages saved their encoder: a failed write raises (D-174).
     save_training_history_json(mlm_history, run_dir)
 
+    eval_error: Optional[str] = None
     if config.run_embedding_eval:
-        # An evaluation failure must never kill a training cell that has
-        # already produced a checkpoint -- but a SILENT failure would leave an
-        # empty results table that reads like a config problem, so `eval_ok` is
-        # a first-class field the report counts and prints.
+        # DECISION plan-2026-10-14T062616-81938e81/D-186: a failed evaluation is
+        # recorded (`eval_ok` False, the report counts and prints it), the
+        # results file is written, and THEN the cell raises, so its exit code is
+        # 1 and the sweep lists it in failures.log. Do NOT return normally on a
+        # failed evaluation: an exit code of 0 reads as a scored cell.
         try:
             from .evaluate_embeddings import EvalConfig, evaluate_run
 
@@ -531,13 +535,17 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
             )
         except Exception as exc:
             logger.error("embedding evaluation failed", exc_info=True)
-            results["embedding_eval"] = {
-                "eval_ok": False, "eval_error": str(exc)[:500]
-            }
+            eval_error = str(exc)[:500]
+            results["embedding_eval"] = {"eval_ok": False, "eval_error": eval_error}
 
     with open(results_path(run_dir), "w") as handle:
         json.dump(results, handle, indent=2)
     logger.info(f"Wrote {results_path(run_dir)}")
+    if eval_error is not None:
+        raise RuntimeError(
+            f"embedding evaluation failed (results written to "
+            f"{results_path(run_dir)}): {eval_error}"
+        )
     return results
 
 

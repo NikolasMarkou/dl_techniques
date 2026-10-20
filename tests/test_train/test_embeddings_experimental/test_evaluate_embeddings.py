@@ -177,39 +177,51 @@ class TestEmbedTexts:
 # Failure containment
 # ---------------------------------------------------------------------
 
-class TestEvaluationNeverKillsATrainingCell:
+class TestAFailedEvaluationFailsTheCell:
     def test_a_missing_encoder_raises_a_clear_error(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="did not finish stage 1"):
             load_encoder(str(tmp_path))
 
-    def test_run_study_cell_records_eval_ok_false_and_does_not_raise(
+    def test_a_cell_whose_evaluation_fails_writes_its_results_then_raises(
         self, tmp_path, monkeypatch
     ):
-        """A failed eval must be visible, not fatal and not silent."""
-        from train.embeddings_experimental import train_embeddings
+        """D-186: the failure is in results.json (eval_ok False) and in the exit code.
 
-        results = {}
-        run_dir = str(tmp_path)
+        Drives the real ``run_study_cell`` with the data, the model and both
+        training stages stubbed, so only the evaluation block is exercised.
+        """
+        from train.embeddings_experimental import train_embeddings
+        from train.embeddings_experimental.config import ExperimentConfig
+
+        class _Encoder:
+            def build(self, shape):
+                pass
+
+            def count_params(self):
+                return 7
 
         def boom(*args, **kwargs):
             raise RuntimeError("planted")
 
+        monkeypatch.setattr(train_embeddings, "load_wikipedia_train_val",
+                            lambda **kwargs: (["a"], ["b"]))
+        monkeypatch.setattr(train_embeddings, "build_model", lambda config: _Encoder())
+        monkeypatch.setattr(train_embeddings, "run_mlm_stage",
+                            lambda *args: {"loss": [1.0]})
+        monkeypatch.setattr(train_embeddings, "save_training_history_json",
+                            lambda history, run_dir: None)
         monkeypatch.setattr(
-            "train.embeddings_experimental.evaluate_embeddings.evaluate_run",
-            boom,
-        )
-        # Exercise the same guarded block the trainer uses.
-        try:
-            from train.embeddings_experimental.evaluate_embeddings import (
-                EvalConfig as _EC,
-                evaluate_run as _run,
-            )
-            results["embedding_eval"] = _run(run_dir, _EC())
-        except Exception as exc:
-            results["embedding_eval"] = {"eval_ok": False,
-                                         "eval_error": str(exc)[:500]}
-        assert results["embedding_eval"]["eval_ok"] is False
-        assert "planted" in results["embedding_eval"]["eval_error"]
+            "train.embeddings_experimental.evaluate_embeddings.evaluate_run", boom)
+        config = ExperimentConfig(output_dir=str(tmp_path), experiment_name="cell",
+                                  run_contrastive=False)
+
+        with pytest.raises(RuntimeError, match="planted"):
+            train_embeddings.run_study_cell(config)
+        with open(results_path(str(tmp_path / "cell"))) as handle:
+            written = json.load(handle)
+        assert written["embedding_eval"]["eval_ok"] is False
+        assert "planted" in written["embedding_eval"]["eval_error"]
+        assert written["mlm"] == {"loss": [1.0]}
 
 
 # ---------------------------------------------------------------------

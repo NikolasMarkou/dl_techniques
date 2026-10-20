@@ -15,6 +15,8 @@ Interface contracts:
 - :func:`lr_reduction_epochs` -- ``(lrs) -> list[int]`` (1-based); never raises.
 - :func:`load_best_metrics` -- ``(run_dir, evaluate) -> (metrics | None, error | None)``;
   never raises.
+- :func:`fail_on_best_load_error` -- ``(run_dir, load_error) -> None``; raises
+  ``RuntimeError`` when ``load_error`` is not ``None``. Called after the summary is written.
 - :func:`write_classification_figures` -- ``-> {"files", "ece", "failed"}``; never raises
   for a figure or report failure.
 - :func:`read_analysis_status` -- ``-> {"status", "loss", "accuracy", "error", "path"}``;
@@ -104,7 +106,8 @@ def load_best_metrics(
 
     Returns:
         ``(metrics, None)`` on success, ``(None, error_text)`` if the checkpoint
-        is missing or does not load.
+        is missing or does not load. The caller records the error in its summary
+        and then calls :func:`fail_on_best_load_error` (D-186).
     """
     path = best_checkpoint_path(str(run_dir))
     try:
@@ -112,6 +115,29 @@ def load_best_metrics(
     except Exception as e:  # noqa: BLE001 - reported, not fatal
         logger.warning(f"Could not evaluate best checkpoint {path}: {e}")
         return None, f"{type(e).__name__}: {e}"
+
+
+def fail_on_best_load_error(run_dir: Path, load_error: Optional[str]) -> None:
+    """Fail a finished run whose best checkpoint did not load or evaluate.
+
+    Call it after ``results_summary.json`` is written with ``load_error`` in it.
+
+    Args:
+        run_dir: The run directory (named in the message).
+        load_error: The error text :func:`load_best_metrics` returned, ``None`` on success.
+
+    Raises:
+        RuntimeError: If ``load_error`` is not ``None``.
+    """
+    # DECISION plan-2026-10-14T062616-81938e81/D-186: a best checkpoint that does not load
+    # or evaluate fails the run, AFTER the summary records the error. Do NOT drop this call
+    # or make it a warning: the test metrics of the selected weights are missing, and an
+    # exit code of 0 reads as a scored run.
+    if load_error is not None:
+        raise RuntimeError(
+            f"{best_checkpoint_path(str(run_dir))} did not load or evaluate: {load_error} "
+            f"(the summary is written: {Path(run_dir) / 'results_summary.json'})"
+        )
 
 
 def write_classification_figures(

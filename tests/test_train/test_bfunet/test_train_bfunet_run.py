@@ -1246,8 +1246,8 @@ def test_a_disabled_run_writes_the_skip_into_its_summary(unset_steps_run) -> Non
     assert summary["test_eval"] == {"status": "skipped", "reason": "disabled"}
 
 
-def test_an_error_in_the_test_eval_is_recorded_and_logged_and_never_raised(e2e) -> None:
-    """A finished run must survive its own post-run evaluation failing, and say so."""
+def test_an_error_in_the_test_eval_is_recorded_and_logged_by_the_helper(e2e) -> None:
+    """The helper records the failure and logs it; ``train()`` turns it into a failed run."""
     from train.bfunet import eval_psnr_vs_noise as ev
 
     def boom(path):
@@ -1264,6 +1264,31 @@ def test_an_error_in_the_test_eval_is_recorded_and_logged_and_never_raised(e2e) 
     assert "RuntimeError" in block["message"] and "scripted load failure" in block["message"]
     assert any(r.levelno == logging.ERROR and "scripted load failure" in r.getMessage()
                for r in records), [r.getMessage() for r in records]
+
+
+def test_a_run_whose_test_eval_fails_writes_its_summary_then_raises(tmp_path) -> None:
+    """D-186 (amends b8d39688/D-009): a failed held-out evaluation fails the run.
+
+    The run trains, saves both models and writes ``results_summary.json`` with the
+    ``test_eval`` error block, and only then raises, so the exit code says it failed.
+    """
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    def boom(path):
+        raise RuntimeError("scripted load failure")
+
+    _write_pngs(tmp_path / "train", N_TRAIN, seed=1)
+    _write_pngs(tmp_path / "val", N_VAL, seed=2)
+    config = _tiny_config(tmp_path, "eval_fails", epochs=1, test_eval=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ev, "load_denoiser", boom)
+        with pytest.raises(RuntimeError, match="scripted load failure"):
+            run_train(config)
+    run_dir = tmp_path / "out" / "eval_fails"
+    assert (run_dir / "final_model.keras").is_file()
+    summary = _strict_json(run_dir / "results_summary.json")
+    assert summary["test_eval"]["status"] == "error"
+    assert "scripted load failure" in summary["test_eval"]["message"]
 
 
 def test_a_model_that_returns_its_input_gains_exactly_zero(e2e) -> None:

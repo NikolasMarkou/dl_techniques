@@ -64,9 +64,30 @@ def _history(**series):
     return history
 
 
+def _save_like_model_checkpoint(model, callbacks) -> None:
+    """Write ``model`` where each ``ModelCheckpoint`` in ``callbacks`` would.
+
+    A stubbed ``fit`` runs no callback, so without this no ``best_model.keras``
+    exists, and a run without a loadable best checkpoint fails (D-186).
+    """
+    for callback in callbacks or []:
+        if isinstance(callback, keras.callbacks.ModelCheckpoint):
+            # A real checkpoint is written after training steps, with the optimizer
+            # built; one saved before that does not reload into a compiled model.
+            model.optimizer.build(model.trainable_variables)
+            model.save(callback.filepath)
+
+
 def _stub_fit(monkeypatch, history):
-    """Replace ``keras.Model.fit`` (call-through is pointless: we want a chosen history)."""
-    monkeypatch.setattr(keras.Model, "fit", lambda self, *a, **k: history)
+    """Replace ``keras.Model.fit`` (call-through is pointless: we want a chosen history).
+
+    The stub still writes the best checkpoint, as ``ModelCheckpoint`` would.
+    """
+    def fit(self, *args, **kwargs):
+        _save_like_model_checkpoint(self, kwargs.get("callbacks"))
+        return history
+
+    monkeypatch.setattr(keras.Model, "fit", fit)
 
 
 def _config(tmp_path, name, **overrides) -> tpm.TrainingConfig:
@@ -236,6 +257,24 @@ def _snapshot(directory: Path) -> dict:
             for p in sorted(directory.rglob("*")) if p.is_file()}
 
 
+def test_a_run_without_a_loadable_best_checkpoint_writes_the_summary_then_fails(
+        monkeypatch, tmp_path) -> None:
+    """D-186: the stubbed fit writes no ``best_model.keras``; the run records the load
+    error in ``results_summary.json`` and only then raises."""
+    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    monkeypatch.setattr(keras.Model, "fit", lambda self, *a, **k: _ok_history())
+
+    with pytest.raises(RuntimeError, match="best_model.keras"):
+        tpm.train_model(_config(tmp_path, "no_best", epochs=2))
+
+    run_dir = tmp_path / "no_best"
+    assert (run_dir / "final_model.keras").is_file()
+    saved = _strict((run_dir / "results_summary.json").read_text())
+    assert saved["best_checkpoint_load_error"]
+    assert saved["test_metrics_best"] is None
+    assert _file_handlers() == [], "the run.log handler is removed when the run raises"
+
+
 def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical(
         monkeypatch, tmp_path) -> None:
     """Before this guard a second run under the same name merged into the first
@@ -292,6 +331,7 @@ def test_the_run_log_is_opened_in_write_mode(monkeypatch, tmp_path) -> None:
 
     def fit(self, *args, **kwargs):
         modes.extend(h.mode for h in _file_handlers())
+        _save_like_model_checkpoint(self, kwargs.get("callbacks"))
         return _ok_history()
 
     monkeypatch.setattr(keras.Model, "fit", fit)

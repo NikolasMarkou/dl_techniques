@@ -2506,26 +2506,28 @@ def _run_test_eval(
     config: "BFUnetTrainingConfig", final_model: keras.Model, output_dir: Path,
     final_is_best: bool = False,
 ) -> Dict[str, Any]:
-    """The ``test_eval`` block of ``results_summary.json``; never raises for an evaluation failure.
+    """The ``test_eval`` block of ``results_summary.json``; records an evaluation failure.
 
     Interface contract: same arguments as :func:`_evaluate_held_out` (``final_is_best`` is
     forwarded to it). Returns
     ``{"status": "skipped", "reason": "disabled"}`` when ``config.test_eval`` is off, the
     scored block otherwise, and ``{"status": "error", "message": ...}`` (plus an ERROR log
-    line) when the evaluation raised.
+    line) when the evaluation raised. It does not raise for that error itself: :func:`train`
+    writes the summary with the block and then raises (D-186).
     """
     if not config.test_eval:
         logger.info("Held-out test evaluation disabled (test_eval=False).")
         return {"status": "skipped", "reason": "disabled"}
-    # DECISION plan-2026-09-19T131351-b8d39688/D-009: the run has already trained and saved
-    # by now, so a failure here is recorded, loud, and never turned into a failed run. Do
-    # NOT let the exception propagate, and do NOT swallow it without the record and the log
-    # line: an error nobody sees would read as a run with no test numbers for no reason.
+    # DECISION plan-2026-09-19T131351-b8d39688/D-009 (amended by plan-2026-10-14T062616-81938e81/D-186):
+    # the run has already trained and saved by now, so a failure here is recorded and logged
+    # and the block goes into the summary; ``train`` then raises on the error status. Do NOT
+    # let the exception propagate from here (the summary would be lost), and do NOT drop the
+    # record or the log line.
     try:
         block = _evaluate_held_out(config, final_model, output_dir, final_is_best)
     except Exception as exc:  # noqa: BLE001 - recorded and logged, see the docstring
         message = f"{type(exc).__name__}: {exc}"
-        logger.error(f"Held-out test evaluation failed (the run itself finished): {message}")
+        logger.error(f"Held-out test evaluation failed (the summary is written, then the run fails): {message}")
         return {"status": "error", "message": message}
     logger.info(f"Held-out test evaluation: {block['status']} in {block['seconds']:.1f}s")
     return block
@@ -3323,18 +3325,28 @@ def _train_in_run_dir(
         viz_batch.numpy() if viz_batch is not None
         else np.zeros((1, config.patch_size, config.patch_size, config.channels), dtype="float32")
     )
+    test_eval = _run_test_eval(config, model, output_dir, final_is_best=best_is_final)
     _write_finished_summary(
         output_dir, summary_head, hist,
         epoch_times=epoch_line.epoch_times,
         fit_wall_seconds=fit_wall_seconds,
         model_loading_validated=model_loading_validated,
-        test_eval=_run_test_eval(config, model, output_dir, final_is_best=best_is_final),
+        test_eval=test_eval,
         analyzer=run_summary.run_data_free_analysis(
             model, analysis_sample, analysis_sample, history, config.experiment_name, output_dir,
             enabled=config.model_analysis,
         ),
         visualizations=viz_callback.visualizations_block(),
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-186: a held-out evaluation that raised fails
+    # the run, AFTER both models and the summary (with its test_eval error block) are on
+    # disk. Do NOT return normally here: an exit code of 0 reads as a scored run. A skip (a
+    # missing set directory, or test_eval off) is not a failure and still returns.
+    if test_eval["status"] == "error":
+        raise RuntimeError(
+            f"Held-out test evaluation failed: {test_eval['message']} "
+            f"(the summary is written: {output_dir / 'results_summary.json'})"
+        )
 
     gc.collect()
     return model

@@ -248,6 +248,25 @@ def last_is_best(tmp_path_factory):
     return SimpleNamespace(run_dir=out / "lastbest", summary=summary, events=events, analysis_calls=analysis_calls)
 
 
+def test_a_best_checkpoint_that_does_not_load_writes_the_summary_then_fails(
+        monkeypatch, tmp_path) -> None:
+    """D-186: the load error is in ``results_summary.json`` and the run raises after it."""
+    monkeypatch.setattr(common, "load_oxford_pet", _band_loader([]))
+    monkeypatch.setattr(run_summary, "load_best_metrics",
+                        lambda run_dir, evaluate: (None, "OSError: planted unreadable checkpoint"))
+    config = _config(tmp_path, "best_unreadable", epochs=1, warmup_epochs=0, max_samples=24,
+                     model_analysis=False)
+
+    with pytest.raises(RuntimeError, match="planted unreadable checkpoint"):
+        common.train(config)
+
+    run_dir = tmp_path / "best_unreadable"
+    assert (run_dir / "final_model.keras").is_file()
+    saved = _strict((run_dir / "results_summary.json").read_text())
+    assert saved["best_checkpoint_load_error"] == "OSError: planted unreadable checkpoint"
+    assert saved["test_metrics_best"] is None
+
+
 def test_the_test_split_is_scored_once_when_the_best_epoch_is_the_last(last_is_best) -> None:
     """The reloaded best checkpoint and the in-memory model hold the same weights: one pass over
     the test split serves both keys, and the summary says the second is a copy."""

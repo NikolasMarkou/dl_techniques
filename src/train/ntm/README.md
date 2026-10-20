@@ -173,8 +173,9 @@ MPLBACKEND=Agg python -m train.ntm.run_benchmark_suite \
 > (story, question). A model trained for one of them cannot accept the others,
 > so `model.predict` raises. `run_full_suite` contains each failure to its own
 > benchmark, logs it with a traceback and keeps going — so a run against a
-> copy-task model legitimately prints ~4 tracebacks and still writes a report
-> with the 2 benchmarks it could run. For a copy-shaped NTM (input `(23, 10)` →
+> copy-task model prints ~4 tracebacks and still writes a report
+> with the 2 benchmarks it could run, then exits non-zero naming the 4 that
+> produced no result (the report is short of what was requested). For a copy-shaped NTM (input `(23, 10)` →
 > output `(23, 8)`): `copy_task` and
 > `length_generalization` recorded; `associative_recall` and `memory_capacity`
 > failed with `Matrix size-incompatible: In[0]: [32,13], In[1]: [18,128]`,

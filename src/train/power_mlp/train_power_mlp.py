@@ -1005,7 +1005,9 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             "analyzer": analysis,
             "notes": notes,
         }
-        return write_summary_json(run_dir, summary)
+        written = write_summary_json(run_dir, summary)
+        run_summary.fail_on_best_load_error(run_dir, best_load_error)
+        return written
 
 
 # ---------------------------------------------------------------------
