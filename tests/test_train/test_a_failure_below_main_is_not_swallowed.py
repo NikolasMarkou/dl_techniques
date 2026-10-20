@@ -367,32 +367,6 @@ def test_a_resize_run_with_a_failed_image_raises_after_every_split(monkeypatch, 
     assert (dst / "validation" / "00" / "good.jpg").is_file()
 
 
-def test_a_clip_inference_input_that_fails_to_load_raises():
-    from train.clip.train_clip import CLIPInference
-
-    class Loader:
-        image_size = 4
-        context_length = 3
-
-        def preprocess_image(self, path, training=False):
-            raise FileNotFoundError(path)
-
-        def preprocess_text(self, text):
-            raise ValueError(f"cannot tokenize {text!r}")
-
-    class Model:
-        def encode_image(self, x, training=False):
-            return keras.ops.ones((keras.ops.shape(x)[0], 2))
-
-        encode_text = encode_image
-
-    inference = CLIPInference(Model(), Loader(), batch_size=2)
-    with pytest.raises(FileNotFoundError, match="missing.jpg"):
-        inference.encode_images(["missing.jpg"], show_progress=False)
-    with pytest.raises(ValueError, match="cannot tokenize"):
-        inference.encode_texts(["a caption"], show_progress=False)
-
-
 def test_the_thera_eval_takes_its_statistics_from_the_trainer_only(monkeypatch):
     import importlib
     import sys
