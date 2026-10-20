@@ -13,6 +13,7 @@ import keras
 from typing import Optional, Tuple
 
 from dl_techniques.models.time_series.timestral.config import LAYER_KIND_AXES
+from dl_techniques.utils.dtype_policy import mask_sentinel
 
 # DECISION plan-2026-10-14T062616-81938e81/D-178: every sublayer is constructed
 # with its parent's dtype_policy, so TimestralModel(config, dtype=X) builds and
@@ -276,12 +277,15 @@ def _sdpa(query, key, value, mask=None):
 
     Scores (B, H, S, T); `mask` (B, 1, S, T) broadcasts over heads; True =
     attend. Manual softmax path — `keras.ops.attention` does not exist in this Keras.
+    A masked score takes `mask_sentinel(scores.dtype)` (-1e9 in float32), which is
+    finite in every compute dtype; its exp is exactly 0 beside any attended score.
     """
     head_dim = int(key.shape[-1])
     scores = keras.ops.einsum("bshd,bthd->bhst", query, key) * (1.0 / head_dim ** 0.5)
     if mask is not None:
         mask_h = keras.ops.broadcast_to(mask, keras.ops.shape(scores))
-        scores = keras.ops.where(mask_h, scores, -1e30 * keras.ops.ones_like(scores))
+        sentinel = keras.ops.cast(mask_sentinel(scores.dtype), scores.dtype)
+        scores = keras.ops.where(mask_h, scores, sentinel)
     attn = keras.ops.exp(scores - keras.ops.max(scores, axis=-1, keepdims=True))
     attn = attn / keras.ops.sum(attn, axis=-1, keepdims=True)
     return keras.ops.einsum("bhst,bthd->bshd", attn, value)
