@@ -46,7 +46,7 @@ import h5py
 import keras
 import numpy as np
 
-from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD
+from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD, fill_batch
 
 logger = logging.getLogger(__name__)
 
@@ -609,57 +609,50 @@ class MegaDepthDataset(keras.utils.PyDataset):
         return max(1, self.n_pairs // self.batch_size)
 
     def __getitem__(self, idx: int):
-        batch_rgb, batch_ytrue = [], []
-
-        for attempt in range(self.batch_size * 3):
-            if len(batch_rgb) == self.batch_size:
-                break
-            # DECISION plan-2026-10-14T062616-81938e81/D-126
-            # Do NOT add len(batch_rgb) to this offset: `attempt` already
-            # counts every load, kept or skipped, so the sum advanced by 2
-            # per sample. Consecutive batches overlapped by half and the files
-            # at odd offsets were never read.
-            sample_idx = (idx * self.batch_size + attempt) % self.n_pairs
-            i = self.indices[sample_idx]
-
-            if self.use_resize:
-                result = load_and_resize_pair(
-                    self.rgb_paths[i],
-                    self.depth_paths[i],
-                    self.patch_size,
-                    self.min_valid_ratio,
-                    augment=self.is_training and self.augment,
-                )
-            else:
-                # DECISION plan-2026-10-14T062616-81938e81/D-109
-                # Do NOT let a validation crop draw from the global RNG: each
-                # epoch would score different crops of the same files, and the
-                # val_loss trend would be crop noise. Seeding by file index
-                # fixes each file's crop for the whole run.
-                result = load_and_process_pair(
-                    self.rgb_paths[i],
-                    self.depth_paths[i],
-                    self.patch_size,
-                    self.min_valid_ratio,
-                    augment=self.is_training and self.augment,
-                    rng=None if self.is_training else np.random.default_rng(int(i)),
-                )
-            if result is None:
-                continue
-            rgb, y_true = result
-            batch_rgb.append(rgb)
-            batch_ytrue.append(y_true)
-
-        # Pad if we couldn't fill the batch (rare)
-        if not batch_rgb:
-            ps = self.patch_size
-            batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
-            batch_ytrue = [np.zeros((ps, ps, 2), dtype=np.float32)]
-
-        rgb = np.stack(batch_rgb)
+        # DECISION plan-2026-10-14T062616-81938e81/D-126
+        # Do NOT add len(batch_rgb) to this offset: `attempt` already
+        # counts every load, kept or skipped, so the sum advanced by 2
+        # per sample. Consecutive batches overlapped by half and the files
+        # at odd offsets were never read.
+        # DECISION plan-2026-10-14T062616-81938e81/D-194
+        # Do NOT pad a batch in which no crop qualified with a zero sample:
+        # a mid-grey image with an all-invalid mask still took an optimizer
+        # step. Measured at the trainer defaults, 18.9% of training draws are
+        # rejected and no default batch is all-rejected, so fill_batch raises,
+        # naming the files, and draws no further samples.
+        samples = fill_batch(
+            "MegaDepthDataset", idx, self.batch_size, self.indices,
+            self._load_one, lambda i: self.rgb_paths[i],
+            "MegaDepth crop qualified (enough valid pixels, depth with spread)",
+        )
+        rgb = np.stack([sample[0] for sample in samples])
         if self.imagenet_standardize:
             rgb = standardize_imagenet(rgb)
-        return rgb, np.stack(batch_ytrue)
+        return rgb, np.stack([sample[1] for sample in samples])
+
+    def _load_one(self, i: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """File ``i``'s ``(rgb, y_true)`` sample, or ``None`` if no crop qualified."""
+        if self.use_resize:
+            return load_and_resize_pair(
+                self.rgb_paths[i],
+                self.depth_paths[i],
+                self.patch_size,
+                self.min_valid_ratio,
+                augment=self.is_training and self.augment,
+            )
+        # DECISION plan-2026-10-14T062616-81938e81/D-109
+        # Do NOT let a validation crop draw from the global RNG: each
+        # epoch would score different crops of the same files, and the
+        # val_loss trend would be crop noise. Seeding by file index
+        # fixes each file's crop for the whole run.
+        return load_and_process_pair(
+            self.rgb_paths[i],
+            self.depth_paths[i],
+            self.patch_size,
+            self.min_valid_ratio,
+            augment=self.is_training and self.augment,
+            rng=None if self.is_training else np.random.default_rng(int(i)),
+        )
 
     def on_epoch_end(self):
         if self.is_training:

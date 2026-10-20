@@ -882,8 +882,9 @@ def fill_batch(
 ) -> List[Any]:
     """The samples of batch ``idx``: the next window of files, a skipped file refilled.
 
-    Interface contract (2 callers: ``train.omnipoint.data.MegaDepthPinholeDataset``
-    and ``train.omnipoint.kitti_depth.KittiDepthDataset``). Attempt ``a`` (from
+    Interface contract (3 callers: ``train.common.megadepth.MegaDepthDataset``,
+    ``train.omnipoint.data.MegaDepthPinholeDataset`` and
+    ``train.omnipoint.kitti_depth.KittiDepthDataset``). Attempt ``a`` (from
     0, at most ``3 * batch_size``) reads file ``indices[(idx * batch_size + a)
     % len(indices)]`` through ``load_one(file_index)``; a ``None`` result is
     skipped, and filling stops when ``batch_size`` results are kept. When every
