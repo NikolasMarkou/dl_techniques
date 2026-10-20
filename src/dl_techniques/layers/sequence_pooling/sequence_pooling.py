@@ -83,7 +83,6 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.dtype_policy import mask_sentinel
 from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
@@ -255,12 +254,12 @@ class SequencePooling(keras.layers.Layer):
             bias.
         kernel_initializer: Initializer for each attention pooler's projection
             kernel and context vector (``attention``,
-            ``multi_head_attention``). Every pooler gets its own clone, and so
-            does every weight inside it. ``weighted`` and the ``weighted_sum``
+            ``multi_head_attention``). Every weight of every pooler gets its
+            own clone. ``weighted`` and the ``weighted_sum``
             aggregation weights do not read it: both start at ``'ones'`` on
             purpose, so they begin as a plain mean (uniform softmax).
         bias_initializer: Initializer for each attention pooler's projection
-            bias, cloned per pooler. ``weighted`` and the aggregation weights
+            bias. ``weighted`` and the aggregation weights
             have no bias.
         kernel_regularizer: Optional regularizer for the attention kernels and
             context vectors, the ``weighted`` position weights and the
@@ -334,11 +333,11 @@ class SequencePooling(keras.layers.Layer):
                     dropout_rate=self.attention_dropout_rate,
                     use_bias=self.use_bias,
                     temperature=self.temperature,
-                    # DECISION plan-2026-10-14T062616-81938e81/D-201: a fresh
-                    # clone per pooler. One shared seedless instance tied the
-                    # 'attention' and 'multi_head_attention' weights (r = 1.0).
-                    kernel_initializer=clone_initializer(self.kernel_initializer),
-                    bias_initializer=clone_initializer(self.bias_initializer),
+                    # AttentionPooling clones the initializers for each of its
+                    # weights (D-201), so two poolers handed one instance draw
+                    # independently.
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     bias_regularizer=self.bias_regularizer,
                     name=f'{strat}_pooling'
