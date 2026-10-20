@@ -602,30 +602,26 @@ class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
         if not self.config.export_onnx:
             return None
         if not os.path.exists(model_path):
-            logger.warning(f"ONNX export skipped: checkpoint absent ({model_path})")
-            return None
+            # A requested export that cannot run raises (D-183).
+            raise FileNotFoundError(f"ONNX export: checkpoint absent ({model_path})")
         onnx_path = os.path.join(exp_dir, "model.onnx")
-        try:
-            logger.info(f"Exporting to ONNX: {onnx_path}")
-            best_model = keras.saving.load_model(model_path, compile=False)
-            input_signature = [
-                keras.InputSpec(
-                    shape=(None, self.config.input_length, self.config.num_features),
-                    dtype="float32",
-                )
-            ]
-            best_model.export(
-                onnx_path,
-                format="onnx",
-                input_signature=input_signature,
-                opset_version=self.config.onnx_opset_version,
-                verbose=True,
+        logger.info(f"Exporting to ONNX: {onnx_path}")
+        best_model = keras.saving.load_model(model_path, compile=False)
+        input_signature = [
+            keras.InputSpec(
+                shape=(None, self.config.input_length, self.config.num_features),
+                dtype="float32",
             )
-            logger.info(f"ONNX export successful: {onnx_path}")
-            return onnx_path
-        except Exception as exc:
-            logger.error(f"ONNX export failed: {exc}", exc_info=True)
-            return None
+        ]
+        best_model.export(
+            onnx_path,
+            format="onnx",
+            input_signature=input_signature,
+            opset_version=self.config.onnx_opset_version,
+            verbose=True,
+        )
+        logger.info(f"ONNX export successful: {onnx_path}")
+        return onnx_path
 
     def run_experiment(self) -> Dict[str, Any]:
         """Base skeleton + AdaptiveEMA's dummy-forward build and ONNX fold-in.
@@ -656,14 +652,8 @@ class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
         training_results = self._train_model(data_pipeline, exp_dir=None)
         logger.info(f"Results: {self.exp_dir}")
 
-        best_model_path = os.path.join(self.exp_dir, "best_model.keras")
-        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-
-        if self.config.save_results:
-            self._save_results(
-                training_results, self.exp_dir,
-                extra_fields={"onnx_path": onnx_path},
-            )
+        # results.json carries onnx_path; a failed export raises after it (D-183).
+        self._save_results_with_onnx(training_results)
         return {
             "config": self.config,
             "experiment_dir": self.exp_dir,

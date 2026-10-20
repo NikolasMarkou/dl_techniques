@@ -285,30 +285,27 @@ class TimestralTrainer(BaseTimeSeriesTrainer):
         The base block (MAE, RMSE, sMAPE, rMAE against the naive last value, MASE,
         coverage, sharpness) on ``TimestralForecaster``'s median and quantiles, plus
         ``MAE_naive``, ``MAE_seasonal_naive`` and ``beats_naive`` /
-        ``beats_seasonal_naive`` (1.0 or 0.0), all on the same test windows. Non-fatal,
-        like the base block: a failure logs a warning and yields ``{}``.
+        ``beats_seasonal_naive`` (1.0 or 0.0), all on the same test windows. A failure
+        raises, as the base block does (D-183): these numbers are the run's evidence
+        that the forecaster beats its baselines.
         """
-        try:
-            context, y_true = data_pipeline['test_data_raw']
-            forecast = forecast_windows(self.model, context, self.config)
-            point = forecast.median[:, 0][..., None]
-            metrics = compute_post_hoc_forecast_metrics(
-                y_true, point, backcast=context,
-                quantiles=forecast.quantiles[:, 0][:, :, None, :],
-                quantile_levels=list(forecast.quantile_levels),
-            )
-            horizon = self.config.prediction_length
-            naive = np.repeat(context[:, -1:, 0], horizon, axis=1)
-            seasonal = seasonal_naive(context[..., 0], horizon)
-            metrics['MAE_naive'] = float(np.abs(y_true[..., 0] - naive).mean())
-            metrics['MAE_seasonal_naive'] = float(np.abs(y_true[..., 0] - seasonal).mean())
-            metrics['beats_naive'] = float(metrics['MAE'] < metrics['MAE_naive'])
-            metrics['beats_seasonal_naive'] = float(metrics['MAE'] < metrics['MAE_seasonal_naive'])
-            logger.info(f"Held-out forecaster vs baselines: {metrics}")
-            return metrics
-        except Exception as e:
-            logger.warning(f"post_hoc_metrics computation failed: {e}")
-            return {}
+        context, y_true = data_pipeline['test_data_raw']
+        forecast = forecast_windows(self.model, context, self.config)
+        point = forecast.median[:, 0][..., None]
+        metrics = compute_post_hoc_forecast_metrics(
+            y_true, point, backcast=context,
+            quantiles=forecast.quantiles[:, 0][:, :, None, :],
+            quantile_levels=list(forecast.quantile_levels),
+        )
+        horizon = self.config.prediction_length
+        naive = np.repeat(context[:, -1:, 0], horizon, axis=1)
+        seasonal = seasonal_naive(context[..., 0], horizon)
+        metrics['MAE_naive'] = float(np.abs(y_true[..., 0] - naive).mean())
+        metrics['MAE_seasonal_naive'] = float(np.abs(y_true[..., 0] - seasonal).mean())
+        metrics['beats_naive'] = float(metrics['MAE'] < metrics['MAE_naive'])
+        metrics['beats_seasonal_naive'] = float(metrics['MAE'] < metrics['MAE_seasonal_naive'])
+        logger.info(f"Held-out forecaster vs baselines: {metrics}")
+        return metrics
 
 
 def build_parser() -> argparse.ArgumentParser:

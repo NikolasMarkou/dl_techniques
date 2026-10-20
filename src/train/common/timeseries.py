@@ -391,10 +391,7 @@ class WindowedTimeSeriesProcessor:
             if not buffer:
                 for name in random.choices(
                         self.weighted_patterns, weights=self.weights, k=self.patterns_to_mix):
-                    try:
-                        data = self.ts_generator.generate_task_data(name)
-                    except Exception:
-                        continue
+                    data = self.ts_generator.generate_task_data(name)
                     if len(data) < total_len * self.min_length_multiplier:
                         continue
                     if self.require_finite and not np.isfinite(data).all():
@@ -429,10 +426,7 @@ class WindowedTimeSeriesProcessor:
         while len(samples) < num_samples:
             name = self.selected_patterns[cycle % len(self.selected_patterns)]
             cycle += 1
-            try:
-                data = self.ts_generator.generate_task_data(name)
-            except Exception:
-                continue
+            data = self.ts_generator.generate_task_data(name)
             if len(data) < total_len * self.min_length_multiplier:
                 continue
             if self.require_finite and not np.isfinite(data).all():
@@ -457,10 +451,7 @@ class WindowedTimeSeriesProcessor:
         random.shuffle(viz_patterns)
 
         for name in viz_patterns:
-            try:
-                data = self.ts_generator.generate_task_data(name)
-            except Exception:
-                continue
+            data = self.ts_generator.generate_task_data(name)
             if len(data) < total_len * self.min_length_multiplier:
                 continue
             if self.require_finite and not np.isfinite(data).all():
@@ -1110,58 +1101,56 @@ class BaseTimeSeriesTrainer:
 
         Runs AFTER ``model.evaluate`` and writes a NEW ``post_hoc_metrics`` key
         in ``results.json``; it never touches ``test_metrics`` / ``model.evaluate``.
+        Returns ``{}`` when there is no test data or the model is not a
+        ``ForecastMixin``; any other failure raises (D-183).
         """
-        # DECISION plan_2026-06-10_39646d39/D-001: this block is ADDITIVE,
-        # NON-FATAL, and ForecastMixin-GATED.
+        # DECISION plan_2026-06-10_39646d39/D-001: this block is ADDITIVE and
+        # ForecastMixin-GATED.
         #   * ADDITIVE — it populates a new `post_hoc_metrics` key only; it must
         #     NOT replace or mutate `test_metrics` or the `model.evaluate` flow.
-        #   * NON-FATAL — the ENTIRE computation is wrapped in try/except: a
-        #     metric failure logs a warning and yields `{}`, never aborting a
-        #     training run (mirrors the non-fatal viz pattern, D-001/F2). Do NOT
-        #     let any exception here propagate.
+        #   * It is no longer NON-FATAL (amended by
+        #     plan-2026-10-14T062616-81938e81 D-183): a failure raises. The old
+        #     try/except returned `{}`, the same value as "no test data", so a
+        #     run whose held-out metrics failed exited 0 with none.
         #   * ForecastMixin-GATED — only models that implement the Forecast
         #     contract yield a point/quantiles uniformly. For a non-mixin model we
         #     deliberately do NOT guess how to extract a point from an arbitrary
         #     output paradigm (that is later-iteration work); we skip instead.
-        try:
-            test_data_raw = data_pipeline.get('test_data_raw')
-            if test_data_raw is None:
-                return {}
-
-            if not isinstance(self.model, ForecastMixin):
-                logger.info(
-                    "post_hoc_metrics: model is not a ForecastMixin; "
-                    "skipping unified forecast metrics"
-                )
-                return {}
-
-            # test_data_raw is (inputs, targets); inputs is the context window
-            # (backcast), targets is y_true. Either may be a nested tuple/list —
-            # take the primary element (same guard as _prepare_viz_data_from_processor).
-            inputs, targets = test_data_raw
-            test_inputs = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
-            y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
-            backcast = test_inputs
-
-            fc = self.model.predict_forecast(test_inputs)
-            point = fc.point
-            quantiles = None
-            quantile_levels = None
-            if fc.has_quantiles():
-                quantiles = fc.quantiles
-                quantile_levels = fc.quantile_levels or getattr(
-                    self.config, 'quantile_levels', None)
-
-            return compute_post_hoc_forecast_metrics(
-                np.asarray(y_true),
-                np.asarray(point),
-                backcast=np.asarray(backcast),
-                quantiles=None if quantiles is None else np.asarray(quantiles),
-                quantile_levels=quantile_levels,
-            )
-        except Exception as e:
-            logger.warning(f"post_hoc_metrics computation failed: {e}")
+        test_data_raw = data_pipeline.get('test_data_raw')
+        if test_data_raw is None:
             return {}
+
+        if not isinstance(self.model, ForecastMixin):
+            logger.info(
+                "post_hoc_metrics: model is not a ForecastMixin; "
+                "skipping unified forecast metrics"
+            )
+            return {}
+
+        # test_data_raw is (inputs, targets); inputs is the context window
+        # (backcast), targets is y_true. Either may be a nested tuple/list —
+        # take the primary element (same guard as _prepare_viz_data_from_processor).
+        inputs, targets = test_data_raw
+        test_inputs = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
+        y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
+        backcast = test_inputs
+
+        fc = self.model.predict_forecast(test_inputs)
+        point = fc.point
+        quantiles = None
+        quantile_levels = None
+        if fc.has_quantiles():
+            quantiles = fc.quantiles
+            quantile_levels = fc.quantile_levels or getattr(
+                self.config, 'quantile_levels', None)
+
+        return compute_post_hoc_forecast_metrics(
+            np.asarray(y_true),
+            np.asarray(point),
+            backcast=np.asarray(backcast),
+            quantiles=None if quantiles is None else np.asarray(quantiles),
+            quantile_levels=quantile_levels,
+        )
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -1190,48 +1179,73 @@ class BaseTimeSeriesTrainer:
     def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
         """Export the trained model to ONNX (prism/tirex). No-op otherwise.
 
-        Guarded by ``getattr(config, 'export_onnx', False)`` (mdn/nbeats lack the
-        flag → skip) and ``os.path.exists(model_path)`` (early-stop may never fire
-        → checkpoint absent). Conversion failures are caught + logged (matching
-        the originals' silent-catch), returning ``None``.
+        Skipped (``None``) unless ``config.export_onnx`` (mdn/nbeats lack the flag).
+        A requested export raises when the checkpoint is absent, when the config
+        has no ``input_length``/``backcast_length``, or when the conversion fails;
+        :meth:`_save_results_with_onnx` records it and fails the run (D-183).
         """
         if not getattr(self.config, 'export_onnx', False):
             return None
+        # A requested export that cannot run raises (D-183); both cases below were
+        # a log line and a run that exited 0 without the export.
         if not os.path.exists(model_path):
-            logger.warning(f"ONNX export skipped: checkpoint absent ({model_path})")
-            return None
+            raise FileNotFoundError(f"ONNX export: checkpoint absent ({model_path})")
 
         # No TS trainer config defines ``context_len``; resolve the input length
         # from the actual config field (``input_length``, or nbeats' ``backcast_length``).
         input_length = getattr(self.config, 'input_length', None) or getattr(
             self.config, 'backcast_length', None)
         if input_length is None:
-            logger.error(
-                "ONNX export skipped: config has neither 'input_length' nor "
+            raise ValueError(
+                "ONNX export: config has neither 'input_length' nor "
                 "'backcast_length' to size the input signature."
             )
-            return None
 
         onnx_path = os.path.join(exp_dir, 'model.onnx')
-        try:
-            logger.info(f"Exporting to ONNX: {onnx_path}")
-            best_model = keras.saving.load_model(model_path, compile=False)
-            input_signature = [
-                keras.InputSpec(
-                    shape=(None, input_length, self.processor.num_features),
-                    dtype="float32"
-                )
-            ]
-            best_model.export(
-                onnx_path, format="onnx",
-                input_signature=input_signature,
-                opset_version=self.config.onnx_opset_version, verbose=True
+        logger.info(f"Exporting to ONNX: {onnx_path}")
+        best_model = keras.saving.load_model(model_path, compile=False)
+        input_signature = [
+            keras.InputSpec(
+                shape=(None, input_length, self.processor.num_features),
+                dtype="float32"
             )
-            logger.info(f"ONNX export successful: {onnx_path}")
-            return onnx_path
-        except Exception as e:
-            logger.error(f"ONNX export failed: {e}", exc_info=True)
-            return None
+        ]
+        best_model.export(
+            onnx_path, format="onnx",
+            input_signature=input_signature,
+            opset_version=self.config.onnx_opset_version, verbose=True
+        )
+        logger.info(f"ONNX export successful: {onnx_path}")
+        return onnx_path
+
+    def _save_results_with_onnx(self, training_results: Dict[str, Any]) -> None:
+        """Export ``best_model.keras`` to ONNX, write ``results.json``, then fail on a failed export.
+
+        Interface contract: call after :meth:`_train_model` has set ``self.exp_dir``.
+        Writes ``results.json`` (when ``config.save_results``) with an ``onnx_path``
+        field: the exported path, or ``None`` when the export was skipped or failed.
+        Raises ``RuntimeError`` naming the export error after that write when
+        :meth:`_export_to_onnx` raised. Shared by the base :meth:`run_experiment`
+        and AdaptiveEMA's override.
+        """
+        # DECISION plan-2026-10-14T062616-81938e81/D-183: a requested ONNX export
+        # that fails is recorded (onnx_path null), results.json is written, and
+        # then the run raises. Do NOT catch and continue: the run exited 0 with
+        # the export the user asked for missing. See decisions.md D-183.
+        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
+        export_error = None
+        try:
+            onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
+        except Exception as exc:
+            logger.error(f"ONNX export failed: {exc}", exc_info=True)
+            onnx_path, export_error = None, f"{type(exc).__name__}: {exc}"
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir,
+                               extra_fields={'onnx_path': onnx_path})
+        if export_error is not None:
+            raise RuntimeError(
+                f"ONNX export failed: {export_error} (results.json records onnx_path null)"
+            )
 
     # ------------------------------------------------------------------ #
     # Orchestration skeleton
@@ -1256,11 +1270,7 @@ class BaseTimeSeriesTrainer:
         training_results = self._train_model(data_pipeline, exp_dir=None)
         logger.info(f"Results: {self.exp_dir}")
         if getattr(self.config, 'export_onnx', False):
-            best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
-            onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-            if self.config.save_results:
-                self._save_results(training_results, self.exp_dir,
-                                   extra_fields={'onnx_path': onnx_path})
+            self._save_results_with_onnx(training_results)
         elif self.config.save_results:
             self._save_results(training_results, self.exp_dir)
         return {

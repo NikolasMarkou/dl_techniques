@@ -539,57 +539,52 @@ class DeepARTrainer(BaseTimeSeriesTrainer):
     def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
         """Override: assemble DeepAR's prediction-mode dict from the test window.
 
-        Keeps the base contract's ADDITIVE / NON-FATAL / ForecastMixin-GATED
-        structure: a new ``post_hoc_metrics`` key only, wrapped in try/except
-        (warning + ``{}`` on failure), run only when the model is a
-        :class:`ForecastMixin`.
+        Keeps the base contract's ADDITIVE / ForecastMixin-GATED structure: a new
+        ``post_hoc_metrics`` key only, run only when the model is a
+        :class:`ForecastMixin`. A failure raises (D-183; it returned ``{}``).
         """
-        try:
-            test_data_raw = data_pipeline.get('test_data_raw')
-            if test_data_raw is None:
-                return {}
-
-            if not isinstance(self.model, ForecastMixin):
-                logger.info(
-                    "post_hoc_metrics: model is not a ForecastMixin; skipping")
-                return {}
-
-            # DeepAR processor emits ({'target':[T,D],'covariates':[T,C]}, zeros).
-            # After stacking, test_data_raw == (inputs_dict, zeros) where
-            # inputs_dict['target'] is [B, T, D] (T = L + H).
-            inputs, _ = test_data_raw
-            target_stack = np.asarray(inputs['target'])  # [B, T, D]
-            if target_stack.ndim == 2:
-                target_stack = target_stack[..., np.newaxis]
-
-            L = self.config.input_length
-            H = self.config.prediction_length
-            B = target_stack.shape[0]
-
-            cond = target_stack[:, :L, :]            # [B, L, D]
-            y_true = target_stack[:, L:L + H, :]     # [B, H, D]
-
-            full_cov = np.stack(
-                [self.processor._make_covariates(L + H)] * B, axis=0)  # [B, L+H, C]
-            assert full_cov.shape[1] == L + H, (
-                f"full_covariates must span L+H={L + H}, got {full_cov.shape[1]}")
-
-            fc = self.model.predict_forecast(
-                {'conditioning_target': cond, 'full_covariates': full_cov})
-
-            quantiles = fc.quantiles if fc.has_quantiles() else None
-            quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
-
-            return compute_post_hoc_forecast_metrics(
-                np.asarray(y_true),
-                np.asarray(fc.point),
-                backcast=np.asarray(cond),
-                quantiles=None if quantiles is None else np.asarray(quantiles),
-                quantile_levels=quantile_levels,
-            )
-        except Exception as e:
-            logger.warning(f"post_hoc_metrics computation failed: {e}")
+        test_data_raw = data_pipeline.get('test_data_raw')
+        if test_data_raw is None:
             return {}
+
+        if not isinstance(self.model, ForecastMixin):
+            logger.info(
+                "post_hoc_metrics: model is not a ForecastMixin; skipping")
+            return {}
+
+        # DeepAR processor emits ({'target':[T,D],'covariates':[T,C]}, zeros).
+        # After stacking, test_data_raw == (inputs_dict, zeros) where
+        # inputs_dict['target'] is [B, T, D] (T = L + H).
+        inputs, _ = test_data_raw
+        target_stack = np.asarray(inputs['target'])  # [B, T, D]
+        if target_stack.ndim == 2:
+            target_stack = target_stack[..., np.newaxis]
+
+        L = self.config.input_length
+        H = self.config.prediction_length
+        B = target_stack.shape[0]
+
+        cond = target_stack[:, :L, :]            # [B, L, D]
+        y_true = target_stack[:, L:L + H, :]     # [B, H, D]
+
+        full_cov = np.stack(
+            [self.processor._make_covariates(L + H)] * B, axis=0)  # [B, L+H, C]
+        assert full_cov.shape[1] == L + H, (
+            f"full_covariates must span L+H={L + H}, got {full_cov.shape[1]}")
+
+        fc = self.model.predict_forecast(
+            {'conditioning_target': cond, 'full_covariates': full_cov})
+
+        quantiles = fc.quantiles if fc.has_quantiles() else None
+        quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
+
+        return compute_post_hoc_forecast_metrics(
+            np.asarray(y_true),
+            np.asarray(fc.point),
+            backcast=np.asarray(cond),
+            quantiles=None if quantiles is None else np.asarray(quantiles),
+            quantile_levels=quantile_levels,
+        )
 
 # ---------------------------------------------------------------------
 # CLI parser + main (Step 11)

@@ -550,10 +550,9 @@ class MDNTrainer(BaseTimeSeriesTrainer):
     def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
         """Override: re-assemble the FULL 2-tuple test input for the post-hoc block.
 
-        Keeps the base contract's ADDITIVE / NON-FATAL / ForecastMixin-GATED
-        structure (invariant I1): a new ``post_hoc_metrics`` key only, wrapped in
-        try/except (warning + ``{}`` on failure), and run only when the model is a
-        :class:`ForecastMixin`.
+        Keeps the base contract's ADDITIVE / ForecastMixin-GATED structure
+        (invariant I1): a new ``post_hoc_metrics`` key only, run only when the model
+        is a :class:`ForecastMixin`. A failure raises (D-183; it returned ``{}``).
         """
         # DECISION plan_2026-06-10_31eed970/D-003: MDN's MultiTaskMDNModel consumes
         # a 2-tuple (sequence, task_ids) input, but the base extractor
@@ -564,37 +563,33 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         # only knows single-input models. Generalizing the base extractor to
         # multi-input models was deliberately DEFERRED (only mdn needs it today;
         # use-before-reuse). See decisions.md D-003.
-        try:
-            test_data_raw = data_pipeline.get('test_data_raw')
-            if test_data_raw is None:
-                return {}
-
-            if not isinstance(self.model, ForecastMixin):
-                logger.info(
-                    "post_hoc_metrics: model is not a ForecastMixin; skipping")
-                return {}
-
-            # test_data_raw == ((seq_stack [B,W,1], task_stack [B,1]), y_stack).
-            # Pass the FULL 2-tuple to predict_forecast (NOT inputs[0]); the seq
-            # context is the backcast; y_stack is y_true.
-            full_inputs, targets = test_data_raw
-            backcast = full_inputs[0] if isinstance(full_inputs, (tuple, list)) else full_inputs
-            y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
-
-            fc = self.model.predict_forecast(full_inputs)
-            quantiles = fc.quantiles if fc.has_quantiles() else None
-            quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
-
-            return compute_post_hoc_forecast_metrics(
-                np.asarray(y_true),
-                np.asarray(fc.point),
-                backcast=np.asarray(backcast),
-                quantiles=None if quantiles is None else np.asarray(quantiles),
-                quantile_levels=quantile_levels,
-            )
-        except Exception as e:
-            logger.warning(f"post_hoc_metrics computation failed: {e}")
+        test_data_raw = data_pipeline.get('test_data_raw')
+        if test_data_raw is None:
             return {}
+
+        if not isinstance(self.model, ForecastMixin):
+            logger.info(
+                "post_hoc_metrics: model is not a ForecastMixin; skipping")
+            return {}
+
+        # test_data_raw == ((seq_stack [B,W,1], task_stack [B,1]), y_stack).
+        # Pass the FULL 2-tuple to predict_forecast (NOT inputs[0]); the seq
+        # context is the backcast; y_stack is y_true.
+        full_inputs, targets = test_data_raw
+        backcast = full_inputs[0] if isinstance(full_inputs, (tuple, list)) else full_inputs
+        y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
+
+        fc = self.model.predict_forecast(full_inputs)
+        quantiles = fc.quantiles if fc.has_quantiles() else None
+        quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
+
+        return compute_post_hoc_forecast_metrics(
+            np.asarray(y_true),
+            np.asarray(fc.point),
+            backcast=np.asarray(backcast),
+            quantiles=None if quantiles is None else np.asarray(quantiles),
+            quantile_levels=quantile_levels,
+        )
 
     def _save_results(self, results: Dict[str, Any], exp_dir: str,
                       extra_fields: Optional[Dict[str, Any]] = None) -> None:
