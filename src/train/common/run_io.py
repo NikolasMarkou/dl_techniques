@@ -103,6 +103,11 @@ def prepare_run_dir(
 
     Returns:
         The created run directory as a :class:`~pathlib.Path`.
+
+    Raises:
+        OSError: If the directory or the config file cannot be written.
+        TypeError: If the config holds a value JSON cannot serialize (see
+            :func:`train.common.config_io.save_config_json`).
     """
     run_dir = (
         Path(output_dir)

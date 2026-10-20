@@ -76,8 +76,19 @@ def save_config_json(
         results_dir: Directory to write into. Created with ``exist_ok=True``.
         filename: Output filename. Defaults to ``"config.json"``.
 
+    A failure RAISES, so a run whose config could not be written does not exit
+    0; no caller wraps it (``tests/test_train/test_a_history_write_follows_the_model_save.py``
+    checks every call site, plan-2026-10-14T062616-81938e81 D-177). The payload
+    is serialized before the file is opened, so an unserializable value leaves no
+    partial file.
+
     Returns:
         The full path to the written JSON file.
+
+    Raises:
+        OSError: If the directory cannot be created or the file cannot be written.
+        TypeError: If a value is neither JSON-native nor a numpy type
+            :func:`json_numpy_default` converts.
     """
     os.makedirs(results_dir, exist_ok=True)
 
@@ -88,9 +99,10 @@ def save_config_json(
     else:
         payload = config
 
+    text = json.dumps(payload, indent=2, default=json_numpy_default)
     path = os.path.join(results_dir, filename)
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2, default=json_numpy_default)
+        f.write(text)
 
     logger.info(f"[config_io] saved config to {path}")
     return path

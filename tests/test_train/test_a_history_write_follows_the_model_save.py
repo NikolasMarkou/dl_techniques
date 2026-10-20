@@ -18,6 +18,9 @@ site it finds:
 
 At 2026-10-20 (before the step) the census found 53 sites: 13 wrote the history
 before a later save and 1 sat inside ``try/except Exception``.
+
+Step 4.1 (D-177) widens the ``except`` rule to every ``train.common.run_io``
+writer (``save_config_json``, ``prepare_run_dir`` and the history writer).
 """
 
 import ast
@@ -308,3 +311,92 @@ def test_positive_control_a_planted_bad_site_is_caught(name):
     source, expected = _BAD[name]
     (site,) = census(source)
     assert expected in _violations(site), (name, site)
+
+
+# ---------------------------------------------------------------------------
+# Every run_io writer (iteration 2 step 4.1, D-177)
+# ---------------------------------------------------------------------------
+#
+# Measured at 3da9b5075: ``train/cliffordnet/train_cliffordnet.py`` wrapped its
+# ``save_config_json`` in ``try/except Exception`` that logged a warning, so a run
+# whose config could not be written exited 0. The writers raise; no ``except``
+# may enclose a call to any of them.
+
+#: Every public function of ``train.common.run_io``, classified. A new one fails
+#: ``test_every_run_io_function_is_classified`` until it is put in one set.
+RUN_IO_WRITERS = frozenset({"prepare_run_dir", "save_config_json", "save_training_history_json"})
+RUN_IO_NON_WRITERS = frozenset({"default_experiment_name", "run_timestamp"})
+
+
+def test_every_run_io_function_is_classified():
+    import inspect
+
+    from train.common import run_io
+
+    public = {name for name, value in vars(run_io).items()
+              if inspect.isfunction(value) and not name.startswith("_")}
+    assert public == RUN_IO_WRITERS | RUN_IO_NON_WRITERS
+
+
+def writer_sites(source: str, path: str = "<string>") -> List[Tuple[str, int, str, Tuple[int, ...]]]:
+    """(path, line, writer, enclosing ``try`` lines) for every run_io writer call."""
+    module = _Module(source)
+    return sorted((path, node.lineno, _call_name(node), tuple(module.enclosing_excepts(node)))
+                  for node in ast.walk(module.tree)
+                  if isinstance(node, ast.Call) and _call_name(node) in RUN_IO_WRITERS)
+
+
+def _repo_writer_sites():
+    sites = []
+    for path in sorted(SRC.rglob("*.py")):
+        source = path.read_text()
+        if any(name in source for name in RUN_IO_WRITERS):
+            sites += writer_sites(source, str(path.relative_to(SRC.parent)))
+    return sites
+
+
+WRITER_SITES = _repo_writer_sites()
+
+
+def _token_calls(source: str) -> int:
+    """Writer names followed by ``(`` in the token stream (comments, strings and
+    ``def`` lines are not calls), independent of the AST walk."""
+    import io
+    import tokenize
+
+    tokens = [t for t in tokenize.generate_tokens(io.StringIO(source).readline)
+              if t.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                                tokenize.DEDENT, tokenize.COMMENT)]
+    return sum(1 for i, t in enumerate(tokens[:-1])
+               if t.type == tokenize.NAME and t.string in RUN_IO_WRITERS
+               and tokens[i + 1].string == "("
+               and not (i and tokens[i - 1].string == "def"))
+
+
+def test_the_writer_census_sees_every_call():
+    """No call escapes the AST walk (an alias or a wrapper would hide a site)."""
+    token_calls = sum(_token_calls(path.read_text()) for path in SRC.rglob("*.py"))
+    assert len(WRITER_SITES) == token_calls
+    assert len(WRITER_SITES) >= 120
+
+
+def test_no_except_encloses_a_run_io_write():
+    swallowed = [f"{path}:{line} {name} (try at {excepts})"
+                 for path, line, name, excepts in WRITER_SITES if excepts]
+    assert swallowed == [], (
+        "a run_io writer raises on failure; an enclosing except would let the run "
+        "exit 0 with the record missing:\n" + "\n".join(swallowed))
+
+
+def test_positive_control_a_swallowed_config_write_is_caught():
+    source = '''
+def train(config, out):
+    try:
+        save_config_json(config, out)
+    except Exception as e:
+        logger.warning(f"Failed to save config: {e}")
+    prepare_run_dir(config)
+'''
+    sites = writer_sites(source)
+    assert [(name, bool(excepts)) for _p, _l, name, excepts in sites] == [
+        ("save_config_json", True), ("prepare_run_dir", False)]

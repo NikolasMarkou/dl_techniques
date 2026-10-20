@@ -8,7 +8,8 @@ the contracts worth pinning are the ones a call site would silently depend on:
   warned and returned None, so a run with its record missing exited 0). Every
   call site writes after the model save, so the raise never costs the weights
   (``test_a_history_write_follows_the_model_save.py``)
-- ``prepare_run_dir`` both creates the directory and writes the config
+- ``prepare_run_dir`` both creates the directory and writes the config; a
+  failed config write raises from it and from ``save_config_json`` (D-177)
 - ``default_experiment_name`` drops empty fragments so a disabled optional
   suffix does not leave a doubled underscore
 """
@@ -27,6 +28,7 @@ from train.common.run_io import (
     default_experiment_name,
     prepare_run_dir,
     run_timestamp,
+    save_config_json,
     save_training_history_json,
 )
 
@@ -118,6 +120,38 @@ class TestPrepareRunDir:
         config = _Config(output_dir=str(tmp_path), experiment_name="exp_a")
         run_dir = prepare_run_dir(config, config_filename="run_config.json")
         assert (run_dir / "run_config.json").exists()
+
+
+# ---------------------------------------------------------------------
+# save_config_json / prepare_run_dir fail loudly (D-177)
+# ---------------------------------------------------------------------
+
+def _full_disk(*_args, **_kwargs):
+    raise OSError(28, "No space left on device")
+
+
+class TestConfigWriteRaises:
+
+    def test_an_unserializable_value_raises_and_leaves_no_partial_file(self, tmp_path):
+        with pytest.raises(TypeError):
+            save_config_json({"lr": 1e-3, "bad": object()}, str(tmp_path))
+        assert not (tmp_path / "config.json").exists()
+
+    def test_a_failed_open_raises_the_os_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("builtins.open", _full_disk)
+        with pytest.raises(OSError, match="No space left"):
+            save_config_json({"lr": 1e-3}, str(tmp_path))
+
+    def test_prepare_run_dir_raises_when_the_config_write_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("builtins.open", _full_disk)
+        config = _Config(output_dir=str(tmp_path), experiment_name="exp_a")
+        with pytest.raises(OSError, match="No space left"):
+            prepare_run_dir(config)
+
+    def test_control_a_real_write_returns_its_path(self, tmp_path):
+        path = save_config_json({"lr": np.float32(0.5)}, str(tmp_path))
+        assert path == str(tmp_path / "config.json")
+        assert json.loads((tmp_path / "config.json").read_text()) == {"lr": 0.5}
 
 
 # ---------------------------------------------------------------------

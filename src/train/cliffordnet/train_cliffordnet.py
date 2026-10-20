@@ -519,6 +519,25 @@ def train_model(args) -> None:
     )
     callbacks.insert(0, keras.callbacks.TerminateOnNaN())
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-177: the config is written here,
+    # before training, and NOT wrapped. A failed write raises before any compute
+    # is spent. Do NOT move it back after fit inside try/except-and-warn: the run
+    # then exited 0 with config.json missing. See decisions.md D-177.
+    save_config_json({
+        "dataset": args.dataset, "variant": args.variant,
+        "epochs": args.epochs, "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "stochastic_depth_rate": args.stochastic_depth_rate,
+        "dropout_rate": args.dropout_rate,
+        "cli_mode": args.cli_mode, "ctx_mode": args.ctx_mode,
+        "use_global_context": args.use_global_context,
+        "warmup_epochs": args.warmup_epochs,
+        "random_erasing_prob": args.random_erasing_prob,
+        "input_shape": list(input_shape),
+        "num_classes": num_classes,
+    }, results_dir)
+
     logger.info(
         f"Training | dataset={args.dataset}, variant={args.variant}, "
         f"epochs={args.epochs}, batch={args.batch_size}, lr={args.learning_rate}"
@@ -532,26 +551,6 @@ def train_model(args) -> None:
         callbacks=callbacks,
         verbose=1,
     )
-
-    # ---- Save config and training history -----------------------------
-    try:
-        config_dict = {
-            "dataset": args.dataset, "variant": args.variant,
-            "epochs": args.epochs, "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "weight_decay": args.weight_decay,
-            "stochastic_depth_rate": args.stochastic_depth_rate,
-            "dropout_rate": args.dropout_rate,
-            "cli_mode": args.cli_mode, "ctx_mode": args.ctx_mode,
-            "use_global_context": args.use_global_context,
-            "warmup_epochs": args.warmup_epochs,
-            "random_erasing_prob": args.random_erasing_prob,
-            "input_shape": list(input_shape),
-            "num_classes": num_classes,
-        }
-        save_config_json(config_dict, results_dir)
-    except Exception as e:
-        logger.warning(f"Failed to save config: {e}")
 
     # ---- Save final model & validate ---------------------------------
     test_sample = x_test[:4]
