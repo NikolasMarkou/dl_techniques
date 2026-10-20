@@ -198,8 +198,8 @@ def collect_image_paths(
 
     For each directory it recursively scans (``rglob("*")``) for files whose
     suffix matches ``extensions`` (case-insensitive). A directory that does not
-    exist is skipped with a warning, and any scan error is logged as a warning
-    rather than raised (one bad directory does not abort the whole scan).
+    exist is skipped with a warning; an error while scanning one that does
+    exist raises (a partial listing must not become the training set).
 
     This helper does NOT raise when no files are found — it returns the
     (possibly empty) list. Callers keep their own ``if not paths: raise
@@ -226,6 +226,10 @@ def collect_image_paths(
 
     Returns:
         A list of matching file paths as strings. Possibly empty.
+
+    Raises:
+        OSError: Whatever listing an existing directory raises (permissions, an
+            I/O error, a directory removed mid-scan).
     """
     if extensions is None:
         extensions = DEFAULT_IMAGE_EXTENSIONS
@@ -241,12 +245,11 @@ def collect_image_paths(
         if not dir_path.is_dir():
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    all_file_paths.append(str(file_path))
-        except Exception as e:
-            logger.warning(f"Error scanning directory {directory}: {e}")
+        # A scan that fails raises (D-183): a warning here trained on whatever
+        # part of the directory was listed before the error.
+        for file_path in dir_path.rglob("*"):
+            if file_path.is_file() and file_path.suffix in extensions_set:
+                all_file_paths.append(str(file_path))
 
     logger.info(f"Found a total of {len(all_file_paths)} files.")
 

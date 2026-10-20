@@ -41,7 +41,7 @@ import csv
 import gc
 import glob
 import os
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import keras
 
@@ -56,7 +56,10 @@ class StepCheckpointCallback(keras.callbacks.Callback):
 
     Maintains a rolling window of the ``max_checkpoints`` most recent
     ``step_NNNNNNN.keras`` files plus a ``final.keras`` written on
-    :meth:`on_train_end`. Writes per-step metrics to ``training_log.csv`` every
+    :meth:`on_train_end`. A failed ``final.keras`` save raises. A failed step
+    save is logged, recorded, and retried at the next interval; after
+    ``final.keras`` is written, :meth:`on_train_end` raises naming every step
+    file that failed. Writes per-step metrics to ``training_log.csv`` every
     ``log_every_steps`` steps, periodically refreshes step plots, and optionally
     runs a synchronous weight/spectral analysis.
 
@@ -125,6 +128,8 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self._current_epoch = 0
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
+        # Step files whose save raised; on_train_end fails the run on them.
+        self._failed_saves: List[str] = []
         self._analysis_dir = os.path.join(save_dir, "step_analysis")
         os.makedirs(self._ckpt_dir, exist_ok=True)
         if self.analyze_every_steps > 0:
@@ -223,16 +228,19 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self.close()
         os.makedirs(self._ckpt_dir, exist_ok=True)
         path = os.path.join(self._ckpt_dir, "final.keras")
-        try:
-            self.checkpoint_model.save(path)
-            logger.info(f"Final checkpoint saved: {path}")
-        except Exception:
-            # LESSON: periodic side-effect callbacks must surface failures
-            # loudly rather than swallow them silently.
-            logger.error(
-                f"Failed to write final.keras at {path}", exc_info=True
-            )
+        # DECISION plan-2026-10-14T062616-81938e81/D-183: the final save is not
+        # wrapped, and a step save that failed earlier fails the run here, after
+        # final.keras is on disk. Do NOT log and continue: a run that lost its
+        # checkpoints exited 0. See decisions.md D-183.
+        self.checkpoint_model.save(path)
+        logger.info(f"Final checkpoint saved: {path}")
         self._plot_metrics()
+        if self._failed_saves:
+            failed, self._failed_saves = self._failed_saves, []
+            raise RuntimeError(
+                f"{len(failed)} step checkpoint save(s) failed: {', '.join(failed)} "
+                f"(final.keras was written)"
+            )
 
     def close(self) -> None:
         """Idempotent close of the CSV handle.
@@ -365,12 +373,13 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         try:
             self.checkpoint_model.save(path)
         except Exception:
-            # LESSON: periodic side-effect callbacks must surface failures
-            # loudly. Log and skip cleanup so the next save can retry.
+            # Log, record (on_train_end raises on it, D-183) and skip cleanup so
+            # the next save can retry.
             logger.error(
                 f"Checkpoint save failed at step {self.global_step} ({path})",
                 exc_info=True,
             )
+            self._failed_saves.append(os.path.basename(path))
             return
         if self._gc_on_save:
             # Release the transient NumPy copies Keras allocates during native
