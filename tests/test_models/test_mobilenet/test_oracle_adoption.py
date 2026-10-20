@@ -296,10 +296,15 @@ class TestMobileNetGradientFlow:
                 f"{name}: a non-zero stochastic rate is live: {stochastic}"
             )
 
+    # V3 runs at 64 px too (step 9.3.3, D-231): at 32 px Small's blocks 8-10
+    # output a 1 x 1 map, the V2 trap again, and their project_norm betas read
+    # 2e-9 to 3e-7 of the median gradient, i.e. rounding, so this exact-zero
+    # arm passed or failed by the draw (block_8 read exactly 0.0 at seed 3 at
+    # d929850f3). At 64 and 128 px they read about 1e-4 of the median.
     @pytest.mark.parametrize(
         "name,build,shape",
         [("v1", _v1, SMALL), ("v2", _v2, V2_SHAPE),
-         ("v3", _v3, SMALL), ("v4", _v4, SMALL)],
+         ("v3", lambda: _v3(input_shape=V2_SHAPE), V2_SHAPE), ("v4", _v4, SMALL)],
     )
     def test_gradients_reach_every_trainable_weight_after_one_step(
             self, name, build, shape):
