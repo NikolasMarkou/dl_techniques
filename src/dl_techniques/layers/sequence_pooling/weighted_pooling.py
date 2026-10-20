@@ -56,6 +56,13 @@ class WeightedPooling(keras.layers.Layer):
         │  → Output [B, embed_dim]         │
         └──────────────────────────────────┘
 
+    A sequence longer than ``max_seq_len`` has no weights for its tail. With a
+    static length (every eager call, and a functional model built for a fixed
+    length) ``call`` raises a ``ValueError`` naming ``max_seq_len``. With an
+    unknown length no assert is traced: the run reaches a longer input and the
+    backend refuses the broadcast (``Incompatible shapes``). Nothing is
+    truncated silently.
+
     Args:
         max_seq_len: Maximum sequence length for weight allocation.
         dropout_rate: Dropout rate applied to normalised weights.
@@ -89,12 +96,30 @@ class WeightedPooling(keras.layers.Layer):
         else:
             self.dropout = None
 
+    def _check_length(self, seq_len: Optional[int]) -> None:
+        """Raise if a static ``seq_len`` exceeds ``max_seq_len``.
+
+        Called from ``build`` (a functional model infers shapes without
+        running ``call``) and from ``call`` (an already-built layer meeting a
+        longer input). A ``None`` length passes; see the class docstring.
+        """
+        if seq_len is not None and seq_len > self.max_seq_len:
+            raise ValueError(
+                f"WeightedPooling: the sequence length {seq_len} is longer "
+                f"than max_seq_len={self.max_seq_len}; there is one position "
+                f"weight per position up to max_seq_len."
+            )
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build learnable position weights.
 
         Args:
             input_shape: Shape tuple of the input tensor.
+
+        Raises:
+            ValueError: If the static sequence length exceeds ``max_seq_len``.
         """
+        self._check_length(input_shape[1])
         # Create learnable position weights
         self.position_weights = self.add_weight(
             name='position_weights',
@@ -133,6 +158,7 @@ class WeightedPooling(keras.layers.Layer):
         Returns:
             Pooled output ``(batch, embed_dim)``.
         """
+        self._check_length(inputs.shape[1])
         seq_len = keras.ops.shape(inputs)[1]
 
         # Get weights for current sequence length

@@ -117,6 +117,31 @@ _KERNEL_STRATEGIES = frozenset({'attention', 'multi_head_attention'})
 STRATEGY_NAMES: Tuple[str, ...] = typing.get_args(PoolingStrategy)
 AGGREGATION_NAMES: Tuple[str, ...] = typing.get_args(AggregationMethod)
 
+#: Output width of each strategy as a multiple of ``hidden_dim``. ``'flatten'``
+#: (``seq_len * hidden_dim``) and ``'none'`` (the sequence itself) have none.
+_WIDTH_MULTIPLE: Dict[str, int] = {
+    **{s: 1 for s in STRATEGY_NAMES if s not in ('flatten', 'none')},
+    'mean_max': 2,
+    'mean_std': 2,
+    'mean_max_min': 3,
+}
+
+
+def _strategy_width(
+    strategy: str,
+    seq_len: Optional[int],
+    hidden_dim: Optional[int],
+) -> Optional[int]:
+    """Return the last-axis width ``strategy`` emits, or ``None`` if unknown.
+
+    Not defined for ``'none'``, which returns the sequence itself.
+    """
+    if hidden_dim is None:
+        return None
+    if strategy == 'flatten':
+        return None if seq_len is None else seq_len * hidden_dim
+    return _WIDTH_MULTIPLE[strategy] * hidden_dim
+
 
 def check_strategy_config(
     strategy: Union[str, List[str], Tuple[str, ...]],
@@ -131,6 +156,12 @@ def check_strategy_config(
     * ``strategy`` is one name or a list or tuple of names, each in
       :data:`STRATEGY_NAMES`; ``aggregation_method`` is in
       :data:`AGGREGATION_NAMES`, checked for any number of strategies.
+    * Two or more strategies: none is named twice (a learnable one would
+      share one pooler), none is ``'none'`` (it returns the sequence), and an
+      aggregation other than ``'concat'`` needs every output at the same
+      width (``'flatten'``, ``seq_len * hidden_dim`` wide, never qualifies).
+      Each rule refuses a configuration ``call`` cannot run or would run
+      meaninglessly.
     * Returns the strategies as a new ``list``.
     * Raises ``ValueError`` naming the offending value otherwise.
 
@@ -160,6 +191,30 @@ def check_strategy_config(
             f"SequencePooling: unknown aggregation_method "
             f"{aggregation_method!r}; expected one of {list(AGGREGATION_NAMES)}."
         )
+    if len(strategies) > 1:
+        repeated = sorted({s for s in strategies if strategies.count(s) > 1})
+        if repeated:
+            raise ValueError(
+                f"SequencePooling: strategy {repeated} named more than once in "
+                f"{strategies}; a learnable strategy would share one pooler."
+            )
+        if 'none' in strategies:
+            raise ValueError(
+                f"SequencePooling: 'none' returns the sequence and cannot be "
+                f"combined with another strategy; got {strategies}."
+            )
+        if aggregation_method != 'concat':
+            widths = {
+                s: ('seq_len * hidden_dim' if s == 'flatten'
+                    else f"{_WIDTH_MULTIPLE[s]} * hidden_dim")
+                for s in strategies
+            }
+            if len(set(widths.values())) > 1 or 'flatten' in strategies:
+                raise ValueError(
+                    f"SequencePooling: aggregation_method={aggregation_method!r} "
+                    f"combines the outputs elementwise, so every output needs "
+                    f"the same fixed width; got widths {widths}. Use 'concat'."
+                )
     return strategies
 
 # ---------------------------------------------------------------------
@@ -291,7 +346,7 @@ class SequencePooling(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Store ALL configuration (critical for get_config)
-        self.strategy = strategy if isinstance(strategy, list) else [strategy]
+        self.strategy = check_strategy_config(strategy, aggregation_method)
         self.exclude_positions = exclude_positions or []
         self.aggregation_method = aggregation_method
         self.attention_hidden_dim = attention_hidden_dim
@@ -870,10 +925,9 @@ class SequencePooling(keras.layers.Layer):
         if len(outputs) == 1:
             return outputs[0]
 
-        # Handle different aggregation methods
+        # Handle different aggregation methods ('none' never reaches here:
+        # check_strategy_config refuses it in a list)
         if self.aggregation_method == 'concat':
-            if any(s == 'none' for s in self.strategy):
-                raise ValueError("Cannot concatenate 'none' strategy with others")
             return keras.ops.concatenate(outputs, axis=-1)
 
         elif self.aggregation_method == 'add':
@@ -910,38 +964,16 @@ class SequencePooling(keras.layers.Layer):
         Returns:
             Output shape tuple.
         """
-        batch_size = input_shape[0]
-        hidden_dim = input_shape[-1]
-
-        # Handle single strategy
-        if len(self.strategy) == 1:
-            strat = self.strategy[0]
-            if strat == 'none':
-                return input_shape
-            elif strat == 'flatten':
-                seq_len = input_shape[1]
-                return (batch_size, seq_len * hidden_dim if seq_len else None)
-            elif strat in ['mean_max', 'mean_std']:
-                return (batch_size, hidden_dim * 2)
-            elif strat == 'mean_max_min':
-                return (batch_size, hidden_dim * 3)
-            else:
-                return (batch_size, hidden_dim)
-
-        # Handle multiple strategies
-        if self.aggregation_method == 'concat':
-            total_dim = 0
-            for strat in self.strategy:
-                if strat in ['mean_max', 'mean_std']:
-                    total_dim += hidden_dim * 2
-                elif strat == 'mean_max_min':
-                    total_dim += hidden_dim * 3
-                else:
-                    total_dim += hidden_dim
-            return (batch_size, total_dim)
-        else:
-            # add, multiply, weighted_sum preserve dimension
-            return (batch_size, hidden_dim)
+        if self.strategy == ['none']:
+            return tuple(input_shape)
+        widths = [
+            _strategy_width(s, input_shape[1], input_shape[-1])
+            for s in self.strategy
+        ]
+        if len(widths) == 1 or self.aggregation_method != 'concat':
+            # Non-concat aggregation: every width is equal (checked in __init__).
+            return (input_shape[0], widths[0])
+        return (input_shape[0], None if None in widths else sum(widths))
 
     def get_config(self) -> Dict[str, Any]:
         """Return layer configuration for serialization.

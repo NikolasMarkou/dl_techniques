@@ -885,33 +885,25 @@ class TestSequencePooling:
     # Test error cases
 
     def test_invalid_strategy(self) -> None:
-        """Test invalid strategy raises error."""
-        with pytest.raises(ValueError, match="Unknown pooling strategy"):
-            layer = SequencePooling(strategy='invalid_strategy')
-            input_tensor = keras.ops.ones((2, 10, 32))
-            layer(input_tensor)
+        """An invalid strategy is refused at construction."""
+        with pytest.raises(ValueError, match="unknown pooling strategy"):
+            SequencePooling(strategy='invalid_strategy')
 
     def test_invalid_aggregation(self) -> None:
-        """Test invalid aggregation method raises error."""
-        with pytest.raises(ValueError, match="Unknown aggregation method"):
-            layer = SequencePooling(
+        """An invalid aggregation method is refused at construction."""
+        with pytest.raises(ValueError, match="unknown aggregation_method"):
+            SequencePooling(
                 strategy=['mean', 'max'],
                 aggregation_method='invalid_method'  # type: ignore
             )
-            input_tensor = keras.ops.ones((2, 10, 32))
-            layer(input_tensor)
 
     def test_none_with_concat(self, sample_input: keras.KerasTensor) -> None:
-        """Test that 'none' strategy cannot be concatenated."""
-        with pytest.raises(
-                ValueError,
-                match="Cannot concatenate 'none' strategy with others"
-        ):
-            layer = SequencePooling(
+        """'none' cannot be combined with another strategy (refused at construction)."""
+        with pytest.raises(ValueError, match="'none' returns the sequence"):
+            SequencePooling(
                 strategy=['none', 'mean'],
                 aggregation_method='concat'
             )
-            layer(sample_input)
 
 
 class TestIntegrationScenarios:

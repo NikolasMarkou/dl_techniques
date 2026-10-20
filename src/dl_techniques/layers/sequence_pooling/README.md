@@ -186,7 +186,10 @@ weighted = create_sequence_pooling_layer(
 ```
 
 A scalar weight is allocated per position up to `max_seq_len`; only the first
-`seq_len` weights are used (softmax-normalised) at call time.
+`seq_len` weights are used (softmax-normalised) at call time. A static sequence
+longer than `max_seq_len` raises a `ValueError` naming `max_seq_len`; with an
+unknown length the backend refuses the longer input at run time
+(`Incompatible shapes`). Nothing is truncated.
 
 ### `sequence`
 **Required:** None
@@ -251,13 +254,22 @@ When `strategy` is a list, the per-strategy outputs are combined with one of the
 
 | Method | Behaviour |
 |--------|-----------|
-| `concat` | Concatenate outputs along the feature axis (output dim is the sum of per-strategy dims). Rejects the `none` strategy. |
-| `add` | Element-wise sum of all outputs (requires matching dims). |
-| `multiply` | Element-wise product of all outputs (requires matching dims). |
+| `concat` | Concatenate outputs along the feature axis (output dim is the sum of per-strategy dims). |
+| `add` | Element-wise sum of all outputs. |
+| `multiply` | Element-wise product of all outputs. |
 | `weighted_sum` | Softmax-normalised learnable scalar per strategy, then a weighted sum (a single `aggregation_weights` vector is created in `build`). |
 
-With a **single** strategy the aggregation method is irrelevant — the lone
-strategy output is returned directly.
+The constructor refuses, with a `ValueError`, every list `call` could not run:
+an unknown strategy or aggregation name, a strategy named twice (a learnable one
+would share one pooler), `none` in a list of two or more, and `add`, `multiply`
+or `weighted_sum` over strategies of different widths (`mean_max`/`mean_std` are
+`2 * dim`, `mean_max_min` is `3 * dim`, and `flatten` is `seq_len * dim`, so it
+combines only under `concat`). `compute_output_shape` reports exactly the shape
+`call` returns, including `flatten` inside a `concat` (`None` when `seq_len` is
+unknown).
+
+With a **single** strategy the aggregation method does not change the output —
+the lone strategy output is returned directly — but its name is still checked.
 
 ```python
 # Multi-strategy + learnable aggregation
