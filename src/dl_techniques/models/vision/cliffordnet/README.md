@@ -190,20 +190,26 @@ This design preserves:
 
 ### Variants
 
-| Variant  | Vision ch/depth/shifts | Text ch/depth/shifts | embed_dim | Params |
-|:---------|:-----------------------|:---------------------|:---------:|-------:|
-| `nano`   | 128 / 12 / [1,2]       | 128 / 12 / [1,2]     | 256       | ~9.5M  |
-| `nano_g` | 128 / 12 / [1,2] +gFFN-G | 128 / 12 / [1,2]   | 256       | ~10.3M |
-| `mini`   | 192 / 12 / [1,2,4]     | 192 / 12 / [1,2,4]   | 384       | ~18M   |
-| `small`  | 192 / 15 / [1,2,4]     | 192 / 15 / [1,2,4]   | 384       | ~20M   |
-| `base`   | 256 / 16 / [1,2,4,8]   | 256 / 12 / [1,2,4]   | 512       | ~33M   |
-| `large`  | 384 / 20 / [1,2,4,8,16]| 384 / 16 / [1,2,4,8] | 768       | ~120M  |
+| Variant  | Vision stage channels / depths | Text ch / depth / shifts | embed_dim | Params |
+|:---------|:-------------------------------|:-------------------------|:---------:|-------:|
+| `nano`   | 128,128,256,256 / 3,3,3,3      | 128 / 12 / [1,2]         | 256       | 13,671,361 |
+| `nano_g` | as `nano`, + gFFN-G            | 128 / 12 / [1,2]         | 256       | 15,639,745 |
+| `mini`   | 192,192,384,384 / 3,3,3,3      | 192 / 12 / [1,2,4]       | 384       | 28,955,041 |
+| `small`  | 192,192,384,384 / 4,4,4,3      | 192 / 15 / [1,2,4]       | 384       | 32,264,929 |
+| `base`   | 256,256,512,512 / 4,4,4,4      | 256 / 12 / [1,2,4]       | 512       | 54,632,321 |
+| `large`  | 384,384,768,768 / 5,5,5,5      | 384 / 16 / [1,2,4,8]     | 768       | 152,394,049 |
+
+Params is `count_params()` of `CliffordCLIP.from_variant(v, vocab_size=50257,
+image_size=112, context_length=64, vision_patch_size=4)` after one call (the
+trainer's defaults; the GPT-2 token embedding alone is `50257 * text_channels`,
+6.4M at 128 channels). Measured 2026-10-20, after the two final projections
+became bias-free. The vision shifts per stage are in `CliffordCLIP.MODEL_VARIANTS`.
 
 `nano` and `nano_g` are depth/shift-aligned with `CliffordNet.nano` and `CliffordNetLM.from_variant("nano", ...)` on every shared axis (channels=128, depth=12, shifts=[1,2]) so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only, mirroring `CliffordNet.lite_g`; the text side stays `use_global_context=False` because `CliffordNetLM` has no global-context variant in its ladder.
 
 Both towers also expose an optional pre-projection `head_dropout` gated on `dropout_rate > 0`, placed after `*_head_norm` and before the projection Dense -- the same hook `CliffordNet.head_dropout` (on the pooled vector) and `CliffordNetLM.head_dropout` (on the `(B, L, D)` sequence) provide. `dropout_rate=0.0` skips the sublayer entirely.
 
-The `small` variant is parameter-matched to ViT-CLIP at the same channel width (192) and vocabulary (GPT-2 BPE, 50,257 tokens). ViT-CLIP at 192ch/12 layers has ~20.4M params; CliffordCLIP-small reaches the same count with 15+15 depth instead of 12+12 -- 25% more layers at the same budget because each Clifford block carries no FFN and no QKV projections.
+`small` is not parameter-matched to a ViT-CLIP of the same width. Measured with the same vocabulary (GPT-2 BPE, 50,257 tokens), 112 px and context 64: CliffordCLIP-small has 32,264,929 parameters with 15+15 blocks; this repo's `CLIP` at width 192, 12+12 layers, 3 heads, `embed_dim=384`, patch 16 has 23,734,657. Small has 25% more blocks per tower and 36% more parameters.
 
 ---
 
@@ -283,7 +289,7 @@ Every model in the family exploits the core properties of the Clifford geometric
 
 3. **Global-context branch uses hardcoded shifts=[1, 2] and cli_mode='full'.** The global branch summarises whole-image or whole-sequence statistics via GAP (vision) or causal cumulative mean (text). It deliberately decouples its hyperparameters from the local branch because the global view operates at a different spatial scale and does not need the same shift set.
 
-4. **CliffordCLIP-small (15+15 depth) is parameter-matched to ViT-CLIP at 192ch/12L.** At the same 20.4M parameter budget, CliffordCLIP fits 25% more layers (15 vs 12 per tower) because each block has no FFN and no QKV projections. This trades single-layer receptive field (7x7 DWConv vs global attention) for deeper compositional feature extraction, which is the natural scaling axis of the Clifford architecture.
+4. **CliffordCLIP-small (15+15 depth) is deeper than a ViT-CLIP at 192ch/12L, not parameter-matched to it.** Measured at the trainer's defaults it has 32.3M parameters against 23.7M (see Variants above): 25% more blocks per tower and 36% more parameters. Each Clifford block has no FFN and no QKV projections. This trades single-layer receptive field (7x7 DWConv vs global attention) for deeper compositional feature extraction.
 
 ---
 

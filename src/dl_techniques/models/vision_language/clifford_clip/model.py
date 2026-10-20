@@ -290,7 +290,8 @@ class CliffordCLIP(keras.Model):
           begins as ``plain`` and introduces wedge/inner content as
           training proceeds, the way
           :class:`GatedGeometricResidual` works inside the backbone.
-    :param use_bias: Whether Dense layers use bias.
+    :param use_bias: Whether Dense layers use bias, except the two final
+        projections, which are bias-free as in OpenAI CLIP.
     :param kernel_initializer: Kernel initializer for all Dense/projection.
     :param bias_initializer: Bias initializer.
     :param kernel_regularizer: Optional kernel regularizer.
@@ -979,11 +980,16 @@ class CliffordCLIP(keras.Model):
                 name="text_head_scale",
             )
 
+        # DECISION plan-2026-10-14T062616-81938e81/D-225: bias-free whatever
+        # ``use_bias`` says, as OpenAI CLIP's ``x @ self.proj`` /
+        # ``x @ self.text_projection``; do NOT route ``use_bias`` back here (a
+        # learned offset before the L2 norm). See decisions.md.
+        _proj_kw = {**_dk, "use_bias": False}
         self.vision_projection = keras.layers.Dense(
-            self.embed_dim, name="vision_projection", **_dk
+            self.embed_dim, name="vision_projection", **_proj_kw
         )
         self.text_projection = keras.layers.Dense(
-            self.embed_dim, name="text_projection", **_dk
+            self.embed_dim, name="text_projection", **_proj_kw
         )
 
     # ------------------------------------------------------------------

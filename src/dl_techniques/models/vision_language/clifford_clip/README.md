@@ -191,7 +191,11 @@ matching OpenCLIP).
 **Projection head**: `head_shifts` (shifts `>= channels` are filtered out; if all are
 filtered, falls back to `[1]`), `head_cli_mode`, `head_kind` (see § 2 table above),
 `use_bias`, `kernel_initializer`, `bias_initializer`, `kernel_regularizer`,
-`bias_regularizer`.
+`bias_regularizer`. `use_bias` reaches every Dense except the two final projections
+(`vision_projection`, `text_projection`), which are bias-free whatever it says, as OpenAI
+CLIP's `x @ self.proj` is (since 2026-10-20; archives saved before carry two bias
+variables this model no longer builds and do not load). Parameter counts per variant:
+`src/dl_techniques/models/vision/cliffordnet/README.md`, Variants.
 
 `get_config()` round-trips every constructor argument (staged vision fields, not the
 legacy scalar ones); `from_config()` deserializes the two regularizers.
