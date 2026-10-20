@@ -26,6 +26,7 @@ from dl_techniques.models.language.hrm.model import (
     HierarchicalReasoningModel,
     create_hierarchical_reasoning_model,
 )
+from tests.layer_naming import PublicAutoName
 
 CFG = dict(
     vocab_size=16,
@@ -127,7 +128,7 @@ class TestInitialStatesAreHonestlyNonTrainable:
         )
 
 
-class _ScriptedHaltModel(HierarchicalReasoningModel):
+class _ScriptedHaltModel(PublicAutoName, HierarchicalReasoningModel):
     """A model whose halting schedule and per-step output are DICTATED.
 
     `_forward_step` is replaced wholesale so the (b) assertion depends on the

@@ -32,12 +32,13 @@ from .precision_arm_oracle import (
     precision_policy,
     run_forward,
 )
+from tests.layer_naming import PublicAutoName
 
 
 # ---------------------------------------------------------------------------
 # Subjects
 # ---------------------------------------------------------------------------
-class _HealthyModel(keras.Model):
+class _HealthyModel(PublicAutoName, keras.Model):
     """A model with nothing wrong with it. The anti-vacuity twin."""
 
     def __init__(self, **kwargs):
@@ -48,7 +49,7 @@ class _HealthyModel(keras.Model):
         return self.dense(inputs)
 
 
-class _RaisingFFTModel(keras.Model):
+class _RaisingFFTModel(PublicAutoName, keras.Model):
     """``fft2`` with no float32 island -- raises under ``mixed_float16``."""
 
     def __init__(self, **kwargs):
@@ -61,7 +62,7 @@ class _RaisingFFTModel(keras.Model):
         return ops.squeeze(real, 1)
 
 
-class _Float32LeakModel(keras.Model):
+class _Float32LeakModel(PublicAutoName, keras.Model):
     """Green forward, but hands the caller float32 under ``mixed_float16``."""
 
     def __init__(self, **kwargs):
@@ -72,7 +73,7 @@ class _Float32LeakModel(keras.Model):
         return ops.cast(self.dense(inputs), "float32")
 
 
-class _VoidGuardModel(keras.Model):
+class _VoidGuardModel(PublicAutoName, keras.Model):
     """``+ 1e-9`` is exactly 0.0 in float16, so a zero row divides by zero."""
 
     def __init__(self, **kwargs):
@@ -87,7 +88,7 @@ class _VoidGuardModel(keras.Model):
         return x / (ops.sum(ops.abs(x), axis=-1, keepdims=True) + 1e-9)
 
 
-class _DeadBackwardModel(keras.Model):
+class _DeadBackwardModel(PublicAutoName, keras.Model):
     """Finite float16 forward whose output is disconnected from its variable."""
 
     def __init__(self, **kwargs):
@@ -202,7 +203,7 @@ def test_part_4_the_dead_backward_model_passes_every_forward_part():
 # ---------------------------------------------------------------------------
 # The self-calibrating cross-arm tolerance (D-055)
 # ---------------------------------------------------------------------------
-class _WrongUnderFloat16Model(keras.Model):
+class _WrongUnderFloat16Model(PublicAutoName, keras.Model):
     """Finite float16 output, correct dtype, live backward -- wrong VALUE."""
 
     def __init__(self, **kwargs):
@@ -276,7 +277,7 @@ def test_flatten_tensors_handles_dicts_lists_and_none_values():
 # of change that quietly turns an instrument into a rubber stamp. Every one of
 # them is therefore proved to still reject the defect it was carved around.
 # ---------------------------------------------------------------------------
-class _IntAndFloatModel(keras.Model):
+class _IntAndFloatModel(PublicAutoName, keras.Model):
     """Returns a float activation AND an integer mask -- the ``BERT`` shape."""
 
     def __init__(self):
@@ -287,7 +288,7 @@ class _IntAndFloatModel(keras.Model):
         return {"logits": self.dense(x), "mask": ops.cast(x[:, :1] > 0, "int32")}
 
 
-class _IntOnlyModel(keras.Model):
+class _IntOnlyModel(PublicAutoName, keras.Model):
     """Returns ONLY integers -- part 2 must call itself vacuous, not pass."""
 
     def __init__(self):
@@ -298,7 +299,7 @@ class _IntOnlyModel(keras.Model):
         return ops.cast(self.dense(x) > 0, "int32")
 
 
-class _IntAndLeakingFloatModel(keras.Model):
+class _IntAndLeakingFloatModel(PublicAutoName, keras.Model):
     """An integer mask beside a float32 LEAK -- the exemption must not hide it."""
 
     def __init__(self):
@@ -312,7 +313,7 @@ class _IntAndLeakingFloatModel(keras.Model):
         }
 
 
-class _UniformSoftmaxModel(keras.Model):
+class _UniformSoftmaxModel(PublicAutoName, keras.Model):
     """A zero-initialised softmax head: uniform output, the D-059 saddle."""
 
     def __init__(self):
@@ -326,7 +327,7 @@ class _UniformSoftmaxModel(keras.Model):
         return self.dense(x)
 
 
-class _TwoArgumentModel(keras.Model):
+class _TwoArgumentModel(PublicAutoName, keras.Model):
     """``call(a, b, training)`` -- the ``TRM`` shape ``default_call`` cannot invoke."""
 
     def __init__(self):
@@ -337,7 +338,7 @@ class _TwoArgumentModel(keras.Model):
         return self.dense(a) + self.dense(b)
 
 
-class _TrainingModeOnlyFiniteModel(keras.Model):
+class _TrainingModeOnlyFiniteModel(PublicAutoName, keras.Model):
     """Finite in training mode, overflowing at inference -- the ``yolo12`` shape."""
 
     def __init__(self):
@@ -631,7 +632,7 @@ def test_the_raises_arm_refuses_to_run_without_a_reason():
                                expect="raises")
 
 
-class _PinnedFloat32(keras.Model):
+class _PinnedFloat32(PublicAutoName, keras.Model):
     """Casts its output to float32 -- the R-142 defect the arm exists to see."""
 
     def __init__(self):

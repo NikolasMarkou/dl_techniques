@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.vision.convnext import ConvNeXtV1, ConvNeXtV2
+from tests.layer_naming import PublicAutoName
 
 _INPUT = (1, 32, 32, 3)
 
@@ -64,7 +65,7 @@ def test_the_parity_check_can_see_a_missing_method():
     become true for every class (Keras' base defines one that raises) and the
     test above would pass against the very defect it names.
     """
-    class _NoShape(keras.Model):
+    class _NoShape(PublicAutoName, keras.Model):
         pass
 
     assert "compute_output_shape" not in _NoShape.__dict__

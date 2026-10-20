@@ -63,6 +63,7 @@ from dl_techniques.layers.activations.routing_probabilities import (
 )
 from dl_techniques.layers.activations.soft_value_range import SoftValueRange
 from dl_techniques.layers.activations.thresh_max import ThreshMax
+from tests.layer_naming import PublicAutoName
 
 _PACKAGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -140,7 +141,7 @@ _RECIPES = {
 }
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal enclosing layer whose `call()` invokes the child.
 
     Test-local, not a shared abstraction: its entire purpose is to move the

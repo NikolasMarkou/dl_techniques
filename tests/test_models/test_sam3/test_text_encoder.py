@@ -33,6 +33,7 @@ from keras import ops
 
 from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 from dl_techniques.utils.masking import create_causal_attend_mask
+from tests.layer_naming import PublicAutoName
 
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
@@ -350,7 +351,7 @@ class TestUpstreamStructuralParity:
         assert encoder.encoder.intermediate_size == 81
 
 
-class _Passthrough(keras.layers.Layer):
+class _Passthrough(PublicAutoName, keras.layers.Layer):
     """An inert stand-in for `embed_norm`, i.e. the REFERENCE's structure."""
 
     def call(self, inputs, training=None):

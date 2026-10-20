@@ -15,6 +15,7 @@ import pytest
 
 from dl_techniques.layers.spatial_layer import coordinate_grid
 from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
+from tests.layer_naming import PublicAutoName
 
 
 def _finite(t) -> bool:
@@ -64,7 +65,7 @@ def test_output_shape_tracks_coords():
 
 
 @keras.saving.register_keras_serializable()
-class _HyperWrap(keras.Model):
+class _HyperWrap(PublicAutoName, keras.Model):
     """Tiny model wrapping TheraHypernetwork with a 3-tuple input."""
 
     def __init__(self, hidden_dim=32, out_dim=3, **kwargs):

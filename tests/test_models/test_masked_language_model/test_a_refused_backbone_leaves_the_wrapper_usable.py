@@ -34,6 +34,7 @@ from dl_techniques.models.common.masked_language_model import (
     MaskedLanguageModel,
 )
 from ..tiny_language_models import TINY, VOCAB
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 
@@ -146,7 +147,7 @@ def test_the_clm_still_tolerates_any_other_backbone_build_error(caplog):
     ``ValueError`` is still wrapped and built.
     """
 
-    class _FailingBuild(keras.layers.Layer):
+    class _FailingBuild(PublicAutoName, keras.layers.Layer):
         hidden_size = 8
 
         def build(self, input_shape):

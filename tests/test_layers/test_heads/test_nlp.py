@@ -27,6 +27,7 @@ from dl_techniques.layers.heads.nlp import (
     TextClassificationHead,
     QuestionAnsweringHead,
 )
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # Fixtures: a fixed input + a known attention mask (last token of row 0 masked)
@@ -276,7 +277,7 @@ class TestNLPFactoryAndRoundtrip:
         )
 
         @keras.saving.register_keras_serializable()
-        class _NLPWrapper(keras.Model):
+        class _NLPWrapper(PublicAutoName, keras.Model):
             def __init__(self, **kw):
                 super().__init__(**kw)
                 self.head = create_nlp_head(

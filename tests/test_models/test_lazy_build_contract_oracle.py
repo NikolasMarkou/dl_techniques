@@ -27,6 +27,7 @@ from .lazy_build_contract_oracle import (
     measure_lazy_build,
     perturb_weights,
 )
+from tests.layer_naming import PublicAutoName
 
 # DECISION plan-2026-08-23T091307-9a110062/D-602
 # The Keras "`build()` was called on layer X, however the layer does not have a
@@ -52,7 +53,7 @@ pytestmark = [
 
 
 @keras.saving.register_keras_serializable(package="lazy_build_oracle_tests")
-class _HealthyLazyModel(keras.Model):
+class _HealthyLazyModel(PublicAutoName, keras.Model):
     """No ``build()``; everything is created in ``__init__``. R-002 charges it
     and, as batch 2 measured on 8 real packages, nothing is lost."""
 
@@ -69,7 +70,7 @@ class _HealthyLazyModel(keras.Model):
 
 
 @keras.saving.register_keras_serializable(package="lazy_build_oracle_tests")
-class _InsensitiveModel(keras.Model):
+class _InsensitiveModel(PublicAutoName, keras.Model):
     """The forward does not read its own weights."""
 
     def __init__(self, units: int = 4, **kwargs):
@@ -86,7 +87,7 @@ class _InsensitiveModel(keras.Model):
 
 
 @keras.saving.register_keras_serializable(package="lazy_build_oracle_tests")
-class _LossyReloadModel(keras.Model):
+class _LossyReloadModel(PublicAutoName, keras.Model):
     """
     A scalar that is saved but never restored.
 

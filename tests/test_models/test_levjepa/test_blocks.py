@@ -8,9 +8,10 @@ import tensorflow as tf
 from dl_techniques.models.vision.levjepa.blocks import LeVJEPABlock
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+from tests.layer_naming import PublicAutoName
 
 
-class _BlockWrapper(keras.layers.Layer):
+class _BlockWrapper(PublicAutoName, keras.layers.Layer):
     """Adapts ``LeVJEPABlock.call``'s extra kwargs to the oracle's
     ``model(inputs, training=...)`` contract."""
 

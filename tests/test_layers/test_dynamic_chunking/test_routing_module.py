@@ -47,6 +47,7 @@ from tests.numerics import (
 )
 
 from .hnet_reference_numpy import routing_reference
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # Derived tolerance
@@ -988,7 +989,7 @@ class TestGradientFlow:
 # =====================================================================
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent that builds ``RoutingModule`` from its own ``call()``.
 
     Interface contract: takes ``(B, L, D)``, returns the routing probability

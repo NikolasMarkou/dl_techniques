@@ -1177,6 +1177,10 @@ class _SEWeights(layers.Layer):
         filter counts depend on the build-time channel count, so they are created
         in :meth:`build`. See the class docstring for the parameter reference.
         """
+        # Keras would name an unnamed instance "_se_weights", a root name scope
+        # TensorFlow refuses after Keras pushed it, which leaves the parent's
+        # scope on the global stack (D-220 of plan-2026-10-14T062616-81938e81).
+        kwargs.setdefault("name", "se_weights")
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.activation = deserialize_activation(activation)

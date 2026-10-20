@@ -39,6 +39,7 @@ from dl_techniques.models.vision.dit.blocks import DiTBlock, DiTFinalLayer
 from dl_techniques.models.vision.dit.model import DiT
 
 from ._dit_helpers import BATCH, TINY, dit_config, relative_paths, tiny_inputs
+from tests.layer_naming import PublicAutoName
 
 HIDDEN = TINY["hidden_size"]
 HEADS = TINY["num_heads"]
@@ -229,7 +230,7 @@ class _NullBuild:
         return object.__getattribute__(self, "_wrapped")(*args, **kwargs)
 
 
-class _DiTWithOneSubLayerDroppedFromBuild(DiT):
+class _DiTWithOneSubLayerDroppedFromBuild(PublicAutoName, DiT):
     """The seeded defect: ``build()`` skips a sub-layer ``call()`` still runs.
 
     ``y_embedder`` is the one dropped because it runs unconditionally on every
@@ -280,7 +281,7 @@ class TestTheAntiVacuityHalf:
         weights and would read green forever.
         """
 
-        class _Hollow(DiT):
+        class _Hollow(PublicAutoName, DiT):
             def build(self, input_shape: Any) -> None:
                 if self.built:
                     return

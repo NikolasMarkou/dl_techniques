@@ -26,9 +26,10 @@ import pytest
 
 from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 from dl_techniques.layers.ffn.kan_linear import KANLinear
+from tests.layer_naming import PublicAutoName
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call()`` reaches the child, forcing the stateless build."""
 
     def __init__(self, child: keras.layers.Layer, **kwargs) -> None:

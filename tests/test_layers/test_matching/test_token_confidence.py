@@ -13,6 +13,7 @@ from tests.test_models.test_sam.dead_component_oracle import (
     no_op_kill,
     zeroed_variables,
 )
+from tests.layer_naming import PublicAutoName
 
 pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
@@ -36,7 +37,7 @@ def _layer(cdt, seed=0, cls=MatchTokenConfidence):
     return layer, weights
 
 
-class _NoStopGradient(MatchTokenConfidence):
+class _NoStopGradient(PublicAutoName, MatchTokenConfidence):
     """MUTANT: the confidence head without the detach."""
 
     def _logit(self, desc):
@@ -104,7 +105,7 @@ class TestStopGradient:
         assert np.abs(g0).max() > 0.0 and np.abs(g1).max() > 0.0
 
 
-class _LogitsFromProbability(MatchTokenConfidence):
+class _LogitsFromProbability(PublicAutoName, MatchTokenConfidence):
     """MUTANT: the 'logits' are recovered from the clipped probability, so they saturate."""
 
     def call(self, desc0, desc1, return_logits=False):

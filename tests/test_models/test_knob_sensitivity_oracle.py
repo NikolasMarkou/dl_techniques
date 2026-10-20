@@ -18,6 +18,7 @@ from .knob_sensitivity_oracle import (
     knob_output_deltas,
     weight_signature,
 )
+from tests.layer_naming import PublicAutoName
 
 
 def _mlp(units: int, activation: str) -> keras.Model:
@@ -97,7 +98,7 @@ class TestSeedingContract:
             )
 
 
-class _SubclassedMLP(keras.Model):
+class _SubclassedMLP(PublicAutoName, keras.Model):
     """A SUBCLASSED model: ``len(self.weights) == 0`` until the first call.
 
     Every real consumer of :func:`assert_value_knob_changes_output` in this

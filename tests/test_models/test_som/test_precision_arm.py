@@ -26,6 +26,7 @@ from keras import ops
 
 from ..precision_arm_oracle import precision_policy
 from ..precision_arm_subjects import SUBJECTS
+from tests.layer_naming import PublicAutoName
 
 
 def test_keras_autocasts_a_float32_variable_read_inside_call():
@@ -38,7 +39,7 @@ def test_keras_autocasts_a_float32_variable_read_inside_call():
 
     seen = {}
 
-    class _Probe(keras.layers.Layer):
+    class _Probe(PublicAutoName, keras.layers.Layer):
         def build(self, input_shape):
             self.counter = self.add_weight(
                 name="counter", shape=(), dtype="float32",

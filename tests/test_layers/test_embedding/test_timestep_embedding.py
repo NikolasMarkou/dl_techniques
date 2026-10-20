@@ -39,6 +39,7 @@ from dl_techniques.layers.embedding.factory import (
 from dl_techniques.models.vision_language.bit_diffusion.blocks import (
     DiTXATimestepEmbedder,
 )
+from tests.layer_naming import PublicAutoName
 
 
 def _np(x) -> np.ndarray:
@@ -59,7 +60,7 @@ def _basis(layer, t: np.ndarray) -> np.ndarray:
     return _np(layer.timestep_embedding(keras.ops.convert_to_tensor(t)))
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call()`` is the only path that builds the child."""
 
     def __init__(self, child: keras.layers.Layer, **kwargs) -> None:

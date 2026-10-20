@@ -29,9 +29,10 @@ from dl_techniques.layers.embedding.dual_rotary_position_embedding import (
     DualRotaryPositionEmbedding,
 )
 from dl_techniques.layers.embedding.multi_axis_rope import Ideogram4MRoPE
+from tests.layer_naming import PublicAutoName
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call()`` is the only path that builds the child."""
 
     def __init__(self, child: keras.layers.Layer, **kwargs) -> None:

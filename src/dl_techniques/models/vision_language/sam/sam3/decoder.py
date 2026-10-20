@@ -171,6 +171,11 @@ class _Sam3DecoderAttention(keras.layers.Layer):
             self, d_model: int, num_heads: int, dropout_rate: float = 0.0,
             use_bias: bool = True, **kwargs: Any,
     ) -> None:
+        # Keras would name an unnamed instance "_sam3_decoder_attention", a
+        # root name scope TensorFlow refuses after Keras pushed it, which
+        # leaves the parent's scope on the global stack (D-220 of
+        # plan-2026-10-14T062616-81938e81).
+        kwargs.setdefault("name", "sam3_decoder_attention")
         super().__init__(**kwargs)
         if d_model % num_heads != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by "

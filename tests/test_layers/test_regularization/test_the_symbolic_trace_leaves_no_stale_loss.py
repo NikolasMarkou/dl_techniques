@@ -45,6 +45,7 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialSmoothness
+from tests.layer_naming import PublicAutoName
 
 NUM_UNITS = 784
 RADIUS = 5
@@ -61,7 +62,7 @@ def _built_tap(alpha=2.5):
 def _parent(tap):
     """A subclassed model whose ``call`` is the tap's only caller."""
 
-    class _Parent(keras.Model):
+    class _Parent(PublicAutoName, keras.Model):
         def __init__(self, child):
             super().__init__()
             self.child = child

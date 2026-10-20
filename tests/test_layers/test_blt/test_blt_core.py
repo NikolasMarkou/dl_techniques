@@ -23,6 +23,7 @@ from keras import ops
 from typing import Any, Dict
 
 from dl_techniques.layers.blt.blt_core import ByteLatentReasoningCore
+from tests.layer_naming import PublicAutoName
 
 
 class TestByteLatentReasoningCore:
@@ -144,7 +145,7 @@ class TestByteLatentReasoningCore:
         """Save/load a Model wrapping the EAGERLY pre-built core; outputs match."""
 
         @keras.saving.register_keras_serializable(package="test_blt_core")
-        class _CoreWrapper(keras.Model):
+        class _CoreWrapper(PublicAutoName, keras.Model):
             """Thin wrapper that builds the core EAGERLY in __init__.
 
             NOT a functional/symbolic trace: a symbolic trace lazily constructs

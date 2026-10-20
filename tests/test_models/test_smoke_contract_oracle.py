@@ -30,6 +30,7 @@ from .smoke_contract_oracle import (
     collapse_to_scalar,
     slice_leading_axis,
 )
+from tests.layer_naming import PublicAutoName
 
 
 def _tensor_model():
@@ -38,7 +39,7 @@ def _tensor_model():
     return keras.Model(inp, keras.layers.Dense(4)(inp), name="tensor_model")
 
 
-class _DictModel(keras.Model):
+class _DictModel(PublicAutoName, keras.Model):
     """A SUBCLASSED model returning a dict with a ``None`` value.
 
     The ``None`` mirrors ``DistilBERT``'s measured output

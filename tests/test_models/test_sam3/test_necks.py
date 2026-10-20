@@ -30,6 +30,7 @@ from dl_techniques.models.vision_language.sam.sam3.necks import (
     _build_scale_stack,
     _encode_position,
 )
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # tiny variant -- trunk grid 8x8, dim 16, d_model 8
@@ -571,7 +572,7 @@ class TestPositionalEncoding:
         check that catches the reverse defect (a lost transpose) at every scale
         whose channel count differs from its spatial extent.
         """
-        class _AlreadyChannelsLast(keras.layers.Layer):
+        class _AlreadyChannelsLast(PublicAutoName, keras.layers.Layer):
             def call(self, inputs):
                 return ops.zeros_like(inputs)
 
@@ -860,7 +861,7 @@ class TestSerialization:
         so neither direction is asserted on faith.
         """
         @keras.saving.register_keras_serializable(package="sam3_d098_probe")
-        class _Probe(keras.layers.Layer):
+        class _Probe(PublicAutoName, keras.layers.Layer):
             def __init__(self, nested=True, **kwargs):
                 super().__init__(**kwargs)
                 self.nested = nested

@@ -903,6 +903,11 @@ class _TextLMWrapper(keras.Model):
         context_length: int,
         **kwargs: Any,
     ) -> None:
+        # Keras would name an unnamed instance "_text_lm_wrapper", a root name
+        # scope TensorFlow refuses after Keras pushed it, which leaves the
+        # model's scope on the global stack (D-220 of
+        # plan-2026-10-14T062616-81938e81).
+        kwargs.setdefault("name", "text_lm_wrapper")
         super().__init__(**kwargs)
         self.clip_model = clip_model
         self.context_length = context_length

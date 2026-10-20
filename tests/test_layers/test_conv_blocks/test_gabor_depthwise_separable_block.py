@@ -41,6 +41,7 @@ from tests.test_layers.test_attention.test_tripse_attention import (
     StrictTrainingActivation,
 )
 import dl_techniques.layers.activations.factory as _act_factory
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # Shared constants. `K = 3` (not the layer default 11) keeps `padding='valid'`
@@ -2289,7 +2290,7 @@ class TestTrainingDependentNormalization:
 _STRICT_ACT_KEY = "__gabor_block_strict_training_probe__"
 
 
-class _ShapedStrictTrainingActivation(StrictTrainingActivation):
+class _ShapedStrictTrainingActivation(PublicAutoName, StrictTrainingActivation):
     """`StrictTrainingActivation` plus the one method THIS block requires.
 
     MEASURED: `GaborDepthwiseSeparableBlock.build()` calls

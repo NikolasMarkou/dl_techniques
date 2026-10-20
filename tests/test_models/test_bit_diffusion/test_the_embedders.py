@@ -41,6 +41,7 @@ from dl_techniques.models.vision_language.bit_diffusion.blocks import (
     get_2d_sincos_pos_embed,
     get_2d_sincos_pos_embed_from_grid,
 )
+from tests.layer_naming import PublicAutoName
 
 # The upstream time scale. The MODEL multiplies by this before calling the
 # embedder; the embedder itself must not.
@@ -441,7 +442,7 @@ class TestTwoDimensionalSinCosTable:
         # attribute nor an .assign() in build().
         table = get_2d_sincos_pos_embed(embed_dim=8, grid_size=4)
 
-        class _Holder(keras.layers.Layer):
+        class _Holder(PublicAutoName, keras.layers.Layer):
             def build(self, input_shape):
                 self.pos_embed = self.add_weight(
                     name="pos_embed",

@@ -34,6 +34,7 @@ from .gradient_flow_oracle import (
     default_loss,
     gradient_report,
 )
+from tests.layer_naming import PublicAutoName
 
 X = np.random.default_rng(0).random((2, 4)).astype("float32")
 
@@ -74,7 +75,7 @@ def _healthy_model() -> keras.Model:
     return model
 
 
-class _DisconnectedModel(keras.Model):
+class _DisconnectedModel(PublicAutoName, keras.Model):
     """``orphan`` is built, trainable, serialized -- and never executed."""
 
     def __init__(self, disconnect: bool = True, **kwargs):
@@ -95,7 +96,7 @@ class _DisconnectedModel(keras.Model):
         return out
 
 
-class _ZeroGatedModel(keras.Model):
+class _ZeroGatedModel(PublicAutoName, keras.Model):
     """``branch`` is gated by a scalar whose initializer is zeros."""
 
     def __init__(self, gate_init: str = "zeros", **kwargs):

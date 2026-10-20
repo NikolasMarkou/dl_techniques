@@ -40,6 +40,7 @@ from dl_techniques.layers.generative.topographic_product import (
     build_window_stack,
     windowed_stack_energy,
 )
+from tests.layer_naming import PublicAutoName
 
 B, S, C, D = 2, 6, 3, 4
 LATENT = C * D
@@ -101,7 +102,7 @@ def _relative(layer):
     return sorted(w.path.split("/", 1)[-1] for w in layer.weights)
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call()`` is the only path that builds the child."""
 
     def __init__(self, child, **kwargs):

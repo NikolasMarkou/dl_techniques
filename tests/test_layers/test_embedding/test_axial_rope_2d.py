@@ -26,6 +26,7 @@ import pytest
 from keras import ops
 
 from dl_techniques.layers.embedding import AxialRoPE2D
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # oracle + guard bodies (shared by the real tests and the dead-component probe)
@@ -232,7 +233,7 @@ def _guard_num_k_exclude(cls) -> None:
 # ---------------------------------------------------------------------
 
 
-class _SinDeadRoPE(AxialRoPE2D):
+class _SinDeadRoPE(PublicAutoName, AxialRoPE2D):
     """Dead component A: the sine half of the rotation is forced to zero."""
 
     def build(self, query_shape, key_shape=None):
@@ -240,7 +241,7 @@ class _SinDeadRoPE(AxialRoPE2D):
         self._sin_table = np.zeros_like(self._sin_table)
 
 
-class _RotationDeadRoPE(AxialRoPE2D):
+class _RotationDeadRoPE(PublicAutoName, AxialRoPE2D):
     """Dead component B: the rotation is the identity (``cos=1``, ``sin=0``)."""
 
     def build(self, query_shape, key_shape=None):
@@ -779,7 +780,7 @@ def _oracle_rotate_scaled(
     return out
 
 
-class _ScalePosDeadRoPE(AxialRoPE2D):
+class _ScalePosDeadRoPE(PublicAutoName, AxialRoPE2D):
     """Dead component C: `scale_pos` is forced to a constant 1.0 before the table.
 
     Measures which of the G1.6 guards are structurally blind to the whole

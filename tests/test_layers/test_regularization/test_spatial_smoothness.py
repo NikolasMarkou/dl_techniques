@@ -46,6 +46,7 @@ from .spatial_smoothness_oracle import (
     reference_smoothness_loss,
     smooth_field_activations,
 )
+from tests.layer_naming import PublicAutoName
 
 NUM_UNITS = 784
 RADIUS = 5
@@ -58,7 +59,7 @@ def _sample_input(batch=2, length=8, units=NUM_UNITS, seed=0):
     ).astype("float32")
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call`` is the only path that builds the child."""
 
     def __init__(self, child, **kwargs):
@@ -723,7 +724,7 @@ class TestGradients:
         assert abs(measured[2.5]) > 1e-3
 
 
-class _DenseThenTap(keras.Model):
+class _DenseThenTap(PublicAutoName, keras.Model):
     """A tap ON the output of a projection, so a gradient has somewhere to land.
 
     The order matters and is not cosmetic. With ``dense(tap(x))`` the penalty

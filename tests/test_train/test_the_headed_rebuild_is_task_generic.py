@@ -31,6 +31,7 @@ from train.common.nlp import (
     sentiment_task_config,
     set_backbone_trainable,
 )
+from tests.layer_naming import PublicAutoName
 
 VOCAB = 97
 LENGTH = 12
@@ -70,7 +71,7 @@ def test_the_sentiment_config_is_the_one_the_scripts_used() -> None:
         "sentiment_analysis", NLPTaskType.SENTIMENT_ANALYSIS, 3, 0.2)
 
 
-class _HeadUnderAnotherAttribute(keras.Model):
+class _HeadUnderAnotherAttribute(PublicAutoName, keras.Model):
     def __init__(self):
         super().__init__()
         self.body = keras.layers.Dense(4, name="body")

@@ -41,6 +41,7 @@ import pytest
 
 from .precision_arm_oracle import assert_float64_arm, float64_scope
 from .precision_arm_subjects import FLOAT64_CHARGED, SUBJECTS, float64_subject
+from tests.layer_naming import PublicAutoName
 
 
 def test_every_charged_package_has_a_float64_subject():
@@ -107,7 +108,7 @@ def test_the_output_dtype_part_can_convict():
     scope: a model whose head casts to float32 must FAIL, and the failure must
     name the output dtype rather than crash somewhere else.
     """
-    class _Pinned(keras.Model):
+    class _Pinned(PublicAutoName, keras.Model):
         def __init__(self):
             super().__init__()
             self.d = keras.layers.Dense(3)

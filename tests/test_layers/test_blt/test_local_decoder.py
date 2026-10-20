@@ -6,6 +6,7 @@ import keras
 import numpy as np
 
 from dl_techniques.layers.blt.local_decoder import LocalDecoder
+from tests.layer_naming import PublicAutoName
 
 VOCAB, HID, SEQ, NP_, GDIM = 32, 16, 10, 8, 16
 B = 2
@@ -28,7 +29,7 @@ def _patch_ids():
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class _DecWrapper(keras.Model):
+class _DecWrapper(PublicAutoName, keras.Model):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.dec = LocalDecoder(

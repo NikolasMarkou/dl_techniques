@@ -49,6 +49,7 @@ from dl_techniques.models.graph.graph_energy_transformer.model import (
     create_graph_anomaly_detector,
     create_graph_classifier,
 )
+from tests.layer_naming import PublicAutoName
 
 # --- geometry. N >= 64 WITH PAD rows. DO NOT SHRINK N. ----------------------
 N_REAL = 64
@@ -78,7 +79,7 @@ COLLAPSE_THRESHOLD = INITIAL_LOSS_SCALE / 32.0    # 1024: below = collapsed, abo
 # ---------------------------------------------------------------------------
 
 
-class _Fp16UnsafeBackbone(GraphEnergyTransformerBackbone):
+class _Fp16UnsafeBackbone(PublicAutoName, GraphEnergyTransformerBackbone):
     """RED control: build ET blocks at the fp16 COMPUTE policy, NOT the fp32 variable dtype.
 
     This overrides exactly the ``_make_block`` seam the production backbone exposes, swapping

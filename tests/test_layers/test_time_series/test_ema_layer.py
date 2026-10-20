@@ -27,6 +27,7 @@ import pytest
 from keras import ops
 
 from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
+from tests.layer_naming import PublicAutoName
 
 
 # ---------------------------------------------------------------------
@@ -34,7 +35,7 @@ from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
 # Do NOT change this — it is the contract under test.
 # ---------------------------------------------------------------------
 @keras.saving.register_keras_serializable(package="ema_test_ref")
-class _ReferenceEMA(keras.layers.Layer):
+class _ReferenceEMA(PublicAutoName, keras.layers.Layer):
     def __init__(self, period: int = 25, adjust: bool = True, **kwargs):
         super().__init__(**kwargs)
         if period < 1:

@@ -29,9 +29,10 @@ from dl_techniques.layers.time_series.nbeats_blocks import (
     SeasonalityBlock,
     TrendBlock,
 )
+from tests.layer_naming import PublicAutoName
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call()`` reaches the child, forcing the stateless build.
 
     :param child: The layer under test; it is built by being called from here.

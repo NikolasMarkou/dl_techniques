@@ -55,6 +55,7 @@ from ..smoke_contract_oracle import (
     assert_finite,
     broken_forward,
 )
+from tests.layer_naming import PublicAutoName
 
 MAX_LEN = 16
 EXPRESSIONS = ["1 + 2", "3 * 4", "10 / 2"]
@@ -84,7 +85,7 @@ EXPECTED_SHAPES: Dict[str, tuple] = {
 }
 
 
-class _OneACTStep(keras.Model):
+class _OneACTStep(PublicAutoName, keras.Model):
     """Adapter: ``ids -> one ACT step's outputs``. Owns no weights.
 
     Interface contract: ``__call__(input_ids, training=...)`` takes an

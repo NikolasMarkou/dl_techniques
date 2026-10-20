@@ -22,6 +22,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.layers.structured_linear.crystal_layer import CrystalLayer
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 
@@ -38,7 +39,7 @@ def _sample_input(rank: int = 2, input_dim: int = 8, batch: int = 4) -> np.ndarr
     ).astype(np.float32)
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call`` is the only path that builds the child."""
 
     def __init__(self, child: keras.layers.Layer, **kwargs: Any) -> None:

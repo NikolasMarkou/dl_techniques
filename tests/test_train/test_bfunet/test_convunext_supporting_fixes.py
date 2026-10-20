@@ -34,6 +34,7 @@ from train.bfunet.train_convunext_denoiser import (
     verify_bias_free,
     parse_arguments,
 )
+from tests.layer_naming import PublicAutoName
 
 PATCH = 32
 CHANNELS = 1
@@ -345,7 +346,7 @@ class TestDashboardTicksAndBestMarker:
         assert common.best_epoch_of_history(_history([0], [0.01])) is None
 
 
-class _Scale(keras.layers.Layer):
+class _Scale(PublicAutoName, keras.layers.Layer):
     """3x - 1: on a [0,1] input the output leaves [0,1] on both sides (the unclipped-PSNR trap)."""
 
     def call(self, x):

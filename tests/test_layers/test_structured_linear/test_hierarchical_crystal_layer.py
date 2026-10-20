@@ -27,6 +27,7 @@ from keras import ops
 from dl_techniques.layers.structured_linear.hierarchical_crystal_layer import (
     HierarchicalCrystalLayer
 )
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 
@@ -50,7 +51,7 @@ def _layer(macro: int = 3, micro: int = 12, **kwargs) -> HierarchicalCrystalLaye
     )
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call`` is the only path that builds the child."""
 
     def __init__(self, child: keras.layers.Layer, **kwargs: Any) -> None:

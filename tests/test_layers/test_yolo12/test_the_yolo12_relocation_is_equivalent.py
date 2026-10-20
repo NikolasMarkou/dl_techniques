@@ -61,6 +61,7 @@ import pytest
 
 from tests.conftest import GOLDEN_REFERENCE_DEVICE
 from tests.numerics import reassociation_atol
+from tests.layer_naming import PublicAutoName
 
 # TF32 truncates the matmul mantissa to 10 bits (~4100x eps_f32), which would swamp both the
 # exact-0.0 self-comparison and the derived tolerance. Opt in per module; the fixture
@@ -487,7 +488,7 @@ def _make_mutant(pinned_module: Any):
     ``calls``, which the control test asserts is non-zero.
     """
 
-    class _MutatedAreaAttention(pinned_module.AreaAttention):
+    class _MutatedAreaAttention(PublicAutoName, pinned_module.AreaAttention):
         calls = 0
 
         def _compute_attention(self, q, k, v):

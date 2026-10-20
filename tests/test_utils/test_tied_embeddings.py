@@ -33,6 +33,7 @@ from numpy.testing import assert_allclose
 import keras
 
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
+from tests.layer_naming import PublicAutoName
 
 
 # ---------------------------------------------------------------------
@@ -40,7 +41,7 @@ from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 # ---------------------------------------------------------------------
 
 
-class _TiedLogitsModel(keras.Model):
+class _TiedLogitsModel(PublicAutoName, keras.Model):
     """The smallest real model that exercises `tied_embedding_logits` under
     an actual `AutocastScope` -- i.e. through `Embedding.__call__`, not a
     hand-built tensor with no policy attached.
@@ -84,7 +85,7 @@ def _old_operand_cast_logits(hidden_states, embedding_weights, *, bias=None):
     return logits
 
 
-class _OldTiedLogitsModel(keras.Model):
+class _OldTiedLogitsModel(PublicAutoName, keras.Model):
     """Same shape as `_TiedLogitsModel`, wired to the OLD expression."""
 
     def __init__(self, vocab_size: int = 32, hidden_size: int = 8, **kwargs):
@@ -292,7 +293,7 @@ class TestRealModelForwardPass:
 
         keras.mixed_precision.set_global_policy("mixed_float16")
 
-        class _MockCausalBackbone(keras.Model):
+        class _MockCausalBackbone(PublicAutoName, keras.Model):
             """Minimal causal-shaped backbone exposing `hidden_size` and a
             `last_hidden_state` output, matching the repo's own
             `tests/test_models/test_masked_language_model/test_clm.py`

@@ -67,6 +67,7 @@ from ..gradient_flow_oracle import (
 )
 from ..smoke_contract_oracle import broken_forward
 from ._dit_helpers import BATCH, TINY, ddpm_training_batch, np_
+from tests.layer_naming import PublicAutoName
 
 #: Measured 2026-09-02 on :data:`TINY` at ``SGD(lr=0.5)``. See the docstring.
 TRAINABLE_TENSORS = 39
@@ -301,7 +302,7 @@ class TestAfterTrainingStartsNothingIsStranded:
             )
 
 
-class _DiTWithTheLabelPathCut(DiT):
+class _DiTWithTheLabelPathCut(PublicAutoName, DiT):
     """Seeded defect: the conditioning vector drops its label term.
 
     ``c = t_emb`` instead of ``c = t_emb + y_emb``. The label table is still

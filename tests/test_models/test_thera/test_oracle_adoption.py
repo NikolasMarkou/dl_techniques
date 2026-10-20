@@ -87,6 +87,7 @@ from ..smoke_contract_oracle import (
     assert_finite,
     broken_forward,
 )
+from tests.layer_naming import PublicAutoName
 
 SRC_SHAPE = (2, 8, 8, 3)
 QUERY = 12
@@ -300,7 +301,7 @@ class TestTheraJacobianBranch:
                     expect_zero=(JAC_DEAD_SUFFIX,))
 
 
-class _JacModel(keras.Model):
+class _JacModel(PublicAutoName, keras.Model):
     """Thin adapter that makes ``return_jac=True`` the forward.
 
     Exists because ``gradient_report`` calls ``model(inputs, training=...)`` and

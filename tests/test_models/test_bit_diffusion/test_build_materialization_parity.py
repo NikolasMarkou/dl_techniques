@@ -49,6 +49,7 @@ from dl_techniques.models.vision_language.bit_diffusion.model import (
 from dl_techniques.models.vision_language.bit_diffusion.token_decoder import (
     SharedTokenDecoder,
 )
+from tests.layer_naming import PublicAutoName
 
 HIDDEN = 32
 HEADS = 4
@@ -225,7 +226,7 @@ class TestParityPerClass:
         )
 
 
-class _DiTXAWithOneSubLayerDroppedFromBuild(DiTXA):
+class _DiTXAWithOneSubLayerDroppedFromBuild(PublicAutoName, DiTXA):
     """The seeded defect: ``build()`` skips a sub-layer ``call()`` still runs.
 
     This is the real failure v2 §8.1 describes -- a weight tree that does not

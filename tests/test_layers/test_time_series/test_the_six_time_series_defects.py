@@ -44,6 +44,7 @@ from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.temporal_fusion import TemporalFusionLayer
+from tests.layer_naming import PublicAutoName
 
 # --- Anti-vacuity control: which tree did we actually import? -------------
 DL_TECHNIQUES_PATH = os.path.realpath(dl_techniques.__file__)
@@ -247,7 +248,7 @@ def test_the_exogenous_block_honours_input_and_output_dim():
         assert tuple(block.compute_output_shape(y.shape)[1]) == (4, fore_len * out_dim)
 
 
-class _WrongLayoutBlock(ExogenousBlock):
+class _WrongLayoutBlock(PublicAutoName, ExogenousBlock):
     """
     The ONE plausible wrong fix for D-4, as a subclass — the control for the
     layout guard below.

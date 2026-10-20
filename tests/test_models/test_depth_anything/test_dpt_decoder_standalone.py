@@ -39,13 +39,14 @@ import pytest
 import keras
 
 from dl_techniques.models.vision.depth_anything.components import DPTDecoder
+from tests.layer_naming import PublicAutoName
 
 SHAPE = (None, 8, 8, 16)
 X = np.random.RandomState(0).randn(2, 8, 8, 16).astype("float32")
 
 
 @keras.saving.register_keras_serializable(package="test_dpt_decoder_standalone")
-class _ExplicitBuildWrapper(keras.Model):
+class _ExplicitBuildWrapper(PublicAutoName, keras.Model):
     """A parent that builds its child EXPLICITLY -- the `load_model` shape."""
 
     def __init__(self, **kwargs):

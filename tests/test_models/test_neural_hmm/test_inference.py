@@ -36,6 +36,7 @@ import tensorflow as tf
 from dl_techniques.models.probabilistic.neural_hmm import inference
 from dl_techniques.utils.dtype_policy import mask_sentinel
 from tests.numerics import reassociation_atol
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # Brute-force oracle (float64 numpy, independent of the code under test)
@@ -381,7 +382,7 @@ def test_a_reduce_retracing_function_accepts_a_second_and_third_sequence_length(
     assert None in seen_lengths, f"the probe never saw an unknown time axis: {seen_lengths}"
 
 
-class _InferenceLayer(keras.layers.Layer):
+class _InferenceLayer(PublicAutoName, keras.layers.Layer):
     """Runs all four functions, so a functional model can trace them on keras.Input."""
 
     def call(self, log_pi, log_A, log_emit, mask):

@@ -23,6 +23,7 @@ from dl_techniques.models.language.fnet.model import (
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from tests.layer_naming import PublicAutoName
 
 
 class TestFNetModel:
@@ -496,7 +497,7 @@ def _backbone_hidden(model: FNet, batch: Dict[str, np.ndarray]) -> np.ndarray:
 
 
 @keras.saving.register_keras_serializable(package="test_fnet_list_input")
-class _ListInputFNetWrapper(keras.Model):
+class _ListInputFNetWrapper(PublicAutoName, keras.Model):
     """A model called with a LIST of inputs, so its ``build_config`` is a list."""
 
     def __init__(self, **kwargs):

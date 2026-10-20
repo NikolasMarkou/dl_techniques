@@ -8,6 +8,7 @@ import os
 from typing import List
 
 from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
+from tests.layer_naming import PublicAutoName
 
 SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
     'concatenation',
@@ -21,7 +22,7 @@ SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
 
 
 @keras.saving.register_keras_serializable(package="test_custom")
-class _CustomActivationLayer(keras.layers.Layer):
+class _CustomActivationLayer(PublicAutoName, keras.layers.Layer):
     """A minimal custom (non-``keras.layers``) activation Layer, for D-004.
 
     Deliberately registered under its own ``test_custom`` package rather than

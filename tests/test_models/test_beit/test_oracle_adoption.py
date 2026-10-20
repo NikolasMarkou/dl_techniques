@@ -66,6 +66,7 @@ from ..smoke_contract_oracle import (
     assert_finite,
     broken_forward,
 )
+from tests.layer_naming import PublicAutoName
 
 IMG = (32, 32, 3)
 PATCH = 16
@@ -349,7 +350,7 @@ class TestBeitLazyBuildContract:
         """
 
         @keras.saving.register_keras_serializable(package="beit_test_red_proof")
-        class _WeightBlindClassifier(keras.Model):
+        class _WeightBlindClassifier(PublicAutoName, keras.Model):
             def __init__(self, **kwargs):
                 super().__init__(**kwargs)
                 self.inner = create_beit_classifier(

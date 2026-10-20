@@ -69,6 +69,7 @@ from dl_techniques.models.vision.image_restoration.doc_res.components import (
 )
 
 from ..precision_arm_oracle import assert_float64_arm, assert_precision_arm
+from tests.layer_naming import PublicAutoName
 
 
 DIM = 48
@@ -270,7 +271,7 @@ def assert_pixel_reshuffle_sites_have_a_per_channel_successor(layer) -> int:
     return sites
 
 
-class _DecoyResampler(keras.layers.Layer):
+class _DecoyResampler(PublicAutoName, keras.layers.Layer):
     """A component with the ops in the WRONG order: the negative control.
 
     Its ``op_sequence`` puts the pixel-unshuffle FIRST, so nothing precedes it
@@ -289,7 +290,7 @@ class _DecoyResampler(keras.layers.Layer):
         return [self.shuffle, self.act]
 
 
-class _BlindBracketResampler(keras.layers.Layer):
+class _BlindBracketResampler(PublicAutoName, keras.layers.Layer):
     """Ops in the right ORDER but the predecessor is per-channel BLIND.
 
     A ``ReLU`` before the unshuffle preserves the sequence shape the structural

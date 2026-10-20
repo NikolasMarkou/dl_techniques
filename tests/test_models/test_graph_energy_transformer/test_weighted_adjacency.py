@@ -57,6 +57,7 @@ from dl_techniques.models.graph.graph_energy_transformer.model import (
     GRAPH_BACKBONE_NAME,
 )
 from dl_techniques.datasets.graphs.fraud import build_fraud_subgraph_dataset
+from tests.layer_naming import PublicAutoName
 
 # --- geometry. N >= 64 WITH PAD rows. DO NOT SHRINK N. ----------------------
 N_REAL = 64
@@ -370,7 +371,7 @@ def _legacy_descend_capture(backbone, tokens, adjacency_mask, node_mask_2d, capt
     return captured
 
 
-class _LegacyDescendBackbone(GraphEnergyTransformerBackbone):
+class _LegacyDescendBackbone(PublicAutoName, GraphEnergyTransformerBackbone):
     """RED control: the backbone with the PRE-FIX ``descend_capture`` (never forwards ``Ŵ``).
 
     Every other line matches the shipped backbone, so the projector is still created and BUILT

@@ -57,6 +57,7 @@ from train.dit import train_dit as trainer
 from train.dit.ema_callback import WeightEMACallback
 from train.dit.synthetic_data import build_dit_dataset, synthetic_records
 from train.dit.train_dit import TrainingConfig, config_from_argv
+from tests.layer_naming import PublicAutoName
 
 STEPS = 1
 BATCH = 4
@@ -198,7 +199,7 @@ class TestTheTrainerUsesStockFit:
     def test_the_predicate_discriminates(self) -> None:
         """Anti-vacuity: the ``is`` comparison is capable of being FALSE."""
 
-        class _Overridden(DiT):
+        class _Overridden(PublicAutoName, DiT):
             def train_step(self, data):  # pragma: no cover - never fitted
                 return super().train_step(data)
 
