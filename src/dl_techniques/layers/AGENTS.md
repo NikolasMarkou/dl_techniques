@@ -159,7 +159,7 @@ public surface, 18 export nothing — so neither shape is the default and you ha
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (18) | `activations` (35 names), `adapters` (13), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (35) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (18) | `activations` (35 names), `adapters` (13), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (35) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
 All 36 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
@@ -225,8 +225,11 @@ Check in this precedence order; proceed to the next step only when nothing fits.
 ### The factory contract
 
 **1. Every factory RAISES `ValueError` on an undeclared keyword.** Attention, ffn, norms,
-activations and embedding each reject a `bogus_key=1`; a new factory, or any new registry-backed
-dispatch, does the same. **Never filter-and-drop** — each of these was silent, and passed its tests:
+activations, embedding, logic, ssm, adapters, sampling and sequence_pooling each reject a
+`bogus_key=1`; a new factory, or any new registry-backed dispatch, does the same. The one recorded
+exception is `mixtures/factory.py`, which logs a warning naming the key and builds (a cross-plan
+ruling, pinned by `tests/test_layers/test_mixtures/test_factory.py`). **Never filter-and-drop** —
+each of these was silent, and passed its tests:
 
 | Misspelling | Consequence |
 |---|---|

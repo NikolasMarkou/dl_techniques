@@ -619,15 +619,15 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
 STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
 """Substring every strict-drop rejection message carries.
 
-DUPLICATION, deliberate and gated: the identical literal is defined in
-`layers/attention/factory.py`, `layers/ffn/factory.py`,
-`layers/embedding/factory.py` and `layers/sampling.py`. It is not centralised
+DUPLICATION, deliberate and gated: the identical literal is defined in every
+strict factory (attention, ffn, embedding, sampling, ssm, adapters,
+sequence_pooling). It is not centralised
 because every candidate home is either a peer package (importing one factory from
 another drags that package's whole layer tree into this module's import graph) or
 a new shared module (this plan's abstraction budget is 0). The lockstep is NOT
 hand-maintained: `tests/test_layers/test_activations/test_activation_factory.py::
-TestStrictDroppedKeys::test_marker_is_identical_across_all_five_factories` fails
-if any copy drifts.
+TestStrictDroppedKeys::test_marker_is_identical_in_every_factory` finds every
+copy in ``src`` and fails if one drifts.
 """
 
 # Base `keras.layers.Layer` kwargs. Every registered activation class takes

@@ -74,6 +74,8 @@ References:
         methods, highlighting that the optimal strategy is task-dependent.
 """
 
+import typing
+
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 
@@ -111,6 +113,54 @@ AggregationMethod = Literal['concat', 'add', 'multiply', 'weighted_sum']
 #: (``AttentionPooling``). ``'weighted'`` and the ``weighted_sum`` aggregation
 #: weights initialise at ``'ones'``; every other strategy owns no weight.
 _KERNEL_STRATEGIES = frozenset({'attention', 'multi_head_attention'})
+
+STRATEGY_NAMES: Tuple[str, ...] = typing.get_args(PoolingStrategy)
+AGGREGATION_NAMES: Tuple[str, ...] = typing.get_args(AggregationMethod)
+
+
+def check_strategy_config(
+    strategy: Union[str, List[str], Tuple[str, ...]],
+    aggregation_method: str,
+) -> List[str]:
+    """Check a strategy selection and return it as a list.
+
+    Interface contract (callers: ``SequencePooling.__init__`` and
+    ``factory.validate_sequence_pooling_config``, so a configuration the factory
+    accepts is one the layer accepts):
+
+    * ``strategy`` is one name or a list or tuple of names, each in
+      :data:`STRATEGY_NAMES`; ``aggregation_method`` is in
+      :data:`AGGREGATION_NAMES`, checked for any number of strategies.
+    * Returns the strategies as a new ``list``.
+    * Raises ``ValueError`` naming the offending value otherwise.
+
+    Args:
+        strategy: The ``strategy`` argument as the caller gave it.
+        aggregation_method: The ``aggregation_method`` argument.
+
+    Returns:
+        The strategy names as a list.
+
+    Raises:
+        ValueError: If a name is unknown or the selection is empty.
+    """
+    strategies = (
+        list(strategy) if isinstance(strategy, (list, tuple)) else [strategy]
+    )
+    if not strategies:
+        raise ValueError("SequencePooling: strategy must name at least one strategy.")
+    unknown = [s for s in strategies if s not in STRATEGY_NAMES]
+    if unknown:
+        raise ValueError(
+            f"SequencePooling: unknown pooling strategy {unknown!r}; "
+            f"expected names from {list(STRATEGY_NAMES)}."
+        )
+    if aggregation_method not in AGGREGATION_NAMES:
+        raise ValueError(
+            f"SequencePooling: unknown aggregation_method "
+            f"{aggregation_method!r}; expected one of {list(AGGREGATION_NAMES)}."
+        )
+    return strategies
 
 # ---------------------------------------------------------------------
 # Main Configurable Pooling Layer

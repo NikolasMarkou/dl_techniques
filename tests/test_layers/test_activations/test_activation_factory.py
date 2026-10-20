@@ -9,8 +9,8 @@ Covers N-01 of plan-2026-08-18T140459-7991552f:
 - base ``keras.layers.Layer`` kwargs (``trainable``, ``dtype``) are exempted and
   still build -- the non-regression pin, because these DID build before the
   hardening and a strict-to-registry-keys-only check would have broken them;
-- the strict-drop marker literal is identical across all five factories that
-  define it.
+- the strict-drop marker literal and the Keras base-parameter set are identical
+  in every ``src`` module that defines them (found by a walk, not a list).
 
 Registry-vs-constructor DRIFT is deliberately NOT re-tested here. It already has a
 home: `tests/test_layers/test_factory_registry_drift.py` covers `activations`
@@ -127,46 +127,66 @@ class TestStrictDroppedKeys:
         layer = resolve_activation_layer('sigmoid')
         assert isinstance(layer, keras.layers.Activation)
 
-    def test_marker_is_identical_across_all_five_factories(self):
-        """The five copies of the marker literal must stay in lockstep.
+    def test_marker_is_identical_in_every_factory(self):
+        """Every copy of the marker literal in ``src`` must stay in lockstep.
 
-        `STRICT_DROPPED_KEY_MARKER` is defined five times (attention, ffn,
-        embedding, activations, sampling) because every candidate shared home is
-        either a peer package -- importing one factory from another drags its
-        whole layer tree into the importer's graph -- or a new module, which
-        this plan has no abstraction budget for. A hand-maintained "keep these
-        equal" invariant is a defect; this test is what makes it not one.
+        `STRICT_DROPPED_KEY_MARKER` is defined once per strict factory because
+        every candidate shared home is either a peer package -- importing one
+        factory from another drags its whole layer tree into the importer's
+        graph -- or a new module. A hand-maintained "keep these equal"
+        invariant is a defect; this test is what makes it not one. It FINDS the
+        copies (a module-level assignment in any ``src`` file) instead of
+        listing them: the earlier hand list named five and missed the ssm and
+        adapters copies (plan-2026-10-14T062616-81938e81 D-200).
         """
-        from dl_techniques.layers.attention.factory import (
-            STRICT_DROPPED_KEY_MARKER as attention_marker,
-        )
-        from dl_techniques.layers.embedding.factory import (
-            STRICT_DROPPED_KEY_MARKER as embedding_marker,
-        )
-        from dl_techniques.layers.ffn.factory import (
-            STRICT_DROPPED_KEY_MARKER as ffn_marker,
-        )
-        from dl_techniques.layers.generative.sampling import (
-            STRICT_DROPPED_KEY_MARKER as sampling_marker,
-        )
-        markers = {
-            'attention': attention_marker,
-            'ffn': ffn_marker,
-            'embedding': embedding_marker,
-            'activations': STRICT_DROPPED_KEY_MARKER,
-            'sampling': sampling_marker,
-        }
-        assert len(set(markers.values())) == 1, (
-            f"the strict-drop marker has drifted between factories: {markers}"
+        copies = _module_level_literals("STRICT_DROPPED_KEY_MARKER")
+        assert len(copies) >= 8, f"the walk found only {sorted(copies)}"
+        assert "layers/sequence_pooling/factory.py" in copies
+        assert set(copies.values()) == {STRICT_DROPPED_KEY_MARKER}, (
+            f"the strict-drop marker has drifted between factories: {copies}"
         )
 
-    def test_keras_base_param_set_matches_the_norms_factory(self):
-        """`_KERAS_BASE_PARAMS` is duplicated from `norms/factory.py`.
+    def test_keras_base_param_set_is_identical_in_every_factory(self):
+        """Every copy of `_KERAS_BASE_PARAMS` in ``src`` is the same set.
 
-        Same lockstep argument as the marker above, same reason it is gated
-        instead of trusted.
+        Same lockstep argument as the marker above, same reason it is found
+        by a walk instead of trusted to a list.
         """
-        from dl_techniques.layers.norms.factory import (
-            _KERAS_BASE_PARAMS as norms_base_params,
+        copies = _module_level_literals("_KERAS_BASE_PARAMS")
+        assert len(copies) >= 5, f"the walk found only {sorted(copies)}"
+        assert "layers/sequence_pooling/factory.py" in copies
+        assert set(copies.values()) == {_KERAS_BASE_PARAMS}, (
+            f"the Keras base-parameter set has drifted between factories: {copies}"
         )
-        assert _KERAS_BASE_PARAMS == norms_base_params
+
+
+def _module_level_literals(name):
+    """``{path under src/dl_techniques: value}`` of every module-level ``name = <literal>``.
+
+    A ``frozenset({...})`` call is read as the frozenset of its literal argument.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[3] / "src" / "dl_techniques"
+    found = {}
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if name not in text:
+            continue
+        for node in ast.parse(text).body:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                continue
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                    and value.func.id == "frozenset"):
+                literal = frozenset(ast.literal_eval(value.args[0]))
+            else:
+                literal = ast.literal_eval(value)
+            found[path.relative_to(root).as_posix()] = literal
+    return found

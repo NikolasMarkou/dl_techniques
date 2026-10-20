@@ -27,9 +27,12 @@ since an earlier plan.
 `create_attention_layer` now raises the same
 `ValueError: ... unsupported parameter(s) [...]` (its own
 `STRICT_DROPPED_KEY_MARKER`, imported below) on any key the target type does not declare.
-The silent-discard sentence at the top of this docstring still holds VERBATIM for the
-remaining FOUR registry factories (`activations`, `mixtures`, `logic`, `sequence_pooling`),
-which is why this guard is still repo-wide and still necessary.
+**UPDATE 2026-10-20 (plan-2026-10-14T062616-81938e81/D-200): every registry factory but
+`mixtures` now raises.** `activations`, `logic`, `ssm`, `sampling` and `sequence_pooling` refuse
+an undeclared key as well; `mixtures` alone logs a warning naming the key and builds (a recorded
+cross-plan ruling). The silent-discard sentence at the top of this docstring now holds only for
+`mixtures`, and only half-silently. This guard is still repo-wide and still necessary for the
+reason below.
 Note also that the raise does NOT subsume this guard even for `embedding` or `attention`: a parameter
 REGISTERED but absent from the class ctor, or registered and never wired, passes the filter
 untouched and can only be caught by the registry-vs-ctor comparison below.
@@ -463,8 +466,8 @@ def test_registry_declares_every_constructor_param(factory, type_name, target, i
     factory), so for those three families the drift surfaces as a loud construction failure
     at a parameter the class genuinely accepts. `attention:gated`'s `num_kv_heads` was
     exactly that case and is why it had to be declared in the same commit as the raise.
-    The remaining families still drop the value without raising, which is where "silently"
-    still applies. Either way the registry is wrong and this test is what says so.
+    Since D-200 every family but `mixtures` raises; `mixtures` warns and drops. Either way
+    the registry is wrong and this test is what says so.
     """
     signature = _signature_params(target)
     declared = set(info.get("required_params", [])) | set(
@@ -474,10 +477,9 @@ def test_registry_declares_every_constructor_param(factory, type_name, target, i
     assert not missing, (
         f"{factory} registry entry '{type_name}' ({getattr(target, '__name__', target)}) "
         f"does not declare {missing}, which its constructor accepts. create_{factory}_* "
-        f"FILTERS kwargs against this registry, so a caller passing any of these either "
-        f"has the value SILENTLY DISCARDED and gets the class default (activations, "
-        f"mixtures, logic, sequence_pooling) or gets a hard ValueError for a parameter the "
-        f"class genuinely supports (ffn, embedding, attention -- the strict families). Add "
+        f"checks kwargs against this registry, so a caller passing any of these either "
+        f"gets a hard ValueError for a parameter the class genuinely supports (every "
+        f"strict family) or, for mixtures, a warning and the class default. Add "
         f"them to 'optional_params' with their real constructor defaults."
     )
 

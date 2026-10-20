@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 from .weighted_pooling import WeightedPooling
-from .sequence_pooling import SequencePooling
+from .sequence_pooling import SequencePooling, check_strategy_config
 from .attention_pooling import AttentionPooling
 
 # ---------------------------------------------------------------------
@@ -146,6 +146,26 @@ Each entry contains:
 """
 
 
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
+"""Substring every undeclared-keyword ``ValueError`` from this factory carries.
+
+The same literal is defined in the other strict factories (attention, ffn,
+embedding, activations, sampling, ssm, adapters); importing a peer factory would
+pull its layer tree into this module's import graph.
+``tests/test_layers/test_activations/test_activation_factory.py::TestStrictDroppedKeys::
+test_marker_is_identical_in_every_factory`` finds every definition in ``src``
+and fails if one drifts.
+"""
+
+# Base ``keras.layers.Layer`` kwargs. All three pooling classes forward
+# ``**kwargs`` to ``Layer.__init__``, so these build and are not refused. The
+# same frozenset lives in ``norms/factory.py`` and is pinned identical by the
+# same test class as the marker above.
+_KERAS_BASE_PARAMS = frozenset(
+    {'name', 'dtype', 'trainable', 'activity_regularizer', 'autocast'}
+)
+
+
 # ---------------------------------------------------------------------
 # Public API Functions
 # ---------------------------------------------------------------------
@@ -183,9 +203,33 @@ def validate_sequence_pooling_config(
         **kwargs: Parameter dictionary to validate for the specified type.
 
     Raises:
-        ValueError: If pooling_type is not supported, required parameters are
-            missing, or a provided parameter value violates its constraint.
+        ValueError: If pooling_type is not supported, a keyword is not
+            declared for it (the message carries
+            :data:`STRICT_DROPPED_KEY_MARKER`), required parameters are
+            missing, a provided parameter value violates its constraint, or a
+            ``'sequence'`` strategy or aggregation name is unknown.
     """
+    # DECISION plan-2026-10-14T062616-81938e81/D-200: refuse an undeclared
+    # keyword here, in the one function both entry points run, instead of
+    # filtering it out in create_sequence_pooling_layer. The filter turned
+    # `dropout=0.5` (for `dropout_rate`) into a pooler with no dropout and no
+    # error. Do NOT restore the filter; the Keras base kwargs stay exempt.
+    info = SEQUENCE_POOLING_REGISTRY.get(pooling_type)
+    if info is not None:
+        declared = (
+            set(info['required_params'])
+            | set(info['optional_params'])
+            | _KERAS_BASE_PARAMS
+        )
+        undeclared = sorted(set(kwargs) - declared)
+        if undeclared:
+            raise ValueError(
+                f"validate_sequence_pooling_config('{pooling_type}'): "
+                f"{len(undeclared)} {STRICT_DROPPED_KEY_MARKER} {undeclared}. "
+                f"'{pooling_type}' ({info['class'].__name__}) accepts only "
+                f"{sorted(declared)}."
+            )
+
     if pooling_type not in SEQUENCE_POOLING_REGISTRY:
         available_types = list(SEQUENCE_POOLING_REGISTRY.keys())
         raise ValueError(
@@ -229,6 +273,15 @@ def validate_sequence_pooling_config(
                 f"got {kwargs[param]}"
             )
 
+    if pooling_type == 'sequence':
+        check_strategy_config(
+            kwargs.get('strategy', info['optional_params']['strategy']),
+            kwargs.get(
+                'aggregation_method',
+                info['optional_params']['aggregation_method'],
+            ),
+        )
+
     logger.debug(
         f"Validation successful for '{pooling_type}' with parameters: {kwargs}"
     )
@@ -250,67 +303,43 @@ def create_sequence_pooling_layer(
         pooling_type: The type of pooling layer to create
             (``'attention'``, ``'weighted'``, or ``'sequence'``).
         name: Optional name for the layer instance.
-        **kwargs: Type-specific parameters for the pooling layer. See
-            ``get_sequence_pooling_info()`` for per-type parameter specs.
+        **kwargs: Type-specific parameters for the pooling layer, plus any of
+            ``dtype``, ``trainable``, ``activity_regularizer``, ``autocast``.
+            See ``get_sequence_pooling_info()`` for per-type parameter specs.
 
     Returns:
         A fully configured and instantiated sequence-pooling layer.
 
     Raises:
-        ValueError: If pooling_type is invalid, required parameters are missing,
-            parameter values are out of range, or layer construction fails.
-        TypeError: If parameter types are incompatible with the target class.
+        ValueError: Every failure path. A keyword the type does not declare
+            gives a message carrying :data:`STRICT_DROPPED_KEY_MARKER`; an
+            unknown type, a bad value or a constructor error gives a message
+            beginning ``Failed to create`` or the validator's own message.
     """
+    validate_sequence_pooling_config(pooling_type, **kwargs)
+
+    info = SEQUENCE_POOLING_REGISTRY[pooling_type]
+    pool_class = info['class']
+
+    # Defaults first, then the caller's values (every key is declared).
+    params = dict(info['optional_params'])
+    params.update(kwargs)
+    if name:
+        params['name'] = name
+
+    logger.info(
+        f"Creating '{pooling_type}' sequence pooling layer "
+        f"({pool_class.__name__}) with parameters: {params}"
+    )
+
     try:
-        # Validate configuration before proceeding
-        validate_sequence_pooling_config(pooling_type, **kwargs)
-
-        # Get layer information and class
-        info = SEQUENCE_POOLING_REGISTRY[pooling_type]
-        pool_class = info['class']
-
-        # Merge user parameters with defaults (user wins)
-        params = info['optional_params'].copy()
-        params.update(kwargs)
-
-        # Filter parameters to match the constructor signature
-        valid_param_names = set(info['required_params']) | set(
-            info['optional_params'].keys()
-        )
-        final_params = {
-            k: v for k, v in params.items() if k in valid_param_names
-        }
-
-        # Add name if provided
-        if name:
-            final_params['name'] = name
-
-        logger.info(
-            f"Creating '{pooling_type}' sequence pooling layer "
-            f"({pool_class.__name__}) with parameters: {final_params}"
-        )
-
-        # Instantiate the pooling layer
-        return pool_class(**final_params)
-
+        return pool_class(**params)
     except (TypeError, ValueError) as e:
-        # Provide detailed error context
-        info = SEQUENCE_POOLING_REGISTRY.get(pooling_type)
-        if info:
-            class_name = info['class'].__name__
-            error_msg = (
-                f"Failed to create '{pooling_type}' sequence pooling layer "
-                f"({class_name}). "
-                f"Required parameters: {info['required_params']}. "
-                f"Provided parameters: {list(kwargs.keys())}. "
-                f"Please verify parameter compatibility. Original error: {e}"
-            )
-        else:
-            error_msg = (
-                f"Failed to create sequence pooling layer. "
-                f"Unknown type '{pooling_type}'. Error: {e}"
-            )
-
+        error_msg = (
+            f"Failed to create '{pooling_type}' sequence pooling layer "
+            f"({pool_class.__name__}). "
+            f"Provided parameters: {list(kwargs.keys())}. Original error: {e}"
+        )
         logger.error(error_msg)
         raise ValueError(error_msg) from e
 

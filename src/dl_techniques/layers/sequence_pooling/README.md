@@ -114,8 +114,14 @@ except ValueError as e:
     print(f"Validation error: {e}")
 ```
 
-Validation checks type existence, required-parameter completeness, and light
-value-range constraints:
+Validation checks type existence, that every keyword is declared for the type,
+required-parameter completeness, light value-range constraints, and, for
+`'sequence'`, the `strategy` and `aggregation_method` names. A keyword the type
+does not declare raises a `ValueError` carrying `STRICT_DROPPED_KEY_MARKER`
+(`"unsupported parameter(s)"`), so a misspelling such as `dropout=` for
+`dropout_rate=` fails instead of building a pooler without dropout. The Keras
+base keywords (`name`, `dtype`, `trainable`, `activity_regularizer`,
+`autocast`) are always accepted.
 
 ```python
 # Raises ValueError: "Unknown sequence pooling type 'softmax_pool'"
@@ -126,6 +132,12 @@ validate_sequence_pooling_config('attention', num_heads=-1)
 
 # Raises ValueError: "Parameter 'dropout_rate' must be between 0.0 and 1.0, got 1.5"
 validate_sequence_pooling_config('attention', dropout_rate=1.5)
+
+# Raises ValueError: "... 1 unsupported parameter(s) ['dropout'] ..."
+validate_sequence_pooling_config('attention', dropout=0.5)
+
+# Raises ValueError: "SequencePooling: unknown pooling strategy ['bogus'] ..."
+validate_sequence_pooling_config('sequence', strategy='bogus')
 ```
 
 ## Layer-Specific Parameters
@@ -343,12 +355,14 @@ class MyProjectClassificationHead(keras.layers.Layer):
 ### Functions
 
 - **`create_sequence_pooling_layer(pooling_type, name=None, **kwargs)`** — Factory
-  for creating pooling layers with validation, default merging, and parameter
-  filtering. Returns a configured `keras.layers.Layer`.
+  for creating pooling layers with validation and default merging. An undeclared
+  keyword raises `ValueError` (it is never dropped). Returns a configured
+  `keras.layers.Layer`.
 - **`create_sequence_pooling_from_config(config)`** — Creates a layer from a
   configuration dictionary (pops the `'type'` key, forwards the rest).
 - **`validate_sequence_pooling_config(pooling_type, **kwargs)`** — Validates type
-  existence, required-parameter completeness, and value ranges. Raises `ValueError`.
+  existence, declared keywords, required-parameter completeness, value ranges and
+  the `'sequence'` strategy and aggregation names. Raises `ValueError`.
 - **`get_sequence_pooling_info()`** — Returns a dict mapping each pooling type to a
   shallow copy of its metadata (`description`, `required_params`, `optional_params`,
   `use_case`).
@@ -362,6 +376,8 @@ class MyProjectClassificationHead(keras.layers.Layer):
 - **`AggregationMethod`** — `Literal['concat', 'add', 'multiply', 'weighted_sum']`.
 - **`SEQUENCE_POOLING_REGISTRY`** — the underlying `Dict[str, Dict[str, Any]]`
   registry (prefer `get_sequence_pooling_info()` for read access).
+- **`STRICT_DROPPED_KEY_MARKER`** — `"unsupported parameter(s)"`, the substring every
+  undeclared-keyword `ValueError` from the factory carries.
 
 ### Classes
 

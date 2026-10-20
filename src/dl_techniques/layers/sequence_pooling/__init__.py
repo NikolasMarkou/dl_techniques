@@ -24,6 +24,7 @@ from .factory import (
     list_sequence_pooling_types,
     SequencePoolingType,
     SEQUENCE_POOLING_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
 )
 
 # Layer Classes
@@ -43,6 +44,7 @@ __all__ = [
     "list_sequence_pooling_types",
     "SequencePoolingType",
     "SEQUENCE_POOLING_REGISTRY",
+    "STRICT_DROPPED_KEY_MARKER",
 
     # Layer Classes
     "AttentionPooling",

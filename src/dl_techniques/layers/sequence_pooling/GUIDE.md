@@ -16,18 +16,18 @@ contract, is reachable through the factory, and serializes round-trip safely.
 
 The package exposes all pooling layers through a single registry-driven factory
 (`factory.py`). Dispatch is **pure registry lookup — no `if/elif` ladder**:
-`create_sequence_pooling_layer` validates the config, looks the class up in
-`SEQUENCE_POOLING_REGISTRY`, merges defaults with user kwargs, filters to valid
-parameter names, and instantiates. Adding a type is a registry edit, not a code
-branch.
+`create_sequence_pooling_layer` validates the config (an undeclared keyword raises a
+`ValueError` carrying `STRICT_DROPPED_KEY_MARKER`; it is never filtered out), looks
+the class up in `SEQUENCE_POOLING_REGISTRY`, merges defaults with user kwargs, and
+instantiates. Adding a type is a registry edit, not a code branch.
 
 ```python
 # create_sequence_pooling_layer (factory.py) — the dispatch is data, not control flow
+validate_sequence_pooling_config(pooling_type, **kwargs)  # refuses undeclared keys
 info = SEQUENCE_POOLING_REGISTRY[pooling_type]
-pool_class = info['class']
-params = info['optional_params'].copy()
+params = dict(info['optional_params'])
 params.update(kwargs)
-return pool_class(**final_params)
+return info['class'](**params)
 ```
 
 ### Keras 3 Compliance
