@@ -21,10 +21,10 @@ now constructor parameters:
   allocates during native ``.keras`` serialization; the vanilla copies did not.
 - **Analysis** (``analyze_every_steps``): ``0`` disables analysis entirely (the
   CLIP copy never analyzed); ``> 0`` runs :class:`ModelAnalyzer` synchronously.
-- **CSV schema** (``csv_fields``): ``None`` derives field names dynamically from
-  the first logged row (NLP / CLIP behavior); a fixed tuple uses
-  ``extrasaction="ignore"`` / ``restval=""`` so missing or extra keys never
-  raise (routing behavior), and adds ``epoch`` / ``lr`` columns.
+
+The step CSV takes its field names from the first logged row and pads any key
+that appears later. Its readers (``step_plots.plot_step_metrics``) need only
+the ``step`` column (D-195).
 
 ``_global_step`` (internal-counter mode) persists across multiple ``fit()``
 calls because it is an instance attribute seeded once from ``initial_step`` and
@@ -40,16 +40,14 @@ this one.
 import csv
 import gc
 import glob
-import math
 import os
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import keras
 
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 from dl_techniques.utils.logger import logger
 
-from train.common.callbacks import read_current_lr
 from train.common.step_plots import plot_step_metrics
 
 
@@ -84,10 +82,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         incremented in :meth:`on_train_batch_end`.
     :param gc_on_save: Call ``gc.collect()`` after each checkpoint save to free
         the transient NumPy buffers Keras allocates during ``.keras`` save.
-    :param csv_fields: Optional fixed CSV schema. ``None`` derives field names
-        dynamically from the first logged row. A tuple writes a fixed-schema CSV
-        (``extrasaction="ignore"``, ``restval=""``) and adds ``epoch`` / ``lr``
-        columns to each row.
     :param saved_model: The model written to ``step_*.keras`` and
         ``final.keras`` and handed to the analyzer. ``None`` (the default) is
         the model ``fit`` trains (``self.model``). Pass the inner model when
@@ -107,7 +101,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         plot_every_steps: int = 25000,
         step_counter: Optional[Any] = None,
         gc_on_save: bool = False,
-        csv_fields: Optional[Sequence[str]] = None,
         saved_model: Optional[keras.Model] = None,
     ) -> None:
         super().__init__()
@@ -120,14 +113,12 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self._plot_every_steps = plot_every_steps
         self._save_dir = save_dir
         self._gc_on_save = gc_on_save
-        self._csv_fields = tuple(csv_fields) if csv_fields is not None else None
 
         # Step source: external counter (routing) vs internal counter (vanilla).
         # The internal counter is seeded once here and NEVER reset in
         # on_train_begin, so it persists across multiple fit() calls (resume).
         self._counter = step_counter
         self._internal_step = initial_step
-        self._current_epoch = 0
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
         # Step files whose save raised; on_train_end fails the run on them.
@@ -187,9 +178,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
     def _global_step(self) -> int:
         return self.global_step
 
-    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        self._current_epoch = epoch
-
     def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         # Advance the internal counter only when we own it.
         if self._counter is None:
@@ -215,14 +203,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             and step % self._plot_every_steps == 0
         ):
             self._plot_metrics()
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        # Keras puts val_* keys into ``logs`` only at epoch end. For a fixed
-        # CSV schema (routing) we flush a row carrying those validation metrics;
-        # the dynamic-schema variants did not write an epoch-end row, so we keep
-        # that behavior to avoid changing their CSV layout.
-        if self._csv_fields is not None:
-            self._log_metrics(logs, val_logs=logs)
 
     def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
         # Both stages of multi-stage training call this; ``final.keras`` always
@@ -258,38 +238,15 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             self._csv_file = None
             self._csv_writer = None
 
-    def _current_lr(self) -> Optional[float]:
-        """The current learning rate, or ``None`` when it cannot be read.
-
-        ``None`` is written as an empty CSV field, which pandas reads as NaN and
-        ``compare_runs`` skips (D-189); a made-up 0.0 would read as a rate.
-        """
-        lr = read_current_lr(self.model)
-        return lr if math.isfinite(lr) else None
-
-    def _log_metrics(
-        self,
-        logs: Optional[Dict[str, Any]],
-        val_logs: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if logs is None and val_logs is None:
-            return
-
-        os.makedirs(os.path.dirname(self._csv_path) or ".", exist_ok=True)
-
-        if self._csv_fields is not None:
-            self._log_metrics_fixed(logs, val_logs)
-        else:
-            self._log_metrics_dynamic(logs)
-
-    def _log_metrics_dynamic(self, logs: Optional[Dict[str, Any]]) -> None:
-        """Dynamic-schema CSV row (NLP / vanilla / CLIP behavior).
+    def _log_metrics(self, logs: Optional[Dict[str, Any]]) -> None:
+        """One CSV row with the step and every numeric value in ``logs``.
 
         Coerces each value to ``float`` defensively (folded in from the CLIP
         variant) and pads any field that appeared later in the run.
         """
         if logs is None:
             return
+        os.makedirs(os.path.dirname(self._csv_path) or ".", exist_ok=True)
         row: Dict[str, Any] = {"step": self.global_step}
         for k, v in logs.items():
             try:
@@ -312,45 +269,6 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         # Pad any new keys that appeared mid-run so the writer never raises.
         for k in self._csv_writer.fieldnames:
             row.setdefault(k, None)
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
-
-    def _log_metrics_fixed(
-        self,
-        logs: Optional[Dict[str, Any]],
-        val_logs: Optional[Dict[str, Any]],
-    ) -> None:
-        """Fixed-schema CSV row (routing behavior).
-
-        Uses ``extrasaction="ignore"`` / ``restval=""`` so missing or extra
-        keys never raise, and adds ``epoch`` / ``lr`` columns.
-        """
-        if self._csv_writer is None or not os.path.exists(self._csv_path):
-            if self._csv_file is not None:
-                try:
-                    self._csv_file.close()
-                except Exception:
-                    pass
-            self._csv_file = open(self._csv_path, "a", newline="")
-            self._csv_writer = csv.DictWriter(
-                self._csv_file,
-                fieldnames=list(self._csv_fields),
-                extrasaction="ignore",
-                restval="",
-            )
-            if self._csv_file.tell() == 0:
-                self._csv_writer.writeheader()
-        row: Dict[str, Any] = {
-            "step": self.global_step,
-            "epoch": self._current_epoch,
-            "lr": self._current_lr(),
-        }
-        if logs:
-            row.update(logs)
-        if val_logs:
-            row.update(
-                {k: v for k, v in val_logs.items() if k.startswith("val_")}
-            )
         self._csv_writer.writerow(row)
         self._csv_file.flush()
 

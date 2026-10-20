@@ -316,9 +316,7 @@ _EXEMPT = {
          'records the failed step; on_train_end raises after the final save (D-183)'),
         ('close', 'pass', 'self._csv_file.close()',
          'closing the CSV handle'),
-        ('_log_metrics_dynamic', 'pass', 'self._csv_file.close()',
-         'closing the CSV handle'),
-        ('_log_metrics_fixed', 'pass', 'self._csv_file.close()',
+        ('_log_metrics', 'pass', 'self._csv_file.close()',
          'closing the CSV handle'),
     ],
     'train/common/timeseries.py': [
@@ -567,9 +565,9 @@ def test_the_census_counts_are_pinned():
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 60, "exempt": 61, None: 0}
+                      "optional": 60, "exempt": 60, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 60
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 61
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 60
 
 
 _PLANTED = '''

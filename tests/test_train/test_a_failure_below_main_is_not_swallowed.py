@@ -75,36 +75,6 @@ def test_step_checkpoints_that_all_save_end_the_run_cleanly(tmp_path):
     assert (tmp_path / "checkpoints" / "final.keras").is_file()
 
 
-def _lr_column(tmp_path, model):
-    """The ``lr`` cells a fixed-schema step log writes for two logged batches."""
-    import csv
-
-    from train.common.step_checkpoint import StepCheckpointCallback
-
-    callback = StepCheckpointCallback(
-        save_dir=str(tmp_path), save_every_steps=1000, analyze_every_steps=0,
-        log_every_steps=1, plot_every_steps=0, csv_fields=("step", "epoch", "lr", "loss"))
-    callback.set_model(model)
-    for batch in range(2):
-        callback.on_train_batch_end(batch, {"loss": 1.0})
-    callback.close()
-    with open(tmp_path / "training_log.csv", newline="") as handle:
-        return [row["lr"] for row in csv.DictReader(handle)]
-
-
-def test_a_learning_rate_that_cannot_be_read_is_an_empty_step_log_field(tmp_path):
-    """D-189: an unread rate is an empty field (NaN to pandas), never a made-up 0.0."""
-    model = _tiny_model()  # not compiled: no optimizer, no rate to read
-    assert _lr_column(tmp_path, model) == ["", ""]
-
-
-def test_a_readable_learning_rate_is_written_to_the_step_log(tmp_path):
-    """Control: a compiled model's rate is written as it is."""
-    model = _tiny_model()
-    model.compile(optimizer=keras.optimizers.SGD(learning_rate=0.125), loss="mse")
-    assert [float(value) for value in _lr_column(tmp_path, model)] == [0.125, 0.125]
-
-
 # ---------------------------------------------------------------------
 # train.common.datasets.collect_image_paths
 # ---------------------------------------------------------------------
