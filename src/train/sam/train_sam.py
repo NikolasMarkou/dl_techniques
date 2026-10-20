@@ -657,11 +657,11 @@ def train_sam(config: SAMTrainingConfig) -> Tuple[SAMTrainingModel, Any]:
         except Exception as error:  # pragma: no cover - reporting path
             logger.warning("Could not read GPU memory info: %s", error)
 
-    save_training_history_json(history, output_dir)
-
-    # A failed final save fails the run (D-102 of plan-2026-10-14T062616-81938e81).
+    # A failed final save or history write fails the run; the model is saved
+    # first (D-102, D-174 of plan-2026-10-14T062616-81938e81).
     model.save(output_dir / "final_model.keras")
     logger.info("Final model saved to %s", output_dir / "final_model.keras")
+    save_training_history_json(history, output_dir)
 
     return model, history
 

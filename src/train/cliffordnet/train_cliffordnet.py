@@ -553,8 +553,6 @@ def train_model(args) -> None:
     except Exception as e:
         logger.warning(f"Failed to save config: {e}")
 
-    save_training_history_json(history, results_dir)
-
     # ---- Save final model & validate ---------------------------------
     test_sample = x_test[:4]
     pre_save_output = model.predict(test_sample, verbose=0)
@@ -567,6 +565,8 @@ def train_model(args) -> None:
     # validate_model_loading itself.
     model.save(final_path)
     logger.info(f"Final model saved to: {final_path}")
+    # After the save: a failed history write raises (D-174).
+    save_training_history_json(history, results_dir)
     validate_model_loading(final_path, test_sample, pre_save_output, custom_objects)
 
     # ---- Load best checkpoint & evaluate -----------------------------

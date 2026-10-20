@@ -499,7 +499,6 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
 
     mlm_history = run_mlm_stage(config, encoder, train_texts, val_texts, run_dir)
     results["mlm"] = {k: [float(v) for v in vs] for k, vs in mlm_history.items()}
-    save_training_history_json(mlm_history, run_dir)
 
     if config.run_contrastive:
         contrastive_history = run_contrastive_stage(
@@ -508,6 +507,8 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
         results["contrastive"] = {
             k: [float(v) for v in vs] for k, vs in contrastive_history.items()
         }
+    # After both stages saved their encoder: a failed write raises (D-174).
+    save_training_history_json(mlm_history, run_dir)
 
     if config.run_embedding_eval:
         # An evaluation failure must never kill a training cell that has

@@ -161,11 +161,11 @@ def main(config: TrainingConfig) -> None:
         callbacks=callbacks,
     )
 
-    save_training_history_json(history, results_dir)
-
     final_model_path = Path(results_dir) / "final_model.keras"
     model.save(final_model_path)
     logger.info(f"Saved final model to {final_model_path}")
+    # After the save: a failed history write raises (D-174).
+    save_training_history_json(history, results_dir)
 
 # ---------------------------------------------------------------------
 

@@ -714,7 +714,6 @@ def main() -> None:
     logger.info("Training complete.")
     final_loss = history.history['val_loss'][-1]
     logger.info(f"Final Validation MSE: {final_loss:.6f}")
-    save_training_history_json(history, run_dir)
 
     # Persist the final (not necessarily best) model so a run leaves an
     # inspectable artifact even when `save_best_only=True` never fired (e.g.
@@ -724,6 +723,8 @@ def main() -> None:
     model_path = run_dir / "final_model.keras"
     model.save(model_path)
     logger.info(f"Saved trained model to {model_path}")
+    # After the save: a failed history write raises (D-174).
+    save_training_history_json(history, run_dir)
 
     # Visualization: final, definitive-quality post-hoc render. Reuses the
     # SAME `viz_manager` instance `KANVisualizationCallback` used during

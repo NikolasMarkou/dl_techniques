@@ -835,11 +835,11 @@ def train_dit(config: TrainingConfig) -> Tuple[DiT, Any, Path]:
                 values[-1] - values[0],
             )
 
-    save_training_history_json(history, run_dir)
-
-    # A failed final save fails the run (D-102 of plan-2026-10-14T062616-81938e81).
+    # A failed final save or history write fails the run; the model is saved
+    # first (D-102, D-174 of plan-2026-10-14T062616-81938e81).
     model.save(run_dir / "final_model.keras")
     logger.info("Final model saved to %s", run_dir / "final_model.keras")
+    save_training_history_json(history, run_dir)
 
     return model, history, run_dir
 

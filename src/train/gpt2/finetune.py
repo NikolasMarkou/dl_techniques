@@ -468,12 +468,13 @@ def finetune_gpt2(
         verbose=1,
     )
     logger.info("Fine-tuning completed!")
-    save_training_history_json(history, results_dir)
 
-    # Save
+    # Save the model, then the history: a failed write raises and must not cost
+    # the weights (D-174 of plan-2026-10-14T062616-81938e81).
     final_path = os.path.join(config.save_dir, "gpt2_finetuned.keras")
     model.save(final_path)
     logger.info(f"Model saved to: {final_path}")
+    save_training_history_json(history, results_dir)
 
     # Summary
     best_epoch = tf.argmin(history.history["val_loss"]).numpy()

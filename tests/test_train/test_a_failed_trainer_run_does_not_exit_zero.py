@@ -317,8 +317,9 @@ def test_a_run_whose_history_or_summary_write_fails_raises(
 # Measured at b50fd4e80: ``train_one_variant`` wrapped its ``config.json`` and
 # ``training_history.json`` writes in ``try/except Exception`` and logged a
 # WARNING, so the variant was recorded as trained with its record missing and
-# the sweep exited 0. ``save_training_history_json`` is best-effort by contract
-# (D-102) and returns ``None`` on failure; the trainer now checks it.
+# the sweep exited 0. The shared ``save_training_history_json`` returned ``None``
+# on failure until D-174 and the trainer checked it; it now raises itself, so the
+# history case below fails the real writer's ``open``.
 
 
 class _PredictingStubModel(_StubModel):
@@ -358,9 +359,11 @@ def test_a_variant_whose_config_json_write_fails_raises(monkeypatch, tmp_path):
 def test_a_variant_whose_history_write_fails_raises(monkeypatch, tmp_path):
     model = _PredictingStubModel(fail_save=False)
     module, run = _one_variant(monkeypatch, tmp_path, model)
-    # The shared writer's failure contract: it logs and returns None.
-    monkeypatch.setattr(module, "save_training_history_json", lambda *a, **k: None)
-    with pytest.raises(RuntimeError, match="training_history"):
+    # The real shared writer, its file write failing (D-174: it raises).
+    from train.common import run_io
+
+    monkeypatch.setattr(run_io, "open", _failing_open("training_history.json"), raising=False)
+    with pytest.raises(_DiskFull, match="training_history"):
         run()
     assert len(model.saved) == 1, model.saved
 

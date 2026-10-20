@@ -1154,12 +1154,10 @@ def main(argv=None) -> int:
             # built before the loop (Step 3 of plan-2026-09-18T045308-c89cdf76), so
             # this save is always valid even under `--epochs 1`, a loop that never
             # beat the `-1.0` best_val_accuracy sentinel, or a loop that raised on
-            # its very first iteration. Each save below is wrapped in its OWN
+            # its very first iteration. The model save below is wrapped in its own
             # try/except so a save failure is logged via logger.error and does NOT
-            # mask the ORIGINAL exception — nothing here re-raises or swallows
-            # anything, so Python's normal try/finally semantics let that original
-            # exception propagate unchanged once this finally block finishes. See
-            # decisions.md D-008.
+            # mask the ORIGINAL exception. The history write is not wrapped (amended
+            # by plan-2026-10-14T062616-81938e81 D-174, below). See decisions.md D-008.
             final_model_path = run_dir / "final_model.keras"
             try:
                 model.save(final_model_path)
@@ -1169,10 +1167,12 @@ def main(argv=None) -> int:
                     f"Failed to save final model to {final_model_path}: {save_error}"
                 )
 
-            try:
-                save_training_history_json(history, run_dir)
-            except Exception as save_error:
-                logger.error(f"Failed to save training history JSON: {save_error}")
+            # DECISION plan-2026-10-14T062616-81938e81/D-174: NOT wrapped. The shared
+            # writer raises on failure, so a failed history write fails the run.
+            # Raised while a loop exception propagates, it carries that exception
+            # as __context__ (both print). Do NOT re-wrap it in try/except-and-log:
+            # that exited 0 with the record missing. See decisions.md D-174.
+            save_training_history_json(history, run_dir)
 
     logger.info(
         f"Run complete — run_dir={run_dir}, epochs={args.epochs}, "

@@ -436,10 +436,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             validation_data=val_ds, validation_steps=validation_steps,
             callbacks=callbacks, verbose=2)
         fit_seconds = time.time() - start
-        save_training_history_json(history, run_dir)
 
         final_path = run_dir / LIGHTGLUE_MODEL_NAME
         lightglue.save(str(final_path))
+        # After the save: a failed history write raises (D-174).
+        save_training_history_json(history, run_dir)
         reloaded = keras.saving.load_model(str(final_path), compile=False)
         reload_verified = all(
             np.array_equal(a, b) for a, b in zip(lightglue.get_weights(), reloaded.get_weights()))

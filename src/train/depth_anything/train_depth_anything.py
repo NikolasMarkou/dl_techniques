@@ -702,14 +702,13 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     elapsed = time.time() - start_time
     logger.info(f"Training completed in {elapsed:.2f} seconds")
 
-    save_training_history_json(history, output_dir)
-
-    # A failed save or summary fails the run; the model is saved first so a
-    # failed summary never costs the weights (D-102 of
+    # A failed save, history or summary fails the run; the model is saved first
+    # so a failed record never costs the weights (D-102, D-174 of
     # plan-2026-10-14T062616-81938e81).
     inference_path = output_dir / "model_inference.keras"
     model.save(str(inference_path))
     logger.info(f"Inference model saved to: {inference_path}")
+    save_training_history_json(history, output_dir)
 
     trained_epochs = len(history.history.get("loss", []))
     best_loss = min(history.history.get("val_loss", [float("nan")]))

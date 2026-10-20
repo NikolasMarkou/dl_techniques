@@ -19,7 +19,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from dl_techniques.utils.logger import logger
 from train.common.config_io import save_config_json
 
 # ---------------------------------------------------------------------
@@ -121,16 +120,17 @@ def save_training_history_json(
         history: Any,
         output_dir: Union[str, Path],
         filename: str = "training_history.json",
-) -> Optional[Path]:
+) -> Path:
     """Write a Keras ``History`` to JSON as ``{metric: [per-epoch floats]}``.
 
     Every value is coerced with ``float()`` so numpy scalars and backend
     tensors serialize as plain JSON numbers.
 
-    This is a BEST-EFFORT artifact, matching the behaviour of the 20 call sites
-    it replaces: a failure here is logged as a warning and swallowed rather
-    than raised, because losing the history dump must never destroy a run whose
-    weights were already saved.
+    A failure RAISES, so a run whose record could not be written does not exit
+    0. Call it after the model is saved, so a failed write never costs the
+    weights; ``tests/test_train/test_a_history_write_follows_the_model_save.py``
+    checks both at every call site. (Until plan-2026-10-14T062616-81938e81
+    D-174 it logged a warning and returned ``None``.)
 
     Args:
         history: A ``keras.callbacks.History`` (anything with a ``.history``
@@ -139,19 +139,18 @@ def save_training_history_json(
         filename: Name of the JSON file.
 
     Returns:
-        The written path, or ``None`` if writing failed.
+        The written path.
+
+    Raises:
+        OSError: If the file cannot be written (e.g. ``output_dir`` is missing).
+        TypeError: If a value is not a number ``float()`` accepts, or a key
+            is not a string JSON accepts.
+        ValueError: If a value is a string ``float()`` cannot parse.
+        AttributeError: If ``history`` is neither a dict nor has ``.history``.
     """
-    try:
-        raw: Dict[str, Any] = (
-            history if isinstance(history, dict) else history.history
-        )
-        history_dict = {
-            key: [float(v) for v in values] for key, values in raw.items()
-        }
-        path = Path(output_dir) / filename
-        with open(path, "w") as handle:
-            json.dump(history_dict, handle, indent=2)
-        return path
-    except Exception as error:  # pragma: no cover - best-effort artifact
-        logger.warning(f"Failed to save training history: {error}")
-        return None
+    raw: Dict[str, Any] = history if isinstance(history, dict) else history.history
+    history_dict = {key: [float(v) for v in values] for key, values in raw.items()}
+    path = Path(output_dir) / filename
+    with open(path, "w") as handle:
+        json.dump(history_dict, handle, indent=2)
+    return path

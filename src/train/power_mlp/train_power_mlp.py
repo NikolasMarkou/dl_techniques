@@ -869,7 +869,6 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             callbacks=callbacks,
             verbose=1,
         )
-        save_training_history_json(history, str(run_dir))
         hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
         epochs_run = len(hist.get(MONITOR, []))
         non_finite = run_summary.non_finite_metrics(hist, MONITOR)
@@ -909,6 +908,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
                     "(TerminateOnNaN), not by EarlyStopping, and no best weights were restored",
                 ],
             })
+            save_training_history_json(history, str(run_dir))
             raise RuntimeError(message)
 
         stopped_early = epochs_run < config.epochs
@@ -937,6 +937,9 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
 
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
+        # After the save: a failed history write raises and must not cost the
+        # weights (D-174). The diverged branch above writes it before raising.
+        save_training_history_json(history, str(run_dir))
         # A reload error surfaces (D-085); a value mismatch is the recorded False.
         sample = x_val[:LOAD_CHECK_SAMPLES]
         load_check: Optional[bool] = bool(validate_model_loading(

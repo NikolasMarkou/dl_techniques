@@ -616,8 +616,8 @@ def train_one_variant(
     # DECISION plan-2026-10-14T062616-81938e81/D-117
     # Written after the model save, and a failed write RAISES: do NOT wrap these
     # in try/except-and-warn (that recorded a trained variant with its record
-    # missing and exited 0). The shared history writer is best-effort by
-    # contract (D-102) and returns None on failure, so its result is checked.
+    # missing and exited 0). The shared history writer raises on failure itself
+    # (amended by D-174 of the same plan; it returned None until then).
     with open(os.path.join(results_dir, "config.json"), "w") as f:
         json.dump({
             "variant": variant_name,
@@ -637,10 +637,7 @@ def train_one_variant(
             "layer_scale_init": args.layer_scale_init,
             "parameters": param_count,
         }, f, indent=2)
-    if save_training_history_json(history, results_dir) is None:
-        raise RuntimeError(
-            f"{variant_name}: training_history.json was not written to "
-            f"{results_dir} (the reason is logged above)")
+    save_training_history_json(history, results_dir)
 
     summary_path = os.path.join(results_dir, "training_summary.txt")
     with open(summary_path, "w") as f:

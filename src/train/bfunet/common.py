@@ -3230,8 +3230,6 @@ def _train_in_run_dir(
     fit_wall_seconds = time.time() - start
     logger.info(f"Training completed in {fit_wall_seconds:.2f}s")
 
-    save_training_history_json(history, output_dir)
-
     # ``TerminateOnNaN`` ends a run whose loss went non-finite, but ``fit`` then returns
     # normally, so everything below (final save, the trainer's "Training completed
     # successfully!") used to run on NaN weights. Record the divergence and raise BEFORE any
@@ -3262,6 +3260,7 @@ def _train_in_run_dir(
             fit_wall_seconds=fit_wall_seconds,
             message=message,
         )
+        save_training_history_json(history, output_dir)
         raise RuntimeError(message)
 
     if config.expose_bottleneck:
@@ -3290,6 +3289,9 @@ def _train_in_run_dir(
 
     model.save(final_path)
     logger.info(f"Saved final (last-epoch) model -> {final_path}")
+    # After every model save: a failed history write raises and must not cost the
+    # weights (D-174). The diverged branch above writes it before raising.
+    save_training_history_json(history, output_dir)
 
     model_loading_validated: Optional[bool] = None
     if round_trip_pred is not None:

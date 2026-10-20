@@ -101,9 +101,12 @@ See "Visualizations" below for what each of the five files shows.
 - `final_model.keras` and `training_history.json` — **attempted on every run,
   including one that raises mid-loop.** The epoch loop body runs inside a
   `try/finally`, so if `train_hebbian`/`model.save()`/`extract_features` raises on
-  some epoch, both saves are still attempted on the way out (best-effort: a save
-  that itself then raises is caught, logged via `logger.error`, and does not mask
-  the original exception — nothing here silently swallows a failure). This was
+  some epoch, both saves are still attempted on the way out. A final-model save
+  that itself then raises is caught and logged via `logger.error`. A failed
+  history write raises (the shared writer's contract since D-174 of
+  plan-2026-10-14T062616-81938e81), so the run fails; if a loop exception is
+  already propagating, it is chained as the new exception's `__context__` and
+  both are printed. This was
   RED-then-GREEN proven with a forced mid-loop exception
   (`tests/test_train/test_mothnet/test_train_mothnet.py::
   test_final_save_attempted_on_mid_loop_exception`).

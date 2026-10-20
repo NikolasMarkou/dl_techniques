@@ -4,8 +4,10 @@ This module replaced three blocks that were copy-pasted across ~20 trainers, so
 the contracts worth pinning are the ones a call site would silently depend on:
 
 - the JSON dump is byte-identical to the inline block it replaced
-- it is BEST-EFFORT (warns and returns None; never raises), because it runs
-  after the weights are already saved
+- a failed write RAISES (plan-2026-10-14T062616-81938e81 D-174; until then it
+  warned and returned None, so a run with its record missing exited 0). Every
+  call site writes after the model save, so the raise never costs the weights
+  (``test_a_history_write_follows_the_model_save.py``)
 - ``prepare_run_dir`` both creates the directory and writes the config
 - ``default_experiment_name`` drops empty fragments so a disabled optional
   suffix does not leave a doubled underscore
@@ -163,26 +165,32 @@ class TestSaveTrainingHistoryJson:
         path = save_training_history_json(self._history(), tmp_path)
         assert path == tmp_path / "training_history.json"
 
-    def test_unserializable_values_warn_instead_of_raising(self, tmp_path):
-        """Best-effort: this runs AFTER the weights are saved."""
-        result = save_training_history_json(
-            _FakeHistory({"loss": [object()]}), tmp_path
-        )
-        assert result is None
+    def test_an_unserializable_value_raises(self, tmp_path):
+        with pytest.raises(TypeError):
+            save_training_history_json(_FakeHistory({"loss": [object()]}), tmp_path)
+        assert not (tmp_path / "training_history.json").exists()
 
-    def test_missing_directory_warns_instead_of_raising(self, tmp_path):
-        result = save_training_history_json(
-            self._history(), tmp_path / "does" / "not" / "exist"
-        )
-        assert result is None
+    def test_a_missing_directory_raises(self, tmp_path):
+        missing = tmp_path / "does" / "not" / "exist"
+        with pytest.raises(FileNotFoundError):
+            save_training_history_json(self._history(), missing)
+
+    def test_a_failed_open_raises_the_os_error(self, tmp_path, monkeypatch):
+        """A full disk or a read-only run dir: the error reaches the caller unchanged."""
+        def full_disk(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("builtins.open", full_disk)
+        with pytest.raises(OSError, match="No space left"):
+            save_training_history_json(self._history(), tmp_path)
 
     def test_control_a_real_write_is_detectable(self, tmp_path):
-        """Guard against the failure tests passing vacuously.
+        """Guard against the failure tests passing for the wrong reason.
 
-        If writing never worked, the two tests above would pass for the wrong
-        reason. This proves the success path produces a file.
+        The success path writes the file and returns its path.
         """
-        assert save_training_history_json(self._history(), tmp_path) is not None
+        assert save_training_history_json(self._history(), tmp_path) == (
+            tmp_path / "training_history.json")
         assert (tmp_path / "training_history.json").exists()
 
 
