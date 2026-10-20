@@ -40,6 +40,7 @@ this one.
 import csv
 import gc
 import glob
+import math
 import os
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -48,6 +49,7 @@ import keras
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 from dl_techniques.utils.logger import logger
 
+from train.common.callbacks import read_current_lr
 from train.common.step_plots import plot_step_metrics
 
 
@@ -256,18 +258,14 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             self._csv_file = None
             self._csv_writer = None
 
-    def _current_lr(self) -> float:
-        """Best-effort current learning rate (0.0 if unavailable)."""
-        opt = getattr(self.model, "optimizer", None)
-        if opt is None:
-            return 0.0
-        lr = opt.learning_rate
-        try:
-            if callable(lr):
-                return float(lr(opt.iterations))
-            return float(keras.ops.convert_to_numpy(lr))
-        except Exception:
-            return 0.0
+    def _current_lr(self) -> Optional[float]:
+        """The current learning rate, or ``None`` when it cannot be read.
+
+        ``None`` is written as an empty CSV field, which pandas reads as NaN and
+        ``compare_runs`` skips (D-189); a made-up 0.0 would read as a rate.
+        """
+        lr = read_current_lr(self.model)
+        return lr if math.isfinite(lr) else None
 
     def _log_metrics(
         self,

@@ -312,8 +312,6 @@ _EXEMPT = {
          "recorded as the analysis block's status unreadable and its error in the summary"),
     ],
     'train/common/step_checkpoint.py': [
-        ('_current_lr', 'return 0.0', 'if callable(lr):',
-         'the learning-rate column of the step log'),
         ('_save_checkpoint', 'Checkpoint save failed at step', 'self.checkpoint_model.save(path)',
          'records the failed step; on_train_end raises after the final save (D-183)'),
         ('close', 'pass', 'self._csv_file.close()',
@@ -569,9 +567,9 @@ def test_the_census_counts_are_pinned():
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 60, "exempt": 62, None: 0}
+                      "optional": 60, "exempt": 61, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 60
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 62
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 61
 
 
 _PLANTED = '''
