@@ -92,7 +92,6 @@ from .perceiver_transformer import PerceiverTransformerLayer
 from .eomt_transformer import EomtTransformer
 from .adaln_zero import AdaLNZeroConditionalBlock
 from .free_transformer import BinaryMapper, FreeTransformerLayer
-from .progressive_focused_transformer import PFTBlock
 from .gated_linear_attention_block import GatedLinearAttentionBlock
 from .area_attention_block import AreaAttentionBlock
 
@@ -140,7 +139,6 @@ __all__ = [
     "AdaLNZeroConditionalBlock",
     "BinaryMapper",
     "FreeTransformerLayer",
-    "PFTBlock",
     "GatedLinearAttentionBlock",
     "AreaAttentionBlock",
 

@@ -13,7 +13,6 @@ Registered block types:
 - ``"eomt_transformer"``: :class:`EomtTransformer`
 - ``"adaln_zero_conditional_block"``: :class:`AdaLNZeroConditionalBlock`
 - ``"free_transformer_layer"``: :class:`FreeTransformerLayer`
-- ``"progressive_focused_transformer_block"``: :class:`PFTBlock`
 - ``"gated_linear_attention_block"``: :class:`GatedLinearAttentionBlock`
 - ``"area_attention_block"``: :class:`AreaAttentionBlock`
 - ``"energy_transformer"``: :class:`EnergyTransformer`
@@ -46,7 +45,6 @@ from .perceiver_transformer import PerceiverTransformerLayer
 from .eomt_transformer import EomtTransformer
 from .adaln_zero import AdaLNZeroConditionalBlock
 from .free_transformer import BinaryMapper, FreeTransformerLayer
-from .progressive_focused_transformer import PFTBlock
 from .gated_linear_attention_block import GatedLinearAttentionBlock
 from .area_attention_block import AreaAttentionBlock
 from .energy_transformer import EnergyTransformer, HopfieldNetwork
@@ -293,34 +291,6 @@ TRANSFORMER_BLOCK_REGISTRY = {
             "stochastic_depth_rate",
             "num_register_tokens",
             "use_bias_free_attention",
-        ],
-    },
-    "progressive_focused_transformer_block": {
-        "cls": PFTBlock,
-        "required_params": [
-            "dim",
-            "num_heads",
-        ],
-        "optional_params": [
-            "head_dim",
-            "ffn_type",
-            "ffn_args",
-            "intermediate_size",
-            "attention_type",
-            "attention_args",
-            "normalization_type",
-            "norm_args",
-            "dropout_rate",
-            "attention_dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-            "layer_scale_init",
-            "stochastic_depth_rate",
-            "local_window_size",
-            "global_ratio",
         ],
     },
     "gated_linear_attention_block": {

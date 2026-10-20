@@ -2,15 +2,15 @@
 
 Why this file exists
 --------------------
-Deleting the scale multiply is caught by ZERO tests in five separate files, every
-deletion proven non-inert:
+Deleting the scale multiply was caught by ZERO tests in five separate files, every
+deletion proven non-inert (the fifth, the shared PFT-SR variant attention layer,
+was deleted in plan-2026-10-14T062616-81938e81 step 7.1, D-216):
 
     multi_head_cross_attention.py   0 / 93   (widest blast radius -- `multi_head`
                                               and `perceiver` both delegate here)
     single_window_attention.py      0 / 63
     ideogram4_attention.py          0 / 13
     lighthouse_attention.py         0 / 12
-    progressive_focused_attention.py 0 / 19
 
 Without the scale, attention logits grow with ``head_dim``, softmax saturates and
 gradients vanish -- a model that trains badly rather than one that crashes, which
@@ -34,7 +34,6 @@ Measured deltas on HEAD for a x2 perturbation:
     single_window         0.378
     ideogram4             0.567
     lighthouse            1.335
-    progressive_focused   0.530
 """
 
 import keras
@@ -47,9 +46,6 @@ from dl_techniques.layers.attention.lighthouse_attention import (
 )
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
-)
-from dl_techniques.layers.attention.progressive_focused_attention import (
-    ProgressiveFocusedAttention,
 )
 from dl_techniques.layers.attention.single_window_attention import (
     SingleWindowAttention,
@@ -70,20 +66,12 @@ def _sequence():
     return np.random.default_rng(0).normal(size=(2, TOKENS, DIM)).astype("float32")
 
 
-def _feature_map():
-    return np.random.default_rng(0).normal(size=(1, 8, 8, DIM)).astype("float32")
-
-
 def _rope_tables():
     """Hand-built cos/sin tables; `Ideogram4Attention.call` requires them."""
     position = np.arange(TOKENS)[None, :, None]
     inv_freq = 1.0 / (10000 ** (np.arange(0, HEAD_DIM, 2) / HEAD_DIM))[None, None, :]
     angle = np.repeat((position * inv_freq).astype("float32"), 2, axis=-1)
     return np.cos(angle).astype("float32"), np.sin(angle).astype("float32")
-
-
-def _unwrap(out):
-    return out[0] if isinstance(out, (tuple, list)) else out
 
 
 def _multi_head_cross():
@@ -115,18 +103,11 @@ def _lighthouse():
     ), "_scale"
 
 
-def _progressive_focused():
-    return ProgressiveFocusedAttention(
-        dim=DIM, num_heads=HEADS, window_size=4
-    ), (lambda layer: _unwrap(layer(_feature_map(), training=False))), "_scale"
-
-
 LAYERS = {
     "multi_head_cross": _multi_head_cross,
     "single_window": _single_window,
     "ideogram4": _ideogram4,
     "lighthouse": _lighthouse,
-    "progressive_focused": _progressive_focused,
 }
 
 

@@ -20,8 +20,9 @@ away:
    window may attend iff their ``(row_wrapped, col_wrapped)`` pair is equal.
 2. *Reference 3x3 region image* (canonical Swin).  The standard ``img_mask``
    slice-counter construction from the reference Swin implementation (mirrored
-   in-repo at ``layers/attention/progressive_focused_attention.py`` in
-   ``_compute_attention_mask``), partitioned with the same function.
+   in-repo by ``shifted_window_mask`` in
+   ``models/vision/super_resolution/pft_sr/blocks.py``), partitioned with the
+   same function.
 
 The two labellings are **not** identical globally -- the reference splits the
 non-wrapped rows into two slices while wrap status does not -- but the pairwise
@@ -161,7 +162,7 @@ def reference_region_windows(
 
     This is the standard ``img_mask`` slice-counter construction of the
     reference Swin implementation (and of the in-repo
-    ``ProgressiveFocusedAttention._compute_attention_mask``), reproduced here
+    ``pft_sr.blocks.shifted_window_mask``), reproduced here
     with no dependency on :func:`wrap_status_windows`.
 
     Args:

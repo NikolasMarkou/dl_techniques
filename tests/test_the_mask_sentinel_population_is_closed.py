@@ -359,13 +359,6 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "The site carries its own WHAT-NOT-TO-DO anchor against the additive "
         "rewrite."
     ),
-    (
-        "dl_techniques/layers/attention/progressive_focused_attention.py",
-        "ProgressiveFocusedAttention._apply_sparsity",
-    ): (
-        "where-form, inside the documented-inert 'threshold' sparsity branch. "
-        "Selection, not multiplication, so the additive hazard cannot arise."
-    ),
     ("dl_techniques/layers/attention/common.py", "<module>"): (
         "MASK_BIAS_VALUE is THE canonical constant, and it is contracted to be "
         "used only inside a mask_dtype(...) chain (>= float32), never in the raw "
@@ -1532,8 +1525,9 @@ class TestTheAllowlistItselfIsWellFormed:
             path for path, _ in SENTINEL_ALLOWLIST if path.startswith(LIBRARY_PREFIX)
         ]
         # 18 since plan-2026-10-14T062616-81938e81 D-203 deleted 8 library
-        # entries whose literals were gone; was 26.
-        assert len(library_keys) >= 18, (
+        # entries whose literals were gone; was 26. 17 since step 7.1 (D-216)
+        # deleted the shared PFT-SR variant attention layer and its one entry.
+        assert len(library_keys) >= 17, (
             f"only {len(library_keys)} allowlist keys are library-relative; the "
             f"census walks src/ and every library key needs the "
             f"{LIBRARY_PREFIX!r} prefix"

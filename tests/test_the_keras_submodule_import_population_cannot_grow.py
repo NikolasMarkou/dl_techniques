@@ -23,6 +23,11 @@ Re-measured at Step 2.6 of the same plan (D-162), after the user's
 ``timestral`` port (6d757c6a6, 10 statements in 8 files) was converted:
 **538 statements in 516 files**. The old ceilings (543 / 521) were 5 above the
 population, so the port's 10 only showed up as 548 > 543.
+
+Step 7.1 of the same plan (D-216): **536 statements in 514 files**. One
+statement left with a deleted test file (the shared PFT-SR variant block's
+tests) and one with ``test_guide_conformance.py``, converted while its
+deleted subject was dropped.
 """
 
 import ast
@@ -35,8 +40,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("src", "tests")
 
 #: Measured ceilings (statements, files). Lower them when a file is converted.
-STATEMENT_CEILING = 538
-FILE_CEILING = 516
+STATEMENT_CEILING = 536
+FILE_CEILING = 514
 
 #: Files converted by name; they must stay clean whatever the totals do.
 CONVERTED = (
@@ -51,6 +56,7 @@ CONVERTED = (
     "src/dl_techniques/models/time_series/timestral/model.py",
     "src/dl_techniques/models/time_series/timestral/scaler.py",
     "tests/test_models/test_timestral/test_forecaster.py",
+    "tests/test_layers/test_transformers/test_guide_conformance.py",
 )
 
 

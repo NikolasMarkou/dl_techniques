@@ -26,7 +26,6 @@ normalization registry keys, which are documented in the sibling packages and in
 | `AdaLNZeroConditionalBlock` | DiT-style adaptive LayerNorm-zero conditional block. | Diffusion transformers and other conditioned stacks. |
 | `AreaAttentionBlock` | The YOLOv12 attention stage over a 4D feature map: `AreaAttention` + a 1x1-conv MLP, each in a plain residual. | YOLOv12-style detection backbones. |
 | `GatedLinearAttentionBlock` | Recurrent sequence mixing with one `(head_dim, head_dim)` state per head; linear, not quadratic, in sequence length. | Long-sequence causal mixing (Qwen3-Next uses it 3x per block). |
-| `PFTBlock` | A block inspired by the Progressive Focused Transformer (PFT-SR, CVPR 2025): score-domain focusing, per-window LePE, factory FFN. Not the official layer, which is `models/vision/super_resolution/pft_sr/blocks.PFTLayer`; no model builds this one. | Experiments with inherited attention maps. |
 | `FreeTransformerLayer` / `BinaryMapper` | FREE latent-variable transformer: a causal block with an optional encoder path inferring a discrete latent, and the straight-through binary latent mapper. | Research on latent-variable transformers only — see the gotcha below. |
 | `EnergyTransformer` / `HopfieldNetwork` | Energy Transformer block (Hoover et al., NeurIPS 2023): `T` steps of gradient descent on one scalar energy, and its associative-memory sub-layer. | Energy-based / Lyapunov-descent residual streams. |
 
@@ -183,7 +182,7 @@ your editor and `inspect.signature` are the authoritative list.
 import keras
 from dl_techniques.layers.transformers import (
     SwinTransformerBlock, SwinConvBlock, PerceiverTransformerLayer, EomtTransformer,
-    AreaAttentionBlock, GatedLinearAttentionBlock, PFTBlock, EnergyTransformer,
+    AreaAttentionBlock, GatedLinearAttentionBlock, EnergyTransformer,
 )
 
 swin = SwinTransformerBlock(dim=96, num_heads=3, window_size=7, shift_size=7 // 2)
@@ -199,7 +198,6 @@ eomt = EomtTransformer(hidden_size=768, num_heads=12, use_masked_attention=True,
 
 area = AreaAttentionBlock(dim=256, num_heads=8, area=4)
 gla = GatedLinearAttentionBlock(dim=512, num_heads=8, max_seq_len=2048)
-pft = PFTBlock(dim=180, num_heads=6, window_size=16, mlp_ratio=2.0)
 
 et = EnergyTransformer(embed_dim=768, num_heads=12, head_dim=64, hopfield_dim=3072,
                        num_steps=12, step_size=0.1, attn_self=False)
@@ -272,8 +270,6 @@ only: no patchify, no `MASK` token, no decoder.
   not redesigned: the encoder path's cross-attention does not receive the sequence as separate K/V,
   so the posterior `Q(Z|S)` is unconditional on `S` (in-code note D-002). No production model depends
   on this layer.
-- **`PFTBlock` lives in `progressive_focused_transformer.py`** — the module name, not
-  `progressive_focused_transformer_block`.
 - **`TransformerLayer`'s `dropout_rate` never applies after attention.** If you want dropout on the
   attention weights, that is `attention_dropout_rate`.
 - **A causal stack's final norm runs at `1e-3`, NOT the norm factory's `1e-6`.** Every layer built

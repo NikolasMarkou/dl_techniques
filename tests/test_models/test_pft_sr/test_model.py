@@ -97,9 +97,10 @@ if __name__ == "__main__":
 
 
 class TestTheDropPathScheduleReachesTheLayers:
-    """Moved from ``test_progressive_focused_transformer.py`` (its
-    ``TestPftSrConsumerSmoke``) when PFT-SR stopped building ``PFTBlock``
-    (plan-2026-10-14T062616-81938e81 step 7, D-212). The official PFT has no
+    """Moved from the shared transformer block's tests (their
+    ``TestPftSrConsumerSmoke``) when PFT-SR stopped building that block
+    (plan-2026-10-14T062616-81938e81 step 7, D-212; the block and its tests
+    were deleted in step 7.1, D-216). The official PFT has no
     stochastic depth; this port keeps it as an opt-in, zero by default."""
 
     def test_a_nonzero_rate_builds_and_runs_in_training(self):
@@ -251,8 +252,9 @@ class TestPFTSRGradientFlow:
 # (base) shifted blocks x one (1, 1024, 1024) array at window_size=32 -- that
 # was registered as a weight, inflating the totals to 13_219_603 / 34_384_803
 # (repo_medium's window_size=8 mask is tiny: 4_120_739 total). A later fix to
-# `ProgressiveFocusedAttention` (the SW-MSA mask crashing every enclosing
-# `Model`) made the mask a plain numpy array cached at build time, converted
+# the shared SW-MSA attention layer PFT-SR then built (the mask crashing every
+# enclosing `Model`; that layer was deleted in step 7.1, D-216) made the mask a
+# plain numpy array cached at build time, converted
 # to a tensor only inside `call()`, so `count_params()` no longer counts it.
 # The three pins below are the TRAINABLE totals from the derivation above --
 # re-measured 2026-09-04 after that fix, and now identical to the trainable

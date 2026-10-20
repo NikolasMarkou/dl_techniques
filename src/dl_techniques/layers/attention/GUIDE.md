@@ -224,9 +224,8 @@ message while sharing one implementation.
 *   **Do NOT adopt where the local message carries a trailing clause telling the caller the actual
     fix** (e.g. "... or pass `head_dim` explicitly"). That clause is the useful half of the
     message.
-*   Four files declined on exactly these grounds and carry a cross-reference comment instead:
-    `gated_attention.py`, `linear_attention.py`, `progressive_focused_attention.py`,
-    `capsule_routing_attention.py`.
+*   Three files declined on exactly these grounds and carry a cross-reference comment instead:
+    `gated_attention.py`, `linear_attention.py`, `capsule_routing_attention.py`.
 *   Tests use `pytest.raises(..., match=...)`. Grep the file's test module for `match=` before
     swapping a message.
 

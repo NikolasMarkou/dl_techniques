@@ -5,11 +5,10 @@ interface that builds them from a config dict. Import a class directly, or
 call `create_attention_layer(type=...)` when the type comes from
 configuration.
 
-`factory.py` registers 35 keys; this package re-exports 38 layer classes,
+`factory.py` registers 35 keys; this package re-exports 37 layer classes,
 32 of them reachable through `create_attention_layer(type=...)`. The other
-6 are direct-import only: `ProgressiveFocusedAttention`,
-`Ideogram4Attention`, `MMDiTJointAttention`, `AttentionRoutingCapsule`,
-`CapsuleBlockV2`, `WindowAttention`.
+5 are direct-import only: `Ideogram4Attention`, `MMDiTJointAttention`,
+`AttentionRoutingCapsule`, `CapsuleBlockV2`, `WindowAttention`.
 
 `WindowAttention` has no factory key of its own. The keys `'window'`,
 `'window_zigzag'` and `'window_band'` are registered against three
@@ -97,8 +96,6 @@ from .rpc_attention import RPCAttention
 # Additional specialized attention, with mixed factory coverage.
 # SingleWindowAttention is registered under key 'single_window' and
 # WaveFieldAttention under 'wave_field'; the rest are direct-import only.
-# direct only
-from .progressive_focused_attention import ProgressiveFocusedAttention
 # key 'single_window'
 from .single_window_attention import SingleWindowAttention
 # key 'wave_field'
@@ -167,7 +164,6 @@ __all__ = [
 
     # Additional specialized, mixed factory coverage — see the per-name
     # comments above each import. Comments here sit on their own line.
-    "ProgressiveFocusedAttention",
     # factory key 'single_window'
     "SingleWindowAttention",
     # factory key 'wave_field'

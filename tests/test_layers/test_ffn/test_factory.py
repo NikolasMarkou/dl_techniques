@@ -1859,19 +1859,6 @@ def _b_gated_linear_attention_block():
     return b.output_ffn
 
 
-def _b_progressive_focused_transformer():
-    from dl_techniques.layers.transformers.progressive_focused_transformer import (
-        PFTBlock,
-    )
-    # The 8 hardcoded per-type branches AND the generic `else` fallback
-    # (reached with a type outside the hardcoded switch).
-    for ffn_type in ('mlp', 'swiglu', 'geglu', 'glu', 'swin_mlp', 'orthoglu',
-                     'differential', 'residual', 'gelu_tanh'):
-        b = PFTBlock(dim=16, num_heads=2, ffn_type=ffn_type)
-        b.build((None, 8, 8, 16))
-    return b._ffn
-
-
 def _b_transformer():
     from dl_techniques.layers.transformers.transformer import TransformerLayer
     b = TransformerLayer(hidden_size=16, num_heads=2, intermediate_size=32)
@@ -2053,8 +2040,6 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/transformers/free_transformer.py": _b_free_transformer,
     "layers/transformers/gated_linear_attention_block.py":
         _b_gated_linear_attention_block,
-    "layers/transformers/progressive_focused_transformer.py":
-        _b_progressive_focused_transformer,
     "layers/transformers/transformer.py": _b_transformer,
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
     "models/vision/dino/dino_v2.py": _b_models_dino_v2,
