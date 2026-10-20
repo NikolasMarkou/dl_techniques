@@ -175,6 +175,15 @@ def main() -> None:
         f"ALL DONE in {dt/3600:.2f}h | ok={grand_ok:,} skip={grand_skip:,} "
         f"err={grand_err:,} | dst={args.dst_root}"
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: an image that failed to
+    # resize is counted, every split still runs, and then the run raises. Do NOT
+    # return normally: the linked manifests name images that are not there, and
+    # the run exited 0. A rerun skips the finished ones. See decisions.md D-183.
+    if grand_err:
+        raise RuntimeError(
+            f"{grand_err:,} image(s) failed to resize (the first 20 per split are "
+            f"logged above); rerun to retry them"
+        )
 
 
 if __name__ == "__main__":

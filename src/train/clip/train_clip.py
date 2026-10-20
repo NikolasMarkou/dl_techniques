@@ -273,6 +273,8 @@ class CLIPInference:
     """Inference utilities for trained CLIP models.
 
     Provides image/text encoding, similarity computation, and zero-shot retrieval.
+    An image or text that fails to preprocess raises (D-183); it was replaced by a
+    black image or an all-zero token row, which then ranked in the retrieval.
 
     Args:
         model: Trained CLIP model instance.
@@ -295,14 +297,8 @@ class CLIPInference:
             batch_paths = image_paths[i:i + self.batch_size]
             batch_images = []
             for path in batch_paths:
-                try:
-                    image = self.data_loader.preprocess_image(path, training=False)
-                    batch_images.append(image.numpy())
-                except Exception as e:
-                    logger.error(f"Error loading image {path}: {e}")
-                    batch_images.append(
-                        np.zeros((self.data_loader.image_size, self.data_loader.image_size, 3))
-                    )
+                image = self.data_loader.preprocess_image(path, training=False)
+                batch_images.append(image.numpy())
 
             batch_tensor = keras.ops.convert_to_tensor(np.array(batch_images))
             batch_embeddings = self.model.encode_image(batch_tensor, training=False)
@@ -326,12 +322,8 @@ class CLIPInference:
             batch_texts = texts[i:i + self.batch_size]
             batch_tokens = []
             for text in batch_texts:
-                try:
-                    tokens = self.data_loader.preprocess_text(text)
-                    batch_tokens.append(tokens.numpy())
-                except Exception as e:
-                    logger.error(f"Error tokenizing text '{text[:50]}...': {e}")
-                    batch_tokens.append(np.zeros(self.data_loader.context_length, dtype=np.int32))
+                tokens = self.data_loader.preprocess_text(text)
+                batch_tokens.append(tokens.numpy())
 
             batch_tensor = keras.ops.convert_to_tensor(np.array(batch_tokens))
             batch_embeddings = self.model.encode_text(batch_tensor, training=False)

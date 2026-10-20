@@ -40,14 +40,10 @@ from dl_techniques.layers.spatial_layer import coordinate_grid
 from train.common.datasets import collect_image_paths
 from train.common.gpu import setup_gpu
 
-# THERA per-channel image statistics. Imported from the trainer so the eval and
-# training paths share one source of truth (DRY); redefined here only if that
-# import is unavailable.
-try:
-    from train.thera.train_thera import THERA_MEAN, THERA_VAR
-except Exception:  # pragma: no cover - fallback when trainer import is unavailable
-    THERA_MEAN = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32)
-    THERA_VAR = np.array([0.25, 0.25, 0.25], dtype=np.float32)
+# THERA per-channel image statistics, imported from the trainer: one source of
+# truth. A failed import raises (D-183); the old fallback redefined both arrays
+# here, so an eval could normalize with statistics the model was not trained on.
+from train.thera.train_thera import THERA_MEAN, THERA_VAR
 
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")

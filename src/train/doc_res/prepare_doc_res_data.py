@@ -1465,6 +1465,32 @@ class DatasetReport:
         return tuple(a for a in self.archives if a.status == "dead-url")
 
 
+def failures(reports: Sequence[DatasetReport]) -> List[str]:
+    """What a real run failed to do, one line per dataset; empty when nothing failed.
+
+    A dataset fails when it was refused on disk budget, when any of its archives
+    ended ``failed`` or ``dead-url``, or when any prompt sidecar failed. ``main``
+    returns 1 when this is not empty (D-183).
+
+    :param reports: The reports :func:`stage_all` returned.
+    :return: ``"<task>/<dataset>: <what failed>"`` lines, in report order.
+    """
+    lines: List[str] = []
+    for report in reports:
+        problems: List[str] = []
+        if report.status == "refused":
+            problems.append(f"refused ({report.detail})")
+        bad = [a.filename for a in report.archives
+               if a.status in ("failed", "dead-url")]
+        if bad:
+            problems.append(f"archives not staged: {', '.join(bad)}")
+        if report.sidecars is not None and report.sidecars.failed:
+            problems.append(f"{report.sidecars.failed} prompt sidecar(s) failed")
+        if problems:
+            lines.append(f"{report.task}/{report.dataset}: {'; '.join(problems)}")
+    return lines
+
+
 def stage_all(
     dataset_root: Path,
     datasets: Sequence[Dataset],
@@ -1683,7 +1709,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     line and allocates nothing else.
 
     :param argv: Command line, or ``None`` for ``sys.argv[1:]``.
-    :return: Process exit code; ``0`` on success.
+    :return: Process exit code; ``0`` on success, ``1`` when any dataset was
+        refused or not fully staged (see :func:`failures`), ``2`` for a filter
+        that matches no dataset.
     """
     args = build_parser().parse_args(argv)
 
@@ -1716,6 +1744,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overwrite_sidecars=args.overwrite_sidecars,
     )
     log_reports(reports, args.root)
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: a refused dataset, an
+    # archive that was not staged or a failed sidecar is reported per dataset and
+    # the run returns 1 after every dataset was attempted. Do NOT return 0
+    # regardless: a run that staged nothing exited 0. See decisions.md D-183.
+    failed = failures(reports)
+    if failed:
+        logger.error("STAGING INCOMPLETE (%d dataset(s)):", len(failed))
+        for line in failed:
+            logger.error("    %s", line)
+        return 1
     return 0
 
 

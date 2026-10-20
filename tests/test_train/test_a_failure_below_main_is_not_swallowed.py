@@ -189,3 +189,218 @@ def test_a_requested_onnx_export_that_fails_writes_results_then_raises(monkeypat
         run(dataclasses.replace(_StubConfig(result_dir=str(tmp_path / "b")), export_onnx=True))
     assert list((tmp_path / "b").glob("*/results.json"))
 
+
+# ---------------------------------------------------------------------
+# Data and inference helpers: the bert streams, CC3M, CLIP, THERA, DocRes
+# ---------------------------------------------------------------------
+
+_LONG_TEXT = "an english sentence long enough to pass the length filter. " * 4
+
+
+def _stream_that_breaks():
+    """A stream that yields one record and then fails, as a dropped connection does."""
+    yield {"text": _LONG_TEXT}
+    raise ConnectionError("stream dropped (test)")
+
+
+@pytest.mark.parametrize("module_name, function_name", [
+    ("train.bert.wikipedia.pretrain", "get_dataset_generator"),
+    ("train.bert.wikipedia.pretrain_english", "get_english_dataset_generator"),
+])
+def test_a_bert_corpus_stream_that_fails_raises(monkeypatch, module_name, function_name):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(module.datasets, "load_dataset", lambda *a, **k: object())
+    monkeypatch.setattr(module.datasets, "interleave_datasets",
+                        lambda *a, **k: _stream_that_breaks())
+    stream = getattr(module, function_name)(module.PretrainConfig())
+    assert next(stream) == _LONG_TEXT
+    with pytest.raises(ConnectionError, match="stream dropped"):
+        next(stream)
+
+
+def test_a_clip_scoring_batch_that_fails_raises(monkeypatch):
+    from train.cliffordnet import filter_cc3m_clipscore as module
+
+    class Broken:
+        def encode_image(self, images, **kwargs):
+            raise RuntimeError("out of memory (test)")
+
+    monkeypatch.setattr(module, "make_image_text_tf_dataset", lambda **k: [
+        {"image": np.zeros((2, 8, 8, 3), np.float32), "text": np.zeros((2, 4), np.int32)}])
+    with pytest.raises(RuntimeError, match="out of memory"):
+        module._score_pairs(Broken(), ["a.jpg", "b.jpg"], np.zeros((2, 4), np.int32),
+                            image_size=8, batch_size=2)
+
+
+def test_an_unreadable_cc3m_state_file_raises(tmp_path):
+    import json
+
+    from train.cliffordnet.prepare_cc3m import _State
+
+    path = tmp_path / "_prepare_cc3m_state.json"
+    path.write_text('{"processed_tars": {"train": ["a.tar"]')
+    with pytest.raises(json.JSONDecodeError):
+        _State.load(str(path))
+    path.write_text(json.dumps({"processed_tars": {"train": ["a.tar"]}}))
+    assert _State.load(str(path)).processed_tars == {"train": ["a.tar"]}
+
+
+def _jpeg_bytes():
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(buffer, "JPEG")
+    return buffer.getvalue()
+
+
+def test_a_cc3m_pair_whose_save_fails_raises_and_a_corrupt_one_is_dropped(
+        monkeypatch, tmp_path):
+    import io
+
+    from PIL import Image
+
+    from train.cliffordnet.prepare_cc3m import _write_pair
+
+    def write(jpg_bytes, idx):
+        return _write_pair(img_root=str(tmp_path), split="train", global_idx=idx,
+                           jpg_bytes=jpg_bytes, caption="a caption",
+                           jsonl_fh=jsonl, jpeg_quality=90)
+
+    jsonl = io.StringIO()
+    jpeg = _jpeg_bytes()  # encoded before save is patched below
+    assert write(jpeg, 0) is True
+    assert write(b"not a jpeg", 1) is False
+    assert len(jsonl.getvalue().splitlines()) == 1
+
+    def full_disk(self, *args, **kwargs):
+        raise _DiskFull("no space left on device (test)")
+
+    monkeypatch.setattr(Image.Image, "save", full_disk)
+    with pytest.raises(_DiskFull):
+        write(jpeg, 2)
+    assert len(jsonl.getvalue().splitlines()) == 1
+
+
+def test_a_cc3m_extraction_with_a_failed_shard_raises_after_every_split(
+        monkeypatch, tmp_path):
+    from train.cliffordnet import prepare_cc3m as module
+
+    opened = []
+
+    def open_tar(name):
+        opened.append(name)
+        raise ConnectionError(f"HTTP open failed for {name} (test)")
+
+    monkeypatch.setattr(module, "_list_shards", lambda split: [f"{split}-0000.tar"])
+    monkeypatch.setattr(module, "_open_tar_stream", open_tar)
+    monkeypatch.setattr("sys.argv", ["prepare_cc3m", "--dst", str(tmp_path),
+                                     "--splits", "train", "validation"])
+    with pytest.raises(RuntimeError, match="'train': 1, 'validation': 1"):
+        module.main()
+    assert opened == ["train-0000.tar", "validation-0000.tar"]
+
+
+class _InlinePool:
+    """``multiprocessing.Pool`` stand-in that maps in this process."""
+
+    def __init__(self, processes=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def imap_unordered(self, fn, tasks, chunksize=1):
+        return map(fn, tasks)
+
+
+def test_a_resize_run_with_a_failed_image_raises_after_every_split(monkeypatch, tmp_path):
+    from train.cliffordnet import resize_cc3m_to_ssd as module
+
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    for split in ("train", "validation"):
+        (src / split / "00").mkdir(parents=True)
+        (src / split / "00" / "good.jpg").write_bytes(_jpeg_bytes())
+    (src / "train" / "00" / "broken.jpg").write_bytes(b"not a jpeg")
+    monkeypatch.setattr(module, "Pool", _InlinePool)
+    monkeypatch.setattr("sys.argv", ["resize", "--src-root", str(src), "--dst-root",
+                                     str(dst), "--size", "4", "--workers", "1"])
+    with pytest.raises(RuntimeError, match="1 image"):
+        module.main()
+    assert (dst / "train" / "00" / "good.jpg").is_file()
+    assert (dst / "validation" / "00" / "good.jpg").is_file()
+
+
+def test_a_clip_inference_input_that_fails_to_load_raises():
+    from train.clip.train_clip import CLIPInference
+
+    class Loader:
+        image_size = 4
+        context_length = 3
+
+        def preprocess_image(self, path, training=False):
+            raise FileNotFoundError(path)
+
+        def preprocess_text(self, text):
+            raise ValueError(f"cannot tokenize {text!r}")
+
+    class Model:
+        def encode_image(self, x, training=False):
+            return keras.ops.ones((keras.ops.shape(x)[0], 2))
+
+        encode_text = encode_image
+
+    inference = CLIPInference(Model(), Loader(), batch_size=2)
+    with pytest.raises(FileNotFoundError, match="missing.jpg"):
+        inference.encode_images(["missing.jpg"], show_progress=False)
+    with pytest.raises(ValueError, match="cannot tokenize"):
+        inference.encode_texts(["a caption"], show_progress=False)
+
+
+def test_the_thera_eval_takes_its_statistics_from_the_trainer_only(monkeypatch):
+    import importlib
+    import sys
+
+    from train.thera import train_thera
+
+    monkeypatch.delitem(sys.modules, "train.thera.eval_thera", raising=False)
+    monkeypatch.setitem(sys.modules, "train.thera.train_thera", None)
+    with pytest.raises(ImportError):
+        importlib.import_module("train.thera.eval_thera")
+    monkeypatch.setitem(sys.modules, "train.thera.train_thera", train_thera)
+    monkeypatch.delitem(sys.modules, "train.thera.eval_thera", raising=False)
+    eval_thera = importlib.import_module("train.thera.eval_thera")
+    assert eval_thera.THERA_MEAN is train_thera.THERA_MEAN
+
+
+def _doc_res_main(monkeypatch, tmp_path, reports):
+    from train.doc_res import prepare_doc_res_data as module
+
+    monkeypatch.setattr(module, "stage_all", lambda *a, **k: reports)
+    return module.main(["--root", str(tmp_path), "--datasets", reports[0].dataset])
+
+
+def test_a_doc_res_staging_that_failed_returns_1(monkeypatch, tmp_path):
+    from train.doc_res.prepare_doc_res_data import (
+        ArchiveResult, DatasetReport, SidecarResult, dataset_names)
+
+    name = dataset_names()[0]
+    archive = ArchiveResult(filename="a.zip", url="http://x", status="failed",
+                            detail="OSError: test")
+    assert _doc_res_main(monkeypatch, tmp_path, [DatasetReport(
+        dataset=name, task="t", status="staged", archives=(archive,))]) == 1
+    assert _doc_res_main(monkeypatch, tmp_path, [DatasetReport(
+        dataset=name, task="t", status="refused", detail="disk")]) == 1
+    sidecars = SidecarResult(dataset=name, task="t", status="ok", failed=2)
+    assert _doc_res_main(monkeypatch, tmp_path, [DatasetReport(
+        dataset=name, task="t", status="staged", sidecars=sidecars)]) == 1
+    staged = ArchiveResult(filename="a.zip", url="http://x", status="staged")
+    assert _doc_res_main(monkeypatch, tmp_path, [DatasetReport(
+        dataset=name, task="t", status="staged", archives=(staged,))]) == 0
+

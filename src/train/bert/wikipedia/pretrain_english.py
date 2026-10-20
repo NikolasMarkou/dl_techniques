@@ -143,6 +143,9 @@ def get_english_dataset_generator(config: PretrainConfig) -> Generator[str, None
     rejected_count = 0
     accepted_count = 0
 
+    # A stream error raises (D-183). Logging it and continuing either ended the
+    # corpus early (a generator that raised is finished) or spun on a stream
+    # that keeps failing; both trained on less data with exit code 0.
     while True:
         try:
             item = next(iter_ds)
@@ -164,9 +167,6 @@ def get_english_dataset_generator(config: PretrainConfig) -> Generator[str, None
 
         except StopIteration:
             break
-        except Exception as e:
-            logger.warning(f"Stream error: {e}")
-            continue
 
 
 def create_tf_dataset(config: PretrainConfig, preprocessor: TiktokenPreprocessor) -> tf.data.Dataset:

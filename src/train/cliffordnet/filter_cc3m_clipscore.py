@@ -205,9 +205,10 @@ def _score_pairs(
     and text embeddings (``encode_image`` / ``encode_text`` both normalize by
     default), i.e. ``sum(img_emb * txt_emb, axis=-1)``. Batches are streamed
     via the shared ``make_image_text_tf_dataset`` (``training=False``) so decode
-    + normalization match the eval recipe. Batches whose images fail to decode
-    are caught and their pairs assigned ``-inf`` (never kept), so one corrupt
-    JPEG cannot abort a multi-hour pass.
+    + normalization match the eval recipe. A batch that fails to score raises
+    (D-183): the old handler sat around the model call, not the image decode, so
+    it turned a model failure (an out-of-memory batch, a bad checkpoint) into
+    ``-inf`` scores and a silently smaller manifest.
 
     :param model: A loaded ``CliffordCLIP``.
     :param paths: Absolute image paths.
@@ -227,17 +228,10 @@ def _score_pairs(
     for batch in ds:
         images = batch["image"]
         tokens = batch["text"]
-        try:
-            img_emb = model.encode_image(images, training=False, normalize=True)
-            txt_emb = model.encode_text(tokens, training=False, normalize=True)
-            batch_scores = keras.ops.sum(img_emb * txt_emb, axis=-1)
-            scores.extend(np.asarray(batch_scores, dtype=np.float32).tolist())
-        except Exception as exc:  # noqa: BLE001 - one bad batch must not abort
-            n_bad = int(keras.ops.shape(tokens)[0])
-            logger.warning(
-                f"Scoring batch failed ({exc!r}); dropping {n_bad} pairs."
-            )
-            scores.extend([float("-inf")] * n_bad)
+        img_emb = model.encode_image(images, training=False, normalize=True)
+        txt_emb = model.encode_text(tokens, training=False, normalize=True)
+        batch_scores = keras.ops.sum(img_emb * txt_emb, axis=-1)
+        scores.extend(np.asarray(batch_scores, dtype=np.float32).tolist())
 
     out = np.asarray(scores, dtype=np.float32)
     # make_image_text_tf_dataset with training=False does NOT drop the

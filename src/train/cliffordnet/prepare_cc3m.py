@@ -50,7 +50,7 @@ import tarfile
 import time
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _HF_REPO_ID = "pixparse/cc3m-wds"
@@ -69,13 +69,12 @@ class _State:
 
     @classmethod
     def load(cls, path: str) -> "_State":
+        # An unreadable state file raises (D-183). Starting from an empty state
+        # re-extracted every shard and appended its captions to the JSONL again.
         if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    raw = json.load(f)
-                return cls(processed_tars=raw.get("processed_tars", {}))
-            except Exception:
-                pass
+            with open(path) as f:
+                raw = json.load(f)
+            return cls(processed_tars=raw.get("processed_tars", {}))
         return cls(processed_tars={})
 
     def save(self, path: str) -> None:
@@ -227,20 +226,25 @@ def _write_pair(
     img_path = os.path.join(shard_dir, f"{img_id}.jpg")
 
     if not os.path.exists(img_path):
+        from PIL import Image as PILImage
+
+        # Only the decode is guarded: a corrupt JPEG drops its pair. The import
+        # and the save are not (D-183): a failed save (a full disk) dropped every
+        # pair that followed and the run exited 0.
         try:
-            from PIL import Image as PILImage
-            os.makedirs(shard_dir, exist_ok=True)
             im = PILImage.open(BytesIO(jpg_bytes))
+            im.load()
             if im.mode != "RGB":
                 im = im.convert("RGB")
-            im.save(img_path, "JPEG", quality=jpeg_quality, optimize=False)
         except Exception as exc:  # noqa: BLE001
             print(
-                f"[warn] decode/save failed for {img_id}: "
+                f"[warn] decode failed for {img_id}: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
             return False
+        os.makedirs(shard_dir, exist_ok=True)
+        im.save(img_path, "JPEG", quality=jpeg_quality, optimize=False)
 
     jsonl_fh.write(
         json.dumps(
@@ -265,8 +269,13 @@ def _extract_split(
     max_samples: Optional[int],
     jpeg_quality: int,
     progress_every: int,
-) -> int:
-    """Extract one split. Resumable at the tar-shard boundary."""
+) -> Tuple[int, int]:
+    """Extract one split. Resumable at the tar-shard boundary.
+
+    Returns ``(pairs written this run, shards that failed)``. A failed shard is
+    reported and not marked done, so a rerun retries it; ``main`` raises after
+    every split when any shard failed.
+    """
     img_root = os.path.join(dst_root, split)
     os.makedirs(img_root, exist_ok=True)
     jsonl_path = os.path.join(dst_root, f"{split}_captions.jsonl")
@@ -374,7 +383,7 @@ def _extract_split(
         f"(total={global_idx:,}), errors={errors:,}, "
         f"elapsed={elapsed:.0f}s"
     )
-    return written
+    return written, errors
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +438,13 @@ def main() -> None:
         }
         print(f"Already-processed tars (resuming): {processed_counts}")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-183: a shard that failed to
+    # open or read is counted, every split still runs, and then the run raises.
+    # Do NOT return normally: an extraction with missing shards exited 0. See
+    # decisions.md D-183.
+    failed: Dict[str, int] = {}
     for split in args.splits:
-        _extract_split(
+        _written, errors = _extract_split(
             dst_root=args.dst,
             split=split,
             state=state,
@@ -438,6 +452,12 @@ def main() -> None:
             max_samples=args.max_samples,
             jpeg_quality=args.jpeg_quality,
             progress_every=args.progress_every,
+        )
+        if errors:
+            failed[split] = errors
+    if failed:
+        raise RuntimeError(
+            f"CC3M shards failed (not marked done; a rerun retries them): {failed}"
         )
 
 

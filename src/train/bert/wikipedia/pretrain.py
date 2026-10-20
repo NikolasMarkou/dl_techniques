@@ -125,6 +125,9 @@ def get_dataset_generator(config: PretrainConfig) -> Generator[str, None, None]:
 
     iter_ds = iter(interleaved)
 
+    # A stream error raises (D-183). Logging it and continuing either ended the
+    # corpus early (a generator that raised is finished) or spun on a stream
+    # that keeps failing; both trained on less data with exit code 0.
     while True:
         try:
             item = next(iter_ds)
@@ -138,9 +141,6 @@ def get_dataset_generator(config: PretrainConfig) -> Generator[str, None, None]:
         except StopIteration:
             logger.info("Dataset iteration finished.")
             break
-        except Exception as e:
-            logger.warning(f"Error reading dataset stream: {e}")
-            continue
 
 
 def create_tf_dataset(
