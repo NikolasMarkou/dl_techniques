@@ -538,3 +538,564 @@ def test_no_entry_point_turns_ctrl_c_into_exit_0():
     assert offenders == [], (
         "these handlers turn Ctrl-C into exit code 0; let the interrupt "
         "propagate (or exit non-zero):\n" + "\n".join(offenders))
+
+
+# ---------------------------------------------------------------------------
+# Broad handlers in ``main`` (iteration 2 step 4, D-176)
+# ---------------------------------------------------------------------------
+#
+# Measured at 3da9b5075 (AST): 80 broad handlers (bare ``except``,
+# ``Exception``, ``BaseException``) sit lexically in a ``main`` under
+# ``src/train``. 21 neither raise nor exit non-zero. 9 of those let a failed
+# run exit 0: ``nbeats`` (``os._exit(0)`` after the handler), ``tabm`` (a
+# failed example is logged), the three logic sweeps (a failed cell becomes a
+# NaN row and the run returns 0), ``train_e5_clevr_hans`` (a failed dataset
+# build leaves ``None``, every model is skipped, ``DONE``) and ``mothnet``
+# (a failed final-model save is logged; ``main()``'s value was discarded).
+# The other 12 are fallbacks by design and are named below.
+#
+# Every broad handler in a ``main`` must now do one of:
+#   - re-raise (any ``raise`` in its body);
+#   - exit non-zero: ``sys.exit``/``exit``/``os._exit`` with a non-zero
+#     literal, or ``return`` a non-zero literal from a ``main`` whose value
+#     the module's ``__main__`` block passes to ``sys.exit``/``SystemExit``;
+#   - record the failure (assign a name, or append/add to it) that ``main``
+#     reads after the ``try`` in an ``if`` that exits non-zero, or passes to an
+#     exit call (a flag the handler sets to a non-zero literal). This is the
+#     D-095 sweep shape: finish every cell, keep the partial rows, then fail;
+#   - be a named exemption below, whose shape is checked.
+
+_EXIT_CALLS = {"sys.exit", "exit", "quit", "os._exit"}
+_RECORDING_METHODS = {"append", "add", "extend", "update"}
+
+
+def _is_broad(handler):
+    if handler.type is None:
+        return True
+    names = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+             else [handler.type])
+    return any(isinstance(name, ast.Name)
+               and name.id in ("Exception", "BaseException") for name in names)
+
+
+def _walk_no_defs(nodes):
+    """Every node under ``nodes``, not entering nested defs, classes or lambdas."""
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _non_zero_int(node):
+    return (isinstance(node, ast.Constant) and isinstance(node.value, int)
+            and not isinstance(node.value, bool) and node.value != 0)
+
+
+def _exit_call_argument(node):
+    """The first argument of a ``sys.exit``-like call, else ``None``."""
+    if (isinstance(node, ast.Call) and ast.unparse(node.func) in _EXIT_CALLS
+            and node.args):
+        return node.args[0]
+    return None
+
+
+def _main_value_is_the_exit_code(tree):
+    """``True`` when ``__main__`` runs ``sys.exit(main())`` or ``SystemExit(main())``."""
+    for statement in tree.body:
+        if not (isinstance(statement, ast.If)
+                and "__main__" in ast.unparse(statement.test)):
+            continue
+        for node in ast.walk(statement):
+            if (isinstance(node, ast.Call)
+                    and ast.unparse(node.func) in _EXIT_CALLS | {"SystemExit"}
+                    and node.args and isinstance(node.args[0], ast.Call)
+                    and ast.unparse(node.args[0].func) == "main"):
+                return True
+    return False
+
+
+def _exits_non_zero(statements, return_is_exit_code):
+    for node in _walk_no_defs(statements):
+        if isinstance(node, ast.Raise):
+            return True
+        if (return_is_exit_code and isinstance(node, ast.Return)
+                and _non_zero_int(node.value)):
+            return True
+        if _non_zero_int(_exit_call_argument(node)):
+            return True
+    return False
+
+
+def _recorded_names(handler):
+    """(names the handler records into, names it sets to a non-zero literal)."""
+    recorded, flags = set(), set()
+    for node in _walk_no_defs(handler.body):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    recorded.add(target.id)
+                    if isinstance(node, ast.Assign) and _non_zero_int(node.value):
+                        flags.add(target.id)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RECORDING_METHODS
+                and isinstance(node.func.value, ast.Name)):
+            recorded.add(node.func.value.id)
+    return recorded, flags
+
+
+def _reads(node, names):
+    return any(isinstance(sub, ast.Name) and sub.id in names
+               for sub in ast.walk(node))
+
+
+def _fails_later(func, try_node, handler, return_is_exit_code):
+    recorded, flags = _recorded_names(handler)
+    if not recorded:
+        return False
+    for node in _walk_no_defs(func.body):
+        if getattr(node, "lineno", 0) <= try_node.end_lineno:
+            continue
+        if (isinstance(node, ast.If) and not isinstance(node.test, ast.UnaryOp)
+                and _reads(node.test, recorded)
+                and _exits_non_zero(node.body, return_is_exit_code)):
+            return True
+        argument = _exit_call_argument(node)
+        if argument is not None and _reads(argument, flags):
+            return True
+    return False
+
+
+def _main_broad_handlers(tree):
+    """(main, try, handler) for every broad handler lexically in a ``main``."""
+    for func in ast.walk(tree):
+        if not (isinstance(func, ast.FunctionDef) and func.name == "main"):
+            continue
+        for node in _walk_no_defs(func.body):
+            if isinstance(node, ast.Try):
+                for handler in node.handlers:
+                    if _is_broad(handler):
+                        yield func, node, handler
+
+
+# path -> [(text in the handler, text in the try body, fallback names the
+# handler may assign, reason)]. The handler text picks the handler; the try
+# text is what makes the fallback optional; the shape check holds the handler
+# to logging (plus the named fallback assignment) and nothing else.
+_EXEMPT_MAIN_HANDLERS = {
+    "train/bert/deploy.py": [
+        ("An unexpected error occurred", "input(", (),
+         "an interactive prompt: a failed prediction is reported and the "
+         "prompt goes on; the user leaves with quit or Ctrl-C"),
+    ],
+    "train/bert/wikipedia/pretrain.py": [
+        ("Training on default strategy", "MirroredStrategy", ("strategy",),
+         "no multi-GPU strategy on this host; the default strategy trains"),
+    ],
+    "train/bert/wikipedia/pretrain_english.py": [
+        ("Using default strategy", "MirroredStrategy", ("strategy",),
+         "no multi-GPU strategy on this host; the default strategy trains"),
+    ],
+    "train/hnet/prepare_hnet_data.py": [
+        ("remote metadata lookup failed", "remote_size_bytes", (),
+         "an optional remote size for the plan printout; the manifest budget "
+         "is used instead"),
+    ],
+    "train/lightglue/train_lightglue.py": [
+        ("viz batch capture failed", "LightGlueVizCallback", (),
+         "optional match panels; training and the saved model do not need them"),
+    ],
+    "train/logic/train_e3_faithfulness.py": [
+        ("LIME failed", "lime_attributions", (),
+         "an optional comparison attribution (third-party LIME); the circuit's "
+         "own attributions are not in the try"),
+        ("SHAP failed", "shap_attributions", (),
+         "an optional comparison attribution (third-party SHAP); the circuit's "
+         "own attributions are not in the try"),
+    ],
+    "train/mothnet/train_mothnet.py": [
+        ("render_training_dashboard failed", "render_training_dashboard", (),
+         "a figure; a visualization failure never aborts training (the "
+         "trainer's documented invariant 9)"),
+        ("render_mb_sparsity failed", "render_mb_sparsity", (),
+         "a figure; invariant 9"),
+        ("AL/MB activation visualization", "extract_al_features", (),
+         "a figure; invariant 9"),
+        ("confusion_matrix visualization", "ClassificationResults", (),
+         "a figure; invariant 9"),
+        ("{_plugin_name} visualization", "_visualize_or_warn", (),
+         "a figure (end-of-run per-class plots); invariant 9"),
+    ],
+}
+
+
+def _exemption_shape_holds(try_node, handler, try_text, fallbacks):
+    if try_text not in "\n".join(ast.unparse(s) for s in try_node.body):
+        return False
+    for statement in handler.body:
+        if isinstance(statement, (ast.Pass, ast.Continue, ast.Break)):
+            continue
+        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                and ast.unparse(statement.value.func).startswith("logger.")):
+            continue
+        if (isinstance(statement, ast.Assign)
+                and all(isinstance(t, ast.Name) and t.id in fallbacks
+                        for t in statement.targets)):
+            continue
+        return False
+    return True
+
+
+def _classify_main_handlers(source, exemptions=()):
+    """Census rows ``(line, verdict)``; verdict is ``None`` for an offender.
+
+    ``exemptions`` is this file's list for the source. An exemption whose
+    handler text matches but whose shape no longer holds is an offender.
+    """
+    with warnings.catch_warnings():  # invalid escapes in scanned sources
+        warnings.simplefilter("ignore", (DeprecationWarning, SyntaxWarning))
+        tree = ast.parse(source)
+    return_is_exit_code = _main_value_is_the_exit_code(tree)
+    rows = []
+    for func, try_node, handler in _main_broad_handlers(tree):
+        handler_text = ast.unparse(handler)
+        if any(isinstance(n, ast.Raise) for n in _walk_no_defs(handler.body)):
+            verdict = "raises"
+        elif _exits_non_zero(handler.body, return_is_exit_code):
+            verdict = "exits"
+        elif _fails_later(func, try_node, handler, return_is_exit_code):
+            verdict = "records"
+        else:
+            verdict = None
+            for marker, try_text, fallbacks, _reason in exemptions:
+                if (marker in handler_text and _exemption_shape_holds(
+                        try_node, handler, try_text, fallbacks)):
+                    verdict = f"exempt: {marker}"
+        rows.append((handler.lineno, verdict))
+    return sorted(rows)
+
+
+def _main_handler_census():
+    census = {}
+    for path in sorted((_SRC / "train").rglob("*.py")):
+        relative = path.relative_to(_SRC).as_posix()
+        rows = _classify_main_handlers(
+            path.read_text(encoding="utf-8"),
+            _EXEMPT_MAIN_HANDLERS.get(relative, ()))
+        if rows:
+            census[relative] = rows
+    return census
+
+
+def test_every_broad_handler_in_a_main_fails_the_run_or_is_exempt():
+    census = _main_handler_census()
+    offenders = [f"{path}:{line}" for path, rows in census.items()
+                 for line, verdict in rows if verdict is None]
+    assert offenders == [], (
+        "these broad handlers in main() let a failed run exit 0; re-raise, "
+        "exit non-zero, or record the failure and fail after the sweep "
+        "(D-095):\n" + "\n".join(offenders))
+
+
+def test_each_main_handler_exemption_names_exactly_one_handler():
+    """No stale or ambiguous exemption: each matches one handler, by shape."""
+    census = _main_handler_census()
+    for relative, exemptions in _EXEMPT_MAIN_HANDLERS.items():
+        verdicts = [verdict for _line, verdict in census.get(relative, [])]
+        for marker, _try_text, _fallbacks, reason in exemptions:
+            assert reason
+            assert verdicts.count(f"exempt: {marker}") == 1, (relative, marker)
+    exempt = sum(1 for rows in census.values() for _line, verdict in rows
+                 if verdict and verdict.startswith("exempt"))
+    assert exempt == 12
+
+
+_MAIN_HANDLER_FORMS = '''
+import os
+import sys
+
+
+def main():
+    try:
+        run()
+    except Exception as e:
+        logger.error(f"failed: {e}")
+    try:
+        run()
+    except Exception:
+        return 1
+    try:
+        run()
+    except Exception:
+        raise
+    try:
+        run()
+    except Exception:
+        sys.exit(2)
+    failed = []
+    for cell in cells:
+        try:
+            run(cell)
+        except Exception:
+            failed.append(cell)
+    if failed:
+        raise RuntimeError(failed)
+    seen = []
+    for cell in cells:
+        try:
+            run(cell)
+        except Exception:
+            seen.append(cell)
+    if not seen:
+        raise RuntimeError("nothing ran")
+    code = 0
+    try:
+        run()
+    except Exception:
+        code = 1
+    os._exit(code)
+    try:
+        run()
+    except BaseException:
+        logger.warning("optional plot failed")
+    try:
+        input("> ")
+    except Exception:
+        logger.info("prompt error")
+'''
+
+_PLANTED_EXEMPTION = [
+    ("prompt error", "input(", (), "a prompt"),
+    # Matches by text, but its try holds no plot: the shape check refuses it.
+    ("optional plot failed", "render_plot", (), "a figure"),
+]
+
+
+def test_the_main_handler_census_tells_a_swallow_from_a_failure():
+    """Positive control over planted forms, with and without ``sys.exit(main())``."""
+    lines = _MAIN_HANDLER_FORMS.splitlines()
+    excepts = [i for i, line in enumerate(lines, start=1)
+               if line.strip().startswith("except")]
+    verdicts = dict(_classify_main_handlers(_MAIN_HANDLER_FORMS, _PLANTED_EXEMPTION))
+    # The logged swallow, ``return 1`` whose value nobody exits with, the
+    # ``if not seen`` that fails only when nothing failed, and the exemption
+    # whose shape does not hold.
+    offenders = sorted(line for line, verdict in verdicts.items() if verdict is None)
+    assert offenders == [excepts[0], excepts[1], excepts[5], excepts[7]]
+    assert verdicts[excepts[2]] == "raises"
+    assert verdicts[excepts[3]] == "exits"
+    assert verdicts[excepts[4]] == "records"
+    assert verdicts[excepts[6]] == "records"
+    assert verdicts[excepts[8]] == "exempt: prompt error"
+
+    exiting = _MAIN_HANDLER_FORMS + '\n\nif __name__ == "__main__":\n    sys.exit(main())\n'
+    assert dict(_classify_main_handlers(exiting, _PLANTED_EXEMPTION))[excepts[1]] == "exits"
+
+
+# Process exit codes for 3 of the 9: the failing step is stubbed in a child
+# interpreter, which runs the trainer the way a shell does. Each writes only
+# under ``tmp_path``.
+
+def _run_child(script, tmp_path):
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MPLBACKEND="Agg")
+    return subprocess.run([sys.executable, "-c", script], env=env,
+                          cwd=str(tmp_path), capture_output=True, text=True,
+                          timeout=600)
+
+
+_NBEATS_CHILD = '''
+import sys
+import train.time_series.nbeats.train_nbeats as m
+
+class Trainer:
+    def __init__(self, config, generator_config):
+        if {fail!r}:
+            raise RuntimeError("the run crashed (test)")
+
+    def run_experiment(self):
+        return {{"results_dir": "unused"}}
+
+m.NBeatsTrainer = Trainer
+sys.argv = ["train_nbeats"]
+m.main()
+'''
+
+
+@pytest.mark.parametrize("fail, expected", [(True, 1), (False, 0)])
+def test_a_failed_nbeats_process_exits_non_zero(tmp_path, fail, expected):
+    """N-BEATS ends in ``os._exit`` (its D-008 teardown); the code is the run's."""
+    done = _run_child(_NBEATS_CHILD.format(fail=fail), tmp_path)
+    assert done.returncode == expected, done.stderr[-3000:]
+
+
+_MONKS_CHILD = '''
+import runpy
+import sys
+import train.logic.monks_data as data
+
+def unavailable(problem_id):
+    raise RuntimeError(f"monks-{{problem_id}} data unavailable (test)")
+
+data.load_monks = unavailable
+sys.argv = ["train_e4_monks", "--problems", "1,2", "--models", "circuit",
+            "--seeds", "0", "--out-dir", {out!r}]
+runpy.run_module("train.logic.train_e4_monks", run_name="__main__")
+'''
+
+
+def test_a_logic_sweep_with_failed_cells_exits_non_zero(tmp_path):
+    """The sweep finishes and writes its rows, then the process fails."""
+    done = _run_child(_MONKS_CHILD.format(out=str(tmp_path / "monks")), tmp_path)
+    assert done.returncode != 0, done.stderr[-3000:]
+    (out_dir,) = tmp_path.glob("monks_*")
+    rows = (out_dir / "results.csv").read_text().splitlines()
+    assert len(rows) == 3, rows  # header + both cells
+    assert "problem=1" in done.stderr and "problem=2" in done.stderr
+
+
+_MOTHNET_CHILD = '''
+import runpy
+import sys
+import train.common
+from dl_techniques.models.general_purpose.mothnet.model import MothNet
+
+# --gpu defaults to 0; the child sees no device (CUDA_VISIBLE_DEVICES="").
+train.common.setup_gpu = lambda *args, **kwargs: None
+
+real_save = MothNet.save
+
+def save(self, path, *args, **kwargs):
+    if str(path).endswith("final_model.keras"):
+        raise OSError(f"disk full writing {{path}} (test)")
+    return real_save(self, path, *args, **kwargs)
+
+MothNet.save = save
+sys.argv = ["train_mothnet", "--mb-units", "200", "--al-units", "64",
+            "--epochs", "1", "--num-train-samples", "100",
+            "--num-val-samples", "50", "--batch-size", "32", "--viz-freq", "0",
+            "--output-dir", {out!r}, "--experiment-name", "run"]
+runpy.run_module("train.mothnet.train_mothnet", run_name="__main__")
+'''
+
+
+def test_a_mothnet_process_whose_final_save_fails_exits_non_zero(tmp_path):
+    done = _run_child(_MOTHNET_CHILD.format(out=str(tmp_path)), tmp_path)
+    assert done.returncode != 0, done.stderr[-3000:]
+    assert "disk full writing" in done.stderr
+    # The epoch checkpoint was written before the failed final save.
+    checkpoints = [p for p in (tmp_path / "run").rglob("*.keras")
+                   if p.name != "final_model.keras"]
+    assert checkpoints, sorted(str(p) for p in (tmp_path / "run").rglob("*"))
+
+
+# In-process checks for the other sweeps: every cell is attempted, the rows are
+# written, then the run fails naming the failed cells.
+
+def _crash(*_args, **_kwargs):
+    raise RuntimeError("the cell crashed (test)")
+
+
+def test_a_tabm_run_with_a_failed_example_raises_after_the_rest(monkeypatch):
+    from train.tabm import train_tabm as module
+
+    ran = []
+    examples = {name: (lambda name=name: ran.append(name)) for name in module.EXAMPLES}
+    examples["regression"] = _crash
+    monkeypatch.setattr(module, "EXAMPLES", examples)
+    monkeypatch.setattr("train.common.setup_gpu", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="regression"):
+        module.main(["--examples", "regression", "real-dataset"])
+    assert ran == ["real-dataset"]
+
+
+def test_the_logic_benchmark_with_a_failed_cell_raises_after_the_rest(
+        monkeypatch, tmp_path):
+    from train.logic import train_benchmark as module
+
+    monkeypatch.chdir(tmp_path)  # it writes under ./results
+    monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(module, "train_one", _crash)
+    monkeypatch.setattr(sys, "argv", ["train_benchmark", "--only-task", "parity_k6"])
+    with pytest.raises(RuntimeError, match="parity_k6/mlp_large"):
+        module.main()
+    (csv_path,) = tmp_path.glob("results/*/results.csv")
+    assert len(csv_path.read_text().splitlines()) == 4  # header + 3 cells
+
+
+def test_the_lowdata_mux_sweep_with_a_failed_cell_raises_after_the_rest(
+        monkeypatch, tmp_path):
+    from train.logic import train_e4_lowdata_mux as module
+
+    def run_cell(n, model_name, seed):
+        if seed == 1:
+            _crash()
+        return {"N": n, "model": model_name, "seed": seed, "params": 1,
+                "epochs_used": 1, "wall_s": 0.0, "test_acc": 0.9}
+
+    monkeypatch.setattr(module, "run_cell", run_cell)
+    monkeypatch.setattr(sys, "argv", [
+        "train_e4_lowdata_mux", "--seeds", "0,1,2", "--n-values", "32",
+        "--models", "circuit", "--out-dir", str(tmp_path / "mux")])
+    with pytest.raises(RuntimeError, match="1 cells failed: N=32 model=circuit seed=1"):
+        module.main()
+    (out_dir,) = tmp_path.glob("mux_*")
+    assert len((out_dir / "mux_results.csv").read_text().splitlines()) == 4
+    # The failed seed's NaN row no longer breaks the aggregate (statistics.mean
+    # raised on it): the report and the plot are written.
+    assert "circuit=0.900" in (out_dir / "report.md").read_text()
+    assert (out_dir / "learning_curve.png").is_file()
+
+
+def _clevr(monkeypatch, tmp_path, argv):
+    from train.logic import train_e5_clevr_hans as module
+
+    monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["train_e5_clevr_hans", "--skip-download",
+                                      "--out-dir", str(tmp_path / "out")] + argv)
+    return module
+
+
+def test_a_clevr_run_without_data_raises_after_its_report(monkeypatch, tmp_path):
+    module = _clevr(monkeypatch, tmp_path, ["--data-dir", str(tmp_path / "none")])
+    with pytest.raises(RuntimeError, match="no model trained"):
+        module.main()
+    assert (tmp_path / "out" / "report.md").is_file()
+
+
+def test_a_clevr_run_whose_dataset_build_fails_raises(monkeypatch, tmp_path):
+    (tmp_path / "data" / "images").mkdir(parents=True)
+    module = _clevr(monkeypatch, tmp_path, ["--data-dir", str(tmp_path / "data")])
+    monkeypatch.setattr(module, "find_splits",
+                        lambda _d: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(module, "infer_num_classes", lambda _s: 3)
+    monkeypatch.setattr(module, "build_image_dataset", _crash)
+    with pytest.raises(RuntimeError, match="the cell crashed"):
+        module.main()
+
+
+def test_a_clevr_run_with_a_failed_fit_raises_after_its_report(monkeypatch, tmp_path):
+    (tmp_path / "data" / "images").mkdir(parents=True)
+    module = _clevr(monkeypatch, tmp_path, ["--data-dir", str(tmp_path / "data")])
+    monkeypatch.setattr(module, "find_splits",
+                        lambda _d: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(module, "infer_num_classes", lambda _s: 3)
+    for name in ("build_image_dataset", "build_symbolic_dataset"):
+        monkeypatch.setattr(module, name, lambda *a, **k: (object(), 1))
+    for name in ("build_resnet50_circuit", "build_resnet50_mlp", "build_symbolic_circuit"):
+        monkeypatch.setattr(module, name, lambda *a, **k: object())
+
+    def train_and_eval(model, *args, name, **kwargs):
+        if name == "resnet50_mlp":
+            return {"model": name, "status": "fit_error", "error": "boom", "wall_s": 0.0}
+        return {"model": name, "status": "complete", "params": 1, "epochs_used": 1,
+                "wall_s": 0.0, "val_acc": 0.5, "test_acc": 0.5, "shortcut_gap": 0.0}
+
+    monkeypatch.setattr(module, "train_and_eval", train_and_eval)
+    with pytest.raises(RuntimeError, match="resnet50_mlp"):
+        module.main()
+    rows = (tmp_path / "out" / "results.csv").read_text().splitlines()
+    assert len(rows) == 4  # header + all three models

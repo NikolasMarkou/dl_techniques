@@ -364,6 +364,8 @@ def main() -> None:
 
     if args.download_only:
         logger.info(f"download-only: have_data={have_data}; exiting.")
+        if not have_data:
+            raise RuntimeError(f"CLEVR-Hans3 download failed into {args.data_dir}")
         return
 
     splits = find_splits(args.data_dir) if have_data else {}
@@ -379,7 +381,7 @@ def main() -> None:
         write_report_md(rows, report_md, honest_negative_reason=reason)
         write_csv(rows, os.path.join(out_dir, "results.csv"))
         logger.info(f"Wrote honest-negative report: {report_md}")
-        return
+        raise RuntimeError(f"no model trained: {reason} (report: {report_md})")
 
     # --- Stage B: build datasets + train -----------------------------
     num_classes = max(
@@ -393,47 +395,45 @@ def main() -> None:
         report_md = os.path.join(out_dir, "report.md")
         write_report_md(rows, report_md, honest_negative_reason=reason)
         write_csv(rows, os.path.join(out_dir, "results.csv"))
-        return
+        raise RuntimeError(f"no model trained: {reason} (report: {report_md})")
     logger.info(f"Inferred num_classes={num_classes}")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: a failed dataset build
+    # (image or symbolic) raises. Do NOT wrap these builds in try/except-and-None
+    # again: every model was then skipped and the run wrote an empty report and
+    # exited 0. The honest-negative report, a model whose fit or evaluation
+    # failed (train_and_eval's row) and a failed download also end the run
+    # non-zero, after the report is written. See decisions.md D-176.
     # Image datasets (for circuit + mlp).
     if "circuit" not in skip or "mlp" not in skip:
-        try:
-            img_train_ds, n_train = build_image_dataset(
-                splits["train"], image_size=args.image_size, batch_size=args.batch_size,
-                shuffle=True, seed=args.seed,
-            )
-            img_val_ds, n_val = build_image_dataset(
-                splits["val"], image_size=args.image_size, batch_size=args.batch_size,
-                shuffle=False,
-            )
-            img_test_ds, n_test = build_image_dataset(
-                splits["test"], image_size=args.image_size, batch_size=args.batch_size,
-                shuffle=False,
-            )
-            logger.info(f"Image datasets: train={n_train}, val={n_val}, test={n_test}")
-        except Exception as e:
-            logger.error(f"Image dataset build failed: {type(e).__name__}: {e}")
-            img_train_ds = img_val_ds = img_test_ds = None
+        img_train_ds, n_train = build_image_dataset(
+            splits["train"], image_size=args.image_size, batch_size=args.batch_size,
+            shuffle=True, seed=args.seed,
+        )
+        img_val_ds, n_val = build_image_dataset(
+            splits["val"], image_size=args.image_size, batch_size=args.batch_size,
+            shuffle=False,
+        )
+        img_test_ds, n_test = build_image_dataset(
+            splits["test"], image_size=args.image_size, batch_size=args.batch_size,
+            shuffle=False,
+        )
+        logger.info(f"Image datasets: train={n_train}, val={n_val}, test={n_test}")
     else:
         img_train_ds = img_val_ds = img_test_ds = None
 
     # Symbolic datasets (for oracle).
     if "oracle" not in skip:
-        try:
-            sym_train_ds, _ = build_symbolic_dataset(
-                splits["train"], batch_size=args.symbolic_batch_size,
-                shuffle=True, seed=args.seed,
-            )
-            sym_val_ds, _ = build_symbolic_dataset(
-                splits["val"], batch_size=args.symbolic_batch_size, shuffle=False,
-            )
-            sym_test_ds, _ = build_symbolic_dataset(
-                splits["test"], batch_size=args.symbolic_batch_size, shuffle=False,
-            )
-        except Exception as e:
-            logger.error(f"Symbolic dataset build failed: {type(e).__name__}: {e}")
-            sym_train_ds = sym_val_ds = sym_test_ds = None
+        sym_train_ds, _ = build_symbolic_dataset(
+            splits["train"], batch_size=args.symbolic_batch_size,
+            shuffle=True, seed=args.seed,
+        )
+        sym_val_ds, _ = build_symbolic_dataset(
+            splits["val"], batch_size=args.symbolic_batch_size, shuffle=False,
+        )
+        sym_test_ds, _ = build_symbolic_dataset(
+            splits["test"], batch_size=args.symbolic_batch_size, shuffle=False,
+        )
     else:
         sym_train_ds = sym_val_ds = sym_test_ds = None
 
@@ -449,7 +449,7 @@ def main() -> None:
         del m
         keras.utils.clear_session()
     else:
-        logger.info("Skipping circuit (skip-models or dataset unavailable).")
+        logger.info("Skipping circuit (--skip-models).")
 
     # ----- MLP (image) -----
     if "mlp" not in skip and img_train_ds is not None:
@@ -485,6 +485,11 @@ def main() -> None:
     write_report_md(rows, md_path)
     logger.info(f"Wrote CSV: {csv_path}")
     logger.info(f"Wrote report: {md_path}")
+    failed = [r["model"] for r in rows
+              if r["status"] == "fit_error" or r.get("val_acc") is None
+              or r.get("test_acc") is None]
+    if failed:
+        raise RuntimeError(f"models failed to train or evaluate: {', '.join(failed)}")
     logger.info("DONE")
 
 

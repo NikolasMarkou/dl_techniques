@@ -666,12 +666,20 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     logger.info("TabM Model Examples")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: a failed example is
+    # logged, the remaining examples still run, and the run then raises naming
+    # every failed one. Do NOT go back to log-and-continue: the process exited 0
+    # with an example crashed. See decisions.md D-176.
+    failed: List[str] = []
     for name in args.examples:
         try:
             EXAMPLES[name]()
         except Exception as e:
-            logger.error(f"Error in {name} example: {e}")
+            logger.error(f"Error in {name} example: {e}", exc_info=True)
+            failed.append(name)
 
+    if failed:
+        raise RuntimeError(f"TabM examples failed: {', '.join(failed)}")
     logger.info("All examples completed")
 
 

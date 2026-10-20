@@ -470,17 +470,22 @@ def main() -> None:
     # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
     # hangs on shutdown. Do NOT normalize to sys.exit/finally (per-script choice,
     # not consolidatable duplication). See plan_2026-06-09_a3c7304c/decisions.md D-008.
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: the hard exit carries the
+    # run's code: 1 after a failed run. Do NOT go back to a literal os._exit(0):
+    # a crashed run exited 0. See decisions.md D-176.
+    exit_code = 0
     try:
         trainer = NBeatsTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
         keras.utils.clear_session()
-        sys.stdout.flush()
-        sys.stderr.flush()
     except Exception as e:
         logger.error(f"Failed: {e}", exc_info=True)
+        exit_code = 1
 
-    os._exit(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

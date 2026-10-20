@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from typing import Dict, List
 
@@ -1154,18 +1155,18 @@ def main(argv=None) -> int:
             # built before the loop (Step 3 of plan-2026-09-18T045308-c89cdf76), so
             # this save is always valid even under `--epochs 1`, a loop that never
             # beat the `-1.0` best_val_accuracy sentinel, or a loop that raised on
-            # its very first iteration. The model save below is wrapped in its own
-            # try/except so a save failure is logged via logger.error and does NOT
-            # mask the ORIGINAL exception. The history write is not wrapped (amended
-            # by plan-2026-10-14T062616-81938e81 D-174, below). See decisions.md D-008.
+            # its very first iteration. Neither the model save nor the history write
+            # is wrapped (amended by plan-2026-10-14T062616-81938e81 D-174 and D-176,
+            # below). See decisions.md D-008.
+            #
+            # DECISION plan-2026-10-14T062616-81938e81/D-176: the final save is NOT
+            # wrapped. A failed save raises, so the run exits non-zero; raised while
+            # a loop exception propagates, it carries that exception as __context__
+            # (both print). Do NOT re-wrap it in try/except-and-log: the run exited
+            # 0 with final_model.keras missing. See decisions.md D-176.
             final_model_path = run_dir / "final_model.keras"
-            try:
-                model.save(final_model_path)
-                logger.info(f"Saved final model to {final_model_path}")
-            except Exception as save_error:
-                logger.error(
-                    f"Failed to save final model to {final_model_path}: {save_error}"
-                )
+            model.save(final_model_path)
+            logger.info(f"Saved final model to {final_model_path}")
 
             # DECISION plan-2026-10-14T062616-81938e81/D-174: NOT wrapped. The shared
             # writer raises on failure, so a failed history write fails the run.
@@ -1186,4 +1187,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

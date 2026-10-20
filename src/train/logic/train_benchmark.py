@@ -568,7 +568,12 @@ def main() -> None:
     os.makedirs(results_dir, exist_ok=True)
     logger.info(f"Results dir: {results_dir}")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: a failed cell keeps its
+    # FAILED row and the sweep goes on; after the CSV and report are written the
+    # run raises naming every failed cell. Do NOT return normally after a failed
+    # cell: the run exited 0. See decisions.md D-176.
     rows: List[Dict[str, Any]] = []
+    failed: List[str] = []
     plan = grid()
     if args.only_task:
         plan = [p for p in plan if p[0] == args.only_task]
@@ -589,7 +594,8 @@ def main() -> None:
                 results_dir=results_dir,
             )
         except Exception as e:
-            logger.error(f"FAILED {task}/{model}: {e}")
+            logger.error(f"FAILED {task}/{model}: {e}", exc_info=True)
+            failed.append(f"{task}/{model}")
             row = {
                 "task": task, "model": model, "params": -1, "epochs_used": -1,
                 "wall_s": 0.0, "soft_test_acc": 0.0, "exact_acc": None,
@@ -609,6 +615,9 @@ def main() -> None:
     write_report_md(rows, md_path)
     logger.info(f"Wrote CSV: {csv_path}")
     logger.info(f"Wrote report: {md_path}")
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(plan)} cells failed: {', '.join(failed)}")
     logger.info("DONE")
 
 

@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import statistics
 import sys
 import time
 from typing import Any, Dict, List
@@ -36,6 +35,7 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 from train.common import set_seeds
+from train.common.stats import mean_std
 from train.logic.train_benchmark import (
     build_circuit,
     build_mlp,
@@ -127,12 +127,9 @@ def write_csv(rows: List[Dict[str, Any]], path: str) -> None:
 
 
 def _agg(rows, key):
-    vals = [r[key] for r in rows if r.get(key) is not None]
-    if not vals:
-        return float("nan"), float("nan")
-    if len(vals) == 1:
-        return float(vals[0]), 0.0
-    return float(statistics.mean(vals)), float(statistics.stdev(vals))
+    # A failed cell's row holds NaN; statistics.mean raised on it (AttributeError),
+    # so one failed seed lost the report. mean_std skips NaN (D-176).
+    return mean_std([r[key] for r in rows if r.get(key) is not None])
 
 
 def plot_learning_curve(rows: List[Dict[str, Any]], path: str) -> None:
@@ -228,7 +225,12 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
     logger.info(f"E4 MUX: out_dir={out_dir} N={n_values} seeds={seeds} models={models}")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: a failed cell keeps its
+    # FAILED row and the sweep goes on; after the CSV and report are written the
+    # run raises naming every failed cell. Do NOT return normally after a failed
+    # cell: the run exited 0. See decisions.md D-176.
     rows: List[Dict[str, Any]] = []
+    failed: List[str] = []
     for n in n_values:
         for m in models:
             for s in seeds:
@@ -237,6 +239,7 @@ def main() -> int:
                     write_csv(rows, os.path.join(out_dir, "mux_results.csv"))
                 except Exception as e:
                     logger.exception(f"cell failed N={n} model={m} seed={s}: {e}")
+                    failed.append(f"N={n} model={m} seed={s}")
                     rows.append({
                         "N": n, "model": m, "seed": s,
                         "params": -1, "epochs_used": 0, "wall_s": 0.0,
@@ -247,6 +250,8 @@ def main() -> int:
     write_csv(rows, csv_path)
     plot_learning_curve(rows, os.path.join(out_dir, "learning_curve.png"))
     write_report(rows, os.path.join(out_dir, "report.md"))
+    if failed:
+        raise RuntimeError(f"{len(failed)} cells failed: {'; '.join(failed)}")
     return 0
 
 

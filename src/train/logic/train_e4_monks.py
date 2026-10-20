@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import statistics
 import sys
 import time
 from typing import Any, Dict, List, Tuple
@@ -43,6 +42,7 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 from train.common import set_seeds
+from train.common.stats import mean_std
 from train.logic.monks_data import load_monks
 from train.logic.rule_recovery import MONKS_RULES, rule_equivalence_score
 from train.logic.train_benchmark import (
@@ -247,12 +247,9 @@ def write_csv(rows: List[Dict[str, Any]], path: str) -> None:
 
 
 def _agg(rows: List[Dict[str, Any]], key: str) -> Tuple[float, float]:
-    vals = [r[key] for r in rows if r.get(key) is not None]
-    if not vals:
-        return float("nan"), float("nan")
-    if len(vals) == 1:
-        return float(vals[0]), 0.0
-    return float(statistics.mean(vals)), float(statistics.stdev(vals))
+    # A failed cell's row holds NaN; statistics.mean raised on it (AttributeError),
+    # so one failed seed lost the report. mean_std skips NaN (D-176).
+    return mean_std([r[key] for r in rows if r.get(key) is not None])
 
 
 def write_report(rows: List[Dict[str, Any]], path: str) -> None:
@@ -369,7 +366,12 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
     logger.info(f"E4 Monks: out_dir={out_dir} seeds={seeds} problems={problems} models={models}")
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-176: a failed cell keeps its
+    # FAILED row and the sweep goes on; after the CSV and report are written the
+    # run raises naming every failed cell. Do NOT return normally after a failed
+    # cell: the run exited 0. See decisions.md D-176.
     rows: List[Dict[str, Any]] = []
+    failed: List[str] = []
     for problem in problems:
         for m in models:
             for seed in seeds:
@@ -380,6 +382,7 @@ def main() -> int:
                     write_csv(rows, os.path.join(out_dir, "results.csv"))
                 except Exception as e:
                     logger.exception(f"cell failed: problem={problem} model={m} seed={seed}: {e}")
+                    failed.append(f"problem={problem} model={m} seed={seed}")
                     rows.append({
                         "problem": problem, "model": m, "seed": seed,
                         "params": -1, "epochs_used": 0, "wall_s": 0.0,
@@ -399,6 +402,8 @@ def main() -> int:
     report_path = os.path.join(out_dir, "report.md")
     write_report(rows, report_path)
     logger.info(f"Wrote report: {report_path}")
+    if failed:
+        raise RuntimeError(f"{len(failed)} cells failed: {'; '.join(failed)}")
     return 0
 
 
