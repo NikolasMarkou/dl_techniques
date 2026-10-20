@@ -25,6 +25,14 @@ detection with ``multi_head`` included). A grid-less sequence (a
 says so.
 
 The inputs are non-square (4 x 6), so a transposed reshape cannot pass.
+
+The arms above check shapes, finiteness and a gradient, and a restore that
+reshapes to ``(B, W, H, -1)`` and transposes back keeps every one of them
+green (W5, measured at e7c5b583b: 24 of 24). The value arms below replace the
+attention by an identity and feed a position-coded map (channel 0 = row,
+channel 1 = column, the rest = cell id): ``_apply_attention`` must then hand
+back every cell exactly where it was, on the map -> sequence -> map path and
+on the sequence -> grid -> sequence path.
 """
 
 import keras
@@ -142,3 +150,34 @@ def test_fftnet_heads_run_either_attention_type(task_type, attention_type) -> No
         assert _shapes(out) == {"classifications": (2, 2, 2, 36), "regressions": (2, 2, 2, 36)}
     else:
         assert _shapes(out) == (2, 32, 32, 4)
+
+
+def _position_coded_map() -> np.ndarray:
+    """``(1, H, W, C)``: channel 0 = row, channel 1 = column, the rest = cell id."""
+    x = np.zeros((1, H, W, C), "float32")
+    for i in range(H):
+        for j in range(W):
+            x[0, i, j, 0], x[0, i, j, 1], x[0, i, j, 2:] = i, j, i * W + j
+    return x
+
+
+_VALUE_CASES = (
+    [("map_to_sequence", name) for name in _SPATIAL_HEADS]
+    + [("sequence_to_grid", name) for name in _SEQUENCE_HEADS])
+
+
+@pytest.mark.parametrize("path,name", _VALUE_CASES, ids=[f"{p}-{n}" for p, n in _VALUE_CASES])
+def test_an_identity_attention_hands_back_every_cell_in_place(path, name) -> None:
+    if path == "map_to_sequence":
+        # A sequence type on a map: flatten to H * W tokens, then restore.
+        head = _SPATIAL_HEADS[name](hidden_dim=C, use_attention=True, attention_type="multi_head")
+        x = _position_coded_map()
+    else:
+        # A spatial type on a sequence: place the tokens on the grid, then flatten.
+        head = _SEQUENCE_HEADS[name](hidden_dim=C, use_attention=True, attention_type="cbam")
+        x = _position_coded_map().reshape(1, H * W, C)
+    head.attention = keras.layers.Identity()
+    out = keras.ops.convert_to_numpy(head._apply_attention(keras.ops.convert_to_tensor(x)))
+    assert out.shape == x.shape
+    moved = np.argwhere((out != x).any(axis=-1))
+    assert moved.size == 0, f"{len(moved)} cells moved, first at {moved[:3].tolist()}"

@@ -31,7 +31,12 @@ One row per consumer class, four arms per row:
     Keras' "``from_logits=True`` but the output came from a softmax" warning
     fails this arm too.
 
-Adding a consumer is one entry in :data:`SUBJECTS`.
+Adding a consumer is one entry in :data:`SUBJECTS`. An AST arm
+(``test_every_classification_head_owner_has_a_census_row``) fails when a
+``models/`` class builds a classification head (``build_model_vision_head``,
+``create_vision_head``, ``create_head`` or ``ClassificationHead``) and has no
+row, so a new consumer that returns the head's dict cannot slip past the
+census; callers of another task type (DarkIR, SCUNet) are exempt by task.
 
 Step 6 added the FFTNet classifier (``create_fftnet_classifier``, a functional
 ``keras.Model`` around the ``FFTNet`` encoder with a ``Sequential``
@@ -63,6 +68,8 @@ torchvision's published count and AlexNet against the paper's layer list
 summed by hand.
 """
 
+import ast
+from pathlib import Path
 from typing import Callable, Dict, Tuple
 
 import keras
@@ -928,3 +935,94 @@ def test_a_dead_head_knob_is_refused(name: str, knob: str) -> None:
     value = "default" if knob == "head_config_preset" else {}
     with pytest.raises(ValueError, match=knob):
         builder(**{knob: value})
+
+
+# ---------------------------------------------------------------------
+# The census finds its own subjects (plan-2026-10-14T062616-81938e81
+# iteration 2 step 6.4, the heads review's A2-3)
+# ---------------------------------------------------------------------
+
+#: Calls that build a vision head, with the position of their task argument.
+#: ``ClassificationHead`` takes none: building one is always a subject.
+_HEAD_BUILDERS = {
+    "build_model_vision_head": 0,
+    "create_vision_head": 0,
+    "create_head": 1,
+    "ClassificationHead": None,
+}
+_MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "models"
+
+
+def _task_of(call: ast.Call, position: int) -> str:
+    """The task a head-building call names, as the ``VisionTaskType`` value.
+
+    :raises AssertionError: If the task is not a literal, so the census
+        cannot tell whether the call builds a classifier.
+    """
+    node = call.args[position] if len(call.args) > position else next(
+        (k.value for k in call.keywords if k.arg == "task_type"), None)
+    if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "VisionTaskType":
+        return node.attr.lower()
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.lower()
+    raise AssertionError(
+        f"line {call.lineno}: the task of {ast.unparse(call.func)} is not a "
+        f"literal ({ast.unparse(node) if node else None}); the census cannot "
+        f"tell whether it builds a classifier")
+
+
+def _classifier_owners(source: str) -> set:
+    """Names of the classes (or module-level functions) in ``source`` that
+    build a classification head. Other task types (DarkIR and SCUNet build a
+    denoising head) are not subjects: the exemption is by task, not by name.
+    """
+    owners = set()
+
+    def visit(node: ast.AST, owner) -> None:
+        for child in ast.iter_child_nodes(node):
+            here = owner
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef)) and owner is None:
+                here = child.name
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = getattr(func, "id", None) or getattr(func, "attr", None)
+                if name in _HEAD_BUILDERS:
+                    position = _HEAD_BUILDERS[name]
+                    if position is None or _task_of(child, position) == "classification":
+                        owners.add(here)
+            visit(child, here)
+
+    visit(ast.parse(source), None)
+    return owners
+
+
+def test_the_owner_scan_sees_a_planted_classifier_and_skips_other_tasks() -> None:
+    planted = (
+        "class Planted:\n"
+        "    def __init__(self):\n"
+        "        self.head = build_model_vision_head(\n"
+        "            VisionTaskType.CLASSIFICATION, {'num_classes': 3})\n"
+        "class Restorer:\n"
+        "    def __init__(self):\n"
+        "        self.head = build_model_vision_head(VisionTaskType.DENOISING, {})\n"
+        "def make_classifier():\n"
+        "    return create_vision_head('classification', num_classes=3)\n"
+    )
+    assert _classifier_owners(planted) == {"Planted", "make_classifier"}
+    with pytest.raises(AssertionError, match="not a literal"):
+        _classifier_owners("x = build_model_vision_head(task, {})\n")
+
+
+def test_every_classification_head_owner_has_a_census_row() -> None:
+    owners = set()
+    for path in sorted(_MODELS_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if any(name in source for name in _HEAD_BUILDERS):
+            owners |= _classifier_owners(source)
+    # Anti-vacuity: 16 classification-head owners (17 calls; ResNet makes two)
+    # at 3a89046f8.
+    assert len(owners) >= 16, sorted(owners)
+    rows = {name.split("_")[0] for name in SUBJECTS}
+    assert owners <= rows, (
+        f"classification-head owners with no SUBJECTS row: "
+        f"{sorted(owners - rows)}; add one so the logits arms reach them")
