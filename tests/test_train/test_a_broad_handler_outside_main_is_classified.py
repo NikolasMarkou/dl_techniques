@@ -116,7 +116,7 @@ _OPTIONAL_OUTPUT = {
          'match figures'),
     ],
     'train/common/run_summary.py': [
-        ('run_data_free_analysis', 'Analyzer raised', 'with threadpool_limits(limits=1):',
+        ('run_data_free_analysis', 'Analyzer raised', 'with threadpool_limits(limits=limits):',
          'the analyzer report, recorded as status error in the summary'),
         ('_attempt', 'Visualization', 'result = fn()',
          'a figure, recorded in failed'),

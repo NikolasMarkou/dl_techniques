@@ -405,12 +405,21 @@ def _pool_threads() -> list:
     return sorted((pool["filepath"], pool["num_threads"]) for pool in threadpool_info())
 
 
+def test_the_default_blas_limit_is_the_measured_four() -> None:
+    """D-243: AlexNet's end-of-run analysis took 381.7 s at one BLAS thread, 231.6 s at two and
+    177.8 s at four (3 repeats each, sd <= 1.1 s); a 1.9M-parameter ConvUNext 5.8 / 5.6 / 5.7 s."""
+    assert run_summary.DATA_FREE_ANALYSIS_BLAS_THREADS == 4
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
-def test_the_analysis_runs_on_one_blas_thread_and_gives_the_pool_back(tmp_path, monkeypatch, fails) -> None:
-    """D-046: the spectral fits oversubscribe the host at the default pool size (14.7-21.0 s against
-    6.1-6.6 s at one thread), so the analyzer call is scoped to one thread; the limit must not leak
-    (training and the per-epoch analyzer keep their pools), also when the analysis raises. The pools
-    are set to two threads first so the guard can fail on a host that would default to one."""
+@pytest.mark.parametrize("limits, expected", [(None, 4), (1, 1), (3, 3)], ids=["default", "one", "three"])
+def test_the_analysis_runs_on_its_blas_limit_and_gives_the_pool_back(
+        tmp_path, monkeypatch, fails, limits, expected) -> None:
+    """D-046, D-243: the analyzer call runs inside ``threadpool_limits(limits)``, by default
+    ``DATA_FREE_ANALYSIS_BLAS_THREADS`` (the default pool of 12 threads oversubscribed the host,
+    D-046; four beat one by 204 s on AlexNet, D-243). The limit must not leak (training and the
+    per-epoch analyzer keep their pools), also when the analysis raises. The pools are set to two
+    threads first so the guard can fail on a host that would default to the expected count."""
     seen = []
     _analysis_spy(monkeypatch, tmp_path, payload=_data_free_payload(), raises=ValueError("scripted") if fails else None)
     inner = run_summary.run_model_analysis
@@ -420,13 +429,14 @@ def test_the_analysis_runs_on_one_blas_thread_and_gives_the_pool_back(tmp_path, 
         return inner(*args, **kwargs)
 
     monkeypatch.setattr(run_summary, "run_model_analysis", recording_analysis)
+    kwargs = {} if limits is None else {"limits": limits}
     with threadpool_limits(limits=2):
         before = _pool_threads()
         assert before and {count for _, count in before} == {2}, "the test needs pools it can tell apart"
-        block = _analyse(tmp_path)
-        assert _pool_threads() == before, "the one-thread limit leaked out of the analyzer call"
+        block = _analyse(tmp_path, **kwargs)
+        assert _pool_threads() == before, "the limit leaked out of the analyzer call"
     assert block["status"] == ("error" if fails else "ok")
-    assert len(seen) == 1 and {count for _, count in seen[0]} == {1}, f"not one BLAS thread: {seen}"
+    assert len(seen) == 1 and {count for _, count in seen[0]} == {expected}, f"not {expected} BLAS threads: {seen}"
 
 
 def _with_library_files(run_dir, payload, results=None):

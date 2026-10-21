@@ -59,9 +59,10 @@ epoch's weights) is written to `model_analysis/` by the shared
 `train.common.run_summary.run_data_free_analysis`; if it does not land, the run
 fails. `--epoch-analysis-every N` also runs it every N epochs into
 `epoch_analysis/`; the default 0 never does. Measured on the RTX 4070 at 227 px
-with batch 128: an Imagenette epoch takes 9 to 10 s, the per-epoch analysis 296
-to 305 s, and the one end-of-run analysis 398 s (plan-2026-10-14T062616-81938e81
-D-114).
+with batch 128: an Imagenette epoch takes 9 to 10 s and the per-epoch analysis 296
+to 305 s (plan-2026-10-14T062616-81938e81 D-114). The end-of-run analysis runs on
+four BLAS threads: 177.8 s, against 381.7 s on one (default recipe, batch 256,
+3 repeats each; D-243).
 
 ## The default recipe
 

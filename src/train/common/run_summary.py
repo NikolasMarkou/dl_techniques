@@ -328,9 +328,18 @@ def data_free_analysis_config() -> AnalysisConfig:
     )
 
 
+#: BLAS threads of the end-of-run analysis call (``run_data_free_analysis(limits=...)``'s default).
+# DECISION plan-2026-10-14T062616-81938e81/D-243: four, measured: AlexNet 381.7 s at one thread,
+# 231.6 s at two, 177.8 s at four (3 repeats, sd <= 1.1 s); a 1.9M-parameter ConvUNext 5.8 / 5.6 /
+# 5.7 s. Do NOT go back to one (D-046's value, measured only on the small model) and do NOT remove
+# the limit (D-046: 12 threads oversubscribed the host).
+DATA_FREE_ANALYSIS_BLAS_THREADS = 4
+
+
 def run_data_free_analysis(
         model: keras.Model, sample: np.ndarray, labels: np.ndarray,
         history: "keras.callbacks.History", model_name: str, run_dir: Path, enabled: bool = True,
+        limits: int = DATA_FREE_ANALYSIS_BLAS_THREADS,
 ) -> Dict[str, Any]:
     """Run the end-of-run weights + spectral analysis and read back what reached the disk; never raises.
 
@@ -347,6 +356,8 @@ def run_data_free_analysis(
         model_name: The key the analysis is stored and read back under.
         run_dir: The run directory; results land in ``<run_dir>/model_analysis/``.
         enabled: ``False`` returns :func:`skipped_analysis_status` without touching the disk.
+        limits: BLAS threads for the analyzer call (``threadpoolctl.threadpool_limits``), scoped to
+            that call and restored after it, also on an exception.
 
     Returns:
         :func:`skipped_analysis_status` when disabled, else ``{"status", "analyzers", "error",
@@ -363,7 +374,7 @@ def run_data_free_analysis(
         # DECISION plan-2026-09-19T224205-49c8bf80/D-046: the spectral fits run 12 BLAS threads that
         # oversubscribe the host (14.7-21.0 s against 6.1-6.6 s at one thread, same model and load).
         # Do NOT drop the limit, and do NOT set it process-wide: it is scoped to this one call.
-        with threadpool_limits(limits=1):
+        with threadpool_limits(limits=limits):
             results = run_model_analysis(
                 model, (sample, labels), history, model_name, str(run_dir), data_free_analysis_config())
         block = read_data_free_analysis_status(run_dir, model_name)
