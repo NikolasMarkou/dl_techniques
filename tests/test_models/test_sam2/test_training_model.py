@@ -40,7 +40,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.losses.sam2_video_loss import (
     SAM2GatedMaskLoss,
@@ -82,8 +81,9 @@ def trainer(
         POSITIVE value whenever mask VALUES are under test; see the module
         docstring.
     :type object_score: Optional[float]
-    :param multimask_output_in_sam: Forwarded to the wrapper; ``False`` keeps
-        frame 0 on token 0, so ``iou_supervision`` has one slot per frame.
+    :param multimask_output_in_sam: Forwarded to :func:`create_sam2` (the
+        wrapper reads SAM 2's switch, D-252); ``False`` keeps frame 0 on token
+        0, so ``iou_supervision`` has one slot per frame.
     :type multimask_output_in_sam: bool
     :param overrides: Forwarded to :func:`create_sam2`.
     :type overrides: Any
@@ -91,10 +91,9 @@ def trainer(
     :rtype: SAM2TrainingModel
     """
     overrides.setdefault("multimask_output", False)
-    sam2 = create_sam2("tiny", **overrides)
-    model = SAM2TrainingModel(
-        sam2, num_frames=num_frames,
-        multimask_output_in_sam=multimask_output_in_sam)
+    sam2 = create_sam2(
+        "tiny", multimask_output_in_sam=multimask_output_in_sam, **overrides)
+    model = SAM2TrainingModel(sam2, num_frames=num_frames)
     model.build(None)
     if object_score is not None:
         pin_object_score(sam2, object_score)
@@ -268,7 +267,7 @@ def last_frame_mask_gradients(model: SAM2TrainingModel, inputs: Any,
     """
     with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
-        loss = ops.sum(outputs[SAM2_LOW_RES_LOGITS][:, frame])
+        loss = keras.ops.sum(outputs[SAM2_LOW_RES_LOGITS][:, frame])
     return tape.gradient(loss, model.trainable_variables)
 
 
@@ -1004,7 +1003,7 @@ class TestIoUSupervision:
         packed = np.asarray(
             model(inputs, training=True)[SAM2_IOU_SUPERVISION])
         from_the_loss = np.asarray(mask_presence_gate(
-            ops.convert_to_tensor(inputs["gt_masks"])))[..., 0, 0]
+            keras.ops.convert_to_tensor(inputs["gt_masks"])))[..., 0, 0]
         zeroed = ~np.any(packed != 0.0, axis=-1)
         np.testing.assert_array_equal(zeroed, ~from_the_loss)
         assert zeroed[:, 1].all() and not zeroed[:, 0].any()
@@ -1110,5 +1109,5 @@ class TestIoUSupervision:
         kernel = model.sam2.mask_decoder.pred_obj_score_head.layers[-1].kernel
         with tf.GradientTape() as tape:
             packed = model(inputs, training=True)[SAM2_IOU_SUPERVISION]
-            achieved_only = ops.sum(packed[..., 1])
+            achieved_only = keras.ops.sum(packed[..., 1])
         assert tape.gradient(achieved_only, kernel) is None

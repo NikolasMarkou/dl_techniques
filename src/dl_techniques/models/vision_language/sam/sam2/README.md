@@ -178,7 +178,7 @@ location so a reader knows where to look, not restated:
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
 | [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken | `test_neck.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) it still raised the loss (memorised batch 0.805 against 0.547; 4 held-out clips 0.968 against 0.790) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) it still raised the loss, scored on the same 8 draws of frame-0 points for both (D-252; held-out clips: 1.451 against 1.185 and 2.164 against 1.983 for two runs of the 32-clip command) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
@@ -231,13 +231,27 @@ Four properties of that wrapper are load-bearing and stated at the class:
   `20 * focal + dice` against the ground truth, and the IoU head is supervised on
   all three (`iou_supervision` then has `3 * T` slots). Every other frame decodes
   mask token 0. The memory and the object pointer take the candidate of highest
-  predicted IoU. At inference, answer a single-click frame with
-  `multimask_output=True` and take the candidate of highest predicted IoU, as
-  upstream's predictors do: token 0 is trained by the tracking frames only. Measured
-  (mask loss, inference mode, through `evaluate`): a 2-clip memorisation run, on its
-  batch, 0.547 with the best-IoU candidate, 0.488 with token 0, best constant 0.959;
-  a 32-clip, 30-epoch run, on 4 held-out clips, 0.790 against 1.283 for token 0 and
-  0.921 for the best constant.
+  predicted IoU. The switch lives on `SAM2` (`multimask_output_in_sam`, default
+  `True`, D-252) and the wrapper reads it, so inference answers the frames training
+  trains: `SAM2.call` and `SAM2.stream_step(..., is_conditioning=True)` with one point
+  and no box decode the three candidates and return the one of highest predicted
+  IoU, still one mask (`(B, 1, h, w)`), and its object pointer and memory come from
+  that candidate, as upstream's `_forward_sam_heads` does. A tracking frame, a
+  non-conditioning click, two points or a box decode token 0 (upstream's
+  `_use_multimask` at the `SAM2Base` defaults `multimask_min_pt_num =
+  multimask_max_pt_num = 1`, tracking off; the released configs turn tracking on,
+  which this wrapper does not train). `multimask_output=True` still returns all three
+  candidates. Measured (mask loss, inference mode, through `evaluate`, every answer
+  scored on the SAME frame-0 points, 8 draws of the pipeline's random points; D-252):
+  on the smoke models no single-click answer beats the best constant logit, and which
+  of the two answers is better changes between two runs of one command. The 32-clip,
+  30-epoch run of step 12.6, on its held-out clips: best-IoU candidate 1.185, token 0
+  1.925, lowest-loss candidate 1.116, constant 0.921; the same command rerun at step
+  12.7: 1.984, 1.519, 1.094, 0.921. The 2-clip memorisation run of step 12.6 on its
+  own clips: 1.070, 1.077, 0.958, constant 0.959. The step-12.6 figures that beat the
+  constant (0.547 memorised, 0.790 held out) were single draws: the pipeline redraws
+  the frame-0 point on every pass, and two consecutive `evaluate` calls of one answer
+  scored 0.531 and 1.999. This is section 7's finding, not a new one.
 
 ### The mask head does not learn jointly
 
@@ -254,11 +268,13 @@ claim: the training path demonstrably runs, and on the one configuration that
 was measured it demonstrably does not learn masks jointly.
 
 Measured since, on the trainer's synthetic clips with the encoder trained jointly
-(plan-2026-10-14T062616-81938e81, D-246 and D-249): a 2-clip run memorises its batch
-(mask loss 7.34 to 0.48 against a best constant of 0.96), and a 32-clip, 30-epoch
-run scores 0.744 on 4 held-out clips against 0.921 for the best constant. These are
-small synthetic runs, not an accuracy claim; they bound the statement above to the
-configuration it measured.
+(plan-2026-10-14T062616-81938e81, D-246, D-249, D-252): a 2-clip run's logged mask
+loss falls from 7.34 to 0.48 on the frame-0 points it was drawn last, but the
+pipeline redraws those points on every pass, and scored on 8 draws its lowest-loss
+candidate reaches 0.958 on its own clips against a best constant of 0.959; a 32-clip,
+30-epoch run scores 1.094 to 1.116 on 4 held-out clips against 0.921. The step-12.6
+figures that beat the constant (0.48, 0.744) were single draws. The statement above
+stands for this trainer's configuration.
 
 ## 8. Serialization and Checkpoints
 

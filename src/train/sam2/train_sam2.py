@@ -592,7 +592,7 @@ def create_sam2_training_model(
        ``multimask_output=False`` is passed EXPLICITLY rather than left to the
        variant table: the wrapper refuses ``True`` outright (it chooses each
        frame's mask count itself: the three multimask candidates on a
-       single-click frame 0, ``multimask_output_in_sam``, D-249), and a variant
+       single-click frame 0, ``SAM2.multimask_output_in_sam``, D-249, D-252), and a variant
        table that changed its default would otherwise turn that refusal into a
        crash at construction.
 

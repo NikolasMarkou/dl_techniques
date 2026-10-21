@@ -134,7 +134,16 @@ def test_frame_zero_supervises_its_lowest_loss_candidate_and_every_iou():
 def test_every_multimask_token_trains_when_its_candidate_is_the_lowest_loss_one(token):
     """Each multimask token's hypernetwork MLP and embedding row receive a nonzero
     gradient once its candidate is the one frame 0 supervises; mask token 0 is
-    trained by the single-mask frame after it."""
+    trained by the single-mask frame after it.
+
+    Seeded (D-252): the probe makes a candidate the lowest-loss one by using its
+    own foreground as the ground truth, which needs that candidate to have a
+    foreground and to beat the other two on it. At unseeded initial weights 4
+    of 36 (seed, token) draws failed one of those two preconditions (seeds 0-11:
+    seed 1 token 3, seed 5 token 2, seeds 6 and 8 token 1), so the test failed
+    about one run in nine; seed 0 meets both for every token.
+    """
+    keras.utils.set_random_seed(0)
     model = trainer(num_frames=2, object_score=8.0)
     inputs = clip_inputs(model, batch=1)
     seen = _recording_decode(model)
@@ -186,9 +195,10 @@ def test_a_box_or_a_second_point_keeps_frame_zero_on_token_zero():
 
 def test_the_switch_off_restores_single_mask_training_and_round_trips():
     model = trainer(num_frames=1, object_score=8.0)
-    off = type(model)(model.sam2, num_frames=1, multimask_output_in_sam=False)
-    assert off.get_config()["multimask_output_in_sam"] is False
-    assert model.get_config()["multimask_output_in_sam"] is True
+    off = trainer(num_frames=1, object_score=8.0, multimask_output_in_sam=False)
+    assert off.get_config()["sam2"]["config"]["multimask_output_in_sam"] is False
+    assert model.get_config()["sam2"]["config"]["multimask_output_in_sam"] is True
+    assert type(off).from_config(off.get_config()).sam2.multimask_output_in_sam is False
     seen = _recording_decode(off)
     off(clip_inputs(model), training=False)
     assert keras.ops.convert_to_numpy(seen[0]["low_res_logits"]).shape[1] == 1

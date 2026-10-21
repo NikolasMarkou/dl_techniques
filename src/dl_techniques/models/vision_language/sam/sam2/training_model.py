@@ -28,14 +28,13 @@ References:
 from typing import Any, Dict, List, Optional, Tuple
 
 import keras
-from keras import ops
 
 from dl_techniques.losses.sam2_video_loss import (
     SAM2GatedMaskLoss, mask_presence_gate, select_lowest_loss_mask)
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss
 from dl_techniques.models.vision_language.sam.sam1.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
-from .model import SAM2, _select_best_by_iou
+from .model import SAM2, _num_prompt_points, _select_best_by_iou
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -92,16 +91,17 @@ class SAM2TrainingModel(keras.Model):
     :param seed: Reserved for future stochastic prompting; stored and
         serialized so the config is stable across steps.
     :type seed: int
-    :param multimask_output_in_sam: Upstream's switch of the same name. When
-        set, frame 0 decodes the three multimask candidates whenever its
-        prompt is a single click (one point, no box: upstream's
-        ``_use_multimask`` with ``multimask_min_pt_num = multimask_max_pt_num
-        = 1``, a box counting as two points); the mask loss trains the
-        candidate of lowest loss and the IoU head is supervised on all three.
-        Every other frame decodes mask token 0. Default ``True``, upstream's
-        training value.
-    :type multimask_output_in_sam: bool
     :param kwargs: Forwarded to ``keras.Model``.
+
+    Multimask training follows ``sam2.multimask_output_in_sam`` (one home for
+    the rule, read through ``SAM2._use_multimask``, D-252): when set, frame 0
+    decodes the three multimask candidates whenever its prompt is a single
+    click (one point, no box: upstream's ``_use_multimask`` with
+    ``multimask_min_pt_num = multimask_max_pt_num = 1``, a box counting as two
+    points); the mask loss trains the candidate of lowest loss and the IoU
+    head is supervised on all three. Every other frame decodes mask token 0.
+    ``SAM2.call`` and ``SAM2.stream_step`` answer the same frames with the
+    candidate of highest predicted IoU.
 
     :raises ValueError: If ``sam2`` is not a :class:`SAM2`, if ``num_frames``
         is below 1, or if ``sam2.multimask_output`` is ``True``.
@@ -146,7 +146,6 @@ class SAM2TrainingModel(keras.Model):
             sam2: SAM2,
             num_frames: int = 4,
             seed: int = 42,
-            multimask_output_in_sam: bool = True,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -167,7 +166,7 @@ class SAM2TrainingModel(keras.Model):
                 "SAM2TrainingModel refuses multimask_output=True on the SAM2 "
                 "it trains. The frame axis is folded into the mask axis, one "
                 "supervised mask per frame; the wrapper chooses each frame's "
-                "mask count itself (multimask_output_in_sam: three candidates "
+                "mask count itself (SAM2.multimask_output_in_sam: three candidates "
                 "on a single-click frame 0, token 0 elsewhere). Build the "
                 "model with create_sam2(..., multimask_output=False) and pass "
                 "multimask_output=True to call() or stream_step() at inference."
@@ -176,7 +175,6 @@ class SAM2TrainingModel(keras.Model):
         self.sam2 = sam2
         self.num_frames = int(num_frames)
         self.seed = int(seed)
-        self.multimask_output_in_sam = bool(multimask_output_in_sam)
         # The ONE mask loss: it ranks a multimask frame's candidates
         # (select_lowest_loss_mask) and `compile_sam2_video_trainer` compiles it
         # on `low_res_logits`, so the selection and the loss share their weights.
@@ -208,7 +206,7 @@ class SAM2TrainingModel(keras.Model):
         :rtype: Any
         """
         trailing = tuple(int(dim) for dim in tensor.shape[1:])
-        return ops.reshape(tensor, (-1, self.num_frames) + trailing)
+        return keras.ops.reshape(tensor, (-1, self.num_frames) + trailing)
 
     def _condition(
             self,
@@ -241,22 +239,22 @@ class SAM2TrainingModel(keras.Model):
         """
         hidden = self.sam2.hidden_dim
         grid_h, grid_w = int(features.shape[1]), int(features.shape[2])
-        batch = ops.shape(features)[0]
-        tokens = ops.reshape(features, (batch, grid_h * grid_w, hidden))
-        tokens_pos = ops.reshape(features_pos, (batch, grid_h * grid_w, hidden))
+        batch = keras.ops.shape(features)[0]
+        tokens = keras.ops.reshape(features, (batch, grid_h * grid_w, hidden))
+        tokens_pos = keras.ops.reshape(features_pos, (batch, grid_h * grid_w, hidden))
 
         readout = bank.read(frame_idx)
 
         if readout.memory is None:
             if self.sam2.directly_add_no_mem_embed:
-                conditioned = tokens + ops.cast(
+                conditioned = tokens + keras.ops.cast(
                     self.sam2.no_mem_embed, tokens.dtype)
-                return ops.reshape(
+                return keras.ops.reshape(
                     conditioned, (batch, grid_h, grid_w, hidden))
-            memory = ops.zeros(
+            memory = keras.ops.zeros(
                 (batch, 1, self.sam2.mem_dim), dtype=tokens.dtype)
-            memory_pos = ops.broadcast_to(
-                ops.cast(self.sam2.no_mem_pos_enc, tokens.dtype),
+            memory_pos = keras.ops.broadcast_to(
+                keras.ops.cast(self.sam2.no_mem_pos_enc, tokens.dtype),
                 (batch, 1, self.sam2.mem_dim),
             )
             num_ptr_tokens = 0
@@ -277,7 +275,7 @@ class SAM2TrainingModel(keras.Model):
             num_obj_ptr_tokens=num_ptr_tokens,
             training=training,
         )
-        return ops.reshape(conditioned, (batch, grid_h, grid_w, hidden))
+        return keras.ops.reshape(conditioned, (batch, grid_h, grid_w, hidden))
 
     def _store(
             self,
@@ -308,24 +306,24 @@ class SAM2TrainingModel(keras.Model):
         """
         logits = _select_best_by_iou(
             outputs["low_res_logits"], outputs["iou_predictions"])
-        logits = ops.transpose(logits, (0, 2, 3, 1))
+        logits = keras.ops.transpose(logits, (0, 2, 3, 1))
         size = self.sam2.image_size
-        high_res = ops.image.resize(
+        high_res = keras.ops.image.resize(
             logits, (size, size), interpolation="bilinear")
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-074: this is the sole BPTT
         # truncation point -- detach memory_encoder's inputs (features, high_res) here only, never its output or the read side, or the gradient path to memory_encoder vanishes entirely (measured 38/40 None). See decisions.md.
         memory, memory_pos = self.sam2.memory_encoder(
-            [ops.stop_gradient(features), ops.stop_gradient(high_res)],
+            [keras.ops.stop_gradient(features), keras.ops.stop_gradient(high_res)],
             training=training,
         )
         memory = self.sam2._mark_occlusion(
-            memory, ops.stop_gradient(outputs["object_score_logits"]))
+            memory, keras.ops.stop_gradient(outputs["object_score_logits"]))
         bank.add_frame(
             frame_idx,
             maskmem_features=memory,
             maskmem_pos_enc=memory_pos,
-            obj_ptr=ops.stop_gradient(outputs["object_pointer"]),
+            obj_ptr=keras.ops.stop_gradient(outputs["object_pointer"]),
             is_conditioning=(frame_idx == 0),
         )
 
@@ -355,17 +353,17 @@ class SAM2TrainingModel(keras.Model):
         :rtype: Any
         """
         logits = outputs["low_res_logits"]
-        truth = ops.cast(gt_frame, logits.dtype)
-        predicted = ops.cast(outputs["iou_predictions"], logits.dtype)
+        truth = keras.ops.cast(gt_frame, logits.dtype)
+        predicted = keras.ops.cast(outputs["iou_predictions"], logits.dtype)
         # `achieved_mask_iou` is IMPORTED from SAM 1's training model, not
         # re-derived: it is public, frame-agnostic and the single source of
         # truth for "the IoU this thresholded prediction actually got". It
         # thresholds, so it is already gradient-free; the explicit
         # `stop_gradient` states the intent rather than relying on that.
-        achieved = ops.stop_gradient(achieved_mask_iou(logits, truth))
-        packed = ops.stack([predicted, achieved], axis=-1)
-        present = ops.reshape(mask_presence_gate(truth), (-1, 1, 1))
-        packed = ops.where(present, packed, ops.zeros_like(packed))
+        achieved = keras.ops.stop_gradient(achieved_mask_iou(logits, truth))
+        packed = keras.ops.stack([predicted, achieved], axis=-1)
+        present = keras.ops.reshape(mask_presence_gate(truth), (-1, 1, 1))
+        packed = keras.ops.where(present, packed, keras.ops.zeros_like(packed))
         if int(packed.shape[1]) == slots:
             return packed
         return keras.ops.concatenate([packed] * slots, axis=1)
@@ -430,7 +428,7 @@ class SAM2TrainingModel(keras.Model):
         # T-frame clip unaffordable. This mirrors SAM 1's own
         # encoder-outside-the-loop precedent.
         size = self.sam2.image_size
-        flat = ops.reshape(inputs[INPUT_IMAGE], (-1, size, size, 3))
+        flat = keras.ops.reshape(inputs[INPUT_IMAGE], (-1, size, size, 3))
         encoded = self.sam2.image_encoder(flat, training=training)
 
         vision_features = self._unflatten(encoded["vision_features"])
@@ -455,8 +453,8 @@ class SAM2TrainingModel(keras.Model):
         labels = inputs[INPUT_POINT_LABELS] if has_coords else None
 
         gt_masks = inputs[INPUT_GT_MASKS]
-        multimask_first = self._frame_zero_is_multimask(
-            None if coords is None else coords.shape, boxes is not None)
+        multimask_first = self.sam2._use_multimask(True, _num_prompt_points(
+            None if coords is None else coords.shape, boxes is not None))
         slots = self._slots(multimask_first)
 
         frame_logits: List[Any] = []
@@ -500,6 +498,7 @@ class SAM2TrainingModel(keras.Model):
                 inputs=prompt,
                 multimask_output=multimask,
                 training=training,
+                is_init_cond_frame=(t == 0),
             )
             # DECISION plan-2026-10-14T062616-81938e81/D-249
             # A multimask frame supervises its LOWEST-LOSS candidate against the
@@ -524,26 +523,10 @@ class SAM2TrainingModel(keras.Model):
         return {
             # Each frame contributes a length-1 mask axis (M == 1), so the
             # concatenation IS the frame axis (D-051).
-            SAM2_LOW_RES_LOGITS: ops.concatenate(frame_logits, axis=1),
-            SAM2_OBJECT_SCORE_LOGITS: ops.stack(frame_scores, axis=1),
-            SAM2_IOU_SUPERVISION: ops.concatenate(frame_iou, axis=1),
+            SAM2_LOW_RES_LOGITS: keras.ops.concatenate(frame_logits, axis=1),
+            SAM2_OBJECT_SCORE_LOGITS: keras.ops.stack(frame_scores, axis=1),
+            SAM2_IOU_SUPERVISION: keras.ops.concatenate(frame_iou, axis=1),
         }
-
-    def _frame_zero_is_multimask(
-            self, coords_shape: Optional[Tuple[Any, ...]], has_boxes: bool,
-    ) -> bool:
-        """Upstream's ``_use_multimask`` for frame 0, decided on static shapes.
-
-        :param coords_shape: Static shape of ``point_coords``, or ``None``.
-        :type coords_shape: Optional[Tuple[Any, ...]]
-        :param has_boxes: Whether frame 0 has a box prompt (two points).
-        :type has_boxes: bool
-        :return: ``True`` when frame 0 decodes the multimask candidates.
-        :rtype: bool
-        """
-        num_points = 0 if coords_shape is None else coords_shape[1]
-        num_points = num_points + (2 if has_boxes else 0)
-        return self.multimask_output_in_sam and num_points == 1
 
     def _slots(self, multimask_first: bool) -> int:
         """IoU supervision slots per frame: the candidate count, or 1."""
@@ -568,9 +551,8 @@ class SAM2TrainingModel(keras.Model):
         batch = tuple(input_shape.get(INPUT_IMAGE, (None,)))[0]
         mask_grid = self.sam2.feature_grid * 4
         coords = input_shape.get(INPUT_POINT_COORDS)
-        slots = self._slots(self._frame_zero_is_multimask(
-            None if coords is None else tuple(coords),
-            input_shape.get(INPUT_BOXES) is not None))
+        slots = self._slots(self.sam2._use_multimask(True, _num_prompt_points(
+            coords, input_shape.get(INPUT_BOXES) is not None)))
         return {
             SAM2_LOW_RES_LOGITS: (
                 batch, self.num_frames, mask_grid, mask_grid),
@@ -589,7 +571,6 @@ class SAM2TrainingModel(keras.Model):
             "sam2": keras.layers.serialize(self.sam2),
             "num_frames": self.num_frames,
             "seed": self.seed,
-            "multimask_output_in_sam": self.multimask_output_in_sam,
         })
         return config
 

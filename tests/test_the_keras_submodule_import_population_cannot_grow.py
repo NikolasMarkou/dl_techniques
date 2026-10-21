@@ -28,6 +28,9 @@ Step 7.1 of the same plan (D-216): **536 statements in 514 files**. One
 statement left with a deleted test file (the shared PFT-SR variant block's
 tests) and one with ``test_guide_conformance.py``, converted while its
 deleted subject was dropped.
+
+Step 12.7 of the same plan (D-252): **534 statements in 512 files**, after the
+two SAM 2 files that step edits (``sam2/training_model.py`` and its test).
 """
 
 import ast
@@ -40,8 +43,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("src", "tests")
 
 #: Measured ceilings (statements, files). Lower them when a file is converted.
-STATEMENT_CEILING = 536
-FILE_CEILING = 514
+STATEMENT_CEILING = 534
+FILE_CEILING = 512
 
 #: Files converted by name; they must stay clean whatever the totals do.
 CONVERTED = (
@@ -57,6 +60,8 @@ CONVERTED = (
     "src/dl_techniques/models/time_series/timestral/scaler.py",
     "tests/test_models/test_timestral/test_forecaster.py",
     "tests/test_layers/test_transformers/test_guide_conformance.py",
+    "src/dl_techniques/models/vision_language/sam/sam2/training_model.py",
+    "tests/test_models/test_sam2/test_training_model.py",
 )
 
 

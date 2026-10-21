@@ -92,6 +92,16 @@ _OBJ_PTR_TPOS_TEMPERATURE = 10000.0
 #: ``mixed_float16`` unchanged.
 NO_OBJ_SCORE = -1024.0
 
+#: Upstream ``SAM2Base``'s other three ``_use_multimask`` knobs, at the class
+#: defaults this port trains (``SAM2TrainingModel``, D-249): multimask output
+#: only on a frame with exactly one click, and only on an initial conditioning
+#: frame, never on a tracking frame. They are constants, not constructor
+#: arguments, because the training wrapper trains exactly this rule; answering
+#: frames the training never decoded as candidates would bring back D-245.
+MULTIMASK_MIN_PT_NUM = 1
+MULTIMASK_MAX_PT_NUM = 1
+MULTIMASK_OUTPUT_FOR_TRACKING = False
+
 
 def _sine_positional_encoding_1d(
         positions: Any,
@@ -139,12 +149,32 @@ def _sine_positional_encoding_1d(
     return keras.ops.concatenate([keras.ops.sin(angles), keras.ops.cos(angles)], axis=-1)
 
 
+def _num_prompt_points(coords_shape: Optional[Tuple[Any, ...]], has_boxes: bool) -> int:
+    """Count a prompt's clicks the way upstream's ``_use_multimask`` does.
+
+    Interface contract (``SAM2._decode`` and ``SAM2TrainingModel``'s ``call``
+    and ``compute_output_shape`` call it, so the image path, the video path
+    and training count alike):
+
+    :param coords_shape: Static shape ``(B, N, 2)`` of the point coordinates,
+        or ``None`` when there are no points. ``N`` must be static.
+    :type coords_shape: Optional[Tuple[Any, ...]]
+    :param has_boxes: Whether a box prompt is given. A box counts as two
+        points, as upstream folds a box into the point inputs as its corners.
+    :type has_boxes: bool
+    :return: The number of points, a Python int (graph-legal).
+    :rtype: int
+    """
+    count = 0 if coords_shape is None else int(tuple(coords_shape)[1])
+    return count + (2 if has_boxes else 0)
+
+
 def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
     """Gather each batch row's highest-IoU entry along the mask axis.
 
-    Interface contract (both the pointer selection in :meth:`SAM2._decode` and
-    the memory selection in :meth:`SAM2._store_memory` call it, so the two
-    cannot drift apart):
+    Interface contract (the pointer selection and the single-click answer in
+    :meth:`SAM2._decode` and the memory selection in :meth:`SAM2._store_memory`
+    call it, so the three cannot drift apart):
 
     :param tensor: ``(B, M, ...)`` -- axis 1 is the mask/token axis.
     :type tensor: Any
@@ -193,8 +223,19 @@ class SAM2(keras.Model):
         ``image_size`` (S-3).
     :type image_size: Optional[int]
     :param multimask_output: Default mask-selection mode for :meth:`call` and
-        :meth:`stream_step`. Either may override it per invocation.
+        :meth:`stream_step`: ``True`` returns all three candidates. Either may
+        override it per invocation.
     :type multimask_output: bool
+    :param multimask_output_in_sam: Upstream's switch of the same name. When
+        set, a conditioning frame (every :meth:`call`, and
+        :meth:`stream_step` with ``is_conditioning=True``) whose prompt is one
+        point and no box decodes the three candidates and answers with the
+        one of highest predicted IoU, shape ``(B, 1, h, w)`` like any single
+        mask; its object pointer and its memory come from that candidate.
+        Every other frame decodes mask token 0. ``SAM2TrainingModel`` reads
+        this switch too: with it set, frame 0 trains the three candidates
+        (D-249). Default ``True``, the value of every released SAM 2 config.
+    :type multimask_output_in_sam: bool
     :param directly_add_no_mem_embed: On a frame with no memory, add
         ``no_mem_embed`` to the pixel features and SKIP memory attention
         entirely. Shipped value ``True``.
@@ -282,6 +323,7 @@ class SAM2(keras.Model):
             num_maskmem: int = 7,
             image_size: Optional[int] = None,
             multimask_output: bool = False,
+            multimask_output_in_sam: bool = True,
             directly_add_no_mem_embed: bool = True,
             memory_temporal_stride_for_eval: int = 1,
             max_obj_ptrs_in_encoder: int = 16,
@@ -310,6 +352,7 @@ class SAM2(keras.Model):
             else image_size
         )
         self.multimask_output = bool(multimask_output)
+        self.multimask_output_in_sam = bool(multimask_output_in_sam)
         self.directly_add_no_mem_embed = bool(directly_add_no_mem_embed)
         self.memory_temporal_stride_for_eval = int(
             memory_temporal_stride_for_eval)
@@ -713,7 +756,12 @@ class SAM2(keras.Model):
             configured default (S-3).
         :type multimask_output: Optional[bool]
         :return: ``{'low_res_logits', 'iou_predictions', 'object_score_logits',
-            'object_pointer'}``.
+            'object_pointer'}``. Every image is an initial conditioning frame,
+            so under ``multimask_output_in_sam`` a prompt of one point and no
+            box answers with the candidate of highest predicted IoU (still one
+            mask); a loss compiled on this path then supervises that pick, not
+            the lowest-loss candidate, so train multimask through
+            ``SAM2TrainingModel``.
         :rtype: Dict[str, Any]
         :raises ValueError: If ``'image'`` is absent.
 
@@ -774,6 +822,28 @@ class SAM2(keras.Model):
             inputs=inputs,
             multimask_output=multimask_output,
             training=training,
+            is_init_cond_frame=True,
+        )
+
+    def _use_multimask(self, is_init_cond_frame: bool, num_points: int) -> bool:
+        """Upstream ``SAM2Base._use_multimask``: decode the three candidates?
+
+        Interface contract (:meth:`_decode` and ``SAM2TrainingModel`` call it,
+        so inference answers the frames training trains):
+
+        :param is_init_cond_frame: The frame is an initial conditioning frame
+            (every :meth:`call`; ``stream_step(is_conditioning=True)``; the
+            training wrapper's frame 0).
+        :type is_init_cond_frame: bool
+        :param num_points: From :func:`_num_prompt_points`.
+        :type num_points: int
+        :return: Whether the frame decodes the multimask candidates.
+        :rtype: bool
+        """
+        return (
+            self.multimask_output_in_sam
+            and (bool(is_init_cond_frame) or MULTIMASK_OUTPUT_FOR_TRACKING)
+            and MULTIMASK_MIN_PT_NUM <= int(num_points) <= MULTIMASK_MAX_PT_NUM
         )
 
     def _decode(
@@ -783,6 +853,7 @@ class SAM2(keras.Model):
             inputs: Dict[str, Any],
             multimask_output: Optional[bool],
             training: Optional[bool],
+            is_init_cond_frame: bool,
     ) -> Dict[str, Any]:
         """Run the prompt encoder and mask decoder over given image features.
 
@@ -799,13 +870,30 @@ class SAM2(keras.Model):
         :type multimask_output: Optional[bool]
         :param training: Keras training flag.
         :type training: Optional[bool]
-        :return: The four output tensors, keyed.
+        :param is_init_cond_frame: The frame is an initial conditioning frame,
+            for :meth:`_use_multimask`.
+        :type is_init_cond_frame: bool
+        :return: The four output tensors, keyed. With ``multimask_output``
+            resolved ``False``, the mask axis has length 1: mask token 0, or,
+            on a frame :meth:`_use_multimask` admits, the candidate of
+            highest predicted IoU.
         :rtype: Dict[str, Any]
         """
         multimask = (
             self.multimask_output if multimask_output is None
             else bool(multimask_output)
         )
+        # DECISION plan-2026-10-14T062616-81938e81/D-252: a single-click
+        # conditioning frame decodes the three candidates and answers with the
+        # one of highest predicted IoU, as upstream's _forward_sam_heads does;
+        # the pointer below and the memory (_store_memory) take that same
+        # candidate. Do NOT answer it with token 0: since D-249 frame 0 trains
+        # the candidates and token 0 is trained by the tracking frames only.
+        answer_best = (not multimask) and self._use_multimask(
+            is_init_cond_frame,
+            _num_prompt_points(
+                None if inputs.get("points") is None else inputs["points"][0].shape,
+                inputs.get("boxes") is not None))
         sparse, dense = self.prompt_encoder(
             points=inputs.get("points"),
             boxes=inputs.get("boxes"),
@@ -819,7 +907,7 @@ class SAM2(keras.Model):
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse,
                 dense_prompt_embeddings=dense,
-                multimask_output=multimask,
+                multimask_output=multimask or answer_best,
                 high_res_features=[fpn[0], fpn[1]],
                 training=training,
             )
@@ -839,6 +927,9 @@ class SAM2(keras.Model):
         else:
             selected_token = pointer_tokens[:, 0, :]
         pointer = self.obj_ptr_proj(selected_token, training=training)
+        if answer_best:
+            low_res_logits = _select_best_by_iou(low_res_logits, iou)
+            iou = _select_best_by_iou(iou, iou)
         return {
             "low_res_logits": low_res_logits,
             "iou_predictions": iou,
@@ -928,7 +1019,10 @@ class SAM2(keras.Model):
         :param masks: Optional mask prompt.
         :type masks: Optional[Any]
         :param is_conditioning: Store this frame in the conditioning bucket
-            (``t_pos = 0`` forever).
+            (``t_pos = 0`` forever). It is also upstream's
+            ``is_init_cond_frame``: with one click and no box such a frame
+            answers with its best predicted-IoU candidate
+            (``multimask_output_in_sam``).
         :type is_conditioning: bool
         :param multimask_output: Per-call override; ``None`` defers to the
             configured default.
@@ -954,6 +1048,7 @@ class SAM2(keras.Model):
             inputs={"points": points, "boxes": boxes, "masks": masks},
             multimask_output=multimask_output,
             training=False,
+            is_init_cond_frame=is_conditioning,
         )
 
         if run_memory_encoder:
@@ -1234,6 +1329,7 @@ class SAM2(keras.Model):
             "num_maskmem": self.num_maskmem,
             "image_size": self.image_size,
             "multimask_output": self.multimask_output,
+            "multimask_output_in_sam": self.multimask_output_in_sam,
             "directly_add_no_mem_embed": self.directly_add_no_mem_embed,
             "memory_temporal_stride_for_eval":
                 self.memory_temporal_stride_for_eval,
