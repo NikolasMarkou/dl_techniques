@@ -1,29 +1,35 @@
-"""Ceiling gate + raise contract for ``create_normalization_layer``'s call-site family.
+"""Exact census + raise contract for ``create_normalization_layer``'s call-site family.
 
 Why this file exists
 ====================
 
-178 call sites across 83 files in ``src/`` reach ``create_normalization_layer``.
-**149 of them pass a variable, not a literal** (94 an ``Attribute`` such as
-``self.normalization_type``, 55 a bare ``Name``), so no static instrument can
-know which of the 18 registry keys they will ask for. That population was
-reported but never pinned: D-136 gave a ceiling gate to its *sibling* family
-(``_DYNAMIC_CALL_SITE_CEILING = 15`` in
-``tests/test_models/test_package_api_contract.py``) and explicitly recorded the
-normalization sweep as "reported-but-unpinned". This file closes that gap.
+Every call site of ``create_normalization_layer`` under ``src/`` is pinned, per
+file, as ``(dynamic, literal)``: a site whose ``normalization_type`` is a
+variable (an ``Attribute`` such as ``self.normalization_type`` or a bare
+``Name``) cannot be checked by any static instrument, because no sweep can know
+which registry key it will ask for. Measured at Step 15 of
+``plan-2026-10-14T062616-81938e81`` (D-253): **200 sites in 100 files, 153
+dynamic, 47 literal.**
 
-The residual risk is **growth, not silent fallback.** The factory *raises* on an
-unknown key -- it does not quietly fall back to any layer -- so each of the 149
-dynamic sites is self-guarding at runtime the moment its branch is exercised.
-``test_an_unknown_normalization_type_raises_and_names_the_valid_ones`` pins that
-raise, because it is the entire reason a population ceiling is an adequate
-ruling here rather than a per-value assertion.
+The population was first pinned by two ``<=`` ceilings (D-201 of
+``plan-2026-08-22T035419-a11304c8``: 151 dynamic, 180 total, 2026-09-04). A
+ceiling leaves slack after a removal, and it went red at 157 / 200 without
+saying which site was new (D-120). The exact census names the file. A new or
+removed site fails here until :data:`NORM_CALL_SITES` is edited in the same
+commit; a new DYNAMIC site also needs a reason: a literal ``normalization_type=``
+or a ruling in ``decisions.md``. D-253 of ``plan-2026-10-14T062616-81938e81``
+re-opened D-201 for six dynamic sites, each a documented, stored and serialized
+constructor knob (:data:`RULED_DYNAMIC_KNOBS`).
+
+The residual risk of a dynamic site is a key nobody exercised, not a silent
+fallback: the factory *raises* on an unknown key, so each dynamic site is
+self-guarding the moment its branch runs.
+``test_an_unknown_normalization_type_raises_and_names_the_valid_ones`` pins
+that raise.
 """
 
 import ast
 import os
-import warnings
-from collections import Counter
 from typing import Dict, List, Tuple
 
 import keras
@@ -39,48 +45,150 @@ from dl_techniques.layers.norms.factory import (
 _TESTS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 
-#: Ceiling on ``create_normalization_layer`` call sites whose ``normalization_type``
-#: is a variable rather than a string literal. Such a site has no statically
-#: knowable key, so no static sweep can validate it at all.
-#:
-#: MEASURED over all of ``src/`` (``dl_techniques`` + ``applications`` + ``train``)
-#: 2026-08-23: **178 sites / 83 files**, split **94 Attribute + 55 Name = 149
-#: uncheckable**, 29 literal. Reproduces D-140's table bit-for-bit, including the
-#: file count. Note the scope: restricted to ``src/dl_techniques`` alone the same
-#: sweep reads 172/78/143 -- six of the dynamic sites live outside the library
-#: package, which is why the sweep root is ``src/``.
-#:
-#: A grep-based count is wrong in BOTH directions here (D-140 measured grep at
-#: 198 total / 20 literal against the true 178 / 29). Use the AST.
-#:
-#: RE-MEASURED 2026-09-04: 180 / 84, 96 Attribute + 55 Name = 151 uncheckable,
-#: 29 literal (unchanged). The +2 dynamic / +2 total delta is exactly
-#: ``area_attention.py``'s new ``self.qk_norm_type``-keyed ``q_norm`` /
-#: ``k_norm`` construction (added 2026-09-01, after this pin's 2026-08-23
-#: baseline) -- an optional per-head QK-normalization site, dynamic because
-#: the type is a constructor argument, not a literal.
-_UNCHECKABLE_NORM_CALL_SITE_CEILING = 151
+#: Exact census of ``create_normalization_layer`` call sites under ``src/``
+#: (``dl_techniques`` + ``applications`` + ``train``), by an AST walk (a grep is
+#: wrong in both directions here, D-140 of plan a11304c8):
+#: ``{path relative to src/: (dynamic sites, literal sites)}``. Re-derived at
+#: Step 15 of plan-2026-10-14T062616-81938e81 (D-253): 200 sites, 100 files,
+#: 153 dynamic, 47 literal. Edit it in the commit that adds or removes a site.
+NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
+    "dl_techniques/layers/attention/area_attention.py": (2, 0),
+    "dl_techniques/layers/attention/capsule_routing_attention.py": (2, 0),
+    "dl_techniques/layers/attention/differential_attention.py": (4, 0),
+    "dl_techniques/layers/attention/gated_attention.py": (2, 1),
+    "dl_techniques/layers/attention/group_query_attention.py": (2, 0),
+    "dl_techniques/layers/attention/hopfield_attention.py": (2, 0),
+    "dl_techniques/layers/attention/lighthouse_attention.py": (2, 0),
+    "dl_techniques/layers/attention/multi_head_cross_attention.py": (2, 0),
+    "dl_techniques/layers/attention/multi_head_latent_attention.py": (2, 0),
+    "dl_techniques/layers/attention/non_local_attention.py": (3, 0),
+    "dl_techniques/layers/attention/ring_attention.py": (2, 0),
+    "dl_techniques/layers/attention/rpc_attention.py": (2, 0),
+    "dl_techniques/layers/attention/shared_weights_cross_attention.py": (2, 0),
+    "dl_techniques/layers/attention/single_window_attention.py": (2, 0),
+    "dl_techniques/layers/conv_blocks/basic_block.py": (3, 0),
+    "dl_techniques/layers/conv_blocks/bottleneck_block.py": (4, 0),
+    "dl_techniques/layers/conv_blocks/conv_block.py": (1, 0),
+    "dl_techniques/layers/conv_blocks/depthwise_separable_block.py": (2, 0),
+    "dl_techniques/layers/conv_blocks/gabor_depthwise_separable_block.py": (1, 0),
+    "dl_techniques/layers/conv_blocks/universal_inverted_bottleneck.py": (1, 0),
+    "dl_techniques/layers/dense_block.py": (1, 0),
+    "dl_techniques/layers/eomt_mask.py": (2, 0),
+    "dl_techniques/layers/fastvit/attention_block.py": (1, 0),
+    "dl_techniques/layers/fastvit/conv_mlp.py": (0, 1),
+    "dl_techniques/layers/fastvit/reparam_large_kernel_conv.py": (0, 1),
+    "dl_techniques/layers/fnet_encoder_block.py": (2, 0),
+    "dl_techniques/layers/fusion/multimodal_fusion.py": (5, 0),
+    "dl_techniques/layers/geometric/clifford_block.py": (2, 0),
+    "dl_techniques/layers/geometric/clifford_rnn.py": (2, 0),
+    "dl_techniques/layers/graphs/graph_neural_network.py": (0, 2),
+    "dl_techniques/layers/graphs/relational_graph_transformer_blocks.py": (2, 0),
+    "dl_techniques/layers/heads/nlp/factory.py": (1, 0),
+    "dl_techniques/layers/heads/vision/factory.py": (1, 0),
+    "dl_techniques/layers/heads/vlm/factory.py": (1, 3),
+    "dl_techniques/layers/moe/experts.py": (2, 0),
+    "dl_techniques/layers/moe/gating.py": (1, 0),
+    "dl_techniques/layers/norms/factory.py": (1, 0),
+    "dl_techniques/layers/residual_dense_block.py": (1, 0),
+    "dl_techniques/layers/ssm/context_mamba.py": (1, 0),
+    "dl_techniques/layers/ssm/selective_ssm.py": (0, 1),
+    "dl_techniques/layers/time_series/mixed_sequential_block.py": (3, 0),
+    "dl_techniques/layers/time_series/xlstm_blocks.py": (2, 0),
+    "dl_techniques/layers/transformers/adaln_zero.py": (2, 0),
+    "dl_techniques/layers/transformers/free_transformer.py": (2, 0),
+    "dl_techniques/layers/transformers/gated_linear_attention_block.py": (1, 0),
+    "dl_techniques/layers/transformers/gemma3_transformer.py": (0, 4),
+    "dl_techniques/layers/transformers/text_decoder.py": (2, 0),
+    "dl_techniques/layers/transformers/text_encoder.py": (2, 0),
+    "dl_techniques/layers/transformers/transformer.py": (1, 0),
+    "dl_techniques/layers/transformers/transformer_decoder.py": (3, 0),
+    "dl_techniques/layers/transformers/vision_encoder.py": (6, 0),
+    "dl_techniques/models/language/fnet/model.py": (1, 0),
+    "dl_techniques/models/language/gemma/gemma3.py": (0, 1),
+    "dl_techniques/models/language/hnet/components.py": (0, 3),
+    "dl_techniques/models/language/qwen/components.py": (2, 0),
+    "dl_techniques/models/language/qwen/qwen3.py": (1, 0),
+    "dl_techniques/models/language/qwen/qwen3_embeddings.py": (2, 0),
+    "dl_techniques/models/language/qwen/qwen3_next.py": (1, 0),
+    "dl_techniques/models/language/topolm/components.py": (0, 2),
+    "dl_techniques/models/language/tree_transformer/components.py": (3, 0),
+    "dl_techniques/models/language/tree_transformer/model.py": (1, 0),
+    "dl_techniques/models/neural_computer/nam/cell.py": (2, 0),
+    "dl_techniques/models/neural_computer/nam/model.py": (1, 0),
+    "dl_techniques/models/probabilistic/neural_hmm/encoders.py": (1, 0),
+    "dl_techniques/models/time_series/tirex/model.py": (0, 1),
+    "dl_techniques/models/time_series/xlstm/forecaster.py": (1, 0),
+    "dl_techniques/models/time_series/xlstm/model.py": (1, 0),
+    "dl_techniques/models/vision/alexnet/model.py": (0, 1),
+    "dl_techniques/models/vision/convunext/model.py": (1, 0),
+    "dl_techniques/models/vision/dasiamrpn/model.py": (0, 1),
+    "dl_techniques/models/vision/deepsort/appearance.py": (0, 3),
+    "dl_techniques/models/vision/dino/dino_v1.py": (3, 0),
+    "dl_techniques/models/vision/dino/dino_v2.py": (3, 0),
+    "dl_techniques/models/vision/dino/dino_v3.py": (1, 0),
+    "dl_techniques/models/vision/fftnet/model.py": (3, 0),
+    "dl_techniques/models/vision/image_restoration/darkir/model.py": (0, 4),
+    "dl_techniques/models/vision/image_restoration/pw_fnet/model.py": (2, 0),
+    "dl_techniques/models/vision/mambalct/model.py": (0, 1),
+    "dl_techniques/models/vision/mambalct/uca_encoder.py": (3, 0),
+    "dl_techniques/models/vision/resnet/model.py": (1, 0),
+    "dl_techniques/models/vision/siamfc/model.py": (0, 1),
+    "dl_techniques/models/vision/super_resolution/pft_sr/blocks.py": (0, 2),
+    "dl_techniques/models/vision/super_resolution/pft_sr/model.py": (0, 2),
+    "dl_techniques/models/vision/vit/model.py": (1, 0),
+    "dl_techniques/models/vision/vit_hmlp/model.py": (1, 0),
+    "dl_techniques/models/vision/vit_siglip/model.py": (1, 1),
+    "dl_techniques/models/vision/vq_vae_rotation/model.py": (4, 0),
+    "dl_techniques/models/vision_language/sam/sam1/image_encoder.py": (4, 0),
+    "dl_techniques/models/vision_language/sam/sam1/mask_decoder.py": (1, 0),
+    "dl_techniques/models/vision_language/sam/sam1/prompt_encoder.py": (2, 0),
+    "dl_techniques/models/vision_language/sam/sam1/transformer.py": (5, 0),
+    "dl_techniques/models/vision_language/sam/sam2/mask_decoder.py": (1, 0),
+    "dl_techniques/models/vision_language/sam/sam3/decoder.py": (0, 6),
+    "dl_techniques/models/vision_language/sam/sam3/maskformer_segmentation.py": (0, 1),
+    "dl_techniques/models/vision_language/sam/sam3/vitdet.py": (0, 4),
+    "train/rms_variants_train/experiments/e3_tinytransformer_imdb.py": (1, 0),
+    "train/rms_variants_train/experiments/e4_deep_residual_reg.py": (2, 0),
+    "train/rms_variants_train/experiments/e5_norm_layer_microbench.py": (1, 0),
+    "train/rms_variants_train/experiments/e6_clm_wiki.py": (1, 0),
+    "train/rms_variants_train/norm_overhead_bench.py": (1, 0),
+}
 
-#: Ceiling on the total population, dynamic and literal together. Pinned as well
-#: so that "a dynamic site became literal" and "a site disappeared" are
-#: distinguishable from "the family shrank".
-#:
-#: RE-MEASURED 2026-09-04: 180 total (see above).
-_TOTAL_NORM_CALL_SITE_CEILING = 180
+#: The six dynamic sites D-253 ruled real constructor knobs (D-122 item 4):
+#: ``(file relative to src/, class, the attribute the norm is assigned to)``.
+#: Each class documents ``normalization_type`` (``:param``), takes it in
+#: ``__init__`` and returns it from ``get_config``; a literal type there would
+#: silently ignore the argument.
+RULED_DYNAMIC_KNOBS: Tuple[Tuple[str, str, str], ...] = (
+    ("dl_techniques/layers/conv_blocks/gabor_depthwise_separable_block.py",
+     "GaborDepthwiseSeparableBlock", "gabor_norm"),
+    ("dl_techniques/layers/ssm/context_mamba.py", "ContextMambaLayer", "norm"),
+    ("dl_techniques/models/probabilistic/neural_hmm/encoders.py",
+     "NeuralHMMEncoder", "output_norm"),
+    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "stem_norm"),
+    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "final_norm"),
+    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "merge_norm_"),
+)
 
 
-def _sweep_norm_call_sites() -> Tuple[Counter, List[str], List[str]]:
-    """Return ``(classification_counts, dynamic_sites, literal_sites)``."""
-    counts: Counter = Counter()
-    dynamic: List[str] = []
-    literal: List[str] = []
-    for dirpath, dirnames, filenames in os.walk(SRC_ROOT):
+def _sweep_norm_call_sites(src_root: str = SRC_ROOT) -> Dict[str, Tuple[int, int]]:
+    """Count ``create_normalization_layer`` call sites per file, by AST.
+
+    :param src_root: The tree to sweep (``src/``; the planted-site control
+        passes a temporary one).
+    :return: ``{path relative to src_root: (dynamic, literal)}`` for every file
+        with at least one site. A site is literal when its
+        ``normalization_type`` (first positional or keyword) is a string
+        constant, and dynamic otherwise.
+    """
+    per_file: Dict[str, List[int]] = {}
+    for dirpath, dirnames, filenames in os.walk(src_root):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         for filename in sorted(filenames):
             if not filename.endswith(".py"):
                 continue
             path = os.path.join(dirpath, filename)
-            rel = os.path.relpath(path, SRC_ROOT)
+            rel = os.path.relpath(path, src_root).replace(os.sep, "/")
             with open(path, encoding="utf-8") as handle:
                 source = handle.read()
             # Deliberately no `except SyntaxError: continue` -- a silent skip
@@ -96,64 +204,88 @@ def _sweep_norm_call_sites() -> Tuple[Counter, List[str], List[str]]:
                 for keyword in node.keywords:
                     if keyword.arg == "normalization_type":
                         arg = keyword.value
-                site = f"{rel}:{node.lineno}"
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    counts["LITERAL"] += 1
-                    literal.append(site)
-                elif isinstance(arg, ast.Attribute):
-                    counts["DYNAMIC(Attribute)"] += 1
-                    dynamic.append(site)
-                elif isinstance(arg, ast.Name):
-                    counts["DYNAMIC(Name)"] += 1
-                    dynamic.append(site)
-                else:
-                    counts[f"OTHER({type(arg).__name__})"] += 1
-                    dynamic.append(site)
-    return counts, dynamic, literal
+                literal = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                per_file.setdefault(rel, [0, 0])[1 if literal else 0] += 1
+    return {path: (pair[0], pair[1]) for path, pair in sorted(per_file.items())}
 
 
 @pytest.fixture(scope="module")
-def norm_call_sites() -> Tuple[Counter, List[str], List[str]]:
+def norm_call_sites() -> Dict[str, Tuple[int, int]]:
     return _sweep_norm_call_sites()
 
 
 class TestTheNormFactoryCallSitePopulationIsPinned:
-    """Growth is the only residual risk, so growth is what is pinned."""
+    """Every site is named by its file; a new or removed one fails until the census says so."""
 
-    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
-    # REPORTS a census through `warnings.warn` on purpose -- the inventory is
-    # non-fatal by design, and turning it into an assertion would make a
-    # growth report indistinguishable from the ceiling breach the sibling
-    # test convicts. Under the repo-wide `error::UserWarning` that report
-    # would become a failure, so this ONE test opts back out.
-    @pytest.mark.filterwarnings("always::UserWarning")
-    def test_the_statically_uncheckable_population_has_not_grown(self, norm_call_sites):
-        counts, dynamic, _ = norm_call_sites
-        if dynamic:
-            warnings.warn(
-                "create_normalization_layer call sites with a non-literal type "
-                f"(not statically checkable, {len(dynamic)}): {dynamic}",
-                UserWarning,
-                stacklevel=2,
-            )
-        assert len(dynamic) <= _UNCHECKABLE_NORM_CALL_SITE_CEILING, (
-            "statically uncheckable create_normalization_layer call sites grew "
-            f"from {_UNCHECKABLE_NORM_CALL_SITE_CEILING} to {len(dynamic)} "
-            f"(classification: {dict(counts)}). Each new one is a key no static "
-            "sweep can resolve; it is only validated the moment that particular "
-            "runtime branch executes. Either give the new site a literal "
-            "`normalization_type=`, or re-open the ruling in decisions.md D-201. "
-            "Do NOT raise this ceiling to make a red test green."
+    def test_the_census_is_exact(self, norm_call_sites):
+        if norm_call_sites == NORM_CALL_SITES:
+            return
+        added = sorted(set(norm_call_sites) - set(NORM_CALL_SITES))
+        removed = sorted(set(NORM_CALL_SITES) - set(norm_call_sites))
+        changed = sorted(
+            f"{path}: {NORM_CALL_SITES[path]} -> {norm_call_sites[path]}"
+            for path in set(norm_call_sites) & set(NORM_CALL_SITES)
+            if norm_call_sites[path] != NORM_CALL_SITES[path])
+        pytest.fail(
+            "create_normalization_layer call sites changed, as (dynamic, literal) "
+            f"per file. New files: {[(p, norm_call_sites[p]) for p in added]}; "
+            f"files gone: {[(p, NORM_CALL_SITES[p]) for p in removed]}; "
+            f"changed: {changed}. Edit NORM_CALL_SITES in the same commit. A new "
+            "DYNAMIC site needs a literal `normalization_type=` or a ruling in "
+            "decisions.md (D-253 re-opened D-201 for six named knobs)."
         )
 
-    def test_the_total_population_has_not_grown(self, norm_call_sites):
-        counts, dynamic, literal = norm_call_sites
-        total = len(dynamic) + len(literal)
-        assert total <= _TOTAL_NORM_CALL_SITE_CEILING, (
-            f"create_normalization_layer call sites grew from "
-            f"{_TOTAL_NORM_CALL_SITE_CEILING} to {total} "
-            f"(classification: {dict(counts)}). See decisions.md D-201."
+    def test_the_totals_match_the_census(self, norm_call_sites):
+        dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
+        literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (153, 47, 100), (
+            "the census's own totals moved; re-derive the module docstring's numbers"
         )
+
+    @pytest.mark.parametrize("path, class_name, attribute", RULED_DYNAMIC_KNOBS)
+    def test_each_ruled_dynamic_site_is_a_serialized_knob(self, path, class_name, attribute):
+        """The D-253 premise: documented, taken in ``__init__``, returned by ``get_config``."""
+        with open(os.path.join(SRC_ROOT, path), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name]
+        assert classes, f"{class_name} is not defined in {path}"
+        cls = classes[0]
+        methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+        init_args = [a.arg for a in methods["__init__"].args.args + methods["__init__"].args.kwonlyargs]
+        assert "normalization_type" in init_args, f"{class_name}.__init__ takes no normalization_type"
+        assert ":param normalization_type:" in (ast.get_docstring(cls) or ""), (
+            f"{class_name} does not document normalization_type")
+        config_keys = {
+            node.value for node in ast.walk(methods["get_config"])
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        assert "normalization_type" in config_keys, f"{class_name}.get_config omits normalization_type"
+        dynamic_targets = []
+        for node in ast.walk(cls):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if callee != "create_normalization_layer":
+                continue
+            arg = node.args[0] if node.args else None
+            for keyword in node.keywords:
+                if keyword.arg == "normalization_type":
+                    arg = keyword.value
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                names = [k.value for k in node.keywords if k.arg == "name"]
+                dynamic_targets.append(ast.unparse(names[0]) if names else "")
+        assert any(attribute in target for target in dynamic_targets), (
+            f"no dynamic create_normalization_layer call named like {attribute!r} in "
+            f"{class_name}: {dynamic_targets}")
+
+    def test_the_census_sees_a_planted_site(self, tmp_path):
+        """The instrument's own control: one planted dynamic and one literal site."""
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "planted.py").write_text(
+            "create_normalization_layer(self.kind)\n"
+            "create_normalization_layer(normalization_type='rms_norm')\n"
+            "f = 'create_normalization_layer(x)'  # a string is not a site\n")
+        assert _sweep_norm_call_sites(str(tmp_path)) == {"pkg/planted.py": (1, 1)}
 
 
 class TestTheNormFactoryRaisesRatherThanFallingBack:
@@ -165,7 +297,7 @@ class TestTheNormFactoryRaisesRatherThanFallingBack:
         message = str(excinfo.value)
         assert "not_a_real_normalization" in message, (
             "the raise must echo the offending key; a config-driven caller has "
-            "no other way to find which of its 149 dynamic sites misfired"
+            "no other way to find which of its dynamic sites misfired"
         )
         for valid_key in sorted(_TYPE_TO_CLASS):
             assert valid_key in message, (
@@ -183,9 +315,9 @@ class TestTheNormFactoryRaisesRatherThanFallingBack:
         pytest.fail(
             "create_normalization_layer returned "
             f"{type(result).__name__} for an unknown key instead of raising. "
-            "That single behaviour change would turn all 149 statically "
-            "uncheckable call sites from self-guarding into silently wrong, and "
-            "the population ceiling above would no longer be an adequate ruling."
+            "That single behaviour change would turn every statically "
+            "uncheckable call site from self-guarding into silently wrong, and "
+            "the census above would no longer be an adequate ruling."
         )
 
     @pytest.mark.parametrize("valid_key", sorted(_TYPE_TO_CLASS))
@@ -251,8 +383,8 @@ class TestTheFactoryEpsilonIsNotTheLayerDefault:
         )
         assert factory_default == pytest.approx(1e-6), (
             f"create_normalization_layer's epsilon default moved to "
-            f"{factory_default}. That silently re-tunes every one of the 178 "
-            "call sites that does not pass epsilon explicitly."
+            f"{factory_default}. That silently re-tunes every call site in "
+            "NORM_CALL_SITES that does not pass epsilon explicitly."
         )
         assert keras_default / factory_default == pytest.approx(1000.0), (
             "the documented 1000x divergence between "
