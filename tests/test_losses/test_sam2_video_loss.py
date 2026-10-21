@@ -687,8 +687,8 @@ class TestDeadComponentPartition:
 
     Iteration 1 falsified "all guards go RED under a dead component" at five
     consecutive steps, so the partition is recorded as a test rather than as a
-    prediction. With ``SegmentationWrapperLoss('dice')`` returning a constant,
-    every VALUE guard in this file goes RED (the constant shifts the total by
+    prediction. With the per-row dice (``SAM2GatedMaskLoss._dice_rows``) returning
+    a constant, every VALUE guard in this file goes RED (the constant shifts the total by
     far more than :data:`VALUE_TOLERANCE`) while the gradient, adapter, gate
     and serialization guards stay GREEN -- the gradient guards because a
     constant has zero derivative everywhere, which zeroes the absent rows for
@@ -700,7 +700,7 @@ class TestDeadComponentPartition:
         """So the gradient guard is NOT evidence that dice is alive."""
         truth, logits = discriminating_fixture()
         loss = SAM2GatedMaskLoss()
-        loss._dice = lambda *args, **kwargs: ops.convert_to_tensor(0.5)
+        loss._dice_rows = lambda truth, pred: ops.full((ops.shape(pred)[0],), 0.5)
         gradient = logit_gradient(loss, truth, logits)
         gate = ground_truth_gate(truth)
         assert np.count_nonzero(gradient[~gate]) == 0
@@ -710,6 +710,6 @@ class TestDeadComponentPartition:
         """And the value guard is what catches it."""
         truth, logits = discriminating_fixture()
         loss = SAM2GatedMaskLoss()
-        loss._dice = lambda *args, **kwargs: ops.convert_to_tensor(0.5)
+        loss._dice_rows = lambda truth, pred: ops.full((ops.shape(pred)[0],), 0.5)
         expected = candidate_values(truth, logits)["gt_gated"]
         assert abs(float(loss(truth, logits)) - expected) > VALUE_TOLERANCE

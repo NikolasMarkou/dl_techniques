@@ -119,6 +119,7 @@ from typing import Any, Dict
 import keras
 from keras import ops
 
+from .segmentation_metrics import dice_per_sample
 from .sam_mask_loss import (
     DICE_CHANNELS,
     SAMMaskLoss,
@@ -283,11 +284,36 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
     def call(self, y_true: Any, y_pred: Any) -> Any:
         """Compute the gated ``focal_weight * focal + dice_weight * dice``.
 
+        The mean of :meth:`per_mask` over every ``(batch, mask)`` row: the focal
+        term is a per-row pixel mean and the dice term a per-row value, and
+        every row has the same ``h * w`` pixels, so this equals the focal mean
+        over all pixels plus the dice mean over all rows.
+
         :param y_true: ``(B, M, h, w)`` binary ground truth.
         :type y_true: Any
         :param y_pred: ``(B, M, h, w)`` mask logits or probabilities.
         :type y_pred: Any
         :return: Scalar loss.
+        :rtype: Any
+        """
+        return keras.ops.mean(self.per_mask(y_true, y_pred))
+
+    def per_mask(self, y_true: Any, y_pred: Any) -> Any:
+        """The gated loss of every ``(batch, mask)`` row, unreduced.
+
+        Interface contract (callers: :meth:`call`, which takes its mean, and
+        :func:`select_lowest_loss_mask`, which ranks a frame's candidate masks
+        by it): the arguments are those of :meth:`call`; the return is
+        ``(B, M)``, ``focal_weight * pixel-mean focal + dice_weight * dice`` per
+        row, exactly ``0`` on a ground-truth-absent row. It raises what
+        :meth:`call` raises.
+
+        :param y_true: ``(B, M, h, w)`` binary ground truth, or ``(B, 1, h, w)``
+            repeated across the prediction's mask axis by ``match_mask_axis``.
+        :type y_true: Any
+        :param y_pred: ``(B, M, h, w)`` mask logits or probabilities.
+        :type y_pred: Any
+        :return: ``(B, M)`` per-row loss.
         :rtype: Any
         """
         pred_shape = _static_mask_stack_shape(y_pred, "SAM2GatedMaskLoss(y_pred)")
@@ -351,12 +377,32 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         # silent wrong reduction) is still refused.
         per_pixel_focal = _focal_from_logits(
             truth, logits, self.config.focal_gamma, self.config.focal_alpha)
-        focal_term = ops.mean(
+        focal_rows = keras.ops.mean(
             ops.where(present, per_pixel_focal,
-                      ops.zeros_like(per_pixel_focal)))
+                      ops.zeros_like(per_pixel_focal)),
+            axis=(-2, -1))
 
-        dice_term = self._dice(dice_true, dice_pred)
-        return self.focal_weight * focal_term + self.dice_weight * dice_term
+        dice_rows = keras.ops.reshape(
+            self._dice_rows(dice_true, dice_pred), keras.ops.shape(focal_rows))
+        return self.focal_weight * focal_rows + self.dice_weight * dice_rows
+
+    def _dice_rows(self, dice_true: Any, dice_pred: Any) -> Any:
+        """Dice loss per ``(batch * mask)`` row, ``(B * M,)``.
+
+        The parent's dice is ``dice_scalar``, the mean of ``dice_per_sample``
+        over these rows; the rows are kept so a caller can rank masks by them.
+        Same function, same ``from_logits`` and ``smooth``.
+
+        :param dice_true: ``(B * M, h, w, 1)`` ground truth.
+        :type dice_true: Any
+        :param dice_pred: ``(B * M, h, w, 1)`` gated probabilities.
+        :type dice_pred: Any
+        :return: ``(B * M,)`` dice loss.
+        :rtype: Any
+        """
+        return dice_per_sample(
+            dice_true, dice_pred, from_logits=self.config.from_logits,
+            smooth=self.config.smooth_factor)
 
     def get_config(self) -> Dict[str, Any]:
         """Full serialization config, identical in shape to the parent's.
@@ -366,3 +412,39 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         :rtype: Dict[str, Any]
         """
         return super().get_config()
+
+
+def select_lowest_loss_mask(loss: SAM2GatedMaskLoss, truth: Any, candidates: Any) -> Any:
+    """The candidate mask with the lowest ``loss`` against ``truth``, per row.
+
+    Upstream SAM 2 back-propagates the focal and dice terms of a multimask step
+    only through "the prediction channel with the lowest focal+dice loss"
+    (``MultiStepMultiMasksAndIous._update_losses``: ``argmin(loss_mask *
+    w_mask + loss_dice * w_dice)``, ``training/loss_fns.py`` at facebookresearch/sam2
+    2b90b9f5). The ranking is ``loss.per_mask``, so the mask that is selected is
+    scored by the same weights as the loss it is then scored by.
+
+    Interface contract (caller: ``SAM2TrainingModel.call`` on a multimask
+    frame): ``truth`` is ``(B, 1, h, w)`` and ``candidates`` ``(B, K, h, w)``
+    logits; the return is ``(B, 1, h, w)``, the candidate of lowest loss in
+    each row (the first on a tie, as ``torch.argmin``). The ranking carries no
+    gradient; the gradient reaches the selected candidate only. It raises what
+    ``loss.per_mask`` raises.
+
+    :param loss: The mask loss whose per-row value ranks the candidates.
+    :type loss: SAM2GatedMaskLoss
+    :param truth: ``(B, 1, h, w)`` binary ground truth.
+    :type truth: Any
+    :param candidates: ``(B, K, h, w)`` candidate mask logits.
+    :type candidates: Any
+    :return: ``(B, 1, h, w)`` selected logits.
+    :rtype: Any
+    """
+    scores = keras.ops.stop_gradient(loss.per_mask(truth, candidates))
+    # A one-hot sum, not a gather: the unselected candidates are multiplied by
+    # an exact 0 (no gradient), the selected one by an exact 1 (its value).
+    chosen = keras.ops.one_hot(
+        keras.ops.argmin(scores, axis=-1), int(candidates.shape[1]),
+        dtype=candidates.dtype)
+    return keras.ops.sum(
+        candidates * chosen[:, :, None, None], axis=1, keepdims=True)

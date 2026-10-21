@@ -535,6 +535,12 @@ class SAM2(keras.Model):
             # inference fallback to them (on) answered an unstable mask with an
             # untrained token (val mask loss 1.712 against 1.043). Do NOT turn it
             # back on unless the multimask tokens are trained.
+            # DECISION plan-2026-10-14T062616-81938e81/D-249: still off now that the
+            # multimask tokens train (three candidates on a single-click frame 0,
+            # step 12.6): measured with them trained, the fallback raised the mask
+            # loss (memorised batch 0.805 against 0.547 off; 32-clip run, 4 held-out
+            # clips 0.968 against 0.790). Do NOT turn it on without a measurement
+            # that beats those.
             dynamic_multimask_via_stability=False,
         )
         memory_attention = SAM2MemoryAttention(

@@ -42,12 +42,15 @@ reader cannot re-file the set as a dead model:
    mask prompt), ``point_embedding_2/3`` (2, no box prompt) and
    ``point_embedding_0`` (1, the background-label row -- every label in this
    clip is foreground). Input coverage, exactly as in ``test_sam``.
-4. **Mask-tokens 1..3's hypernetwork MLPs (18).** The decoder holds
-   ``num_multimask_outputs + 1`` mask tokens and returns index 0 at
-   ``multimask_output=False``; the wrapper REFUSES ``multimask_output=True``
-   outright (it would interleave the frame and mask axes), so on this path
-   those three are structurally unreachable. This is the one entry of the four
-   that a shipped configuration cannot flip.
+4. **Mask-tokens 1..3's hypernetwork MLPs (up to 18).** Until step 12.6 of
+   plan-2026-10-14T062616-81938e81 the wrapper decoded token 0 only, so all
+   three were structurally unreachable. Since D-249 frame 0 (one click) decodes
+   the three multimask candidates and the mask loss reaches the candidate of
+   lowest loss against the ground truth in each row, so in one step a
+   candidate's MLP is on the graph exactly when some row selects it AND scores
+   the object present on frame 0 (an absent row's logits are the ``-1024``
+   sentinel, which carries no gradient). Like (2), the membership is derived
+   from the model (:func:`_expected_off_graph`), not pinned.
 
 ``expect_zero`` is two-sided, so the assertion below proves every one of those
 40 IS dead AND that all 304 others are live -- the waiver cannot rot into a
@@ -136,9 +139,39 @@ def _expected_off_graph(model: keras.Model, inputs) -> tuple:
     """
     scores = np.asarray(model(inputs, training=True)[SAM2_OBJECT_SCORE_LOGITS])
     occluded = bool(np.any(scores[:, :-1] <= 0.0))
-    if occluded:
-        return tuple(s for s in EXPECTED_OFF_GRAPH if s != "/no_obj_embed_spatial")
-    return EXPECTED_OFF_GRAPH
+    live = {"/no_obj_embed_spatial"} if occluded else set()
+    for token in _selected_multimask_tokens(model, inputs):
+        live.update(s for s in EXPECTED_OFF_GRAPH
+                    if s.startswith(f"hypernetwork_mlp_{token}/"))
+    return tuple(s for s in EXPECTED_OFF_GRAPH if s not in live)
+
+
+def _selected_multimask_tokens(model: keras.Model, inputs) -> set:
+    """Mask tokens whose frame-0 candidate the mask loss reaches (cause 4).
+
+    A row selects the candidate of lowest ``model.mask_loss`` against its
+    frame-0 ground truth (D-249); the selection reaches the token's MLP only
+    where that row's frame-0 object score is positive.
+
+    :return: Token indices in ``{1, 2, 3}``.
+    """
+    seen = []
+    original = model.sam2._decode
+
+    def spy(*args, **kwargs):
+        seen.append(original(*args, **kwargs))
+        return seen[-1]
+
+    model.sam2._decode = spy
+    try:
+        model(inputs, training=True)
+    finally:
+        model.sam2._decode = original
+    candidates = seen[0]["low_res_logits"]
+    ranks = np.asarray(model.mask_loss.per_mask(
+        inputs["gt_masks"][:, 0:1], candidates))
+    present = np.asarray(seen[0]["object_score_logits"]).reshape(-1) > 0.0
+    return {int(k) + 1 for k, row in zip(np.argmin(ranks, axis=-1), present) if row}
 
 
 def _one_adam_step(model: keras.Model, inputs) -> None:
@@ -175,7 +208,17 @@ def _pin_dropout_to_zero(model: keras.Model) -> int:
     return pinned
 
 
-def _built(**overrides) -> SAM2TrainingModel:
+#: The draw of the two off-graph census tests. At seed 11 (the file's default)
+#: the object score sits near 0 (frame 0 row 0 at 0.0015 after the step, see
+#: above), and after D-249 changed what the step trains every post-step score is
+#: negative (measured: max -0.155), so the whole mask path leaves the graph and
+#: the census measures the draw. At seed 2 every score is above 0.47 before and
+#: after the step (measured over seeds 0-3, 5, 7 at step 12.6), so the mask path
+#: is live and causes (2) and (4) are decided by the model, as intended.
+GF_SEED = 2
+
+
+def _built(seed: int = 11, **overrides) -> SAM2TrainingModel:
     # Since D-090 the rate is a CONSTRUCTOR argument, so it is killed at the
     # source rather than only on the built `Dropout` layers. This is not
     # cosmetic: `SAM2.dropout_rate` is a property over the memory-attention
@@ -184,7 +227,7 @@ def _built(**overrides) -> SAM2TrainingModel:
     # `_pin_dropout_to_zero` is still called below -- it covers the stochastic
     # depth in the Hiera trunk, which no dropout knob reaches.
     overrides.setdefault("dropout_rate", 0.0)
-    keras.utils.set_random_seed(11)
+    keras.utils.set_random_seed(seed)
     model = trainer(**overrides)
     _pin_dropout_to_zero(model)
     return model
@@ -231,7 +274,7 @@ class TestSAM2GradientFlow:
 
     def test_the_expected_off_graph_set_is_exactly_the_measured_one(self):
         """The count AND the membership, before any waiver is trusted."""
-        model = _built()
+        model = _built(seed=GF_SEED)
         x = clip_inputs(model)
         _one_adam_step(model, x)
         expected = _expected_off_graph(model, x)
@@ -250,7 +293,7 @@ class TestSAM2GradientFlow:
         )
 
     def test_gradients_reach_every_other_trainable_weight_after_one_step(self):
-        model = _built()
+        model = _built(seed=GF_SEED)
         x = clip_inputs(model)
         _one_adam_step(model, x)
         expected = _expected_off_graph(model, x)

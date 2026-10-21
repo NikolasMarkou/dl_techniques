@@ -590,10 +590,11 @@ def create_sam2_training_model(
     .. note::
 
        ``multimask_output=False`` is passed EXPLICITLY rather than left to the
-       variant table: the wrapper refuses ``True`` outright (the frame axis is
-       folded into the mask axis, so at ``M > 1`` the two interleave with no
-       shape symptom), and a variant table that changed its default would
-       otherwise turn that refusal into a crash at construction.
+       variant table: the wrapper refuses ``True`` outright (it chooses each
+       frame's mask count itself: the three multimask candidates on a
+       single-click frame 0, ``multimask_output_in_sam``, D-249), and a variant
+       table that changed its default would otherwise turn that refusal into a
+       crash at construction.
 
        Compilation goes through ``compile_sam2_video_trainer``, the ONE home of
        the three-key ``loss=`` dict, of the mandatory object-score BCE and of

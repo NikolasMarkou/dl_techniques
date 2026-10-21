@@ -178,7 +178,7 @@ location so a reader knows where to look, not restated:
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
 | [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken | `test_neck.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: training here decodes token 0 only, so the fallback's multimask tokens are untrained (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) it still raised the loss (memorised batch 0.805 against 0.547; 4 held-out clips 0.968 against 0.790) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
@@ -209,7 +209,7 @@ custom `train_step`. The data pipeline and CLI live in
 [`src/train/sam2/`](../../../../train/sam2/); the loss is
 `dl_techniques.losses.sam2_video_loss`.
 
-Three properties of that wrapper are load-bearing and stated at the class:
+Four properties of that wrapper are load-bearing and stated at the class:
 
 - **`compile(jit_compile=False)` IS MANDATORY.** Keras 3.8's `fit()` defaults to
   `jit_compile='auto'`, which selects XLA on a GPU, and `Hiera`'s stem
@@ -224,6 +224,20 @@ Three properties of that wrapper are load-bearing and stated at the class:
   and which stay live is enumerated in the module docstring.
 - **`obj_ptr_proj` (6 variables) still ships FROZEN.** Stated rather than left
   looking fixed.
+- **Frame 0 trains the three multimask candidates, as upstream does**
+  (plan-2026-10-14T062616-81938e81 D-249; `multimask_output_in_sam=True`, upstream's
+  name and training value). On a frame-0 prompt of one point and no box the decoder
+  returns three candidates; the mask loss reaches the one of lowest
+  `20 * focal + dice` against the ground truth, and the IoU head is supervised on
+  all three (`iou_supervision` then has `3 * T` slots). Every other frame decodes
+  mask token 0. The memory and the object pointer take the candidate of highest
+  predicted IoU. At inference, answer a single-click frame with
+  `multimask_output=True` and take the candidate of highest predicted IoU, as
+  upstream's predictors do: token 0 is trained by the tracking frames only. Measured
+  (mask loss, inference mode, through `evaluate`): a 2-clip memorisation run, on its
+  batch, 0.547 with the best-IoU candidate, 0.488 with token 0, best constant 0.959;
+  a 32-clip, 30-epoch run, on 4 held-out clips, 0.790 against 1.283 for token 0 and
+  0.921 for the best constant.
 
 ### The mask head does not learn jointly
 
@@ -238,6 +252,13 @@ step budget, the SAME decoder with a **frozen** encoder reaches mask IoU
 This is the reason the scope note above says the package makes no accuracy
 claim: the training path demonstrably runs, and on the one configuration that
 was measured it demonstrably does not learn masks jointly.
+
+Measured since, on the trainer's synthetic clips with the encoder trained jointly
+(plan-2026-10-14T062616-81938e81, D-246 and D-249): a 2-clip run memorises its batch
+(mask loss 7.34 to 0.48 against a best constant of 0.96), and a 32-clip, 30-epoch
+run scores 0.744 on 4 held-out clips against 0.921 for the best constant. These are
+small synthetic runs, not an accuracy claim; they bound the statement above to the
+configuration it measured.
 
 ## 8. Serialization and Checkpoints
 

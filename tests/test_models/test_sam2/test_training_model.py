@@ -71,6 +71,7 @@ FRAMES = 3
 def trainer(
         num_frames: int = FRAMES,
         object_score: Optional[float] = None,
+        multimask_output_in_sam: bool = True,
         **overrides: Any,
 ) -> SAM2TrainingModel:
     """Build and build a ``tiny`` wrapper, optionally pinning the score.
@@ -81,6 +82,9 @@ def trainer(
         POSITIVE value whenever mask VALUES are under test; see the module
         docstring.
     :type object_score: Optional[float]
+    :param multimask_output_in_sam: Forwarded to the wrapper; ``False`` keeps
+        frame 0 on token 0, so ``iou_supervision`` has one slot per frame.
+    :type multimask_output_in_sam: bool
     :param overrides: Forwarded to :func:`create_sam2`.
     :type overrides: Any
     :return: A built wrapper.
@@ -88,7 +92,9 @@ def trainer(
     """
     overrides.setdefault("multimask_output", False)
     sam2 = create_sam2("tiny", **overrides)
-    model = SAM2TrainingModel(sam2, num_frames=num_frames)
+    model = SAM2TrainingModel(
+        sam2, num_frames=num_frames,
+        multimask_output_in_sam=multimask_output_in_sam)
     model.build(None)
     if object_score is not None:
         pin_object_score(sam2, object_score)
@@ -472,7 +478,7 @@ class TestMultimaskRefusal:
     def test_multimask_output_true_is_refused_by_name(self) -> None:
         """The message must name the frame/mask interleave, not just 'no'."""
         sam2 = create_sam2("tiny", multimask_output=True)
-        with pytest.raises(ValueError, match="FRAME-major"):
+        with pytest.raises(ValueError, match="folded into the mask axis"):
             SAM2TrainingModel(sam2, num_frames=FRAMES)
 
     def test_the_shipped_false_path_returns_a_mask_axis_of_num_frames(
@@ -953,7 +959,13 @@ def pin_predicted_iou(model: SAM2TrainingModel, value: float) -> None:
 
 
 class TestIoUSupervision:
-    """The packed ``(B, T, 2)`` output, its gate, and the loss it feeds."""
+    """The packed ``(B, T, 2)`` output, its gate, and the loss it feeds.
+
+    The gate and value arms run with ``multimask_output_in_sam=False`` (one
+    slot per frame), the layout their hand oracles index; the ``K``-slot pack
+    of a multimask frame 0 is pinned by value in
+    ``test_the_multimask_tokens_train_as_the_reference_does.py`` (D-249).
+    """
 
     def test_the_output_keys_are_exactly_the_compiled_loss_keys(self) -> None:
         """G4.1. H-5: nothing in Keras checks these two sets against each other.
@@ -987,7 +999,7 @@ class TestIoUSupervision:
         from its own ``y_true``; both go through ``mask_presence_gate``, and
         this asserts the agreement on a clip where they could disagree.
         """
-        model = trainer(object_score=5.0)
+        model = trainer(object_score=5.0, multimask_output_in_sam=False)
         inputs = clip_inputs(model, absent_frames=(1,))
         packed = np.asarray(
             model(inputs, training=True)[SAM2_IOU_SUPERVISION])
@@ -1000,7 +1012,7 @@ class TestIoUSupervision:
     def test_both_channels_are_zeroed_and_the_rest_are_the_real_pair(
             self) -> None:
         """Zeroing ONE channel would leave a live, wrong regression target."""
-        model = trainer(object_score=5.0)
+        model = trainer(object_score=5.0, multimask_output_in_sam=False)
         inputs = clip_inputs(model, absent_frames=(1,))
         outputs = model(inputs, training=True)
         packed = np.asarray(outputs[SAM2_IOU_SUPERVISION])
@@ -1056,7 +1068,7 @@ class TestIoUSupervision:
         # fixture where it stops working. Pinning the draw is the only repair
         # that keeps the assertion meaningful.
         keras.utils.set_random_seed(0)
-        model = trainer(object_score=5.0)
+        model = trainer(object_score=5.0, multimask_output_in_sam=False)
         pin_predicted_iou(model, 0.9)
         inputs = clip_inputs(model, absent_frames=(1,))
         gated = np.asarray(model(inputs, training=False)[SAM2_IOU_SUPERVISION])

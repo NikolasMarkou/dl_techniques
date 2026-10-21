@@ -1052,9 +1052,17 @@ class TestTheTrainersOwnFactoriesTrain:
         outputs = model(inputs)
         assert set(outputs) == set(OUTPUT_KEYS)
         for key in OUTPUT_KEYS:
+            if key == SAM2_IOU_SUPERVISION:
+                continue
             assert tuple(outputs[key].shape)[:2] == (
                 tuple(targets[key].shape)[:2]
             ), key
+        # The IoU target is a placeholder SAMIoULoss never reads; the output
+        # carries K slots per frame, K = 3 on a single-click frame 0 (D-249).
+        single_click = not include_box and background_points == 0
+        slots = 3 if single_click else 1
+        assert tuple(outputs[SAM2_IOU_SUPERVISION].shape)[:2] == (
+            tuple(targets[SAM2_IOU_SUPERVISION].shape)[0], num_frames * slots)
         # The GT resolution this config derives and the resolution the mask
         # decoder produces are derived INDEPENDENTLY -- one from the config's
         # `mask_size`, one from the decoder's upsampling -- and nothing else

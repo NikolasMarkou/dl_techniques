@@ -30,7 +30,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 from keras import ops
 
-from dl_techniques.losses.sam2_video_loss import SAM2GatedMaskLoss, mask_presence_gate
+from dl_techniques.losses.sam2_video_loss import (
+    SAM2GatedMaskLoss, mask_presence_gate, select_lowest_loss_mask)
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss
 from dl_techniques.models.vision_language.sam.sam1.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
@@ -49,7 +50,8 @@ SAM2_LOW_RES_LOGITS = "low_res_logits"
 #: in this package thresholds it hard at ``> 0``, so a trainer that does not
 #: put a loss on this key trains a permanently frozen occlusion head.
 SAM2_OBJECT_SCORE_LOGITS = "object_score_logits"
-#: Key of the packed IoU supervision pair, ``(B, T, 2)``: ``[..., 0]`` is the
+#: Key of the packed IoU supervision pairs, ``(B, T * K, 2)`` (``K`` slots per
+#: frame, see the class docstring): ``[..., 0]`` is the
 #: model's predicted IoU and ``[..., 1]`` the IoU it actually achieved against
 #: the ground truth, already ``stop_gradient``-ed. Both channels are ZEROED on
 #: rows the ground truth calls absent, which is what makes ``SAMIoULoss``
@@ -90,6 +92,15 @@ class SAM2TrainingModel(keras.Model):
     :param seed: Reserved for future stochastic prompting; stored and
         serialized so the config is stable across steps.
     :type seed: int
+    :param multimask_output_in_sam: Upstream's switch of the same name. When
+        set, frame 0 decodes the three multimask candidates whenever its
+        prompt is a single click (one point, no box: upstream's
+        ``_use_multimask`` with ``multimask_min_pt_num = multimask_max_pt_num
+        = 1``, a box counting as two points); the mask loss trains the
+        candidate of lowest loss and the IoU head is supervised on all three.
+        Every other frame decodes mask token 0. Default ``True``, upstream's
+        training value.
+    :type multimask_output_in_sam: bool
     :param kwargs: Forwarded to ``keras.Model``.
 
     :raises ValueError: If ``sam2`` is not a :class:`SAM2`, if ``num_frames``
@@ -107,10 +118,19 @@ class SAM2TrainingModel(keras.Model):
     mask axis (D-051) so ``match_mask_axis`` and both ``sam_mask_loss``
     adapters work unmodified:
 
-    * ``low_res_logits``: ``(B, T, h, w)`` -- ``M == 1``, so ``T`` is
-      unambiguous on that axis.
+    * ``low_res_logits``: ``(B, T, h, w)`` -- one SUPERVISED mask per frame,
+      so ``T`` is unambiguous on that axis. On a multimask frame 0 it is the
+      candidate of lowest loss against ``gt_masks`` (upstream's selection);
+      the mask the model ANSWERS with there (the memory bank's input, and
+      ``SAM2.call(..., multimask_output=True)``'s choice) is the candidate of
+      highest predicted IoU.
     * ``object_score_logits``: ``(B, T, 1)``.
-    * ``iou_supervision``: ``(B, T, 2)`` -- see :data:`SAM2_IOU_SUPERVISION`.
+    * ``iou_supervision``: ``(B, T * K, 2)`` -- see :data:`SAM2_IOU_SUPERVISION`.
+      ``K`` slots per frame: on a multimask frame 0 its ``K = 3`` candidates'
+      pairs, on every other frame its one pair repeated ``K`` times, so the
+      loss's mean over slots weighs each frame alike and averages frame 0
+      over its candidates (upstream's ``supervise_all_iou``). ``K == 1``
+      when frame 0 is not multimask.
 
     Example:
 
@@ -126,6 +146,7 @@ class SAM2TrainingModel(keras.Model):
             sam2: SAM2,
             num_frames: int = 4,
             seed: int = 42,
+            multimask_output_in_sam: bool = True,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -143,17 +164,23 @@ class SAM2TrainingModel(keras.Model):
         # refused, not supported -- the frame axis folds into the mask axis, and at M>1 the two orders (frame-major vs round-major) misalign with no shape check catching it. See decisions.md.
         if bool(sam2.multimask_output):
             raise ValueError(
-                "SAM2TrainingModel refuses multimask_output=True. The frame "
-                "axis is folded into the mask axis, so at M > 1 'low_res_"
-                "logits' is (B, T*M, h, w) interleaved FRAME-major while "
-                "match_mask_axis repeats the ground truth ROUND-major; the "
-                "two do not align and no shape check can see it. Build the "
-                "model with create_sam2(..., multimask_output=False)."
+                "SAM2TrainingModel refuses multimask_output=True on the SAM2 "
+                "it trains. The frame axis is folded into the mask axis, one "
+                "supervised mask per frame; the wrapper chooses each frame's "
+                "mask count itself (multimask_output_in_sam: three candidates "
+                "on a single-click frame 0, token 0 elsewhere). Build the "
+                "model with create_sam2(..., multimask_output=False) and pass "
+                "multimask_output=True to call() or stream_step() at inference."
             )
 
         self.sam2 = sam2
         self.num_frames = int(num_frames)
         self.seed = int(seed)
+        self.multimask_output_in_sam = bool(multimask_output_in_sam)
+        # The ONE mask loss: it ranks a multimask frame's candidates
+        # (select_lowest_loss_mask) and `compile_sam2_video_trainer` compiles it
+        # on `low_res_logits`, so the selection and the loss share their weights.
+        self.mask_loss = SAM2GatedMaskLoss()
 
     def build(self, input_shape: Optional[Any] = None) -> None:
         """Build the wrapped SAM 2 eagerly, then this model.
@@ -306,6 +333,7 @@ class SAM2TrainingModel(keras.Model):
             self,
             outputs: Dict[str, Any],
             gt_frame: Any,
+            slots: int = 1,
     ) -> Any:
         """Pack one frame's ``(predicted, achieved)`` IoU pair, gated.
 
@@ -318,7 +346,12 @@ class SAM2TrainingModel(keras.Model):
             frame axis kept as a length-1 mask axis so it lines up with
             ``low_res_logits`` without a reshape.
         :type gt_frame: Any
-        :return: ``(B, 1, 2)``; concatenating over frames gives ``(B, T, 2)``.
+        :param slots: Slots per frame, ``K``. A frame that decoded ``K``
+            candidates fills them with its ``K`` pairs; a single-mask frame
+            repeats its pair ``K`` times.
+        :type slots: int
+        :return: ``(B, K, 2)``; concatenating over frames gives
+            ``(B, T * K, 2)``.
         :rtype: Any
         """
         logits = outputs["low_res_logits"]
@@ -332,7 +365,10 @@ class SAM2TrainingModel(keras.Model):
         achieved = ops.stop_gradient(achieved_mask_iou(logits, truth))
         packed = ops.stack([predicted, achieved], axis=-1)
         present = ops.reshape(mask_presence_gate(truth), (-1, 1, 1))
-        return ops.where(present, packed, ops.zeros_like(packed))
+        packed = ops.where(present, packed, ops.zeros_like(packed))
+        if int(packed.shape[1]) == slots:
+            return packed
+        return keras.ops.concatenate([packed] * slots, axis=1)
 
     # -----------------------------------------------------------------
     # the traced forward
@@ -419,6 +455,9 @@ class SAM2TrainingModel(keras.Model):
         labels = inputs[INPUT_POINT_LABELS] if has_coords else None
 
         gt_masks = inputs[INPUT_GT_MASKS]
+        multimask_first = self._frame_zero_is_multimask(
+            None if coords is None else coords.shape, boxes is not None)
+        slots = self._slots(multimask_first)
 
         frame_logits: List[Any] = []
         frame_scores: List[Any] = []
@@ -454,17 +493,31 @@ class SAM2TrainingModel(keras.Model):
             # took a full review round to settle. `SAM2.call` is NOT called:
             # `_decode` is a plain method with no `postprocess`, no memory and
             # no Keras `__call__` bookkeeping of its own.
+            multimask = multimask_first and t == 0
             outputs = self.sam2._decode(
                 encoded=per_frame_encoded,
                 features=conditioned,
                 inputs=prompt,
-                multimask_output=False,
+                multimask_output=multimask,
                 training=training,
             )
-            frame_logits.append(outputs["low_res_logits"])
+            # DECISION plan-2026-10-14T062616-81938e81/D-249
+            # A multimask frame supervises its LOWEST-LOSS candidate against the
+            # ground truth (upstream's argmin of 20 * focal + dice), NOT the
+            # candidate of highest predicted IoU: that IoU is itself being trained,
+            # and upstream ranks by the loss. The IoU head gets every candidate's
+            # pair. Do NOT go back to decoding token 0 only (D-051 of plan
+            # 4c240b4c): the three multimask tokens then never train, and the
+            # inference fallback to them answered with untrained tokens (D-245).
+            if multimask:
+                supervised = select_lowest_loss_mask(
+                    self.mask_loss, gt_masks[:, 0:1], outputs["low_res_logits"])
+            else:
+                supervised = outputs["low_res_logits"]
+            frame_logits.append(supervised)
             frame_scores.append(outputs["object_score_logits"])
             frame_iou.append(
-                self._iou_supervision(outputs, gt_masks[:, t:t + 1]))
+                self._iou_supervision(outputs, gt_masks[:, t:t + 1], slots))
 
             self._store(bank, t, features, outputs, training)
 
@@ -475,6 +528,28 @@ class SAM2TrainingModel(keras.Model):
             SAM2_OBJECT_SCORE_LOGITS: ops.stack(frame_scores, axis=1),
             SAM2_IOU_SUPERVISION: ops.concatenate(frame_iou, axis=1),
         }
+
+    def _frame_zero_is_multimask(
+            self, coords_shape: Optional[Tuple[Any, ...]], has_boxes: bool,
+    ) -> bool:
+        """Upstream's ``_use_multimask`` for frame 0, decided on static shapes.
+
+        :param coords_shape: Static shape of ``point_coords``, or ``None``.
+        :type coords_shape: Optional[Tuple[Any, ...]]
+        :param has_boxes: Whether frame 0 has a box prompt (two points).
+        :type has_boxes: bool
+        :return: ``True`` when frame 0 decodes the multimask candidates.
+        :rtype: bool
+        """
+        num_points = 0 if coords_shape is None else coords_shape[1]
+        num_points = num_points + (2 if has_boxes else 0)
+        return self.multimask_output_in_sam and num_points == 1
+
+    def _slots(self, multimask_first: bool) -> int:
+        """IoU supervision slots per frame: the candidate count, or 1."""
+        if multimask_first:
+            return int(self.sam2.mask_decoder.num_multimask_outputs)
+        return 1
 
     # -----------------------------------------------------------------
     # shapes / config
@@ -492,11 +567,15 @@ class SAM2TrainingModel(keras.Model):
         """
         batch = tuple(input_shape.get(INPUT_IMAGE, (None,)))[0]
         mask_grid = self.sam2.feature_grid * 4
+        coords = input_shape.get(INPUT_POINT_COORDS)
+        slots = self._slots(self._frame_zero_is_multimask(
+            None if coords is None else tuple(coords),
+            input_shape.get(INPUT_BOXES) is not None))
         return {
             SAM2_LOW_RES_LOGITS: (
                 batch, self.num_frames, mask_grid, mask_grid),
             SAM2_OBJECT_SCORE_LOGITS: (batch, self.num_frames, 1),
-            SAM2_IOU_SUPERVISION: (batch, self.num_frames, 2),
+            SAM2_IOU_SUPERVISION: (batch, self.num_frames * slots, 2),
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -510,6 +589,7 @@ class SAM2TrainingModel(keras.Model):
             "sam2": keras.layers.serialize(self.sam2),
             "num_frames": self.num_frames,
             "seed": self.seed,
+            "multimask_output_in_sam": self.multimask_output_in_sam,
         })
         return config
 
@@ -566,7 +646,7 @@ def compile_sam2_video_trainer(
     model.compile(
         optimizer=optimizer,
         loss={
-            SAM2_LOW_RES_LOGITS: SAM2GatedMaskLoss(),
+            SAM2_LOW_RES_LOGITS: model.mask_loss,
             SAM2_OBJECT_SCORE_LOGITS: keras.losses.BinaryCrossentropy(
                 from_logits=True),
             SAM2_IOU_SUPERVISION: SAMIoULoss(),
