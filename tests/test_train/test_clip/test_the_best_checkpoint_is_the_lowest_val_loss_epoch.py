@@ -18,6 +18,8 @@ import pytest
 import train.clip.train_clip as train_clip
 from train.common.callbacks import BestSubmodelCheckpoint
 
+from tests.layer_naming import PublicAutoName
+
 from .test_the_trainer_entry_point_trains_end_to_end import _TINY
 
 _BATCH = 8
@@ -88,7 +90,7 @@ def test_a_split_that_leaves_a_side_empty_is_refused(count, fraction):
         train_clip.split_validation(count, fraction, seed=0)
 
 
-class _Holder(keras.Model):
+class _Holder(PublicAutoName, keras.Model):
     def __init__(self):
         super().__init__()
         self.inner = keras.Sequential([keras.Input((2,)), keras.layers.Dense(1)])
