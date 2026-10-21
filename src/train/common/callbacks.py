@@ -59,26 +59,63 @@ def best_checkpoint_path(results_dir: str) -> str:
 
 
 class EpochCSVLogger(keras.callbacks.CSVLogger):
-    """``keras.callbacks.CSVLogger`` whose columns are exactly epoch 0's keys.
+    """``keras.callbacks.CSVLogger`` whose columns are the run's real keys.
 
     Interface contract (callers: :func:`create_callbacks` and every trainer
     that writes ``training_log.csv`` itself; a census forbids
     ``keras.callbacks.CSVLogger(`` elsewhere under ``src/train``):
 
-    * Same arguments, file and row format as ``keras.callbacks.CSVLogger``.
+    * Arguments ``filename`` and ``separator`` as ``keras.callbacks.CSVLogger``;
+      row format as the stock logger. ``append=True`` raises ``ValueError``
+      (a rewrite, below, cannot widen a header an earlier run wrote).
     * The header is ``epoch`` plus the sorted keys of the first epoch's logs.
       Keras 3.8 adds ``val_<key>`` for every key when epoch 0 has no ``val_``
       key (meant for ``validation_freq > 1``), so a run without validation
-      got a ``val_`` column per metric, every cell ``NA``. With validation
-      data the ``val_`` keys are in epoch 0's logs and appear as before.
-    * Like the stock logger, a key that first appears after epoch 0 is not
-      written (no trainer here uses ``validation_freq``).
+      got a ``val_`` column per metric, every cell ``NA``; this logger does
+      not, and a run without validation has no ``val_`` column.
+    * When a later epoch brings a key the header lacks (the first validated
+      epoch under ``validation_freq > 1``), the file is rewritten once with
+      the sorted union as header; every row stays on disk at its epoch end.
+      A key an epoch does not log is an empty cell, never ``NA``.
     """
 
+    def __init__(self, filename, separator=",", append=False):
+        if append:
+            raise ValueError(
+                "EpochCSVLogger does not append: a key first seen after "
+                "epoch 0 rewrites the file with a wider header, and a rewrite "
+                "cannot widen the header an earlier run wrote. Log each run "
+                "to its own file.")
+        super().__init__(filename, separator=separator, append=False)
+        self._rows = []
+
+    def on_train_begin(self, logs=None):
+        self._rows = []
+        super().on_train_begin(logs)
+
     def on_epoch_end(self, epoch, logs=None):
+        logs = dict(logs or {})
         if self.keys is None:
-            self.keys = sorted((logs or {}).keys())
-        super().on_epoch_end(epoch, logs)
+            self.keys = sorted(logs)
+        elif not set(logs) <= set(self.keys):
+            # DECISION plan-2026-10-14T062616-81938e81/D-241
+            # Widen the header by rewriting the file from this run's rows.
+            # Do NOT pad val_ columns at epoch 0 as the stock logger does: a
+            # run without validation then gets a column of NA per metric
+            # (D-236). Do NOT buffer rows until the header is known: under
+            # validation_freq=N a crash would lose up to N-1 epochs of log.
+            self.keys = sorted(set(self.keys) | set(logs))
+            self.csv_file.close()
+            self.writer = None
+            super().on_train_begin()
+            for past_epoch, past_logs in self._rows:
+                super().on_epoch_end(past_epoch, self._filled(past_logs))
+        self._rows.append((epoch, logs))
+        super().on_epoch_end(epoch, self._filled(logs))
+
+    def _filled(self, logs):
+        """``logs`` over the header's keys, an empty cell for a missing key."""
+        return {key: logs.get(key, "") for key in self.keys}
 
 
 # ---------------------------------------------------------------------
