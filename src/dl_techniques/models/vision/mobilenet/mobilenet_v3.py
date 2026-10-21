@@ -12,14 +12,16 @@ network, where its lower per-position cost matters most. The head pools
 first, then runs the wide projection on a `1x1` tensor, instead of
 projecting at full spatial resolution before pooling.
 
-The squeeze-and-excitation gate is the reference's: biased 1x1 convs, a
-bottleneck of `make_divisible(expanded / 4, 8)` and a hard-sigmoid gate
-(Keras Applications `_se_block`, torchvision `SqueezeExcitation`). The
-shared universal block always builds its expansion convolution, so the
-first row of both variants (expansion 16 into 16 channels, no expansion in
-the paper or the references) carries an extra `C -> C` projection and its
-BatchNorm: 320 parameters, the only count difference from Keras
-Applications at `width_multiplier=1.0`.
+Every width follows one reference, Keras Applications `MobileNetV3`: the
+stem is 16 channels at every `width_multiplier`; a block's expanded width
+is `make_divisible(C_in * exp / in)`, its actual input width times the
+table's expansion ratio; the first row (expansion 1) has no expansion
+convolution; the last conv is `make_divisible(6 * C_last)`; the head widens
+only above 1.0. `count_params()` equals `keras.applications.MobileNetV3Small`
+/ `Large` (`weights=None`) at every width. The squeeze-and-excitation gate is
+the reference's: biased 1x1 convs, a bottleneck of
+`make_divisible(expanded / 4, 8)` and a hard-sigmoid gate (Keras Applications
+`_se_block`, torchvision `SqueezeExcitation`).
 The classifier is linear, so this model outputs logits: compile with
 `from_logits=True`. No pretrained checkpoints ship with this package;
 `pretrained=True` raises `NotImplementedError`.
@@ -75,13 +77,13 @@ class MobileNetV3(keras.Model):
         image  [H, W, 3]
            |
            v
-        Conv2D 3x3 s2 -> BN -> hard-swish   (16*alpha channels)
+        Conv2D 3x3 s2 -> BN -> hard-swish   (16 channels at every alpha)
            |
            v
         UniversalInvertedBottleneck x N   (LARGE_CONFIG or SMALL_CONFIG row per block)
            |
            v
-        Conv2D 1x1 -> BN -> hard-swish   (960 Large / 576 Small, alpha-scaled)
+        Conv2D 1x1 -> BN -> hard-swish   (6x the last block: 960 Large / 576 Small at 1.0)
            |
         include_top=False --------+
            |                      |
@@ -198,11 +200,9 @@ class MobileNetV3(keras.Model):
 
         if variant == "large":
             self.block_configs = self.LARGE_CONFIG
-            self.last_block_filters = 960
             last_point = 1280
         else:
             self.block_configs = self.SMALL_CONFIG
-            self.last_block_filters = 576
             last_point = 1024
 
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
@@ -214,7 +214,8 @@ class MobileNetV3(keras.Model):
             if width_multiplier > 1.0 else last_point
         )
 
-        first_filter = make_divisible(16 * width_multiplier)
+        # Keras Applications' stem is Conv2D(16) at every alpha.
+        first_filter = 16
         self.stem_conv = layers.Conv2D(
             first_filter,
             kernel_size=3,
@@ -234,15 +235,26 @@ class MobileNetV3(keras.Model):
 
         self.blocks = []
         in_channels = first_filter
+        # The table's input width at width_multiplier 1.0 (the stem's 16 for
+        # the first row): exp_size / in_size is the row's expansion ratio.
+        in_size = 16
 
         for i, (exp_size, out_size, kernel, stride, use_se, activation) in enumerate(self.block_configs):
-            exp_channels = make_divisible(exp_size * self.width_multiplier)
+            # DECISION plan-2026-10-14T062616-81938e81/D-232: Keras Applications'
+            # _depth(infilters * expansion), the ACTUAL input width times the ratio.
+            # Do NOT use make_divisible(exp_size * width_multiplier) (torchvision's
+            # adjust_channels): it differs at every width but 1.0 (65,584 parameters
+            # short for Large at 0.75), and the head already follows Keras. See decisions.md.
+            exp_channels = make_divisible(in_channels * (exp_size / in_size))
             out_channels = make_divisible(out_size * self.width_multiplier)
 
             # expanded_channels is passed explicitly since expansion is not always an integer multiple of input channels.
             block = UniversalInvertedBottleneck(
                 filters=out_channels,
                 expanded_channels=exp_channels,
+                # The first row (expansion 1) has no expansion conv, as Keras
+                # Applications' `if block_id:` and torchvision's ratio check.
+                use_expansion=i > 0,
                 kernel_size=kernel,
                 stride=stride,
                 use_squeeze_excitation=use_se,
@@ -269,8 +281,10 @@ class MobileNetV3(keras.Model):
             )
             self.blocks.append(block)
             in_channels = out_channels
+            in_size = out_size
 
-        last_block_filters = make_divisible(self.last_block_filters * width_multiplier)
+        # Keras Applications: last_conv_ch = _depth(x.shape[-1] * 6).
+        last_block_filters = make_divisible(in_channels * 6)
         self.last_conv = layers.Conv2D(
             last_block_filters,
             kernel_size=1,

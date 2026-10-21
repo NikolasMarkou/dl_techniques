@@ -233,10 +233,10 @@ class TestMobileNetV3:
         # Check variant-specific properties
         if variant == "large":
             assert len(model.blocks) == len(MobileNetV3.LARGE_CONFIG)
-            assert model.last_block_filters == 960
+            assert model.last_conv.filters == 960
         else:
             assert len(model.blocks) == len(MobileNetV3.SMALL_CONFIG)
-            assert model.last_block_filters == 576
+            assert model.last_conv.filters == 576
 
     def test_convenience_function(self):
         """Test create_mobilenetv3 convenience function."""
@@ -383,12 +383,14 @@ class TestMobileNetV3:
         (large), the hand sum ``2 * expanded * (new - old)`` over the SE
         blocks in ``test_the_v3_squeeze_excite_widths_are_the_references.py``.
         Step 9.3.1 (D-227): the SE convs carry biases, +2,888 (small) and
-        +5,080 (large); the totals are now ``keras.applications`` plus the
-        first row's 320 (``test_the_v3_squeeze_excite_gate_is_the_references.py``).
+        +5,080 (large); the totals were ``keras.applications`` plus the
+        first row's 320. Step 10.3 (D-232): the first row has no expansion
+        conv, -320; the totals equal ``keras.applications.MobileNetV3*``
+        (``test_the_v3_widths_follow_keras_applications_at_every_width.py``).
         """
         expected = {
-            'small': 2_555_288,
-            'large': 5_507_752,
+            'small': 2_554_968,
+            'large': 5_507_432,
         }
         for variant, count in expected.items():
             model = MobileNetV3.from_variant(variant, num_classes=1000)

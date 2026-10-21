@@ -101,8 +101,10 @@ V2_SHAPE = (64, 64, 3)
 #: 2026-10-09..14 added 10 to each. A V4 hidden Dense WITH a bias measured that
 #: bias at an identically-zero gradient (the BatchNorm after it subtracts the
 #: batch mean), which is why the head's block_use_bias is False there.
-#: V3 +18 at step 9.3.1 (D-227): the 9 SE blocks' two conv biases.
-GF_WEIGHTS = {"v1": 83, "v2": 161, "v3": 145, "v4": 38}
+#: V3 +18 at step 9.3.1 (D-227): the 9 SE blocks' two conv biases. V3 -3 at
+#: step 10.3 (D-232): the first row's expansion kernel and BatchNorm gamma and
+#: beta are gone, as in Keras Applications' block 0.
+GF_WEIGHTS = {"v1": 83, "v2": 161, "v3": 142, "v4": 38}
 
 #: The four MobileNetV2 weights that read EXACTLY 0.0 at a 32x32 input, and the
 #: only ones. Each names a block whose output is 1x1 at that input size.

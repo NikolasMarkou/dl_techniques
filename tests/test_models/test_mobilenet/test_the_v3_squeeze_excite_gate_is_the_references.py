@@ -14,12 +14,10 @@ All three references build it the same way:
 
 Until plan-2026-10-14T062616-81938e81 step 9.3.1 the port's SE convs took the
 block's ``use_bias=False`` and its gate was a plain sigmoid (the module
-docstring recorded the gate as a known deviation). With both fixed and the
-step 9.3 rounding, ``count_params()`` at ``width_multiplier=1.0`` equals a live
-``keras.applications`` model plus exactly 320: this port's first row builds an
-expansion ``1x1`` conv (16 x 16 = 256) and its BatchNorm (4 x 16 = 64) where
-the reference's ``block_id == 0`` has none (the module docstring's documented
-deviation).
+docstring recorded the gate as a known deviation). The count against a live
+``keras.applications`` model, which this file pinned as "plus the first row's
+320" until step 10.3, is now exact at every width and lives in
+``test_the_v3_widths_follow_keras_applications_at_every_width.py``.
 """
 
 import keras
@@ -27,9 +25,6 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
-
-#: The documented first-row expansion: 16 x 16 kernel + 4 x 16 BatchNorm.
-FIRST_ROW_EXPANSION = 16 * 16 + 4 * 16
 
 
 def _model(variant: str) -> MobileNetV3:
@@ -41,15 +36,6 @@ def _model(variant: str) -> MobileNetV3:
 def _se_layers(model):
     return [l for l in model._flatten_layers(include_self=False)
             if l.name == "se" and hasattr(l, "conv_reduce")]
-
-
-@pytest.mark.parametrize("variant,ctor", [
-    ("small", "MobileNetV3Small"), ("large", "MobileNetV3Large")])
-def test_the_count_is_keras_applications_plus_the_first_row_expansion(variant, ctor):
-    reference = getattr(keras.applications, ctor)(
-        input_shape=(224, 224, 3), weights=None, include_preprocessing=False)
-    assert _model(variant).count_params() == (
-        reference.count_params() + FIRST_ROW_EXPANSION)
 
 
 @pytest.mark.parametrize("variant", ["small", "large"])

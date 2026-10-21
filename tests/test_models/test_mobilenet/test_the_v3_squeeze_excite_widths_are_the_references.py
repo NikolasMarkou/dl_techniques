@@ -1,16 +1,15 @@
 """MobileNetV3's squeeze-excite bottleneck widths are the reference's.
 
-Which reference: the package README and ``mobilenet_v3.py`` name Keras
-Applications ``MobileNetV3`` for the head; the block widths
-(``make_divisible(exp * width_multiplier)``) are torchvision's
-``adjust_channels`` rule. For the SE bottleneck the two agree: Keras
-Applications ``_se_block`` uses ``_depth(filters * se_ratio)`` (divisor 8, at
-least 8) and torchvision ``SqueezeExcitation`` uses
-``_make_divisible(expanded // 4, 8)``; every expanded width here is a multiple
-of 8, so ``expanded * 0.25`` and ``expanded // 4`` are equal. Both are re-typed
-below as oracles, and at ``width_multiplier=1.0`` (where this port's expanded
-widths equal Keras Applications') the widths are also read from a live
-``keras.applications`` model built with ``weights=None``.
+Which reference: Keras Applications ``MobileNetV3`` at every width since
+plan-2026-10-14T062616-81938e81 step 10.3 (the expanded widths, too, which
+followed torchvision's ``adjust_channels`` before). For the SE bottleneck
+Keras Applications and torchvision agree: ``_se_block`` uses
+``_depth(filters * se_ratio)`` (divisor 8, at least 8) and torchvision
+``SqueezeExcitation`` uses ``_make_divisible(expanded // 4, 8)``; every
+expanded width here is a multiple of 8, so ``expanded * 0.25`` and
+``expanded // 4`` are equal. Both are re-typed below as oracles, and the
+widths are also read from a live ``keras.applications`` model built with
+``weights=None`` at every width the formula test covers.
 
 Until plan-2026-10-14T062616-81938e81 step 9.3 the port rounded the bottleneck
 with ``max(1, int(expanded * 0.25))``: 2 channels at Small's first SE block at
@@ -86,15 +85,17 @@ def test_each_se_width_is_the_reference_formula(variant, width):
             f"{expanded} expanded channels, reference {keras_ref}")
 
 
+@pytest.mark.parametrize("width", [1.0, 0.75, 0.5, 0.25])
 @pytest.mark.parametrize("variant,ctor", [
     ("small", "MobileNetV3Small"), ("large", "MobileNetV3Large")])
-def test_the_widths_equal_a_live_keras_applications_model(variant, ctor):
+def test_the_widths_equal_a_live_keras_applications_model(variant, ctor, width):
     reference = getattr(keras.applications, ctor)(
-        input_shape=(224, 224, 3), weights=None, include_preprocessing=False)
+        input_shape=(224, 224, 3), alpha=width, weights=None,
+        include_preprocessing=False)
     ref_widths = [
         layer.filters for layer in reference.layers
         if layer.name.endswith("squeeze_excite_conv")]
-    assert [b for _, _, b in _se_kernels(_model(variant, 1.0))] == ref_widths
+    assert [b for _, _, b in _se_kernels(_model(variant, width))] == ref_widths
 
 
 def _one_by_one_betas(variant: str) -> set:
@@ -143,20 +144,8 @@ def test_the_se_path_is_live_at_every_seed(variant):
     assert failures == {}
 
 
-#: ``count_params()`` at ``num_classes=1000`` measured at d929850f3, before the
-#: change (SE convs bias-free, bottleneck ``int(expanded * 0.25)``).
-COUNT_BEFORE = {("small", 1.0): 2_546_800, ("small", 0.25): 1_252_320,
-                ("large", 1.0): 5_500_848, ("large", 0.25): 1_810_400}
-
-
-@pytest.mark.parametrize("variant,width", sorted(COUNT_BEFORE))
-def test_the_parameter_count_moves_by_the_hand_sum(variant, width):
-    """Each SE block's two 1x1 kernels are ``expanded x bottleneck``: the count
-    moves by ``2 * expanded * (new - old)`` per block, plus, since step 9.3.1,
-    the two bias vectors ``bottleneck + expanded``; nothing else."""
-    model = _model(variant, width)
-    delta = sum(2 * expanded * (bottleneck - int(expanded * 0.25))
-                + bottleneck + expanded
-                for _, expanded, bottleneck in _se_kernels(model))
-    assert model.count_params() == COUNT_BEFORE[(variant, width)] + delta
-    assert delta > 0
+# The step 9.3 hand-sum pin (the count moved from the d929850f3 totals by
+# exactly the SE widths and biases) was retired at step 10.3 (D-232): its
+# baseline widths no longer exist below 1.0, and the stronger claim, count and
+# every weight shape equal to a live keras.applications model at every width,
+# is test_the_v3_widths_follow_keras_applications_at_every_width.py.

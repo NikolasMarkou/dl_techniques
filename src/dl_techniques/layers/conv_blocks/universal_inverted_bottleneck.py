@@ -60,7 +60,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         │   C_in channels)     │           │
         │  → Norm → Act        │           │
         ├──────────────────────┤           │
-        │  Expand: Conv1x1     │           │
+        │  Opt. expand: Conv1x1│           │
         │  → Norm → Act        │           │
         ├──────────────────────┤           │
         │  Opt. middle DW (dw1)│           │
@@ -96,6 +96,14 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     :param expanded_channels: Exact number of expansion channels (overrides
         ``expansion_factor``). Defaults to None.
     :type expanded_channels: int or None
+    :param use_expansion: Whether to build the ``1x1`` expansion conv, its
+        norm and its activation. False is the references' expansion-ratio-1
+        row (Keras Applications ``_inverted_res_block``'s ``if block_id:``,
+        torchvision's ``if expand_ratio != 1``): the block keeps its input
+        width, so ``build`` raises ``ValueError`` unless the expanded width
+        (``expanded_channels``, else ``C_in * expansion_factor``) equals
+        ``C_in``. Defaults to True.
+    :type use_expansion: bool
     :param stride: Spatial stride of the block. It is applied by the first
         spatial operator present — ``start_dw``, else ``dw1``, else ``dw2``,
         else the ``1x1`` projection — so it takes effect for every combination
@@ -180,6 +188,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             filters: int,
             expansion_factor: int = 4,
             expanded_channels: Optional[int] = None,
+            use_expansion: bool = True,
             stride: int = 1,
             kernel_size: int = 3,
             use_start_dw: bool = False,
@@ -253,6 +262,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.filters = filters
         self.expansion_factor = expansion_factor
         self.expanded_channels = expanded_channels
+        self.use_expansion = use_expansion
         self.stride = stride
         self.kernel_size = kernel_size
         self.use_start_dw = use_start_dw
@@ -309,16 +319,22 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.start_dw_norm = None
             self.start_dw_activation = None
 
-        # Expansion phase
-        self.expand_conv = keras.layers.Conv2D(
-            filters=1,  # Placeholder, will be set in build()
-            kernel_size=1,
-            name='expand_conv',
-            **self._conv_kwargs()
-        )
-
-        self.expand_norm = self._create_normalization_layer('expand_norm')
-        self.expand_activation = self._create_activation_layer('expand_activation')
+        # Expansion phase (absent for the references' expansion-ratio-1 row)
+        if self.use_expansion:
+            self.expand_conv = keras.layers.Conv2D(
+                filters=1,  # Placeholder, will be set in build()
+                kernel_size=1,
+                name='expand_conv',
+                **self._conv_kwargs()
+            )
+            self.expand_norm = self._create_normalization_layer('expand_norm')
+            self.expand_activation = self._create_activation_layer(
+                'expand_activation'
+            )
+        else:
+            self.expand_conv = None
+            self.expand_norm = None
+            self.expand_activation = None
 
         # Processing phase (depthwise convolutions)
         if self.use_dw1:
@@ -476,7 +492,11 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         else:
             expanded_filters = input_filters * self.expansion_factor
 
-        self.expand_conv.filters = expanded_filters
+        if self.expand_conv is None and expanded_filters != input_filters:
+            raise ValueError(
+                f"use_expansion=False keeps the input width {input_filters}, "
+                f"but the expanded width is {expanded_filters}"
+            )
 
         # Build sub-layers sequentially, propagating shape information
         # This ensures robust serialization and weight loading
@@ -492,11 +512,12 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.start_dw_norm.build(current_shape)
 
         # Expansion phase
-        self.expand_conv.build(current_shape)
-        current_shape = self.expand_conv.compute_output_shape(current_shape)
-
-        self.expand_norm.build(current_shape)
-        # Activation doesn't change shape
+        if self.expand_conv is not None:
+            self.expand_conv.filters = expanded_filters
+            self.expand_conv.build(current_shape)
+            current_shape = self.expand_conv.compute_output_shape(current_shape)
+            self.expand_norm.build(current_shape)
+            # Activation doesn't change shape
 
         # Processing phase
         if self.dw1 is not None:
@@ -543,9 +564,10 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             x = self.start_dw_activation(x)
 
         # Expansion phase
-        x = self.expand_conv(x)
-        x = self.expand_norm(x, training=training)
-        x = self.expand_activation(x)
+        if self.expand_conv is not None:
+            x = self.expand_conv(x)
+            x = self.expand_norm(x, training=training)
+            x = self.expand_activation(x)
 
         # Processing phase
         if self.dw1 is not None:
@@ -604,6 +626,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "filters": self.filters,
             "expansion_factor": self.expansion_factor,
             "expanded_channels": self.expanded_channels,
+            "use_expansion": self.use_expansion,
             "stride": self.stride,
             "kernel_size": self.kernel_size,
             "use_start_dw": self.use_start_dw,
