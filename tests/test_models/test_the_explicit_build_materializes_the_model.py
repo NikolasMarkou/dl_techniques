@@ -149,7 +149,11 @@ FIXED = {
     "lewm": 188,
     "mamba": 22,
     "masked_language_model": 23,
-    "mobilenet": 267,
+    # RE-MEASURED 2026-10-21 (plan-2026-10-14T062616-81938e81 step 15.2,
+    # D-255): 267 -> 262. 6cb295f1d (step 10.3.1, D-233) stopped MobileNetV2's
+    # t=1 first stage from building an expansion conv (kernel + 4 BatchNorm
+    # weights = 5); this pin was not moved with it and stayed red since.
+    "mobilenet": 262,
     # RE-MEASURED 2026-09-04: 12, not 13. ModernBERT's `use_bias` defaults to
     # `False`, and `final_norm`/`embeddings` LayerNorms and every encoder
     # layer's norms all construct with `center=self.use_bias` -- so at the

@@ -192,7 +192,12 @@ CENSUS = {
     # legitimate epsilon. Every construction site in mobilenet_v1..v4.py now
     # forwards `epsilon=REFERENCE_BN_EPSILON` (grep confirms it), so 53 of 53
     # read 1e-3; this pin was simply never re-derived after D-203 landed.
-    "mobilenet": (_mobilenet, {"1e-03": 53}),
+    # RE-MEASURED 2026-10-21 (plan-2026-10-14T062616-81938e81 step 15.2,
+    # D-255): 53 -> 52, no epsilon moved. 6cb295f1d (step 10.3.1, D-233)
+    # removed MobileNetV2's t=1 first-stage expansion conv and its
+    # `block_0/expand_norm` BatchNorm (1e-3, REFERENCE_BN_EPSILON like the rest);
+    # the pin was not re-derived with it.
+    "mobilenet": (_mobilenet, {"1e-03": 52}),
     "vit_hmlp": (_vit_hmlp, {"1e-06": 25, "1e-03": 3}),
     # RE-MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81 step 5, D-019):
     # {"1e-03": 36, "1e-06": 12}. Between 2026-10-09 (728c33e3b) and step 5 the

@@ -37,7 +37,6 @@ Every test below fails against the pre-D-052 forward path.
 import numpy as np
 import pytest
 import keras
-from keras import ops
 
 from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 
@@ -52,10 +51,10 @@ def _reference_kanvolution(x, layer):
     enough to pin the tap ordering, which is the part a reshape can silently
     get wrong.
     """
-    control = ops.convert_to_numpy(layer.control_points)
-    w_spline = ops.convert_to_numpy(layer.w_spline)
-    w_silu = ops.convert_to_numpy(layer.w_silu)
-    grid = ops.convert_to_numpy(layer.grid)
+    control = keras.ops.convert_to_numpy(layer.control_points)
+    w_spline = keras.ops.convert_to_numpy(layer.w_spline)
+    w_silu = keras.ops.convert_to_numpy(layer.w_silu)
+    grid = keras.ops.convert_to_numpy(layer.grid)
     spacing = 2.0 / layer.grid_size
 
     def basis(value):
@@ -86,18 +85,23 @@ def _reference_kanvolution(x, layer):
     return out
 
 
+@pytest.mark.usefixtures("tf32_disabled")
 def test_the_layer_computes_the_equation_its_docstring_advertises():
     """Identity pin, not a shape pin, against an independent transcription.
 
     Uses a NON-SQUARE kernel (2x3) on a non-square input so that a swapped
     height/width transpose in the weight reshapes cannot pass.
+
+    True float32 (plan-2026-10-14T062616-81938e81 D-257): with TF32 on, the
+    RTX 4070's convolution misses the numpy transcription by 9.08e-05 at
+    scale 1.36, above the 1e-5 pin; on CPU, or with TF32 off, the layer agrees.
     """
     keras.utils.set_random_seed(3)
     layer = KANvolution(
         filters=2, kernel_size=(2, 3), grid_size=4, padding="valid", use_bias=False
     )
     x = np.random.RandomState(0).randn(1, 4, 5, 3).astype("float32")
-    actual = ops.convert_to_numpy(layer(x))
+    actual = keras.ops.convert_to_numpy(layer(x))
     expected = _reference_kanvolution(x, layer)
 
     assert actual.shape == expected.shape
@@ -121,8 +125,8 @@ def test_the_layer_is_not_degree_one_homogeneous():
         filters=3, kernel_size=3, grid_size=8, padding="same", use_bias=False
     )
     x = keras.random.normal((2, 8, 8, 4), seed=1)
-    once = ops.convert_to_numpy(layer(x))
-    twice = ops.convert_to_numpy(layer(2.0 * x))
+    once = keras.ops.convert_to_numpy(layer(x))
+    twice = keras.ops.convert_to_numpy(layer(2.0 * x))
     gap = float(np.max(np.abs(twice - 2.0 * once)))
     assert gap > 1e-3, (
         f"|f(2x) - 2f(x)| = {gap:.6e}: the layer is (numerically) degree-1 "
@@ -141,14 +145,14 @@ def test_control_points_move_after_one_real_optimizer_step():
         keras.layers.Dense(2),
     ])
     model.compile(optimizer=keras.optimizers.SGD(learning_rate=1.0), loss="mse")
-    before = {v.path: ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
+    before = {v.path: keras.ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
     model.fit(
         np.random.RandomState(0).rand(8, 8, 8, 4).astype("float32"),
         np.random.RandomState(1).rand(8, 2).astype("float32"),
         epochs=1, batch_size=8, verbose=0,
     )
     moved = {
-        v.path: float(np.max(np.abs(ops.convert_to_numpy(v) - before[v.path])))
+        v.path: float(np.max(np.abs(keras.ops.convert_to_numpy(v) - before[v.path])))
         for v in model.trainable_variables
     }
     control = [p for p in moved if p.endswith("control_points")]
@@ -183,7 +187,7 @@ def test_w_spline_and_w_silu_are_not_the_same_weight_twice():
         keras.layers.Dense(2),
     ])
     model.compile(optimizer=keras.optimizers.SGD(learning_rate=1.0), loss="mse")
-    before = {v.path: ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
+    before = {v.path: keras.ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
     model.fit(
         np.random.RandomState(0).rand(8, 8, 8, 4).astype("float32"),
         np.random.RandomState(1).rand(8, 2).astype("float32"),
@@ -193,7 +197,7 @@ def test_w_spline_and_w_silu_are_not_the_same_weight_twice():
     for v in model.trainable_variables:
         if v.path.endswith(("w_spline", "w_silu")):
             deltas[v.path.rsplit("/", 1)[-1]] = (
-                ops.convert_to_numpy(v) - before[v.path]
+                keras.ops.convert_to_numpy(v) - before[v.path]
             )
     assert set(deltas) == {"w_spline", "w_silu"}, deltas.keys()
     identical = float(np.max(np.abs(deltas["w_spline"] - deltas["w_silu"])))
@@ -214,7 +218,7 @@ def test_the_grid_size_changes_the_function(grid_size):
             filters=2, kernel_size=3, grid_size=gs, padding="same", use_bias=False
         )
         x = np.random.RandomState(0).randn(1, 6, 6, 3).astype("float32")
-        outputs.append(ops.convert_to_numpy(layer(x)))
+        outputs.append(keras.ops.convert_to_numpy(layer(x)))
     gap = float(np.max(np.abs(outputs[0] - outputs[1])))
     assert gap > 1e-6, (
         f"grid_size {grid_size} and {grid_size * 2} produce the same output "

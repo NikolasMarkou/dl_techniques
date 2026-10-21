@@ -341,6 +341,12 @@ class TestReassign:
 
 class TestTaxonomyRecovery:
     def test_learned_clusters_recover_superclasses(self):
+        # Seeded (plan-2026-10-14T062616-81938e81 D-256): the head's node
+        # initializer is unseeded, so the clustering starts from whatever the
+        # process-global RNG holds. Measured over keras.utils.set_random_seed(0..29):
+        # seed 0 gives purity 14/20 < 0.8, the other 29 pass; it failed once in
+        # a step-15.2 run. Seed 1 is a passing draw.
+        keras.utils.set_random_seed(1)
         rng = np.random.default_rng(13)
         # 4 well-separated superclusters in 2D, 5 classes each.
         centers = np.array([[8.0, 8.0], [-8.0, 8.0], [8.0, -8.0], [-8.0, -8.0]])

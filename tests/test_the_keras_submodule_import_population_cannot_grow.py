@@ -35,7 +35,9 @@ two SAM 2 files that step edits (``sam2/training_model.py`` and its test).
 Step 15.2 of the same plan (D-254): every file this plan's commits edited is
 converted (100 files, 103 statements; the user's rule converts a file when it is
 edited, and these were edited without it), leaving **431 statements in 412
-files**, none of them a file this plan touched. The rest stay as they are (the
+files**, none of them a file this plan touched; then **430 in 411** after
+``tests/test_layers/test_the_kan_actually_splines.py``, edited for D-257, was
+converted with it. The rest stay as they are (the
 2026-08-25 ruling). The ceilings became an exact census: :data:`KERAS_SUBMODULE_IMPORTS`
 pins the statement count of every file, so a conversion, a new statement in a
 new file, a second statement in a listed file, and a swap (one file fixed,
@@ -53,7 +55,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("src", "tests")
 
 #: Exact census, ``{path relative to the repo root: statements}``, re-derived at
-#: Step 15.2 of plan-2026-10-14T062616-81938e81 (D-254): 431 statements, 412 files.
+#: Step 15.2 of plan-2026-10-14T062616-81938e81 (D-254): 431 statements, 412 files;
+#: 430 / 411 after ``test_the_kan_actually_splines.py`` was edited for D-257.
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -338,7 +341,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_layers/test_structured_linear/test_kanvolution.py": 1,
     "tests/test_layers/test_structured_linear/test_mps_layer.py": 1,
     "tests/test_layers/test_structured_linear/test_orthogonal_butterfly.py": 1,
-    "tests/test_layers/test_the_kan_actually_splines.py": 1,
     "tests/test_layers/test_the_shared_initializer_symmetry_is_broken.py": 1,
     "tests/test_layers/test_thera_heat_field.py": 1,
     "tests/test_layers/test_time_series/test_xlstm_blocks.py": 1,
@@ -532,7 +534,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (431, 412), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (430, 411), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"
