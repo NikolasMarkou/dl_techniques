@@ -576,7 +576,10 @@ class NanoVLM(keras.Model):
 
         The images are encoded once; every step re-runs the decoder over
         ``[vision; text so far]`` (no key-value cache) and samples the next
-        token from the logits at the last position.
+        token from the logits at the last position. Each sequence finishes on
+        its own ``eos_token_id``: a finished row keeps emitting
+        ``eos_token_id``, and the loop ends when every row has finished or
+        after ``max_length`` steps.
 
         :param images: Input images, shape ``(batch_size, height, width, channels)``.
         :type images: keras.KerasTensor
@@ -589,7 +592,8 @@ class NanoVLM(keras.Model):
         :param top_k: Number of highest-probability tokens to sample from;
             ``0`` is greedy.
         :type top_k: int
-        :param eos_token_id: Token ID that ends generation.
+        :param eos_token_id: Token ID that ends a sequence; also the fill of a
+            finished row.
         :type eos_token_id: int
         :param kwargs: Unused, reserved for future generation parameters.
         :return: Generated token sequence, shape ``(batch_size, total_length)``.
@@ -619,6 +623,7 @@ class NanoVLM(keras.Model):
         vision_tokens = self._vision_tokens(images, training=False)
 
         current_tokens = prompt_tokens
+        finished = keras.ops.zeros((keras.ops.shape(prompt_tokens)[0],), dtype="bool")
         for step in range(max_length):
             hidden = self._joint_hidden_states(
                 vision_tokens, current_tokens, None, training=False
@@ -631,14 +636,15 @@ class NanoVLM(keras.Model):
                 next_token_logits, temperature, top_k
             )
 
-            # Append to sequences
-            next_tokens = keras.ops.expand_dims(
-                keras.ops.cast(next_tokens, current_tokens.dtype), axis=1
-            )
-            current_tokens = keras.ops.concatenate([current_tokens, next_tokens], axis=1)
+            # A finished row keeps emitting EOS; a row finishes on its own EOS.
+            next_tokens = keras.ops.where(
+                finished, eos_token_id,
+                keras.ops.cast(next_tokens, current_tokens.dtype))
+            finished = keras.ops.logical_or(finished, next_tokens == eos_token_id)
+            current_tokens = keras.ops.concatenate(
+                [current_tokens, keras.ops.expand_dims(next_tokens, axis=1)], axis=1)
 
-            # Check for EOS (simplified - could be enhanced for per-sequence)
-            if eos_token_id in next_tokens:
+            if bool(keras.ops.all(finished)):
                 break
 
         return current_tokens

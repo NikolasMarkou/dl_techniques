@@ -83,6 +83,26 @@ def test_the_claim_the_eager_call_and_a_symbolic_call_agree():
     assert eager == claimed == symbolic == (BATCH, model.num_vision_tokens + 7, VOCAB)
 
 
+def test_an_unknown_batch_size_is_carried_through():
+    """The F-9 B10 row: the batch axis is never fixed by the model (the
+    pre-D-040 fusion broadcast a batch-1 tensor); a symbolic ``None`` batch
+    and the claimed shape both keep it ``None``."""
+    model = _model()
+    claimed = tuple(model.compute_output_shape({
+        "images": (None, IMG, IMG, 3), "text_tokens": (None, 7)}))
+    symbolic = tuple(model({
+        "images": keras.Input((IMG, IMG, 3)),
+        "text_tokens": keras.Input((7,), dtype="int32"),
+    }).shape)
+    assert claimed == symbolic == (None, model.num_vision_tokens + 7, VOCAB)
+    for batch in (1, 3):
+        images, text = _batch(text_len=7)
+        images = np.repeat(images[:1], batch, axis=0)
+        text = np.repeat(text[:1], batch, axis=0)
+        out = model({"images": images, "text_tokens": text}, training=False)
+        assert tuple(out.shape) == (batch, model.num_vision_tokens + 7, VOCAB)
+
+
 def test_an_all_ones_text_mask_changes_nothing():
     """The vision prefix is spliced in as attended; a zero vision mask or a
     mask aligned to the wrong positions would move these logits."""

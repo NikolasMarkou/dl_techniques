@@ -10,7 +10,8 @@ labels for representation analysis) and ``head_prototypes.npz``.
 
 Arms (``--head``):
 
-- ``softmax`` -- Dense(100) + softmax, cross-entropy. Baseline.
+- ``softmax`` -- a linear Dense(100) emitting logits, cross-entropy
+  (``from_logits=True``; the softmax is in the loss). Baseline.
 - ``harmonic_logits`` -- HarmonicDense(``logits``) + cross-entropy
   (``from_logits=True``).
 - ``harmonic_dist`` -- HarmonicDense(``distances``) + HarMax +
@@ -72,6 +73,10 @@ HEAD_ARMS = (
     "hier_fixed",
     "hier_full",
 )
+
+#: Arms whose head emits pre-activation logits; the loss and the post-hoc
+#: probabilities read this, the others emit normalized probabilities.
+LOGIT_ARMS = frozenset({"softmax", "harmonic_logits"})
 
 NUM_FINE = 100
 NUM_COARSE = 20
@@ -316,6 +321,17 @@ def build_model(config: HeadComparisonConfig) -> Tuple[keras.Model, Any, Any]:
     return model, head, trunk_out
 
 
+def loss_for_head(head: str) -> keras.losses.Loss:
+    """The cross-entropy for ``head``: ``from_logits`` exactly for :data:`LOGIT_ARMS`.
+
+    Interface contract (callers: :func:`train_heads`, tests): ``head`` is one
+    of :data:`HEAD_ARMS`; raises ``ValueError`` otherwise.
+    """
+    if head not in HEAD_ARMS:
+        raise ValueError(f"unknown head {head!r}; expected one of {HEAD_ARMS}")
+    return keras.losses.SparseCategoricalCrossentropy(from_logits=head in LOGIT_ARMS)
+
+
 def build_callbacks(
         config: HeadComparisonConfig,
         run_dir: str,
@@ -439,10 +455,9 @@ def train_heads(
         opt_config["momentum"] = config.momentum
     optimizer = optimizer_builder(opt_config, lr_schedule)
     # build_model returns the uncompiled graph; the loss follows the arm.
-    from_logits = config.head in ("softmax", "harmonic_logits")
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits),
+        loss=loss_for_head(config.head),
         metrics=[
             keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
             keras.metrics.SparseTopKCategoricalAccuracy(k=5, name="top5_accuracy"),
@@ -467,7 +482,7 @@ def train_heads(
     # ---- Post-hoc evaluation ----
     raw = np.asarray(model.predict(x_test, batch_size=512, verbose=0))
     probs = to_probabilities(
-        raw, from_logits=config.head in ("softmax", "harmonic_logits")
+        raw, from_logits=config.head in LOGIT_ARMS
     )
     y_pred = probs.argmax(axis=1)
     test_metrics = {
