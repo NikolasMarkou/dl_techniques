@@ -322,3 +322,12 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.resize_cc3m_to_ssd \
 4. **Do not raise resolution mid-run.** A multi-resolution curriculum keeps the
    lower-res compiled kernels resident while the higher-res ones compile,
    spiking VRAM and OOMing on a 12 GB card. Use one fixed `--image-size`.
+5. **The first CLIP step takes about 4.5 minutes.** Measured on the RTX 4070,
+   `--variant nano --synthetic --image-size 112 --skip-pretrain`, batch 128
+   (plan-2026-10-14T062616-81938e81 D-244): the first step 264 s, a steady step
+   0.25 s. Stochastic depth 0 does not cut it (250 s, the run-to-run spread);
+   without XLA the first step is 135 s and every later step 0.66 s, so XLA
+   (the default, `jit_compile="auto"`) pays for itself after about 320 steps.
+   The first step is Python tracing of the forward, backward and per-variable
+   AdamW update graph (about half) and XLA compiling it. Each pretraining
+   stage compiles its own graph once more.
