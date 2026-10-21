@@ -340,20 +340,19 @@ class TestMobileNetV2:
         """Exact counts at 224 x 224 x 3, 1000 classes, re-derived by command.
 
         Each is ``keras.applications.MobileNetV2(weights=None, alpha=a)``'s
-        count plus the documented first-stage extra: this port's universal
-        block always builds the expansion conv, so stage 1 (t=1) carries a
-        ``C x C`` 1x1 conv and its BatchNorm, ``C*C + 4*C`` with
-        ``C = _make_divisible(32 * alpha)``: 2,496 (C=48), 1,152 (32), 672
-        (24), 320 (16), 320 (16). The head itself (GAP, dropout, one Dense;
-        D-015) matches. MEASURED 2026-10-14 (plan-2026-10-14T062616-81938e81
-        step 3) on CPU.
+        count exactly. Until plan-2026-10-14T062616-81938e81 step 10.3 the
+        universal block always built the expansion conv, so stage 1 (t=1)
+        carried a ``C x C`` 1x1 conv and its BatchNorm, ``C*C + 4*C`` with
+        ``C = make_divisible(32 * alpha)`` (2,496 / 1,152 / 672 / 320 / 320);
+        the live comparison is
+        ``test_the_v2_first_stage_has_no_expansion_conv.py``.
         """
         expected = {
-            'large': 6_159_208,   # keras 6,156,712 + 2,496
-            'medium': 3_540_136,  # keras 3,538,984 + 1,152
-            'small': 2_663_736,   # keras 2,663,064 + 672
-            'nano': 1_987_544,    # keras 1,987,224 + 320
-            'pico': 1_691_528,    # keras 1,691,208 + 320
+            'large': 6_156_712,
+            'medium': 3_538_984,
+            'small': 2_663_064,
+            'nano': 1_987_224,
+            'pico': 1_691_208,
         }
         for variant, count in expected.items():
             model = MobileNetV2.from_variant(variant, num_classes=1000)

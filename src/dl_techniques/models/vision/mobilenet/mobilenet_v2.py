@@ -12,9 +12,9 @@ Channel counts round through `utils.tensors.make_divisible` (nearest multiple of
 more than 10% below `width_multiplier * c`), so `width_multiplier=0.75`
 does not give exactly `0.75 * c`. The final 1280-channel convolution is
 not scaled down for `width_multiplier <= 1.0`, only widened above it. The
-paper's first stage uses expansion factor 1 and skips the expansion
-convolution; this implementation reuses one universal block that always
-expands, so that stage carries a small extra `C -> C` projection. The
+first stage (expansion factor 1) has no expansion convolution, as the paper,
+Keras Applications and torchvision build it, so `count_params()` equals
+`keras.applications.MobileNetV2` at each variant's `alpha`. The
 classifier is linear, so this model outputs logits: compile with
 `from_logits=True`. No pretrained checkpoints ship with this package;
 `pretrained=True` raises `NotImplementedError`.
@@ -184,6 +184,9 @@ class MobileNetV2(keras.Model):
                 self.blocks.append(UniversalInvertedBottleneck(
                     filters=output_channels,
                     expansion_factor=t,
+                    # t=1 has no expansion conv (Keras Applications
+                    # `if block_id:`, torchvision `if expand_ratio != 1`).
+                    use_expansion=t != 1,
                     stride=stride,
                     kernel_size=3,
                     use_dw1=True,

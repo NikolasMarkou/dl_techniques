@@ -66,7 +66,7 @@ MobileNet answers this by redesigning the building block itself rather than by p
 
 ### 4.2 `MobileNetV2`
 - **Stem**: one standard `3x3` convolution.
-- **Body**: 17 inverted residual blocks in 7 stages, from the paper's `(t, c, n, s)` table. The first stage has expansion factor `t=1`. Residual connections apply to stride-1 blocks whose input and output widths match.
+- **Body**: 17 inverted residual blocks in 7 stages, from the paper's `(t, c, n, s)` table. The first stage has expansion factor `t=1` and, as in the paper, Keras Applications and torchvision, no expansion conv, so `count_params()` equals `keras.applications.MobileNetV2(weights=None)` at each variant's `alpha` (until 2026-10-21 the universal block always expanded: `C*C + 4*C` extra, 1,152 at `alpha=1.0`; archives saved before then do not load). Residual connections apply to stride-1 blocks whose input and output widths match.
 - **Head**: a `1x1` convolution expanding to 1280 channels (backbone), then the torchvision classifier: global average pooling, `Dropout(dropout_rate)` (0.2), one linear `Dense(num_classes)`.
 
 ### 4.3 `MobileNetV3`
@@ -214,9 +214,9 @@ custom_v2 = create_mobilenetv2(                                                #
 for model in (default_v2, nano_v2, custom_v2):
     model(np.zeros((1, 224, 224, 3), dtype="float32"))
 
-print(f"medium (alpha=1.0):  {default_v2.count_params():,}")  # 3,540,136
-print(f"nano   (alpha=0.5):  {nano_v2.count_params():,}")     # 1,987,544
-print(f"medium x 0.5:        {custom_v2.count_params():,}")   # 1,987,544
+print(f"medium (alpha=1.0):  {default_v2.count_params():,}")  # 3,538,984
+print(f"nano   (alpha=0.5):  {nano_v2.count_params():,}")     # 1,987,224
+print(f"medium x 0.5:        {custom_v2.count_params():,}")   # 1,987,224
 ```
 
 ### Example 3: MobileNet as a feature extractor

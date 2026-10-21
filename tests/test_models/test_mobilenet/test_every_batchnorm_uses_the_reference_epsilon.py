@@ -52,9 +52,9 @@ _INPUT_SHAPE = (64, 64, 3)
 # V4 is 63 since plan-2026-10-14T062616-81938e81 step 3 (D-015): its reference
 # head (timm head_norm=True) adds one BatchNorm after the 1280-wide Dense, and
 # that BatchNorm must run at the reference epsilon like every other.
-# V3 is 46 since step 10.3 (D-232): its first row has no expansion conv and
-# no expansion BatchNorm, as Keras Applications' block 0.
-_EXPECTED_BN_COUNT = {"V1": 27, "V2": 53, "V3": 46, "V4": 63}
+# V3 is 46 and V2 52 since step 10.3 (D-232, D-233): the first row has no
+# expansion conv and no expansion BatchNorm, as Keras Applications' block 0.
+_EXPECTED_BN_COUNT = {"V1": 27, "V2": 52, "V3": 46, "V4": 63}
 
 _MODELS = {
     "V1": MobileNetV1,
