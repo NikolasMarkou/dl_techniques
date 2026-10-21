@@ -194,6 +194,16 @@ reconstructions = model.predict(x_test[:10], verbose=0)
 print(reconstructions.shape)  # (10, 28, 28, 1)
 ```
 
+**GPU determinism of this decoder.** It upsamples with `Conv2DTranspose`, which runs on a GPU
+as a cuDNN backward-data convolution whose engine is chosen by timing. Once another transposed
+convolution has warmed the autotuner in the same process, the choice can be an engine cuDNN
+flags as non-deterministic (`ConvBwdData_eng25`), and two calls of the same model on the same
+input then differ in the last bits (measured 1.19e-07 on PFT-SR's upsampler, 1.86e-09 on a
+test codec with two transposed convolutions). For bit-identical outputs, upsample with `UpSampling2D`
+followed by `Conv2D`, or set `TF_CUDNN_DETERMINISTIC=1` in the environment before the process
+starts; `tf.config.experimental.enable_op_determinism()` called mid-process keeps an engine
+the autotuner already cached. Measured in plan-2026-10-14T062616-81938e81, D-024 and D-083.
+
 ---
 
 ## 6. Component Reference

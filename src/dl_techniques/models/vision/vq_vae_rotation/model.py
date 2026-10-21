@@ -149,7 +149,7 @@ class VQVAERotationTrick(keras.Model):
         ┌────────────────────────────────────────┐
         │  Encoder (bring-your-own or auto-built)│
         │  Conv2D(hidden, 4, s=2) x n_down       │
-        │    + Norm + swish                      │
+        │    + Norm + ReLU                       │
         │  ResBlock x num_res_blocks             │
         │  Conv2D(embedding_dim, 1, 1)           │
         └──────────────┬─────────────────────────┘
@@ -167,8 +167,8 @@ class VQVAERotationTrick(keras.Model):
         │  Conv2D(hidden, 1, 1)                  │
         │  ResBlock x num_res_blocks             │
         │  Conv2DTranspose(hidden, 4, s=2)       │
-        │    x n_down, + Norm + swish            │
-        │  Conv2D(C_in, 3, 1, padding=same)      │
+        │    x n_down, + Norm + ReLU             │
+        │  Conv2D(C_in, 3, 1, same) + sigmoid    │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
