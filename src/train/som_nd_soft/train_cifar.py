@@ -9,7 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
+from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
 from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import optimizer_builder
@@ -615,9 +615,11 @@ def main() -> None:
     parser.add_argument('--grid-size', type=int, default=16)
     parser.add_argument('--som-temperature', type=float, default=1.0)
     parser.add_argument('--no-augmentation', action='store_true')
+    parser.add_argument('--seed', type=int, default=42, help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     config = CIFARSOMConfig(
         dataset_name=args.dataset,

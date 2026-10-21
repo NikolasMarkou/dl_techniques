@@ -107,6 +107,7 @@ DEST_TO_FIELD: Dict[str, str] = {
     "experiment_name": "experiment_name",
     "monitor_every": "monitor_every_n_epochs",
     "early_stopping_patience": "early_stopping_patience",
+    "seed": "seed",
 }
 
 # Dests that are NOT ``TrainingConfig`` fields, each with the reason it is not.
@@ -144,6 +145,7 @@ EXPECTED: Dict[str, Any] = {
     "experiment_name": "cli_contract_probe",
     "monitor_every_n_epochs": 11,
     "early_stopping_patience": 4,
+    "seed": 7,
 }
 
 GPU_INDEX = 3
@@ -253,6 +255,7 @@ def _argv(tmp_path: Path) -> List[str]:
         "--experiment-name", EXPECTED["experiment_name"],
         "--monitor-every", str(EXPECTED["monitor_every_n_epochs"]),
         "--early-stopping-patience", str(EXPECTED["early_stopping_patience"]),
+        "--seed", str(EXPECTED["seed"]),
         "--gpu", str(GPU_INDEX),
     ]
 

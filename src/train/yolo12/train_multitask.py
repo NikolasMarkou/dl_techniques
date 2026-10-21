@@ -588,7 +588,7 @@ def train_model(args: argparse.Namespace) -> None:
     logger.info(f"Results will be saved to: {results_dir}")
 
     train_dataset, val_dataset, test_dataset = create_dataset_splits(
-        data_dir=args.data_dir, patch_size=args.patch_size, random_seed=args.random_seed
+        data_dir=args.data_dir, patch_size=args.patch_size, random_seed=args.seed
     )
 
     train_info = train_dataset.get_dataset_info()
@@ -990,7 +990,8 @@ def main():
 
     parser.add_argument('--no-evaluate', action='store_true')
     parser.add_argument('--run-eagerly', action='store_true')
-    parser.add_argument('--random-seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
     args.evaluate = not args.no_evaluate
@@ -1009,7 +1010,7 @@ def main():
     # own seed generator, so two same-seed runs produced different weights AND
     # different dropout masks. `set_seeds` additionally calls
     # `keras.utils.set_random_seed` (and seeds PYTHONHASHSEED + `random`).
-    set_seeds(args.random_seed)
+    set_seeds(args.seed)
 
     try:
         train_model(args)

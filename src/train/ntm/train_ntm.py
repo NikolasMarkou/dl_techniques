@@ -11,7 +11,7 @@ from typing import List, Optional
 import keras
 import numpy as np
 
-from train.common import setup_gpu, create_callbacks
+from train.common import setup_gpu, set_seeds, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory import create_ntm
 from . import CopyTaskGenerator, CopyTaskConfig
@@ -61,6 +61,8 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument('--validation-split', type=float, default=0.1)
     parser.add_argument('--num-eval-samples', type=int, default=20)
     parser.add_argument('--success-threshold', type=float, default=0.9)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds), and the copy-task data')
     return parser.parse_args(argv)
 
 
@@ -72,6 +74,7 @@ def main():
         return
 
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     # Generate data
     logger.info("Generating Copy Task data...")
@@ -79,6 +82,7 @@ def main():
         sequence_length=args.sequence_length,
         vector_size=args.vector_size,
         num_samples=args.num_samples,
+        random_seed=args.seed,
     )
     generator = CopyTaskGenerator(config)
     data = generator.generate()

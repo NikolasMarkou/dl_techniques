@@ -41,7 +41,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu, load_dataset, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, set_seeds, load_dataset, create_callbacks as create_common_callbacks
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -104,6 +104,7 @@ class TrainingConfig:
     # Output
     output_dir: str = "results"
     experiment_name: Optional[str] = None
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -283,6 +284,7 @@ def train_rbf_protonet(
           - ``history``: raw ``keras.callbacks.History`` object.
     """
     setup_gpu(gpu_id)
+    set_seeds(config.seed)
 
     logger.info(f"Experiment: {config.experiment_name}")
     logger.info(f"Dataset: cifar100, image size: 32x32x3, feature_dim: {config.feature_dim}")
@@ -449,6 +451,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--monitor-every", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=10)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
 
     return parser.parse_args()
 
@@ -479,6 +482,7 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
+        seed=args.seed,
     )
 
     logger.info(

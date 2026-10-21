@@ -86,6 +86,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
             "run_epoch_analysis": True,
             "analysis_start_epoch": 1,
             "analysis_epoch_frequency": 5,
+            "seed": 42,
         },
     },
     "fnet": {
@@ -128,6 +129,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
             "run_epoch_analysis": True,
             "analysis_start_epoch": 1,
             "analysis_epoch_frequency": 5,
+            "seed": 42,
         },
     },
 }
@@ -221,7 +223,7 @@ class TestArgvToConfig:
             spec["module"],
             spec["train_fn"],
             ["--variant", "small", "--epochs", "7", "--batch-size", "11",
-             "--max-samples", "123"],
+             "--max-samples", "123", "--seed", "9"],
         )
         expected = dict(spec["config_defaults"])
         expected.update({
@@ -229,6 +231,7 @@ class TestArgvToConfig:
             "num_epochs": 7,
             "batch_size": 11,
             "max_samples": 123,
+            "seed": 9,
         })
         assert effective_config(config) == expected
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, create_callbacks, save_config_json
+from train.common import setup_gpu, set_seeds, create_callbacks, save_config_json
 from train.common.run_io import default_experiment_name, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
@@ -502,12 +502,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--grid-size', type=int, default=10)
     parser.add_argument('--som-temperature', type=float, default=0.5)
     parser.add_argument('--output-dir', type=str, default='results')
+    parser.add_argument('--seed', type=int, default=42, help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_arguments()
     setup_gpu()
+    set_seeds(args.seed)
 
     config = MNISTSOMConfig(
         grid_shape=(args.grid_size, args.grid_size),

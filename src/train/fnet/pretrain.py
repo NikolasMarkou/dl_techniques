@@ -33,6 +33,8 @@ from dl_techniques.utils.logger import logger
 class TrainingConfig:
     """Configuration for FNet MLM pre-training."""
 
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
+
     # Model
     fnet_variant: str = "tiny"
     vocab_size: int = 100277  # Tiktoken cl100k_base
@@ -137,7 +139,7 @@ def train_fnet_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     logger.info("FNet MLM Pre-training with Tiktoken")
     logger.info("=" * 60)
 
-    set_seeds(42)
+    set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
@@ -210,6 +212,8 @@ def main() -> None:
     """Main entry point for FNet MLM pre-training."""
     parser = argparse.ArgumentParser(description="FNet MLM Pre-training")
     parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--seed', type=int, default=TrainingConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     parser.add_argument('--variant', type=str, default='tiny', help='FNet variant')
     parser.add_argument('--epochs', type=int, default=3, help='Training epochs')
     parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
@@ -219,6 +223,7 @@ def main() -> None:
     setup_gpu(gpu_id=args.gpu)
 
     config = TrainingConfig()
+    config.seed = args.seed
     config.fnet_variant = args.variant
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size

@@ -574,6 +574,9 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, help="Override number of epochs")
     parser.add_argument("--batch-size", type=int, help="Override batch size")
     parser.add_argument("--learning-rate", type=float, help="Override learning rate")
+    parser.add_argument("--seed", type=int, default=BLTTrainingConfig.random_seed,
+                        help="Seed for Python, NumPy and Keras (train.common.set_seeds) "
+                             "and the byte sampler; it replaces a --config file's random_seed")
 
     args = parser.parse_args()
 
@@ -598,6 +601,7 @@ def main() -> None:
         config.batch_size = args.batch_size
     if args.learning_rate:
         config.learning_rate = args.learning_rate
+    config.random_seed = args.seed
 
     trainer = BLTTrainer(config)
     trainer.run_full_training()

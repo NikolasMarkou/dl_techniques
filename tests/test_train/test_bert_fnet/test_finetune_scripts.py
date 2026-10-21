@@ -94,6 +94,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
             "analysis_epoch_frequency": 1,
             "run_post_training_analysis": True,
             "analysis_n_samples": 1000,
+            "seed": 42,
         },
     },
     "fnet": {
@@ -133,6 +134,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
             "analysis_epoch_frequency": 1,
             "run_post_training_analysis": True,
             "analysis_n_samples": 1000,
+            "seed": 42,
         },
     },
 }
@@ -271,7 +273,8 @@ class TestArgvToConfig:
             spec["module"],
             spec["train_fn"],
             ["--encoder-path", "/tmp/probe_encoder.keras", "--batch-size", "3",
-             "--max-samples", "77", "--no-two-stage", "--skip-analysis"],
+             "--max-samples", "77", "--no-two-stage", "--skip-analysis",
+             "--seed", "9"],
         )
         expected = dict(spec["config_defaults"])
         expected.update({
@@ -280,6 +283,7 @@ class TestArgvToConfig:
             "max_samples": 77,
             "run_two_stage_finetuning": False,
             "run_post_training_analysis": False,
+            "seed": 9,
         })
         assert effective_config(config) == expected
 

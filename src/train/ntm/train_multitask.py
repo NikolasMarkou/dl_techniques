@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
-from train.common import setup_gpu, create_callbacks
+from train.common import setup_gpu, set_seeds, create_callbacks
 
 from .data_generators import (
     CopyTaskGenerator, CopyTaskConfig,
@@ -62,6 +62,9 @@ class MultitaskNTMConfig:
     checkpoint_dir: str = "results/multitask_ntm/checkpoints"
     log_dir: str = "results/multitask_ntm/logs"
     num_eval_samples: int = 1000
+    #: Seeds Python, NumPy and Keras (train.common.set_seeds) and the training
+    #: task stream; the validation stream keeps its fixed seed 42.
+    seed: int = 42
     task_map: Dict[str, int] = field(default_factory=lambda: {
         "copy": 0, "associative_recall": 1, "repeat_copy": 2,
         "priority_access": 3, "dynamic_ngram": 4, "insertion_sort": 5
@@ -81,7 +84,10 @@ class UnifiedTaskGenerator(keras.utils.Sequence):
         self.batch_size = config.batch_size
         self.steps = config.steps_per_epoch if mode == 'train' else config.validation_steps
 
-        seed = 42 if mode == 'val' else None
+        # The training stream follows `config.seed` through a derived seed, so it
+        # never equals the fixed validation stream (seed 42) at any `--seed`.
+        seed = 42 if mode == 'val' else int(
+            np.random.SeedSequence([config.seed, 1]).generate_state(1)[0])
         self.rng = np.random.default_rng(seed)
 
         self.generators = {
@@ -355,6 +361,8 @@ def parse_arguments() -> argparse.Namespace:
     # Device
     parser.add_argument('--gpu', type=int, default=None,
                         help='GPU device index.')
+    parser.add_argument('--seed', type=int, default=MultitaskNTMConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds), and the training task stream')
     return parser.parse_args()
 
 
@@ -364,6 +372,7 @@ def main() -> None:
     setup_gpu(args.gpu)
 
     config = MultitaskNTMConfig(
+        seed=args.seed,
         memory_size=args.memory_size,
         memory_dim=args.memory_dim,
         controller_dim=args.controller_dim,
@@ -382,6 +391,7 @@ def main() -> None:
         patience=args.patience,
         num_eval_samples=args.num_eval_samples,
     )
+    set_seeds(config.seed)
     logger.info(f"Tasks: {list(config.task_map.keys())}, Memory: {config.memory_size}x{config.memory_dim}, "
                 f"Batch: {config.batch_size}, Epochs: {config.num_epochs}")
 

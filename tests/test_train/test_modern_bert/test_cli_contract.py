@@ -116,6 +116,7 @@ def test_no_flags_produces_the_class_defaults(monkeypatch) -> None:
         (["--epochs", "7"], "num_epochs", 7),
         (["--batch-size", "16"], "batch_size", 16),
         (["--max-samples", "500"], "max_samples", 500),
+        (["--seed", "7"], "seed", 7),
     ],
 )
 def test_one_flag_reaches_its_field(monkeypatch, argv, field, expected) -> None:

@@ -506,7 +506,8 @@ def main():
     parser.add_argument('--save-dir', type=str, default='coco_pretrain_results')
     parser.add_argument('--weights-name', type=str, default=None)
     parser.add_argument('--run-eagerly', action='store_true')
-    parser.add_argument('--random-seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     parser.add_argument('--no-visualizations', action='store_true')
     parser.add_argument('--visualization-freq', type=int, default=1)
@@ -526,7 +527,7 @@ def main():
     # own seed generator, so two same-seed runs produced different weights AND
     # different dropout masks. `set_seeds` additionally calls
     # `keras.utils.set_random_seed` (and seeds PYTHONHASHSEED + `random`).
-    set_seeds(args.random_seed)
+    set_seeds(args.seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = f"{args.save_dir}/yolov12_{args.scale}_coco_pretrain_{timestamp}"

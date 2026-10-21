@@ -43,6 +43,8 @@ from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 class FinetuneConfig:
     """Configuration for TreeTransformer sentiment analysis fine-tuning."""
 
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
+
     # Model and paths
     # DECISION plan-2026-08-12T123743-e798a9e1/D-023
     # Derived from the pre-training script's own producer rather than spelled out
@@ -135,7 +137,7 @@ def finetune_sentiment_model(
     logger.info("TreeTransformer Sentiment Analysis Fine-tuning")
     logger.info("=" * 60)
 
-    set_seeds(42)
+    set_seeds(config.seed)
 
     preprocessor = create_tokenizer(
         config.encoding_name, config.max_seq_length,
@@ -254,6 +256,8 @@ def main() -> None:
     parser.add_argument(
         "--gpu", type=int, default=None, help="GPU device index"
     )
+    parser.add_argument("--seed", type=int, default=FinetuneConfig.seed,
+                        help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     parser.add_argument(
         "--pretrained-encoder-path", type=str, default=None,
         help="Pretrained TreeTransformer encoder .keras path",
@@ -282,6 +286,7 @@ def main() -> None:
     setup_gpu(gpu_id=args.gpu)
 
     config = FinetuneConfig()
+    config.seed = args.seed
     if args.pretrained_encoder_path:
         config.pretrained_encoder_path = args.pretrained_encoder_path
     config.batch_size = args.batch_size

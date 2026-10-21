@@ -46,7 +46,7 @@ from keras import ops
 
 from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from dl_techniques.optimization import learning_rate_schedule_builder, optimizer_builder
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.nam.train_dfsa import (
     DifferentiableFSA,
     _fixed_add,
@@ -104,6 +104,8 @@ def parse_args():
     parser.add_argument("--save-interval", type=int, default=5000)
     parser.add_argument("--save-dir", type=str, default="results")
     parser.add_argument("--gpu", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     return parser.parse_args()
 
 
@@ -264,29 +266,34 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
 
 def _eval_quick(model, tokenizer):
     """Quick eval on key expression types. Returns (ok, total, details)."""
-    random.seed(42)
+    # DECISION plan-2026-10-14T062616-81938e81/D-248
+    # A private generator, NOT `random.seed(42)`: the training batches draw their
+    # operands from the global `random`, so reseeding it here restarted the
+    # training stream at every eval. Guarded by
+    # tests/test_train/test_nam/test_the_quick_eval_leaves_the_training_stream_alone.py.
+    rng = random.Random(42)
     tests = {
         "single-op": [
-            f"{random.randint(1,99)} {op} {random.randint(1,99)}"
+            f"{rng.randint(1,99)} {op} {rng.randint(1,99)}"
             for op in ["+", "-", "*", "/"] for _ in range(10)
         ],
         "2-op-flat": [
-            f"{random.randint(1,50)} {random.choice('+-*/')} "
-            f"{random.randint(1,50)} {random.choice('+-*/')} "
-            f"{random.randint(1,50)}"
+            f"{rng.randint(1,50)} {rng.choice('+-*/')} "
+            f"{rng.randint(1,50)} {rng.choice('+-*/')} "
+            f"{rng.randint(1,50)}"
             for _ in range(20)
         ],
         "2-op-paren": [
-            f"({random.randint(1,50)} {random.choice('+-*/')} "
-            f"{random.randint(1,50)}) {random.choice('+-*/')} "
-            f"{random.randint(1,50)}"
+            f"({rng.randint(1,50)} {rng.choice('+-*/')} "
+            f"{rng.randint(1,50)}) {rng.choice('+-*/')} "
+            f"{rng.randint(1,50)}"
             for _ in range(20)
         ],
         "3-op-paren": [
-            f"({random.randint(1,30)} {random.choice('+-*/')} "
-            f"{random.randint(1,30)}) {random.choice('+-*/')} "
-            f"({random.randint(1,30)} {random.choice('+-*/')} "
-            f"{random.randint(1,30)})"
+            f"({rng.randint(1,30)} {rng.choice('+-*/')} "
+            f"{rng.randint(1,30)}) {rng.choice('+-*/')} "
+            f"({rng.randint(1,30)} {rng.choice('+-*/')} "
+            f"{rng.randint(1,30)})"
             for _ in range(10)
         ],
     }
@@ -316,6 +323,7 @@ def _eval_quick(model, tokenizer):
 def main():
     args = parse_args()
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.save_dir) / f"dfsa_ste_{timestamp}"

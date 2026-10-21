@@ -115,6 +115,29 @@ def test_help_prints_a_usage_line(
     assert capsys.readouterr().out.startswith("usage:")
 
 
+def test_the_gpu_help_describes_the_selection_setup_gpu_makes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """``--gpu`` selects a device since D-234 (plan-2026-10-14T062616-81938e81); the
+    help said it "only logs" (D-248)."""
+    _install_sentinels(monkeypatch)
+    with pytest.raises(SystemExit):
+        train_tabm.main(["--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert "only logs" not in text
+    assert "counts within CUDA_VISIBLE_DEVICES" in text
+
+
+def test_seed_reaches_set_seeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--seed`` seeds the process through the shared helper (D-247)."""
+    _install_sentinels(monkeypatch)
+    seeds = _Sentinel("set_seeds")
+    monkeypatch.setattr(train.common, "set_seeds", seeds)
+    train_tabm.main(["--seed", "7", "--examples", "regression"])
+    assert seeds.args == [((7,), {})]
+    assert train_tabm.parse_arguments([]).seed == 42
+
+
 def test_parse_arguments_defaults_to_every_example() -> None:
     """A bare run must still do what it did before the script had a CLI."""
     args = train_tabm.parse_arguments([])

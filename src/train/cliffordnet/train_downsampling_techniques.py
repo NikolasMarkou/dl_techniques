@@ -80,6 +80,7 @@ from train.common import (
     CIFAR100_STD,
     create_callbacks,
     load_dataset,
+    set_seeds,
     setup_gpu,
     validate_model_loading,
 )
@@ -473,6 +474,9 @@ def train_one_variant(
     """
     logger.info(f"========== Variant: {variant_name} ==========")
     t0 = time.time()
+    # Each variant starts from the same seed state, so a variant trained alone
+    # (`--variant X`) draws what it draws inside `--variant all`.
+    set_seeds(args.seed)
 
     # ---- Build + smoke ----
     try:
@@ -789,6 +793,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "serially. See module docstring for the catalog."
         ),
     )
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for Python, NumPy and Keras "
+                             "(train.common.set_seeds), set before each variant.")
     parser.add_argument("--gpu", type=int, default=None,
                         help="GPU index for setup_gpu: counts within "
                              "CUDA_VISIBLE_DEVICES when it is set, else names "

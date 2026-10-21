@@ -33,6 +33,7 @@ from dl_techniques.visualization import (
 )
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     default_experiment_name,
     prepare_run_dir,
@@ -609,9 +610,12 @@ def main() -> None:
     # (including one that happens to equal the base parser's old default) is
     # honored correctly.
     parser.set_defaults(epochs=200, batch_size=128, learning_rate=1e-2)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     # Unified run directory (Step 1 of the bfunet-output-layout normalization
     # plan): ONE run directory at results/<prefix>_<variant>_<timestamp>/,

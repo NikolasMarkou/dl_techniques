@@ -49,7 +49,7 @@ from dl_techniques.models.language.tree_transformer.model import (
 )
 from dl_techniques.optimization import learning_rate_schedule_builder, optimizer_builder
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.nam.data_generator import (
     generate_curriculum_batch,
     prepare_per_step_labels,
@@ -948,6 +948,8 @@ def parse_args():
     parser.add_argument("--save-interval", type=int, default=2000)
     parser.add_argument("--save-dir", type=str, default="results")
     parser.add_argument("--gpu", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     return parser.parse_args()
 
 
@@ -1100,6 +1102,7 @@ def _eval_digit_matrix(model, tokenizer, max_digits=10, samples_per_cell=4):
 def main():
     args = parse_args()
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.save_dir) / f"dfsa_{timestamp}"

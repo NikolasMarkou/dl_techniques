@@ -38,6 +38,8 @@ from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 class FinetuneConfig:
     """Configuration for FNet sentiment analysis fine-tuning."""
 
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
+
     # Model and paths
     pretrained_encoder_path: str = "results/fnet_pretrain/pretrained_fnet_encoder_best.keras"
     save_dir: str = "results/fnet_sentiment_finetune"
@@ -135,7 +137,7 @@ def finetune_sentiment_model(
     logger.info("FNet Sentiment Analysis Fine-tuning")
     logger.info("=" * 60)
 
-    set_seeds(42)
+    set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
@@ -253,6 +255,8 @@ def main() -> None:
     """Main entry point for FNet fine-tuning."""
     parser = argparse.ArgumentParser(description="FNet Sentiment Fine-tuning")
     parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--seed', type=int, default=FinetuneConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     parser.add_argument('--encoder-path', type=str, default=None, help='Pretrained encoder path')
     parser.add_argument('--batch-size', type=int, default=16, help='Batch size')
     parser.add_argument('--max-samples', type=int, default=None, help='Max training samples')
@@ -263,6 +267,7 @@ def main() -> None:
     setup_gpu(gpu_id=args.gpu)
 
     config = FinetuneConfig()
+    config.seed = args.seed
     if args.encoder_path:
         config.pretrained_encoder_path = args.encoder_path
     config.batch_size = args.batch_size

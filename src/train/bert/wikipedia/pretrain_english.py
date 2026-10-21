@@ -68,6 +68,9 @@ class PretrainConfig:
     pad_token_id: int = 100266
     mask_token_id: int = 100267
 
+    # Seeds Python, NumPy and Keras (train.common.set_seeds)
+    seed: int = 42
+
 
 # ---------------------------------------------------------------------
 # Data Pipeline & Filtering
@@ -238,6 +241,8 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help='Total training steps')
     parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
                         help='Peak learning rate')
+    parser.add_argument('--seed', type=int, default=PretrainConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     parser.add_argument('--max-non-ascii-ratio', type=float,
                         default=PretrainConfig.max_non_ascii_ratio,
                         help='Max fraction of non-ASCII characters allowed per sample')
@@ -259,11 +264,13 @@ def main(argv: Optional[list] = None):
     # cause is FIXED (`image_text.py`'s constants are plain lists; `import
     # train.common` emits 0 `Created device` lines). This deferred import is
     # now harmless, not load-bearing. Kept for the history.
-    from train.common import setup_gpu
+    from train.common import setup_gpu, set_seeds
 
     setup_gpu(gpu_id=args.gpu)
 
     config = PretrainConfig()
+    config.seed = args.seed
+    set_seeds(config.seed)
     config.bert_variant = args.variant
     config.global_batch_size = args.batch_size
     config.total_steps = args.total_steps

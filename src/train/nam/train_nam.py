@@ -34,7 +34,7 @@ from dl_techniques.models.neural_computer.nam import NAM, NAMConfig, NAM_VARIANT
 from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.nam.data_generator import (
     generate_batch,
     generate_curriculum_batch,
@@ -134,6 +134,8 @@ def parse_args() -> argparse.Namespace:
         help="Path to checkpoint to resume from",
     )
     parser.add_argument("--gpu", type=int, default=None, help="GPU device ID")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     parser.add_argument(
         "--curriculum", action="store_true",
         help="Use smooth curriculum: difficulty increases over training, "
@@ -782,6 +784,7 @@ def main():
 
     # GPU setup
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     # Setup output directory: results/nam_<variant>-<phase>_<timestamp>/
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -49,6 +49,9 @@ class FinetuneConfig:
     epochs: int = 3  # Standard BERT fine-tuning epochs
     weight_decay: float = 0.01
 
+    # Seeds Python, NumPy and Keras (train.common.set_seeds)
+    seed: int = 42
+
 
 # ---------------------------------------------------------------------
 # Data Pipeline
@@ -146,6 +149,8 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help='Fine-tuning epochs')
     parser.add_argument('--learning-rate', type=float, default=FinetuneConfig.learning_rate,
                         help='Learning rate')
+    parser.add_argument('--seed', type=int, default=FinetuneConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     return parser.parse_args(argv)
 
 
@@ -163,11 +168,13 @@ def main(argv: Optional[list] = None):
     # cause is FIXED (`image_text.py`'s constants are plain lists; `import
     # train.common` emits 0 `Created device` lines). This deferred import is
     # now harmless, not load-bearing. Kept for the history.
-    from train.common import setup_gpu
+    from train.common import setup_gpu, set_seeds
 
     setup_gpu(gpu_id=args.gpu)
 
     config = FinetuneConfig()
+    config.seed = args.seed
+    set_seeds(config.seed)
     config.batch_size = args.batch_size
     config.epochs = args.epochs
     config.learning_rate = args.learning_rate

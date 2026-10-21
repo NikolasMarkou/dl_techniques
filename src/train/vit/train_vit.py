@@ -32,7 +32,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -106,6 +106,8 @@ class TrainingConfig:
     # Convergence guard (DECISION plan_2026-05-12_f2d29729/D-007)
     # If None, threshold auto-derives to min(max(2/num_classes, 0.05), 0.95).
     success_threshold: Optional[float] = None
+
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -380,6 +382,7 @@ def train_vit(
           - ``history``: raw ``keras.callbacks.History`` object.
     """
     setup_gpu(gpu_id)
+    set_seeds(config.seed)
 
     logger.info(f"Experiment: {config.experiment_name}, Variant: {config.model_variant}")
     logger.info(f"Dataset: {config.dataset}, Image size: {config.image_size}, "
@@ -593,6 +596,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--monitor-every", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     parser.add_argument(
         "--success-threshold", type=float, default=None,
         help="Override the auto-derived val_accuracy convergence threshold "
@@ -649,6 +653,7 @@ def main() -> None:
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         success_threshold=args.success_threshold,
+        seed=args.seed,
     )
 
     logger.info(

@@ -23,6 +23,7 @@ from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3, crea
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4, create_mobilenetv4
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     create_callbacks,
     create_learning_rate_schedule,
@@ -100,6 +101,7 @@ def create_model(version: str, variant: str, dataset: str, num_classes: int) -> 
 def train_model(args) -> None:
     """Main training function."""
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     version = args.version
     variant = args.variant or VERSION_REGISTRY[version]["default"]
@@ -213,6 +215,8 @@ def main():
         help="Directory under which the timestamped run directory is created "
              "(default: results)",
     )
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
 

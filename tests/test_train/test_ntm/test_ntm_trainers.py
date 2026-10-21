@@ -630,6 +630,26 @@ class TestPatternTwoArgumentSurface:
             monkeypatch, tmp_path, ["--max-vector-size", "12"])
         assert config.max_vector_size == 12
 
+    def test_seed_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--seed 7`` must arrive as ``config.seed`` (D-247)."""
+        config = _config_from_argv(monkeypatch, tmp_path, ["--seed", "7"])
+        assert config.seed == 7 != MultitaskNTMConfig().seed
+
+    def test_the_training_stream_follows_the_seed_and_never_equals_validation(self):
+        """The training task stream was drawn from fresh entropy (seed ``None``), so
+        ``--seed`` could not reproduce it; it now follows ``config.seed`` through a
+        derived seed, and the validation stream keeps its fixed seed 42 (D-247)."""
+        def first_batch(seed, mode):
+            config = MultitaskNTMConfig(seed=seed, batch_size=2)
+            generator = train_multitask.UnifiedTaskGenerator(config, mode=mode)
+            return generator._generate_raw_data("copy").inputs
+
+        np.testing.assert_array_equal(first_batch(7, "train"), first_batch(7, "train"))
+        assert not np.array_equal(first_batch(7, "train"), first_batch(8, "train"))
+        np.testing.assert_array_equal(first_batch(7, "val"), first_batch(8, "val"))
+        for seed in (42, 7):
+            assert not np.array_equal(first_batch(seed, "train"), first_batch(seed, "val"))
+
     # --- controls: every probe value differs from the dataclass default ------
 
     def test_probe_values_differ_from_the_dataclass_defaults(self):

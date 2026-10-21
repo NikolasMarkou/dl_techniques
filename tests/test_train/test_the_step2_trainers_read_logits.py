@@ -48,7 +48,8 @@ def test_the_coshnet_trainer_compiles_from_logits(monkeypatch):
     monkeypatch.setattr(keras.Model, "compile", spy)
     monkeypatch.setattr(trainer, "create_callbacks", stop)
     args = argparse.Namespace(gpu=None, dataset="cifar10", batch_size=4, variant="tiny",
-                              lr_schedule="constant", learning_rate=1e-3, epochs=1, patience=1)
+                              lr_schedule="constant", learning_rate=1e-3, epochs=1, patience=1,
+                              seed=42)
     with pytest.raises(_StopAfterCompile):
         trainer.train_model(args)
     assert isinstance(seen["loss"], keras.losses.SparseCategoricalCrossentropy)

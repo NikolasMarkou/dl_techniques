@@ -18,6 +18,7 @@ from dl_techniques.models.vision.coshnet.model import CoShNet, create_coshnet
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     load_dataset,
     create_callbacks,
@@ -75,6 +76,7 @@ def train_model(args) -> None:
     """Main CoShNet training function."""
     logger.info("Starting CoShNet training")
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     # Load dataset
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
@@ -190,6 +192,8 @@ def main() -> None:
                         choices=['tiny', 'base', 'large', 'cifar10', 'custom'],
                         help='CoShNet model variant')
     parser.set_defaults(epochs=100, batch_size=64, learning_rate=2e-3, patience=10)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
 
     try:

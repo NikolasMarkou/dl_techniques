@@ -37,7 +37,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder
 )
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import setup_gpu, set_seeds, create_base_argument_parser
 
 
 class PTRMTrainer:
@@ -408,9 +408,12 @@ def main():
     parser.add_argument('--grad-clip-norm', type=float, default=1.0, help='Gradient clipping norm')
     parser.add_argument('--preset', type=str, choices=['ppbench', 'sudoku', 'maze', 'arc', 'quick'],
                         help='Use preset configuration')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
 
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     # Handle presets
     if args.preset == 'ppbench':

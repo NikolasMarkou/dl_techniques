@@ -56,7 +56,7 @@ def test_the_cosine_decay_spans_the_run_after_the_warmup(monkeypatch):
         gpu=None, dataset_path=None, img_size=16, batch_size=4, variant="medium",
         side_loss=False, side_loss_weight=0.2, warmup_steps=4, learning_rate=2e-4,
         epochs=5, weight_decay=1e-4, ssim_weight=0.2, perceptual_weight=0.0,
-        output_dir="unused", patience=1,
+        output_dir="unused", patience=1, seed=42,
     )
     with pytest.raises(_Stop):
         module.train_model(args)

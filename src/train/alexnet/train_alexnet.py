@@ -69,6 +69,7 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_callbacks as create_common_callbacks,
     CIFAR10_MEAN,
     CIFAR10_STD,
@@ -156,6 +157,9 @@ class TrainingConfig:
     experiment_name: Optional[str] = None
     model_variant: str = "alexnet"
     success_threshold: Optional[float] = None
+    #: Seeds Python, NumPy and Keras through `train.common.set_seeds` before
+    #: the data and the model are built.
+    seed: int = 42
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -366,6 +370,7 @@ def train_alexnet(
     :rtype: Dict[str, Any]
     """
     setup_gpu(gpu_id)
+    set_seeds(config.seed)
 
     if config.experiment_name is None:
         config.experiment_name = default_experiment_name("alexnet")
@@ -579,6 +584,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "the end, into model_analysis/)")
     parser.add_argument("--early-stopping-patience", type=int, default=90)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     parser.add_argument("--success-threshold", type=float, default=None,
                         help="Override the auto-derived val_accuracy threshold")
 
@@ -626,6 +632,7 @@ def main() -> None:
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         success_threshold=args.success_threshold,
+        seed=args.seed,
     )
 
     logger.info(

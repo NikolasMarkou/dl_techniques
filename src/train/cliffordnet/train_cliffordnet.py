@@ -28,6 +28,7 @@ from dl_techniques.optimization import (
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     load_dataset,
     create_callbacks,
@@ -419,6 +420,7 @@ def train_model(args) -> None:
     """End-to-end training routine for CliffordNet."""
     logger.info("Starting CliffordNet training")
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     # ---- Data --------------------------------------------------------
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
@@ -676,6 +678,8 @@ def main() -> None:
         epochs=200,
         patience=30,
     )
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
 

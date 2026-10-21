@@ -35,7 +35,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
 )
 from dl_techniques.utils.logger import logger
-from train.common import create_base_argument_parser, setup_gpu
+from train.common import create_base_argument_parser, set_seeds, setup_gpu
 
 
 # ---------------------------------------------------------------------
@@ -427,9 +427,11 @@ def main() -> None:
     parser.add_argument("--save-dir", type=str, default="results")
     parser.add_argument("--eval-freq", type=int, default=1)
     parser.add_argument("--save-freq", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42, help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
 
     args = parser.parse_args()
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     # --- Build datasets ---
     if args.dataset == "arc":

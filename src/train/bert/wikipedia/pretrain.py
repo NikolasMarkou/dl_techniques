@@ -73,6 +73,9 @@ class PretrainConfig:
     # there is no local-arrow-file branch, so there is no knob to select one.
     wikipedia_date: str = "20220301.en"
 
+    # Seeds Python, NumPy and Keras (train.common.set_seeds)
+    seed: int = 42
+
 
 # ---------------------------------------------------------------------
 # Data Pipeline (Wikipedia + BookCorpus)
@@ -222,6 +225,8 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help='Total training steps')
     parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
                         help='Peak learning rate')
+    parser.add_argument('--seed', type=int, default=PretrainConfig.seed,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     return parser.parse_args(argv)
 
 
@@ -250,11 +255,13 @@ def main(argv: Optional[list] = None):
     # HARMLESS but no longer load-bearing. The original text is kept because
     # the history is the point: do not re-derive the module-scope eager-op
     # trap.
-    from train.common import setup_gpu
+    from train.common import setup_gpu, set_seeds
 
     setup_gpu(gpu_id=args.gpu)
 
     config = PretrainConfig()
+    config.seed = args.seed
+    set_seeds(config.seed)
     config.bert_variant = args.variant
     config.global_batch_size = args.batch_size
     config.total_steps = args.total_steps

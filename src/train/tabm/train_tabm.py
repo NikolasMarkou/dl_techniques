@@ -629,8 +629,12 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--gpu", type=int, default=None,
-        help="GPU id to use. NOTE: repo-wide, this only logs -- device "
-             "selection is the CUDA_VISIBLE_DEVICES=N shell prefix.",
+        help="GPU index for setup_gpu: counts within CUDA_VISIBLE_DEVICES "
+             "when it is set, else names a physical GPU (default: all visible).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Seed for Python, NumPy and Keras (train.common.set_seeds).",
     )
     parser.add_argument(
         "--examples", nargs="+", choices=sorted(EXAMPLES), default=sorted(EXAMPLES),
@@ -661,8 +665,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     # HARMLESS but no longer load-bearing. The original text is kept because
     # the history is the point: do not re-derive the module-scope eager-op
     # trap. The test above still pins the pattern.
-    from train.common import setup_gpu
+    from train.common import setup_gpu, set_seeds
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     logger.info("TabM Model Examples")
 

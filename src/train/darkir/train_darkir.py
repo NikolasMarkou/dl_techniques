@@ -20,7 +20,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, create_callbacks, load_dataset
+from train.common import setup_gpu, set_seeds, create_callbacks, load_dataset
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -333,6 +333,7 @@ def train_model(args: argparse.Namespace):
     """Main training loop."""
     logger.info("Starting DarkIR Training...")
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     # Data
     train_ds, val_ds, val_samples = load_restoration_dataset(
@@ -479,6 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
     parser.add_argument('--gpu', type=int, default=None,
                         help='GPU device index to use (default: all GPUs)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     # DarkIR-specific args
     parser.add_argument('--dataset-path', type=str, default=None,

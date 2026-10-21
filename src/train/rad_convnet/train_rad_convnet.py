@@ -24,6 +24,7 @@ import keras
 import tensorflow as tf
 
 from train.common.gpu import setup_gpu
+from train.common.seed import set_seeds
 from train.common.callbacks import create_callbacks
 from train.common.run_io import prepare_run_dir, save_training_history_json, default_experiment_name
 from dl_techniques.utils.logger import logger
@@ -57,6 +58,7 @@ class TrainingConfig:
 
     gpu_id: Optional[int] = None
     max_samples: Optional[int] = None  # debug: truncate each split for a fast smoke run
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -116,6 +118,7 @@ def main(config: TrainingConfig) -> None:
     :type config: TrainingConfig
     """
     setup_gpu(config.gpu_id)
+    set_seeds(config.seed)
 
     train_ds, class_names, n_train = make_dtd_dataset(
         config.dtd_root,
@@ -187,6 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42, help="Seed for Python, NumPy and Keras (train.common.set_seeds)")
     parser.add_argument(
         "--max-samples", type=int, default=None,
         help="Debug: truncate each split to this many samples for a fast smoke run.",
@@ -219,5 +223,6 @@ if __name__ == "__main__":
         experiment_name=args.experiment_name,
         gpu_id=args.gpu_id,
         max_samples=max_samples,
+        seed=args.seed,
     )
     main(cfg)

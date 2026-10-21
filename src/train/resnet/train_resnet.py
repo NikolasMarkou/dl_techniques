@@ -22,7 +22,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
@@ -93,6 +93,7 @@ class TrainingConfig:
     # Output
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
+    seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -327,6 +328,7 @@ def create_callbacks(
 def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) -> keras.Model:
     """Orchestrate the complete ResNet ImageNet training pipeline."""
     setup_gpu(gpu_id)
+    set_seeds(config.seed)
 
     logger.info(f"Experiment: {config.experiment_name}, Variant: {config.model_variant}")
     logger.info(f"Deep Supervision: {'ENABLED (' + config.deep_supervision_schedule_type + ')' if config.enable_deep_supervision else 'DISABLED'}")
@@ -487,6 +489,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--monitor-every', type=int, default=5)
     parser.add_argument('--early-stopping-patience', type=int, default=15)
     parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--seed', type=int, default=42, help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     return parser.parse_args()
 
@@ -511,7 +514,8 @@ def main() -> None:
         augment_data=args.augment_data, label_smoothing=args.label_smoothing,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
-        output_dir=args.output_dir, experiment_name=args.experiment_name
+        output_dir=args.output_dir, experiment_name=args.experiment_name,
+        seed=args.seed,
     )
 
     logger.info(f"Config: {config.model_variant}, DS={'on' if config.enable_deep_supervision else 'off'}, "

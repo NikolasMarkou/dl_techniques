@@ -18,7 +18,7 @@ from typing import Tuple, Dict, Any, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.capsnet import create_capsnet
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks
 from train.common.callbacks import LearningRateLogger
 
 plt.style.use('seaborn-v0_8')
@@ -612,6 +612,7 @@ def _clean_test_results(test_results, model) -> Dict[str, float]:
 def train_model(args) -> None:
     """Main CapsNet training function."""
     setup_gpu(gpu_id=args.gpu)
+    set_seeds(args.seed)
 
     logger.info("Starting CapsNet training")
     logger.info(f"Arguments: {vars(args)}")
@@ -709,6 +710,8 @@ def main():
                         help='Weight for reconstruction loss (default: 0.0005)')
     parser.add_argument('--viz-frequency', type=int, default=1,
                         help='Reconstruction visualization frequency in epochs (default: 1)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
 
