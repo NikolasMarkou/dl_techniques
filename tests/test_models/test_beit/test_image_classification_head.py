@@ -16,7 +16,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
@@ -44,7 +43,7 @@ def _head(model):
 def _logits(model, x):
     """The model's own output: the head's logits, one tensor, no softmax."""
     out = model(x, training=False)
-    return ops.convert_to_numpy(out)
+    return keras.ops.convert_to_numpy(out)
 
 
 class TestBeitForImageClassification:
@@ -69,7 +68,7 @@ class TestBeitForImageClassification:
         # flip. Zero the kernel and pin the bias instead.
         pinned = np.linspace(-5.0, 5.0, 7).astype('float32')
         classifier.set_weights([
-            np.zeros_like(ops.convert_to_numpy(classifier.kernel)),
+            np.zeros_like(keras.ops.convert_to_numpy(classifier.kernel)),
             pinned,
         ])
         out = _logits(model, _images())
@@ -100,17 +99,17 @@ class TestBeitForImageClassification:
 
         x = _images()
         # Pool the trunk output directly: perturbing position 0 must be invisible.
-        tokens = ops.convert_to_numpy(model.backbone(x, training=False))
-        pooled_a = ops.convert_to_numpy(pool(tokens))
+        tokens = keras.ops.convert_to_numpy(model.backbone(x, training=False))
+        pooled_a = keras.ops.convert_to_numpy(pool(tokens))
         tokens_b = tokens.copy()
         tokens_b[:, 0, :] += 100.0
-        pooled_b = ops.convert_to_numpy(pool(tokens_b))
+        pooled_b = keras.ops.convert_to_numpy(pool(tokens_b))
         np.testing.assert_allclose(pooled_a, pooled_b, atol=1e-5, rtol=0)
         # Control: perturbing a PATCH position must move it.
         tokens_c = tokens.copy()
         tokens_c[:, 1, :] += 100.0
         assert not np.allclose(
-            pooled_a, ops.convert_to_numpy(pool(tokens_c)), atol=1e-3
+            pooled_a, keras.ops.convert_to_numpy(pool(tokens_c)), atol=1e-3
         )
 
     def test_cls_pooling_mode_has_no_head_norm(self):
@@ -207,7 +206,7 @@ class TestBeitForImageClassification:
             restored = keras.models.load_model(path)
             after = restored(x, training=False)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(before), ops.convert_to_numpy(after),
+            keras.ops.convert_to_numpy(before), keras.ops.convert_to_numpy(after),
             atol=1e-6, rtol=0,
         )
         assert restored.num_classes == 7

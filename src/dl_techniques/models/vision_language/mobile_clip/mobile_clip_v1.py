@@ -29,7 +29,6 @@ References:
 
 import math
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
@@ -246,7 +245,7 @@ class MobileClipModel(keras.Model):
         """
         features = self.image_encoder(image, training=training)
         if normalize:
-            features = ops.normalize(features, axis=-1)
+            features = keras.ops.normalize(features, axis=-1)
         return features
 
     def encode_text(
@@ -260,7 +259,7 @@ class MobileClipModel(keras.Model):
         """
         features = self.text_encoder(text, training=training)
         if normalize:
-            features = ops.normalize(features, axis=-1)
+            features = keras.ops.normalize(features, axis=-1)
         return features
 
     def call(
@@ -277,8 +276,8 @@ class MobileClipModel(keras.Model):
         image_features = self.encode_image(image, normalize=True, training=training) if image is not None else None
         text_features = self.encode_text(text, normalize=True, training=training) if text is not None else None
 
-        logit_scale = ops.exp(self.logit_scale)
-        logit_scale = ops.clip(logit_scale, 0.0, 100.0)
+        logit_scale = keras.ops.exp(self.logit_scale)
+        logit_scale = keras.ops.clip(logit_scale, 0.0, 100.0)
 
         if self.output_dict:
             return {

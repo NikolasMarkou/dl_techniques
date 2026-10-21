@@ -19,7 +19,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.structured_linear.crystal_layer import CrystalLayer
 from tests.layer_naming import PublicAutoName
@@ -107,7 +106,7 @@ class TestCrystalLayerFrame:
         layer = CrystalLayer(num_classes=6, seed=0)
         _build_through_parent(layer, input_dim=4)
 
-        frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
         gram = frame.T @ frame
         np.testing.assert_allclose(np.diag(gram), 1.0, atol=1e-5, rtol=0)
 
@@ -131,8 +130,8 @@ class TestCrystalLayerFrame:
         second(_sample_input())
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(first.crystal_weights),
-            ops.convert_to_numpy(second.crystal_weights)
+            keras.ops.convert_to_numpy(first.crystal_weights),
+            keras.ops.convert_to_numpy(second.crystal_weights)
         )
 
     def test_a_wider_frame_gives_more_distinct_columns(self):
@@ -145,7 +144,7 @@ class TestCrystalLayerFrame:
         layer = CrystalLayer(num_classes=30, seed=0)
         layer(_sample_input(input_dim=8))
 
-        frame = ops.convert_to_numpy(layer.crystal_weights)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights)
         distinct = {tuple(np.round(column, 6)) for column in frame.T}
 
         assert len(distinct) == 30, (
@@ -167,7 +166,7 @@ class TestCrystalLayerFrame:
         layer = CrystalLayer(num_classes=width, seed=0)
         layer(_sample_input(input_dim=dimensions))
 
-        frame = ops.convert_to_numpy(layer.crystal_weights)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights)
         distinct = len({tuple(np.round(column, 6)) for column in frame.T})
 
         assert distinct == width, (
@@ -190,7 +189,7 @@ class TestCrystalLayerFrame:
         def _max_inner(width):
             layer = CrystalLayer(num_classes=width, seed=0)
             layer(_sample_input(input_dim=8))
-            frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+            frame = keras.ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
             gram = frame.T @ frame
             np.fill_diagonal(gram, -1.0)
             return float(gram.max())
@@ -216,7 +215,7 @@ class TestCrystalLayerFrame:
         layer = CrystalLayer(num_classes=64, seed=0)
         layer(_sample_input(input_dim=2))
 
-        frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
         gram = frame.T @ frame
         np.fill_diagonal(gram, -1.0)
 
@@ -237,7 +236,7 @@ class TestCrystalLayerFrame:
         layer = CrystalLayer(num_classes=3, seed=0)
         layer(_sample_input(input_dim=1))
 
-        frame = ops.convert_to_numpy(layer.crystal_weights)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights)
         distinct = len({tuple(np.round(column, 6)) for column in frame.T})
 
         assert distinct == 2, (
@@ -273,14 +272,14 @@ class TestCrystalLayerForwardPass:
         output = layer(_sample_input())
 
         assert output.shape == (4, num_classes)
-        assert np.all(np.isfinite(ops.convert_to_numpy(output)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(output)))
 
     @pytest.mark.parametrize('rank', [1, 2, 3])
     def test_every_forward_is_finite(self, rank):
         layer = CrystalLayer(num_classes=13, seed=0)
         output = layer(_sample_input(rank=rank))
 
-        assert bool(ops.all(ops.isfinite(output)))
+        assert bool(keras.ops.all(keras.ops.isfinite(output)))
 
     def test_the_logits_are_exact_cosines(self):
         """`scale * <x, v_j>` with both operands unit-norm.
@@ -298,10 +297,10 @@ class TestCrystalLayerForwardPass:
         """
         inputs = _sample_input()
         layer = CrystalLayer(num_classes=9, scale=3.0, seed=0)
-        output = ops.convert_to_numpy(layer(inputs)).astype(np.float64)
+        output = keras.ops.convert_to_numpy(layer(inputs)).astype(np.float64)
 
         unit_x = inputs.astype(np.float64) / np.linalg.norm(inputs.astype(np.float64), axis=-1, keepdims=True)
-        frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+        frame = keras.ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
         unit_w = frame / np.linalg.norm(frame, axis=0, keepdims=True)
 
         np.testing.assert_allclose(output, 3.0 * (unit_x @ unit_w), rtol=0, atol=1e-5)
@@ -312,7 +311,7 @@ class TestCrystalLayerForwardPass:
         NaN here would propagate straight into every downstream loss.
         """
         layer = CrystalLayer(num_classes=5, seed=0)
-        output = ops.convert_to_numpy(layer(np.zeros((3, 8), dtype=np.float32)))
+        output = keras.ops.convert_to_numpy(layer(np.zeros((3, 8), dtype=np.float32)))
 
         assert np.all(np.isfinite(output)), "a zero input produced NaN or Inf"
         np.testing.assert_allclose(output, 0.0, atol=1e-5, rtol=0)
@@ -331,7 +330,7 @@ class TestCrystalLayerForwardPass:
         flipped[:, 0] *= -1.0
 
         delta = float(np.abs(
-            ops.convert_to_numpy(layer(base)) - ops.convert_to_numpy(layer(flipped))
+            keras.ops.convert_to_numpy(layer(base)) - keras.ops.convert_to_numpy(layer(flipped))
         ).max())
 
         assert delta > 1e-3, (
@@ -366,7 +365,7 @@ class TestCrystalLayerForwardPass:
         inputs = _sample_input(rank=rank)
         signature = tf.TensorSpec([None] * (inputs.ndim - 1) + [8], tf.float32)
 
-        eager = ops.convert_to_numpy(
+        eager = keras.ops.convert_to_numpy(
             CrystalLayer(num_classes=11, seed=0)(inputs)
         )
 
@@ -376,7 +375,7 @@ class TestCrystalLayerForwardPass:
         def traced(x):
             return traced_layer(x)
 
-        traced_output = ops.convert_to_numpy(traced(tf.constant(inputs)))
+        traced_output = keras.ops.convert_to_numpy(traced(tf.constant(inputs)))
 
         np.testing.assert_allclose(traced_output, eager, rtol=1e-6, atol=1e-6)
 
@@ -387,8 +386,8 @@ class TestCrystalLayerForwardPass:
         layer(inputs, training=False)
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer(inputs, training=True)),
-            ops.convert_to_numpy(layer(inputs, training=False))
+            keras.ops.convert_to_numpy(layer(inputs, training=True)),
+            keras.ops.convert_to_numpy(layer(inputs, training=False))
         )
 
 
@@ -450,7 +449,7 @@ class TestCrystalLayerKnobSensitivity:
 
         assert low.crystal_weights.shape == high.crystal_weights.shape
         assert not np.allclose(
-            ops.convert_to_numpy(low(inputs)), ops.convert_to_numpy(high(inputs))
+            keras.ops.convert_to_numpy(low(inputs)), keras.ops.convert_to_numpy(high(inputs))
         )
 
     def test_scale_multiplies_the_logits_linearly(self):
@@ -464,8 +463,8 @@ class TestCrystalLayerKnobSensitivity:
         matmul would still be correct up to accumulation.
         """
         inputs = _sample_input()
-        one = ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=1.0, seed=0)(inputs))
-        four = ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=4.0, seed=0)(inputs))
+        one = keras.ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=1.0, seed=0)(inputs))
+        four = keras.ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=4.0, seed=0)(inputs))
 
         np.testing.assert_allclose(four, 4.0 * one, rtol=0, atol=1e-4)
 
@@ -476,7 +475,7 @@ class TestCrystalLayerKnobSensitivity:
         second = CrystalLayer(num_classes=30, seed=2)
 
         assert not np.allclose(
-            ops.convert_to_numpy(first(inputs)), ops.convert_to_numpy(second(inputs))
+            keras.ops.convert_to_numpy(first(inputs)), keras.ops.convert_to_numpy(second(inputs))
         )
 
     def test_the_logits_are_invariant_to_input_magnitude(self):
@@ -494,8 +493,8 @@ class TestCrystalLayerKnobSensitivity:
         """
         layer = CrystalLayer(num_classes=9, scale=2.0, seed=0)
         inputs = _sample_input()
-        base = ops.convert_to_numpy(layer(inputs))
-        scaled = ops.convert_to_numpy(layer(inputs * 5.0))
+        base = keras.ops.convert_to_numpy(layer(inputs))
+        scaled = keras.ops.convert_to_numpy(layer(inputs * 5.0))
 
         np.testing.assert_allclose(scaled, base, rtol=1e-5, atol=1e-5)
 
@@ -503,7 +502,7 @@ class TestCrystalLayerKnobSensitivity:
         """`|cos| <= 1`, so the logits are bounded by `scale`. A closed bound."""
         scale = 4.0
         layer = CrystalLayer(num_classes=20, scale=scale, seed=0)
-        output = ops.convert_to_numpy(layer(_sample_input()))
+        output = keras.ops.convert_to_numpy(layer(_sample_input()))
 
         assert float(np.abs(output).max()) <= scale + 1e-4
 
@@ -516,14 +515,14 @@ class TestCrystalLayerGradients:
         inputs = _sample_input()
 
         with tf.GradientTape() as tape:
-            loss = ops.mean(ops.square(layer(inputs, training=True)))
+            loss = keras.ops.mean(keras.ops.square(layer(inputs, training=True)))
 
         assert layer.trainable_variables, "the layer has no trainable variables"
         grads = tape.gradient(loss, layer.trainable_variables)
 
         for variable, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {variable.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), \
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), \
                 f"all-zero gradient for {variable.path}"
 
     def test_the_frozen_frame_receives_no_gradient(self):
@@ -532,7 +531,7 @@ class TestCrystalLayerGradients:
         inputs = _sample_input()
 
         with tf.GradientTape() as tape:
-            loss = ops.mean(ops.square(layer(inputs, training=True)))
+            loss = keras.ops.mean(keras.ops.square(layer(inputs, training=True)))
         grads = tape.gradient(loss, layer.trainable_variables)
 
         # Identity, not equality: `in` compares with `==`, which raises on a
@@ -579,14 +578,14 @@ class TestCrystalLayerSerialization:
             keras.Input(shape=(8,)),
             CrystalLayer(num_classes=9, scale=3.0, seed=0)
         ])
-        original = ops.convert_to_numpy(model(inputs, training=False))
+        original = keras.ops.convert_to_numpy(model(inputs, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'crystal.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
 
-        restored = ops.convert_to_numpy(loaded(inputs, training=False))
+        restored = keras.ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(
             restored, original, rtol=0, atol=1e-6,
@@ -604,7 +603,7 @@ class TestCrystalLayerSerialization:
             CrystalLayer(num_classes=9, seed=0)
         ])
         model(_sample_input())
-        saved = [ops.convert_to_numpy(w).copy() for w in model.weights]
+        saved = [keras.ops.convert_to_numpy(w).copy() for w in model.weights]
 
         assert saved, "the model has no weights to compare"
 
@@ -615,7 +614,7 @@ class TestCrystalLayerSerialization:
 
         for donor, restored in zip(saved, loaded.weights):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0,
+                keras.ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0,
                 err_msg="frame weights were not restored"
             )
 
@@ -640,7 +639,7 @@ class TestCrystalLayerDtypes:
         output = layer(inputs)
 
         assert output.shape == (4, 9)
-        assert bool(ops.all(ops.isfinite(output))), \
+        assert bool(keras.ops.all(keras.ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite output"
 
     def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
@@ -658,9 +657,9 @@ class TestCrystalLayerDtypes:
         layer = CrystalLayer(num_classes=9, scale=3.0, seed=0)
         output = layer(inputs)
 
-        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+        assert keras.ops.convert_to_numpy(output).dtype == compute_dtype, (
             f"under {dtype_policy} the output came back as "
-            f"{ops.convert_to_numpy(output).dtype}, not the policy's compute "
+            f"{keras.ops.convert_to_numpy(output).dtype}, not the policy's compute "
             f"dtype {compute_dtype}; this arm did not exercise what it claims"
         )
 
@@ -668,7 +667,7 @@ class TestCrystalLayerDtypes:
         compute_dtype = keras.mixed_precision.global_policy().compute_dtype
         layer = CrystalLayer(num_classes=9, seed=0)
 
-        output = ops.convert_to_numpy(
+        output = keras.ops.convert_to_numpy(
             layer(np.zeros((3, 8), dtype=compute_dtype))
         )
 

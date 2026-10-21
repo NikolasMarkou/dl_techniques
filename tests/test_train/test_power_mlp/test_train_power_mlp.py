@@ -42,7 +42,6 @@ from train.common import run_summary  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 import train.power_mlp.visualization as viz  # noqa: E402
 from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP  # noqa: E402
-from keras.src.trainers.trainer import Trainer  # noqa: E402
 
 REPO_ROOT = Path(tpm.__file__).resolve().parents[3]
 
@@ -360,7 +359,7 @@ def smoke(tmp_path_factory):
         # call compile() while loading a model that differs (the trainer
         # reloads best_model.keras). The first call is the trainer's own
         # compile / fit, so `setdefault` records that one.
-        real_compile, real_fit = Trainer.compile, keras.Model.fit
+        real_compile, real_fit = keras.src.trainers.trainer.Trainer.compile, keras.Model.fit
 
         def compile_spy(self, *args, **kwargs):
             seen.setdefault("loss", kwargs.get("loss"))
@@ -377,7 +376,7 @@ def smoke(tmp_path_factory):
             seen["grid"] = (image_shape, mean, std)
             return real_grid(x, y_true, probs, out_path, image_shape, mean, std, *a, **k)
 
-        mp.setattr(Trainer, "compile", compile_spy)
+        mp.setattr(keras.src.trainers.trainer.Trainer, "compile", compile_spy)
         mp.setattr(keras.Model, "fit", fit_spy)
         mp.setattr(run_summary, "plot_confident_errors", grid_spy)
 

@@ -11,7 +11,6 @@ import tempfile
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision.swin_transformer.model import (
     SwinTransformer,
@@ -65,7 +64,7 @@ class TestSwinRoundTrip:
             y1 = reloaded(x, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(y0), ops.convert_to_numpy(y1),
+            keras.ops.convert_to_numpy(y0), keras.ops.convert_to_numpy(y1),
             rtol=1e-5, atol=1e-5,
         )
 

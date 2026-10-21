@@ -105,7 +105,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import keras
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -701,10 +700,10 @@ class TopographicVAE(keras.Model):
             reads it back.
         :rtype: Dict[str, keras.KerasTensor]
         """
-        frames = ops.cast(inputs, self.compute_dtype)
-        shape = ops.shape(frames)
-        flat = ops.reshape(
-            frames, ops.stack([shape[0], shape[1], self.frame_elements])
+        frames = keras.ops.cast(inputs, self.compute_dtype)
+        shape = keras.ops.shape(frames)
+        flat = keras.ops.reshape(
+            frames, keras.ops.stack([shape[0], shape[1], self.frame_elements])
         )
 
         z_mean, z_log_var = self._encode(flat, "z")
@@ -728,20 +727,20 @@ class TopographicVAE(keras.Model):
             # 1/sqrt(nu * energy) is skipped rather than divided by a near-zero.
             # t = z - mu keeps the SAME downstream width and decoder, so the
             # baseline differs only by the topography and not by the architecture.
-            t = z - ops.cast(self.prior_mean, z.dtype)
+            t = z - keras.ops.cast(self.prior_mean, z.dtype)
 
-        t_flat = ops.reshape(
-            t, ops.stack([shape[0], shape[1], self.latent_dim])
+        t_flat = keras.ops.reshape(
+            t, keras.ops.stack([shape[0], shape[1], self.latent_dim])
         )
-        reconstruction = ops.reshape(
+        reconstruction = keras.ops.reshape(
             self.decoder(t_flat),
-            ops.stack(
+            keras.ops.stack(
                 [
                     shape[0],
                     shape[1],
-                    ops.cast(self._input_shape[0], "int32"),
-                    ops.cast(self._input_shape[1], "int32"),
-                    ops.cast(self._input_shape[2], "int32"),
+                    keras.ops.cast(self._input_shape[0], "int32"),
+                    keras.ops.cast(self._input_shape[1], "int32"),
+                    keras.ops.cast(self._input_shape[2], "int32"),
                 ]
             ),
         )
@@ -871,10 +870,10 @@ class TopographicVAE(keras.Model):
             ``u_log_var``, each ``(batch, sequence, latent_dim)``.
         :rtype: Dict[str, keras.KerasTensor]
         """
-        frames = ops.cast(inputs, self.compute_dtype)
-        shape = ops.shape(frames)
-        flat = ops.reshape(
-            frames, ops.stack([shape[0], shape[1], self.frame_elements])
+        frames = keras.ops.cast(inputs, self.compute_dtype)
+        shape = keras.ops.shape(frames)
+        flat = keras.ops.reshape(
+            frames, keras.ops.stack([shape[0], shape[1], self.frame_elements])
         )
         z_mean, z_log_var = self._encode(flat, "z")
         outputs = {"z_mean": z_mean, "z_log_var": z_log_var}
@@ -902,8 +901,8 @@ class TopographicVAE(keras.Model):
             ``sequence == 1`` for a rank-2 or rank-3 input.
         :rtype: keras.KerasTensor
         """
-        variables = ops.cast(topographic_variables, self.compute_dtype)
-        shape = ops.shape(variables)
+        variables = keras.ops.cast(topographic_variables, self.compute_dtype)
+        shape = keras.ops.shape(variables)
         # The rank comes from the STATIC shape, so this branch is decided at
         # trace time; branching on ops.shape() would be a tensor-value test.
         #
@@ -912,28 +911,28 @@ class TopographicVAE(keras.Model):
         # batch of single-frame sequences. Callers holding a bare capsule use
         # traverse_capsules, which reshapes explicitly rather than guessing.
         if len(variables.shape) == 2:
-            flat = ops.reshape(
+            flat = keras.ops.reshape(
                 variables,
-                ops.stack([shape[0], 1, self.latent_dim]),
+                keras.ops.stack([shape[0], 1, self.latent_dim]),
             )
-            shape = ops.stack([shape[0], ops.cast(1, "int32")])
+            shape = keras.ops.stack([shape[0], keras.ops.cast(1, "int32")])
         elif len(variables.shape) == 3:
-            flat = ops.reshape(
+            flat = keras.ops.reshape(
                 variables,
-                ops.stack([shape[0], shape[1], self.latent_dim]),
+                keras.ops.stack([shape[0], shape[1], self.latent_dim]),
             )
         else:
             flat = variables
         reconstruction = self.decoder(flat, training=training)
-        return ops.reshape(
+        return keras.ops.reshape(
             reconstruction,
-            ops.stack(
+            keras.ops.stack(
                 [
                     shape[0],
                     shape[1],
-                    ops.cast(self._input_shape[0], "int32"),
-                    ops.cast(self._input_shape[1], "int32"),
-                    ops.cast(self._input_shape[2], "int32"),
+                    keras.ops.cast(self._input_shape[0], "int32"),
+                    keras.ops.cast(self._input_shape[1], "int32"),
+                    keras.ops.cast(self._input_shape[2], "int32"),
                 ]
             ),
         )
@@ -965,7 +964,7 @@ class TopographicVAE(keras.Model):
         if steps <= 0:
             raise ValueError(f"num_steps must be positive, got {steps}")
 
-        variable = ops.cast(topographic_variable, self.compute_dtype)
+        variable = keras.ops.cast(topographic_variable, self.compute_dtype)
         rank = len(variable.shape)
 
         # Reduce to ONE timestep first, then to capsule form. The order matters:
@@ -987,12 +986,12 @@ class TopographicVAE(keras.Model):
         # Now (batch, C*D) or (batch, C, D) -> (batch, C, D).
         if len(variable.shape) == 2:
             if variable.shape[-1] == self.capsule_dim:
-                variable = ops.expand_dims(variable, axis=0)
+                variable = keras.ops.expand_dims(variable, axis=0)
             else:
-                variable = ops.reshape(
+                variable = keras.ops.reshape(
                     variable,
-                    ops.stack(
-                        [ops.shape(variable)[0], self.num_capsules, self.capsule_dim]
+                    keras.ops.stack(
+                        [keras.ops.shape(variable)[0], self.num_capsules, self.capsule_dim]
                     ),
                 )
 
@@ -1002,12 +1001,12 @@ class TopographicVAE(keras.Model):
         frames = []
         for index in range(steps):
             rolled = self.roll(variable, shift=index)
-            flat = ops.reshape(
+            flat = keras.ops.reshape(
                 rolled,
-                ops.stack([ops.shape(rolled)[0], self.latent_dim]),
+                keras.ops.stack([keras.ops.shape(rolled)[0], self.latent_dim]),
             )
-            frames.append(ops.squeeze(self.decode(flat, training=False), axis=1))
-        return ops.stack(frames, axis=1)
+            frames.append(keras.ops.squeeze(self.decode(flat, training=False), axis=1))
+        return keras.ops.stack(frames, axis=1)
 
     def sample_prior(
         self, num_samples: int, seed: Optional[int] = None
@@ -1030,7 +1029,7 @@ class TopographicVAE(keras.Model):
         shape = (num_samples, self.num_capsules, self.capsule_dim)
         z = keras.random.normal(shape=shape, seed=seed, dtype=self.compute_dtype)
         if not self.use_variance_variables:
-            return {"z": z, "t": z - ops.cast(self.prior_mean, z.dtype)}
+            return {"z": z, "t": z - keras.ops.cast(self.prior_mean, z.dtype)}
 
         u = keras.random.normal(shape=shape, seed=seed, dtype=self.compute_dtype)
         # A single-frame window: prior draws have no time axis to correlate.
@@ -1046,9 +1045,9 @@ class TopographicVAE(keras.Model):
             prior_mean=self.prior_mean,
             name="prior_topographic_product",
         )
-        z_flat = ops.reshape(z, (num_samples, 1, self.latent_dim))
-        u_flat = ops.reshape(u, (num_samples, 1, self.latent_dim))
-        t = ops.reshape(
+        z_flat = keras.ops.reshape(z, (num_samples, 1, self.latent_dim))
+        u_flat = keras.ops.reshape(u, (num_samples, 1, self.latent_dim))
+        t = keras.ops.reshape(
             product([z_flat, u_flat], training=False),
             shape,
         )
@@ -1091,10 +1090,10 @@ class TopographicVAE(keras.Model):
                 f"num_samples must be positive, got {num_samples}"
             )
 
-        frames = ops.cast(inputs, self.compute_dtype)
-        shape = ops.shape(frames)
-        flat = ops.reshape(
-            frames, ops.stack([shape[0], shape[1], self.frame_elements])
+        frames = keras.ops.cast(inputs, self.compute_dtype)
+        shape = keras.ops.shape(frames)
+        flat = keras.ops.reshape(
+            frames, keras.ops.stack([shape[0], shape[1], self.frame_elements])
         )
 
         z_mean, z_log_var = self._encode(flat, "z")
@@ -1104,20 +1103,20 @@ class TopographicVAE(keras.Model):
         log_weights = []
         for draw in range(num_samples):
             noise_seed = None if seed is None else seed + 1000 * draw
-            z = z_mean + ops.exp(
-                0.5 * ops.clip(z_log_var, -20.0, 20.0)
+            z = z_mean + keras.ops.exp(
+                0.5 * keras.ops.clip(z_log_var, -20.0, 20.0)
             ) * keras.random.normal(
-                ops.shape(z_mean), seed=noise_seed, dtype=z_mean.dtype
+                keras.ops.shape(z_mean), seed=noise_seed, dtype=z_mean.dtype
             )
             if self.use_variance_variables:
-                u = u_mean + ops.exp(
-                    0.5 * ops.clip(u_log_var, -20.0, 20.0)
+                u = u_mean + keras.ops.exp(
+                    0.5 * keras.ops.clip(u_log_var, -20.0, 20.0)
                 ) * keras.random.normal(
-                    ops.shape(u_mean), seed=noise_seed, dtype=u_mean.dtype
+                    keras.ops.shape(u_mean), seed=noise_seed, dtype=u_mean.dtype
                 )
                 t = self.topographic_product([z, u], training=training)
             else:
-                t = z - ops.cast(self.prior_mean, z.dtype)
+                t = z - keras.ops.cast(self.prior_mean, z.dtype)
 
             reconstruction = self.decode(t, training=training)
             # Sum over the FRAME elements only, keeping (batch, sequence): the
@@ -1125,30 +1124,30 @@ class TopographicVAE(keras.Model):
             # per-step and the two are subtracted elementwise. Summing everything
             # into a (batch,) shape here would make the subtraction below fail on
             # a shape mismatch rather than silently mis-reduce.
-            log_likelihood = ops.sum(
+            log_likelihood = keras.ops.sum(
                 self._bernoulli_log_likelihood(frames, reconstruction),
                 axis=list(range(2, len(self._input_shape) + 2)),
             )
 
-            log_posterior = -0.5 * ops.sum(
-                ops.square(z - z_mean)
+            log_posterior = -0.5 * keras.ops.sum(
+                keras.ops.square(z - z_mean)
                 + z_log_var
-                + 2.0 * ops.log(2.0 * np.pi),
+                + 2.0 * keras.ops.log(2.0 * np.pi),
                 axis=-1,
             )
-            log_prior = -0.5 * ops.sum(
-                ops.square(z) + 2.0 * ops.log(2.0 * np.pi), axis=-1
+            log_prior = -0.5 * keras.ops.sum(
+                keras.ops.square(z) + 2.0 * keras.ops.log(2.0 * np.pi), axis=-1
             )
             log_weight = log_posterior - log_prior
             if self.use_variance_variables:
-                log_posterior_u = -0.5 * ops.sum(
-                    ops.square(u - u_mean)
+                log_posterior_u = -0.5 * keras.ops.sum(
+                    keras.ops.square(u - u_mean)
                     + u_log_var
-                    + 2.0 * ops.log(2.0 * np.pi),
+                    + 2.0 * keras.ops.log(2.0 * np.pi),
                     axis=-1,
                 )
-                log_prior_u = -0.5 * ops.sum(
-                    ops.square(u) + 2.0 * ops.log(2.0 * np.pi), axis=-1
+                log_prior_u = -0.5 * keras.ops.sum(
+                    keras.ops.square(u) + 2.0 * keras.ops.log(2.0 * np.pi), axis=-1
                 )
                 log_weight = log_weight + log_posterior_u - log_prior_u
             log_weights.append(log_likelihood - log_weight)
@@ -1163,12 +1162,12 @@ class TopographicVAE(keras.Model):
         # the log-mean-exp of the NEGATED weight, which is neither a bound nor the
         # paper's quantity: for a confident decoder it returned a large POSITIVE
         # number, and its ordering against a wrong reconstruction was inverted.
-        stacked = ops.stack(log_weights, axis=0)
-        peak = ops.max(stacked, axis=0)
-        per_example = ops.log(
-            ops.mean(ops.exp(stacked - peak), axis=0)
+        stacked = keras.ops.stack(log_weights, axis=0)
+        peak = keras.ops.max(stacked, axis=0)
+        per_example = keras.ops.log(
+            keras.ops.mean(keras.ops.exp(stacked - peak), axis=0)
         ) + peak
-        return ops.sum(per_example, axis=-1)
+        return keras.ops.sum(per_example, axis=-1)
 
     def _bernoulli_log_likelihood(self, targets, predictions) -> keras.KerasTensor:
         """Elementwise Bernoulli log-likelihood of ``targets`` under ``predictions``.
@@ -1187,10 +1186,10 @@ class TopographicVAE(keras.Model):
         :return: Elementwise log-probabilities, same shape as the inputs.
         :rtype: keras.KerasTensor
         """
-        targets = ops.cast(targets, "float32")
-        predictions = ops.cast(predictions, "float32")
-        clipped = ops.clip(predictions, 1e-7, 1.0 - 1e-7)
-        return targets * ops.log(clipped) + (1.0 - targets) * ops.log1p(-clipped)
+        targets = keras.ops.cast(targets, "float32")
+        predictions = keras.ops.cast(predictions, "float32")
+        clipped = keras.ops.clip(predictions, 1e-7, 1.0 - 1e-7)
+        return targets * keras.ops.log(clipped) + (1.0 - targets) * keras.ops.log1p(-clipped)
 
     @property
     def sampling_seed(self) -> Optional[int]:

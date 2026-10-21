@@ -25,7 +25,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from tests.numerics import matmul_precision_atol, reassociation_atol
 
@@ -50,7 +49,7 @@ def _inputs(seed=0, sequence=S, latent=LATENT):
     rng = np.random.default_rng(seed)
     z = rng.normal(size=(B, sequence, latent)).astype("float32")
     u = rng.normal(size=(B, sequence, latent)).astype("float32")
-    return ops.convert_to_tensor(z), ops.convert_to_tensor(u)
+    return keras.ops.convert_to_tensor(z), keras.ops.convert_to_tensor(u)
 
 
 def _float32_bound(expected, contraction=D, steps=None):
@@ -300,8 +299,8 @@ class TestWindowMatrixClosedForms:
         from_matrix = (matrix @ values.astype(np.float64)).astype("float32")
 
         roll = CapsuleRoll(num_capsules=1, capsule_dim=width)
-        from_layer = ops.convert_to_numpy(
-            roll(ops.convert_to_tensor(values[None, :]), shift=shift)
+        from_layer = keras.ops.convert_to_numpy(
+            roll(keras.ops.convert_to_tensor(values[None, :]), shift=shift)
         )[0]
         np.testing.assert_allclose(from_matrix, from_layer, atol=0.0, rtol=0)
 
@@ -360,7 +359,7 @@ class TestTopographicProductForward:
             temporal_coherence=temporal_coherence,
         )
         z, u = _inputs(seed=1)
-        got = ops.convert_to_numpy(layer([z, u], training=False))
+        got = keras.ops.convert_to_numpy(layer([z, u], training=False))
         expected = _oracle(layer, z, u)
         # TOLERANCE DERIVED, not pasted. `t` is O(1e+02) here -- Eq. 6 divides by
         # sqrt(nu * energy), and the energy of unit-variance `u` under K=2 is
@@ -392,8 +391,8 @@ class TestTopographicProductForward:
             num_capsules=C, capsule_dim=D, coherence_window=1,
             neighborhood_size=2, degrees_of_freedom=degrees_of_freedom,
         )
-        unit = ops.convert_to_numpy(base([z, u]))
-        other = ops.convert_to_numpy(scaled([z, u]))
+        unit = keras.ops.convert_to_numpy(base([z, u]))
+        other = keras.ops.convert_to_numpy(scaled([z, u]))
         expected = unit / np.sqrt(degrees_of_freedom)
         np.testing.assert_allclose(
             other, expected, rtol=0, atol=_float32_bound(expected)
@@ -405,7 +404,7 @@ class TestTopographicProductForward:
         layer = TopographicProduct(
             num_capsules=C, capsule_dim=D, coherence_window=0, neighborhood_size=1
         )
-        got = ops.convert_to_numpy(layer([z, u]))
+        got = keras.ops.convert_to_numpy(layer([z, u]))
         expected = np.sqrt(2.0) * (np.asarray(z, dtype=np.float64) - 30.0) / np.sqrt(
             np.asarray(u, dtype=np.float64) ** 2 + layer.epsilon
         )
@@ -451,14 +450,14 @@ class TestTopographicProductForward:
             num_capsules=C, capsule_dim=D, coherence_window=2, neighborhood_size=1
         )
         z, u = _inputs(seed=6)
-        base = ops.convert_to_numpy(layer([z, u]))
+        base = keras.ops.convert_to_numpy(layer([z, u]))
 
         # Changing ONLY the last timestep's u must leave the FIRST timestep's
         # output untouched (its window is [-2, 0, +2] -> clamped to [0, 0, 1]).
         bumped = np.array(u.numpy())
         bumped[:, -1] += 5.0
-        moved = ops.convert_to_numpy(
-            layer([z, ops.convert_to_tensor(bumped.astype("float32"))])
+        moved = keras.ops.convert_to_numpy(
+            layer([z, keras.ops.convert_to_tensor(bumped.astype("float32"))])
         )
         np.testing.assert_allclose(
             moved[:, 0], base[:, 0], atol=0.0, rtol=0,
@@ -475,11 +474,11 @@ class TestTopographicProductForward:
         output is inf or NaN, on a correctly-shaped tensor.
         """
         z, _ = _inputs(seed=7)
-        zeros = ops.convert_to_tensor(np.zeros((B, S, LATENT), "float32"))
+        zeros = keras.ops.convert_to_tensor(np.zeros((B, S, LATENT), "float32"))
         layer = TopographicProduct(
             num_capsules=C, capsule_dim=D, coherence_window=1, neighborhood_size=2
         )
-        out = ops.convert_to_numpy(layer([z, zeros]))
+        out = keras.ops.convert_to_numpy(layer([z, zeros]))
         assert np.all(np.isfinite(out)), "an all-zero energy must not produce NaN/inf"
 
     def test_a_NEGATIVE_energy_stays_finite(self):
@@ -500,13 +499,13 @@ class TestTopographicProductForward:
             num_capsules=C, capsule_dim=D, coherence_window=1, neighborhood_size=2
         )
         layer([z, u])  # build, so the stack exists
-        stack = ops.convert_to_numpy(layer.window_stack)
+        stack = keras.ops.convert_to_numpy(layer.window_stack)
         assert np.abs(stack).min() >= 0.0, "the built stack is already signed"
 
         layer.window_stack.assign(
-            ops.convert_to_tensor(stack - 2.0, "float32")
+            keras.ops.convert_to_tensor(stack - 2.0, "float32")
         )
-        out = ops.convert_to_numpy(layer([z, u]))
+        out = keras.ops.convert_to_numpy(layer([z, u]))
         assert np.all(np.isfinite(out)), (
             "a negative energy reached the sqrt; the clamp at zero is gone"
         )
@@ -522,19 +521,19 @@ class TestTopographicProductForward:
         layer = TopographicProduct(
             num_capsules=C, capsule_dim=D, coherence_window=1, neighborhood_size=2
         )
-        got = ops.convert_to_numpy(layer([z, u]))
+        got = keras.ops.convert_to_numpy(layer([z, u]))
 
         squared = np.square(
-            ops.convert_to_numpy(
-                ops.pad(
-                    ops.convert_to_tensor(u, "float32"),
+            keras.ops.convert_to_numpy(
+                keras.ops.pad(
+                    keras.ops.convert_to_tensor(u, "float32"),
                     [[0, 0], [1, 0], [0, 0]],
                     constant_values=0.0,
                 )
             )[:, :S]
         )
         energies = [
-            float(np.einsum("de,bse->bsd", ops.convert_to_numpy(layer.window_stack)[i],
+            float(np.einsum("de,bse->bsd", keras.ops.convert_to_numpy(layer.window_stack)[i],
                             squared[:, max(0, i - 1): i - 1 + S]).sum(axis=1).min())
             for i in range(3)
         ]
@@ -544,7 +543,7 @@ class TestTopographicProductForward:
             num_capsules=C, capsule_dim=D, coherence_window=1, neighborhood_size=2
         )
         np.testing.assert_array_equal(
-            got, ops.convert_to_numpy(reference([z, u]))
+            got, keras.ops.convert_to_numpy(reference([z, u]))
         )
 
     @pytest.mark.parametrize("sequence", [1, 2, 9])
@@ -554,7 +553,7 @@ class TestTopographicProductForward:
         layer = TopographicProduct(
             num_capsules=C, capsule_dim=D, coherence_window=3, neighborhood_size=2
         )
-        out = ops.convert_to_numpy(layer([z, u]))
+        out = keras.ops.convert_to_numpy(layer([z, u]))
         assert out.shape == (B, sequence, LATENT)
         assert np.all(np.isfinite(out))
 
@@ -564,9 +563,9 @@ class TestTopographicProductForward:
             topography="torus_2d", grid_shape=(4, 4),
         )
         rng = np.random.default_rng(9)
-        z = ops.convert_to_tensor(rng.normal(size=(B, S, 16)).astype("float32"))
-        u = ops.convert_to_tensor(rng.normal(size=(B, S, 16)).astype("float32"))
-        got = ops.convert_to_numpy(layer([z, u]))
+        z = keras.ops.convert_to_tensor(rng.normal(size=(B, S, 16)).astype("float32"))
+        u = keras.ops.convert_to_tensor(rng.normal(size=(B, S, 16)).astype("float32"))
+        got = keras.ops.convert_to_numpy(layer([z, u]))
         expected = _oracle(layer, z, u)
         np.testing.assert_allclose(
             got, expected, rtol=0, atol=_float32_bound(expected)
@@ -611,7 +610,7 @@ class TestTopographicProductStatelessBuild:
         u_input = keras.Input(shape=(S, LATENT))
         keras.Model([z_input, u_input], parent([z_input, u_input]))
 
-        stack = ops.convert_to_numpy(layer.window_stack)
+        stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
             layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
         )
@@ -658,7 +657,7 @@ class TestTopographicProductStatelessBuild:
         u_input = keras.Input(shape=(S, LATENT))
         keras.Model([z_input, u_input], parent([z_input, u_input]))
 
-        stack = ops.convert_to_numpy(layer.window_stack)
+        stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
             layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
         )
@@ -673,7 +672,7 @@ class TestTopographicProductStatelessBuild:
             num_capsules=C, capsule_dim=D, coherence_window=2, neighborhood_size=2
         )
         layer.build(((None, S, LATENT), (None, S, LATENT)))
-        stack = ops.convert_to_numpy(layer.window_stack)
+        stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
             layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
         )
@@ -706,14 +705,14 @@ class TestTopographicProductGraphSafety:
             num_capsules=C, capsule_dim=D, coherence_window=2, neighborhood_size=2
         )
         z, u = _inputs(seed=10)
-        eager = ops.convert_to_numpy(layer([z, u], training=False))
+        eager = keras.ops.convert_to_numpy(layer([z, u], training=False))
 
         @tf.function
         def traced(z_arg, u_arg):
             return layer([z_arg, u_arg], training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced(z, u)), eager, atol=1e-5, rtol=1e-5
+            keras.ops.convert_to_numpy(traced(z, u)), eager, atol=1e-5, rtol=1e-5
         )
 
     def test_matches_under_xla(self):
@@ -726,9 +725,9 @@ class TestTopographicProductGraphSafety:
         def compiled(z_arg, u_arg):
             return layer([z_arg, u_arg], training=False)
 
-        eager = ops.convert_to_numpy(layer([z, u], training=False))
+        eager = keras.ops.convert_to_numpy(layer([z, u], training=False))
         np.testing.assert_allclose(
-            ops.convert_to_numpy(compiled(z, u)), eager, atol=1e-5, rtol=1e-5
+            keras.ops.convert_to_numpy(compiled(z, u)), eager, atol=1e-5, rtol=1e-5
         )
 
     def test_a_dynamic_sequence_length_traces(self):
@@ -746,7 +745,7 @@ class TestTopographicProductGraphSafety:
 
         for sequence in (2, 7):
             z, u = _inputs(seed=12, sequence=sequence)
-            out = ops.convert_to_numpy(traced(z, u))
+            out = keras.ops.convert_to_numpy(traced(z, u))
             assert out.shape == (B, sequence, LATENT)
             assert np.all(np.isfinite(out))
 
@@ -759,7 +758,7 @@ class TestTopographicProductGraphSafety:
         reference = TopographicProduct(
             num_capsules=C, capsule_dim=D, coherence_window=1, neighborhood_size=2
         )
-        expected = ops.convert_to_numpy(reference([z_np, u_np]))
+        expected = keras.ops.convert_to_numpy(reference([z_np, u_np]))
 
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy(policy)
@@ -768,7 +767,7 @@ class TestTopographicProductGraphSafety:
                 num_capsules=C, capsule_dim=D, coherence_window=1,
                 neighborhood_size=2,
             )
-            out = ops.convert_to_numpy(layer([z_np, u_np]))
+            out = keras.ops.convert_to_numpy(layer([z_np, u_np]))
             assert np.all(np.isfinite(out)), f"{policy} produced NaN/inf"
             np.testing.assert_allclose(
                 out.astype("float64"), expected.astype("float64"),
@@ -852,12 +851,12 @@ class TestTopographicProductSerialization:
         model = keras.Model([z_input, u_input], layer([z_input, u_input]))
         z, u = _inputs(seed=15)
 
-        before = ops.convert_to_numpy(model([z, u], training=False))
+        before = keras.ops.convert_to_numpy(model([z, u], training=False))
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "topo.keras")
             model.save(path)
             loaded = keras.models.load_model(path)
-            after = ops.convert_to_numpy(loaded([z, u], training=False))
+            after = keras.ops.convert_to_numpy(loaded([z, u], training=False))
 
         # atol=0.0: the forward pass has no stochastic element, so a reload that
         # restored the table and the config must reproduce it bit-for-bit.

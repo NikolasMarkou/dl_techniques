@@ -58,7 +58,6 @@ guarded by nothing.
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
@@ -133,7 +132,7 @@ def _run_probe() -> np.ndarray:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
     out = model(x, training=False)
     assert not isinstance(out, dict), "SwinTransformer returns one logits tensor"
-    return np.asarray(ops.convert_to_numpy(out))
+    return np.asarray(keras.ops.convert_to_numpy(out))
 
 
 @pytest.fixture(scope="module")

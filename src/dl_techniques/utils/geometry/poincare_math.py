@@ -23,7 +23,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Any, Union
 
 # ---------------------------------------------------------------------
@@ -158,14 +157,14 @@ class PoincareMath:
         # so every SHGCN model trained under `jit_compile=True` (and `auto` on a
         # GPU) had a NaN loss from its second step. The forward is unchanged:
         # sqrt(1.0) is never selected where the squared norm is positive.
-        squared = ops.sum(ops.square(x), axis=axis, keepdims=keepdims)
+        squared = keras.ops.sum(keras.ops.square(x), axis=axis, keepdims=keepdims)
         positive = squared > 0.0
-        norm = ops.where(
+        norm = keras.ops.where(
             positive,
-            ops.sqrt(ops.where(positive, squared, ops.ones_like(squared))),
-            ops.zeros_like(squared),
+            keras.ops.sqrt(keras.ops.where(positive, squared, keras.ops.ones_like(squared))),
+            keras.ops.zeros_like(squared),
         )
-        return norm, ops.maximum(norm, self.eps)
+        return norm, keras.ops.maximum(norm, self.eps)
 
     @staticmethod
     def _as_compute_dtype(
@@ -188,7 +187,7 @@ class PoincareMath:
         Returns:
             `c` as a tensor of ``reference``'s dtype.
         """
-        return ops.cast(c, reference.dtype)
+        return keras.ops.cast(c, reference.dtype)
 
     def boundary_margin(
             self,
@@ -233,10 +232,10 @@ class PoincareMath:
 
         # `np.finfo().eps` is the spacing at 1.0; the spacing at `radius` scales
         # with the magnitude, so a curvature far from 1.0 is covered too.
-        spacing = ulp_at_one * ops.maximum(ops.abs(radius), 1.0)
-        return ops.maximum(
-            ops.cast(self.boundary_eps, standardized),
-            ops.cast(_BOUNDARY_ULP_SAFETY * spacing, standardized),
+        spacing = ulp_at_one * keras.ops.maximum(keras.ops.abs(radius), 1.0)
+        return keras.ops.maximum(
+            keras.ops.cast(self.boundary_eps, standardized),
+            keras.ops.cast(_BOUNDARY_ULP_SAFETY * spacing, standardized),
         )
 
     def project(
@@ -270,12 +269,12 @@ class PoincareMath:
             where max_radius = (1/sqrt(c)) - boundary_eps
         """
         norm_x = self.safe_norm(x, axis=-1, keepdims=True)
-        radius = 1.0 / ops.sqrt(self._as_compute_dtype(c, x))
+        radius = 1.0 / keras.ops.sqrt(self._as_compute_dtype(c, x))
         max_r = radius - self.boundary_margin(x.dtype, radius)
 
         cond = norm_x >= max_r
         projected = x * (max_r / norm_x)
-        return ops.where(cond, projected, x)
+        return keras.ops.where(cond, projected, x)
 
     def exp_map_0(
             self,
@@ -309,7 +308,7 @@ class PoincareMath:
         Note:
             This operation is differentiable and preserves the origin: exp_0(0) = 0.
         """
-        sqrt_c = ops.sqrt(self._as_compute_dtype(c, v))
+        sqrt_c = keras.ops.sqrt(self._as_compute_dtype(c, v))
         # The branch test uses the RAW norm; the division uses the floored one.
         # See the D-056 anchor on `norm_and_floored_norm`.
         raw_norm_v, norm_v = self.norm_and_floored_norm(v, axis=-1, keepdims=True)
@@ -329,12 +328,12 @@ class PoincareMath:
         # makes the unselected gradient finite. The forward is unchanged
         # bit-for-bit: when `raw >= eps` this selects `norm_v` itself.
         # Do NOT collapse this back to a single `where`. See decisions.md D-061.
-        safe_norm_v = ops.where(
-            raw_norm_v < self.eps, ops.ones_like(norm_v), norm_v
+        safe_norm_v = keras.ops.where(
+            raw_norm_v < self.eps, keras.ops.ones_like(norm_v), norm_v
         )
-        scale = ops.tanh(sqrt_c * safe_norm_v) / (sqrt_c * safe_norm_v)
+        scale = keras.ops.tanh(sqrt_c * safe_norm_v) / (sqrt_c * safe_norm_v)
 
-        return ops.where(raw_norm_v < self.eps, v, v * scale)
+        return keras.ops.where(raw_norm_v < self.eps, v, v * scale)
 
     def log_map_0(
             self,
@@ -369,14 +368,14 @@ class PoincareMath:
             Input points are clamped to stay within valid ball radius to prevent
             atanh(1) = infinity. This operation inverts exp_map_0: log_0(exp_0(v)) = v.
         """
-        sqrt_c = ops.sqrt(self._as_compute_dtype(c, y))
+        sqrt_c = keras.ops.sqrt(self._as_compute_dtype(c, y))
         # The branch test uses the RAW norm; the division uses the floored one.
         # See the D-056 anchor on `norm_and_floored_norm`.
         raw_norm_y, norm_y = self.norm_and_floored_norm(y, axis=-1, keepdims=True)
 
         radius = 1.0 / sqrt_c
         max_r = radius - self.boundary_margin(y.dtype, radius)
-        norm_y = ops.minimum(norm_y, max_r)
+        norm_y = keras.ops.minimum(norm_y, max_r)
 
         # The same double-`where` as `exp_map_0`; the argument is identical and
         # `arctanh(u)/u` carries the same `1/u**2` in its derivative. See the
@@ -389,11 +388,11 @@ class PoincareMath:
         # derivative, so the unselected branch poisoned the gradient at the
         # origin (0 * NaN = NaN), in eager mode too. Half the radius gives
         # arctanh(0.5): finite for every c.
-        safe_norm_y = ops.where(
-            raw_norm_y < self.eps, 0.5 * radius * ops.ones_like(norm_y), norm_y
+        safe_norm_y = keras.ops.where(
+            raw_norm_y < self.eps, 0.5 * radius * keras.ops.ones_like(norm_y), norm_y
         )
-        scale = ops.arctanh(sqrt_c * safe_norm_y) / (sqrt_c * safe_norm_y)
-        return ops.where(raw_norm_y < self.eps, y, y * scale)
+        scale = keras.ops.arctanh(sqrt_c * safe_norm_y) / (sqrt_c * safe_norm_y)
+        return keras.ops.where(raw_norm_y < self.eps, y, y * scale)
 
     def mobius_add(
             self,
@@ -436,12 +435,12 @@ class PoincareMath:
         """
         c = self._as_compute_dtype(c, x)
 
-        xy = ops.sum(x * y, axis=-1, keepdims=True)
-        x2 = ops.sum(ops.square(x), axis=-1, keepdims=True)
-        y2 = ops.sum(ops.square(y), axis=-1, keepdims=True)
+        xy = keras.ops.sum(x * y, axis=-1, keepdims=True)
+        x2 = keras.ops.sum(keras.ops.square(x), axis=-1, keepdims=True)
+        y2 = keras.ops.sum(keras.ops.square(y), axis=-1, keepdims=True)
 
         den = 1.0 + 2.0 * c * xy + (c ** 2) * x2 * y2
-        den = ops.maximum(den, self.eps)
+        den = keras.ops.maximum(den, self.eps)
 
         coeff1 = 1.0 + 2.0 * c * xy + c * y2
         term1 = coeff1 * x

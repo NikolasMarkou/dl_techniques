@@ -78,7 +78,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.attention.window_attention import WindowAttention
 from dl_techniques.layers.ffn.swin_mlp import SwinMLP
@@ -132,15 +131,15 @@ def wrap_status_windows(
     flat_index = np.arange(height * width, dtype="float32").reshape(
         1, height, width, 1
     )
-    rolled = ops.roll(
-        ops.convert_to_tensor(flat_index),
+    rolled = keras.ops.roll(
+        keras.ops.convert_to_tensor(flat_index),
         shift=(-shift_size, -shift_size),
         axis=(1, 2),
     )
     windows = window_partition(rolled, window_size)
     windows = np.asarray(
-        ops.convert_to_numpy(
-            ops.reshape(windows, (-1, window_size * window_size))
+        keras.ops.convert_to_numpy(
+            keras.ops.reshape(windows, (-1, window_size * window_size))
         )
     ).astype("int64")
 
@@ -188,10 +187,10 @@ def reference_region_windows(
             img_mask[:, h_slice, w_slice, :] = count
             count += 1
 
-    windows = window_partition(ops.convert_to_tensor(img_mask), window_size)
+    windows = window_partition(keras.ops.convert_to_tensor(img_mask), window_size)
     return np.asarray(
-        ops.convert_to_numpy(
-            ops.reshape(windows, (-1, window_size * window_size))
+        keras.ops.convert_to_numpy(
+            keras.ops.reshape(windows, (-1, window_size * window_size))
         )
     ).astype("int64")
 
@@ -264,7 +263,7 @@ def _perturbation() -> np.ndarray:
 def _forward(block: SwinTransformerBlock, x: np.ndarray) -> np.ndarray:
     """Deterministic inference-mode forward pass returning a numpy array."""
     return np.asarray(
-        ops.convert_to_numpy(block(ops.convert_to_tensor(x), training=False))
+        keras.ops.convert_to_numpy(block(keras.ops.convert_to_tensor(x), training=False))
     )
 
 
@@ -665,7 +664,7 @@ class TestSwMsaMaskConstruction:
         """
         block = _make_block(shift_size=SHIFT_SIZE)
         mask = np.asarray(
-            ops.convert_to_numpy(
+            keras.ops.convert_to_numpy(
                 block._build_swmsa_keep_mask(
                     BATCH, HEIGHT, WIDTH, SHIFT_SIZE
                 )
@@ -775,7 +774,7 @@ class TestSwMsaMaskConstruction:
             window_size=WINDOW_SIZE,
             shift_size=SHIFT_SIZE,
         )
-        too_small = ops.convert_to_tensor(
+        too_small = keras.ops.convert_to_tensor(
             np.random.default_rng(SEED).standard_normal(
                 (1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM)
             ).astype("float32")
@@ -783,7 +782,7 @@ class TestSwMsaMaskConstruction:
         assert block._resolve_shift_size(too_small) == 0
         out = block(too_small)
         assert tuple(out.shape) == (1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM)
-        assert np.isfinite(ops.convert_to_numpy(out)).all()
+        assert np.isfinite(keras.ops.convert_to_numpy(out)).all()
 
     def test_dynamic_spatial_dims_never_raise(self):
         """A dynamic (``None``) spatial dim must never hit the raise (D-002 / A2).
@@ -823,7 +822,7 @@ class TestSwMsaMaskConstruction:
             window_size=WINDOW_SIZE,
             shift_size=0,
         )
-        small = ops.convert_to_tensor(
+        small = keras.ops.convert_to_tensor(
             np.zeros((1, WINDOW_SIZE, WINDOW_SIZE, DIM), dtype="float32")
         )
         assert tuple(block(small).shape) == (1, WINDOW_SIZE, WINDOW_SIZE, DIM)
@@ -1137,11 +1136,11 @@ class TestPaddedPositionIsolation:
     ):
         """Changing what the padding CONTAINS must move nothing, exactly."""
         block = _make_padding_block(shift_size)
-        x = ops.convert_to_tensor(_padding_probe_input(height, width))
+        x = keras.ops.convert_to_tensor(_padding_probe_input(height, width))
 
-        baseline = np.asarray(ops.convert_to_numpy(block(x)))
+        baseline = np.asarray(keras.ops.convert_to_numpy(block(x)))
         monkeypatch.setattr(swin_block_module, "_PADDING_FILL_VALUE", PAD_GARBAGE)
-        with_garbage = np.asarray(ops.convert_to_numpy(block(x)))
+        with_garbage = np.asarray(keras.ops.convert_to_numpy(block(x)))
 
         # Non-vacuity control: the same block, same probe, must move a lot when
         # a REAL token is perturbed. Without this, a dead layer (or a probe
@@ -1152,7 +1151,7 @@ class TestPaddedPositionIsolation:
             np.abs(
                 baseline
                 - np.asarray(
-                    ops.convert_to_numpy(block(ops.convert_to_tensor(perturbed)))
+                    keras.ops.convert_to_numpy(block(keras.ops.convert_to_tensor(perturbed)))
                 )
             ).max()
         )
@@ -1219,7 +1218,7 @@ class TestPaddedPositionIsolation:
         block = _make_padding_block(shift_size)
         padded_h = height + (WINDOW_SIZE - height % WINDOW_SIZE) % WINDOW_SIZE
         padded_w = width + (WINDOW_SIZE - width % WINDOW_SIZE) % WINDOW_SIZE
-        mask = np.asarray(ops.convert_to_numpy(
+        mask = np.asarray(keras.ops.convert_to_numpy(
             block._build_swmsa_keep_mask(
                 1, padded_h, padded_w, shift_size,
                 valid_height=height, valid_width=width,
@@ -1267,7 +1266,7 @@ class TestPaddedGeometryShiftRule:
             window_size=WINDOW_SIZE,
             shift_size=SHIFT_SIZE,
         )
-        between = ops.convert_to_tensor(
+        between = keras.ops.convert_to_tensor(
             np.zeros((1, WINDOW_SIZE + 2, WINDOW_SIZE + 2, DIM), dtype="float32")
         )
         assert WINDOW_SIZE < WINDOW_SIZE + 2 < 2 * WINDOW_SIZE

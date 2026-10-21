@@ -60,7 +60,6 @@ References:
 
 import numpy as np
 import keras
-from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -239,14 +238,14 @@ class NAM(keras.Model):
         :rtype: Dict[str, Any]
         """
         input_ids = batch["input_ids"]
-        batch_size = ops.shape(input_ids)[0]
+        batch_size = keras.ops.shape(input_ids)[0]
 
         cell_carry = self.cell.initialize_carry(batch_size)
 
         return {
             "cell_carry": cell_carry,
-            "steps": ops.zeros((batch_size,), dtype="int32"),
-            "halted": ops.zeros((batch_size,), dtype="bool"),
+            "steps": keras.ops.zeros((batch_size,), dtype="int32"),
+            "halted": keras.ops.zeros((batch_size,), dtype="bool"),
         }
 
     def _encode(
@@ -265,30 +264,30 @@ class NAM(keras.Model):
         :rtype: Tuple[Any, Any, List[Any]]
         """
         # Create padding mask
-        mask = ops.cast(ops.not_equal(input_ids, 0), "int32")
-        mask = ops.expand_dims(mask, axis=1)  # (B, 1, L)
+        mask = keras.ops.cast(keras.ops.not_equal(input_ids, 0), "int32")
+        mask = keras.ops.expand_dims(mask, axis=1)  # (B, 1, L)
 
         # --- Build numeric feature channels ---
         # Digit value: tokens 4-13 map to 0-9, everything else → 0
-        ids_float = ops.cast(input_ids, self.compute_dtype)
-        is_digit = ops.cast(
-            ops.logical_and(
-                ops.greater_equal(input_ids, 4),
-                ops.less_equal(input_ids, 13),
+        ids_float = keras.ops.cast(input_ids, self.compute_dtype)
+        is_digit = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(input_ids, 4),
+                keras.ops.less_equal(input_ids, 13),
             ),
             self.compute_dtype,
         )
         digit_value = (ids_float - 4.0) * is_digit  # 0-9 for digits, 0 otherwise
 
         # Operator type: +→1, -→2, *→3, /→4, else→0
-        op_type = ops.zeros_like(ids_float)
-        op_type = ops.where(ops.equal(input_ids, 14), ops.ones_like(op_type) * 1.0, op_type)
-        op_type = ops.where(ops.equal(input_ids, 15), ops.ones_like(op_type) * 2.0, op_type)
-        op_type = ops.where(ops.equal(input_ids, 16), ops.ones_like(op_type) * 3.0, op_type)
-        op_type = ops.where(ops.equal(input_ids, 17), ops.ones_like(op_type) * 4.0, op_type)
+        op_type = keras.ops.zeros_like(ids_float)
+        op_type = keras.ops.where(keras.ops.equal(input_ids, 14), keras.ops.ones_like(op_type) * 1.0, op_type)
+        op_type = keras.ops.where(keras.ops.equal(input_ids, 15), keras.ops.ones_like(op_type) * 2.0, op_type)
+        op_type = keras.ops.where(keras.ops.equal(input_ids, 16), keras.ops.ones_like(op_type) * 3.0, op_type)
+        op_type = keras.ops.where(keras.ops.equal(input_ids, 17), keras.ops.ones_like(op_type) * 4.0, op_type)
 
         # Stack: (B, L, 3) — [digit_value, is_digit, operator_type]
-        numeric_features = ops.stack(
+        numeric_features = keras.ops.stack(
             [digit_value, is_digit, op_type], axis=-1
         )
 
@@ -300,7 +299,7 @@ class NAM(keras.Model):
         x = self.pos_encoding(x, training=training)
 
         # Run through tree encoder blocks
-        group_prob = ops.convert_to_tensor(0.0, dtype=self.compute_dtype)
+        group_prob = keras.ops.convert_to_tensor(0.0, dtype=self.compute_dtype)
         all_break_probs = []
 
         for block in self.tree_blocks:
@@ -365,48 +364,48 @@ class NAM(keras.Model):
         q_halt = cell_outputs["q_halt"]
         q_continue = cell_outputs["q_continue"]
 
-        is_last_step = ops.greater_equal(steps, self.config.halt_max_steps)
+        is_last_step = keras.ops.greater_equal(steps, self.config.halt_max_steps)
 
         if training is True:
-            halt_signal = ops.greater(q_halt, ops.cast(0.0, q_halt.dtype))
-            new_halted = ops.logical_or(is_last_step, halt_signal)
+            halt_signal = keras.ops.greater(q_halt, keras.ops.cast(0.0, q_halt.dtype))
+            new_halted = keras.ops.logical_or(is_last_step, halt_signal)
 
             # Exploration: randomly prevent early halting
-            rand_val = keras.random.uniform(ops.shape(q_halt))
-            explore = ops.less(rand_val, self.config.halt_exploration_prob)
-            min_steps = ops.where(
+            rand_val = keras.random.uniform(keras.ops.shape(q_halt))
+            explore = keras.ops.less(rand_val, self.config.halt_exploration_prob)
+            min_steps = keras.ops.where(
                 explore,
-                ops.cast(
+                keras.ops.cast(
                     keras.random.randint(
-                        ops.shape(steps),
+                        keras.ops.shape(steps),
                         minval=2,
                         maxval=self.config.halt_max_steps + 1,
                     ),
                     "int32",
                 ),
-                ops.ones_like(steps),
+                keras.ops.ones_like(steps),
             )
-            step_ok = ops.greater_equal(steps, min_steps)
-            new_halted = ops.logical_and(new_halted, step_ok)
+            step_ok = keras.ops.greater_equal(steps, min_steps)
+            new_halted = keras.ops.logical_and(new_halted, step_ok)
         else:
             # DECISION plan-2026-08-14T233721-d4f9beb2/D-033: inference must consult
             # the learned q_halt too (predicate q_halt > 0, matching training), not just is_last_step. See decisions.md.
-            halt_signal = ops.greater(q_halt, ops.cast(0.0, q_halt.dtype))
-            new_halted = ops.logical_or(is_last_step, halt_signal)
+            halt_signal = keras.ops.greater(q_halt, keras.ops.cast(0.0, q_halt.dtype))
+            new_halted = keras.ops.logical_or(is_last_step, halt_signal)
 
         # --- Result readout ---
         # Pool hidden state for final prediction
-        token_mask = ops.squeeze(mask, axis=1)  # (B, L)
-        token_mask_float = ops.cast(token_mask, self.compute_dtype)
-        pooled = ops.sum(
-            cell_outputs["hidden"] * ops.expand_dims(token_mask_float, -1),
+        token_mask = keras.ops.squeeze(mask, axis=1)  # (B, L)
+        token_mask_float = keras.ops.cast(token_mask, self.compute_dtype)
+        pooled = keras.ops.sum(
+            cell_outputs["hidden"] * keras.ops.expand_dims(token_mask_float, -1),
             axis=1,
         )
         # DECISION plan-2026-08-19T163559-499b6f0e/D-050: floor must be
         # max(1e-9, finfo(dtype).tiny); np.float16(1e-9) is exactly 0.0, so a bare literal NaNs under mixed_float16. See decisions.md.
         mean_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
         pooled = pooled / (
-            ops.sum(token_mask_float, axis=-1, keepdims=True) + mean_eps
+            keras.ops.sum(token_mask_float, axis=-1, keepdims=True) + mean_eps
         )
 
         # Concatenate the cell's intermediate arithmetic result as a hint
@@ -415,14 +414,14 @@ class NAM(keras.Model):
         # upstream sub-skill modules (number extraction, op classifier, etc.).
         # Without this, result loss gradients propagate backward through the
         # entire model and degrade sub-skill learning.
-        result_input = ops.stop_gradient(
-            ops.concatenate(
+        result_input = keras.ops.stop_gradient(
+            keras.ops.concatenate(
                 [pooled, cell_outputs["result"], cell_outputs["valid"]], axis=-1
             )
         )
 
         final_result = self.result_head(result_input)  # (B, 1)
-        valid_logits = self.validity_head(ops.stop_gradient(pooled))  # (B, 1)
+        valid_logits = self.validity_head(keras.ops.stop_gradient(pooled))  # (B, 1)
 
         # --- Build new carry ---
         new_carry = {

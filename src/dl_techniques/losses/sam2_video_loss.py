@@ -117,7 +117,6 @@ reader assembling a training run actually reaches. See ``decisions.md`` D-052.
 from typing import Any, Dict
 
 import keras
-from keras import ops
 
 from .segmentation_metrics import dice_per_sample
 from .sam_mask_loss import (
@@ -168,7 +167,7 @@ def mask_presence_gate(masks: Any) -> Any:
     :return: ``(B, M, 1, 1)`` bool, ``True`` where that row has any foreground.
     :rtype: Any
     """
-    return ops.max(masks, axis=(-2, -1), keepdims=True) > 0.0
+    return keras.ops.max(masks, axis=(-2, -1), keepdims=True) > 0.0
 
 
 def _focal_from_logits(truth: Any, logits: Any, gamma: float, alpha: float) -> Any:
@@ -224,10 +223,10 @@ def _focal_from_logits(truth: Any, logits: Any, gamma: float, alpha: float) -> A
     :return: Per-pixel focal loss, unreduced.
     :rtype: Any
     """
-    cross_entropy = ops.softplus(-logits) + logits * (1.0 - truth)
-    probabilities = ops.sigmoid(logits)
+    cross_entropy = keras.ops.softplus(-logits) + logits * (1.0 - truth)
+    probabilities = keras.ops.sigmoid(logits)
     p_t = probabilities * truth + (1.0 - probabilities) * (1.0 - truth)
-    modulator = ops.power(1.0 - p_t, gamma)
+    modulator = keras.ops.power(1.0 - p_t, gamma)
     return alpha * modulator * cross_entropy
 
 
@@ -321,7 +320,7 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
 
         if self.from_logits:
             logits = y_pred
-            probabilities = ops.sigmoid(logits)
+            probabilities = keras.ops.sigmoid(logits)
         else:
             # Only the `from_logits=True` path is saturation-immune. Recovering
             # logits from probabilities needs a clip to keep `log` finite, so a
@@ -330,10 +329,10 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
             # (`compile_sam2_video_trainer` passes raw `low_res_logits`); it
             # exists only so the inherited constructor argument stays honest.
             probabilities = y_pred
-            safe = ops.clip(probabilities, 1e-7, 1.0 - 1e-7)
-            logits = ops.log(safe) - ops.log1p(-safe)
+            safe = keras.ops.clip(probabilities, 1e-7, 1.0 - 1e-7)
+            logits = keras.ops.log(safe) - keras.ops.log1p(-safe)
 
-        truth = ops.cast(y_true, probabilities.dtype)
+        truth = keras.ops.cast(y_true, probabilities.dtype)
         truth = match_mask_axis(truth, true_shape, pred_shape)
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-052
@@ -354,7 +353,7 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         # derived from `truth`, i.e. from GROUND TRUTH; deriving it from
         # `probabilities` would be self-fulfilling. See decisions.md D-052.
         present = mask_presence_gate(truth)
-        gated = ops.where(present, probabilities, ops.zeros_like(probabilities))
+        gated = keras.ops.where(present, probabilities, keras.ops.zeros_like(probabilities))
 
         # DICE: unchanged. `sam_mask_loss`'s adapter and its refusal are reused,
         # not re-derived -- raw-layout dice reduces (num_masks, height) instead
@@ -378,8 +377,8 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         per_pixel_focal = _focal_from_logits(
             truth, logits, self.config.focal_gamma, self.config.focal_alpha)
         focal_rows = keras.ops.mean(
-            ops.where(present, per_pixel_focal,
-                      ops.zeros_like(per_pixel_focal)),
+            keras.ops.where(present, per_pixel_focal,
+                      keras.ops.zeros_like(per_pixel_focal)),
             axis=(-2, -1))
 
         dice_rows = keras.ops.reshape(

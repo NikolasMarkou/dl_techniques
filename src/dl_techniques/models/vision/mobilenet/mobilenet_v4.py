@@ -36,7 +36,6 @@ References:
 """
 
 import keras
-from keras import layers, regularizers
 from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
@@ -230,7 +229,7 @@ class MobileNetV4(keras.Model):
 
         self.actual_dims = [int(dim * width_multiplier) for dim in dims]
 
-        self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
         self.stem_conv, self.stem_bn, self.stem_activation = self._build_stem()
 
@@ -266,7 +265,7 @@ class MobileNetV4(keras.Model):
 
     def _build_stem(self):
         """Build the stem's conv, batch norm, and activation layers."""
-        stem_conv = layers.Conv2D(
+        stem_conv = keras.layers.Conv2D(
             filters=self.actual_dims[0],
             kernel_size=self.STEM_KERNEL_SIZE,
             strides=self.STEM_STRIDE,
@@ -276,12 +275,12 @@ class MobileNetV4(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        stem_bn = layers.BatchNormalization(
+        stem_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name="stem_bn",
         )
-        stem_activation = layers.ReLU(name="stem_relu")
+        stem_activation = keras.layers.ReLU(name="stem_relu")
         return stem_conv, stem_bn, stem_activation
 
     def _build_stage(self, stage_idx: int):

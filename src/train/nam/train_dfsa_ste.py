@@ -42,7 +42,6 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import ops
 
 from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from dl_techniques.optimization import learning_rate_schedule_builder, optimizer_builder

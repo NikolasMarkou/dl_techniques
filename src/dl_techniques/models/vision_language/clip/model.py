@@ -41,7 +41,6 @@ References:
 """
 
 import keras
-from keras import layers, ops, initializers
 from typing import Optional, Any, Dict, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -516,12 +515,12 @@ class CLIP(keras.Model):
         :meth:`build` instead.
         """
         # Patch embedding layer
-        self.patch_conv = layers.Conv2D(
+        self.patch_conv = keras.layers.Conv2D(
             filters=self.vision_width,
             kernel_size=self.patch_size,
             strides=self.patch_size,
             use_bias=False,
-            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             name='patch_conv'
         )
 
@@ -550,10 +549,10 @@ class CLIP(keras.Model):
         ]
 
         # Vision projection layer
-        self.vision_projection = layers.Dense(
+        self.vision_projection = keras.layers.Dense(
             self.embed_dim,
             use_bias=False,
-            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             name='vision_projection'
         )
 
@@ -564,10 +563,10 @@ class CLIP(keras.Model):
         ``build``.
         """
         # Token embedding layer
-        self.token_embedding = layers.Embedding(
+        self.token_embedding = keras.layers.Embedding(
             self.vocab_size,
             self.text_width,
-            embeddings_initializer=initializers.TruncatedNormal(stddev=0.02),
+            embeddings_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             name='token_embedding'
         )
 
@@ -596,10 +595,10 @@ class CLIP(keras.Model):
         ]
 
         # Text projection layer
-        self.text_projection = layers.Dense(
+        self.text_projection = keras.layers.Dense(
             self.embed_dim,
             use_bias=False,
-            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             name='text_projection'
         )
 
@@ -626,7 +625,7 @@ class CLIP(keras.Model):
         self.logit_scale = self.add_weight(
             name='logit_scale',
             shape=(),
-            initializer=initializers.Constant(self.logit_scale_init),
+            initializer=keras.initializers.Constant(self.logit_scale_init),
             trainable=True
         )
 
@@ -634,7 +633,7 @@ class CLIP(keras.Model):
         self.class_token = self.add_weight(
             name='class_token',
             shape=(1, 1, self.vision_width),
-            initializer=initializers.TruncatedNormal(stddev=0.02),
+            initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             trainable=True
         )
 
@@ -712,19 +711,19 @@ class CLIP(keras.Model):
         :rtype: keras.KerasTensor
         """
         self._ensure_built()
-        batch_size = ops.shape(images)[0]
+        batch_size = keras.ops.shape(images)[0]
 
         # Convert to patches: (batch, num_patches, vision_width)
         patches = self.patch_conv(images, training=training)
-        patches = ops.reshape(
+        patches = keras.ops.reshape(
             patches, (batch_size, self.num_patches, self.vision_width)
         )
 
         # Add class token: (batch, num_patches+1, vision_width)
-        class_tokens = ops.broadcast_to(
+        class_tokens = keras.ops.broadcast_to(
             self.class_token, (batch_size, 1, self.vision_width)
         )
-        x = ops.concatenate([class_tokens, patches], axis=1)
+        x = keras.ops.concatenate([class_tokens, patches], axis=1)
 
         # Apply vision transformer layers
         for transformer_layer in self.vision_transformer_layers:
@@ -739,7 +738,7 @@ class CLIP(keras.Model):
         )
 
         # L2 normalize features
-        image_features = image_features / ops.norm(
+        image_features = image_features / keras.ops.norm(
             image_features, axis=-1, keepdims=True
         )
 
@@ -784,7 +783,7 @@ class CLIP(keras.Model):
         )
 
         # L2 normalize features
-        text_features = text_features / ops.norm(
+        text_features = text_features / keras.ops.norm(
             text_features, axis=-1, keepdims=True
         )
 
@@ -843,7 +842,7 @@ class CLIP(keras.Model):
 
         # Compute similarity if both modalities are present
         if image_features is not None and text_features is not None:
-            logit_scale = ops.exp(self.logit_scale)
+            logit_scale = keras.ops.exp(self.logit_scale)
             logits_per_image, logits_per_text = compute_clip_logits(
                 image_features, text_features, logit_scale
             )

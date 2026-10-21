@@ -19,7 +19,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 from typing import Any, Dict
 
 from dl_techniques.layers.blt.blt_core import ByteLatentReasoningCore
@@ -59,7 +58,7 @@ class TestByteLatentReasoningCore:
     def sample_inputs(self, layer_config, batch_size) -> Dict[str, Any]:
         """Sample byte-token input dict ``{"byte_tokens": (B, seq_len) int32}``."""
         return {
-            "byte_tokens": ops.convert_to_tensor(
+            "byte_tokens": keras.ops.convert_to_tensor(
                 np.random.randint(
                     0, layer_config["vocab_size"],
                     (batch_size, layer_config["seq_len"]),
@@ -127,7 +126,7 @@ class TestByteLatentReasoningCore:
 
         # Finiteness of the differentiable outputs.
         for key in ("logits", "q_halt_logits", "q_continue_logits", "entropy"):
-            arr = ops.convert_to_numpy(outputs[key])
+            arr = keras.ops.convert_to_numpy(outputs[key])
             assert np.all(np.isfinite(arr)), f"{key} contains non-finite values"
 
     @pytest.mark.parametrize("training", [True, False, None])
@@ -161,7 +160,7 @@ class TestByteLatentReasoningCore:
                 self.core = ByteLatentReasoningCore(**cfg)
                 dummy_carry = self.core.empty_carry(batch)
                 dummy_inputs = {
-                    "byte_tokens": ops.convert_to_tensor(
+                    "byte_tokens": keras.ops.convert_to_tensor(
                         np.zeros((batch, cfg["seq_len"]), dtype=np.int32)
                     )
                 }
@@ -191,8 +190,8 @@ class TestByteLatentReasoningCore:
 
         # The entropy_model / patcher are deterministic at eval; with weights
         # round-tripped the reload must reproduce the pre-save outputs.
-        logits_before = ops.convert_to_numpy(out_before["logits"])
-        logits_after = ops.convert_to_numpy(out_after["logits"])
+        logits_before = keras.ops.convert_to_numpy(out_before["logits"])
+        logits_after = keras.ops.convert_to_numpy(out_after["logits"])
         assert logits_after.shape == logits_before.shape
         assert np.all(np.isfinite(logits_after))
         np.testing.assert_allclose(
@@ -219,7 +218,7 @@ class TestByteLatentReasoningCore:
 
         with tf.GradientTape() as tape:
             _, outputs = layer(carry, sample_inputs, training=True)
-            loss = ops.mean(outputs["logits"])
+            loss = keras.ops.mean(outputs["logits"])
 
         grads = tape.gradient(loss, layer.trainable_variables)
         assert len(grads) > 0
@@ -231,7 +230,7 @@ class TestByteLatentReasoningCore:
         assert len(non_none) >= len(grads) - 4
 
         for g in non_none:
-            assert np.all(np.isfinite(ops.convert_to_numpy(g))), \
+            assert np.all(np.isfinite(keras.ops.convert_to_numpy(g))), \
                 "a trainable variable received a non-finite gradient"
 
     def test_carry_detachment(self, layer_config, sample_inputs, batch_size):
@@ -241,7 +240,7 @@ class TestByteLatentReasoningCore:
 
         with tf.GradientTape() as tape:
             new_carry, _ = layer(carry, sample_inputs, training=True)
-            loss = ops.mean(new_carry["z_h"])
+            loss = keras.ops.mean(new_carry["z_h"])
 
         grads = tape.gradient(loss, layer.trainable_variables)
         assert all(g is None for g in grads)

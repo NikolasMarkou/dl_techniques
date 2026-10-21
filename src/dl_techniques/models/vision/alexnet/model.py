@@ -70,7 +70,6 @@ References:
 """
 
 import keras
-from keras import layers
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -349,7 +348,7 @@ class AlexNet(keras.Model):
             # map instead of 6x6. See spatial_guard.STAGES for the full measurement.
             self._pad(layer_name, padding_by_stage[layer_name])
 
-            setattr(self, layer_name, layers.Conv2D(
+            setattr(self, layer_name, keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=kernel,
                 strides=stride,
@@ -361,7 +360,7 @@ class AlexNet(keras.Model):
                 name=layer_name,
             ))
 
-            setattr(self, f"relu{index}", layers.ReLU(name=f"relu{index}"))
+            setattr(self, f"relu{index}", keras.layers.ReLU(name=f"relu{index}"))
 
             # LRN follows conv1 and conv2 only, BEFORE the pool -- the paper's
             # order. It is routed through the norms factory so the layer stays
@@ -376,7 +375,7 @@ class AlexNet(keras.Model):
             pool_name = pool_after.get(layer_name)
             if pool_name is not None:
                 self._pad(pool_name, padding_by_stage[pool_name])
-                setattr(self, pool_name, layers.MaxPooling2D(
+                setattr(self, pool_name, keras.layers.MaxPooling2D(
                     pool_size=3,
                     strides=2,
                     padding="valid",
@@ -399,7 +398,7 @@ class AlexNet(keras.Model):
         """
         if pad <= 0:
             return
-        setattr(self, f"{stage_name}_pad", layers.ZeroPadding2D(
+        setattr(self, f"{stage_name}_pad", keras.layers.ZeroPadding2D(
             padding=((pad, pad), (pad, pad)),
             name=f"{stage_name}_pad",
         ))

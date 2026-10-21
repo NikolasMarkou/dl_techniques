@@ -41,7 +41,6 @@ References:
 import copy
 import math
 import keras
-from keras import ops, initializers
 from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -616,7 +615,7 @@ class MobileClipV2Model(keras.Model):
         self.logit_scale = self.add_weight(
             name='logit_scale',
             shape=(),
-            initializer=initializers.Constant(self.logit_scale_init),
+            initializer=keras.initializers.Constant(self.logit_scale_init),
             trainable=True,
         )
 
@@ -676,7 +675,7 @@ class MobileClipV2Model(keras.Model):
         """
         features = self.image_encoder(image, training=training)
         if normalize:
-            features = ops.normalize(features, axis=-1)
+            features = keras.ops.normalize(features, axis=-1)
         return features
 
     def encode_text(
@@ -690,7 +689,7 @@ class MobileClipV2Model(keras.Model):
         """
         features = self.text_encoder(text, training=training)
         if normalize:
-            features = ops.normalize(features, axis=-1)
+            features = keras.ops.normalize(features, axis=-1)
         return features
 
     def compute_logit_scale(self) -> keras.KerasTensor:
@@ -702,7 +701,7 @@ class MobileClipV2Model(keras.Model):
         temperature turns a diverging run into ``inf`` logits and a ``nan``
         loss with no other observable symptom.
         """
-        return ops.clip(ops.exp(self.logit_scale), 0.0, self.logit_scale_max)
+        return keras.ops.clip(keras.ops.exp(self.logit_scale), 0.0, self.logit_scale_max)
 
     def call(
             self,

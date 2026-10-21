@@ -31,7 +31,6 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import ops
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -188,34 +187,34 @@ class DifferentiableFSA(keras.Model):
         import math
 
         # Padding mask
-        mask = ops.cast(ops.not_equal(token_ids, 0), "float32")  # (B, L)
+        mask = keras.ops.cast(keras.ops.not_equal(token_ids, 0), "float32")  # (B, L)
 
         # Digit and operator features (deterministic from token IDs)
-        ids_float = ops.cast(token_ids, "float32")
-        is_digit = ops.cast(
-            ops.logical_and(
-                ops.greater_equal(token_ids, 4),
-                ops.less_equal(token_ids, 13),
+        ids_float = keras.ops.cast(token_ids, "float32")
+        is_digit = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(token_ids, 4),
+                keras.ops.less_equal(token_ids, 13),
             ),
             "float32",
         )
         digit_values = (ids_float - 4.0) * is_digit  # 0-9
 
-        op_type = ops.zeros_like(ids_float)
-        op_type = ops.where(ops.equal(token_ids, 14), 1.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 15), 2.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 16), 3.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 17), 4.0 * ops.ones_like(op_type), op_type)
+        op_type = keras.ops.zeros_like(ids_float)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 14), 1.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 15), 2.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 16), 3.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 17), 4.0 * keras.ops.ones_like(op_type), op_type)
 
-        is_operator = ops.cast(
-            ops.logical_and(
-                ops.greater_equal(token_ids, 14),
-                ops.less_equal(token_ids, 17),
+        is_operator = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(token_ids, 14),
+                keras.ops.less_equal(token_ids, 17),
             ),
             "float32",
         )
 
-        numeric_features = ops.stack(
+        numeric_features = keras.ops.stack(
             [digit_values, is_digit, op_type, is_operator], axis=-1
         )
 
@@ -229,8 +228,8 @@ class DifferentiableFSA(keras.Model):
         # that tokens i and j belong to the same constituent.
         # "5 * 2" forms a tighter group than "3 + result" because PEMDAS
         # is constituency: higher-precedence ops bind their operands first.
-        mask_3d = ops.expand_dims(mask, axis=1)  # (B, 1, L)
-        group_prob = ops.convert_to_tensor(0.0, dtype=x.dtype)
+        mask_3d = keras.ops.expand_dims(mask, axis=1)  # (B, 1, L)
+        group_prob = keras.ops.convert_to_tensor(0.0, dtype=x.dtype)
         for block in self.tree_blocks:
             x, group_prob, _ = block(
                 (x, mask_3d, group_prob), training=training
@@ -256,18 +255,18 @@ class DifferentiableFSA(keras.Model):
         # The learned scorer provides a REFINEMENT on top of the
         # hardcoded precedence (to allow learning custom precedence
         # rules when fine-tuned).
-        high_prec = ops.cast(  # * and /
-            ops.logical_or(ops.equal(token_ids, 16), ops.equal(token_ids, 17)),
+        high_prec = keras.ops.cast(  # * and /
+            keras.ops.logical_or(keras.ops.equal(token_ids, 16), keras.ops.equal(token_ids, 17)),
             "float32",
         )
-        low_prec = ops.cast(  # + and -
-            ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
+        low_prec = keras.ops.cast(  # + and -
+            keras.ops.logical_or(keras.ops.equal(token_ids, 14), keras.ops.equal(token_ids, 15)),
             "float32",
         )
         # Parenthesis depth: operators inside parens get priority boost
-        is_open_paren = ops.cast(ops.equal(token_ids, 18), "float32")
-        is_close_paren = ops.cast(ops.equal(token_ids, 19), "float32")
-        paren_depth = ops.cumsum(is_open_paren, axis=1) - ops.cumsum(
+        is_open_paren = keras.ops.cast(keras.ops.equal(token_ids, 18), "float32")
+        is_close_paren = keras.ops.cast(keras.ops.equal(token_ids, 19), "float32")
+        paren_depth = keras.ops.cumsum(is_open_paren, axis=1) - keras.ops.cumsum(
             is_close_paren, axis=1
         )
 
@@ -279,16 +278,16 @@ class DifferentiableFSA(keras.Model):
         )
 
         # Leftmost tie-breaking: subtract small position-dependent value
-        seq_positions = ops.cast(ops.arange(ops.shape(token_ids)[1]), "float32")
+        seq_positions = keras.ops.cast(keras.ops.arange(keras.ops.shape(token_ids)[1]), "float32")
         position_tiebreak = -0.01 * seq_positions  # prefer leftmost
 
         # Pure PEMDAS reduction — no learned component.
         scores = pemdas_scores + position_tiebreak
         scores = scores + (1.0 - mask) * (-1e9)  # mask padding
-        reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
+        reduction_weights = keras.ops.softmax(scores, axis=-1)  # (B, L)
 
         # Soft left/right masks
-        cum_op_prob = ops.cumsum(reduction_weights, axis=1)
+        cum_op_prob = keras.ops.cumsum(reduction_weights, axis=1)
         cum_before = cum_op_prob - reduction_weights
         left_mask = (1.0 - cum_op_prob) * is_digit
         right_mask = cum_before * is_digit
@@ -298,17 +297,17 @@ class DifferentiableFSA(keras.Model):
         right_val = self._soft_assemble(token_ids, right_mask, is_digit, digit_values)
 
         # Operator classification — HARDCODED from token_id
-        op_pos_hard = ops.argmax(reduction_weights, axis=-1)  # (B,)
-        op_token_id = ops.take_along_axis(
+        op_pos_hard = keras.ops.argmax(reduction_weights, axis=-1)  # (B,)
+        op_token_id = keras.ops.take_along_axis(
             token_ids,
-            ops.expand_dims(ops.cast(op_pos_hard, "int32"), -1),
+            keras.ops.expand_dims(keras.ops.cast(op_pos_hard, "int32"), -1),
             axis=1,
         )  # (B, 1)
-        op_idx = ops.squeeze(
-            ops.cast(op_token_id, "int32") - 14, axis=-1
+        op_idx = keras.ops.squeeze(
+            keras.ops.cast(op_token_id, "int32") - 14, axis=-1
         )  # (B,)
-        op_idx = ops.clip(op_idx, 0, 3)
-        op_one_hot = ops.cast(ops.one_hot(op_idx, 4), "float32")
+        op_idx = keras.ops.clip(op_idx, 0, 3)
+        op_one_hot = keras.ops.cast(keras.ops.one_hot(op_idx, 4), "float32")
         op_logits = op_one_hot * 30.0 - (1.0 - op_one_hot) * 30.0
 
         # Fixed arithmetic with hard operator select
@@ -317,16 +316,16 @@ class DifferentiableFSA(keras.Model):
         mul_result, mul_valid = _fixed_multiply(left_val, right_val)
         div_result, div_valid = _fixed_divide(left_val, right_val)
 
-        all_results = ops.stack(
+        all_results = keras.ops.stack(
             [add_result, sub_result, mul_result, div_result], axis=1
         )
-        all_valid = ops.stack(
+        all_valid = keras.ops.stack(
             [add_valid, sub_valid, mul_valid, div_valid], axis=1
         )
 
-        op_weights = ops.expand_dims(op_one_hot, axis=-1)
-        result = ops.sum(all_results * op_weights, axis=1)
-        valid = ops.sum(all_valid * op_weights, axis=1)
+        op_weights = keras.ops.expand_dims(op_one_hot, axis=-1)
+        result = keras.ops.sum(all_results * op_weights, axis=1)
+        valid = keras.ops.sum(all_valid * op_weights, axis=1)
 
         return {
             "result": result,
@@ -351,9 +350,9 @@ class DifferentiableFSA(keras.Model):
         out = self.reduce_step(token_ids, training=training)
 
         # Result encoder (learned interface)
-        result_compressed = ops.sign(out["result"]) * ops.log1p(ops.abs(out["result"]))
+        result_compressed = keras.ops.sign(out["result"]) * keras.ops.log1p(keras.ops.abs(out["result"]))
         result_embedding = self.result_encoder(
-            ops.concatenate([result_compressed, out["valid"]], axis=-1)
+            keras.ops.concatenate([result_compressed, out["valid"]], axis=-1)
         )
         out["result_embedding"] = result_embedding
         return out
@@ -374,15 +373,15 @@ class DifferentiableFSA(keras.Model):
         :return: (B, 1) float — assembled number value
         """
         # cumsum gives running count → position-in-number for power-of-10
-        cumsum_left = ops.cumsum(soft_mask, axis=1)
-        total_digits = ops.sum(soft_mask, axis=1, keepdims=True)  # (B, 1)
+        cumsum_left = keras.ops.cumsum(soft_mask, axis=1)
+        total_digits = keras.ops.sum(soft_mask, axis=1, keepdims=True)  # (B, 1)
         power_of_10 = (total_digits - cumsum_left) * soft_mask  # (B, L)
 
         # 10^power is differentiable (d/dx 10^x = 10^x * ln(10))
-        positional_weight = ops.power(10.0, power_of_10) * soft_mask
+        positional_weight = keras.ops.power(10.0, power_of_10) * soft_mask
 
         # Assemble: sum(digit_value * positional_weight)
-        value = ops.sum(
+        value = keras.ops.sum(
             digit_values * positional_weight, axis=1, keepdims=True
         )
         return value  # (B, 1)
@@ -401,29 +400,29 @@ class DifferentiableFSA(keras.Model):
         :param training: Whether in training mode.
         :return: List of per-step output dicts.
         """
-        B = ops.shape(token_ids)[0]
+        B = keras.ops.shape(token_ids)[0]
         L = self.max_expression_len
 
         current_ids = token_ids
-        value_buffer = ops.zeros((B, L))
-        buffer_active = ops.zeros((B, L))
+        value_buffer = keras.ops.zeros((B, L))
+        buffer_active = keras.ops.zeros((B, L))
 
         all_outputs = []
         # Track the last valid result for pass-through when no ops remain
-        last_valid_result = ops.zeros((B, 1))
+        last_valid_result = keras.ops.zeros((B, 1))
 
         for step in range(max_steps):
             # Check if operators remain in the current token sequence
-            is_op_check = ops.cast(
-                ops.logical_and(
-                    ops.greater_equal(current_ids, 14),
-                    ops.less_equal(current_ids, 17),
+            is_op_check = keras.ops.cast(
+                keras.ops.logical_and(
+                    keras.ops.greater_equal(current_ids, 14),
+                    keras.ops.less_equal(current_ids, 17),
                 ),
                 "float32",
             )
-            has_ops = ops.cast(
-                ops.greater(
-                    ops.sum(is_op_check, axis=-1, keepdims=True), 0.5
+            has_ops = keras.ops.cast(
+                keras.ops.greater(
+                    keras.ops.sum(is_op_check, axis=-1, keepdims=True), 0.5
                 ),
                 "float32",
             )  # (B, 1) — 1.0 if operators remain
@@ -474,43 +473,43 @@ class DifferentiableFSA(keras.Model):
         """
         import math
 
-        B = ops.shape(token_ids)[0]
+        B = keras.ops.shape(token_ids)[0]
         L = self.max_expression_len
 
         if value_buffer is None:
-            value_buffer = ops.zeros((B, L))
+            value_buffer = keras.ops.zeros((B, L))
         if buffer_active is None:
-            buffer_active = ops.zeros((B, L))
+            buffer_active = keras.ops.zeros((B, L))
 
         # Padding mask
-        mask = ops.cast(ops.not_equal(token_ids, 0), "float32")  # (B, L)
+        mask = keras.ops.cast(keras.ops.not_equal(token_ids, 0), "float32")  # (B, L)
 
         # Digit and operator features (deterministic from token IDs)
-        ids_float = ops.cast(token_ids, "float32")
-        is_digit = ops.cast(
-            ops.logical_and(
-                ops.greater_equal(token_ids, 4),
-                ops.less_equal(token_ids, 13),
+        ids_float = keras.ops.cast(token_ids, "float32")
+        is_digit = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(token_ids, 4),
+                keras.ops.less_equal(token_ids, 13),
             ),
             "float32",
         )
         digit_values = (ids_float - 4.0) * is_digit  # 0-9
 
-        is_operator = ops.cast(
-            ops.logical_and(
-                ops.greater_equal(token_ids, 14),
-                ops.less_equal(token_ids, 17),
+        is_operator = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(token_ids, 14),
+                keras.ops.less_equal(token_ids, 17),
             ),
             "float32",
         )
 
-        op_type = ops.zeros_like(ids_float)
-        op_type = ops.where(ops.equal(token_ids, 14), 1.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 15), 2.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 16), 3.0 * ops.ones_like(op_type), op_type)
-        op_type = ops.where(ops.equal(token_ids, 17), 4.0 * ops.ones_like(op_type), op_type)
+        op_type = keras.ops.zeros_like(ids_float)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 14), 1.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 15), 2.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 16), 3.0 * keras.ops.ones_like(op_type), op_type)
+        op_type = keras.ops.where(keras.ops.equal(token_ids, 17), 4.0 * keras.ops.ones_like(op_type), op_type)
 
-        numeric_features = ops.stack(
+        numeric_features = keras.ops.stack(
             [digit_values, is_digit, op_type, is_operator], axis=-1
         )
 
@@ -520,8 +519,8 @@ class DifferentiableFSA(keras.Model):
         x = self.pos_encoding(x, training=training)
 
         # Tree transformer
-        mask_3d = ops.expand_dims(mask, axis=1)  # (B, 1, L)
-        group_prob = ops.convert_to_tensor(0.0, dtype=x.dtype)
+        mask_3d = keras.ops.expand_dims(mask, axis=1)  # (B, 1, L)
+        group_prob = keras.ops.convert_to_tensor(0.0, dtype=x.dtype)
         for block in self.tree_blocks:
             x, group_prob, _ = block(
                 (x, mask_3d, group_prob), training=training
@@ -529,25 +528,25 @@ class DifferentiableFSA(keras.Model):
         x = self.encoder_norm(x)
 
         # --- PEMDAS reduction scoring (hardcoded, paren-aware) ---
-        high_prec = ops.cast(
-            ops.logical_or(ops.equal(token_ids, 16), ops.equal(token_ids, 17)),
+        high_prec = keras.ops.cast(
+            keras.ops.logical_or(keras.ops.equal(token_ids, 16), keras.ops.equal(token_ids, 17)),
             "float32",
         )
-        low_prec = ops.cast(
-            ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
+        low_prec = keras.ops.cast(
+            keras.ops.logical_or(keras.ops.equal(token_ids, 14), keras.ops.equal(token_ids, 15)),
             "float32",
         )
         # Parenthesis depth: operators inside parens get priority boost
-        is_open_paren = ops.cast(ops.equal(token_ids, 18), "float32")
-        is_close_paren = ops.cast(ops.equal(token_ids, 19), "float32")
-        paren_depth = ops.cumsum(is_open_paren, axis=1) - ops.cumsum(
+        is_open_paren = keras.ops.cast(keras.ops.equal(token_ids, 18), "float32")
+        is_close_paren = keras.ops.cast(keras.ops.equal(token_ids, 19), "float32")
+        paren_depth = keras.ops.cumsum(is_open_paren, axis=1) - keras.ops.cumsum(
             is_close_paren, axis=1
         )
         pemdas_scores = (
             paren_depth * 100.0 + high_prec * 20.0 + low_prec * 15.0
         )
 
-        seq_positions = ops.cast(ops.arange(L), "float32")
+        seq_positions = keras.ops.cast(keras.ops.arange(L), "float32")
         position_tiebreak = -0.01 * seq_positions
 
         scores = pemdas_scores + position_tiebreak
@@ -562,20 +561,20 @@ class DifferentiableFSA(keras.Model):
         # locally because the second reduce_step doesn't compute it (only the
         # dead first one does).
         if self.use_learned_residual:
-            numeric_features = ops.stack(
+            numeric_features = keras.ops.stack(
                 [digit_values, is_digit, op_type, is_operator], axis=-1
             )  # (B, L, 4)
-            scorer_in = ops.concatenate(
+            scorer_in = keras.ops.concatenate(
                 [x, numeric_features], axis=-1
             )  # (B, L, D+4)
-            residual_raw = ops.squeeze(
+            residual_raw = keras.ops.squeeze(
                 self.reduction_scorer(scorer_in), axis=-1
             )  # (B, L)
-            residual = 5.0 * ops.tanh(residual_raw)  # bounded
+            residual = 5.0 * keras.ops.tanh(residual_raw)  # bounded
             scores = scores + self.alpha * residual
             residual_logits_out = residual  # for consistency loss in train_dfsa_ste
         else:
-            residual_logits_out = ops.zeros_like(scores)
+            residual_logits_out = keras.ops.zeros_like(scores)
 
         # Snapshot pemdas-only logits (operator-masked) BEFORE the padding mask
         # is applied — used by the consistency loss in train_dfsa_ste.py.
@@ -591,20 +590,20 @@ class DifferentiableFSA(keras.Model):
         # Safety: if no operators exist, add small uniform score to avoid
         # softmax(all -inf) = NaN. The has_ops check in multi_reduce
         # handles the result pass-through.
-        any_op = ops.cast(
-            ops.greater(
-                ops.sum(is_operator, axis=-1, keepdims=True), 0.5
+        any_op = keras.ops.cast(
+            keras.ops.greater(
+                keras.ops.sum(is_operator, axis=-1, keepdims=True), 0.5
             ),
             "float32",
         )  # (B, 1)
         scores = scores + (1.0 - any_op) * mask * (-100.0)  # uniform when no ops
-        reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
+        reduction_weights = keras.ops.softmax(scores, axis=-1)  # (B, L)
 
         # Hard operator position (for masking and re-tokenization)
-        op_pos_hard = ops.argmax(reduction_weights, axis=-1)  # (B,)
+        op_pos_hard = keras.ops.argmax(reduction_weights, axis=-1)  # (B,)
 
         # --- Adjacent operand masking via op_cumsum ---
-        is_value = ops.clip(is_digit + buffer_active, 0.0, 1.0)
+        is_value = keras.ops.clip(is_digit + buffer_active, 0.0, 1.0)
         left_mask, right_mask = self._adjacent_masks(
             token_ids, is_digit, is_operator, buffer_active,
             op_pos_hard, L,
@@ -624,26 +623,26 @@ class DifferentiableFSA(keras.Model):
         # position. Token 14=+ (idx 0), 15=- (idx 1), 16=* (idx 2),
         # 17=/ (idx 3). PEMDAS scoring guarantees op_pos_hard always
         # points to an operator token (non-operators masked to -inf).
-        op_token_id = ops.take_along_axis(
+        op_token_id = keras.ops.take_along_axis(
             token_ids,
-            ops.expand_dims(ops.cast(op_pos_hard, "int32"), -1),
+            keras.ops.expand_dims(keras.ops.cast(op_pos_hard, "int32"), -1),
             axis=1,
         )  # (B, 1)
-        op_idx = ops.squeeze(
-            ops.cast(op_token_id, "int32") - 14, axis=-1
+        op_idx = keras.ops.squeeze(
+            keras.ops.cast(op_token_id, "int32") - 14, axis=-1
         )  # (B,)
-        op_idx = ops.clip(op_idx, 0, 3)  # safety clamp
-        op_hard = ops.cast(ops.one_hot(op_idx, 4), "float32")
+        op_idx = keras.ops.clip(op_idx, 0, 3)  # safety clamp
+        op_hard = keras.ops.cast(keras.ops.one_hot(op_idx, 4), "float32")
 
         if self.use_ste and training:
             # Straight-through estimator: forward uses hard (100% correct),
             # backward uses soft (gradients flow to tree encoder).
-            pooled = ops.sum(
-                x * ops.expand_dims(reduction_weights, -1), axis=1
+            pooled = keras.ops.sum(
+                x * keras.ops.expand_dims(reduction_weights, -1), axis=1
             )
             op_logits = self.op_classifier(pooled)
-            op_soft = ops.softmax(op_logits, axis=-1)
-            op_one_hot = op_soft + ops.stop_gradient(op_hard - op_soft)
+            op_soft = keras.ops.softmax(op_logits, axis=-1)
+            op_one_hot = op_soft + keras.ops.stop_gradient(op_hard - op_soft)
         else:
             op_one_hot = op_hard
             op_logits = op_hard * 30.0 - (1.0 - op_hard) * 30.0
@@ -654,16 +653,16 @@ class DifferentiableFSA(keras.Model):
         mul_result, mul_valid = _fixed_multiply(left_val, right_val)
         div_result, div_valid = _fixed_divide(left_val, right_val)
 
-        all_results = ops.stack(
+        all_results = keras.ops.stack(
             [add_result, sub_result, mul_result, div_result], axis=1
         )
-        all_valid = ops.stack(
+        all_valid = keras.ops.stack(
             [add_valid, sub_valid, mul_valid, div_valid], axis=1
         )
 
-        op_weights = ops.expand_dims(op_one_hot, axis=-1)
-        result = ops.sum(all_results * op_weights, axis=1)
-        valid = ops.sum(all_valid * op_weights, axis=1)
+        op_weights = keras.ops.expand_dims(op_one_hot, axis=-1)
+        result = keras.ops.sum(all_results * op_weights, axis=1)
+        valid = keras.ops.sum(all_valid * op_weights, axis=1)
 
         return {
             "result": result,
@@ -700,35 +699,35 @@ class DifferentiableFSA(keras.Model):
         :return: (left_mask, right_mask) each (B, L) float
         """
         # Segment boundaries from operator cumulative count
-        op_cumsum = ops.cumsum(
-            ops.cast(is_operator, "int32"), axis=1
+        op_cumsum = keras.ops.cumsum(
+            keras.ops.cast(is_operator, "int32"), axis=1
         )  # (B, L)
 
         # Selected operator's cumsum value
-        op_pos_expanded = ops.expand_dims(
-            ops.cast(op_pos, "int32"), axis=-1
+        op_pos_expanded = keras.ops.expand_dims(
+            keras.ops.cast(op_pos, "int32"), axis=-1
         )  # (B, 1)
-        selected_cum = ops.take_along_axis(
+        selected_cum = keras.ops.take_along_axis(
             op_cumsum, op_pos_expanded, axis=1
         )  # (B, 1)
 
         # Positions that hold a value (digit or result placeholder)
-        is_value = ops.clip(is_digit + buffer_active, 0.0, 1.0)
+        is_value = keras.ops.clip(is_digit + buffer_active, 0.0, 1.0)
 
         # Left operand: value positions in segment (selected_cum - 1)
-        in_left_segment = ops.cast(
-            ops.equal(op_cumsum, selected_cum - 1), "float32"
+        in_left_segment = keras.ops.cast(
+            keras.ops.equal(op_cumsum, selected_cum - 1), "float32"
         )
         left_mask = in_left_segment * is_value
 
         # Right operand: value positions in segment (selected_cum)
         # that are AFTER the operator position
-        positions = ops.cast(ops.arange(L), "int32")  # (L,)
-        after_op = ops.cast(
-            ops.greater(positions, op_pos_expanded), "float32"
+        positions = keras.ops.cast(keras.ops.arange(L), "int32")  # (L,)
+        after_op = keras.ops.cast(
+            keras.ops.greater(positions, op_pos_expanded), "float32"
         )  # (B, L)
-        in_right_segment = ops.cast(
-            ops.equal(op_cumsum, selected_cum), "float32"
+        in_right_segment = keras.ops.cast(
+            keras.ops.equal(op_cumsum, selected_cum), "float32"
         )
         right_mask = in_right_segment * after_op * is_value
 
@@ -754,27 +753,27 @@ class DifferentiableFSA(keras.Model):
         :return: (B, 1) float — assembled value
         """
         # Check if this operand contains a result placeholder
-        has_buffer = ops.sum(
+        has_buffer = keras.ops.sum(
             mask * buffer_active, axis=1, keepdims=True
         )  # (B, 1) — >0 if buffer present
 
         # Digit-only assembly (standard power-of-10)
         digit_mask = mask * is_digit * (1.0 - buffer_active)
-        cumsum_d = ops.cumsum(digit_mask, axis=1)
-        total_d = ops.sum(digit_mask, axis=1, keepdims=True)
+        cumsum_d = keras.ops.cumsum(digit_mask, axis=1)
+        total_d = keras.ops.sum(digit_mask, axis=1, keepdims=True)
         power_of_10 = (total_d - cumsum_d) * digit_mask
-        positional_weight = ops.power(10.0, power_of_10) * digit_mask
-        digit_val = ops.sum(
+        positional_weight = keras.ops.power(10.0, power_of_10) * digit_mask
+        digit_val = keras.ops.sum(
             digit_values * positional_weight, axis=1, keepdims=True
         )
 
         # Buffer value: read directly (carries gradients from prior step)
-        buffer_val = ops.sum(
+        buffer_val = keras.ops.sum(
             mask * buffer_active * value_buffer, axis=1, keepdims=True
         )
 
         # Select: buffer if present, otherwise digits
-        val = ops.where(has_buffer > 0.5, buffer_val, digit_val)
+        val = keras.ops.where(has_buffer > 0.5, buffer_val, digit_val)
         return val
 
     def _retokenize(self, token_ids, value_buffer, buffer_active,
@@ -799,55 +798,55 @@ class DifferentiableFSA(keras.Model):
         :return: (new_token_ids, new_value_buffer, new_buffer_active)
         """
         L = self.max_expression_len
-        op_pos_expanded = ops.expand_dims(
-            ops.cast(op_pos, "int32"), axis=-1
+        op_pos_expanded = keras.ops.expand_dims(
+            keras.ops.cast(op_pos, "int32"), axis=-1
         )  # (B, 1)
 
         # Operator one-hot
-        op_one_hot = ops.cast(
-            ops.one_hot(ops.cast(op_pos, "int32"), L), "float32"
+        op_one_hot = keras.ops.cast(
+            keras.ops.one_hot(keras.ops.cast(op_pos, "int32"), L), "float32"
         )  # (B, L)
 
         # Clear mask: left operand + operator + right operand
-        clear_mask = ops.clip(left_mask + right_mask + op_one_hot, 0.0, 1.0)
+        clear_mask = keras.ops.clip(left_mask + right_mask + op_one_hot, 0.0, 1.0)
 
         # Also clear spaces and parentheses adjacent to cleared positions.
         # 2 expansion rounds handle up to 2 nesting levels (e.g. ((a+b))).
-        is_space = ops.cast(ops.equal(token_ids, 3), "float32")
-        is_paren = ops.cast(
-            ops.logical_or(
-                ops.equal(token_ids, 18), ops.equal(token_ids, 19)
+        is_space = keras.ops.cast(keras.ops.equal(token_ids, 3), "float32")
+        is_paren = keras.ops.cast(
+            keras.ops.logical_or(
+                keras.ops.equal(token_ids, 18), keras.ops.equal(token_ids, 19)
             ),
             "float32",
         )
-        is_clearable = ops.clip(is_space + is_paren, 0.0, 1.0)
+        is_clearable = keras.ops.clip(is_space + is_paren, 0.0, 1.0)
         for _ in range(2):
-            clear_shifted_r = ops.concatenate(
-                [ops.zeros_like(clear_mask[:, :1]), clear_mask[:, :-1]],
+            clear_shifted_r = keras.ops.concatenate(
+                [keras.ops.zeros_like(clear_mask[:, :1]), clear_mask[:, :-1]],
                 axis=1,
             )
-            clear_shifted_l = ops.concatenate(
-                [clear_mask[:, 1:], ops.zeros_like(clear_mask[:, :1])],
+            clear_shifted_l = keras.ops.concatenate(
+                [clear_mask[:, 1:], keras.ops.zeros_like(clear_mask[:, :1])],
                 axis=1,
             )
-            adjacent_clear = is_clearable * ops.clip(
+            adjacent_clear = is_clearable * keras.ops.clip(
                 clear_shifted_r + clear_shifted_l, 0.0, 1.0
             )
-            clear_mask = ops.clip(clear_mask + adjacent_clear, 0.0, 1.0)
+            clear_mask = keras.ops.clip(clear_mask + adjacent_clear, 0.0, 1.0)
 
         # New token_ids: clear to PAD, place RESULT_PLACEHOLDER at op_pos
-        clear_int = ops.cast(clear_mask > 0.5, "int32")
+        clear_int = keras.ops.cast(clear_mask > 0.5, "int32")
         new_ids = token_ids * (1 - clear_int)  # zero out cleared positions
         # Place RESULT_PLACEHOLDER (ID=21) at op_pos
-        placeholder_ids = ops.cast(op_one_hot, "int32") * RESULT_PLACEHOLDER_ID
+        placeholder_ids = keras.ops.cast(op_one_hot, "int32") * RESULT_PLACEHOLDER_ID
         new_ids = new_ids + placeholder_ids
 
         # Update value buffer: store result at op_pos (gradient-carrying)
-        result_broadcast = ops.squeeze(result, axis=-1)  # (B,) or (B,1)→(B,)
-        if len(ops.shape(result_broadcast)) == 2:
+        result_broadcast = keras.ops.squeeze(result, axis=-1)  # (B,) or (B,1)→(B,)
+        if len(keras.ops.shape(result_broadcast)) == 2:
             result_broadcast = result_broadcast[:, 0]
         new_buffer = value_buffer * (1.0 - clear_mask) + (
-            ops.expand_dims(result_broadcast, -1) * op_one_hot
+            keras.ops.expand_dims(result_broadcast, -1) * op_one_hot
         )
         new_active = buffer_active * (1.0 - clear_mask) + op_one_hot
 
@@ -867,11 +866,11 @@ class DifferentiableFSA(keras.Model):
         last = outputs[-1]
 
         # Result encoder (learned interface to host transformer)
-        result_compressed = ops.sign(last["result"]) * ops.log1p(
-            ops.abs(last["result"])
+        result_compressed = keras.ops.sign(last["result"]) * keras.ops.log1p(
+            keras.ops.abs(last["result"])
         )
         result_embedding = self.result_encoder(
-            ops.concatenate([result_compressed, last["valid"]], axis=-1)
+            keras.ops.concatenate([result_compressed, last["valid"]], axis=-1)
         )
 
         return {
@@ -892,13 +891,13 @@ class DifferentiableFSA(keras.Model):
         :param digit_values: (B, L) float — 0-9
         :return: (B, 1) float
         """
-        cumsum_left = ops.cumsum(soft_mask, axis=1)
-        total_digits = ops.sum(soft_mask, axis=1, keepdims=True)
+        cumsum_left = keras.ops.cumsum(soft_mask, axis=1)
+        total_digits = keras.ops.sum(soft_mask, axis=1, keepdims=True)
         power_of_10 = (total_digits - cumsum_left) * soft_mask
 
-        positional_weight = ops.power(10.0, power_of_10) * soft_mask
+        positional_weight = keras.ops.power(10.0, power_of_10) * soft_mask
 
-        value = ops.sum(
+        value = keras.ops.sum(
             digit_values * positional_weight, axis=1, keepdims=True
         )
         return value

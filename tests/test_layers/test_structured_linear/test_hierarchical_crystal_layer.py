@@ -22,7 +22,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.structured_linear.hierarchical_crystal_layer import (
     HierarchicalCrystalLayer
@@ -127,7 +126,7 @@ class TestHierarchicalCrystalLayerFrames:
         _Parent(layer)(keras.Input(shape=(4,)))
 
         for variable in (layer.macro_weights, layer.micro_weights):
-            values = ops.convert_to_numpy(variable).astype(np.float64)
+            values = keras.ops.convert_to_numpy(variable).astype(np.float64)
             np.testing.assert_allclose(
                 np.linalg.norm(values, axis=0), 1.0, atol=1e-5, rtol=0,
                 err_msg=f"{variable.path} is not unit-norm after a parent build"
@@ -164,7 +163,7 @@ class TestHierarchicalCrystalLayerFrames:
         layer = _layer(3, 12, seed=0)
         layer(_sample_input(input_dim=4))
 
-        micro = ops.convert_to_numpy(layer.micro_weights)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights)
         distinct = {tuple(np.round(column, 6)) for column in micro.T}
 
         assert len(distinct) == 36, (
@@ -180,7 +179,7 @@ class TestHierarchicalCrystalLayerFrames:
         layer = _layer(3, 6, seed=0)
         layer(_sample_input(input_dim=4))
 
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
         first_group = micro[:, 0:6]
         second_group = micro[:, 6:12]
 
@@ -192,12 +191,12 @@ class TestHierarchicalCrystalLayerFrames:
         second(_sample_input(input_dim=4))
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(first.macro_weights),
-            ops.convert_to_numpy(second.macro_weights)
+            keras.ops.convert_to_numpy(first.macro_weights),
+            keras.ops.convert_to_numpy(second.macro_weights)
         )
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(first.micro_weights),
-            ops.convert_to_numpy(second.micro_weights)
+            keras.ops.convert_to_numpy(first.micro_weights),
+            keras.ops.convert_to_numpy(second.micro_weights)
         )
 
     @pytest.mark.parametrize('seed', [None, 0, 7])
@@ -224,8 +223,8 @@ class TestHierarchicalCrystalLayerFrames:
         layer = _layer(3, 5, cluster_spread=0.25, seed=seed)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
 
         for group in range(3):
             centroid = macro[:, group]
@@ -246,7 +245,7 @@ class TestHierarchicalCrystalLayerFrames:
         """
         layer = _layer(3, 5, cluster_spread=0.25, seed=0)
         layer(_sample_input(input_dim=4))
-        first = ops.convert_to_numpy(layer.micro_weights).copy()
+        first = keras.ops.convert_to_numpy(layer.micro_weights).copy()
 
         # Force a second build of the same instance.
         layer = _layer(3, 5, cluster_spread=0.25, seed=0)
@@ -254,7 +253,7 @@ class TestHierarchicalCrystalLayerFrames:
         layer(_sample_input(input_dim=4))
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer.micro_weights), first,
+            keras.ops.convert_to_numpy(layer.micro_weights), first,
             err_msg="a second forward pass changed the leaf frame's seed root"
         )
 
@@ -277,7 +276,7 @@ class TestHierarchicalCrystalLayerForwardPass:
         output = layer(_sample_input(input_dim=4))
 
         assert output.shape == (4, macro * micro)
-        assert bool(ops.all(ops.isfinite(output)))
+        assert bool(keras.ops.all(keras.ops.isfinite(output)))
 
     @pytest.mark.parametrize('rank', [1, 2, 3, 4])
     def test_hierarchy_mode_reports_all_three_outputs(self, rank):
@@ -303,7 +302,7 @@ class TestHierarchicalCrystalLayerForwardPass:
         grow with the class count beyond a few ulps.
         """
         layer = _layer(3, 12, return_hierarchy=True, seed=0)
-        joint = ops.convert_to_numpy(layer(_sample_input(input_dim=4))['joint_probabilities'])
+        joint = keras.ops.convert_to_numpy(layer(_sample_input(input_dim=4))['joint_probabilities'])
 
         np.testing.assert_allclose(
             joint.sum(axis=-1), 1.0, rtol=0, atol=BAYES_ATOL,
@@ -314,7 +313,7 @@ class TestHierarchicalCrystalLayerForwardPass:
     def test_the_bayes_identity_holds_at_every_rank(self, rank):
         """The regrouping is the fragile part, so it is checked per rank."""
         layer = _layer(3, 12, return_hierarchy=True, seed=0)
-        joint = ops.convert_to_numpy(
+        joint = keras.ops.convert_to_numpy(
             layer(_sample_input(rank=rank, input_dim=4))['joint_probabilities']
         )
 
@@ -331,12 +330,12 @@ class TestHierarchicalCrystalLayerForwardPass:
         inputs = _sample_input(input_dim=4).astype(np.float64)
         layer = _layer(3, 5, scale=7.0, return_hierarchy=True, seed=0)
         outputs = {
-            key: ops.convert_to_numpy(value).astype(np.float64)
+            key: keras.ops.convert_to_numpy(value).astype(np.float64)
             for key, value in layer(inputs.astype(np.float32)).items()
         }
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
         unit_x = inputs / np.linalg.norm(inputs, axis=-1, keepdims=True)
         unit_macro = macro / np.linalg.norm(macro, axis=0, keepdims=True)
         unit_micro = micro / np.linalg.norm(micro, axis=0, keepdims=True)
@@ -363,7 +362,7 @@ class TestHierarchicalCrystalLayerForwardPass:
     def test_the_joint_is_a_probability_distribution(self):
         """Non-negative and bounded by one, which a renormalized logit would not be."""
         layer = _layer(3, 12, return_hierarchy=True, seed=0)
-        joint = ops.convert_to_numpy(layer(_sample_input(input_dim=4))['joint_probabilities'])
+        joint = keras.ops.convert_to_numpy(layer(_sample_input(input_dim=4))['joint_probabilities'])
 
         assert joint.min() >= 0.0
         assert joint.max() <= 1.0
@@ -373,7 +372,7 @@ class TestHierarchicalCrystalLayerForwardPass:
         outputs = layer(np.zeros((2, 4), dtype=np.float32))
 
         for key, value in outputs.items():
-            values = ops.convert_to_numpy(value)
+            values = keras.ops.convert_to_numpy(value)
             assert np.all(np.isfinite(values)), f"{key} went non-finite on a zero input"
 
     def test_inference_and_training_agree(self):
@@ -383,8 +382,8 @@ class TestHierarchicalCrystalLayerForwardPass:
 
         for key in ('macro_logits', 'micro_logits', 'joint_probabilities'):
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(layer(inputs, training=True)[key]),
-                ops.convert_to_numpy(layer(inputs, training=False)[key])
+                keras.ops.convert_to_numpy(layer(inputs, training=True)[key]),
+                keras.ops.convert_to_numpy(layer(inputs, training=False)[key])
             )
 
     def test_the_leaf_logits_do_not_depend_on_the_macro_mode(self):
@@ -394,8 +393,8 @@ class TestHierarchicalCrystalLayerForwardPass:
         nested = _layer(3, 5, return_hierarchy=True, seed=0)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(nested(inputs)['micro_logits']),
-            ops.convert_to_numpy(flat(inputs)),
+            keras.ops.convert_to_numpy(nested(inputs)['micro_logits']),
+            keras.ops.convert_to_numpy(flat(inputs)),
             rtol=0, atol=1e-6
         )
 
@@ -407,8 +406,8 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=0.0, seed=0)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights)
-        micro = ops.convert_to_numpy(layer.micro_weights)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights)
 
         for group in range(3):
             centroid = macro[:, group]
@@ -430,8 +429,8 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=0.3, seed=0)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
 
         for group in range(3):
             leaves = micro[:, group * 5:(group + 1) * 5]
@@ -447,8 +446,8 @@ class TestClusterSpread:
         for spread in (0.0, 0.15, 0.5):
             layer = _layer(3, 5, cluster_spread=spread, seed=0)
             layer(_sample_input(input_dim=4))
-            macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-            micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+            macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+            micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
             worst = max(
                 float(np.abs(micro[:, g * 5:(g + 1) * 5].T @ macro[:, g]).max())
                 for g in range(3)
@@ -475,13 +474,13 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=0.0, return_hierarchy=True, seed=0)
         outputs = layer(_sample_input(input_dim=4))
 
-        micro = ops.convert_to_numpy(layer.micro_weights)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights)
         distinct = len({tuple(np.round(column, 6)) for column in micro.T})
         assert distinct == 3, (
             f"expected 3 distinct leaves at cluster_spread=0, got {distinct}"
         )
 
-        logits = ops.convert_to_numpy(outputs['micro_logits'])
+        logits = keras.ops.convert_to_numpy(outputs['micro_logits'])
         grouped = logits.reshape(*logits.shape[:-1], 3, 5)
         within_group = np.abs(grouped[:, :, 0] - grouped[:, :, 1]).max()
         assert within_group == 0.0, (
@@ -498,7 +497,7 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=0.25, return_hierarchy=True, seed=0)
         outputs = layer(_sample_input(input_dim=4))
 
-        logits = ops.convert_to_numpy(outputs['micro_logits'])
+        logits = keras.ops.convert_to_numpy(outputs['micro_logits'])
         grouped = logits.reshape(*logits.shape[:-1], 3, 5)
 
         assert np.abs(grouped[:, :, 0] - grouped[:, :, 1]).max() > 1e-3, \
@@ -515,8 +514,8 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=0.9, seed=42)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
 
         for group in range(3):
             leaves = micro[:, group * 5:(group + 1) * 5]
@@ -544,8 +543,8 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=spread, seed=0)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
         macro /= np.linalg.norm(macro, axis=0, keepdims=True)
         micro /= np.linalg.norm(micro, axis=0, keepdims=True)
 
@@ -570,8 +569,8 @@ class TestClusterSpread:
         layer = _layer(3, 5, cluster_spread=1.0, seed=0)
         layer(_sample_input(input_dim=4))
 
-        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
-        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro = keras.ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = keras.ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
         macro /= np.linalg.norm(macro, axis=0, keepdims=True)
         micro /= np.linalg.norm(micro, axis=0, keepdims=True)
 
@@ -599,12 +598,12 @@ class TestClusterSpread:
         outputs = layer(_sample_input(input_dim=4))
 
         for key, value in outputs.items():
-            values = ops.convert_to_numpy(value)
+            values = keras.ops.convert_to_numpy(value)
             assert np.all(np.isfinite(values)), (
                 f"{key} went non-finite at cluster_spread=1.0"
             )
 
-        assert np.all(np.isfinite(ops.convert_to_numpy(layer.micro_weights))), (
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(layer.micro_weights))), (
             "a zero-norm leaf must land as a finite zero column, not NaN"
         )
 
@@ -670,13 +669,13 @@ class TestHierarchicalCrystalLayerKnobSensitivity:
         first, second = _layer(3, 12, seed=1), _layer(3, 12, seed=2)
 
         assert not np.allclose(
-            ops.convert_to_numpy(first(inputs)), ops.convert_to_numpy(second(inputs))
+            keras.ops.convert_to_numpy(first(inputs)), keras.ops.convert_to_numpy(second(inputs))
         )
 
     def test_scale_multiplies_the_logits_linearly(self):
         inputs = _sample_input(input_dim=4)
-        one = ops.convert_to_numpy(_layer(3, 5, scale=1.0, seed=0)(inputs))
-        four = ops.convert_to_numpy(_layer(3, 5, scale=4.0, seed=0)(inputs))
+        one = keras.ops.convert_to_numpy(_layer(3, 5, scale=1.0, seed=0)(inputs))
+        four = keras.ops.convert_to_numpy(_layer(3, 5, scale=4.0, seed=0)(inputs))
 
         np.testing.assert_allclose(four, 4.0 * one, rtol=0, atol=1e-4)
 
@@ -685,8 +684,8 @@ class TestHierarchicalCrystalLayerKnobSensitivity:
         inputs = _sample_input(input_dim=4)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(layer(inputs * 4.0)),
-            ops.convert_to_numpy(layer(inputs)),
+            keras.ops.convert_to_numpy(layer(inputs * 4.0)),
+            keras.ops.convert_to_numpy(layer(inputs)),
             rtol=1e-5, atol=1e-5
         )
 
@@ -701,7 +700,7 @@ class TestHierarchicalCrystalLayerKnobSensitivity:
         flipped[:, 0] *= -1.0
 
         assert float(np.abs(
-            ops.convert_to_numpy(layer(base)) - ops.convert_to_numpy(layer(flipped))
+            keras.ops.convert_to_numpy(layer(base)) - keras.ops.convert_to_numpy(layer(flipped))
         ).max()) > 1e-3
 
 
@@ -714,7 +713,7 @@ class TestHierarchicalCrystalLayerGraphSafety:
         signature = tf.TensorSpec([None] * (inputs.ndim - 1) + [4], tf.float32)
 
         eager = {
-            key: ops.convert_to_numpy(value)
+            key: keras.ops.convert_to_numpy(value)
             for key, value in _layer(3, 12, return_hierarchy=True, seed=0)(inputs).items()
         }
 
@@ -730,13 +729,13 @@ class TestHierarchicalCrystalLayerGraphSafety:
         # insertion order (the micro logits come first), so a positional read of
         # `keras.tree.flatten` silently compares unrelated tensors.
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced_output['joint_probabilities']),
+            keras.ops.convert_to_numpy(traced_output['joint_probabilities']),
             eager['joint_probabilities'],
             rtol=1e-6, atol=1e-6,
             err_msg="traced joint probabilities differ from the eager ones"
         )
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced_output['macro_logits']),
+            keras.ops.convert_to_numpy(traced_output['macro_logits']),
             eager['macro_logits'],
             rtol=1e-6, atol=1e-6,
             err_msg="traced macro logits differ from the eager ones"
@@ -753,7 +752,7 @@ class TestHierarchicalCrystalLayerGraphSafety:
         joint = traced(np.zeros((4, 3, 4), dtype=np.float32))['joint_probabilities']
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(joint).sum(axis=-1), 1.0, rtol=0, atol=BAYES_ATOL
+            keras.ops.convert_to_numpy(joint).sum(axis=-1), 1.0, rtol=0, atol=BAYES_ATOL
         )
 
 
@@ -766,14 +765,14 @@ class TestHierarchicalCrystalLayerGradients:
 
         with tf.GradientTape() as tape:
             outputs = layer(inputs, training=True)
-            loss = ops.sum(ops.square(outputs['joint_probabilities']))
+            loss = keras.ops.sum(keras.ops.square(outputs['joint_probabilities']))
 
         assert len(layer.trainable_variables) == 2, "expected macro and micro frames"
         grads = tape.gradient(loss, layer.trainable_variables)
 
         for variable, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {variable.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), \
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), \
                 f"all-zero gradient for {variable.path}"
 
     def test_the_frozen_frames_receive_no_gradient(self):
@@ -793,11 +792,11 @@ class TestHierarchicalCrystalLayerGradients:
         # the absence below is attributable to the freeze and not to a probe
         # that could never have seen a gradient.
         with tf.GradientTape() as live_tape:
-            loss = ops.sum(ops.square(
+            loss = keras.ops.sum(keras.ops.square(
                 layer(inputs, training=True)['joint_probabilities']
             ))
         assert any(
-            grad is not None and np.any(ops.convert_to_numpy(grad) != 0.0)
+            grad is not None and np.any(keras.ops.convert_to_numpy(grad) != 0.0)
             for grad in live_tape.gradient(loss, layer.trainable_variables)
         ), "the probe cannot detect a gradient, so its absence proves nothing"
 
@@ -805,7 +804,7 @@ class TestHierarchicalCrystalLayerGradients:
         layer.micro_weights.trainable = False
 
         with tf.GradientTape() as tape:
-            frozen_loss = ops.sum(ops.square(
+            frozen_loss = keras.ops.sum(keras.ops.square(
                 layer(inputs, training=True)['joint_probabilities']
             ))
         grads = tape.gradient(frozen_loss, layer.trainable_variables)
@@ -844,14 +843,14 @@ class TestHierarchicalCrystalLayerSerialization:
             keras.Input(shape=(4,)),
             _layer(3, 5, scale=3.0, seed=0)
         ])
-        original = ops.convert_to_numpy(model(inputs, training=False))
+        original = keras.ops.convert_to_numpy(model(inputs, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'hierarchical.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
 
-        restored = ops.convert_to_numpy(loaded(inputs, training=False))
+        restored = keras.ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(
             restored, original, rtol=0, atol=1e-6,
@@ -866,7 +865,7 @@ class TestHierarchicalCrystalLayerSerialization:
             _layer(3, 5, scale=3.0, return_hierarchy=True, seed=0)
         ])
         original = {
-            key: ops.convert_to_numpy(value)
+            key: keras.ops.convert_to_numpy(value)
             for key, value in model(inputs, training=False).items()
         }
 
@@ -876,7 +875,7 @@ class TestHierarchicalCrystalLayerSerialization:
             loaded = keras.models.load_model(path)
 
         restored = {
-            key: ops.convert_to_numpy(value)
+            key: keras.ops.convert_to_numpy(value)
             for key, value in loaded(inputs, training=False).items()
         }
 
@@ -893,7 +892,7 @@ class TestHierarchicalCrystalLayerSerialization:
             _layer(3, 5, seed=0)
         ])
         model(_sample_input(input_dim=4))
-        saved = [ops.convert_to_numpy(w).copy() for w in model.weights]
+        saved = [keras.ops.convert_to_numpy(w).copy() for w in model.weights]
 
         assert saved, "the model has no weights to compare"
 
@@ -904,7 +903,7 @@ class TestHierarchicalCrystalLayerSerialization:
 
         for donor, restored in zip(saved, loaded.weights):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0
+                keras.ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0
             )
 
 
@@ -925,7 +924,7 @@ class TestHierarchicalCrystalLayerDtypes:
         output = layer(inputs)
 
         assert output.shape == (4, 15)
-        assert bool(ops.all(ops.isfinite(output))), \
+        assert bool(keras.ops.all(keras.ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite leaf logit"
 
     def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
@@ -934,9 +933,9 @@ class TestHierarchicalCrystalLayerDtypes:
 
         output = _layer(3, 5, seed=0)(inputs)
 
-        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+        assert keras.ops.convert_to_numpy(output).dtype == compute_dtype, (
             f"under {dtype_policy} the output came back as "
-            f"{ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
+            f"{keras.ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
         )
 
     def test_the_bayes_identity_survives_every_policy(self, dtype_policy):
@@ -945,7 +944,7 @@ class TestHierarchicalCrystalLayerDtypes:
         inputs = _sample_input(input_dim=4).astype(compute_dtype)
 
         layer = _layer(3, 5, return_hierarchy=True, seed=0)
-        joint = ops.convert_to_numpy(layer(inputs)['joint_probabilities'])
+        joint = keras.ops.convert_to_numpy(layer(inputs)['joint_probabilities'])
 
         # float16 accumulates coarser than float32, so the bound is widened
         # to the dtype's own resolution rather than left at the float32 value.

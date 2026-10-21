@@ -21,7 +21,6 @@ the legacy ``create_loss_function`` factory (deprecated, use
 
 import dataclasses
 import keras
-from keras import ops
 from dataclasses import dataclass
 from typing import Optional, Any, Dict
 
@@ -263,21 +262,21 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = ops.cast(y_true, "float32")
+        y_true = keras.ops.cast(y_true, "float32")
 
         if self.config.from_logits:
             log_p = _log_probs_from_logits(y_pred)
             y_pred = keras.ops.exp(log_p)
         else:
             epsilon = 1e-7
-            y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
-            log_p = ops.log(y_pred)
+            y_pred = keras.ops.clip(y_pred, epsilon, 1.0 - epsilon)
+            log_p = keras.ops.log(y_pred)
 
         cross_entropy = -y_true * log_p
-        focal_factor = ops.power(1.0 - y_pred, self.config.focal_gamma)
+        focal_factor = keras.ops.power(1.0 - y_pred, self.config.focal_gamma)
 
         focal_ce = self.config.focal_alpha * focal_factor * cross_entropy
-        return ops.mean(ops.sum(focal_ce, axis=-1))
+        return keras.ops.mean(keras.ops.sum(focal_ce, axis=-1))
 
     def tversky_loss(
             self,
@@ -371,19 +370,19 @@ class SegmentationLosses:
             Returns:
                 Lovász gradient tensor
             """
-            gts = ops.sum(gt_sorted)
-            intersection = gts - ops.cumsum(gt_sorted, axis=0)
-            union = gts + ops.cumsum(1.0 - gt_sorted, axis=0)
+            gts = keras.ops.sum(gt_sorted)
+            intersection = gts - keras.ops.cumsum(gt_sorted, axis=0)
+            union = gts + keras.ops.cumsum(1.0 - gt_sorted, axis=0)
             jaccard = 1.0 - intersection / (union + self.config.smooth_factor)
 
             # Compute differences for gradient
-            jaccard_diff = ops.concatenate([
+            jaccard_diff = keras.ops.concatenate([
                 jaccard[0:1],
                 jaccard[1:] - jaccard[:-1]
             ], axis=0)
             return jaccard_diff
 
-        y_true = ops.cast(y_true, "float32")
+        y_true = keras.ops.cast(y_true, "float32")
         y_pred = _prepare_probs(y_pred, self.config.from_logits)
         losses = []
 
@@ -392,21 +391,21 @@ class SegmentationLosses:
             pred_c = y_pred[..., c]
 
             # Flatten tensors for sorting
-            target_flat = ops.reshape(target_c, [-1])
-            pred_flat = ops.reshape(pred_c, [-1])
+            target_flat = keras.ops.reshape(target_c, [-1])
+            pred_flat = keras.ops.reshape(pred_c, [-1])
 
             # Compute per-pixel errors and sort by descending error
             # (following Berman et al. "The Lovász-Softmax loss")
-            errors = ops.abs(target_flat - pred_flat)
-            sorted_indices = ops.argsort(-errors)
-            errors_sorted = ops.take(errors, sorted_indices)
-            target_sorted = ops.take(target_flat, sorted_indices)
+            errors = keras.ops.abs(target_flat - pred_flat)
+            sorted_indices = keras.ops.argsort(-errors)
+            errors_sorted = keras.ops.take(errors, sorted_indices)
+            target_sorted = keras.ops.take(target_flat, sorted_indices)
 
             grad = lovasz_grad(target_sorted)
-            loss_c = ops.sum(errors_sorted * grad)
+            loss_c = keras.ops.sum(errors_sorted * grad)
             losses.append(loss_c)
 
-        return ops.mean(ops.stack(losses))
+        return keras.ops.mean(keras.ops.stack(losses))
 
     def combo_loss(
             self,
@@ -458,7 +457,7 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = ops.cast(y_true, "float32")
+        y_true = keras.ops.cast(y_true, "float32")
 
         # Compute boundary map using gradient magnitude
         # This is a simplified version using difference operations instead of convolution
@@ -473,14 +472,14 @@ class SegmentationLosses:
             """
             # Use simple differences to approximate gradients
             # Pad the tensor to handle boundaries
-            padded_mask = ops.pad(mask, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
+            padded_mask = keras.ops.pad(mask, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
 
             # Compute gradients using differences
             grad_x = padded_mask[:, 1:-1, 2:, :] - padded_mask[:, 1:-1, :-2, :]
             grad_y = padded_mask[:, 2:, 1:-1, :] - padded_mask[:, :-2, 1:-1, :]
 
             # Compute gradient magnitude
-            magnitude = ops.sqrt(grad_x**2 + grad_y**2 + self.config.smooth_factor)
+            magnitude = keras.ops.sqrt(grad_x**2 + grad_y**2 + self.config.smooth_factor)
 
             return magnitude
 
@@ -488,10 +487,10 @@ class SegmentationLosses:
         y_pred = _prepare_probs(y_pred, self.config.from_logits)
 
         # Normalize boundary map
-        boundary_map = ops.clip(boundary_map, 0, self.config.boundary_theta)
+        boundary_map = keras.ops.clip(boundary_map, 0, self.config.boundary_theta)
         boundary_map = boundary_map / self.config.boundary_theta
 
-        boundary_loss = ops.mean(boundary_map * ops.square(1 - y_pred))
+        boundary_loss = keras.ops.mean(boundary_map * keras.ops.square(1 - y_pred))
         return boundary_loss
 
     def hausdorff_distance_loss(
@@ -516,7 +515,7 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = ops.cast(y_true, "float32")
+        y_true = keras.ops.cast(y_true, "float32")
 
         # Simplified distance approximation using difference operations
         def approximate_distance_transform(mask: Any) -> Any:
@@ -532,13 +531,13 @@ class SegmentationLosses:
             result = mask
             for iteration in range(3):  # Apply multiple iterations for distance approximation
                 # Pad tensor for boundary handling
-                padded = ops.pad(result, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
+                padded = keras.ops.pad(result, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
 
                 # Approximate dilation using maximum of neighboring pixels
-                dilated = ops.maximum(
-                    ops.maximum(
-                        ops.maximum(padded[:, :-2, 1:-1, :], padded[:, 2:, 1:-1, :]),
-                        ops.maximum(padded[:, 1:-1, :-2, :], padded[:, 1:-1, 2:, :])
+                dilated = keras.ops.maximum(
+                    keras.ops.maximum(
+                        keras.ops.maximum(padded[:, :-2, 1:-1, :], padded[:, 2:, 1:-1, :]),
+                        keras.ops.maximum(padded[:, 1:-1, :-2, :], padded[:, 1:-1, 2:, :])
                     ),
                     result
                 )
@@ -551,12 +550,12 @@ class SegmentationLosses:
         dt_pred = approximate_distance_transform(y_pred)
 
         # Compute approximate Hausdorff distances
-        hd_true_pred = ops.max(dt_true * y_pred, axis=[1, 2])
-        hd_pred_true = ops.max(dt_pred * y_true, axis=[1, 2])
+        hd_true_pred = keras.ops.max(dt_true * y_pred, axis=[1, 2])
+        hd_pred_true = keras.ops.max(dt_pred * y_true, axis=[1, 2])
 
         # Symmetric Hausdorff distance
-        hd = ops.maximum(hd_true_pred, hd_pred_true)
-        return ops.mean(hd)
+        hd = keras.ops.maximum(hd_true_pred, hd_pred_true)
+        return keras.ops.mean(hd)
 
 
 def create_loss_function(

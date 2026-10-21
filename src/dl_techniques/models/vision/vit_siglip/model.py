@@ -29,7 +29,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, activations, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -272,10 +271,10 @@ class SigLIPVisionTransformer(keras.Model):
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: NormalizationType = "layer_norm",
             normalization_position: Literal['pre', 'post'] = "post",
             ffn_type: FFNType = "mlp",
@@ -356,7 +355,7 @@ class SigLIPVisionTransformer(keras.Model):
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         # DECISION plan-2026-09-15T135450-e083ae85/D-013
         # Resolve eagerly here, mirroring the kernel_initializer/bias_initializer
         # lines immediately above -- see decisions.md D-013 (same fix as
@@ -367,9 +366,9 @@ class SigLIPVisionTransformer(keras.Model):
         # the model's own stored attribute had the wrong type). Do not revert
         # to storing the raw `kernel_regularizer`/`bias_regularizer` arguments
         # here.
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         # DECISION plan-2026-09-15T135450-e083ae85/D-016
         # Unlike vit_hmlp's twin fix (D-013 above applies identically to both
         # files), this file's raw-regularizer-storage bug predates this plan
@@ -458,9 +457,9 @@ class SigLIPVisionTransformer(keras.Model):
         self.head = None
         if self.include_top:
             if self.dropout_rate > 0.0:
-                self.head_dropout = layers.Dropout(self.dropout_rate, name="head_dropout")
+                self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
 
-            self.head = layers.Dense(
+            self.head = keras.layers.Dense(
                 self.num_classes,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
@@ -499,7 +498,7 @@ class SigLIPVisionTransformer(keras.Model):
 
         return keras.Sequential([
             # Stage 1: Coarse-grained patching
-            layers.Conv2D(
+            keras.layers.Conv2D(
                 filters=self.embed_dim // 2,
                 kernel_size=(patch_h // 2, patch_w // 2),
                 strides=(patch_h // 2, patch_w // 2),
@@ -515,10 +514,10 @@ class SigLIPVisionTransformer(keras.Model):
             # not layers.LayerNormalization directly; that default eps=1e-3 is a 100x divergence
             # from the model's final norm (1e-6). See decisions.md.
             create_normalization_layer('layer_norm', name='patch_embed_norm1'),
-            layers.Activation('gelu', name='patch_embed_activation1'),
+            keras.layers.Activation('gelu', name='patch_embed_activation1'),
 
             # Stage 2: Refinement to final embedding dimension
-            layers.Conv2D(
+            keras.layers.Conv2D(
                 filters=self.embed_dim,
                 kernel_size=2,
                 strides=2,
@@ -607,7 +606,7 @@ class SigLIPVisionTransformer(keras.Model):
             sequence ``(batch, max_seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
 
         # Shape: (batch_size, patch_h, patch_w, embed_dim).
         x = self.siglip_patch_embed(inputs, training=training)
@@ -617,11 +616,11 @@ class SigLIPVisionTransformer(keras.Model):
         num_patches_h = img_h // patch_h
         num_patches_w = img_w // patch_w
 
-        x = ops.reshape(x, [batch_size, num_patches_h * num_patches_w, self.embed_dim])
+        x = keras.ops.reshape(x, [batch_size, num_patches_h * num_patches_w, self.embed_dim])
 
         # Prepend the CLS token: (batch_size, seq_len, embed_dim).
-        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)
 
         # Positional embedding includes its own dropout.
         x = self.pos_embed(x, training=training)
@@ -675,14 +674,14 @@ class SigLIPVisionTransformer(keras.Model):
         :rtype: keras.KerasTensor
         """
         patch_tokens = self.get_patch_tokens(features)
-        batch_size = ops.shape(patch_tokens)[0]
+        batch_size = keras.ops.shape(patch_tokens)[0]
 
         patch_h, patch_w = self.patch_size
         img_h, img_w = self.input_shape_config[:2]
         num_patches_h = img_h // patch_h
         num_patches_w = img_w // patch_w
 
-        return ops.reshape(
+        return keras.ops.reshape(
             patch_tokens,
             [batch_size, num_patches_h, num_patches_w, self.embed_dim]
         )
@@ -771,10 +770,10 @@ class SigLIPVisionTransformer(keras.Model):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "pos_dropout_rate": self.pos_dropout_rate,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
@@ -869,10 +868,10 @@ def create_siglip_vision_transformer(
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_initializer: Union[str, initializers.Initializer] = "zeros",
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         normalization_type: NormalizationType = "layer_norm",
         normalization_position: Literal['pre', 'post'] = "post",
         ffn_type: FFNType = "mlp",

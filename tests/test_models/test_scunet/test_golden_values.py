@@ -81,7 +81,6 @@ and this config has now been through both.
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
@@ -161,7 +160,7 @@ def _run_probe() -> np.ndarray:
     rng = np.random.default_rng(WEIGHT_SEED)
     for w in model.weights:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
-    return np.asarray(ops.convert_to_numpy(model(x, training=False)))
+    return np.asarray(keras.ops.convert_to_numpy(model(x, training=False)))
 
 
 @pytest.fixture(scope="module")

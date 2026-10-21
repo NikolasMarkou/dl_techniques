@@ -32,7 +32,6 @@ References:
 """
 
 import keras
-from keras import layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union
 
 
@@ -129,7 +128,7 @@ class FireModule(keras.layers.Layer):
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
 
-        self.squeeze = layers.Conv2D(
+        self.squeeze = keras.layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
             activation='relu',
@@ -138,7 +137,7 @@ class FireModule(keras.layers.Layer):
             name='squeeze'
         )
 
-        self.expand_1x1 = layers.Conv2D(
+        self.expand_1x1 = keras.layers.Conv2D(
             filters=e1x1,
             kernel_size=1,
             activation='relu',
@@ -147,7 +146,7 @@ class FireModule(keras.layers.Layer):
             name='expand_1x1'
         )
 
-        self.expand_3x3 = layers.Conv2D(
+        self.expand_3x3 = keras.layers.Conv2D(
             filters=e3x3,
             kernel_size=3,
             padding='same',
@@ -157,7 +156,7 @@ class FireModule(keras.layers.Layer):
             name='expand_3x3'
         )
 
-        self.concat = layers.Concatenate(axis=-1)
+        self.concat = keras.layers.Concatenate(axis=-1)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the squeeze, expand, and concatenate sub-layers.
@@ -225,8 +224,8 @@ class FireModule(keras.layers.Layer):
             's1x1': self.s1x1,
             'e1x1': self.e1x1,
             'e3x3': self.e3x3,
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer)
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer)
         })
         return config
 
@@ -505,7 +504,7 @@ class SqueezeNetV1(keras.Model):
         :return: Tensor after conv1 and, when pool index 1 is present, the pool.
         :rtype: keras.KerasTensor
         """
-        conv1 = layers.Conv2D(
+        conv1 = keras.layers.Conv2D(
             filters=self.conv1_filters,
             kernel_size=self.conv1_kernel,
             strides=self.conv1_stride,
@@ -519,7 +518,7 @@ class SqueezeNetV1(keras.Model):
         self.stem_layers.append(conv1)
 
         if 1 in self.pool_indices:
-            maxpool1 = layers.MaxPooling2D(
+            maxpool1 = keras.layers.MaxPooling2D(
                 pool_size=3,
                 strides=2,
                 padding='valid',
@@ -565,12 +564,12 @@ class SqueezeNetV1(keras.Model):
 
             if idx in bypass_indices:
                 if self.use_bypass == "simple" and identity.shape[-1] == x.shape[-1]:
-                    add_layer = layers.Add(name=f'add_{fire_name}')
+                    add_layer = keras.layers.Add(name=f'add_{fire_name}')
                     x = add_layer([x, identity])
                     self.bypass_layers.append(add_layer)
                 elif self.use_bypass == "complex":
                     if identity.shape[-1] != x.shape[-1]:
-                        bypass_conv = layers.Conv2D(
+                        bypass_conv = keras.layers.Conv2D(
                             filters=x.shape[-1],
                             kernel_size=1,
                             activation=None,
@@ -581,14 +580,14 @@ class SqueezeNetV1(keras.Model):
                         identity = bypass_conv(identity)
                         self.bypass_layers.append(bypass_conv)
 
-                    add_layer = layers.Add(name=f'add_{fire_name}')
+                    add_layer = keras.layers.Add(name=f'add_{fire_name}')
                     x = add_layer([x, identity])
                     self.bypass_layers.append(add_layer)
 
             # pool_indices counts layers, so it names fire modules 2..9.
             fire_number = idx + 2
             if fire_number in self.pool_indices:
-                pool_layer = layers.MaxPooling2D(
+                pool_layer = keras.layers.MaxPooling2D(
                     pool_size=3,
                     strides=2,
                     padding='valid',
@@ -599,7 +598,7 @@ class SqueezeNetV1(keras.Model):
 
             # Dropout lands before the head fork, so include_top=False keeps it.
             if idx == len(self.fire_configs) - 1:
-                dropout = layers.Dropout(
+                dropout = keras.layers.Dropout(
                     rate=self.dropout_rate,
                     name='dropout'
                 )
@@ -625,7 +624,7 @@ class SqueezeNetV1(keras.Model):
         # pool with no activation, and cannot put the ReLU between a per-position
         # classifier and the pool. Do NOT add a softmax after the pool: the
         # output is the logits. See decisions.md.
-        conv10 = layers.Conv2D(
+        conv10 = keras.layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
             activation='relu',
@@ -636,7 +635,7 @@ class SqueezeNetV1(keras.Model):
         x = conv10(x)
         self.head_layers.append(conv10)
 
-        avgpool = layers.GlobalAveragePooling2D(name='avgpool')
+        avgpool = keras.layers.GlobalAveragePooling2D(name='avgpool')
         x = avgpool(x)
         self.head_layers.append(avgpool)
 
@@ -712,8 +711,8 @@ class SqueezeNetV1(keras.Model):
             'variant_config': self.variant_config,
             'use_bypass': self.use_bypass,
             'dropout_rate': self.dropout_rate,
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
         })
@@ -729,11 +728,11 @@ class SqueezeNetV1(keras.Model):
         :rtype: SqueezeNetV1
         """
         if config.get('kernel_regularizer'):
-            config['kernel_regularizer'] = regularizers.deserialize(
+            config['kernel_regularizer'] = keras.regularizers.deserialize(
                 config['kernel_regularizer']
             )
         if config.get('kernel_initializer'):
-            config['kernel_initializer'] = initializers.deserialize(
+            config['kernel_initializer'] = keras.initializers.deserialize(
                 config['kernel_initializer']
             )
 

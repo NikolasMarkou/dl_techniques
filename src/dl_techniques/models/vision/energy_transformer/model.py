@@ -37,8 +37,6 @@ References:
 """
 
 import keras
-from keras import layers
-from keras.saving import serialize_keras_object, deserialize_keras_object
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -547,7 +545,7 @@ def _coerce_backbone(backbone: Any) -> EnergyTransformerBackbone:
     if isinstance(backbone, EnergyTransformerBackbone):
         return backbone
     if isinstance(backbone, dict):
-        obj = deserialize_keras_object(backbone)
+        obj = keras.saving.deserialize_keras_object(backbone)
         if not isinstance(obj, EnergyTransformerBackbone):
             raise TypeError(
                 f"Deserialized backbone is a {type(obj).__name__}, expected "
@@ -640,10 +638,10 @@ class EnergyTransformerMIM(keras.Model):
         self.num_patches = backbone.num_patches
         self.embed_dim = backbone.embed_dim
 
-        self.decoder_norm = layers.LayerNormalization(
+        self.decoder_norm = keras.layers.LayerNormalization(
             epsilon=1e-6, name="decoder_norm", dtype=self.dtype_policy
         )
-        self.decoder_proj = layers.Dense(
+        self.decoder_proj = keras.layers.Dense(
             self.patch_dim, name="decoder_proj", dtype=self.dtype_policy
         )
 
@@ -694,7 +692,7 @@ class EnergyTransformerMIM(keras.Model):
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
-        config.update({"backbone": serialize_keras_object(self.backbone)})
+        config.update({"backbone": keras.saving.serialize_keras_object(self.backbone)})
         return config
 
     @classmethod
@@ -707,7 +705,7 @@ class EnergyTransformerMIM(keras.Model):
         :rtype: EnergyTransformerMIM
         """
         config = dict(config)
-        config["backbone"] = deserialize_keras_object(config["backbone"])
+        config["backbone"] = keras.saving.deserialize_keras_object(config["backbone"])
         return cls(**config)
 
 
@@ -809,17 +807,17 @@ class EnergyTransformerClassifier(keras.Model):
         self.embed_dim = backbone.embed_dim
 
         # `head_` prefix, distinct from `decoder_`, so these are never transferred.
-        self.head_norm = layers.LayerNormalization(
+        self.head_norm = keras.layers.LayerNormalization(
             epsilon=1e-6, name="head_norm", dtype=self.dtype_policy
         )
-        self.head_pool = layers.GlobalAveragePooling1D(
+        self.head_pool = keras.layers.GlobalAveragePooling1D(
             name="head_pool", dtype=self.dtype_policy
         )
         # Created at every rate, so the layer structure does not depend on a number.
-        self.head_dropout = layers.Dropout(
+        self.head_dropout = keras.layers.Dropout(
             self.dropout_rate, name="head_dropout", dtype=self.dtype_policy
         )
-        self.head_dense = layers.Dense(
+        self.head_dense = keras.layers.Dense(
             self.num_classes, name="head_dense", dtype=self.dtype_policy
         )
 
@@ -876,7 +874,7 @@ class EnergyTransformerClassifier(keras.Model):
         """
         config = super().get_config()
         config.update({
-            "backbone": serialize_keras_object(self.backbone),
+            "backbone": keras.saving.serialize_keras_object(self.backbone),
             "num_classes": self.num_classes,
             "dropout_rate": self.dropout_rate,
         })
@@ -892,7 +890,7 @@ class EnergyTransformerClassifier(keras.Model):
         :rtype: EnergyTransformerClassifier
         """
         config = dict(config)
-        config["backbone"] = deserialize_keras_object(config["backbone"])
+        config["backbone"] = keras.saving.deserialize_keras_object(config["backbone"])
         return cls(**config)
 
 

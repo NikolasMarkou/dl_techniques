@@ -23,7 +23,6 @@ Fourier sine row starts at exactly 0.0), so only a value comparison discriminate
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.layers.time_series.nbeats_blocks import (
     SeasonalityBlock,
@@ -156,16 +155,16 @@ class TestTrendBlockIsNotAConstantZeroMap:
             ),
             BACKCAST_LENGTH,
         )
-        x = ops.convert_to_tensor(
+        x = keras.ops.convert_to_tensor(
             np.random.RandomState(0).randn(4, BACKCAST_LENGTH).astype("float32") * 3.0
         )
         backcast, forecast = block(x)
 
-        assert float(ops.max(ops.abs(forecast))) > 1e-6, (
+        assert float(keras.ops.max(keras.ops.abs(forecast))) > 1e-6, (
             "trend forecast is identically zero: the polynomial basis did not survive "
             "the stateless build pass"
         )
-        assert float(ops.max(ops.abs(backcast))) > 1e-6, (
+        assert float(keras.ops.max(keras.ops.abs(backcast))) > 1e-6, (
             "trend backcast is identically zero, so the doubly-residual stack is a no-op"
         )
 
@@ -180,7 +179,7 @@ class TestTrendBlockIsNotAConstantZeroMap:
             BACKCAST_LENGTH,
         )
         x = np.random.RandomState(1).randn(4, BACKCAST_LENGTH).astype("float32") * 3.0
-        backcast, _ = block(ops.convert_to_tensor(x))
+        backcast, _ = block(keras.ops.convert_to_tensor(x))
         residual = x - np.asarray(backcast)
         assert not np.array_equal(residual, x), (
             "the residual handed to the next block is the unmodified input: this stack "

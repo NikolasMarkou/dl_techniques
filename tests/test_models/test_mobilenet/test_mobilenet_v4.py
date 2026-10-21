@@ -24,7 +24,6 @@ import numpy as np
 from typing import Dict, Any
 
 import keras
-from keras import ops
 import tensorflow as tf
 
 from tests.numerics import reassociation_atol
@@ -407,7 +406,7 @@ class TestMobileNetV4:
 
         with tf.GradientTape() as tape:
             output = model(sample_inputs['cifar'], training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         gradients = tape.gradient(loss, model.trainable_variables)
 
@@ -416,7 +415,7 @@ class TestMobileNetV4:
         missing = [v.path for v, g in zip(model.trainable_variables, gradients)
                    if g is None]
         assert not missing, f"trainable weights with no gradient: {missing}"
-        non_zero_grads = [g for g in gradients if ops.max(ops.abs(g)) > 1e-8]
+        non_zero_grads = [g for g in gradients if keras.ops.max(keras.ops.abs(g)) > 1e-8]
         assert len(non_zero_grads) > 0, "All gradients are zero"
 
     @pytest.mark.parametrize("training", [True, False, None])

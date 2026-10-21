@@ -32,7 +32,6 @@ References:
 """
 
 import keras
-from keras import layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -123,7 +122,7 @@ class SimplifiedFireModule(keras.layers.Layer):
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
 
-        self.squeeze = layers.Conv2D(
+        self.squeeze = keras.layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
             activation='relu',
@@ -132,7 +131,7 @@ class SimplifiedFireModule(keras.layers.Layer):
             name='squeeze'
         )
 
-        self.expand_3x3 = layers.Conv2D(
+        self.expand_3x3 = keras.layers.Conv2D(
             filters=e3x3,
             kernel_size=3,
             padding='same',
@@ -197,8 +196,8 @@ class SimplifiedFireModule(keras.layers.Layer):
         config.update({
             's1x1': self.s1x1,
             'e3x3': self.e3x3,
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer)
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer)
         })
         return config
 
@@ -488,11 +487,11 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: keras.KerasTensor
         """
         if self.use_3d:
-            Conv = layers.Conv3D
-            MaxPool = layers.MaxPooling3D
+            Conv = keras.layers.Conv3D
+            MaxPool = keras.layers.MaxPooling3D
         else:
-            Conv = layers.Conv2D
-            MaxPool = layers.MaxPooling2D
+            Conv = keras.layers.Conv2D
+            MaxPool = keras.layers.MaxPooling2D
 
         conv1 = Conv(
             filters=self.conv1_filters,
@@ -528,9 +527,9 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: keras.KerasTensor
         """
         if self.use_3d:
-            MaxPool = layers.MaxPooling3D
+            MaxPool = keras.layers.MaxPooling3D
         else:
-            MaxPool = layers.MaxPooling2D
+            MaxPool = keras.layers.MaxPooling2D
 
         for idx, fire_config in enumerate(self.fire_configs):
             # The stem's conv1 is layer 1, so the Fire blocks start at simpfire2.
@@ -567,7 +566,7 @@ class SqueezeNoduleNetV2(keras.Model):
                 self.pool_layers.append(pool_layer)
 
         # Outside the loop and before the head branch, so include_top=False keeps it.
-        dropout = layers.Dropout(
+        dropout = keras.layers.Dropout(
             rate=self.dropout_rate,
             name='drop9'
         )
@@ -599,7 +598,7 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: keras.Sequential
         """
         return keras.Sequential([
-            layers.Conv3D(
+            keras.layers.Conv3D(
                 filters=s1x1,
                 kernel_size=1,
                 activation='relu',
@@ -607,7 +606,7 @@ class SqueezeNoduleNetV2(keras.Model):
                 kernel_initializer=self.kernel_initializer,
                 name=f'{name}_squeeze'
             ),
-            layers.Conv3D(
+            keras.layers.Conv3D(
                 filters=e3x3,
                 kernel_size=3,
                 padding='same',
@@ -630,11 +629,11 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: keras.KerasTensor
         """
         if self.use_3d:
-            Conv = layers.Conv3D
-            GlobalPool = layers.GlobalAveragePooling3D
+            Conv = keras.layers.Conv3D
+            GlobalPool = keras.layers.GlobalAveragePooling3D
         else:
-            Conv = layers.Conv2D
-            GlobalPool = layers.GlobalAveragePooling2D
+            Conv = keras.layers.Conv2D
+            GlobalPool = keras.layers.GlobalAveragePooling2D
 
         # DECISION plan-2026-10-14T062616-81938e81/D-017
         # conv10 + ReLU + global average pool is the paper's head, built here,
@@ -729,8 +728,8 @@ class SqueezeNoduleNetV2(keras.Model):
             'num_classes': self.num_classes,
             'variant_config': self.variant_config,
             'dropout_rate': self.dropout_rate,
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'include_top': self.include_top,
             'use_3d': self.use_3d,
             'input_shape': self._input_shape
@@ -747,11 +746,11 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: SqueezeNoduleNetV2
         """
         if config.get('kernel_regularizer'):
-            config['kernel_regularizer'] = regularizers.deserialize(
+            config['kernel_regularizer'] = keras.regularizers.deserialize(
                 config['kernel_regularizer']
             )
         if config.get('kernel_initializer'):
-            config['kernel_initializer'] = initializers.deserialize(
+            config['kernel_initializer'] = keras.initializers.deserialize(
                 config['kernel_initializer']
             )
 

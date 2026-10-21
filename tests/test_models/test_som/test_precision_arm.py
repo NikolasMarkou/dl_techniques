@@ -22,7 +22,7 @@ plain tensor, not a variable -- stayed float32.
 
 import numpy as np
 import pytest
-from keras import ops
+import keras
 
 from ..precision_arm_oracle import precision_policy
 from ..precision_arm_subjects import SUBJECTS
@@ -53,7 +53,7 @@ def test_keras_autocasts_a_float32_variable_read_inside_call():
 
     with precision_policy("mixed_float16"):
         layer = _Probe()
-        layer(ops.zeros((2, 3)))
+        layer(keras.ops.zeros((2, 3)))
         outside_call_dtype = str(layer.counter.dtype)
 
     # The variable is declared `dtype="float32"` and really IS float32 when
@@ -70,18 +70,18 @@ def test_keras_autocasts_a_float32_variable_read_inside_call():
 def test_the_pre_fix_expression_raises_and_the_cast_repairs_it():
     """RED then GREEN, on the exact arithmetic of ``som_nd_layer.py:445``."""
     with precision_policy("mixed_float16"):
-        squared_distance = ops.convert_to_tensor(
+        squared_distance = keras.ops.convert_to_tensor(
             np.arange(16, dtype="float32").reshape(4, 4))   # the float32 grid
-        sigma_autocast = ops.convert_to_tensor(
+        sigma_autocast = keras.ops.convert_to_tensor(
             np.array(1.0, dtype="float16"))                 # the autocast read
         with pytest.raises(TypeError):
-            ops.exp(-squared_distance / (2 * ops.square(sigma_autocast)))
-        repaired = ops.exp(
+            keras.ops.exp(-squared_distance / (2 * keras.ops.square(sigma_autocast)))
+        repaired = keras.ops.exp(
             -squared_distance
-            / (2 * ops.square(ops.cast(sigma_autocast, "float32")))
+            / (2 * keras.ops.square(keras.ops.cast(sigma_autocast, "float32")))
         )
         assert np.isfinite(
-            np.asarray(ops.convert_to_numpy(repaired))).all()
+            np.asarray(keras.ops.convert_to_numpy(repaired))).all()
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -94,7 +94,7 @@ def test_the_som_forward_runs_under_mixed_float16_in_both_modes(training):
         model = build()
         bmu, error = model(make_inputs(), training=training)
     assert str(bmu.dtype) == "<dtype: 'int32'>" or "int" in str(bmu.dtype)
-    err = np.asarray(ops.convert_to_numpy(ops.cast(error, "float32")))
+    err = np.asarray(keras.ops.convert_to_numpy(keras.ops.cast(error, "float32")))
     assert np.isfinite(err).all()
 
 
@@ -107,12 +107,12 @@ def test_the_competitive_update_actually_moved_the_map():
         model = build()
         x = make_inputs()
         model(x, training=False)
-        before = np.asarray(ops.convert_to_numpy(
-            ops.cast(model.som_layer.weights_map, "float32"))).copy()
+        before = np.asarray(keras.ops.convert_to_numpy(
+            keras.ops.cast(model.som_layer.weights_map, "float32"))).copy()
         for _ in range(3):
             model(x, training=True)
-        after = np.asarray(ops.convert_to_numpy(
-            ops.cast(model.som_layer.weights_map, "float32")))
+        after = np.asarray(keras.ops.convert_to_numpy(
+            keras.ops.cast(model.som_layer.weights_map, "float32")))
     delta = float(np.abs(after - before).max())
     assert delta > 0.0, (
         "three training calls under mixed_float16 left the weight map "

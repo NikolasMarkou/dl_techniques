@@ -18,7 +18,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from tests.numerics import tf32_execution
 from dl_techniques.losses.sam3_detection_loss import (
@@ -143,23 +142,23 @@ class TestBoxGeometry:
         rng = np.random.default_rng(SEED)
         boxes = (rng.random((3, 7, 4)) * 0.8 + 0.1).astype("float64")
         expected = _ref_cxcywh_to_xyxy(boxes)
-        actual = ops.convert_to_numpy(
-            box_cxcywh_to_xyxy(ops.convert_to_tensor(boxes)))
+        actual = keras.ops.convert_to_numpy(
+            box_cxcywh_to_xyxy(keras.ops.convert_to_tensor(boxes)))
         np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
     def test_cxcywh_to_xyxy_on_a_hand_computed_box(self):
         # A value oracle a human can check: centre (0.5, 0.5), 0.2 x 0.4.
         box = np.array([[[0.5, 0.5, 0.2, 0.4]]])
-        actual = ops.convert_to_numpy(
-            box_cxcywh_to_xyxy(ops.convert_to_tensor(box)))
+        actual = keras.ops.convert_to_numpy(
+            box_cxcywh_to_xyxy(keras.ops.convert_to_tensor(box)))
         np.testing.assert_allclose(actual[0, 0], [0.4, 0.3, 0.6, 0.7],
                                    rtol=0, atol=1e-12)
 
     def test_giou_of_identical_boxes_is_exactly_one(self):
         boxes = np.array([[[0.0, 0.0, 1.0, 1.0], [0.2, 0.3, 0.9, 0.8]]])
-        giou = ops.convert_to_numpy(
-            pairwise_generalized_iou(ops.convert_to_tensor(boxes),
-                                     ops.convert_to_tensor(boxes)))
+        giou = keras.ops.convert_to_numpy(
+            pairwise_generalized_iou(keras.ops.convert_to_tensor(boxes),
+                                     keras.ops.convert_to_tensor(boxes)))
         np.testing.assert_allclose(np.diag(giou[0]), [1.0, 1.0],
                                    rtol=0, atol=1e-6)
 
@@ -168,9 +167,9 @@ class TestBoxGeometry:
         # inter 0, union 2, iou 0, enclosing 3x1 = 3 -> giou = 0 - (3-2)/3.
         a = np.array([[[0.0, 0.0, 1.0, 1.0]]])
         b = np.array([[[2.0, 0.0, 3.0, 1.0]]])
-        giou = ops.convert_to_numpy(
-            pairwise_generalized_iou(ops.convert_to_tensor(a),
-                                     ops.convert_to_tensor(b)))
+        giou = keras.ops.convert_to_numpy(
+            pairwise_generalized_iou(keras.ops.convert_to_tensor(a),
+                                     keras.ops.convert_to_tensor(b)))
         np.testing.assert_allclose(giou[0, 0, 0], -1.0 / 3.0,
                                    rtol=0, atol=1e-6)
 
@@ -182,9 +181,9 @@ class TestBoxGeometry:
             (rng.random((2, 4, 4)) * 0.5 + 0.25).astype("float64"))
         expected = np.stack([_ref_generalized_box_iou(a[i], b[i])
                              for i in range(2)])
-        actual = ops.convert_to_numpy(
-            pairwise_generalized_iou(ops.convert_to_tensor(a),
-                                     ops.convert_to_tensor(b)))
+        actual = keras.ops.convert_to_numpy(
+            pairwise_generalized_iou(keras.ops.convert_to_tensor(a),
+                                     keras.ops.convert_to_tensor(b)))
         np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
     def test_giou_is_nan_only_when_BOTH_boxes_are_degenerate(self):
@@ -202,12 +201,12 @@ class TestBoxGeometry:
         zero = np.zeros((1, 1, 4), dtype="float64")
         real = np.array([[[0.2, 0.2, 0.8, 0.8]]], dtype="float64")
 
-        both_degenerate = ops.convert_to_numpy(pairwise_generalized_iou(
-            ops.convert_to_tensor(zero), ops.convert_to_tensor(zero)))
+        both_degenerate = keras.ops.convert_to_numpy(pairwise_generalized_iou(
+            keras.ops.convert_to_tensor(zero), keras.ops.convert_to_tensor(zero)))
         assert np.isnan(both_degenerate[0, 0, 0])
 
-        one_degenerate = ops.convert_to_numpy(pairwise_generalized_iou(
-            ops.convert_to_tensor(real), ops.convert_to_tensor(zero)))
+        one_degenerate = keras.ops.convert_to_numpy(pairwise_generalized_iou(
+            keras.ops.convert_to_tensor(real), keras.ops.convert_to_tensor(zero)))
         assert np.isfinite(one_degenerate[0, 0, 0])
         # inter 0, union 0.36, iou 0, enclose 0.8*0.8 = 0.64
         np.testing.assert_allclose(one_degenerate[0, 0, 0],
@@ -226,7 +225,7 @@ class TestCostMatrix:
             3, 6, 4, [[1, 1, 1, 0], [1, 0, 0, 0], [1, 1, 0, 0]])
         matcher = _Sam3HungarianMatcher()
         expected = _ref_cost_matrix(logits, pred, tgt, valid)
-        actual = ops.convert_to_numpy(
+        actual = keras.ops.convert_to_numpy(
             matcher.cost_matrix(logits, pred, tgt, valid))
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
 
@@ -237,7 +236,7 @@ class TestCostMatrix:
         expected = _ref_cost_matrix(logits, pred, tgt, valid,
                                     cost_class_w=1.5, cost_bbox_w=3.0,
                                     cost_giou_w=0.5, alpha=0.6, gamma=1.0)
-        actual = ops.convert_to_numpy(
+        actual = keras.ops.convert_to_numpy(
             matcher.cost_matrix(logits, pred, tgt, valid))
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
 
@@ -245,7 +244,7 @@ class TestCostMatrix:
         logits, pred, tgt, valid = _sample(2, 4, 5,
                                            [[1, 0, 1, 0, 0], [0, 0, 0, 0, 0]])
         matcher = _Sam3HungarianMatcher()
-        cost = ops.convert_to_numpy(
+        cost = keras.ops.convert_to_numpy(
             matcher.cost_matrix(logits, pred, tgt, valid))
         invalid = valid == 0.0
         assert np.all(cost[:, :, invalid[0]][0] == INVALID_COST)
@@ -254,7 +253,7 @@ class TestCostMatrix:
 
     def test_is_finite_even_with_all_zero_padded_target_rows(self):
         logits, pred, tgt, valid = _sample(2, 4, 4, [[1, 0, 0, 0]] * 2)
-        cost = ops.convert_to_numpy(
+        cost = keras.ops.convert_to_numpy(
             _Sam3HungarianMatcher().cost_matrix(logits, pred, tgt, valid))
         assert np.all(np.isfinite(cost))
 
@@ -274,7 +273,7 @@ class TestCostMatrix:
                          [0.0, 0.0, 0.0, 0.0]]], dtype="float32")
         valid = np.array([[1.0, 0.0]], dtype="float32")
         logits = np.zeros((1, 2, 1), dtype="float32")
-        cost = ops.convert_to_numpy(
+        cost = keras.ops.convert_to_numpy(
             _Sam3HungarianMatcher().cost_matrix(logits, pred, tgt, valid))
         assert np.all(np.isfinite(cost))
         assert np.all(cost[0, :, 1] == INVALID_COST)
@@ -287,7 +286,7 @@ class TestCostMatrix:
             tape.watch(pred_t)
             cost = _Sam3HungarianMatcher().cost_matrix(
                 logits, pred_t, tgt, valid)
-            total = ops.sum(ops.where(cost < VALID_COST_THRESHOLD, cost, 0.0))
+            total = keras.ops.sum(keras.ops.where(cost < VALID_COST_THRESHOLD, cost, 0.0))
         grad = tape.gradient(total, pred_t).numpy()
         assert np.all(np.isfinite(grad))
 
@@ -314,8 +313,8 @@ class TestCostMatrix:
     def test_accepts_both_rank_2_and_rank_3_logits(self):
         logits, pred, tgt, valid = _sample(2, 4, 3, [[1, 1, 1]] * 2)
         matcher = _Sam3HungarianMatcher()
-        a = ops.convert_to_numpy(matcher.cost_matrix(logits, pred, tgt, valid))
-        b = ops.convert_to_numpy(
+        a = keras.ops.convert_to_numpy(matcher.cost_matrix(logits, pred, tgt, valid))
+        b = keras.ops.convert_to_numpy(
             matcher.cost_matrix(logits[..., 0], pred, tgt, valid))
         np.testing.assert_array_equal(a, b)
 
@@ -329,28 +328,28 @@ class TestAssignment:
     def test_more_queries_than_targets_matches_every_valid_target(self):
         logits, pred, tgt, valid = _sample(2, 8, 3, [[1, 1, 1], [1, 1, 0]])
         _, is_matched = _Sam3HungarianMatcher()(logits, pred, tgt, valid)
-        counts = ops.convert_to_numpy(ops.sum(is_matched, axis=1))
+        counts = keras.ops.convert_to_numpy(keras.ops.sum(is_matched, axis=1))
         np.testing.assert_array_equal(counts, [3.0, 2.0])
 
     def test_more_targets_than_queries_matches_every_query(self):
         logits, pred, tgt, valid = _sample(2, 3, 8, [[1] * 8, [1] * 5 + [0] * 3])
         assignment, is_matched = _Sam3HungarianMatcher()(
             logits, pred, tgt, valid)
-        counts = ops.convert_to_numpy(ops.sum(is_matched, axis=1))
+        counts = keras.ops.convert_to_numpy(keras.ops.sum(is_matched, axis=1))
         np.testing.assert_array_equal(counts, [3.0, 3.0])
         # Every matched target index is distinct within an image.
-        idx = ops.convert_to_numpy(assignment)
+        idx = keras.ops.convert_to_numpy(assignment)
         for b in range(2):
-            chosen = idx[b][ops.convert_to_numpy(is_matched)[b] > 0]
+            chosen = idx[b][keras.ops.convert_to_numpy(is_matched)[b] > 0]
             assert len(set(chosen.tolist())) == len(chosen)
 
     def test_all_targets_invalid_yields_no_matches_and_does_not_raise(self):
         logits, pred, tgt, valid = _sample(3, 5, 4, [[0, 0, 0, 0]] * 3)
         assignment, is_matched = _Sam3HungarianMatcher()(
             logits, pred, tgt, valid)
-        np.testing.assert_array_equal(ops.convert_to_numpy(is_matched),
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(is_matched),
                                       np.zeros((3, 5), dtype="float32"))
-        np.testing.assert_array_equal(ops.convert_to_numpy(assignment),
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(assignment),
                                       np.zeros((3, 5), dtype="int32"))
 
     def test_no_match_ever_lands_on_an_invalid_target(self):
@@ -363,8 +362,8 @@ class TestAssignment:
         valid = [[1, 0, 1, 0, 0], [1, 1, 1, 0, 0]]
         logits, pred, tgt, v = _sample(2, 6, 5, valid)
         assignment, is_matched = _Sam3HungarianMatcher()(logits, pred, tgt, v)
-        idx = ops.convert_to_numpy(assignment)
-        mask = ops.convert_to_numpy(is_matched)
+        idx = keras.ops.convert_to_numpy(assignment)
+        mask = keras.ops.convert_to_numpy(is_matched)
         for b in range(2):
             for q in range(6):
                 if mask[b, q] > 0:
@@ -376,8 +375,8 @@ class TestAssignment:
         matcher = _Sam3HungarianMatcher()
         cost = _ref_cost_matrix(logits, pred, tgt, valid)
         assignment, is_matched = matcher(logits, pred, tgt, valid)
-        idx = ops.convert_to_numpy(assignment)
-        mask = ops.convert_to_numpy(is_matched)
+        idx = keras.ops.convert_to_numpy(assignment)
+        mask = keras.ops.convert_to_numpy(is_matched)
         for b in range(2):
             achieved = sum(cost[b, q, idx[b, q]]
                            for q in range(4) if mask[b, q] > 0)
@@ -393,8 +392,8 @@ class TestAssignment:
 
         def total(logits_, pred_, cost_):
             assignment, is_matched = matcher(logits_, pred_, tgt, valid)
-            idx = ops.convert_to_numpy(assignment)[0]
-            mask = ops.convert_to_numpy(is_matched)[0]
+            idx = keras.ops.convert_to_numpy(assignment)[0]
+            mask = keras.ops.convert_to_numpy(is_matched)[0]
             return sum(cost_[0, q, idx[q]]
                        for q in range(len(mask)) if mask[q] > 0)
 
@@ -419,15 +418,15 @@ class TestAssignment:
         valid = np.ones((1, 3), dtype="float32")
         assignment, is_matched = _Sam3HungarianMatcher()(
             logits, queries, targets, valid)
-        idx = ops.convert_to_numpy(assignment)[0]
-        mask = ops.convert_to_numpy(is_matched)[0]
+        idx = keras.ops.convert_to_numpy(assignment)[0]
+        mask = keras.ops.convert_to_numpy(is_matched)[0]
         np.testing.assert_array_equal(mask, [1.0, 1.0, 0.0, 1.0])
         assert idx[0] == 2 and idx[1] == 0 and idx[3] == 1
 
     def test_graph_mode_agrees_with_eager_and_keeps_the_static_shape(self):
         logits, pred, tgt, valid = _sample(2, 6, 4, [[1, 1, 0, 0], [1, 1, 1, 1]])
         matcher = _Sam3HungarianMatcher()
-        eager = [ops.convert_to_numpy(t)
+        eager = [keras.ops.convert_to_numpy(t)
                  for t in matcher(logits, pred, tgt, valid)]
 
         @tf.function
@@ -470,10 +469,10 @@ class TestGradient:
             tape.watch(pred_t)
             assignment, is_matched = matcher(logits, pred_t, tgt, valid)
             gathered = tf.gather(tf.constant(tgt), assignment, batch_dims=1)
-            l1 = ops.sum(ops.abs(pred_t - gathered), axis=-1)
-            loss = ops.sum(l1 * is_matched)
+            l1 = keras.ops.sum(keras.ops.abs(pred_t - gathered), axis=-1)
+            loss = keras.ops.sum(l1 * is_matched)
         grad = tape.gradient(loss, pred_t).numpy()
-        mask = ops.convert_to_numpy(is_matched)
+        mask = keras.ops.convert_to_numpy(is_matched)
 
         assert np.all(np.isfinite(grad))
         matched_rows = grad[mask > 0]
@@ -493,7 +492,7 @@ class TestGradient:
         with tf.GradientTape() as tape:
             tape.watch(pred_t)
             _, is_matched = _Sam3HungarianMatcher()(logits, pred_t, tgt, valid)
-            loss = ops.sum(is_matched)
+            loss = keras.ops.sum(is_matched)
         assert tape.gradient(loss, pred_t) is None
 
 
@@ -516,7 +515,7 @@ class TestPrecisionRegimes:
             logits, pred, tgt, valid = _sample(2, 6, 4,
                                                [[1, 1, 1, 0], [1, 1, 0, 0]])
             expected = _ref_cost_matrix(logits, pred, tgt, valid)
-            actual = ops.convert_to_numpy(
+            actual = keras.ops.convert_to_numpy(
                 _Sam3HungarianMatcher().cost_matrix(logits, pred, tgt, valid))
             finite = expected < VALID_COST_THRESHOLD
             np.testing.assert_allclose(actual[finite], expected[finite],
@@ -531,7 +530,7 @@ class TestPublicHelperDtypes:
 
     @pytest.mark.parametrize("dtype", ["float32", "float64"])
     def test_box_conversion_preserves_dtype(self, dtype):
-        boxes = ops.convert_to_tensor(
+        boxes = keras.ops.convert_to_tensor(
             np.ones((1, 2, 4), dtype=dtype))
         assert keras.backend.standardize_dtype(
             box_cxcywh_to_xyxy(boxes).dtype) == dtype
@@ -800,7 +799,7 @@ def _make_packed(seed=SEED, valid=None, keep=None, exhaustive=None,
         "exhaustive": exhaustive,
     }
     if keep is None:
-        keep = np.asarray(ops.convert_to_numpy(
+        keep = np.asarray(keras.ops.convert_to_numpy(
             derive_keep_loss(fields["tgt_boxes"], valid)), dtype="float32")
     fields["keep"] = np.asarray(keep, dtype="float32").reshape(batch, 1)
     return fields
@@ -840,7 +839,7 @@ def _loss(**kwargs):
 
 
 def _terms(loss, y_true, y_pred):
-    return {k: float(ops.convert_to_numpy(v))
+    return {k: float(keras.ops.convert_to_numpy(v))
             for k, v in loss.compute_terms(y_true, y_pred).items()}
 
 
@@ -858,16 +857,16 @@ class TestPackedLayout:
     def test_unpack_predictions_round_trips_value_exactly(self, include_masks):
         fields = _make_packed()
         _, y_pred = _pack(fields, include_masks=include_masks)
-        out = unpack_predictions(ops.convert_to_tensor(y_pred), include_masks)
+        out = unpack_predictions(keras.ops.convert_to_tensor(y_pred), include_masks)
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["pred_logits"]), fields["logits"])
+            keras.ops.convert_to_numpy(out["pred_logits"]), fields["logits"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["pred_boxes"]), fields["pred_boxes"])
+            keras.ops.convert_to_numpy(out["pred_boxes"]), fields["pred_boxes"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["presence_logit"]), fields["presence"])
+            keras.ops.convert_to_numpy(out["presence_logit"]), fields["presence"])
         if include_masks:
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(out["pred_masks"]), fields["pred_masks"])
+                keras.ops.convert_to_numpy(out["pred_masks"]), fields["pred_masks"])
         else:
             assert out["pred_masks"] is None
 
@@ -875,20 +874,20 @@ class TestPackedLayout:
     def test_unpack_targets_round_trips_value_exactly(self, include_masks):
         fields = _make_packed()
         y_true, _ = _pack(fields, include_masks=include_masks)
-        out = unpack_targets(ops.convert_to_tensor(y_true), include_masks)
+        out = unpack_targets(keras.ops.convert_to_tensor(y_true), include_masks)
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["target_valid"]), fields["valid"])
+            keras.ops.convert_to_numpy(out["target_valid"]), fields["valid"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["target_boxes"]), fields["tgt_boxes"])
+            keras.ops.convert_to_numpy(out["target_boxes"]), fields["tgt_boxes"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["keep_loss"]), fields["keep"])
+            keras.ops.convert_to_numpy(out["keep_loss"]), fields["keep"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["num_boxes"]), fields["valid"].sum(1))
+            keras.ops.convert_to_numpy(out["num_boxes"]), fields["valid"].sum(1))
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["is_exhaustive"]), fields["exhaustive"])
+            keras.ops.convert_to_numpy(out["is_exhaustive"]), fields["exhaustive"])
         if include_masks:
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(out["target_masks"]), fields["tgt_masks"])
+                keras.ops.convert_to_numpy(out["target_masks"]), fields["tgt_masks"])
         else:
             assert out["target_masks"] is None
 
@@ -900,10 +899,10 @@ class TestPackedLayout:
         """
         fields = _make_packed()
         _, y_pred = _pack(fields)
-        out = unpack_predictions(ops.convert_to_tensor(y_pred), True)
+        out = unpack_predictions(keras.ops.convert_to_tensor(y_pred), True)
         assert not np.allclose(fields["presence"][:, 0], fields["logits"][:, 0])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["presence_logit"])[:, 0],
+            keras.ops.convert_to_numpy(out["presence_logit"])[:, 0],
             fields["presence"][:, 0])
 
 
@@ -912,14 +911,14 @@ class TestDeriveKeepLoss:
     def test_an_image_with_no_valid_target_is_a_presence_negative(self):
         boxes = np.zeros((1, 3, 4), dtype="float32")
         valid = np.zeros((1, 3), dtype="float32")
-        assert float(ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 0.0
+        assert float(keras.ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 0.0
 
     def test_an_image_with_one_valid_target_is_a_presence_positive(self):
         """The M3 liveness arm for the test above: not always-zero."""
         boxes = np.array([[[0.5, 0.5, 0.2, 0.2], [0, 0, 0, 0]]],
                          dtype="float32")
         valid = np.array([[1.0, 0.0]], dtype="float32")
-        assert float(ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 1.0
+        assert float(keras.ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 1.0
 
     def test_a_valid_row_with_a_zero_area_box_does_NOT_count_as_visible(self):
         """The `w > 0 & h > 0` terms of `loss_fns.py:418-422` are LIVE.
@@ -930,10 +929,10 @@ class TestDeriveKeepLoss:
         """
         boxes = np.array([[[0.5, 0.5, 0.0, 0.3]]], dtype="float32")
         valid = np.ones((1, 1), dtype="float32")
-        assert float(ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 0.0
+        assert float(keras.ops.convert_to_numpy(derive_keep_loss(boxes, valid))) == 0.0
         boxes_h = np.array([[[0.5, 0.5, 0.3, 0.0]]], dtype="float32")
         assert float(
-            ops.convert_to_numpy(derive_keep_loss(boxes_h, valid))) == 0.0
+            keras.ops.convert_to_numpy(derive_keep_loss(boxes_h, valid))) == 0.0
 
 
 # --------------------------------------------------------------------------
@@ -947,9 +946,9 @@ class TestBceSpelling:
     @pytest.mark.parametrize("truth", [0.0, 1.0, 0.37])
     def test_bce_value_matches_an_independently_spelled_oracle(self, logit,
                                                                truth):
-        actual = float(ops.convert_to_numpy(binary_cross_entropy_with_logits(
-            ops.convert_to_tensor(np.float64(truth)),
-            ops.convert_to_tensor(np.float64(logit)))))
+        actual = float(keras.ops.convert_to_numpy(binary_cross_entropy_with_logits(
+            keras.ops.convert_to_tensor(np.float64(truth)),
+            keras.ops.convert_to_tensor(np.float64(logit)))))
         np.testing.assert_allclose(actual, _ref_bce(truth, logit),
                                    rtol=1e-12, atol=1e-12)
 
@@ -968,8 +967,8 @@ class TestBceSpelling:
         with tf.GradientTape() as tape:
             tape.watch(x)
             value = binary_cross_entropy_with_logits(
-                ops.convert_to_tensor(truth), x)
-        grad = float(ops.convert_to_numpy(tape.gradient(value, x)))
+                keras.ops.convert_to_tensor(truth), x)
+        grad = float(keras.ops.convert_to_numpy(tape.gradient(value, x)))
         assert grad == pytest.approx(expected, abs=1e-7)
 
     @pytest.mark.parametrize("truth,textbook,correct",
@@ -988,9 +987,9 @@ class TestBceSpelling:
         x = tf.constant(0.0, dtype=tf.float32)
         with tf.GradientTape() as tape:
             tape.watch(x)
-            value = (ops.maximum(x, 0.0) - x * truth
-                     + ops.log1p(ops.exp(-ops.abs(x))))
-        grad = float(ops.convert_to_numpy(tape.gradient(value, x)))
+            value = (keras.ops.maximum(x, 0.0) - x * truth
+                     + keras.ops.log1p(keras.ops.exp(-keras.ops.abs(x))))
+        grad = float(keras.ops.convert_to_numpy(tape.gradient(value, x)))
         assert grad == pytest.approx(textbook, abs=1e-7)
         assert abs(grad - correct) > 0.4
 
@@ -1005,8 +1004,8 @@ class TestFocalSpelling:
         logits = rng.standard_normal(64).astype("float64")
         truth = (rng.random(64) > 0.5).astype("float64")
         alpha = 0.5
-        actual = ops.convert_to_numpy(sigmoid_focal_loss(
-            ops.convert_to_tensor(truth), ops.convert_to_tensor(logits),
+        actual = keras.ops.convert_to_numpy(sigmoid_focal_loss(
+            keras.ops.convert_to_tensor(truth), keras.ops.convert_to_tensor(logits),
             alpha=alpha, gamma=0.0))
         alpha_t = alpha * truth + (1.0 - alpha) * (1.0 - truth)
         np.testing.assert_allclose(actual, alpha_t * _ref_bce(truth, logits),
@@ -1018,8 +1017,8 @@ class TestFocalSpelling:
         logits = rng.standard_normal(64).astype("float64")
         truth = (rng.random(64) > 0.5).astype("float64")
         alpha = 0.5
-        actual = ops.convert_to_numpy(sigmoid_focal_loss(
-            ops.convert_to_tensor(truth), ops.convert_to_tensor(logits),
+        actual = keras.ops.convert_to_numpy(sigmoid_focal_loss(
+            keras.ops.convert_to_tensor(truth), keras.ops.convert_to_tensor(logits),
             alpha=alpha, gamma=2.0))
         alpha_t = alpha * truth + (1.0 - alpha) * (1.0 - truth)
         assert not np.allclose(actual, alpha_t * _ref_bce(truth, logits))
@@ -1033,12 +1032,12 @@ class TestFocalSpelling:
         arithmetic wholesale would down-weight one class by 3x."""
         logits = np.array([0.7], dtype="float64")
         alpha = 0.25
-        positive = float(ops.convert_to_numpy(sigmoid_focal_loss(
-            ops.convert_to_tensor(np.array([1.0])),
-            ops.convert_to_tensor(logits), alpha=alpha, gamma=2.0)))
-        negative = float(ops.convert_to_numpy(sigmoid_focal_loss(
-            ops.convert_to_tensor(np.array([0.0])),
-            ops.convert_to_tensor(logits), alpha=alpha, gamma=2.0)))
+        positive = float(keras.ops.convert_to_numpy(sigmoid_focal_loss(
+            keras.ops.convert_to_tensor(np.array([1.0])),
+            keras.ops.convert_to_tensor(logits), alpha=alpha, gamma=2.0)))
+        negative = float(keras.ops.convert_to_numpy(sigmoid_focal_loss(
+            keras.ops.convert_to_tensor(np.array([0.0])),
+            keras.ops.convert_to_tensor(logits), alpha=alpha, gamma=2.0)))
         # Under a flat scalar alpha both would carry the same 0.25 factor.
         np.testing.assert_allclose(
             positive, alpha * (1 - 1 / (1 + np.exp(-logits[0]))) ** 2
@@ -1058,10 +1057,10 @@ class TestFocalSpelling:
         x = tf.constant([40.0], dtype=tf.float32)
         with tf.GradientTape() as tape:
             tape.watch(x)
-            value = ops.sum(sigmoid_focal_loss(
-                ops.convert_to_tensor(np.array([1.0], dtype="float32")), x,
+            value = keras.ops.sum(sigmoid_focal_loss(
+                keras.ops.convert_to_tensor(np.array([1.0], dtype="float32")), x,
                 alpha=0.5, gamma=0.0))
-        grad = ops.convert_to_numpy(tape.gradient(value, x))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, x))
         assert np.all(np.isfinite(grad))
 
 
@@ -1072,11 +1071,11 @@ class TestDiagonalGeometry:
         a = _ref_cxcywh_to_xyxy((rng.random((3, 9, 4)) * 0.5 + 0.25))
         b = _ref_cxcywh_to_xyxy((rng.random((3, 9, 4)) * 0.5 + 0.25))
         exp_iou, exp_giou = _ref_diag_iou_giou(a, b)
-        iou, giou = iou_and_generalized_iou(ops.convert_to_tensor(a),
-                                            ops.convert_to_tensor(b))
-        np.testing.assert_allclose(ops.convert_to_numpy(iou), exp_iou,
+        iou, giou = iou_and_generalized_iou(keras.ops.convert_to_tensor(a),
+                                            keras.ops.convert_to_tensor(b))
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(iou), exp_iou,
                                    rtol=0, atol=1e-12)
-        np.testing.assert_allclose(ops.convert_to_numpy(giou), exp_giou,
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(giou), exp_giou,
                                    rtol=0, atol=1e-12)
 
     def test_the_pairwise_adapter_still_agrees_with_the_matcher_oracle(self):
@@ -1086,9 +1085,9 @@ class TestDiagonalGeometry:
         b = _ref_cxcywh_to_xyxy((rng.random((2, 4, 4)) * 0.5 + 0.25))
         expected = np.stack([_ref_generalized_box_iou(a[i], b[i])
                              for i in range(2)])
-        actual = ops.convert_to_numpy(
-            pairwise_generalized_iou(ops.convert_to_tensor(a),
-                                     ops.convert_to_tensor(b)))
+        actual = keras.ops.convert_to_numpy(
+            pairwise_generalized_iou(keras.ops.convert_to_tensor(a),
+                                     keras.ops.convert_to_tensor(b)))
         np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
 
@@ -1173,7 +1172,7 @@ class TestTermValues:
         with tf.GradientTape() as tape:
             tape.watch(tensor)
             value = loss(y_true, tensor)
-        grad = ops.convert_to_numpy(tape.gradient(value, tensor))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, tensor))
         box_grad = grad[:, :QUERIES, PACKED_BOX_START:PACKED_MASK_START]
         np.testing.assert_array_equal(box_grad, np.zeros_like(box_grad))
         # Liveness arm: the SAME probe sees a live gradient on the logits.
@@ -1227,7 +1226,7 @@ class TestTheFiveDivisors:
         # Image 0, row 2: the flag stays 1, the EXTENTS go to zero.
         fields["tgt_boxes"][0, 2, 2:] = 0.0
         fields["keep"] = np.asarray(
-            ops.convert_to_numpy(derive_keep_loss(fields["tgt_boxes"],
+            keras.ops.convert_to_numpy(derive_keep_loss(fields["tgt_boxes"],
                                                   fields["valid"])),
             dtype="float32").reshape(fields["valid"].shape[0], 1)
         conjunction = float(((fields["valid"] > 0)
@@ -1556,8 +1555,8 @@ class TestFirstClassCases:
         with tf.GradientTape() as tape:
             tape.watch(tensor)
             value = loss(y_true, tensor)
-        grad = ops.convert_to_numpy(tape.gradient(value, tensor))
-        assert np.isfinite(float(ops.convert_to_numpy(value)))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, tensor))
+        assert np.isfinite(float(keras.ops.convert_to_numpy(value)))
         assert np.all(np.isfinite(grad))
         # Liveness: SOMETHING is still learning -- the presence negative.
         assert np.abs(grad[:, QUERIES, PACKED_SCORE_CHANNEL]).max() > 1e-6
@@ -1573,8 +1572,8 @@ class TestFirstClassCases:
         with tf.GradientTape() as tape:
             tape.watch(tensor)
             value = loss(y_true, tensor)
-        grad = ops.convert_to_numpy(tape.gradient(value, tensor))
-        assert np.isfinite(float(ops.convert_to_numpy(value)))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, tensor))
+        assert np.isfinite(float(keras.ops.convert_to_numpy(value)))
         assert np.all(np.isfinite(grad))
         np.testing.assert_allclose(
             _terms(loss, y_true, y_pred)["loss_ce"],
@@ -1596,7 +1595,7 @@ class TestFirstClassCases:
         with tf.GradientTape() as tape:
             tape.watch(tensor)
             value = loss(y_true, tensor)
-        grad = ops.convert_to_numpy(tape.gradient(value, tensor))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, tensor))
         assert np.all(np.isfinite(grad))
         assert _terms(loss, y_true, y_pred)["num_matched"] == 1.0
 
@@ -1609,7 +1608,7 @@ class TestFirstClassCases:
         with tf.GradientTape() as tape:
             tape.watch(tensor)
             value = _loss()(y_true, tensor)
-        grad = ops.convert_to_numpy(tape.gradient(value, tensor))
+        grad = keras.ops.convert_to_numpy(tape.gradient(value, tensor))
         assert np.abs(grad[:, :QUERIES, PACKED_SCORE_CHANNEL]).max() > 1e-6
         assert np.abs(
             grad[:, :QUERIES, PACKED_BOX_START:PACKED_MASK_START]).max() > 1e-6
@@ -1646,7 +1645,7 @@ class TestSwitches:
         expected = (20.0 * terms["loss_ce"] + 20.0 * terms["presence_loss"]
                     + 5.0 * terms["loss_bbox"] + 2.0 * terms["loss_giou"])
         np.testing.assert_allclose(
-            float(ops.convert_to_numpy(loss(y_true, y_pred))), expected,
+            float(keras.ops.convert_to_numpy(loss(y_true, y_pred))), expected,
             rtol=1e-5, atol=1e-6)
 
     def test_the_total_is_the_weighted_sum_of_the_six_terms(self):
@@ -1658,7 +1657,7 @@ class TestSwitches:
                     + 5.0 * terms["loss_bbox"] + 2.0 * terms["loss_giou"]
                     + 200.0 * terms["loss_mask"] + 10.0 * terms["loss_dice"])
         np.testing.assert_allclose(
-            float(ops.convert_to_numpy(loss(y_true, y_pred))), expected,
+            float(keras.ops.convert_to_numpy(loss(y_true, y_pred))), expected,
             rtol=1e-5, atol=1e-5)
 
     def test_scale_by_find_batch_size_multiplies_the_total_by_sqrt_B(self):
@@ -1666,8 +1665,8 @@ class TestSwitches:
         D-007. The default being off is what this first asserts."""
         fields = _make_packed()
         y_true, y_pred = _pack(fields)
-        plain = float(ops.convert_to_numpy(_loss()(y_true, y_pred)))
-        scaled = float(ops.convert_to_numpy(
+        plain = float(keras.ops.convert_to_numpy(_loss()(y_true, y_pred)))
+        scaled = float(keras.ops.convert_to_numpy(
             _loss(scale_by_find_batch_size=True)(y_true, y_pred)))
         np.testing.assert_allclose(scaled, plain * np.sqrt(BATCH), rtol=1e-5)
         assert Sam3DetectionLoss().scale_by_find_batch_size is False
@@ -1713,8 +1712,8 @@ class TestSwitches:
         restored = Sam3DetectionLoss.from_config(config)
         assert restored.get_config() == config
         np.testing.assert_allclose(
-            float(ops.convert_to_numpy(restored(y_true, y_pred))),
-            float(ops.convert_to_numpy(original(y_true, y_pred))),
+            float(keras.ops.convert_to_numpy(restored(y_true, y_pred))),
+            float(keras.ops.convert_to_numpy(original(y_true, y_pred))),
             rtol=0, atol=0)
 
     def test_every_constructor_argument_survives_get_config(self):
@@ -1795,8 +1794,8 @@ class TestDeepSupervisionIdentityAtZeroAux:
         guarantee over to the explicit spelling."""
         fields = _make_packed()
         y_true, y_pred = _pack(fields)
-        default = float(ops.convert_to_numpy(_loss()(y_true, y_pred)))
-        explicit = float(ops.convert_to_numpy(
+        default = float(keras.ops.convert_to_numpy(_loss()(y_true, y_pred)))
+        explicit = float(keras.ops.convert_to_numpy(
             _loss(num_aux_layers=0)(y_true, y_pred)))
         assert default == explicit
 
@@ -1804,12 +1803,12 @@ class TestDeepSupervisionIdentityAtZeroAux:
             self):
         fields = _make_packed()
         _, y_pred = _pack(fields, include_masks=True)
-        out = unpack_predictions(ops.convert_to_tensor(y_pred), True, 0)
+        out = unpack_predictions(keras.ops.convert_to_tensor(y_pred), True, 0)
         assert out["aux"] == []
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["pred_logits"]), fields["logits"])
+            keras.ops.convert_to_numpy(out["pred_logits"]), fields["logits"])
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(out["pred_boxes"]), fields["pred_boxes"])
+            keras.ops.convert_to_numpy(out["pred_boxes"]), fields["pred_boxes"])
 
     def test_num_aux_layers_must_be_a_non_negative_int(self):
         with pytest.raises(ValueError, match="num_aux_layers"):
@@ -1849,14 +1848,14 @@ class TestG3AuxiliarySupervisionReachesEveryLayer:
         # Liveness FIRST: the main block must be supervised, or a green aux
         # assertion would be measuring a loss that supervises nothing.
         assert grads[0] is not None, "main block gradient is None"
-        main_box_grad = ops.convert_to_numpy(
+        main_box_grad = keras.ops.convert_to_numpy(
             grads[0])[:, :QUERIES, PACKED_BOX_START:PACKED_MASK_START]
         assert np.abs(main_box_grad).max() > 0.0
 
         for index in range(1, num_aux + 1):
             assert grads[index] is not None, (
                 f"auxiliary block {index - 1} got a None gradient")
-            box_grad = ops.convert_to_numpy(
+            box_grad = keras.ops.convert_to_numpy(
                 grads[index])[:, :QUERIES,
                               PACKED_BOX_START:PACKED_MASK_START]
             assert np.abs(box_grad).max() > 0.0, (
@@ -1908,9 +1907,9 @@ class TestG4AuxiliaryBlocksAreWeightedEqually:
         """
         fields = _make_packed()
         y_true, block = _pack(fields, include_masks=False)
-        single = float(ops.convert_to_numpy(
+        single = float(keras.ops.convert_to_numpy(
             _loss(include_masks=False)(y_true, block)))
-        triple = float(ops.convert_to_numpy(
+        triple = float(keras.ops.convert_to_numpy(
             _loss(include_masks=False, num_aux_layers=2)(
                 y_true, np.concatenate([block, block, block], axis=1))))
 
@@ -1923,10 +1922,10 @@ class TestG4AuxiliaryBlocksAreWeightedEqually:
         deep-supervised total equals the sum of each block scored alone."""
         num_aux = 2
         y_true, blocks = _aux_stack(num_aux)
-        total = float(ops.convert_to_numpy(
+        total = float(keras.ops.convert_to_numpy(
             _loss(include_masks=False, num_aux_layers=num_aux)(
                 y_true, np.concatenate(blocks, axis=1))))
-        parts = [float(ops.convert_to_numpy(
+        parts = [float(keras.ops.convert_to_numpy(
             _loss(include_masks=False)(y_true, block))) for block in blocks]
         assert len(set(parts)) == len(parts), "the blocks are not distinct"
         np.testing.assert_allclose(total, sum(parts), rtol=1e-6, atol=0.0)
@@ -1948,14 +1947,14 @@ class TestG5AuxiliaryBlocksCarryNoMaskSupervision:
         y_true, blocks = _aux_stack(num_aux, include_masks=True)
         packed = np.concatenate(blocks, axis=1)
         loss = _loss(include_masks=True, num_aux_layers=num_aux)
-        base = float(ops.convert_to_numpy(loss(y_true, packed)))
+        base = float(keras.ops.convert_to_numpy(loss(y_true, packed)))
         rows = QUERIES + 1
 
         for index in range(1, num_aux + 1):
             perturbed = packed.copy()
             perturbed[:, index * rows:index * rows + QUERIES,
                       PACKED_MASK_START:] += 17.0
-            moved = float(ops.convert_to_numpy(loss(y_true, perturbed)))
+            moved = float(keras.ops.convert_to_numpy(loss(y_true, perturbed)))
             assert moved == base, (
                 f"auxiliary block {index - 1}'s mask channels moved the loss "
                 f"by {moved - base}")
@@ -1963,7 +1962,7 @@ class TestG5AuxiliaryBlocksCarryNoMaskSupervision:
         # Control: the MAIN block's mask channels ARE supervised.
         control = packed.copy()
         control[:, :QUERIES, PACKED_MASK_START:] += 17.0
-        assert float(ops.convert_to_numpy(loss(y_true, control))) != base
+        assert float(keras.ops.convert_to_numpy(loss(y_true, control))) != base
 
 
 class TestFourBlocksAreSupervisedIndependently:
@@ -2001,7 +2000,7 @@ class TestFourBlocksAreSupervisedIndependently:
 
         for index in range(num_aux + 1):
             assert grads[index] is not None, f"block {index} gradient is None"
-            box_grad = ops.convert_to_numpy(
+            box_grad = keras.ops.convert_to_numpy(
                 grads[index])[:, :QUERIES,
                               PACKED_BOX_START:PACKED_MASK_START]
             assert np.abs(box_grad).max() > 0.0, (
@@ -2017,10 +2016,10 @@ class TestFourBlocksAreSupervisedIndependently:
         """
         num_aux = 3
         y_true, blocks = _aux_stack(num_aux)
-        total = float(ops.convert_to_numpy(
+        total = float(keras.ops.convert_to_numpy(
             _loss(include_masks=False, num_aux_layers=num_aux)(
                 y_true, np.concatenate(blocks, axis=1))))
-        parts = [float(ops.convert_to_numpy(
+        parts = [float(keras.ops.convert_to_numpy(
             _loss(include_masks=False)(y_true, block))) for block in blocks]
         assert len(set(parts)) == len(parts), "the blocks are not distinct"
         np.testing.assert_allclose(total, sum(parts), rtol=1e-6, atol=0.0)

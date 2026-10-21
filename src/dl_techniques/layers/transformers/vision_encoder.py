@@ -16,7 +16,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, get_args
 
 # ---------------------------------------------------------------------
@@ -185,10 +184,10 @@ class VisionEncoder(keras.layers.Layer):
             stochastic_depth_rate: float = 0.0,
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             attention_args: Optional[Dict[str, Any]] = None,
             norm_args: Optional[Dict[str, Any]] = None,
             ffn_args: Optional[Dict[str, Any]] = None,
@@ -266,10 +265,10 @@ class VisionEncoder(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = resolve_activation(activation)
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.attention_args = attention_args or {}
         self.norm_args = norm_args or {}
         self.ffn_args = ffn_args or {}
@@ -384,7 +383,7 @@ class VisionEncoder(keras.layers.Layer):
 
         if self.patch_embed_type == 'linear':
             # Standard ViT-style linear patch embedding
-            return layers.Conv2D(
+            return keras.layers.Conv2D(
                 filters=self.embed_dim,
                 kernel_size=self.patch_size,
                 strides=self.patch_size,
@@ -398,7 +397,7 @@ class VisionEncoder(keras.layers.Layer):
             # sigmoid contrastive loss and its tower uses a single-conv stem; see models/vision/vit_siglip/model.py's module docstring.
             return keras.Sequential([
                 # Stage 1: Coarse-grained patching
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=self.embed_dim // 2,
                     kernel_size=self.patch_size // 2,
                     strides=self.patch_size // 2,
@@ -411,9 +410,9 @@ class VisionEncoder(keras.layers.Layer):
                     name='patch_embed_norm1',
                     **self.norm_args
                 ),
-                layers.Activation('gelu', name='patch_embed_activation1'),
+                keras.layers.Activation('gelu', name='patch_embed_activation1'),
                 # Stage 2: Refinement to final embedding dimension
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=self.embed_dim,
                     kernel_size=2,
                     strides=2,
@@ -426,7 +425,7 @@ class VisionEncoder(keras.layers.Layer):
         elif self.patch_embed_type == 'conv':
             # Multi-layer convolution patch embedding
             return keras.Sequential([
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=self.embed_dim // 4,
                     kernel_size=3,
                     strides=2,
@@ -439,8 +438,8 @@ class VisionEncoder(keras.layers.Layer):
                     name='patch_embed_norm1',
                     **self.norm_args
                 ),
-                layers.Activation(self.activation, name='patch_embed_act1'),
-                layers.Conv2D(
+                keras.layers.Activation(self.activation, name='patch_embed_act1'),
+                keras.layers.Conv2D(
                     filters=self.embed_dim // 2,
                     kernel_size=3,
                     strides=2,
@@ -453,8 +452,8 @@ class VisionEncoder(keras.layers.Layer):
                     name='patch_embed_norm2',
                     **self.norm_args
                 ),
-                layers.Activation(self.activation, name='patch_embed_act2'),
-                layers.Conv2D(
+                keras.layers.Activation(self.activation, name='patch_embed_act2'),
+                keras.layers.Conv2D(
                     filters=self.embed_dim,
                     kernel_size=self.patch_size // 4,
                     strides=self.patch_size // 4,
@@ -468,16 +467,16 @@ class VisionEncoder(keras.layers.Layer):
             # Hybrid CNN backbone + patch embedding (simplified)
             return keras.Sequential([
                 # CNN backbone (simplified ResNet-like)
-                layers.Conv2D(64, 7, strides=2, padding='same', name='hybrid_conv1', **base_args),
+                keras.layers.Conv2D(64, 7, strides=2, padding='same', name='hybrid_conv1', **base_args),
                 create_normalization_layer(self.normalization_type, name='hybrid_norm1', **self.norm_args),
-                layers.Activation(self.activation, name='hybrid_act1'),
-                layers.MaxPooling2D(3, strides=2, padding='same', name='hybrid_pool1'),
+                keras.layers.Activation(self.activation, name='hybrid_act1'),
+                keras.layers.MaxPooling2D(3, strides=2, padding='same', name='hybrid_pool1'),
                 # Bottleneck
-                layers.Conv2D(self.embed_dim // 2, 3, padding='same', name='hybrid_conv2', **base_args),
+                keras.layers.Conv2D(self.embed_dim // 2, 3, padding='same', name='hybrid_conv2', **base_args),
                 create_normalization_layer(self.normalization_type, name='hybrid_norm2', **self.norm_args),
-                layers.Activation(self.activation, name='hybrid_act2'),
+                keras.layers.Activation(self.activation, name='hybrid_act2'),
                 # Final patch embedding
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=self.embed_dim,
                     kernel_size=1,
                     strides=1,
@@ -552,8 +551,8 @@ class VisionEncoder(keras.layers.Layer):
 
         # DECISION plan-2026-07-31T042809-ddc92265/D-009: splice a ones column
         # for the CLS token at position 0 -- an un-extended mask misaligns every downstream index by one (13 of 18 pooling strategies broke on this). See decisions.md.
-        cls_mask = ops.ones((batch_size, 1), dtype=attention_mask.dtype)
-        return ops.concatenate([cls_mask, attention_mask], axis=1)
+        cls_mask = keras.ops.ones((batch_size, 1), dtype=attention_mask.dtype)
+        return keras.ops.concatenate([cls_mask, attention_mask], axis=1)
 
     def _validate_attention_mask(self, attention_mask: Optional[keras.KerasTensor]) -> None:
         """Fail loudly on a mask that does not match the documented contract.
@@ -590,17 +589,17 @@ class VisionEncoder(keras.layers.Layer):
         :return: Sequence features ``(B, seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
         x = self.patch_embed(inputs, training=training)
 
         # Reshape to sequence format. Shape can vary by patch embedder.
         # Final shape should be (batch_size, num_patches, embed_dim)
         if len(x.shape) == 4:
-            x = ops.reshape(x, [batch_size, -1, self.embed_dim])
+            x = keras.ops.reshape(x, [batch_size, -1, self.embed_dim])
 
         if self.use_cls_token:
-            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-            x = ops.concatenate([cls_tokens, x], axis=1)
+            cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+            x = keras.ops.concatenate([cls_tokens, x], axis=1)
 
         attention_mask = self._extend_mask_for_cls(attention_mask, batch_size)
 
@@ -679,7 +678,7 @@ class VisionEncoder(keras.layers.Layer):
             inputs, attention_mask=attention_mask, training=training
         )
 
-        pooling_mask = self._extend_mask_for_cls(attention_mask, ops.shape(inputs)[0])
+        pooling_mask = self._extend_mask_for_cls(attention_mask, keras.ops.shape(inputs)[0])
         output = self.pooling_layer(x, mask=pooling_mask, training=training)
 
         return output
@@ -762,12 +761,12 @@ class VisionEncoder(keras.layers.Layer):
         patch_features = self.get_patch_features(
             inputs, attention_mask=attention_mask, training=training
         )
-        batch_size = ops.shape(patch_features)[0]
+        batch_size = keras.ops.shape(patch_features)[0]
 
         patches_h = self.img_size // self.patch_size
         patches_w = self.img_size // self.patch_size
 
-        return ops.reshape(
+        return keras.ops.reshape(
             patch_features,
             [batch_size, patches_h, patches_w, self.embed_dim]
         )
@@ -813,10 +812,10 @@ class VisionEncoder(keras.layers.Layer):
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'attention_args': self.attention_args,
             'norm_args': self.norm_args,
             'ffn_args': self.ffn_args,

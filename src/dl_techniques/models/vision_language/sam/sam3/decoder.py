@@ -24,7 +24,6 @@ References:
 
 import keras
 import math
-from keras import layers, ops
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -66,8 +65,8 @@ def _box_rpb_log_compress(deltas: Any) -> Any:
     :rtype: Any
     """
     scaled = deltas * _BOX_RPB_SCALE
-    compressed = ops.log2(ops.abs(scaled) + 1.0) / _BOX_RPB_LOG_DIVISOR
-    return ops.sign(scaled) * compressed
+    compressed = keras.ops.log2(keras.ops.abs(scaled) + 1.0) / _BOX_RPB_LOG_DIVISOR
+    return keras.ops.sign(scaled) * compressed
 
 
 def _box_rpb_bias(
@@ -113,20 +112,20 @@ def _box_rpb_bias(
     height, width = int(feat_size[0]), int(feat_size[1])
     dtype = reference_boxes.dtype
 
-    centre_x, centre_y, box_w, box_h = ops.split(reference_boxes, 4, axis=-1)
-    edges_x = ops.concatenate(
+    centre_x, centre_y, box_w, box_h = keras.ops.split(reference_boxes, 4, axis=-1)
+    edges_x = keras.ops.concatenate(
         [centre_x - 0.5 * box_w, centre_x + 0.5 * box_w], axis=-1)
-    edges_y = ops.concatenate(
+    edges_y = keras.ops.concatenate(
         [centre_y - 0.5 * box_h, centre_y + 0.5 * box_h], axis=-1)
 
     # Normalized grid coordinates: arange(N) / N, matching the reference.
-    coords_y = ops.cast(ops.arange(height), dtype) / float(height)
-    coords_x = ops.cast(ops.arange(width), dtype) / float(width)
+    coords_y = keras.ops.cast(keras.ops.arange(height), dtype) / float(height)
+    coords_x = keras.ops.cast(keras.ops.arange(width), dtype) / float(width)
 
-    deltas_y = (ops.reshape(coords_y, (1, 1, height, 1))
-                - ops.expand_dims(edges_y, axis=2))
-    deltas_x = (ops.reshape(coords_x, (1, 1, width, 1))
-                - ops.expand_dims(edges_x, axis=2))
+    deltas_y = (keras.ops.reshape(coords_y, (1, 1, height, 1))
+                - keras.ops.expand_dims(edges_y, axis=2))
+    deltas_x = (keras.ops.reshape(coords_x, (1, 1, width, 1))
+                - keras.ops.expand_dims(edges_x, axis=2))
 
     if mode == "log":
         deltas_y = _box_rpb_log_compress(deltas_y)
@@ -136,10 +135,10 @@ def _box_rpb_bias(
     bias_x = embed_x(deltas_x)  # (batch, num_queries, width,  num_heads)
 
     # Outer SUM over the two axes -- not a concatenation and not a product.
-    bias = ops.expand_dims(bias_y, 3) + ops.expand_dims(bias_x, 2)
-    bias = ops.transpose(bias, (0, 4, 1, 2, 3))
-    return ops.reshape(
-        bias, (-1, num_heads, ops.shape(bias)[2], height * width))
+    bias = keras.ops.expand_dims(bias_y, 3) + keras.ops.expand_dims(bias_x, 2)
+    bias = keras.ops.transpose(bias, (0, 4, 1, 2, 3))
+    return keras.ops.reshape(
+        bias, (-1, num_heads, keras.ops.shape(bias)[2], height * width))
 
 
 # DECISION plan-2026-08-04T044628-4c240b4c/D-080: keep this module-private,
@@ -188,15 +187,15 @@ class _Sam3DecoderAttention(keras.layers.Layer):
         self.head_dim = self.d_model // self.num_heads
         self._scale = 1.0 / math.sqrt(float(self.head_dim))
 
-        self.q_proj = layers.Dense(self.d_model, use_bias=self.use_bias,
+        self.q_proj = keras.layers.Dense(self.d_model, use_bias=self.use_bias,
                                    name="q_proj")
-        self.k_proj = layers.Dense(self.d_model, use_bias=self.use_bias,
+        self.k_proj = keras.layers.Dense(self.d_model, use_bias=self.use_bias,
                                    name="k_proj")
-        self.v_proj = layers.Dense(self.d_model, use_bias=self.use_bias,
+        self.v_proj = keras.layers.Dense(self.d_model, use_bias=self.use_bias,
                                    name="v_proj")
-        self.out_proj = layers.Dense(self.d_model, use_bias=self.use_bias,
+        self.out_proj = keras.layers.Dense(self.d_model, use_bias=self.use_bias,
                                      name="out_proj")
-        self.attn_dropout = layers.Dropout(self.dropout_rate,
+        self.attn_dropout = keras.layers.Dropout(self.dropout_rate,
                                            name="attn_dropout")
 
     def build(
@@ -229,9 +228,9 @@ class _Sam3DecoderAttention(keras.layers.Layer):
 
     def _split_heads(self, x: Any) -> Any:
         """Reshape ``(B, N, d_model)`` to ``(B, heads, N, head_dim)``."""
-        shape = ops.shape(x)
-        x = ops.reshape(x, (shape[0], shape[1], self.num_heads, self.head_dim))
-        return ops.transpose(x, (0, 2, 1, 3))
+        shape = keras.ops.shape(x)
+        x = keras.ops.reshape(x, (shape[0], shape[1], self.num_heads, self.head_dim))
+        return keras.ops.transpose(x, (0, 2, 1, 3))
 
     def call(
             self, query: Any, key: Any, value: Any,
@@ -258,18 +257,18 @@ class _Sam3DecoderAttention(keras.layers.Layer):
         k = self._split_heads(self.k_proj(key))
         v = self._split_heads(self.v_proj(value))
 
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self._scale
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2))) * self._scale
         if additive_bias is not None:
             # The bias is REAL-VALUED and enters here, on the raw scores,
             # before any normalization. See this class's D-080 anchor.
-            scores = scores + ops.cast(additive_bias, scores.dtype)
+            scores = scores + keras.ops.cast(additive_bias, scores.dtype)
 
-        attn = self.attn_dropout(ops.softmax(scores, axis=-1),
+        attn = self.attn_dropout(keras.ops.softmax(scores, axis=-1),
                                  training=training)
-        out = ops.matmul(attn, v)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        shape = ops.shape(out)
-        out = ops.reshape(out, (shape[0], shape[1], self.d_model))
+        out = keras.ops.matmul(attn, v)
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        shape = keras.ops.shape(out)
+        out = keras.ops.reshape(out, (shape[0], shape[1], self.d_model))
         return self.out_proj(out)
 
     def compute_output_shape(
@@ -359,7 +358,7 @@ class Sam3DecoderLayer(keras.layers.Layer):
         # measured in this package; see decisions.md D-098).
         self.self_attn = _Sam3DecoderAttention(
             self.d_model, self.num_heads, self.dropout_rate, name="self_attn")
-        self.dropout2 = layers.Dropout(self.dropout_rate, name="dropout2")
+        self.dropout2 = keras.layers.Dropout(self.dropout_rate, name="dropout2")
         self.norm2 = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="norm2")
 
@@ -372,14 +371,14 @@ class Sam3DecoderLayer(keras.layers.Layer):
             dropout_rate=self.dropout_rate, use_bias=True,
             shared_qk_projections=False, probability_type="softmax",
             qk_norm_type=None, name="ca_text")
-        self.catext_dropout = layers.Dropout(self.dropout_rate,
+        self.catext_dropout = keras.layers.Dropout(self.dropout_rate,
                                              name="catext_dropout")
         self.catext_norm = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="catext_norm")
 
         self.cross_attn = _Sam3DecoderAttention(
             self.d_model, self.num_heads, self.dropout_rate, name="cross_attn")
-        self.dropout1 = layers.Dropout(self.dropout_rate, name="dropout1")
+        self.dropout1 = keras.layers.Dropout(self.dropout_rate, name="dropout1")
         self.norm1 = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="norm1")
 
@@ -391,7 +390,7 @@ class Sam3DecoderLayer(keras.layers.Layer):
             "mlp", hidden_dim=self.dim_feedforward, output_dim=self.d_model,
             activation=self.activation, dropout_rate=self.dropout_rate,
             use_bias=True, name="ffn")
-        self.dropout4 = layers.Dropout(self.dropout_rate, name="dropout4")
+        self.dropout4 = keras.layers.Dropout(self.dropout_rate, name="dropout4")
         self.norm3 = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="norm3")
 
@@ -528,10 +527,10 @@ class Sam3DecoderLayer(keras.layers.Layer):
         if presence_token is not None:
             # The presence token joins the query sequence with a ZEROED
             # position: it is not a spatial query and must not be given one.
-            tgt = ops.concatenate([presence_token, tgt], axis=1)
+            tgt = keras.ops.concatenate([presence_token, tgt], axis=1)
             if query_pos is not None:
-                query_pos = ops.concatenate(
-                    [ops.zeros_like(presence_token), query_pos], axis=1)
+                query_pos = keras.ops.concatenate(
+                    [keras.ops.zeros_like(presence_token), query_pos], axis=1)
 
         # --- 1. self-attention ------------------------------------------
         q = self._with_pos(tgt, query_pos)
@@ -542,7 +541,7 @@ class Sam3DecoderLayer(keras.layers.Layer):
         if self.use_text_cross_attention:
             keep = None
             if text_padding_mask is not None:
-                keep = ops.logical_not(ops.cast(text_padding_mask, "bool"))
+                keep = keras.ops.logical_not(keras.ops.cast(text_padding_mask, "bool"))
             attended = self.ca_text(
                 self._with_pos(tgt, query_pos), memory_text,
                 attention_mask=keep, training=training)
@@ -553,8 +552,8 @@ class Sam3DecoderLayer(keras.layers.Layer):
         if presence_token is not None and image_cross_bias is not None:
             # A ZERO bias row for the presence token: it attends everywhere,
             # whatever per-query bias the real queries carry.
-            zero_row = ops.zeros_like(image_cross_bias[:, :, :1, :])
-            image_cross_bias = ops.concatenate(
+            zero_row = keras.ops.zeros_like(image_cross_bias[:, :, :1, :])
+            image_cross_bias = keras.ops.concatenate(
                 [zero_row, image_cross_bias], axis=2)
         attended = self.cross_attn(
             self._with_pos(tgt, query_pos),
@@ -809,11 +808,11 @@ class Sam3TransformerDecoder(keras.layers.Layer):
     def _make_mlp(depth: int, hidden: int, out_dim: int, name: str,
                   zero_init_last: bool = False) -> list:
         """Build a flat ReLU MLP stack; only the last projection is linear."""
-        stack = [layers.Dense(hidden, activation="relu", name=f"{name}_{index}")
+        stack = [keras.layers.Dense(hidden, activation="relu", name=f"{name}_{index}")
                  for index in range(depth - 1)]
         extra = dict(kernel_initializer="zeros", bias_initializer="zeros") \
             if zero_init_last else {}
-        stack.append(layers.Dense(out_dim, name=f"{name}_{depth - 1}", **extra))
+        stack.append(keras.layers.Dense(out_dim, name=f"{name}_{depth - 1}", **extra))
         return stack
 
     @staticmethod
@@ -834,8 +833,8 @@ class Sam3TransformerDecoder(keras.layers.Layer):
     @staticmethod
     def _inverse_sigmoid(x: Any, eps: float = 1e-3) -> Any:
         """The reference's numerically guarded logit function."""
-        x = ops.clip(x, 0.0, 1.0)
-        return ops.log(ops.maximum(x, eps) / ops.maximum(1.0 - x, eps))
+        x = keras.ops.clip(x, 0.0, 1.0)
+        return keras.ops.log(keras.ops.maximum(x, eps) / keras.ops.maximum(1.0 - x, eps))
 
     @staticmethod
     def _sine_embed_for_boxes(boxes: Any, d_model: int) -> Any:
@@ -858,15 +857,15 @@ class Sam3TransformerDecoder(keras.layers.Layer):
         :rtype: Any
         """
         num_feats = d_model // 2
-        index = ops.cast(ops.arange(num_feats // 2), boxes.dtype)
-        dim_t = ops.power(10000.0, (2.0 * index) / float(num_feats))
+        index = keras.ops.cast(keras.ops.arange(num_feats // 2), boxes.dtype)
+        dim_t = keras.ops.power(10000.0, (2.0 * index) / float(num_feats))
         parts = []
         for axis in (1, 0, 2, 3):
             scaled = boxes[..., axis:axis + 1] * (2.0 * math.pi) / dim_t
-            pair = ops.stack([ops.sin(scaled), ops.cos(scaled)], axis=-1)
-            shape = ops.shape(pair)
-            parts.append(ops.reshape(pair, (shape[0], shape[1], num_feats)))
-        return ops.concatenate(parts, axis=-1)
+            pair = keras.ops.stack([keras.ops.sin(scaled), keras.ops.cos(scaled)], axis=-1)
+            shape = keras.ops.shape(pair)
+            parts.append(keras.ops.reshape(pair, (shape[0], shape[1], num_feats)))
+        return keras.ops.concatenate(parts, axis=-1)
 
     def build(
             self, memory_shape: Tuple[Optional[int], ...],
@@ -967,24 +966,24 @@ class Sam3TransformerDecoder(keras.layers.Layer):
             are ``None`` when the presence token is disabled.
         :rtype: Tuple[Any, Any, Optional[Any], Optional[Any]]
         """
-        batch = ops.shape(memory)[0]
+        batch = keras.ops.shape(memory)[0]
         if tgt is None:
-            tgt = ops.broadcast_to(
-                ops.expand_dims(ops.cast(self.query_embed, self.compute_dtype),
+            tgt = keras.ops.broadcast_to(
+                keras.ops.expand_dims(keras.ops.cast(self.query_embed, self.compute_dtype),
                                 0),
                 (batch, self.num_queries, self.d_model))
         if reference_boxes is None:
-            reference_boxes = ops.sigmoid(ops.broadcast_to(
-                ops.expand_dims(
-                    ops.cast(self.reference_points, self.compute_dtype), 0),
+            reference_boxes = keras.ops.sigmoid(keras.ops.broadcast_to(
+                keras.ops.expand_dims(
+                    keras.ops.cast(self.reference_points, self.compute_dtype), 0),
                 (batch, self.num_queries, 4)))
         else:
-            reference_boxes = ops.cast(reference_boxes, self.compute_dtype)
+            reference_boxes = keras.ops.cast(reference_boxes, self.compute_dtype)
         presence = None
         if self.use_presence_token:
-            presence = ops.broadcast_to(
-                ops.expand_dims(
-                    ops.cast(self.presence_token, self.compute_dtype), 0),
+            presence = keras.ops.broadcast_to(
+                keras.ops.expand_dims(
+                    keras.ops.cast(self.presence_token, self.compute_dtype), 0),
                 (batch, 1, self.d_model))
 
         hidden_states = []
@@ -1025,15 +1024,15 @@ class Sam3TransformerDecoder(keras.layers.Layer):
             delta = self._run_mlp(
                 self.bbox_embed,
                 normed if self.use_normed_output_consistently else output)
-            refined = ops.sigmoid(
+            refined = keras.ops.sigmoid(
                 delta + self._inverse_sigmoid(reference_boxes))
-            reference_boxes = ops.stop_gradient(refined)
+            reference_boxes = keras.ops.stop_gradient(refined)
             if index != self.num_layers - 1:
                 all_reference_boxes.append(refined)
             hidden_states.append(normed)
 
             if presence is not None:
-                logits = ops.squeeze(
+                logits = keras.ops.squeeze(
                     self._run_mlp(self.presence_token_head,
                                   self.presence_token_out_norm(presence)),
                     axis=-1)
@@ -1041,13 +1040,13 @@ class Sam3TransformerDecoder(keras.layers.Layer):
                 # is 10.0, the open-vocabulary scorer's is 12.0 -- do not unify them.
                 # At the reference SHA the clamp is a provable no-op (result discarded); this port makes it effective, matching the reference's stated intent. See decisions.md.
                 if self.clamp_presence_logits:
-                    logits = ops.clip(logits,
+                    logits = keras.ops.clip(logits,
                                       -self.clamp_presence_logit_max_val,
                                       self.clamp_presence_logit_max_val)
                 presence_logits.append(logits)
 
-        return (ops.stack(hidden_states), ops.stack(all_reference_boxes),
-                ops.stack(presence_logits) if presence_logits else None,
+        return (keras.ops.stack(hidden_states), keras.ops.stack(all_reference_boxes),
+                keras.ops.stack(presence_logits) if presence_logits else None,
                 presence)
 
     def compute_output_shape(

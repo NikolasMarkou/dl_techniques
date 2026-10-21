@@ -27,7 +27,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -306,10 +305,10 @@ class ViTHMLP(keras.Model):
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
             stem_norm_layer: StemNormLayer = "batch",
-            kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: NormalizationType = "layer_norm",
             normalization_position: Literal['pre', 'post'] = "pre",
             ffn_type: FFNType = "mlp",
@@ -389,7 +388,7 @@ class ViTHMLP(keras.Model):
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
         self.stem_norm_layer = str(stem_norm_layer)
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         # DECISION plan-2026-09-15T135450-e083ae85/D-013
         # Resolve eagerly here, mirroring the kernel_initializer/bias_initializer
         # lines immediately above -- see decisions.md D-013. The deleted
@@ -400,9 +399,9 @@ class ViTHMLP(keras.Model):
         # correctly via their own regularizers.get() calls, but the model's
         # own stored attribute had the wrong type). Do not revert to storing
         # the raw `kernel_regularizer`/`bias_regularizer` arguments here.
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.normalization_type = str(normalization_type)
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
@@ -577,7 +576,7 @@ class ViTHMLP(keras.Model):
         self.cls_token = self.add_weight(
             name="cls_token",
             shape=(1, 1, self.embed_dim),
-            initializer=initializers.RandomNormal(stddev=0.02),
+            initializer=keras.initializers.RandomNormal(stddev=0.02),
             trainable=True
         )
 
@@ -633,9 +632,9 @@ class ViTHMLP(keras.Model):
         x = self.stem(inputs, training=training)
 
         # Prepend the CLS token: (batch_size, seq_len, embed_dim).
-        batch_size = ops.shape(x)[0]
-        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        batch_size = keras.ops.shape(x)[0]
+        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)
 
         # Positional embedding includes its own dropout.
         x = self.pos_embed(x, training=training)
@@ -698,10 +697,10 @@ class ViTHMLP(keras.Model):
             "attention_dropout_rate": self.attention_dropout_rate,
             "pos_dropout_rate": self.pos_dropout_rate,
             "stem_norm_layer": self.stem_norm_layer,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
@@ -850,10 +849,10 @@ def create_vit_hmlp(
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
         stem_norm_layer: StemNormLayer = "batch",
-        kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_initializer: Union[str, initializers.Initializer] = "zeros",
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         normalization_type: NormalizationType = "layer_norm",
         normalization_position: Literal['pre', 'post'] = "pre",
         ffn_type: FFNType = "mlp",
@@ -1057,18 +1056,18 @@ def create_inputs_with_masking(
     masks = []
     for _ in range(batch_size):
         # Create random mask for this sample
-        indices = keras.random.shuffle(ops.arange(num_patches, dtype='int32'))[:num_mask]
-        mask_sample = ops.zeros([num_patches], dtype='float32')
+        indices = keras.random.shuffle(keras.ops.arange(num_patches, dtype='int32'))[:num_mask]
+        mask_sample = keras.ops.zeros([num_patches], dtype='float32')
 
         # Set masked positions to 1
-        mask_sample = ops.scatter_update(
+        mask_sample = keras.ops.scatter_update(
             mask_sample,
-            ops.expand_dims(indices, 1),
-            ops.ones([num_mask], dtype='float32')
+            keras.ops.expand_dims(indices, 1),
+            keras.ops.ones([num_mask], dtype='float32')
         )
         masks.append(mask_sample)
 
-    mask = ops.stack(masks, axis=0)
+    mask = keras.ops.stack(masks, axis=0)
 
     logger.info(f"Created masked inputs: {batch_size} samples, {mask_ratio:.1%} masking ratio")
     return images, mask
@@ -1106,11 +1105,11 @@ def apply_mask_after_stem(
     patches = stem(images)
 
     # Shape: (batch_size, num_patches, 1).
-    mask_expanded = ops.expand_dims(mask, -1)
+    mask_expanded = keras.ops.expand_dims(mask, -1)
 
     # Broadcast mask to match patch dimensions.
-    embed_dim = ops.shape(patches)[-1]
-    mask_expanded = ops.repeat(mask_expanded, embed_dim, axis=-1)
+    embed_dim = keras.ops.shape(patches)[-1]
+    mask_expanded = keras.ops.repeat(mask_expanded, embed_dim, axis=-1)
 
     # Apply mask: multiply by (1 - mask) to zero out masked patches
     masked_patches = patches * (1 - mask_expanded)

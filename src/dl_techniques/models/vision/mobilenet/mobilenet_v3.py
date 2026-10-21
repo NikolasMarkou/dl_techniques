@@ -40,7 +40,6 @@ References:
 """
 
 import keras
-from keras import layers, regularizers, initializers
 from typing import Tuple, Optional, Dict, Any, Literal, Union
 
 # ---------------------------------------------------------------------
@@ -172,7 +171,7 @@ class MobileNetV3(keras.Model):
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
             weight_decay: float = 1e-5,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, int, int]] = None,
             head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -191,7 +190,7 @@ class MobileNetV3(keras.Model):
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
         self.input_shape_config = input_shape or (224, 224, 3)
 
@@ -205,7 +204,7 @@ class MobileNetV3(keras.Model):
             self.block_configs = self.SMALL_CONFIG
             last_point = 1024
 
-        self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
         # The head's hidden width ("last point"): widened only above
         # width_multiplier 1.0, as Keras Applications MobileNetV3 does.
@@ -216,7 +215,7 @@ class MobileNetV3(keras.Model):
 
         # Keras Applications' stem is Conv2D(16) at every alpha.
         first_filter = 16
-        self.stem_conv = layers.Conv2D(
+        self.stem_conv = keras.layers.Conv2D(
             first_filter,
             kernel_size=3,
             strides=2,
@@ -226,7 +225,7 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        self.stem_bn = layers.BatchNormalization(
+        self.stem_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name="stem_bn",
@@ -285,7 +284,7 @@ class MobileNetV3(keras.Model):
 
         # Keras Applications: last_conv_ch = _depth(x.shape[-1] * 6).
         last_block_filters = make_divisible(in_channels * 6)
-        self.last_conv = layers.Conv2D(
+        self.last_conv = keras.layers.Conv2D(
             last_block_filters,
             kernel_size=1,
             strides=1,
@@ -295,7 +294,7 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="last_conv"
         )
-        self.last_bn = layers.BatchNormalization(
+        self.last_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name="last_bn",
@@ -418,7 +417,7 @@ class MobileNetV3(keras.Model):
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
             "weight_decay": self.weight_decay,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
             "head_config_overrides": self._head_config_overrides,

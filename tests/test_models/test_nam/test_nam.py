@@ -8,7 +8,6 @@ serialization, gradient flow, and fixed arithmetic validity.
 import pytest
 import numpy as np
 import keras
-from keras import ops
 
 from dl_techniques.models.neural_computer.nam import NAM, NAMCell, NAMConfig, NAM_VARIANTS
 from dl_techniques.models.neural_computer.nam.tokenizer import (
@@ -139,57 +138,57 @@ class TestArithmeticTokenizer:
 class TestFixedArithmetic:
 
     def test_add(self):
-        a = ops.convert_to_tensor([[3.0]])
-        b = ops.convert_to_tensor([[4.0]])
+        a = keras.ops.convert_to_tensor([[3.0]])
+        b = keras.ops.convert_to_tensor([[4.0]])
         result, valid = _fixed_add(a, b)
         assert float(result[0, 0]) == pytest.approx(7.0)
         assert float(valid[0, 0]) == pytest.approx(1.0)
 
     def test_subtract(self):
-        a = ops.convert_to_tensor([[10.0]])
-        b = ops.convert_to_tensor([[3.0]])
+        a = keras.ops.convert_to_tensor([[10.0]])
+        b = keras.ops.convert_to_tensor([[3.0]])
         result, valid = _fixed_subtract(a, b)
         assert float(result[0, 0]) == pytest.approx(7.0)
         assert float(valid[0, 0]) == pytest.approx(1.0)
 
     def test_multiply(self):
-        a = ops.convert_to_tensor([[3.0]])
-        b = ops.convert_to_tensor([[4.0]])
+        a = keras.ops.convert_to_tensor([[3.0]])
+        b = keras.ops.convert_to_tensor([[4.0]])
         result, valid = _fixed_multiply(a, b)
         assert float(result[0, 0]) == pytest.approx(12.0)
         assert float(valid[0, 0]) == pytest.approx(1.0)
 
     def test_divide_normal(self):
-        a = ops.convert_to_tensor([[10.0]])
-        b = ops.convert_to_tensor([[2.0]])
+        a = keras.ops.convert_to_tensor([[10.0]])
+        b = keras.ops.convert_to_tensor([[2.0]])
         result, valid = _fixed_divide(a, b)
         assert float(result[0, 0]) == pytest.approx(5.0)
         assert float(valid[0, 0]) == pytest.approx(1.0)
 
     def test_divide_by_zero(self):
-        a = ops.convert_to_tensor([[10.0]])
-        b = ops.convert_to_tensor([[0.0]])
+        a = keras.ops.convert_to_tensor([[10.0]])
+        b = keras.ops.convert_to_tensor([[0.0]])
         result, valid = _fixed_divide(a, b)
         assert float(result[0, 0]) == pytest.approx(0.0)
         assert float(valid[0, 0]) == pytest.approx(0.0)
 
     def test_divide_near_zero(self):
-        a = ops.convert_to_tensor([[10.0]])
-        b = ops.convert_to_tensor([[1e-10]])
+        a = keras.ops.convert_to_tensor([[10.0]])
+        b = keras.ops.convert_to_tensor([[1e-10]])
         result, valid = _fixed_divide(a, b)
         # Near-zero denominator → invalid
         assert float(valid[0, 0]) == pytest.approx(0.0)
         assert float(result[0, 0]) == pytest.approx(0.0)
 
     def test_divide_negative_zero(self):
-        a = ops.convert_to_tensor([[5.0]])
-        b = ops.convert_to_tensor([[-0.0]])
+        a = keras.ops.convert_to_tensor([[5.0]])
+        b = keras.ops.convert_to_tensor([[-0.0]])
         result, valid = _fixed_divide(a, b)
         assert float(valid[0, 0]) == pytest.approx(0.0)
 
     def test_add_batched(self):
-        a = ops.convert_to_tensor([[1.0], [2.0], [3.0]])
-        b = ops.convert_to_tensor([[4.0], [5.0], [6.0]])
+        a = keras.ops.convert_to_tensor([[1.0], [2.0], [3.0]])
+        b = keras.ops.convert_to_tensor([[4.0], [5.0], [6.0]])
         result, valid = _fixed_add(a, b)
         expected = [5.0, 7.0, 9.0]
         for i in range(3):
@@ -198,8 +197,8 @@ class TestFixedArithmetic:
 
     def test_divide_mixed_validity(self):
         """Batch where some divisions are valid, some aren't."""
-        a = ops.convert_to_tensor([[10.0], [20.0], [30.0]])
-        b = ops.convert_to_tensor([[2.0], [0.0], [5.0]])
+        a = keras.ops.convert_to_tensor([[10.0], [20.0], [30.0]])
+        b = keras.ops.convert_to_tensor([[2.0], [0.0], [5.0]])
         result, valid = _fixed_divide(a, b)
         assert float(result[0, 0]) == pytest.approx(5.0)
         assert float(valid[0, 0]) == pytest.approx(1.0)
@@ -260,8 +259,8 @@ class TestNAMCell:
         D = tiny_config.hidden_size
 
         carry = cell.initialize_carry(batch_size)
-        hidden = ops.ones((batch_size, L, D))
-        mask = ops.ones((batch_size, 1, L), dtype="int32")
+        hidden = keras.ops.ones((batch_size, L, D))
+        mask = keras.ops.ones((batch_size, 1, L), dtype="int32")
         # Dummy token_ids with a simple expression pattern
         token_ids = np.zeros((batch_size, L), dtype=np.int32)
         token_ids[:, 0] = 1   # BOS
@@ -290,7 +289,7 @@ class TestNAMCell:
         cell = NAMCell(config=tiny_config)
         carry = cell.initialize_carry(4)
         hidden = keras.random.normal((4, tiny_config.max_expression_len, 32))
-        mask = ops.ones((4, 1, tiny_config.max_expression_len), dtype="int32")
+        mask = keras.ops.ones((4, 1, tiny_config.max_expression_len), dtype="int32")
         token_ids = np.zeros((4, tiny_config.max_expression_len), dtype=np.int32)
 
         _, outputs = cell((carry, hidden, mask, token_ids), training=False)

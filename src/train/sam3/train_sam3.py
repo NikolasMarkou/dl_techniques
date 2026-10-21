@@ -172,7 +172,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import keras
 import numpy as np
 import tensorflow as tf
-from keras import ops
 
 from train.common import (
     log_gpu_peak_memory,
@@ -929,7 +928,7 @@ def matched_box_iou(pred_boxes: Any, pred_logits: Any,
     assignment, is_matched = loss.matcher(
         pred_logits, pred_boxes,
         targets["target_boxes"], targets["target_valid"])
-    gathered = ops.take_along_axis(
+    gathered = keras.ops.take_along_axis(
         targets["target_boxes"], assignment[:, :, None], axis=1)
     # `iou_and_generalized_iou` reads **xyxy**; every box here is normalized
     # cxcywh. Feeding it cxcywh does not raise -- it silently scores two
@@ -938,9 +937,9 @@ def matched_box_iou(pred_boxes: Any, pred_logits: Any,
         box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gathered))
     # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
     # propagates `nan * 0.0 = nan` from a both-degenerate padded pair.
-    return (float(ops.sum(
-        ops.where(is_matched > 0.0, iou, ops.zeros_like(iou)))),
-        float(ops.sum(is_matched)))
+    return (float(keras.ops.sum(
+        keras.ops.where(is_matched > 0.0, iou, keras.ops.zeros_like(iou)))),
+        float(keras.ops.sum(is_matched)))
 
 
 def evaluate_sam3(
@@ -1089,14 +1088,14 @@ def evaluate_sam3(
             packed = pack_predictions(outputs,
                                       include_masks=model.include_masks)
         terms = loss.compute_terms(y_true, packed)
-        targets = unpack_targets(ops.cast(y_true, "float32"),
+        targets = unpack_targets(keras.ops.cast(y_true, "float32"),
                                  model.include_masks)
 
-        pred_boxes = ops.cast(outputs["pred_boxes"], "float32")
+        pred_boxes = keras.ops.cast(outputs["pred_boxes"], "float32")
         assignment, is_matched = loss.matcher(
             outputs["pred_logits"], pred_boxes,
             targets["target_boxes"], targets["target_valid"])
-        gathered = ops.take_along_axis(
+        gathered = keras.ops.take_along_axis(
             targets["target_boxes"], assignment[:, :, None], axis=1)
         # `iou_and_generalized_iou` reads **xyxy**; every box on this path is
         # normalized `cxcywh` (H-5). Feeding it `cxcywh` directly does NOT
@@ -1109,9 +1108,9 @@ def evaluate_sam3(
         # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
         # propagates `nan * 0.0 = nan`, so ONE both-degenerate pair in a padded
         # column poisons the whole split's mean (review-iter-1 NOTE 10).
-        box_iou_sum += float(ops.sum(ops.where(is_matched > 0.0, iou,
-                                               ops.zeros_like(iou))))
-        matched_total += float(ops.sum(is_matched))
+        box_iou_sum += float(keras.ops.sum(keras.ops.where(is_matched > 0.0, iou,
+                                               keras.ops.zeros_like(iou))))
+        matched_total += float(keras.ops.sum(is_matched))
         # ZERO extra forward passes: the SAME `pred_boxes`/`pred_logits` are
         # scored a second time against the NON-prompted categories' ground
         # truth. The cost is one extra `loss.matcher` call per batch. The
@@ -1124,30 +1123,30 @@ def evaluate_sam3(
             distractor_pairs += pairs
         head_boxes.append(np.asarray(pred_boxes))
         head_logits.append(
-            np.asarray(ops.cast(outputs["pred_logits"], "float32")))
+            np.asarray(keras.ops.cast(outputs["pred_logits"], "float32")))
         head_presence.append(np.asarray(
-            ops.cast(outputs["presence_logit"], "float32")).reshape(-1))
+            keras.ops.cast(outputs["presence_logit"], "float32")).reshape(-1))
 
         if model.include_masks and targets["target_masks"] is not None:
-            flat = ops.reshape(
-                ops.cast(outputs["pred_masks"], "float32"),
-                (ops.shape(outputs["pred_masks"])[0],
-                 ops.shape(outputs["pred_masks"])[1], -1))
-            predicted = ops.cast(ops.sigmoid(flat) > 0.5, "float32")
-            truth = ops.take_along_axis(
+            flat = keras.ops.reshape(
+                keras.ops.cast(outputs["pred_masks"], "float32"),
+                (keras.ops.shape(outputs["pred_masks"])[0],
+                 keras.ops.shape(outputs["pred_masks"])[1], -1))
+            predicted = keras.ops.cast(keras.ops.sigmoid(flat) > 0.5, "float32")
+            truth = keras.ops.take_along_axis(
                 targets["target_masks"], assignment[:, :, None], axis=1)
-            intersection = ops.sum(predicted * truth, axis=-1)
-            union = ops.sum(
-                ops.maximum(predicted, truth), axis=-1) + 1e-6
+            intersection = keras.ops.sum(predicted * truth, axis=-1)
+            union = keras.ops.sum(
+                keras.ops.maximum(predicted, truth), axis=-1) + 1e-6
             mask_iou_sum += float(
-                ops.sum((intersection / union) * is_matched))
+                keras.ops.sum((intersection / union) * is_matched))
 
-        presence = ops.cast(
-            ops.sigmoid(ops.cast(outputs["presence_logit"], "float32")) > 0.5,
+        presence = keras.ops.cast(
+            keras.ops.sigmoid(keras.ops.cast(outputs["presence_logit"], "float32")) > 0.5,
             "float32")
         presence_correct += float(
-            ops.sum(ops.cast(presence == targets["keep_loss"], "float32")))
-        presence_total += float(ops.size(presence))
+            keras.ops.sum(keras.ops.cast(presence == targets["keep_loss"], "float32")))
+        presence_total += float(keras.ops.size(presence))
 
         distinct = int(np.unique(np.asarray(outputs["pred_masks"])).size)
         unique_minimum = (distinct if unique_minimum is None

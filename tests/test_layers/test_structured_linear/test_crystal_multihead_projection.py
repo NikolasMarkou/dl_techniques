@@ -20,7 +20,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.structured_linear.crystal_multihead_projection import (
     CrystalMultiHeadProjection
@@ -178,7 +177,7 @@ class TestCrystalMultiHeadProjectionBuild:
         layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
         _Parent(layer)(keras.Input(shape=(6, 32)))
 
-        prisms = ops.convert_to_numpy(layer.crystal_prisms).astype(np.float64)
+        prisms = keras.ops.convert_to_numpy(layer.crystal_prisms).astype(np.float64)
         # Every prism column is a unit vertex: (H, D_h, V) reduced over D_h.
         np.testing.assert_allclose(
             np.linalg.norm(prisms, axis=1), 1.0, atol=1e-5, rtol=0
@@ -193,8 +192,8 @@ class TestCrystalMultiHeadProjectionBuild:
         second(_sample_input())
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(first.crystal_prisms),
-            ops.convert_to_numpy(second.crystal_prisms)
+            keras.ops.convert_to_numpy(first.crystal_prisms),
+            keras.ops.convert_to_numpy(second.crystal_prisms)
         )
 
 
@@ -246,7 +245,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
             layer = CrystalMultiHeadProjection(num_heads=4, output_dim=16, seed=0)
             x = np.random.default_rng(7).standard_normal((4, 32)).astype(np.float32)
 
-            output = ops.convert_to_numpy(layer(x)).astype(np.float64)
+            output = keras.ops.convert_to_numpy(layer(x)).astype(np.float64)
 
         num_heads, head_dim = 4, 8
         vertices = head_dim + 1
@@ -254,7 +253,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
         heads = x.reshape(4, num_heads, head_dim).astype(np.float64)
         heads /= np.linalg.norm(heads, axis=-1, keepdims=True)
 
-        prisms = ops.convert_to_numpy(layer.crystal_prisms).astype(np.float64)
+        prisms = keras.ops.convert_to_numpy(layer.crystal_prisms).astype(np.float64)
         prisms /= np.linalg.norm(prisms, axis=1, keepdims=True)
 
         features = np.einsum('bhd,hdv->bhv', heads, prisms) * layer.scale
@@ -262,8 +261,8 @@ class TestCrystalMultiHeadProjectionForwardPass:
             1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (features + 0.044715 * features ** 3))
         )
 
-        kernel = ops.convert_to_numpy(layer.out_projection.kernel).astype(np.float64)
-        bias = ops.convert_to_numpy(layer.out_projection.bias).astype(np.float64)
+        kernel = keras.ops.convert_to_numpy(layer.out_projection.kernel).astype(np.float64)
+        bias = keras.ops.convert_to_numpy(layer.out_projection.bias).astype(np.float64)
         reference = features.reshape(4, num_heads * vertices) @ kernel + bias
 
         np.testing.assert_allclose(output, reference, rtol=0, atol=1e-5)
@@ -282,7 +281,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
         output = layer(_sample_input(input_dim=32))
 
         assert output.shape == (2, 6, 32)
-        assert bool(ops.all(ops.isfinite(output)))
+        assert bool(keras.ops.all(keras.ops.isfinite(output)))
 
     def test_output_dim_none_keeps_the_input_width(self):
         inputs = _sample_input(input_dim=32)
@@ -298,11 +297,11 @@ class TestCrystalMultiHeadProjectionForwardPass:
         output = layer(_sample_input(input_dim=32))
 
         assert output.shape == (2, 6, output_dim)
-        assert bool(ops.all(ops.isfinite(output)))
+        assert bool(keras.ops.all(keras.ops.isfinite(output)))
 
     def test_a_zero_input_stays_finite(self):
         layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
-        output = ops.convert_to_numpy(layer(np.zeros((2, 6, 32), dtype=np.float32)))
+        output = keras.ops.convert_to_numpy(layer(np.zeros((2, 6, 32), dtype=np.float32)))
 
         assert np.all(np.isfinite(output)), "a zero input produced NaN or Inf"
 
@@ -314,7 +313,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
         flipped[..., 0] *= -1.0
 
         assert float(np.abs(
-            ops.convert_to_numpy(layer(base)) - ops.convert_to_numpy(layer(flipped))
+            keras.ops.convert_to_numpy(layer(base)) - keras.ops.convert_to_numpy(layer(flipped))
         ).max()) > 1e-4
 
     def test_the_heads_do_not_mix(self):
@@ -329,12 +328,12 @@ class TestCrystalMultiHeadProjectionForwardPass:
         num_heads, head_dim = 4, 8
 
         layer = CrystalMultiHeadProjection(num_heads=num_heads, seed=0)
-        base = ops.convert_to_numpy(layer(inputs))
+        base = keras.ops.convert_to_numpy(layer(inputs))
 
         # Move only the first head's slice.
         perturbed = inputs.copy()
         perturbed[..., 0:head_dim] += 5.0
-        moved = ops.convert_to_numpy(layer(perturbed))
+        moved = keras.ops.convert_to_numpy(layer(perturbed))
 
         assert not np.allclose(moved, base), "the perturbation reached nothing at all"
 
@@ -348,7 +347,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
         inputs = _sample_input(input_dim=32)
         layer(inputs)
 
-        prisms = ops.convert_to_numpy(layer.crystal_prisms)
+        prisms = keras.ops.convert_to_numpy(layer.crystal_prisms)
         # Two heads' prisms that were identical would read identical subspaces.
         assert not np.allclose(prisms[0], prisms[1]), "head 0 and head 1 share a prism"
 
@@ -364,8 +363,8 @@ class TestCrystalMultiHeadProjectionForwardPass:
         permuted = inputs[..., ::-1]
 
         assert not np.allclose(
-            ops.convert_to_numpy(layer(inputs)),
-            ops.convert_to_numpy(layer(permuted))
+            keras.ops.convert_to_numpy(layer(inputs)),
+            keras.ops.convert_to_numpy(layer(permuted))
         )
 
     def test_inference_and_training_agree(self):
@@ -375,8 +374,8 @@ class TestCrystalMultiHeadProjectionForwardPass:
         layer(inputs, training=False)
 
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer(inputs, training=True)),
-            ops.convert_to_numpy(layer(inputs, training=False))
+            keras.ops.convert_to_numpy(layer(inputs, training=True)),
+            keras.ops.convert_to_numpy(layer(inputs, training=False))
         )
 
     @pytest.mark.parametrize('rank', [2, 3])
@@ -397,7 +396,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
 
         eager_layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
         eager_layer(_sample_input())
-        eager = ops.convert_to_numpy(eager_layer(inputs))
+        eager = keras.ops.convert_to_numpy(eager_layer(inputs))
 
         # Built on the SAME rank before set_weights, because set_weights on an
         # unbuilt layer raises "expecting 0 weights" -- the weights must have a
@@ -405,7 +404,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
         traced_layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
         traced_layer(_sample_input())
         traced_layer.set_weights(
-            [ops.convert_to_numpy(w).copy() for w in eager_layer.weights]
+            [keras.ops.convert_to_numpy(w).copy() for w in eager_layer.weights]
         )
 
         @tf.function(input_signature=[signature])
@@ -413,7 +412,7 @@ class TestCrystalMultiHeadProjectionForwardPass:
             return traced_layer(x)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced(tf.constant(inputs))),
+            keras.ops.convert_to_numpy(traced(tf.constant(inputs))),
             eager,
             rtol=1e-6, atol=1e-6
         )
@@ -497,8 +496,8 @@ class TestCrystalMultiHeadProjectionKnobSensitivity:
         low = CrystalMultiHeadProjection(num_heads=4, scale=1.0, seed=0)
         high = CrystalMultiHeadProjection(num_heads=4, scale=6.0, seed=0)
 
-        low_out = ops.convert_to_numpy(low(inputs))
-        high_out = ops.convert_to_numpy(high(inputs))
+        low_out = keras.ops.convert_to_numpy(low(inputs))
+        high_out = keras.ops.convert_to_numpy(high(inputs))
 
         assert [w.shape for w in low.weights] == [w.shape for w in high.weights]
         assert not np.allclose(low_out, high_out)
@@ -526,10 +525,10 @@ class TestCrystalMultiHeadProjectionKnobSensitivity:
         ones(_sample_input())
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(zeros.out_projection.kernel), 0.0, rtol=0, atol=0.0
+            keras.ops.convert_to_numpy(zeros.out_projection.kernel), 0.0, rtol=0, atol=0.0
         )
         np.testing.assert_allclose(
-            ops.convert_to_numpy(ones.out_projection.kernel), 1.0, rtol=0, atol=0.0
+            keras.ops.convert_to_numpy(ones.out_projection.kernel), 1.0, rtol=0, atol=0.0
         )
 
     def test_the_seed_changes_the_prisms_and_the_output(self):
@@ -538,7 +537,7 @@ class TestCrystalMultiHeadProjectionKnobSensitivity:
         second = CrystalMultiHeadProjection(num_heads=4, seed=2)
 
         assert not np.allclose(
-            ops.convert_to_numpy(first(inputs)), ops.convert_to_numpy(second(inputs))
+            keras.ops.convert_to_numpy(first(inputs)), keras.ops.convert_to_numpy(second(inputs))
         )
 
 
@@ -552,7 +551,7 @@ class TestCrystalMultiHeadProjectionGradients:
         inputs = _sample_input()
 
         with tf.GradientTape() as tape:
-            loss = ops.mean(ops.square(layer(inputs, training=True)))
+            loss = keras.ops.mean(keras.ops.square(layer(inputs, training=True)))
 
         variables = layer.trainable_variables
         assert len(variables) >= 3, \
@@ -561,7 +560,7 @@ class TestCrystalMultiHeadProjectionGradients:
 
         for variable, grad in zip(variables, grads):
             assert grad is not None, f"no gradient for {variable.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), \
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), \
                 f"all-zero gradient for {variable.path}"
 
     def test_the_frozen_prisms_receive_no_gradient(self):
@@ -584,7 +583,7 @@ class TestCrystalMultiHeadProjectionGradients:
         layer(inputs)
 
         with tf.GradientTape() as live_tape:
-            loss = ops.mean(ops.square(layer(inputs, training=True)))
+            loss = keras.ops.mean(keras.ops.square(layer(inputs, training=True)))
         released = live_tape.gradient(loss, layer.trainable_variables)
 
         assert any(grad is not None for grad in released), \
@@ -593,7 +592,7 @@ class TestCrystalMultiHeadProjectionGradients:
         layer.trainable = False
 
         with tf.GradientTape() as tape:
-            frozen_loss = ops.mean(ops.square(layer(inputs, training=True)))
+            frozen_loss = keras.ops.mean(keras.ops.square(layer(inputs, training=True)))
 
         assert layer.trainable_variables == [], \
             "layer.trainable = False did not empty trainable_variables"
@@ -630,14 +629,14 @@ class TestCrystalMultiHeadProjectionSerialization:
             keras.Input(shape=(6, 32)),
             CrystalMultiHeadProjection(num_heads=4, output_dim=32, seed=0)
         ])
-        original = ops.convert_to_numpy(model(inputs, training=False))
+        original = keras.ops.convert_to_numpy(model(inputs, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'prisms.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
 
-        restored = ops.convert_to_numpy(loaded(inputs, training=False))
+        restored = keras.ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(
             restored, original, rtol=0, atol=1e-6,
@@ -652,7 +651,7 @@ class TestCrystalMultiHeadProjectionSerialization:
             CrystalMultiHeadProjection(num_heads=4, seed=0)
         ])
         model(_sample_input())
-        saved = [ops.convert_to_numpy(w).copy() for w in model.weights]
+        saved = [keras.ops.convert_to_numpy(w).copy() for w in model.weights]
 
         assert saved, "the model has no weights to compare"
 
@@ -663,7 +662,7 @@ class TestCrystalMultiHeadProjectionSerialization:
 
         for donor, restored in zip(saved, loaded.weights):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0,
+                keras.ops.convert_to_numpy(restored), donor, atol=0.0, rtol=0,
                 err_msg="weights were not restored"
             )
 
@@ -684,7 +683,7 @@ class TestCrystalMultiHeadProjectionDtypes:
         output = layer(inputs)
 
         assert output.shape == (2, 6, 32)
-        assert bool(ops.all(ops.isfinite(output))), \
+        assert bool(keras.ops.all(keras.ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite output"
 
     def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
@@ -693,16 +692,16 @@ class TestCrystalMultiHeadProjectionDtypes:
 
         output = CrystalMultiHeadProjection(num_heads=4, seed=0)(inputs)
 
-        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+        assert keras.ops.convert_to_numpy(output).dtype == compute_dtype, (
             f"under {dtype_policy} the output came back as "
-            f"{ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
+            f"{keras.ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
         )
 
     def test_a_zero_input_is_finite_in_every_policy(self, dtype_policy):
         compute_dtype = keras.mixed_precision.global_policy().compute_dtype
         layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
 
-        output = ops.convert_to_numpy(
+        output = keras.ops.convert_to_numpy(
             layer(np.zeros((2, 6, 32), dtype=compute_dtype))
         )
 

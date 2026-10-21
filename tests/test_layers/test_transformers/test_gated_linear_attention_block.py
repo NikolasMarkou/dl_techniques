@@ -10,7 +10,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import layers, models, ops
 
 # Make sure to import the NEW, refactored GatedLinearAttentionBlock
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
@@ -358,7 +357,7 @@ class TestGatedLinearAttentionBlock:
         output = layer(over_long, training=False)
 
         assert output.shape == over_long.shape
-        out_np = ops.convert_to_numpy(output)
+        out_np = keras.ops.convert_to_numpy(output)
         assert np.all(np.isfinite(out_np)), "output must be finite"
         per_step_absmax = np.max(np.abs(out_np), axis=(0, 2))
         assert np.all(per_step_absmax > 0.0), (
@@ -379,7 +378,7 @@ class TestGatedLinearAttentionBlock:
         output = layer(exact, training=False)
 
         assert output.shape == exact.shape
-        out_np = ops.convert_to_numpy(output)
+        out_np = keras.ops.convert_to_numpy(output)
         assert np.all(np.isfinite(out_np)), "output must be finite"
         assert np.any(out_np != 0.0), "output must not be all-zero"
         # Every timestep must carry signal -- the defect zeroed a *suffix*.
@@ -427,7 +426,7 @@ class TestGatedLinearAttentionBlock:
         def spy(inputs, *args, **kwargs):
             outputs = original(inputs, *args, **kwargs)
             sink.append(
-                (ops.convert_to_numpy(inputs), ops.convert_to_numpy(outputs))
+                (keras.ops.convert_to_numpy(inputs), keras.ops.convert_to_numpy(outputs))
             )
             return outputs
 
@@ -472,7 +471,7 @@ class TestGatedLinearAttentionBlock:
         # kernel columns [h*head_dim, (h+1)*head_dim) because `call()` reshapes
         # qk_dim -> (num_heads, head_dim) in that (heads-major) order.
         projection = getattr(layer, f"{which}_proj")
-        kernel = ops.convert_to_numpy(projection.kernel)
+        kernel = keras.ops.convert_to_numpy(projection.kernel)
         perturbed_kernel = kernel.copy()
         perturbed_kernel[:, 0:head_dim] *= 5.0
         projection.kernel.assign(perturbed_kernel)
@@ -565,7 +564,7 @@ class TestGatedLinearAttentionBlock:
         output = layer(sample_input, training=False)
 
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(output)))
 
     def test_training_vs_inference_mode(self, regularized_config, sample_input_32):
         """Tests that layer behaves differently in training vs inference due to dropout."""
@@ -573,7 +572,7 @@ class TestGatedLinearAttentionBlock:
         output_train = layer(sample_input_32, training=True)
         output_infer = layer(sample_input_32, training=False)
         assert not np.allclose(
-            ops.convert_to_numpy(output_train), ops.convert_to_numpy(output_infer)
+            keras.ops.convert_to_numpy(output_train), keras.ops.convert_to_numpy(output_infer)
         )
 
     def test_deterministic_inference(self, default_config, sample_input_64):
@@ -582,7 +581,7 @@ class TestGatedLinearAttentionBlock:
         output1 = layer(sample_input_64, training=False)
         output2 = layer(sample_input_64, training=False)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1), ops.convert_to_numpy(output2)
+            keras.ops.convert_to_numpy(output1), keras.ops.convert_to_numpy(output2)
         )
 
     # ===============================================
@@ -620,21 +619,21 @@ class TestGatedLinearAttentionBlock:
         config = request.getfixturevalue(config_fixture)
         sample_input = request.getfixturevalue(input_fixture)
 
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         outputs = GatedLinearAttentionBlock(**config)(inputs)
-        model = models.Model(inputs, outputs)
+        model = keras.models.Model(inputs, outputs)
 
         original_prediction = model(sample_input, training=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_model.keras")
             model.save(filepath)
-            loaded_model = models.load_model(filepath)
+            loaded_model = keras.models.load_model(filepath)
             loaded_prediction = loaded_model(sample_input, training=False)
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6
             )
 
@@ -647,7 +646,7 @@ class TestGatedLinearAttentionBlock:
         x_var = tf.Variable(sample_input_64)
         with tf.GradientTape() as tape:
             output = layer(x_var, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
         gradients = tape.gradient(loss, layer.trainable_variables)
         assert len(gradients) > 0
         assert all(g is not None for g in gradients)
@@ -658,14 +657,14 @@ class TestGatedLinearAttentionBlock:
         # sub-layer cannot hide behind a healthy one.
         dead = [
             v.name for v, g in zip(layer.trainable_variables, gradients)
-            if float(ops.max(ops.abs(g))) == 0.0
+            if float(keras.ops.max(keras.ops.abs(g))) == 0.0
         ]
         assert not dead, (
             f"{len(dead)} of {len(gradients)} trainable variables received an "
             f"exactly-zero gradient, so they cannot learn: {dead}"
         )
-        total = float(ops.max(ops.abs(ops.concatenate(
-            [ops.reshape(g, (-1,)) for g in gradients], axis=0
+        total = float(keras.ops.max(keras.ops.abs(keras.ops.concatenate(
+            [keras.ops.reshape(g, (-1,)) for g in gradients], axis=0
         ))))
         assert np.isfinite(total) and total > 0.0, (
             f"gradient magnitude is {total} — no signal reaches the parameters"
@@ -673,11 +672,11 @@ class TestGatedLinearAttentionBlock:
 
     def test_model_training_loop_integration(self, default_config):
         """Tests integration into a standard training loop."""
-        model = models.Sequential([
-            layers.InputLayer(shape=(16, 64)),
+        model = keras.models.Sequential([
+            keras.layers.InputLayer(shape=(16, 64)),
             GatedLinearAttentionBlock(**default_config),
-            layers.GlobalAveragePooling1D(),
-            layers.Dense(10),
+            keras.layers.GlobalAveragePooling1D(),
+            keras.layers.Dense(10),
         ])
         model.compile("adam", "sparse_categorical_crossentropy")
         x_train = tf.random.normal((32, 16, 64))
@@ -792,19 +791,19 @@ def capture_scan_io(
     def spy(q, k, v, alpha, beta, training=None):
         out = original(q, k, v, alpha, beta, training=training)
         captured.update(
-            q=ops.convert_to_numpy(q),
-            k=ops.convert_to_numpy(k),
-            v=ops.convert_to_numpy(v),
-            alpha=ops.convert_to_numpy(alpha),
-            beta=ops.convert_to_numpy(beta),
-            scan_out=ops.convert_to_numpy(out),
+            q=keras.ops.convert_to_numpy(q),
+            k=keras.ops.convert_to_numpy(k),
+            v=keras.ops.convert_to_numpy(v),
+            alpha=keras.ops.convert_to_numpy(alpha),
+            beta=keras.ops.convert_to_numpy(beta),
+            scan_out=keras.ops.convert_to_numpy(out),
         )
         return out
 
     layer.gated_linear_scan = spy
     try:
         kwargs = {} if attention_mask is None else {"attention_mask": attention_mask}
-        captured["block_out"] = ops.convert_to_numpy(
+        captured["block_out"] = keras.ops.convert_to_numpy(
             layer(x, training=training, **kwargs)
         )
     finally:
@@ -1343,7 +1342,7 @@ class TestMixedPrecision:
         x = np.asarray(
             np.random.default_rng(3).normal(size=(2, 16, 32)), dtype="float32"
         )
-        y = ops.convert_to_numpy(layer(x, training=False))
+        y = keras.ops.convert_to_numpy(layer(x, training=False))
         assert y.shape == (2, 16, 32)
         assert y.dtype.name == _POLICY_TO_OUTPUT_DTYPE[dtype_policy], (
             f"policy {dtype_policy} produced {y.dtype}"
@@ -1423,7 +1422,7 @@ class TestXLACompilation:
         x = np.asarray(
             np.random.default_rng(2).normal(size=(4, 16, 32)), dtype="float32"
         )
-        eager = ops.convert_to_numpy(model(x, training=False)).astype("float64")
+        eager = keras.ops.convert_to_numpy(model(x, training=False)).astype("float64")
 
         model.compile(loss="mse", optimizer="adam", jit_compile=True)
         jitted = model.predict(x, verbose=0).astype("float64")
@@ -2323,7 +2322,7 @@ class TestPaddingMask:
         # helper silently degenerates back to the case it exists to avoid.
         biases = [w for w in layer.weights if "bias" in w.path]
         assert biases and any(
-            float(np.abs(ops.convert_to_numpy(w)).max()) > 0 for w in biases
+            float(np.abs(keras.ops.convert_to_numpy(w)).max()) > 0 for w in biases
         ), "no non-zero bias was assigned; the masking probes would go blind"
         return layer
 
@@ -2340,8 +2339,8 @@ class TestPaddingMask:
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
             x, _, reals, spans = _padded_case(pad_lens)
-            padded_out = ops.convert_to_numpy(layer(x, training=False))
-            refs = [ops.convert_to_numpy(layer(r, training=False))[0] for r in reals]
+            padded_out = keras.ops.convert_to_numpy(layer(x, training=False))
+            refs = [keras.ops.convert_to_numpy(layer(r, training=False))[0] for r in reals]
 
         deltas = []
         for b, span in enumerate(spans):
@@ -2364,7 +2363,7 @@ class TestPaddingMask:
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
             x, mask, _, _ = _padded_case([0, 5])
-            out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            out = keras.ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
         assert out.shape == x.shape
         assert np.isfinite(out).all()
 
@@ -2443,10 +2442,10 @@ class TestPaddingMask:
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
             x, mask, _, _ = _padded_case(pad_lens)
-            out_a = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            out_a = keras.ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
             x2 = x.copy()
             x2[1, :5] = np.random.default_rng(99).normal(size=(5, x.shape[-1])) * 30.0
-            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+            out_b = keras.ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
 
         # Non-vacuity: the perturbation must actually be a different input.
         assert float(np.abs(x - x2).max()) > 1.0
@@ -2471,7 +2470,7 @@ class TestPaddingMask:
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
             x, mask, _, spans = _padded_case([0, 5], side=side)
-            out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            out = keras.ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
 
         left, right = spans[1]
         total = out.shape[1]
@@ -2501,14 +2500,14 @@ class TestPaddingMask:
             x, mask, _, spans = _padded_case([0, 5], side="both")
             left, right = spans[1]
             assert left > 0 and right > 0, "the 'both' case degenerated"
-            out_a = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            out_a = keras.ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
             x2 = x.copy()
             rng = np.random.default_rng(2718)
             x2[1, :left] = rng.normal(size=(left, x.shape[-1])) * 30.0
             x2[1, x.shape[1] - right :] = rng.normal(
                 size=(right, x.shape[-1])
             ) * 30.0
-            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+            out_b = keras.ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
 
         assert float(np.abs(x - x2).max()) > 1.0, "the perturbation is vacuous"
         real_a = _real_slice(out_a[1], spans[1])
@@ -2541,13 +2540,13 @@ class TestPaddingMask:
             layer = self._fresh_layer()
             x, mask, _, spans = _padded_case([0, 5], side="both")
             xf = x.astype("float32")
-            out_a = ops.convert_to_numpy(layer(xf, attention_mask=mask, training=False))
+            out_a = keras.ops.convert_to_numpy(layer(xf, attention_mask=mask, training=False))
             x2 = xf.copy()
             left, right = spans[1]
             rng = np.random.default_rng(161803)
             x2[1, :left] = rng.normal(size=(left, x.shape[-1])) * 30.0
             x2[1, xf.shape[1] - right :] = rng.normal(size=(right, x.shape[-1])) * 30.0
-            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+            out_b = keras.ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
 
         assert np.isfinite(out_a).all() and np.isfinite(out_b).all(), (
             f"[{policy}] the masked forward produced non-finite values "
@@ -2580,8 +2579,8 @@ class TestPaddingMask:
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
             x, _, _, _ = _padded_case([0, 0])
-            plain = ops.convert_to_numpy(layer(x, training=False))
-            ones = ops.convert_to_numpy(
+            plain = keras.ops.convert_to_numpy(layer(x, training=False))
+            ones = keras.ops.convert_to_numpy(
                 layer(x, attention_mask=np.ones(x.shape[:2]), training=False)
             )
         assert np.array_equal(plain, ones), (
@@ -2608,14 +2607,14 @@ class TestPaddingMask:
         inp = keras.Input(shape=(x.shape[1], PAD_MASK_CFG["dim"]))
         msk = keras.Input(shape=(x.shape[1],))
         layer = self._fresh_layer()
-        model = models.Model([inp, msk], layer(inp, attention_mask=msk))
+        model = keras.models.Model([inp, msk], layer(inp, attention_mask=msk))
 
-        before = ops.convert_to_numpy(model([x, mask]))
+        before = keras.ops.convert_to_numpy(model([x, mask]))
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "gla_mask.keras")
             model.save(path)
             reloaded = keras.models.load_model(path)
-            after = ops.convert_to_numpy(reloaded([x, mask]))
+            after = keras.ops.convert_to_numpy(reloaded([x, mask]))
 
         assert float(np.abs(before).max()) > 1e-6, "vacuous: output is ~zero"
         np.testing.assert_allclose(before, after, rtol=0, atol=1e-6)

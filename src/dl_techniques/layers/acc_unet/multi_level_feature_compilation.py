@@ -16,7 +16,6 @@ after the last iteration.
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, List, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -267,7 +266,7 @@ class MLFCLayer(keras.layers.Layer):
             # Process each level
             for level_idx in range(4):
                 idx = iter_idx * 4 + level_idx
-                target_shape = ops.shape(current_features[level_idx])
+                target_shape = keras.ops.shape(current_features[level_idx])
                 target_height = target_shape[1]
                 target_width = target_shape[2]
 
@@ -287,7 +286,7 @@ class MLFCLayer(keras.layers.Layer):
                         resized_features.append(feat_resized)
 
                 # Concatenate all resized features using ops
-                concatenated = ops.concatenate(resized_features, axis=-1)
+                concatenated = keras.ops.concatenate(resized_features, axis=-1)
 
                 # Apply compilation convolution
                 compiled_feat = self.compilation_convs[idx](concatenated)
@@ -296,7 +295,7 @@ class MLFCLayer(keras.layers.Layer):
 
                 # Merge with original features using residual connection
                 original_feat = current_features[level_idx]
-                merged_input = ops.concatenate([compiled_feat, original_feat], axis=-1)
+                merged_input = keras.ops.concatenate([compiled_feat, original_feat], axis=-1)
 
                 # Apply merge convolution with residual
                 merged_feat = self.merge_convs[idx](merged_input)

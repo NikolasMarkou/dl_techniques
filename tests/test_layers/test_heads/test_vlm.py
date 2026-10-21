@@ -31,7 +31,6 @@ import keras
 # `tf` is used ONLY by `TestSite1PostFusionWidthAssertion`'s site-2 guard, for the
 # device-invariant exception type and the GPU-presence check (D-030).
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.ffn.factory import (
     FFN_REGISTRY,
@@ -187,8 +186,8 @@ class TestVLMForwardPass:
     def test_image_captioning_forward(self, vision_feats, text_feats) -> None:
         head = _captioning_head()
         out = head({
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "text_features": ops.convert_to_tensor(text_feats),
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "text_features": keras.ops.convert_to_tensor(text_feats),
         })
         assert "logits" in out
         assert tuple(out["logits"].shape) == (B, S, VOCAB)
@@ -198,8 +197,8 @@ class TestVLMForwardPass:
     ) -> None:
         head = _vqa_head()
         out = head({
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "question_features": ops.convert_to_tensor(text_feats),
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "question_features": keras.ops.convert_to_tensor(text_feats),
         })
         assert "answer_logits" in out
         assert tuple(out["answer_logits"].shape) == (B, NUM_CLASSES)
@@ -207,8 +206,8 @@ class TestVLMForwardPass:
     def test_image_text_matching_forward(self, vision_feats, text_feats) -> None:
         head = _itm_head()
         out = head({
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "text_features": ops.convert_to_tensor(text_feats),
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "text_features": keras.ops.convert_to_tensor(text_feats),
         })
         # Full output dict contract (SC1).
         assert set(out.keys()) == {
@@ -221,7 +220,7 @@ class TestVLMForwardPass:
         assert tuple(out["similarity_matrix"].shape) == (B, B)
         assert tuple(out["logits"].shape) == (B, B)
         assert tuple(out["match_score"].shape) == (B,)
-        assert np.all(np.isfinite(ops.convert_to_numpy(out["similarity_matrix"])))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out["similarity_matrix"])))
 
     def test_image_captioning_causal_property(
         self, vision_feats, text_feats
@@ -270,16 +269,16 @@ class TestVLMForwardPass:
         """
         head = _captioning_head()
         base = {
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "text_features": ops.convert_to_tensor(text_feats),
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "text_features": keras.ops.convert_to_tensor(text_feats),
         }
-        logits0 = ops.convert_to_numpy(head(base)["logits"])
+        logits0 = keras.ops.convert_to_numpy(head(base)["logits"])
 
         perturbed = text_feats.copy()
         perturbed[:, S - 1, :] += 5.0  # disturb only the final position's input
-        logits1 = ops.convert_to_numpy(head({
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "text_features": ops.convert_to_tensor(perturbed),
+        logits1 = keras.ops.convert_to_numpy(head({
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "text_features": keras.ops.convert_to_tensor(perturbed),
         })["logits"])
 
         # Positions 0..S-2 must be unchanged; only the last position may differ.
@@ -312,8 +311,8 @@ class TestVLMRoundtrip:
         It now builds a FUNCTIONAL model, so the head really is serialized and
         revived through `get_config`/`from_config`, and asserts VALUE equality.
         """
-        vf = ops.convert_to_tensor(vision_feats)
-        tf_ = ops.convert_to_tensor(text_feats)
+        vf = keras.ops.convert_to_tensor(vision_feats)
+        tf_ = keras.ops.convert_to_tensor(text_feats)
 
         v_in = keras.Input(shape=tuple(vf.shape[1:]), name="vision_features")
         t_in = keras.Input(shape=tuple(tf_.shape[1:]), name="text_features")
@@ -331,8 +330,8 @@ class TestVLMRoundtrip:
 
         assert tuple(y1["logits"].shape) == tuple(y0["logits"].shape) == (B, S, VOCAB)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(y1["logits"]),
-            ops.convert_to_numpy(y0["logits"]),
+            keras.ops.convert_to_numpy(y1["logits"]),
+            keras.ops.convert_to_numpy(y0["logits"]),
             rtol=1e-6, atol=1e-6,
             err_msg=(
                 "captioning logits changed across a .keras round-trip — the "
@@ -405,8 +404,8 @@ class TestVLMComputeOutputShape:
     def test_itm_shape(self, vision_feats, text_feats):
         head = _itm_head()
         out = head({
-            "vision_features": ops.convert_to_tensor(vision_feats),
-            "text_features": ops.convert_to_tensor(text_feats),
+            "vision_features": keras.ops.convert_to_tensor(vision_feats),
+            "text_features": keras.ops.convert_to_tensor(text_feats),
         })
         shapes = head.compute_output_shape(
             {"vision_features": (B, S, DIM), "text_features": (B, S, DIM)}
@@ -459,8 +458,8 @@ class TestCaptioningCausalMaskGraphSafety:
         """
         vf, tf_ = self._inputs()
         out = _captioning_head()(
-            {"vision_features": ops.convert_to_tensor(vf),
-             "text_features": ops.convert_to_tensor(tf_)}
+            {"vision_features": keras.ops.convert_to_tensor(vf),
+             "text_features": keras.ops.convert_to_tensor(tf_)}
         )
         assert tuple(out["logits"].shape) == (B, S, VOCAB)
 
@@ -533,13 +532,13 @@ class TestCaptioningCausalMaskGraphSafety:
         def attn_spy(x, attention_mask=None, training=None):
             captured["mask"] = (
                 None if attention_mask is None
-                else ops.convert_to_numpy(attention_mask)
+                else keras.ops.convert_to_numpy(attention_mask)
             )
             return real_attn(x, attention_mask=attention_mask, training=training)
 
         head.self_attention_layers[0] = attn_spy
         try:
-            head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+            head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         finally:
             head.self_attention_layers[0] = real_attn
 
@@ -718,7 +717,7 @@ def _flatten_outputs(out) -> np.ndarray:
         return np.concatenate(
             [_flatten_outputs(out[k]).ravel() for k in sorted(out)]
         )
-    return ops.convert_to_numpy(out).ravel()
+    return keras.ops.convert_to_numpy(out).ravel()
 
 
 def _shapes_of(payload) -> dict:
@@ -745,7 +744,7 @@ class TestVLMHeadFamilyExplicitBuild:
         # that build() creates EVERY weight a forward pass would, so compare
         # against a fresh instance driven by an actual call.
         reference = _make_single(task_type, label)
-        reference({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        reference({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         assert len(reference.weights) > 0, "the reference forward pass built nothing"
         assert len(head.weights) == len(reference.weights), (
             f"{label}: build() created {len(head.weights)} weights but a forward "
@@ -764,7 +763,7 @@ class TestVLMHeadFamilyExplicitBuild:
         so building it would show up here as extra weights.
         """
         payload = _family_payload(text_key)
-        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+        tensors = {k: keras.ops.convert_to_tensor(v) for k, v in payload.items()}
 
         keras.utils.set_random_seed(5)
         explicit = _make_single(task_type, label)
@@ -826,7 +825,7 @@ class TestVLMHeadFamilyExplicitBuild:
         head.build(_shapes_of(payload))
         assert head.built and len(head.weights) > 0
 
-        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+        tensors = {k: keras.ops.convert_to_tensor(v) for k, v in payload.items()}
         keras.utils.set_random_seed(7)
         explicit = mk()
         explicit.build(_shapes_of(payload))
@@ -867,12 +866,12 @@ class TestVisualGroundingForwardPass:
     def test_forward_pass_runs_and_returns_the_documented_keys(self) -> None:
         payload = _family_payload()
         head = _make_single(VLMTaskType.VISUAL_GROUNDING, "grounding")
-        out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
 
         assert "bbox" in out and "confidence" in out
         assert tuple(out["bbox"].shape) == (_FAMILY_BATCH, 4)
         assert tuple(out["confidence"].shape) == (_FAMILY_BATCH, _FAMILY_SEQ)
-        assert np.isfinite(ops.convert_to_numpy(out["bbox"])).all()
+        assert np.isfinite(keras.ops.convert_to_numpy(out["bbox"])).all()
 
     def test_top_region_gather_selects_the_argmax_region(self) -> None:
         """The gather must pick the region the confidence scorer ranked first.
@@ -903,26 +902,26 @@ class TestVisualGroundingForwardPass:
 
         def fusion_spy(tensors, training=None):
             out = real_fusion(tensors, training=training)
-            captured["fused"] = ops.convert_to_numpy(out)
+            captured["fused"] = keras.ops.convert_to_numpy(out)
             return out
 
         class _ScoreStub:
             """Emits the ranking above, shaped as the scorer's (B, N, 1)."""
 
             def __call__(self, _fused, *args, **kwargs):
-                return ops.convert_to_tensor(scores[..., None])
+                return keras.ops.convert_to_tensor(scores[..., None])
 
         head.fusion = fusion_spy
         head.confidence_scorer = _ScoreStub()
         try:
-            out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+            out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         finally:
             del head.fusion
             del head.confidence_scorer
 
         assert "fused" in captured, "the fusion layer was never called"
         fused = captured["fused"]
-        grounded = ops.convert_to_numpy(out["grounded_features"])
+        grounded = keras.ops.convert_to_numpy(out["grounded_features"])
         expected = np.stack(
             [fused[row, region] for row, region in enumerate(chosen)]
         )
@@ -936,7 +935,7 @@ class TestVisualGroundingForwardPass:
         )
         # And the head must report the ranking it was given.
         np.testing.assert_allclose(
-            ops.convert_to_numpy(out["confidence"]), scores, rtol=1e-6, atol=1e-6
+            keras.ops.convert_to_numpy(out["confidence"]), scores, rtol=1e-6, atol=1e-6
         )
 
 
@@ -1277,10 +1276,10 @@ def _ffn_head(ffn_type: str, **extra) -> ImageCaptioningHead:
 def _ffn_inputs():
     rng = np.random.default_rng(1)
     return {
-        "vision_features": ops.convert_to_tensor(
+        "vision_features": keras.ops.convert_to_tensor(
             rng.normal(size=(B, S, DIM)).astype("float32")
         ),
-        "text_features": ops.convert_to_tensor(
+        "text_features": keras.ops.convert_to_tensor(
             rng.normal(size=(B, S, DIM)).astype("float32")
         ),
     }
@@ -1306,7 +1305,7 @@ class TestCaptioningFFNTypes:
         head = _ffn_head(ffn_type)
         out = head(_ffn_inputs())
         assert tuple(out["logits"].shape) == (B, S, VOCAB)
-        assert np.isfinite(ops.convert_to_numpy(out["logits"])).all()
+        assert np.isfinite(keras.ops.convert_to_numpy(out["logits"])).all()
 
     @pytest.mark.parametrize("ffn_type", _HIDDEN_DIM_REQUIRING_FFN_TYPES)
     def test_config_round_trip(self, ffn_type) -> None:
@@ -1536,7 +1535,7 @@ class TestFFNOutputWidthParamRouting:
         for factory in (_itm_width_head, _cap_width_head):
             with pytest.raises(ValueError) as excinfo:
                 head = factory("gated_mlp")
-                head({k: ops.convert_to_tensor(v)
+                head({k: keras.ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
             message = str(excinfo.value)
             assert "filters" not in message, (
@@ -1603,7 +1602,7 @@ class TestSite1PostFusionWidthAssertion:
 
     def test_the_assertion_is_green_as_shipped(self) -> None:
         head = _itm_width_head("swiglu")
-        head({k: ops.convert_to_tensor(v) for k, v in _family_payload().items()})
+        head({k: keras.ops.convert_to_tensor(v) for k, v in _family_payload().items()})
         assert head.post_fusion_ffn.compute_output_shape(
             (None, _FAMILY_DIM)
         )[-1] == _FAMILY_DIM
@@ -1620,7 +1619,7 @@ class TestSite1PostFusionWidthAssertion:
         try:
             with pytest.raises(ValueError) as excinfo:
                 head = _itm_width_head("mlp")
-                head({k: ops.convert_to_tensor(v)
+                head({k: keras.ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
         finally:
             vlm_factory._ffn_width_kwargs = original
@@ -1665,7 +1664,7 @@ class TestSite1PostFusionWidthAssertion:
         # Without this, a generally-broken `_cap_width_head` would satisfy the
         # `raises` below for entirely the wrong reason.
         control = _cap_width_head("mlp")
-        control({k: ops.convert_to_tensor(v)
+        control({k: keras.ops.convert_to_tensor(v)
                  for k, v in _family_payload().items()})
 
         def half_width(ffn_type, width):
@@ -1675,7 +1674,7 @@ class TestSite1PostFusionWidthAssertion:
         try:
             with pytest.raises(tf.errors.InvalidArgumentError) as excinfo:
                 head = _cap_width_head("mlp")
-                head({k: ops.convert_to_tensor(v)
+                head({k: keras.ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
         finally:
             vlm_factory._ffn_width_kwargs = original
@@ -1738,7 +1737,7 @@ class TestSwiGLUComputeOutputShapeHonesty:
         from dl_techniques.layers.ffn.factory import create_ffn_layer
 
         layer = create_ffn_layer("swiglu", output_dim=24)
-        x = ops.convert_to_tensor(
+        x = keras.ops.convert_to_tensor(
             np.zeros((2, 5, 32), dtype="float32")
         )
         declared = tuple(layer.compute_output_shape((2, 5, 32)))
@@ -1924,7 +1923,7 @@ class TestPostFusionFFNHiddenDimRule:
             ffn_expansion_factor=expansion,
         )
         payload = _family_payload()
-        head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         return head
 
     @staticmethod
@@ -2010,7 +2009,7 @@ class TestPostFusionFFNHiddenDimRule:
             ffn_type="swiglu", ffn_expansion_factor=4, num_layers=1,
         )
         payload = _family_payload()
-        cap({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        cap({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         cap_hidden = int(cap.ffn_layers[0].hidden_dim)
 
         itm = self._itm("swiglu", 4)
@@ -2095,7 +2094,7 @@ class TestFusionStrategyOutputContract:
         """
         head = _fusion_head(cls, name, task_type, strategy)
         payload = _family_payload()
-        out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        out = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         flat = _flatten_outputs(out)
         assert flat.size > 0
         assert np.all(np.isfinite(flat)), (
@@ -2115,7 +2114,7 @@ class TestFusionStrategyOutputContract:
         `build()` would leave `head(payload)` dying with the old opaque error.
         """
         payload = _family_payload()
-        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+        tensors = {k: keras.ops.convert_to_tensor(v) for k, v in payload.items()}
 
         with pytest.raises(ValueError, match=strategy):
             _fusion_head(cls, name, task_type, strategy).build(
@@ -2197,7 +2196,7 @@ class TestMultiTaskConfigPreservesKerasBaseKwargs:
         count read 33 both before and after and is not a reliable discriminator.
         """
         payload = _family_payload()
-        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+        tensors = {k: keras.ops.convert_to_tensor(v) for k, v in payload.items()}
 
         frozen = self._head(name="mt", trainable=False)
         frozen(tensors)
@@ -2273,14 +2272,14 @@ class TestHeadsActuallyConsumeTheirInputs:
     def _perturb(head, payload, key):
         """Return (baseline, perturbed) outputs after changing only `key`."""
         base = _flatten_outputs(
-            head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+            head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         )
         bumped = {k: v.copy() for k, v in payload.items()}
         # A large, structured shift: a tiny epsilon could vanish into a
         # saturating nonlinearity and make a live input look dead.
         bumped[key] = bumped[key] + 7.0
         after = _flatten_outputs(
-            head({k: ops.convert_to_tensor(v) for k, v in bumped.items()})
+            head({k: keras.ops.convert_to_tensor(v) for k, v in bumped.items()})
         )
         return base, after
 
@@ -2327,15 +2326,15 @@ class TestHeadsActuallyConsumeTheirInputs:
         payload = _family_payload()
         head = _make_single(VLMTaskType.IMAGE_CAPTIONING, "captioning")
 
-        live = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        live = head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
         zeroed = head({
-            "vision_features": ops.convert_to_tensor(payload["vision_features"]),
-            "text_features": ops.zeros_like(
-                ops.convert_to_tensor(payload["text_features"])
+            "vision_features": keras.ops.convert_to_tensor(payload["vision_features"]),
+            "text_features": keras.ops.zeros_like(
+                keras.ops.convert_to_tensor(payload["text_features"])
             ),
         })
-        live_logits = ops.convert_to_numpy(live["logits"])
-        zero_logits = ops.convert_to_numpy(zeroed["logits"])
+        live_logits = keras.ops.convert_to_numpy(live["logits"])
+        zero_logits = keras.ops.convert_to_numpy(zeroed["logits"])
 
         delta = float(np.max(np.abs(live_logits - zero_logits)))
         assert delta > 1e-6, (
@@ -2392,7 +2391,7 @@ def _build_site1(ffn_type: str):
         ffn_type=ffn_type,
     )
     payload = _family_payload()
-    head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+    head({k: keras.ops.convert_to_tensor(v) for k, v in payload.items()})
     return head
 
 

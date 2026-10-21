@@ -11,7 +11,6 @@ for the model to contrast against.
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Union, Tuple
 import warnings
 
@@ -471,7 +470,7 @@ class CLIPContrastiveLoss(keras.losses.Loss):
         self._validate_logits(logits_per_image, logits_per_text)
 
         # Get batch size for label generation
-        batch_size = ops.shape(logits_per_image)[0]
+        batch_size = keras.ops.shape(logits_per_image)[0]
 
         # Apply temperature scaling if configured
         # Temperature scales logits before softmax: logits' = logits / τ
@@ -483,12 +482,12 @@ class CLIPContrastiveLoss(keras.losses.Loss):
         # Generate ground truth labels: diagonal elements are correct pairs
         # For batch_size=N, labels = [0, 1, 2, ..., N-1]
         # This means: image_i matches text_i (i-th diagonal element)
-        labels = ops.arange(batch_size, dtype='int32')
+        labels = keras.ops.arange(batch_size, dtype='int32')
 
         # Convert to one-hot encoding to support label smoothing
         # categorical_crossentropy with from_logits=True works with one-hot targets
         # and supports label_smoothing argument.
-        y_true_one_hot = ops.one_hot(labels, num_classes=batch_size)
+        y_true_one_hot = keras.ops.one_hot(labels, num_classes=batch_size)
 
         # Compute image→text loss: "given image, predict matching text"
         # Each image should correctly classify its corresponding text from N options

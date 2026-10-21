@@ -24,7 +24,6 @@ from typing import Tuple
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
 from tests.layer_naming import PublicAutoName
@@ -45,33 +44,33 @@ class _ReferenceEMA(PublicAutoName, keras.layers.Layer):
         self.alpha = 2.0 / (period + 1.0)
 
     def call(self, inputs):
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         ndim = len(inputs.shape)
         if ndim == 2:
-            x = ops.expand_dims(inputs, axis=-1)
+            x = keras.ops.expand_dims(inputs, axis=-1)
         else:
             x = inputs
         time_steps = input_shape[1]
         ema_prev = x[:, 0, :]
         ema_values = [ema_prev]
-        alpha = ops.cast(self.alpha, dtype=x.dtype)
-        one_minus_alpha = ops.cast(1.0 - self.alpha, dtype=x.dtype)
+        alpha = keras.ops.cast(self.alpha, dtype=x.dtype)
+        one_minus_alpha = keras.ops.cast(1.0 - self.alpha, dtype=x.dtype)
         T = x.shape[1] if x.shape[1] is not None else time_steps
         for t in range(1, T):
             if self.adjust:
-                weight = ops.cast(
-                    1.0 - ops.power(one_minus_alpha, ops.cast(t + 1, x.dtype)),
+                weight = keras.ops.cast(
+                    1.0 - keras.ops.power(one_minus_alpha, keras.ops.cast(t + 1, x.dtype)),
                     dtype=x.dtype,
                 )
                 ema_current = alpha * x[:, t, :] + one_minus_alpha * ema_prev
-                ema_current = ema_current / ops.maximum(weight, 1e-10)
+                ema_current = ema_current / keras.ops.maximum(weight, 1e-10)
             else:
                 ema_current = alpha * x[:, t, :] + one_minus_alpha * ema_prev
             ema_values.append(ema_current)
             ema_prev = ema_current
-        ema = ops.stack(ema_values, axis=1)
+        ema = keras.ops.stack(ema_values, axis=1)
         if ndim == 2:
-            ema = ops.squeeze(ema, axis=-1)
+            ema = keras.ops.squeeze(ema, axis=-1)
         return ema
 
 
@@ -92,22 +91,22 @@ class TestEquivalence:
     def test_equivalence_adjust_false(self, period, T, ndim):
         rng = np.random.default_rng(0)
         x_np = self._make_input(rng, T, ndim)
-        x = ops.convert_to_tensor(x_np)
-        new = ops.convert_to_numpy(
+        x = keras.ops.convert_to_tensor(x_np)
+        new = keras.ops.convert_to_numpy(
             ExponentialMovingAverage(period=period, adjust=False)(x)
         )
-        ref = ops.convert_to_numpy(_ReferenceEMA(period=period, adjust=False)(x))
+        ref = keras.ops.convert_to_numpy(_ReferenceEMA(period=period, adjust=False)(x))
         # adjust=False is bit-exact in practice; allow only float32 ULP.
         np.testing.assert_allclose(new, ref, atol=1e-7, rtol=1e-7)
 
     def test_equivalence_adjust_true(self, period, T, ndim):
         rng = np.random.default_rng(0)
         x_np = self._make_input(rng, T, ndim)
-        x = ops.convert_to_tensor(x_np)
-        new = ops.convert_to_numpy(
+        x = keras.ops.convert_to_tensor(x_np)
+        new = keras.ops.convert_to_numpy(
             ExponentialMovingAverage(period=period, adjust=True)(x)
         )
-        ref = ops.convert_to_numpy(_ReferenceEMA(period=period, adjust=True)(x))
+        ref = keras.ops.convert_to_numpy(_ReferenceEMA(period=period, adjust=True)(x))
         # D-003: ops.scan XLA fusion differs from unrolled eager-op sequence.
         # Tolerances chosen one ULP-class above pure float32 noise on chained
         # divisions; realistic-workload max-rel-diff is 1.2e-6.
@@ -119,25 +118,25 @@ class TestEquivalence:
 # ---------------------------------------------------------------------
 class TestShapeAndEdgeCases:
     def test_output_shape_2d(self):
-        x = ops.convert_to_tensor(np.random.randn(4, 32).astype(np.float32))
+        x = keras.ops.convert_to_tensor(np.random.randn(4, 32).astype(np.float32))
         y = ExponentialMovingAverage(period=10)(x)
         assert tuple(y.shape) == (4, 32)
 
     def test_output_shape_3d(self):
-        x = ops.convert_to_tensor(np.random.randn(4, 32, 5).astype(np.float32))
+        x = keras.ops.convert_to_tensor(np.random.randn(4, 32, 5).astype(np.float32))
         y = ExponentialMovingAverage(period=10)(x)
         assert tuple(y.shape) == (4, 32, 5)
 
     def test_t_equals_1_is_identity(self):
-        x = ops.convert_to_tensor(np.array([[1.5], [2.5], [3.5]]).astype(np.float32))
+        x = keras.ops.convert_to_tensor(np.array([[1.5], [2.5], [3.5]]).astype(np.float32))
         # x is (3, 1) — 2D, T=1
-        y = ops.convert_to_numpy(ExponentialMovingAverage(period=5)(x))
-        np.testing.assert_array_equal(y, ops.convert_to_numpy(x))
+        y = keras.ops.convert_to_numpy(ExponentialMovingAverage(period=5)(x))
+        np.testing.assert_array_equal(y, keras.ops.convert_to_numpy(x))
 
     def test_period_1_is_identity_adjust_false(self):
         x_np = np.random.randn(2, 16, 3).astype(np.float32)
-        x = ops.convert_to_tensor(x_np)
-        y = ops.convert_to_numpy(
+        x = keras.ops.convert_to_tensor(x_np)
+        y = keras.ops.convert_to_numpy(
             ExponentialMovingAverage(period=1, adjust=False)(x)
         )
         # alpha = 2/2 = 1; one_minus_alpha = 0 → y_t = x_t for all t.
@@ -164,12 +163,12 @@ class TestSerialization:
         model = keras.Model(inp, out)
 
         x_np = np.random.randn(2, 16, 1).astype(np.float32)
-        before = ops.convert_to_numpy(model(ops.convert_to_tensor(x_np)))
+        before = keras.ops.convert_to_numpy(model(keras.ops.convert_to_tensor(x_np)))
 
         path = os.path.join(tmp_path, "ema_model.keras")
         model.save(path)
         loaded = keras.models.load_model(path)
-        after = ops.convert_to_numpy(loaded(ops.convert_to_tensor(x_np)))
+        after = keras.ops.convert_to_numpy(loaded(keras.ops.convert_to_tensor(x_np)))
 
         np.testing.assert_allclose(before, after, atol=1e-7, rtol=1e-7)
 

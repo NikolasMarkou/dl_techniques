@@ -47,7 +47,6 @@ bare `load_weights` into a default-constructed model does NOT.
 
 import numpy as np
 import keras
-from keras import ops
 import pytest
 
 from dl_techniques.models.vision_language.fastvlm.components import AttentionBlockVLM
@@ -72,12 +71,12 @@ def _equivariance_delta(layer, seed=0):
     """``max|f(Px) - P f(x)|`` over a random spatial permutation, and ``|y|max``."""
     rng = np.random.RandomState(seed)
     x_np = rng.randn(BATCH, GRID, GRID, DIM).astype("float32")
-    y = ops.convert_to_numpy(layer(ops.convert_to_tensor(x_np)))
+    y = keras.ops.convert_to_numpy(layer(keras.ops.convert_to_tensor(x_np)))
 
     perm = rng.permutation(GRID * GRID)
     x_perm = x_np.reshape(BATCH, GRID * GRID, DIM)[:, perm]
-    y_perm = ops.convert_to_numpy(
-        layer(ops.convert_to_tensor(x_perm.reshape(BATCH, GRID, GRID, DIM)))
+    y_perm = keras.ops.convert_to_numpy(
+        layer(keras.ops.convert_to_tensor(x_perm.reshape(BATCH, GRID, GRID, DIM)))
     ).reshape(BATCH, GRID * GRID, DIM)
 
     reference = y.reshape(BATCH, GRID * GRID, DIM)[:, perm]
@@ -128,11 +127,11 @@ class TestTheTwoInstrumentTraps:
         feats = rng.randn(BATCH, GRID, GRID, DIM).astype("float32")
         pool = keras.layers.GlobalAveragePooling2D()
 
-        a = ops.convert_to_numpy(pool(ops.convert_to_tensor(feats)))
+        a = keras.ops.convert_to_numpy(pool(keras.ops.convert_to_tensor(feats)))
         perm = rng.permutation(GRID * GRID)
         shuffled = feats.reshape(BATCH, GRID * GRID, DIM)[:, perm]
-        b = ops.convert_to_numpy(
-            pool(ops.convert_to_tensor(shuffled.reshape(BATCH, GRID, GRID, DIM)))
+        b = keras.ops.convert_to_numpy(
+            pool(keras.ops.convert_to_tensor(shuffled.reshape(BATCH, GRID, GRID, DIM)))
         )
         np.testing.assert_allclose(a, b, atol=1e-5)
 
@@ -159,7 +158,7 @@ class TestAssembledModelDefaults:
     def test_num_kv_heads_equals_num_heads(self):
         """`'group_query'` here is MHA arithmetic plus RoPE, not a capacity cut."""
         model = self._tiny(use_layer_scale=False)
-        model(ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32")))
+        model(keras.ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32")))
         block = model.stages[2].layers[0]
         attention = block.transformer.attention
         assert attention.num_kv_heads == attention.num_heads == 4
@@ -167,18 +166,18 @@ class TestAssembledModelDefaults:
     def test_stage3_of_the_assembled_model_is_position_aware(self):
         """Read the STAGE, not the logits -- the head would hide this."""
         model = self._tiny(use_layer_scale=False)
-        model(ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32")))
+        model(keras.ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32")))
         stage3 = model.stages[2]
 
         rng = np.random.RandomState(0)
         side = 4  # 64 / 16
         x = rng.randn(BATCH, side, side, 64).astype("float32")
-        y = ops.convert_to_numpy(stage3(ops.convert_to_tensor(x)))
+        y = keras.ops.convert_to_numpy(stage3(keras.ops.convert_to_tensor(x)))
 
         perm = rng.permutation(side * side)
         xp = x.reshape(BATCH, side * side, 64)[:, perm]
-        yp = ops.convert_to_numpy(
-            stage3(ops.convert_to_tensor(xp.reshape(BATCH, side, side, 64)))
+        yp = keras.ops.convert_to_numpy(
+            stage3(keras.ops.convert_to_tensor(xp.reshape(BATCH, side, side, 64)))
         ).reshape(BATCH, side * side, 64)
         reference = y.reshape(BATCH, side * side, 64)[:, perm]
 
@@ -191,7 +190,7 @@ class TestAssembledModelDefaults:
         """The default flip renames the attention subtree. Pin both shapes."""
         default = self._tiny()
         legacy = self._tiny(attention_type="multi_head")
-        probe = ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32"))
+        probe = keras.ops.convert_to_tensor(np.zeros((1, 64, 64, 3), dtype="float32"))
         default(probe)
         legacy(probe)
 
@@ -231,7 +230,7 @@ class TestRopeTableCeiling:
         """The ceiling is enforced at CALL time by `RotaryPositionEmbedding`,
         not at build; either way it is a loud ValueError naming the knob."""
         block = _block("group_query", max_seq_len=16)
-        x = ops.convert_to_tensor(
+        x = keras.ops.convert_to_tensor(
             np.zeros((1, GRID, GRID, DIM), dtype="float32")
         )
         with pytest.raises(ValueError, match="max_seq_len"):

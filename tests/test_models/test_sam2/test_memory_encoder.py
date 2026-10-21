@@ -41,7 +41,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 from scipy.special import erf
 
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
@@ -223,7 +222,7 @@ class TestAffineSigmoidValue:
 
         for probe, hand in self.HAND_DERIVED.items():
             probe_array = np.full((1, 1, 1, 1), probe, dtype="float32")
-            actual = float(ops.convert_to_numpy(
+            actual = float(keras.ops.convert_to_numpy(
                 encoder._affine_sigmoid(probe_array)).reshape(-1)[0])
 
             expected = {
@@ -271,7 +270,7 @@ class TestAffineSigmoidValue:
         """
         saturating = np.array(
             [-1.0e4, 1.0e4], dtype="float32").reshape((1, 1, 2, 1))
-        limits = ops.convert_to_numpy(
+        limits = keras.ops.convert_to_numpy(
             encoder._affine_sigmoid(saturating)).reshape(-1)
 
         assert float(limits[0]) == pytest.approx(SIGMOID_BIAS, abs=1e-4), (
@@ -322,13 +321,13 @@ class TestAffineSigmoidValue:
         twin.set_weights(encoder.get_weights())
 
         logits = mask_logits.astype("float64")
-        actual = ops.convert_to_numpy(
+        actual = keras.ops.convert_to_numpy(
             encoder([pix_feat, mask_logits])[0]).astype("float64")
 
         distances = {}
         for name, transform in MASK_TRANSFORM_CANDIDATES.items():
             candidate = transform(logits).astype("float32")
-            reproduced = ops.convert_to_numpy(
+            reproduced = keras.ops.convert_to_numpy(
                 twin([pix_feat, candidate])[0]).astype("float64")
             distances[name] = float(np.abs(actual - reproduced).max())
 
@@ -398,7 +397,7 @@ class TestAffineSigmoidValue:
             ])
             assert layer.compute_dtype == "float16"
             assert layer.variable_dtype == "float32"
-            shipped = ops.convert_to_numpy(
+            shipped = keras.ops.convert_to_numpy(
                 layer._affine_sigmoid(logits16)).astype("float64")
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -503,9 +502,9 @@ class TestDownSamplerGeometry:
         same.build((1, MASK_GRID, MASK_GRID, 1))
         same.set_weights(down.convs[0].get_weights())
 
-        symmetric = ops.convert_to_numpy(
+        symmetric = keras.ops.convert_to_numpy(
             down.convs[0](down.pads[0](ones)))
-        as_same = ops.convert_to_numpy(same(ones))
+        as_same = keras.ops.convert_to_numpy(same(ones))
 
         assert symmetric.shape == as_same.shape
         assert float(np.abs(symmetric - as_same).max()) > 1e-6, (
@@ -572,8 +571,8 @@ class TestAdditiveFusion:
             mask_logits: np.ndarray,
     ) -> None:
         """Liveness of the mask branch, as the plan specifies for G5.3."""
-        base = ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
-        scaled = ops.convert_to_numpy(
+        base = keras.ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
+        scaled = keras.ops.convert_to_numpy(
             encoder([pix_feat, mask_logits * 2.0])[0])
         assert float(np.abs(base - scaled).max()) > 1e-5, (
             "doubling the mask logits did not move the memory -- the mask "
@@ -587,8 +586,8 @@ class TestAdditiveFusion:
             mask_logits: np.ndarray,
     ) -> None:
         """Perturbing EITHER branch alone must move the memory."""
-        base = ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
-        moved_pix = ops.convert_to_numpy(
+        base = keras.ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
+        moved_pix = keras.ops.convert_to_numpy(
             encoder([pix_feat + 1.0, mask_logits])[0])
         assert float(np.abs(base - moved_pix).max()) > 1e-5, (
             "the pixel-feature branch is dead")
@@ -728,10 +727,10 @@ class TestConvNextBlockMatchesCXBlock:
 
         weights = {
             variable.path.split("/", 1)[1]:
-                ops.convert_to_numpy(variable).astype("float64")
+                keras.ops.convert_to_numpy(variable).astype("float64")
             for variable in block.weights
         }
-        actual = ops.convert_to_numpy(
+        actual = keras.ops.convert_to_numpy(
             block(x, training=False)).astype("float64")
         reference = _cxblock_reference(x, weights, kernel)
 
@@ -768,7 +767,7 @@ class TestConvNextBlockMatchesCXBlock:
             for variable in block.conv_3.weights
         ]
         with zeroed_variables(killed):
-            output = ops.convert_to_numpy(fuser(probe, training=False))
+            output = keras.ops.convert_to_numpy(fuser(probe, training=False))
 
         assert float(np.abs(output - probe).max()) == pytest.approx(
             0.0, abs=1e-6), (
@@ -845,11 +844,11 @@ class TestAuthoringContract:
             in_dim=IN_DIM, out_dim=OUT_DIM, name="memory_encoder")(inputs)
         model = keras.Model(inputs, outputs)
 
-        before = ops.convert_to_numpy(model([pix_feat, mask_logits])[0])
+        before = keras.ops.convert_to_numpy(model([pix_feat, mask_logits])[0])
         path = tmp_path / "memory_encoder.keras"
         model.save(path)
         restored = keras.models.load_model(path)
-        after = ops.convert_to_numpy(restored([pix_feat, mask_logits])[0])
+        after = keras.ops.convert_to_numpy(restored([pix_feat, mask_logits])[0])
 
         assert float(np.abs(before - after).max()) == 0.0
 
@@ -908,7 +907,7 @@ class TestAuthoringContract:
             memory, _ = layer(
                 [tf.constant(pix_feat), tf.constant(mask_logits)],
                 training=True)
-            loss = ops.mean(ops.square(memory))
+            loss = keras.ops.mean(keras.ops.square(memory))
         gradients = tape.gradient(loss, layer.trainable_variables)
         dead = [
             variable.path
@@ -944,8 +943,8 @@ class TestDeadComponentPartition:
         """
         killed = list(encoder.mask_downsampler.final_conv.weights)
         with zeroed_variables(killed):
-            base = ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
-            scaled = ops.convert_to_numpy(
+            base = keras.ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
+            scaled = keras.ops.convert_to_numpy(
                 encoder([pix_feat, mask_logits * 2.0])[0])
             # G5.3's liveness assertion would now FAIL.
             assert float(np.abs(base - scaled).max()) == pytest.approx(
@@ -958,7 +957,7 @@ class TestDeadComponentPartition:
         # logit 0.6) through the whole first pass.
         probe = np.full((1, 1, 1, 1), 0.6, dtype="float32")
         with zeroed_variables(killed):
-            value = float(ops.convert_to_numpy(
+            value = float(keras.ops.convert_to_numpy(
                 encoder._affine_sigmoid(probe)).reshape(-1)[0])
         assert value == pytest.approx(
             TestAffineSigmoidValue.HAND_DERIVED[0.6][0], abs=1e-5)
@@ -971,10 +970,10 @@ class TestDeadComponentPartition:
     ) -> None:
         """Additive fusion means one dead branch does not kill the other."""
         with zeroed_variables(list(encoder.pix_feat_proj.weights)):
-            base = ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
-            moved_pix = ops.convert_to_numpy(
+            base = keras.ops.convert_to_numpy(encoder([pix_feat, mask_logits])[0])
+            moved_pix = keras.ops.convert_to_numpy(
                 encoder([pix_feat + 1.0, mask_logits])[0])
-            scaled_mask = ops.convert_to_numpy(
+            scaled_mask = keras.ops.convert_to_numpy(
                 encoder([pix_feat, mask_logits * 2.0])[0])
 
         assert float(np.abs(base - moved_pix).max()) == pytest.approx(
@@ -999,8 +998,8 @@ class TestDeadComponentPartition:
         """
         with zeroed_variables(list(encoder.out_proj.weights)):
             memory, position = encoder([pix_feat, mask_logits])
-            memory = ops.convert_to_numpy(memory)
-            position = ops.convert_to_numpy(position)
+            memory = keras.ops.convert_to_numpy(memory)
+            position = keras.ops.convert_to_numpy(position)
 
         assert float(np.abs(memory).max()) == 0.0
         assert int(position.shape[-1]) == OUT_DIM

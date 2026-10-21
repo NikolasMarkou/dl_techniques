@@ -19,7 +19,6 @@ The cases below pin all three verdicts the instrument can return:
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from .smoke_contract_oracle import (
     DEFAULT_BREAKERS,
@@ -167,10 +166,10 @@ def test_an_empty_breaker_list_is_refused():
 def test_broken_forward_restores_the_original_call():
     model = _tensor_model()
     x = _x()
-    before = ops.convert_to_numpy(model(x, training=False))
+    before = keras.ops.convert_to_numpy(model(x, training=False))
     with broken_forward(model, collapse_to_scalar):
         assert tuple(model(x, training=False).shape) == ()
-    after = ops.convert_to_numpy(model(x, training=False))
+    after = keras.ops.convert_to_numpy(model(x, training=False))
     np.testing.assert_allclose(before, after, rtol=0, atol=0)
     assert "call" not in model.__dict__, "the instance attribute was not removed"
 
@@ -178,12 +177,12 @@ def test_broken_forward_restores_the_original_call():
 def test_slice_leading_axis_refuses_a_rank_zero_leaf():
     """A breaker that is a no-op would make the guard look weak for free."""
     with pytest.raises(ValueError, match=r"rank-0 leaf"):
-        slice_leading_axis(ops.convert_to_tensor(1.0))
+        slice_leading_axis(keras.ops.convert_to_tensor(1.0))
 
 
 def test_assert_finite_catches_nan_and_inf_through_a_dict_with_none():
-    assert_finite({"a": ops.convert_to_tensor([1.0, 2.0]), "b": None})
+    assert_finite({"a": keras.ops.convert_to_tensor([1.0, 2.0]), "b": None})
     with pytest.raises(AssertionError, match="NaN"):
-        assert_finite({"a": ops.convert_to_tensor([float("nan")]), "b": None})
+        assert_finite({"a": keras.ops.convert_to_tensor([float("nan")]), "b": None})
     with pytest.raises(AssertionError, match="inf"):
-        assert_finite([ops.convert_to_tensor([float("inf")])])
+        assert_finite([keras.ops.convert_to_tensor([float("inf")])])

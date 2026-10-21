@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, List, Tuple
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.layers.statistics.deep_kernel_pca import DeepKernelPCA
 from dl_techniques.layers.statistics.invertible_kernel_pca import (
@@ -365,8 +364,8 @@ class TestEveryForwardPassIsFinite:
 
 def _as_tensors(sample: Any) -> Any:
     if isinstance(sample, (list, tuple)):
-        return [ops.convert_to_tensor(a) for a in sample]
-    return ops.convert_to_tensor(sample)
+        return [keras.ops.convert_to_tensor(a) for a in sample]
+    return keras.ops.convert_to_tensor(sample)
 
 
 # ---------------------------------------------------------------------
@@ -396,7 +395,7 @@ class TestConstructionAndForwardAcrossDtypePolicies:
             sample = subject.make_input()
             arrays = sample if isinstance(sample, (list, tuple)) else [sample]
             tensors = [
-                ops.convert_to_tensor(np.asarray(a, dtype=compute)) for a in arrays
+                keras.ops.convert_to_tensor(np.asarray(a, dtype=compute)) for a in arrays
             ]
             outputs = layer(
                 tensors if isinstance(sample, (list, tuple)) else tensors[0]
@@ -478,7 +477,7 @@ class TestForwardAgreesWithBuildOnTheLayerNameScope:
 
         via_forward = AffineCouplingLayer(input_dim=4, context_dim=3, name="coupling")
         via_forward.forward(
-            ops.convert_to_tensor(sample[0]), ops.convert_to_tensor(sample[1])
+            keras.ops.convert_to_tensor(sample[0]), keras.ops.convert_to_tensor(sample[1])
         )
 
         assert [w.path for w in explicit.weights][0].startswith("coupling/")

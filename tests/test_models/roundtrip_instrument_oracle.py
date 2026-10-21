@@ -82,8 +82,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
-from keras import ops
-from keras.src.utils.naming import to_snake_case
 
 from .lazy_build_contract_oracle import flatten_tensors, perturb_weights
 
@@ -116,8 +114,8 @@ def _model_prefixes(model: Any) -> Tuple[str, ...]:
     A trailing ``_<n>`` is allowed on each, because that is exactly what the
     global auto-name counter appends to a SECOND instance.
     """
-    names = {model.name, to_snake_case(model.name),
-             to_snake_case(type(model).__name__)}
+    names = {model.name, keras.src.utils.naming.to_snake_case(model.name),
+             keras.src.utils.naming.to_snake_case(type(model).__name__)}
     return tuple(sorted(n for n in names if n))
 
 
@@ -156,7 +154,7 @@ def weight_map(model: Any) -> List[Tuple[str, np.ndarray]]:
     silently collapses those to 68 entries and the comparison then speaks for
     barely half the model. :func:`n_colliding_paths` reports the count instead.
     """
-    return [(relative_path(model, w), np.asarray(ops.convert_to_numpy(w)))
+    return [(relative_path(model, w), np.asarray(keras.ops.convert_to_numpy(w)))
             for w in model.weights]
 
 
@@ -166,7 +164,7 @@ def n_colliding_paths(pairs: Sequence[Tuple[str, Any]]) -> int:
 
 
 def _as_arrays(tensors: Sequence[Any]) -> List[np.ndarray]:
-    return [np.asarray(ops.convert_to_numpy(t)) for t in tensors]
+    return [np.asarray(keras.ops.convert_to_numpy(t)) for t in tensors]
 
 
 def _call(model: Any, inputs: Any, call_fn: Optional[Callable], training: bool) -> Any:

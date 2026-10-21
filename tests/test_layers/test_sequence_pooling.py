@@ -10,7 +10,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 from typing import Dict, Any, List, Optional
 
 from dl_techniques.layers.sequence_pooling import (
@@ -91,8 +90,8 @@ class TestAttentionPooling:
 
         assert output.shape == (4, 32)
         # Output should be valid (not NaN or Inf)
-        assert not ops.any(ops.isnan(output))
-        assert not ops.any(ops.isinf(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isinf(output))
 
     def test_multi_head_attention(
             self,
@@ -243,12 +242,12 @@ class TestWeightedPooling:
         """Test forward pass with masking."""
         layer = WeightedPooling(**layer_config)
         mask = keras.ops.ones((4, 10))
-        mask = ops.cast(mask, 'float32')
+        mask = keras.ops.cast(mask, 'float32')
 
         output = layer(sample_input, mask=mask)
 
         assert output.shape == (4, 32)
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_variable_sequence_length(
             self,
@@ -402,7 +401,7 @@ class TestSequencePooling:
         output = layer(sample_input)
 
         assert output.shape == (4, 32)
-        expected = ops.mean(sample_input, axis=1)
+        expected = keras.ops.mean(sample_input, axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),
@@ -422,7 +421,7 @@ class TestSequencePooling:
         assert output.shape == (4, 32)
 
         # Manually compute expected mean for first sample (7 valid tokens)
-        expected_first = ops.mean(sample_input[0, :7, :], axis=0)
+        expected_first = keras.ops.mean(sample_input[0, :7, :], axis=0)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output[0]),
             keras.ops.convert_to_numpy(expected_first),
@@ -436,7 +435,7 @@ class TestSequencePooling:
         output = layer(sample_input)
 
         assert output.shape == (4, 32)
-        expected = ops.max(sample_input, axis=1)
+        expected = keras.ops.max(sample_input, axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),
@@ -450,7 +449,7 @@ class TestSequencePooling:
         output = layer(sample_input)
 
         assert output.shape == (4, 32)
-        expected = ops.min(sample_input, axis=1)
+        expected = keras.ops.min(sample_input, axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),
@@ -464,7 +463,7 @@ class TestSequencePooling:
         output = layer(sample_input)
 
         assert output.shape == (4, 32)
-        expected = ops.sum(sample_input, axis=1)
+        expected = keras.ops.sum(sample_input, axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),
@@ -484,8 +483,8 @@ class TestSequencePooling:
         mean_part = output[:, :32]
         max_part = output[:, 32:]
 
-        expected_mean = ops.mean(sample_input, axis=1)
-        expected_max = ops.max(sample_input, axis=1)
+        expected_mean = keras.ops.mean(sample_input, axis=1)
+        expected_max = keras.ops.max(sample_input, axis=1)
 
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(mean_part),
@@ -508,7 +507,7 @@ class TestSequencePooling:
         assert output.shape == (4, 64)
 
         mean_part = output[:, :32]
-        expected_mean = ops.mean(sample_input, axis=1)
+        expected_mean = keras.ops.mean(sample_input, axis=1)
 
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(mean_part),
@@ -615,7 +614,7 @@ class TestSequencePooling:
         assert output.shape == (4, 32)
 
         # Manually compute expected mean excluding first two positions
-        expected = ops.mean(sample_input[:, 2:, :], axis=1)
+        expected = keras.ops.mean(sample_input[:, 2:, :], axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),
@@ -651,7 +650,7 @@ class TestSequencePooling:
 
         assert output.shape == (4, 32)  # Same dimension
 
-        expected = ops.mean(sample_input, axis=1) + ops.max(sample_input, axis=1)
+        expected = keras.ops.mean(sample_input, axis=1) + keras.ops.max(sample_input, axis=1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             keras.ops.convert_to_numpy(expected),

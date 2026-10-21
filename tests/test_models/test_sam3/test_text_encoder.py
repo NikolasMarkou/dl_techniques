@@ -29,7 +29,6 @@ diverges.
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 from dl_techniques.utils.masking import create_causal_attend_mask
@@ -150,7 +149,7 @@ def tiny_encoder() -> Sam3TextEncoder:
 
 
 def _forward(encoder: Sam3TextEncoder, ids) -> np.ndarray:
-    return ops.convert_to_numpy(encoder(ids, training=False))
+    return keras.ops.convert_to_numpy(encoder(ids, training=False))
 
 
 # ---------------------------------------------------------------------
@@ -236,8 +235,8 @@ class TestCausality:
         bumped = ids.copy()
         bumped[:, -1] = (bumped[:, -1] + 37) % TINY["vocab_size"]
         inner = tiny_encoder.encoder
-        base = ops.convert_to_numpy(inner(ids, training=False))
-        moved = ops.convert_to_numpy(inner(bumped, training=False))
+        base = keras.ops.convert_to_numpy(inner(ids, training=False))
+        moved = keras.ops.convert_to_numpy(inner(bumped, training=False))
         leak = np.abs(base[:, 0] - moved[:, 0]).max()
         assert leak > 1e-4, (
             f"the unmasked tower did NOT leak ({leak}); the exact-zero causality "
@@ -254,7 +253,7 @@ class TestCausalMask:
     # -- only its shape is read, values/dtype are irrelevant.
 
     def test_mask_is_lower_triangular_and_boolean(self, tiny_encoder):
-        mask = ops.convert_to_numpy(
+        mask = keras.ops.convert_to_numpy(
             create_causal_attend_mask(keras.ops.zeros((2, TINY_SEQ)))
         )
         assert mask.dtype == np.bool_
@@ -266,7 +265,7 @@ class TestCausalMask:
     def test_mask_keeps_the_diagonal(self, tiny_encoder):
         # `>=` not `>`: a token must attend to ITSELF. An off-by-one here makes
         # position 0 attend to nothing at all.
-        mask = ops.convert_to_numpy(
+        mask = keras.ops.convert_to_numpy(
             create_causal_attend_mask(keras.ops.zeros((1, TINY_SEQ)))
         )
         assert bool(mask[0, 0, 0]) is True
@@ -274,7 +273,7 @@ class TestCausalMask:
     def test_mask_is_built_at_the_supplied_length_not_the_context(
             self, tiny_encoder
     ):
-        mask = ops.convert_to_numpy(
+        mask = keras.ops.convert_to_numpy(
             create_causal_attend_mask(keras.ops.zeros((1, 3)))
         )
         assert mask.shape == (1, 3, 3)
@@ -320,8 +319,8 @@ class TestUpstreamStructuralParity:
 
     def test_training_true_is_deterministic(self, tiny_encoder):
         ids = _ids()
-        first = ops.convert_to_numpy(tiny_encoder(ids, training=True))
-        second = ops.convert_to_numpy(tiny_encoder(ids, training=True))
+        first = keras.ops.convert_to_numpy(tiny_encoder(ids, training=True))
+        second = keras.ops.convert_to_numpy(tiny_encoder(ids, training=True))
         assert np.abs(first - second).max() == 0.0
 
     def test_positional_embeddings_are_learned_absolute(self, tiny_encoder):
@@ -371,7 +370,7 @@ def _forward_with_embed_norm_replaced(encoder, ids, replacement=None):
     original = inner.embed_norm
     object.__setattr__(inner, "embed_norm", replacement or _Passthrough())
     try:
-        return ops.convert_to_numpy(encoder(ids, training=False))
+        return keras.ops.convert_to_numpy(encoder(ids, training=False))
     finally:
         object.__setattr__(inner, "embed_norm", original)
 
@@ -572,11 +571,11 @@ class TestSerialization:
         inputs = keras.Input(shape=(TINY_SEQ,), dtype="int32")
         model = keras.Model(inputs, Sam3TextEncoder(**TINY)(inputs))
         ids = _ids()
-        before = ops.convert_to_numpy(model(ids, training=False))
+        before = keras.ops.convert_to_numpy(model(ids, training=False))
         path = tmp_path / "sam3_text.keras"
         model.save(path)
         restored = keras.models.load_model(path)
-        after = ops.convert_to_numpy(restored(ids, training=False))
+        after = keras.ops.convert_to_numpy(restored(ids, training=False))
         assert np.abs(before - after).max() == 0.0
 
     def test_the_restored_layer_is_still_causal(self, tmp_path):
@@ -589,8 +588,8 @@ class TestSerialization:
         ids = _ids()
         bumped = ids.copy()
         bumped[:, -1] = (bumped[:, -1] + 37) % TINY["vocab_size"]
-        base = ops.convert_to_numpy(restored(ids, training=False))
-        moved = ops.convert_to_numpy(restored(bumped, training=False))
+        base = keras.ops.convert_to_numpy(restored(ids, training=False))
+        moved = keras.ops.convert_to_numpy(restored(bumped, training=False))
         assert np.abs(base[:, 0] - moved[:, 0]).max() == 0.0
 
 
@@ -613,8 +612,8 @@ class TestSettledScale:
         bumped = ids.copy()
         bumped[:, -1] = (bumped[:, -1] + 1234) % SHIPPED["vocab_size"]
 
-        masked_base = ops.convert_to_numpy(shipped(ids, training=False))
-        masked_moved = ops.convert_to_numpy(shipped(bumped, training=False))
+        masked_base = keras.ops.convert_to_numpy(shipped(ids, training=False))
+        masked_moved = keras.ops.convert_to_numpy(shipped(bumped, training=False))
         assert np.abs(masked_base[:, 0] - masked_moved[:, 0]).max() == 0.0
 
         # The same tower without the mask, at the SETTLED width: the leak is
@@ -622,8 +621,8 @@ class TestSettledScale:
         # figure the exploration phase measured. Re-measured here, not inherited.
         inner = shipped.encoder
         leak = np.abs(
-            ops.convert_to_numpy(inner(ids, training=False))[:, 0]
-            - ops.convert_to_numpy(inner(bumped, training=False))[:, 0]
+            keras.ops.convert_to_numpy(inner(ids, training=False))[:, 0]
+            - keras.ops.convert_to_numpy(inner(bumped, training=False))[:, 0]
         ).max()
         assert leak > 1e-2
 
@@ -648,7 +647,7 @@ class TestSettledScale:
 
     def test_shipped_forward_shape(self, shipped):
         seq = SHIPPED["context_length"]
-        out = ops.convert_to_numpy(
+        out = keras.ops.convert_to_numpy(
             shipped(_ids(seq=seq, vocab=SHIPPED["vocab_size"]), training=False)
         )
         assert out.shape == (2, seq, SHIPPED["d_model"])

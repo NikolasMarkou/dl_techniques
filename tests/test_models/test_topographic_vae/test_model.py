@@ -35,7 +35,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.layers.capsules import CapsuleRoll
 from dl_techniques.layers.generative.topographic_product import (
@@ -180,7 +179,7 @@ def _snapshot(model):
     respond to the optimizer.
     """
     return {
-        v.path: np.array(ops.convert_to_numpy(v)).copy()
+        v.path: np.array(keras.ops.convert_to_numpy(v)).copy()
         for v in model.trainable_variables
     }
 
@@ -213,10 +212,10 @@ def _contract(outputs, batch=None, sequence=SEQUENCE):
     )
     for key, value in outputs.items():
         assert value is not None, f"the output entry {key!r} is None"
-        array = np.asarray(ops.convert_to_numpy(value))
+        array = np.asarray(keras.ops.convert_to_numpy(value))
         assert np.all(np.isfinite(array)), f"non-finite values in {key!r}"
 
-    reconstruction = np.asarray(ops.convert_to_numpy(outputs["reconstruction"]))
+    reconstruction = np.asarray(keras.ops.convert_to_numpy(outputs["reconstruction"]))
     assert reconstruction.ndim == 5, f"reconstruction rank {reconstruction.ndim}"
     assert reconstruction.shape[-3:] == FRAME, (
         f"reconstruction frame shape {reconstruction.shape[-3:]}, expected "
@@ -239,7 +238,7 @@ def _contract(outputs, batch=None, sequence=SEQUENCE):
     )
 
     for key in LATENT_KEYS:
-        latent = np.asarray(ops.convert_to_numpy(outputs[key]))
+        latent = np.asarray(keras.ops.convert_to_numpy(outputs[key]))
         assert latent.ndim == 3, f"{key!r} rank {latent.ndim}, expected 3"
         assert latent.shape[-1] == LATENT, f"{key!r} width {latent.shape[-1]}"
         assert latent.shape[-2] == sequence, (
@@ -386,7 +385,7 @@ class TestTopographicVAEForward:
         assert set(shapes) == EXPECTED_KEYS, sorted(shapes)
         for key, expected in shapes.items():
             declared = tuple(expected)
-            actual = tuple(ops.shape(live[key]))
+            actual = tuple(keras.ops.shape(live[key]))
             assert len(actual) == len(declared), key
             for axis, (got, want) in enumerate(zip(actual, declared)):
                 if want is not None:
@@ -420,15 +419,15 @@ class TestTopographicVAEForward:
         outputs = model(_sample(), training=False)
         expected = (
             outputs["z_mean"]
-            + ops.exp(0.5 * outputs["z_log_var"]) * 0.0
+            + keras.ops.exp(0.5 * outputs["z_log_var"]) * 0.0
             - model.prior_mean
         )
         # The sampler noise makes an exact comparison impossible, so pin the
         # MEAN: an unbiased sample of `z - mu` has that mean.
         assert np.abs(
-            float(ops.mean(outputs["t"])) - float(ops.mean(expected))
+            float(keras.ops.mean(outputs["t"])) - float(keras.ops.mean(expected))
         ) < 1.0
-        assert np.all(np.isfinite(ops.convert_to_numpy(outputs["t"])))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(outputs["t"])))
 
     def test_encode_matches_the_posterior_inside_call(self):
         model = _build()
@@ -437,8 +436,8 @@ class TestTopographicVAEForward:
         outputs = model(sample, training=False)
         for key in ("z_mean", "z_log_var", "u_mean", "u_log_var"):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(encoded[key]),
-                ops.convert_to_numpy(outputs[key]),
+                keras.ops.convert_to_numpy(encoded[key]),
+                keras.ops.convert_to_numpy(outputs[key]),
                 atol=1e-6,
                 rtol=0,
             )
@@ -447,11 +446,11 @@ class TestTopographicVAEForward:
         """The two stages and the forward path compute the same quantity."""
         model = _build()
         outputs = model(_sample(), training=False)
-        direct = ops.convert_to_numpy(
-            model.decode(ops.convert_to_numpy(outputs["t"]), training=False)
+        direct = keras.ops.convert_to_numpy(
+            model.decode(keras.ops.convert_to_numpy(outputs["t"]), training=False)
         )
         np.testing.assert_allclose(
-            direct, ops.convert_to_numpy(outputs["reconstruction"]), atol=1e-5,
+            direct, keras.ops.convert_to_numpy(outputs["reconstruction"]), atol=1e-5,
             rtol=1e-5,
         )
 
@@ -466,13 +465,13 @@ class TestTopographicVAEForward:
         model = _build()
         sample = _sample()
         outputs = model(sample, training=False)
-        latent = ops.convert_to_numpy(outputs["t"])
+        latent = keras.ops.convert_to_numpy(outputs["t"])
         bumped = latent.copy()
         bumped[:, 0, 0] += 5.0
-        baseline = ops.convert_to_numpy(
+        baseline = keras.ops.convert_to_numpy(
             model.decode(latent, training=False)
         )
-        moved = ops.convert_to_numpy(model.decode(bumped, training=False))
+        moved = keras.ops.convert_to_numpy(model.decode(bumped, training=False))
         assert np.abs(moved - baseline).max() > 1e-4, (
             "the reconstruction did not respond to `t`; the decoder is reading "
             "somewhere else and the topography is decorative"
@@ -481,14 +480,14 @@ class TestTopographicVAEForward:
     def test_is_graph_safe_and_matches_tf_function(self):
         model = _build()
         sample = _sample()
-        eager = ops.convert_to_numpy(model.encode(sample)["z_mean"])
+        eager = keras.ops.convert_to_numpy(model.encode(sample)["z_mean"])
 
         @tf.function
         def traced(x):
             return model.encode(x)["z_mean"]
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced(ops.convert_to_tensor(sample))),
+            keras.ops.convert_to_numpy(traced(keras.ops.convert_to_tensor(sample))),
             eager,
             atol=1e-6,
             rtol=0,
@@ -497,7 +496,7 @@ class TestTopographicVAEForward:
     def test_matches_under_xla(self):
         model = _build()
         sample = _sample()
-        eager = ops.convert_to_numpy(model.encode(sample)["z_mean"])
+        eager = keras.ops.convert_to_numpy(model.encode(sample)["z_mean"])
 
         @tf.function(jit_compile=True)
         def compiled(x):
@@ -515,7 +514,7 @@ class TestTopographicVAEForward:
         # reassociation), and 2.89e-03 on GPU 1 against that same bound, where
         # the TF32 term is ~4100x larger and dominates. A pasted 1e-04 passes on
         # one device and fails on the other, which is why it was not pasted.
-        got = ops.convert_to_numpy(compiled(ops.convert_to_tensor(sample)))
+        got = keras.ops.convert_to_numpy(compiled(keras.ops.convert_to_tensor(sample)))
         scale = float(np.abs(eager).max())
         atol = max(
             reassociation_atol(
@@ -532,7 +531,7 @@ class TestTopographicVAEForward:
         try:
             model = _build()
             outputs = model(_sample(), training=False)
-            reconstruction = ops.convert_to_numpy(outputs["reconstruction"])
+            reconstruction = keras.ops.convert_to_numpy(outputs["reconstruction"])
             assert np.all(np.isfinite(reconstruction)), policy
             assert reconstruction.min() >= -1e-3 and reconstruction.max() <= 1.0 + 1e-3
         finally:
@@ -560,11 +559,11 @@ class TestCapsuleTraversal:
         """
         model = _build()
         sample = _sample()
-        latents = ops.convert_to_numpy(model(sample, training=False)["t"])
-        traversal = ops.convert_to_numpy(
+        latents = keras.ops.convert_to_numpy(model(sample, training=False)["t"])
+        traversal = keras.ops.convert_to_numpy(
             model.traverse_capsules(latents, num_steps=SEQUENCE)
         )
-        direct = ops.convert_to_numpy(
+        direct = keras.ops.convert_to_numpy(
             model.decode(latents[:, :1], training=False)
         )
         np.testing.assert_allclose(
@@ -575,8 +574,8 @@ class TestCapsuleTraversal:
         """The other half: a traversal that returned a constant would satisfy the
         equality above while showing nothing."""
         model = _build()
-        latents = ops.convert_to_numpy(model(_sample(), training=False)["t"])
-        traversal = ops.convert_to_numpy(
+        latents = keras.ops.convert_to_numpy(model(_sample(), training=False)["t"])
+        traversal = keras.ops.convert_to_numpy(
             model.traverse_capsules(latents, num_steps=SEQUENCE)
         )
         deltas = np.abs(traversal[:, 1:] - traversal[:, :-1]).max()
@@ -599,10 +598,10 @@ class TestCapsuleTraversal:
         latents[0, 0] = 1.0
 
         rolled = CapsuleRoll(num_capsules=CAPSULES, capsule_dim=CAPSULE_DIM)(
-            ops.convert_to_tensor(latents.reshape(1, CAPSULES, CAPSULE_DIM)),
+            keras.ops.convert_to_tensor(latents.reshape(1, CAPSULES, CAPSULE_DIM)),
             shift=1,
         )
-        rolled_flat = ops.convert_to_numpy(rolled).reshape(1, LATENT)
+        rolled_flat = keras.ops.convert_to_numpy(rolled).reshape(1, LATENT)
         support = np.nonzero(np.abs(rolled_flat[0]) > 1e-6)[0]
         assert support.tolist() == [1], (
             f"the impulse landed on {support.tolist()}; "
@@ -611,12 +610,12 @@ class TestCapsuleTraversal:
         np.testing.assert_allclose(rolled_flat.sum(), 1.0, atol=0.0, rtol=0)
 
         # And the traversal's second step is that decode, exactly.
-        traversal = ops.convert_to_numpy(
+        traversal = keras.ops.convert_to_numpy(
             model.traverse_capsules(latents, num_steps=2)
         )
-        direct = ops.convert_to_numpy(
+        direct = keras.ops.convert_to_numpy(
             model.decode(
-                ops.convert_to_tensor(rolled_flat[:, None, :]), training=False
+                keras.ops.convert_to_tensor(rolled_flat[:, None, :]), training=False
             )
         )
         np.testing.assert_allclose(
@@ -696,14 +695,14 @@ class TestGradients:
         sample = _sample()
         with tf.GradientTape() as tape:
             outputs = model(sample, training=True)
-            loss = ops.mean(ops.square(outputs["reconstruction"]))
+            loss = keras.ops.mean(keras.ops.square(outputs["reconstruction"]))
         gradients = tape.gradient(loss, model.trainable_variables)
 
         assert len(model.trainable_variables) > 0, "anti-vacuity"
         for variable, gradient in zip(model.trainable_variables, gradients):
             assert gradient is not None, f"no gradient for {variable.path}"
             assert np.any(
-                ops.convert_to_numpy(gradient) != 0.0
+                keras.ops.convert_to_numpy(gradient) != 0.0
             ), f"all-zero gradient for {variable.path}"
 
     def test_the_variance_encoder_receives_a_gradient(self):
@@ -721,7 +720,7 @@ class TestGradients:
         model = _build()
         with tf.GradientTape() as tape:
             outputs = model(_sample(), training=True)
-            loss = ops.mean(ops.square(outputs["reconstruction"]))
+            loss = keras.ops.mean(keras.ops.square(outputs["reconstruction"]))
         by_path = {
             variable.path: gradient
             for variable, gradient in zip(
@@ -735,7 +734,7 @@ class TestGradients:
         ]
         assert u_encoder, "the u encoder carries no gradient path"
         for gradient in u_encoder:
-            assert np.any(ops.convert_to_numpy(gradient) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(gradient) != 0.0), (
                 "the u encoder got an all-zero gradient; the topographic bias "
                 "is inert"
             )
@@ -805,12 +804,12 @@ class TestTrainingPath:
         sample = _sample(batch=2)
         model.fit(sample, sample, epochs=1, batch_size=2, verbose=0)
         before = {
-            w.path: np.array(ops.convert_to_numpy(w)).copy()
+            w.path: np.array(keras.ops.convert_to_numpy(w)).copy()
             for w in model.weights if "window_stack" in w.path
         }
         model.fit(sample, sample, epochs=1, batch_size=2, verbose=0)
         after = {
-            w.path: np.array(ops.convert_to_numpy(w)).copy()
+            w.path: np.array(keras.ops.convert_to_numpy(w)).copy()
             for w in model.weights if "window_stack" in w.path
         }
         assert before, "no window stack to check"
@@ -857,7 +856,7 @@ class TestTrainingPath:
                 x=sample,
                 y=sample,
                 y_pred=model(sample, training=False),
-                sample_weight=ops.convert_to_tensor(
+                sample_weight=keras.ops.convert_to_tensor(
                     np.ones(2, "float32")
                 ),
             )
@@ -885,7 +884,7 @@ class TestTrainingPath:
         sample = _sample(batch=2)
         model.fit(sample, sample, epochs=1, batch_size=2, verbose=0)
         values = [
-            float(ops.convert_to_numpy(tracker.result()))
+            float(keras.ops.convert_to_numpy(tracker.result()))
             for tracker in model.metric_trackers
         ]
         for name, value in zip(("reconstruction", "z_kl", "u_kl"), values):
@@ -930,7 +929,7 @@ class TestLogLikelihood:
         sample = _sample()
         values = [
             float(
-                ops.convert_to_numpy(
+                keras.ops.convert_to_numpy(
                     model.log_likelihood(sample, num_samples=k, seed=3)
                 )[0]
             )
@@ -964,12 +963,12 @@ class TestLogLikelihood:
         original_decode = model.decode
 
         def _record(t, training=None):
-            captured.append(np.asarray(ops.convert_to_numpy(t)))
+            captured.append(np.asarray(keras.ops.convert_to_numpy(t)))
             return original_decode(t, training=training)
 
         with mock.patch.object(model, "decode", _record):
             reported = float(
-                ops.convert_to_numpy(
+                keras.ops.convert_to_numpy(
                     model.log_likelihood(sample, num_samples=1, seed=7)
                 )[0]
             )
@@ -977,15 +976,15 @@ class TestLogLikelihood:
         assert len(captured) == 1, captured
         z = captured[0] + float(model.prior_mean)
         encoded = model.encode(sample)
-        z_mean = np.asarray(ops.convert_to_numpy(encoded["z_mean"]))
-        z_log_var = np.asarray(ops.convert_to_numpy(encoded["z_log_var"]))
+        z_mean = np.asarray(keras.ops.convert_to_numpy(encoded["z_mean"]))
+        z_log_var = np.asarray(keras.ops.convert_to_numpy(encoded["z_log_var"]))
         assert np.abs(z - z_mean).max() > 1e-6, (
             "the captured t carries no sampling noise; the oracle would then be "
             "checking the posterior mean rather than a draw"
         )
 
         reconstruction = np.asarray(
-            ops.convert_to_numpy(original_decode(captured[0], training=False))
+            keras.ops.convert_to_numpy(original_decode(captured[0], training=False))
         )
         clipped = np.clip(reconstruction, 1e-7, 1.0 - 1e-7)
         log_likelihood = float(
@@ -1003,17 +1002,17 @@ class TestLogLikelihood:
     def test_the_shape_is_per_example(self):
         model = _build()
         values = model.log_likelihood(_sample(batch=3), num_samples=2, seed=0)
-        assert tuple(ops.shape(values)) == (3,)
+        assert tuple(keras.ops.shape(values)) == (3,)
 
     def test_a_seeded_estimate_is_reproducible(self):
         """The samplers are stochastic, so an unseeded estimate is not comparable
         across runs and neither is a metric computed from it."""
         model = _build()
         sample = _sample()
-        first = ops.convert_to_numpy(
+        first = keras.ops.convert_to_numpy(
             model.log_likelihood(sample, num_samples=3, seed=1)
         )
-        second = ops.convert_to_numpy(
+        second = keras.ops.convert_to_numpy(
             model.log_likelihood(sample, num_samples=3, seed=1)
         )
         np.testing.assert_array_equal(first, second)
@@ -1026,10 +1025,10 @@ class TestLogLikelihood:
         """
         model = _build()
         sample = _sample()
-        one = ops.convert_to_numpy(
+        one = keras.ops.convert_to_numpy(
             model.log_likelihood(sample, num_samples=1, seed=0)
         )
-        five = ops.convert_to_numpy(
+        five = keras.ops.convert_to_numpy(
             model.log_likelihood(sample, num_samples=5, seed=0)
         )
         assert not np.allclose(one, five)
@@ -1046,7 +1045,7 @@ class TestLogLikelihood:
         model = _build()
         # A model whose decoder output matches the data should score well.
         sample = _sample(batch=2)
-        value = ops.convert_to_numpy(
+        value = keras.ops.convert_to_numpy(
             model.log_likelihood(sample, num_samples=2, seed=0)
         )
         finite = np.isfinite(value)
@@ -1071,21 +1070,21 @@ class TestLogLikelihood:
         """
         model = _build()
         targets = _sample(batch=1)
-        reconstruction = ops.convert_to_tensor(
+        reconstruction = keras.ops.convert_to_tensor(
             np.clip(targets, 1e-3, 1.0 - 1e-3), "float32"
         )
         # Image axes only, then the sequence sum -- the per-example total that
         # `log_likelihood` accumulates, at a reconstruction the caller chose.
         image_axes = list(range(2, len(FRAME) + 2))
-        per_example = lambda t: ops.sum(
-            ops.sum(
+        per_example = lambda t: keras.ops.sum(
+            keras.ops.sum(
                 model._bernoulli_log_likelihood(t, reconstruction),
                 axis=image_axes,
             ),
             axis=-1,
         )
-        matched = float(ops.convert_to_numpy(per_example(targets))[0])
-        mismatched = float(ops.convert_to_numpy(per_example(1.0 - targets))[0])
+        matched = float(keras.ops.convert_to_numpy(per_example(targets))[0])
+        mismatched = float(keras.ops.convert_to_numpy(per_example(1.0 - targets))[0])
         assert matched > mismatched, (matched, mismatched)
         assert np.isfinite(matched) and np.isfinite(mismatched)
 
@@ -1108,7 +1107,7 @@ class TestLogLikelihood:
         sample = _sample(batch=2)
         model.fit(sample, sample, epochs=30, batch_size=2, verbose=0)
 
-        reconstruction = ops.convert_to_numpy(
+        reconstruction = keras.ops.convert_to_numpy(
             model(sample, training=False)["reconstruction"]
         )
         correlation = float(
@@ -1122,12 +1121,12 @@ class TestLogLikelihood:
         # Both estimates are seeded, so the only difference between them is the
         # data being scored.
         good = float(
-            ops.convert_to_numpy(
+            keras.ops.convert_to_numpy(
                 model.log_likelihood(sample, num_samples=1, seed=0)
             )[0]
         )
         bad = float(
-            ops.convert_to_numpy(
+            keras.ops.convert_to_numpy(
                 model.log_likelihood(1.0 - sample, num_samples=1, seed=0)
             )[0]
         )
@@ -1147,7 +1146,7 @@ class TestPriorSampling:
         draws = model.sample_prior(5, seed=0)
         assert tuple(draws["z"].shape) == (5, CAPSULES, CAPSULE_DIM)
         assert tuple(draws["t"].shape) == (5, CAPSULES, CAPSULE_DIM)
-        assert np.all(np.isfinite(ops.convert_to_numpy(draws["t"])))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(draws["t"])))
 
     def test_the_heavy_tailed_prior_actually_has_heavy_tails(self):
         """Section B.3 validates the prior by sampling it.
@@ -1158,7 +1157,7 @@ class TestPriorSampling:
         distribution than the paper's.
         """
         model = _build(neighborhood_size=1, degrees_of_freedom=1.0)
-        samples = ops.convert_to_numpy(
+        samples = keras.ops.convert_to_numpy(
             model.sample_prior(20000, seed=0)["t"]
         ).reshape(-1)
         centered = samples - samples.mean()
@@ -1171,8 +1170,8 @@ class TestPriorSampling:
 
     def test_it_is_seeded(self):
         model = _build()
-        first = ops.convert_to_numpy(model.sample_prior(3, seed=5)["t"])
-        second = ops.convert_to_numpy(model.sample_prior(3, seed=5)["t"])
+        first = keras.ops.convert_to_numpy(model.sample_prior(3, seed=5)["t"])
+        second = keras.ops.convert_to_numpy(model.sample_prior(3, seed=5)["t"])
         np.testing.assert_array_equal(first, second)
 
     def test_the_baseline_omits_the_u_draw(self):
@@ -1310,7 +1309,7 @@ class TestKnobSensitivity:
         for neighborhood_size, expected_block_sum in ((1, 1), (CAPSULE_DIM, 4)):
             model = _build(neighborhood_size=neighborhood_size)
             model(_sample())
-            stack = ops.convert_to_numpy(
+            stack = keras.ops.convert_to_numpy(
                 weights_in_scope(model, "window_stack")[0]
             )
             expected = build_window_stack(
@@ -1359,7 +1358,7 @@ class TestKnobSensitivity:
                 )
             )
             keras.utils.set_random_seed(13)
-            values[nu] = ops.convert_to_numpy(
+            values[nu] = keras.ops.convert_to_numpy(
                 builder()(sample, training=False)["t"]
             )
         ratio = np.abs(values[1.0]) / np.maximum(np.abs(values[4.0]), 1e-12)
@@ -1467,7 +1466,7 @@ class TestSerialization:
         sample = _sample(batch=4)
         model.fit(sample, sample, epochs=2, batch_size=2, verbose=0)
 
-        before = ops.convert_to_numpy(model.encode(sample)["z_mean"])
+        before = keras.ops.convert_to_numpy(model.encode(sample)["z_mean"])
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "tvae.keras")
             model.save(path)
@@ -1476,15 +1475,15 @@ class TestSerialization:
             # BEFORE the loaded model's first call: after one, a build()-only
             # load path has the same weight COUNT as a correct one, because the
             # gap has been filled with fresh random weights.
-            donor = [ops.convert_to_numpy(w).copy() for w in model.weights]
+            donor = [keras.ops.convert_to_numpy(w).copy() for w in model.weights]
             assert donor, "the donor has no weights to compare"
             for original, restored in zip(donor, loaded.weights):
                 # atol=0.0: restoration is a copy, not a computation.
                 np.testing.assert_allclose(
-                    original, ops.convert_to_numpy(restored), atol=0.0, rtol=0
+                    original, keras.ops.convert_to_numpy(restored), atol=0.0, rtol=0
                 )
 
-            after = ops.convert_to_numpy(loaded.encode(sample)["z_mean"])
+            after = keras.ops.convert_to_numpy(loaded.encode(sample)["z_mean"])
 
         np.testing.assert_allclose(before, after, atol=0.0, rtol=0)
 
@@ -1701,8 +1700,8 @@ class TestAnActivationCallableRoundTrips:
         rebuilt(sample)
         rebuilt.set_weights(model.get_weights())
         np.testing.assert_allclose(
-            ops.convert_to_numpy(rebuilt(sample, training=False)["z_mean"]),
-            ops.convert_to_numpy(model(sample, training=False)["z_mean"]),
+            keras.ops.convert_to_numpy(rebuilt(sample, training=False)["z_mean"]),
+            keras.ops.convert_to_numpy(model(sample, training=False)["z_mean"]),
             atol=0.0, rtol=0,
         )
         assert rebuilt.get_config()["activation"] == config["activation"]

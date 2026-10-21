@@ -37,7 +37,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 import keras
-from keras.datasets import cifar100 as cifar100_datasets
 
 from train.common import (
     setup_gpu,
@@ -426,7 +425,7 @@ def train_heads(
     y_train = np.asarray(y_train).reshape(-1)
     y_test = np.asarray(y_test).reshape(-1)
     # Coarse (superclass) labels ride alongside the shared fine loader.
-    (_, y_train_coarse), (_, y_test_coarse) = cifar100_datasets.load_data(
+    (_, y_train_coarse), (_, y_test_coarse) = keras.datasets.cifar100.load_data(
         label_mode="coarse"
     )
     y_train_coarse = np.asarray(y_train_coarse).reshape(-1)

@@ -46,7 +46,7 @@ def test_train_heads_compiles_with_loss_for_head(tmp_path, monkeypatch):
     monkeypatch.setattr(heads, "setup_gpu", lambda gpu_id=None: None)
     monkeypatch.setattr(heads, "load_dataset", lambda name: (
         (images, fine), (images, fine), None, None))
-    monkeypatch.setattr(heads.cifar100_datasets, "load_data", lambda label_mode: (
+    monkeypatch.setattr(keras.datasets.cifar100, "load_data", lambda label_mode: (
         (None, fine // 5), (None, fine // 5)))
     seen = []
 

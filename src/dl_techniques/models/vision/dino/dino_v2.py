@@ -65,7 +65,6 @@ References:
 import math
 import keras
 import numpy as np
-from keras import layers, initializers
 from typing import Optional, Union, Dict, Any, Tuple, Literal, List
 
 # ---------------------------------------------------------------------
@@ -270,7 +269,7 @@ class DINOv2PositionEmbedding(keras.layers.Layer):
         # A fresh instance per layer: a shared default instance is one RNG stream
         # for every table (tests/test_the_shared_initializer_population_cannot_grow.py).
         self.initializer = (
-            initializers.TruncatedNormal(stddev=0.02) if initializer is None
+            keras.initializers.TruncatedNormal(stddev=0.02) if initializer is None
             else keras.initializers.get(initializer))
         m = self.grid_size
         self.is_identity = output_grid == (m, m)
@@ -522,13 +521,13 @@ class DINOv2Block(keras.layers.Layer):
         if self.init_values is not None:
             self.ls1 = LayerScale(
                 multiplier_type='CHANNEL',
-                initializer=initializers.Constant(self.init_values),
+                initializer=keras.initializers.Constant(self.init_values),
                 constraint=None,
                 name="ls1"
             )
             self.ls2 = LayerScale(
                 multiplier_type='CHANNEL',
-                initializer=initializers.Constant(self.init_values),
+                initializer=keras.initializers.Constant(self.init_values),
                 constraint=None,
                 name="ls2"
             )
@@ -876,7 +875,7 @@ class DINOv2VisionTransformer(keras.Model):
             self.register_token_layer = RegisterTokens(
                 num_tokens=self.num_register_tokens,
                 embed_dim=self.embed_dim,
-                initializer=initializers.TruncatedNormal(stddev=1e-6),
+                initializer=keras.initializers.TruncatedNormal(stddev=1e-6),
                 name='register_tokens'
             )
 
@@ -1008,7 +1007,7 @@ class DINOv2VisionTransformer(keras.Model):
             reg_tokens = self.register_token_layer(x)
             cls = x[:, :1]
             rest = x[:, 1:]
-            x = layers.Concatenate(axis=1, name='add_register_tokens')([cls, reg_tokens, rest])
+            x = keras.layers.Concatenate(axis=1, name='add_register_tokens')([cls, reg_tokens, rest])
 
         return x
 
@@ -1063,28 +1062,28 @@ class DINOv2VisionTransformer(keras.Model):
         # A training-dependent output structure is rejected by ops.cond; each key is produced by its own shape-inferable Lambda instead of one dict-returning Lambda. See decisions.md.
         num_reg = self.num_register_tokens
 
-        cls_token = layers.Lambda(
+        cls_token = keras.layers.Lambda(
             lambda t: t[:, 0], name='slice_cls_token'
         )(x_norm)
 
         if num_reg > 0:
-            reg_tokens = layers.Lambda(
+            reg_tokens = keras.layers.Lambda(
                 lambda t: t[:, 1:1 + num_reg], name='slice_reg_tokens'
             )(x_norm)
-            patch_tokens = layers.Lambda(
+            patch_tokens = keras.layers.Lambda(
                 lambda t: t[:, 1 + num_reg:], name='slice_patch_tokens'
             )(x_norm)
         else:
-            reg_tokens = layers.Lambda(
+            reg_tokens = keras.layers.Lambda(
                 lambda t: t[:, 0:0], name='slice_reg_tokens'
             )(x_norm)
-            patch_tokens = layers.Lambda(
+            patch_tokens = keras.layers.Lambda(
                 lambda t: t[:, 1:], name='slice_patch_tokens'
             )(x_norm)
 
         # DECISION plan_2026-06-15_e2759fbc/D-008: route `masks` through an identity Lambda before echoing it as an output, never the bare input tensor.
         # A bare input-as-output makes it both an input and output of this Functional model, which raises a "part of a cycle" error once the wrapper nests it. See decisions.md.
-        masks_out = layers.Lambda(lambda t: t, name='masks_passthrough')(masks)
+        masks_out = keras.layers.Lambda(lambda t: t, name='masks_passthrough')(masks)
 
         outputs = {
             "x_norm_clstoken": cls_token,
@@ -1423,9 +1422,9 @@ class DINOv2(keras.Model):
 
         # Create classifier if needed
         if self.include_top and self.num_classes > 0:
-            self.classifier = layers.Dense(
+            self.classifier = keras.layers.Dense(
                 self.num_classes,
-                kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+                kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
                 name='classifier'
             )
             outputs = self.classifier(features)

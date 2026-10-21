@@ -19,7 +19,6 @@ from __future__ import annotations
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from .lazy_build_contract_oracle import (
     assert_lazy_build_costs_nothing,
@@ -80,7 +79,7 @@ class _InsensitiveModel(PublicAutoName, keras.Model):
 
     def call(self, inputs, training=None):
         _ = self.dense(inputs)
-        return ops.zeros((ops.shape(inputs)[0], self.units))
+        return keras.ops.zeros((keras.ops.shape(inputs)[0], self.units))
 
     def get_config(self):
         return {**super().get_config(), "units": self.units}
@@ -201,11 +200,11 @@ def test_perturbation_skips_batchnorm_moving_statistics():
     batch 8 before its round trip could run. They are excluded by name.
     """
     model = keras.Sequential([keras.layers.Input((6,)), keras.layers.BatchNormalization()])
-    before = {w.path: np.asarray(ops.convert_to_numpy(w)).copy() for w in model.weights}
+    before = {w.path: np.asarray(keras.ops.convert_to_numpy(w)).copy() for w in model.weights}
     touched = perturb_weights(model)
     assert touched == 2, "gamma and beta must be perturbed"
     for w in model.weights:
-        moved = not np.array_equal(np.asarray(ops.convert_to_numpy(w)), before[w.path])
+        moved = not np.array_equal(np.asarray(keras.ops.convert_to_numpy(w)), before[w.path])
         if "moving_" in w.path:
             assert not moved, f"{w.path} must not be perturbed"
         else:
@@ -222,4 +221,4 @@ def test_perturbation_is_relative_with_a_floor_and_handles_scalar_weights():
     layer = keras.layers.Dense(3, kernel_initializer="zeros", bias_initializer="zeros")
     layer.build((None, 4))
     assert perturb_weights(layer) == 2
-    assert float(np.abs(np.asarray(ops.convert_to_numpy(layer.bias))).max()) > 0.0
+    assert float(np.abs(np.asarray(keras.ops.convert_to_numpy(layer.bias))).max()) > 0.0

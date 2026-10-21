@@ -24,7 +24,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf  # noqa: F401  # GradientTape (HRM precedent)
 
 from dl_techniques.losses.hrm_loss import create_hrm_loss
@@ -246,7 +245,7 @@ class TRMTrainer:
             step_losses.append(float(step_loss))
             step_count += 1
 
-            if bool(ops.all(carry["halted"])):
+            if bool(keras.ops.all(carry["halted"])):
                 break
 
         current_lr = float(self.optimizer.learning_rate)
@@ -278,7 +277,7 @@ class TRMTrainer:
             self.metrics.update_state(step_targets, outputs)
             step_losses.append(float(step_loss))
             step_count += 1
-            if bool(ops.all(carry["halted"])):
+            if bool(keras.ops.all(carry["halted"])):
                 break
 
         eval_metrics = self.metrics.result()

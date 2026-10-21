@@ -1,7 +1,7 @@
 """Per-site guards for `tripse_attention.py`'s composite initializer fan-out.
 
 Every class in `tripse_attention.py` resolves ONE initializer instance in
-`__init__` (`self.kernel_initializer = initializers.get(kernel_initializer)`)
+`__init__` (`self.kernel_initializer = keras.initializers.get(kernel_initializer)`)
 and hands that same instance to every sub-layer it constructs. A seedless
 `Initializer` INSTANCE replays the same underlying sample at every later site,
 so those sub-layer kernels start life as the same random numbers -- a spatial

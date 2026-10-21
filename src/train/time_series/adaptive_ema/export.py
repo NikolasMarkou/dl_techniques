@@ -159,33 +159,32 @@ def _ema_unrolled_for_export(input_length: int):
     translate.
     """
     from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
-    from keras import ops as _ops
 
     original_call = ExponentialMovingAverage.call
 
     def unrolled_call(self, inputs):
         ndim = len(inputs.shape)
-        x = _ops.expand_dims(inputs, axis=-1) if ndim == 2 else inputs
+        x = keras.ops.expand_dims(inputs, axis=-1) if ndim == 2 else inputs
         T = x.shape[1] if x.shape[1] is not None else input_length
         if T == 1:
             return inputs
-        alpha = _ops.cast(self.alpha, dtype=x.dtype)
-        oma = _ops.cast(1.0 - self.alpha, dtype=x.dtype)
+        alpha = keras.ops.cast(self.alpha, dtype=x.dtype)
+        oma = keras.ops.cast(1.0 - self.alpha, dtype=x.dtype)
         ema_prev = x[:, 0, :]
         ema_values = [ema_prev]
         for t in range(1, T):
             cur = alpha * x[:, t, :] + oma * ema_prev
             if self.adjust:
-                w = _ops.cast(
-                    1.0 - _ops.power(oma, _ops.cast(t + 1, x.dtype)),
+                w = keras.ops.cast(
+                    1.0 - keras.ops.power(oma, keras.ops.cast(t + 1, x.dtype)),
                     dtype=x.dtype,
                 )
-                cur = cur / _ops.maximum(w, 1e-10)
+                cur = cur / keras.ops.maximum(w, 1e-10)
             ema_values.append(cur)
             ema_prev = cur
-        ema = _ops.stack(ema_values, axis=1)
+        ema = keras.ops.stack(ema_values, axis=1)
         if ndim == 2:
-            ema = _ops.squeeze(ema, axis=-1)
+            ema = keras.ops.squeeze(ema, axis=-1)
         return ema
 
     ExponentialMovingAverage.call = unrolled_call

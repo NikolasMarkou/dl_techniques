@@ -15,7 +15,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 
 # Import the layer being tested

@@ -32,7 +32,6 @@ References:
 """
 
 import keras
-from keras import layers, regularizers
 from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -153,7 +152,7 @@ class MobileNetV2(keras.Model):
         self.weight_decay = weight_decay
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
-        self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
         # Head configuration
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
@@ -163,17 +162,17 @@ class MobileNetV2(keras.Model):
     def _build_model_layers(self) -> None:
         """Create every sub-layer from the stored configuration."""
         first_channels = make_divisible(32 * self.width_multiplier)
-        self.initial_conv = layers.Conv2D(
+        self.initial_conv = keras.layers.Conv2D(
             first_channels, 3, strides=2, padding='same', use_bias=False,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer, name='conv1'
         )
-        self.initial_bn = layers.BatchNormalization(
+        self.initial_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name='conv1_bn',
         )
-        self.initial_relu = layers.ReLU(max_value=6, name='conv1_relu6')
+        self.initial_relu = keras.layers.ReLU(max_value=6, name='conv1_relu6')
 
         self.blocks = []
         block_id = 0
@@ -208,17 +207,17 @@ class MobileNetV2(keras.Model):
             last_channels = make_divisible(1280 * self.width_multiplier)
         else:
             last_channels = 1280
-        self.last_conv = layers.Conv2D(
+        self.last_conv = keras.layers.Conv2D(
             last_channels, 1, padding='same', use_bias=False,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer, name='conv_last'
         )
-        self.last_bn = layers.BatchNormalization(
+        self.last_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name='conv_last_bn',
         )
-        self.last_relu = layers.ReLU(max_value=6, name='conv_last_relu6')
+        self.last_relu = keras.layers.ReLU(max_value=6, name='conv_last_relu6')
 
         # Classification head using standardized factory
         if self.include_top:

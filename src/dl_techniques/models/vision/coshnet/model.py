@@ -63,7 +63,6 @@ References:
 """
 
 import keras
-from keras import layers, ops, initializers, regularizers
 from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
 # ---------------------------------------------------------------------
@@ -381,9 +380,9 @@ class CoShNet(keras.Model):
         conv_padding: str = "same",
         # Regularization and training
         dropout_rate: float = 0.1,
-        kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         # Initialization
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         # Advanced options
         include_top: bool = True,
         epsilon: float = 1e-7,
@@ -446,22 +445,22 @@ class CoShNet(keras.Model):
 
         # Handle regularizer serialization
         if isinstance(kernel_regularizer, str):
-            self.kernel_regularizer = regularizers.get(kernel_regularizer)
+            self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
             self._kernel_regularizer_config = kernel_regularizer
         elif kernel_regularizer is None:
             self.kernel_regularizer = None
             self._kernel_regularizer_config = None
         else:
             self.kernel_regularizer = kernel_regularizer
-            self._kernel_regularizer_config = regularizers.serialize(kernel_regularizer)
+            self._kernel_regularizer_config = keras.regularizers.serialize(kernel_regularizer)
 
         # Handle initializer serialization
         if isinstance(kernel_initializer, str):
-            self.kernel_initializer = initializers.get(kernel_initializer)
+            self.kernel_initializer = keras.initializers.get(kernel_initializer)
             self._kernel_initializer_config = kernel_initializer
         else:
             self.kernel_initializer = kernel_initializer
-            self._kernel_initializer_config = initializers.serialize(kernel_initializer)
+            self._kernel_initializer_config = keras.initializers.serialize(kernel_initializer)
 
         # Validate configuration
         self._validate_config()
@@ -609,7 +608,7 @@ class CoShNet(keras.Model):
         :rtype: keras.KerasTensor
         """
         # Convert real shearlet output to complex
-        x = ops.cast(x, 'complex64')
+        x = keras.ops.cast(x, 'complex64')
 
         # Complex ReLU activation (shared across layers)
         self.activation = ComplexReLU(name='complex_relu')
@@ -688,7 +687,7 @@ class CoShNet(keras.Model):
         # Final real-valued classification layer
         # DECISION plan-2026-10-14T062616-81938e81/D-142: linear, the model emits
         # logits (the GUIDE logits rule); never a softmax activation here.
-        self.classifier = layers.Dense(
+        self.classifier = keras.layers.Dense(
             units=self.num_classes,
             kernel_regularizer=self.kernel_regularizer,
             kernel_initializer=self.kernel_initializer,
@@ -696,7 +695,7 @@ class CoShNet(keras.Model):
         )
 
         # Convert complex to real by taking magnitude
-        x = ops.abs(x)
+        x = keras.ops.abs(x)
         x = self.classifier(x)
 
         return x
@@ -808,13 +807,13 @@ class CoShNet(keras.Model):
         """
         # Handle regularizer deserialization
         if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = regularizers.deserialize(
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
 
         # Handle initializer deserialization
         if config.get("kernel_initializer"):
-            config["kernel_initializer"] = initializers.deserialize(
+            config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
             )
 

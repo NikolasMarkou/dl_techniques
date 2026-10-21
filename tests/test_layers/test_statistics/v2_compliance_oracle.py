@@ -40,7 +40,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 # ---------------------------------------------------------------------
 # types
@@ -150,7 +149,7 @@ def _flatten_outputs(y: Any) -> List[np.ndarray]:
         for item in y:
             out.extend(_flatten_outputs(item))
         return out
-    return [np.asarray(ops.convert_to_numpy(y))]
+    return [np.asarray(keras.ops.convert_to_numpy(y))]
 
 
 def _symbolic_inputs(sample_input: ArrayLike) -> Tuple[Any, List[Any]]:
@@ -170,7 +169,7 @@ def _symbolic_inputs(sample_input: ArrayLike) -> Tuple[Any, List[Any]]:
 def _tensor_args(sample_input: ArrayLike) -> Any:
     """Convert ``sample_input`` to the argument shape a layer's ``call`` expects."""
     arrays = [
-        ops.convert_to_tensor(np.asarray(a, dtype=keras.backend.floatx()))
+        keras.ops.convert_to_tensor(np.asarray(a, dtype=keras.backend.floatx()))
         for a in _as_list(sample_input)
     ]
     if isinstance(sample_input, (list, tuple)):
@@ -358,7 +357,7 @@ def assert_weights_restored_before_first_call(
     model = model_factory()
     model(_tensor_args(sample_input), training=False)  # build the donor
 
-    saved = [np.array(ops.convert_to_numpy(w)) for w in model.weights]
+    saved = [np.array(keras.ops.convert_to_numpy(w)) for w in model.weights]
     assert saved, "the model has no weights to compare -- this check would be vacuous"
     saved_total = int(sum(int(np.prod(w.shape)) for w in model.weights))
 
@@ -381,7 +380,7 @@ def assert_weights_restored_before_first_call(
     for before, weight in zip(saved, loaded.weights):
         np.testing.assert_allclose(
             before,
-            np.array(ops.convert_to_numpy(weight)),
+            np.array(keras.ops.convert_to_numpy(weight)),
             atol=0.0,
             rtol=0,
             err_msg=f"weight {weight.path!r} was not restored",
@@ -464,8 +463,8 @@ def assert_gradients_reach_every_trainable_weight(
     with tf.GradientTape() as tape:
         outputs = apply(layer, args)
         flat = outputs if isinstance(outputs, (list, tuple)) else [outputs]
-        loss = ops.sum(
-            ops.stack([ops.mean(ops.square(ops.cast(o, "float32"))) for o in flat])
+        loss = keras.ops.sum(
+            keras.ops.stack([keras.ops.mean(keras.ops.square(keras.ops.cast(o, "float32"))) for o in flat])
         )
 
     variables = list(layer.trainable_variables)
@@ -477,7 +476,7 @@ def assert_gradients_reach_every_trainable_weight(
     grads = tape.gradient(loss, variables)
     for var, grad in zip(variables, grads):
         assert grad is not None, f"no gradient for {var.path}"
-        assert np.any(np.asarray(ops.convert_to_numpy(grad)) != 0.0), (
+        assert np.any(np.asarray(keras.ops.convert_to_numpy(grad)) != 0.0), (
             f"all-zero gradient for {var.path}"
         )
 
@@ -495,7 +494,7 @@ def assert_forward_is_finite(y: Any) -> None:
     shape assertion, which is what most forward tests actually assert.
     """
     for index, array in enumerate(_flatten_outputs(y)):
-        finite = bool(ops.convert_to_numpy(ops.all(ops.isfinite(array))))
+        finite = bool(keras.ops.convert_to_numpy(keras.ops.all(keras.ops.isfinite(array))))
         assert finite, (
             f"output {index} is not finite: "
             f"{int(np.sum(~np.isfinite(array)))} of {array.size} entries"

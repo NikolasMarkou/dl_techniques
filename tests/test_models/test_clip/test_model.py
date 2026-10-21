@@ -21,7 +21,6 @@ import pytest
 from dl_techniques.utils.masking import create_mask
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 import tempfile
 import os
@@ -209,7 +208,7 @@ class TestCLIPModelForwardPass:
         assert image_features.shape == (batch_size, built_model.embed_dim)
 
         # Features should be L2 normalized
-        norms = ops.norm(image_features, axis=-1)
+        norms = keras.ops.norm(image_features, axis=-1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(norms),
             1.0,
@@ -222,7 +221,7 @@ class TestCLIPModelForwardPass:
         batch_size = 4
         seq_length = 32
         # Use keras.random.uniform and cast to int32
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
@@ -236,7 +235,7 @@ class TestCLIPModelForwardPass:
         assert text_features.shape == (batch_size, built_model.embed_dim)
 
         # Features should be L2 normalized
-        norms = ops.norm(text_features, axis=-1)
+        norms = keras.ops.norm(text_features, axis=-1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(norms),
             1.0,
@@ -248,7 +247,7 @@ class TestCLIPModelForwardPass:
         """Test forward pass with dictionary input."""
         batch_size = 4
         test_images = keras.random.normal((batch_size, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, 32),
                 minval=1,
@@ -278,7 +277,7 @@ class TestCLIPModelForwardPass:
         """Test forward pass with tuple input."""
         batch_size = 4
         test_images = keras.random.normal((batch_size, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, 32),
                 minval=1,
@@ -309,7 +308,7 @@ class TestCLIPModelForwardPass:
     def test_forward_pass_text_only(self, built_model):
         """Test forward pass with only text."""
         batch_size = 4
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, 32),
                 minval=1,
@@ -329,7 +328,7 @@ class TestCLIPModelForwardPass:
         """Test properties of similarity matrices."""
         batch_size = 3
         test_images = keras.random.normal((batch_size, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, 32),
                 minval=1,
@@ -347,7 +346,7 @@ class TestCLIPModelForwardPass:
         # logits_per_text should be transpose of logits_per_image
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(logits_per_text),
-            keras.ops.convert_to_numpy(ops.transpose(logits_per_image)),
+            keras.ops.convert_to_numpy(keras.ops.transpose(logits_per_image)),
             rtol=1e-6, atol=1e-6,
             err_msg="logits_per_text should be transpose of logits_per_image"
         )
@@ -414,7 +413,7 @@ class TestCLIPModelSerialization:
 
         # Test forward pass before saving
         test_images = keras.random.normal((2, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((2, 32), minval=1, maxval=1000),
             dtype='int32'
         )
@@ -462,7 +461,7 @@ class TestCLIPEdgeCases:
         })
 
         test_images = keras.random.normal((2, 32, 32, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((2, 16), minval=1, maxval=1000),
             dtype='int32'
         )
@@ -480,7 +479,7 @@ class TestCLIPEdgeCases:
         })
 
         test_images = keras.random.normal((1, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((1, 32), minval=1, maxval=1000),
             dtype='int32'
         )
@@ -498,11 +497,11 @@ class TestCLIPEdgeCases:
         })
 
         # Create text with lots of padding (0s)
-        test_tokens = ops.ones((2, 32), dtype='int32')
+        test_tokens = keras.ops.ones((2, 32), dtype='int32')
         # Only first 5 tokens are non-zero, rest are padding
-        padded_tokens = ops.concatenate([
+        padded_tokens = keras.ops.concatenate([
             test_tokens[:, :5],
-            ops.zeros((2, 27), dtype='int32')
+            keras.ops.zeros((2, 27), dtype='int32')
         ], axis=1)
 
         test_images = keras.random.normal((2, 224, 224, 3))
@@ -510,7 +509,7 @@ class TestCLIPEdgeCases:
 
         assert outputs['text_features'].shape == (2, 128)
         # Features should still be normalized
-        norms = ops.norm(outputs['text_features'], axis=-1)
+        norms = keras.ops.norm(outputs['text_features'], axis=-1)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(norms),
             1.0,
@@ -593,7 +592,7 @@ class TestCreateCLIPFactory:
         })
 
         test_images = keras.random.normal((2, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((2, 77), minval=1, maxval=49408),
             dtype='int32'
         )
@@ -633,7 +632,7 @@ class TestCLIPIntegration:
         # Create test data
         batch_size = 4
         test_images = keras.random.normal((batch_size, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform(
                 (batch_size, 32), minval=1, maxval=1000
             ),
@@ -650,7 +649,7 @@ class TestCLIPIntegration:
         # Check symmetry
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(logits_per_text),
-            keras.ops.convert_to_numpy(ops.transpose(logits_per_image)),
+            keras.ops.convert_to_numpy(keras.ops.transpose(logits_per_image)),
             rtol=1e-5, atol=1e-6,
             err_msg="Similarity matrices should be transpose of each other"
         )
@@ -673,7 +672,7 @@ class TestCLIPIntegration:
         })
 
         test_images = keras.random.normal((3, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((3, 32), minval=1, maxval=1000),
             dtype='int32'
         )
@@ -713,7 +712,7 @@ class TestCLIPIntegration:
         })
 
         test_images = keras.random.normal((2, 224, 224, 3))
-        test_tokens = ops.cast(
+        test_tokens = keras.ops.cast(
             keras.random.uniform((2, 32), minval=1, maxval=1000),
             dtype='int32'
         )
@@ -724,7 +723,7 @@ class TestCLIPIntegration:
             # Create a simple contrastive-like loss
             logits_per_image = outputs['logits_per_image']
             # Simple loss: negative diagonal (matching pairs should have high similarity)
-            loss = -ops.mean(ops.diagonal(logits_per_image))
+            loss = -keras.ops.mean(keras.ops.diagonal(logits_per_image))
 
         gradients = tape.gradient(loss, model.trainable_weights)
 
@@ -734,7 +733,7 @@ class TestCLIPIntegration:
 
         # Check that gradients have reasonable magnitudes
         grad_norms = [
-            ops.sqrt(ops.sum(ops.square(g))) for g in non_none_grads
+            keras.ops.sqrt(keras.ops.sum(keras.ops.square(g))) for g in non_none_grads
         ]
         grad_norm_values = [keras.ops.convert_to_numpy(norm) for norm in grad_norms]
         assert all(norm > 1e-12 for norm in grad_norm_values)  # Not vanishingly small

@@ -29,7 +29,6 @@ References:
 """
 
 import keras
-from keras import layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
@@ -330,10 +329,10 @@ class SwinTransformer(keras.Model):
             drop_path_rate: float = 0.1,
             patch_size: int = 4,
             use_bias: bool = True,
-            kernel_initializer: Optional[Union[str, Dict[str, Any], initializers.Initializer]] = None,
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+            kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
             head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -414,10 +413,10 @@ class SwinTransformer(keras.Model):
         # so `initializers.get` produces a fresh instance per model.
         if kernel_initializer is None:
             kernel_initializer = REFERENCE_KERNEL_INITIALIZER
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self.stages = []
         self.patch_merge_layers = []
@@ -484,7 +483,7 @@ class SwinTransformer(keras.Model):
         x = self.patch_embed(x)
 
         if self.PATCH_EMBED_NORM:
-            self.patch_embed_norm = layers.LayerNormalization(
+            self.patch_embed_norm = keras.layers.LayerNormalization(
                 epsilon=self.LAYERNORM_EPSILON,
                 center=self.use_bias,
                 scale=True,
@@ -496,7 +495,7 @@ class SwinTransformer(keras.Model):
         # PatchEmbedding2D's 3D output or the block's 4D input. See decisions.md.
         grid_h = self._input_shape[0] // self.patch_size
         grid_w = self._input_shape[1] // self.patch_size
-        x = layers.Reshape(
+        x = keras.layers.Reshape(
             (grid_h, grid_w, self.embed_dim),
             name="patch_embed_grid_restore"
         )(x)
@@ -611,7 +610,7 @@ class SwinTransformer(keras.Model):
         # that normalizes the pooled vector, a different function from the
         # official norm-then-avgpool. Do NOT build it without include_top: the
         # headless features stay the raw stage-3 output. See decisions.md.
-        self.head_norm = layers.LayerNormalization(
+        self.head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
             scale=True,
@@ -707,10 +706,10 @@ class SwinTransformer(keras.Model):
             "drop_path_rate": self.drop_path_rate,
             "patch_size": self.patch_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "include_top": self.include_top,
             "input_shape": self._input_shape,
             "head_config_overrides": self._head_config_overrides,
@@ -727,19 +726,19 @@ class SwinTransformer(keras.Model):
         :rtype: SwinTransformer
         """
         if config.get("kernel_initializer"):
-            config["kernel_initializer"] = initializers.deserialize(
+            config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
             )
         if config.get("bias_initializer"):
-            config["bias_initializer"] = initializers.deserialize(
+            config["bias_initializer"] = keras.initializers.deserialize(
                 config["bias_initializer"]
             )
         if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = regularizers.deserialize(
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
         if config.get("bias_regularizer"):
-            config["bias_regularizer"] = regularizers.deserialize(
+            config["bias_regularizer"] = keras.regularizers.deserialize(
                 config["bias_regularizer"]
             )
         return cls(**config)

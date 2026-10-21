@@ -24,7 +24,6 @@ import numpy as np
 from typing import Dict, Any
 
 import keras
-from keras import ops
 import tensorflow as tf
 
 from tests.numerics import reassociation_atol
@@ -126,8 +125,8 @@ class TestMobileNetV1:
             loaded_pred = loaded_model(sample_inputs['cifar'])
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Standard model predictions differ after serialization"
             )
@@ -145,8 +144,8 @@ class TestMobileNetV1:
             loaded_pred = loaded_model(sample_inputs['custom'])
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Small variant model predictions differ after serialization"
             )
@@ -164,8 +163,8 @@ class TestMobileNetV1:
             loaded_features = loaded_model(sample_inputs['cifar'])
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_features),
-                ops.convert_to_numpy(loaded_features),
+                keras.ops.convert_to_numpy(original_features),
+                keras.ops.convert_to_numpy(loaded_features),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Feature extractor outputs differ after serialization"
             )
@@ -268,7 +267,7 @@ class TestMobileNetV1:
         model = MobileNetV1(**default_config)
         with tf.GradientTape() as tape:
             output = model(sample_inputs['cifar'], training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
         gradients = tape.gradient(loss, model.trainable_variables)
         assert len(gradients) > 0
         # The head builds only what its call() applies (plan-2026-10-14
@@ -276,7 +275,7 @@ class TestMobileNetV1:
         missing = [v.path for v, g in zip(model.trainable_variables, gradients)
                    if g is None]
         assert not missing, f"trainable weights with no gradient: {missing}"
-        non_zero_grads = [g for g in gradients if ops.max(ops.abs(g)) > 1e-8]
+        non_zero_grads = [g for g in gradients if keras.ops.max(keras.ops.abs(g)) > 1e-8]
         assert len(non_zero_grads) > 0, "All gradients are zero"
 
     @pytest.mark.parametrize("training", [True, False, None])

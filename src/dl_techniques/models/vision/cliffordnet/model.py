@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import os
 import keras
-from keras import initializers, regularizers
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -57,7 +56,7 @@ from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 
 # Matches the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
-_DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+_DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 
 # DECISION plan-2026-08-23T091307-9a110062/D-480: momentum stays 0.9; Keras and
 # torch define it oppositely, so the reference's 0.1 is this value. See
@@ -256,10 +255,10 @@ class CliffordNet(keras.Model):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
@@ -603,16 +602,16 @@ class CliffordNet(keras.Model):
                 "stochastic_depth_rate": self.stochastic_depth_rate,
                 "dropout_rate": self.dropout_rate,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(
+                "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),
-                "bias_initializer": initializers.serialize(
+                "bias_initializer": keras.initializers.serialize(
                     self.bias_initializer
                 ),
-                "kernel_regularizer": regularizers.serialize(
+                "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
-                "bias_regularizer": regularizers.serialize(
+                "bias_regularizer": keras.regularizers.serialize(
                     self.bias_regularizer
                 ),
                 "head_config_overrides": self._head_config_overrides,

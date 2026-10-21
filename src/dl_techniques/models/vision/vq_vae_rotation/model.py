@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import keras
 import numpy as np
 import tensorflow as tf
-from keras import initializers, ops
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.factory import (
@@ -224,7 +223,7 @@ class VQVAERotationTrick(keras.Model):
             diversity_coefficient: float = 0.0,
             orthogonal_reg_coefficient: float = 0.0,
             reconstruction_loss_weight: float = 1.0,
-            quantizer_initializer: Union[str, initializers.Initializer] = "uniform",
+            quantizer_initializer: Union[str, keras.initializers.Initializer] = "uniform",
             input_shape: Optional[Tuple[int, int, int]] = None,
             hidden_channels: int = 128,
             downsample_factor: int = 4,
@@ -319,7 +318,7 @@ class VQVAERotationTrick(keras.Model):
         self.norm_type = norm_type
 
         if isinstance(quantizer_initializer, str):
-            self.quantizer_initializer = initializers.get(quantizer_initializer)
+            self.quantizer_initializer = keras.initializers.get(quantizer_initializer)
         else:
             self.quantizer_initializer = quantizer_initializer
 
@@ -396,7 +395,7 @@ class VQVAERotationTrick(keras.Model):
         for batch in batches:
             x = batch[0] if isinstance(batch, (tuple, list)) else batch
             z_e = self.encoder(x, training=False)
-            z_e = ops.reshape(z_e, (-1, self.embedding_dim))
+            z_e = keras.ops.reshape(z_e, (-1, self.embedding_dim))
             collected.append(keras.ops.convert_to_numpy(z_e))
 
         if not collected:
@@ -433,8 +432,8 @@ class VQVAERotationTrick(keras.Model):
             x_recon = self(x, training=True)
             # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the prediction up to
             # float32, never the data down; see the sibling models/vision/vq_vae. See decisions.md.
-            x_recon = ops.cast(x_recon, "float32")
-            recon_loss = ops.mean(ops.square(x - x_recon))
+            x_recon = keras.ops.cast(x_recon, "float32")
+            recon_loss = keras.ops.mean(keras.ops.square(x - x_recon))
             recon_loss = self.reconstruction_loss_weight * recon_loss
             # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
             # self.quantizer.losses; the narrow form silently drops regularizers on a
@@ -443,7 +442,7 @@ class VQVAERotationTrick(keras.Model):
             # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the aux-loss sum up to
             # float32 too, since add_loss terms carry compute_dtype. See decisions.md.
             vq_loss = (
-                ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
+                keras.ops.cast(keras.ops.sum(keras.ops.stack(aux_losses)), "float32")
                 if aux_losses else 0.0
             )
             total = recon_loss + vq_loss
@@ -465,12 +464,12 @@ class VQVAERotationTrick(keras.Model):
     def test_step(self, data: Union[keras.KerasTensor, Tuple]) -> Dict[str, Any]:
         x = data[0] if isinstance(data, tuple) else data
         x_recon = self(x, training=False)
-        recon_loss = ops.mean(ops.square(x - x_recon))
+        recon_loss = keras.ops.mean(keras.ops.square(x - x_recon))
         recon_loss = self.reconstruction_loss_weight * recon_loss
         # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
         # self.quantizer.losses, so val_loss stays comparable to the training objective. See decisions.md.
         aux_losses = self.losses
-        vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
+        vq_loss = keras.ops.sum(keras.ops.stack(aux_losses)) if aux_losses else 0.0
         total = recon_loss + vq_loss
         self.total_loss_tracker.update_state(total)
         self.reconstruction_loss_tracker.update_state(recon_loss)
@@ -528,7 +527,7 @@ class VQVAERotationTrick(keras.Model):
                 "diversity_coefficient": self.diversity_coefficient,
                 "orthogonal_reg_coefficient": self.orthogonal_reg_coefficient,
                 "reconstruction_loss_weight": self.reconstruction_loss_weight,
-                "quantizer_initializer": initializers.serialize(
+                "quantizer_initializer": keras.initializers.serialize(
                     self.quantizer_initializer
                 ),
                 "input_shape_config": self._input_shape,

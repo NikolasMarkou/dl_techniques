@@ -21,7 +21,6 @@ operations in a U-Net structure for image restoration tasks.
 import pytest
 import numpy as np
 import keras
-from keras import ops
 import tempfile
 import os
 from typing import Tuple, List
@@ -525,8 +524,8 @@ class TestSCUNetSerialization:
 
             # Check that outputs are numerically identical
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Outputs should match after serialization"
             )
@@ -566,8 +565,8 @@ class TestSCUNetSerialization:
             # Check output shapes and numerical accuracy
             assert loaded_output.shape == original_output.shape
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Outputs should match after serialization"
             )
@@ -594,8 +593,8 @@ class TestSCUNetSerialization:
 
             # Verify outputs match in inference mode
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6
             )
 
@@ -628,8 +627,8 @@ class TestSCUNetSerialization:
 
             # Should still match original
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(final_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(final_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Multiple save/load cycles should preserve model"
             )
@@ -755,8 +754,8 @@ class TestSCUNetErrorHandling:
 
         # Outputs should be identical in inference mode
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1),
-            ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
             rtol=1e-6, atol=1e-6,
             err_msg="Inference outputs should be deterministic"
         )
@@ -823,7 +822,7 @@ class TestSCUNetTrainingBehavior:
         with tf.GradientTape() as tape:
             tape.watch(test_input)
             output = model(test_input, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         # Compute gradients
         gradients = tape.gradient(loss, model.trainable_variables)
@@ -850,7 +849,7 @@ class TestSCUNetOutputQuality:
         output = model(test_input, training=False)
 
         # Check for NaNs
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_output_has_no_infs(self) -> None:
         """Test that output contains no infinite values."""
@@ -860,7 +859,7 @@ class TestSCUNetOutputQuality:
         output = model(test_input, training=False)
 
         # Check for infs
-        assert not ops.any(ops.isinf(output))
+        assert not keras.ops.any(keras.ops.isinf(output))
 
 
 if __name__ == "__main__":

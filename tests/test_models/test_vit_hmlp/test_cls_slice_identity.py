@@ -22,7 +22,6 @@ RED, measured at ``38c7493c6`` (3 tests in this file):
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision.vit_hmlp.model import ViTHMLP
 
@@ -99,7 +98,7 @@ class TestViTHmlpClsSliceIdentity:
         model.include_top = True
 
         # Pass the full sequence to the head; it will extract the CLS token (position 0)
-        seq_tensor = ops.convert_to_tensor(sequence)
+        seq_tensor = keras.ops.convert_to_tensor(sequence)
         from_cls = _np(model.classification_head(seq_tensor)['logits'])
         np.testing.assert_allclose(
             logits, from_cls, rtol=0, atol=0,
@@ -108,7 +107,7 @@ class TestViTHmlpClsSliceIdentity:
         # Anti-vacuity: the rejected slice must give a different answer
         swapped_seq = sequence.copy()
         swapped_seq[:, [0, -1], :] = swapped_seq[:, [-1, 0], :]
-        from_swapped = _np(model.classification_head(ops.convert_to_tensor(swapped_seq))['logits'])
+        from_swapped = _np(model.classification_head(keras.ops.convert_to_tensor(swapped_seq))['logits'])
         assert not np.allclose(logits, from_swapped, atol=1e-6), (
             "vit_hmlp's head produces the same output for swapped CLS token; "
             "it is not pinned to position 0"

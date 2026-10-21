@@ -14,7 +14,6 @@ from the YOLOv12 backbone).
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 # ---------------------------------------------------------------------
@@ -314,19 +313,19 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             cls_pred = self.cls_branches[i](x, training=training)
 
             # Reshape predictions for concatenation
-            batch_size = ops.shape(x)[0]
-            h = ops.shape(x)[1]
-            w = ops.shape(x)[2]
+            batch_size = keras.ops.shape(x)[0]
+            h = keras.ops.shape(x)[1]
+            w = keras.ops.shape(x)[2]
 
-            bbox_pred = ops.reshape(bbox_pred, (batch_size, h * w, 4 * self.reg_max))
-            cls_pred = ops.reshape(cls_pred, (batch_size, h * w, self.num_classes))
+            bbox_pred = keras.ops.reshape(bbox_pred, (batch_size, h * w, 4 * self.reg_max))
+            cls_pred = keras.ops.reshape(cls_pred, (batch_size, h * w, self.num_classes))
 
             # Concatenate bbox and class predictions
-            output = ops.concatenate([bbox_pred, cls_pred], axis=-1)
+            output = keras.ops.concatenate([bbox_pred, cls_pred], axis=-1)
             outputs.append(output)
 
         # Concatenate all scales along anchor dimension
-        return ops.concatenate(outputs, axis=1)
+        return keras.ops.concatenate(outputs, axis=1)
 
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """Compute output shape of the layer.
@@ -713,7 +712,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         # Fuse with P4 features
         if len(self.skip_convs) > 0:
             p4_processed = self.skip_convs[0](p4, training=training)
-            x = ops.concatenate([x, p4_processed], axis=-1)
+            x = keras.ops.concatenate([x, p4_processed], axis=-1)
 
             # Apply attention if enabled
             if self.attention_blocks[0] is not None:
@@ -726,7 +725,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             # Fuse with P3 features
             if len(self.skip_convs) > 1:
                 p3_processed = self.skip_convs[1](p3, training=training)
-                x = ops.concatenate([x, p3_processed], axis=-1)
+                x = keras.ops.concatenate([x, p3_processed], axis=-1)
 
                 # Apply attention if enabled
                 if self.attention_blocks[1] is not None:
@@ -1054,7 +1053,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
                 pooled_features.append(pooled)
 
         # Concatenate all pooled features
-        x = ops.concatenate(pooled_features, axis=-1)
+        x = keras.ops.concatenate(pooled_features, axis=-1)
 
         # Apply attention pooling if enabled
         if self.attention_pooling is not None:

@@ -37,7 +37,6 @@ References:
 
 import keras
 import tensorflow as tf
-from keras import layers, ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -440,7 +439,7 @@ class VAE(keras.Model):
         x = inputs
 
         # Initial conv layer
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=self.filters[0],
             kernel_size=3,
             strides=1,
@@ -452,20 +451,20 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(
+            x = keras.layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(
                 x
             )
-        x = layers.Activation(self.activation, name="encoder_stem_activation")(x)
+        x = keras.layers.Activation(self.activation, name="encoder_stem_activation")(x)
 
         # Encoder blocks with downsampling
         for depth in range(self.depths):
             x = self._build_encoder_stage(x, depth)
 
         # Global pooling and latent projection
-        x = layers.GlobalAveragePooling2D(name="encoder_global_pool")(x)
+        x = keras.layers.GlobalAveragePooling2D(name="encoder_global_pool")(x)
 
         # Latent space projection
-        z_mean = layers.Dense(
+        z_mean = keras.layers.Dense(
             units=self.latent_dim,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
@@ -482,7 +481,7 @@ class VAE(keras.Model):
             # DECISION plan_2026-06-04_6196678d/D-007: bias=12.0 + zeros kernel so
             # kappa starts informative (~12), not at softplus(0)~=0.69 which drives
             # posterior collapse (decoder ignores z, kappa -> 0). See decisions.md.
-            kappa_raw = layers.Dense(
+            kappa_raw = keras.layers.Dense(
                 units=1,
                 use_bias=self.use_bias,
                 kernel_initializer="zeros",
@@ -491,7 +490,7 @@ class VAE(keras.Model):
                 name="encoder_kappa",
             )(x)
             # Softplus keeps kappa strictly positive; carried in the z_log_var slot.
-            z_log_var = layers.Activation(
+            z_log_var = keras.layers.Activation(
                 "softplus", name="encoder_kappa_softplus"
             )(kappa_raw)
             return z_mean, z_log_var
@@ -504,7 +503,7 @@ class VAE(keras.Model):
         )
 
         # Bias starts at -2.0 so the initial variance is small.
-        z_log_var = layers.Dense(
+        z_log_var = keras.layers.Dense(
             units=log_var_units,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
@@ -522,7 +521,7 @@ class VAE(keras.Model):
         num_filters = self.filters[stage_idx]
 
         # Downsampling layer
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=num_filters,
             kernel_size=2,
             strides=2,
@@ -534,10 +533,10 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(
+            x = keras.layers.BatchNormalization(
                 center=self.use_bias, name=f"encoder_downsample_bn_{stage_idx}"
             )(x)
-        x = layers.Activation(
+        x = keras.layers.Activation(
             self.activation, name=f"encoder_downsample_activation_{stage_idx}"
         )(x)
 
@@ -556,7 +555,7 @@ class VAE(keras.Model):
         residual = x
 
         # First convolution
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=filters,
             kernel_size=3,
             strides=1,
@@ -568,16 +567,16 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(
+            x = keras.layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(
                 x
             )
-        x = layers.Activation(self.activation, name=f"{prefix}_activation_1")(x)
+        x = keras.layers.Activation(self.activation, name=f"{prefix}_activation_1")(x)
 
         if self.dropout_rate > 0:
-            x = layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")(x)
+            x = keras.layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")(x)
 
         # Second convolution
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=filters,
             kernel_size=3,
             strides=1,
@@ -589,13 +588,13 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_2")(
+            x = keras.layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_2")(
                 x
             )
 
         # Residual connection
-        x = layers.Add(name=f"{prefix}_add")([x, residual])
-        x = layers.Activation(self.activation, name=f"{prefix}_activation_final")(x)
+        x = keras.layers.Add(name=f"{prefix}_add")([x, residual])
+        x = keras.layers.Activation(self.activation, name=f"{prefix}_activation_final")(x)
 
         return x
 
@@ -611,7 +610,7 @@ class VAE(keras.Model):
         feature_width = max(feature_width, 1)
 
         # Project latent to feature map
-        x = layers.Dense(
+        x = keras.layers.Dense(
             units=feature_height * feature_width * self.filters[-1],
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -619,7 +618,7 @@ class VAE(keras.Model):
             name="decoder_projection",
         )(z)
 
-        x = layers.Reshape(
+        x = keras.layers.Reshape(
             (feature_height, feature_width, self.filters[-1]), name="decoder_reshape"
         )(x)
 
@@ -628,7 +627,7 @@ class VAE(keras.Model):
             x = self._build_decoder_stage(x, depth)
 
         # Final output layer
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=channels,
             kernel_size=3,
             strides=1,
@@ -645,7 +644,7 @@ class VAE(keras.Model):
         if x.shape[1:] != self._input_shape:
             # Resize to exact input shape if needed
             target_height, target_width = self._input_shape[:2]
-            x = layers.Resizing(
+            x = keras.layers.Resizing(
                 height=target_height,
                 width=target_width,
                 interpolation="bilinear",
@@ -661,12 +660,12 @@ class VAE(keras.Model):
         num_filters = self.filters[stage_idx]
 
         # Upsampling layer
-        x = layers.UpSampling2D(
+        x = keras.layers.UpSampling2D(
             size=(2, 2), interpolation="nearest", name=f"decoder_upsample_{stage_idx}"
         )(x)
 
         # Convolution after upsampling
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             filters=num_filters,
             kernel_size=3,
             strides=1,
@@ -678,10 +677,10 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(
+            x = keras.layers.BatchNormalization(
                 center=self.use_bias, name=f"decoder_bn_{stage_idx}"
             )(x)
-        x = layers.Activation(self.activation, name=f"decoder_activation_{stage_idx}")(
+        x = keras.layers.Activation(self.activation, name=f"decoder_activation_{stage_idx}")(
             x
         )
 
@@ -900,7 +899,7 @@ class VAE(keras.Model):
             # compute_dtype (float16 under mixed_float16); cast the sum up before
             # adding to the float32 running total. See decisions.md.
             if self.losses:
-                total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
+                total_loss += keras.ops.cast(keras.ops.sum(self.losses), total_loss.dtype)
 
             # DECISION plan-2026-08-19T163559-499b6f0e/D-089: scale_loss must run
             # inside the tape and the scaled value is what tape.gradient differentiates
@@ -916,7 +915,7 @@ class VAE(keras.Model):
         # gradients are of the scaled loss and get unscaled afterwards. See decisions.md.
         clip_limit = self.optimizer.scale_loss(1.0)
         gradients = [
-            ops.clip(grad, -clip_limit, clip_limit) if grad is not None else None
+            keras.ops.clip(grad, -clip_limit, clip_limit) if grad is not None else None
             for grad in gradients
         ]
 
@@ -959,7 +958,7 @@ class VAE(keras.Model):
         # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast add_loss terms up
         # to float32 before summing. See `train_step` and decisions.md.
         if self.losses:
-            total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
+            total_loss += keras.ops.cast(keras.ops.sum(self.losses), total_loss.dtype)
 
         # Update metrics
         self.total_loss_tracker.update_state(total_loss)
@@ -993,20 +992,20 @@ class VAE(keras.Model):
         # DECISION plan-2026-08-19T163559-499b6f0e/D-011: float32 is required here,
         # not plumbing -- the 1e-7 clip below is a no-op in float16 (below its
         # smallest normal), so log(0) reaches -inf without this cast. See decisions.md.
-        y_true = ops.cast(y_true, "float32")
-        y_pred = ops.cast(y_pred, "float32")
+        y_true = keras.ops.cast(y_true, "float32")
+        y_pred = keras.ops.cast(y_pred, "float32")
 
         # Flatten for loss computation
-        y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
-        y_pred_flat = ops.reshape(y_pred, (ops.shape(y_pred)[0], -1))
+        y_true_flat = keras.ops.reshape(y_true, (keras.ops.shape(y_true)[0], -1))
+        y_pred_flat = keras.ops.reshape(y_pred, (keras.ops.shape(y_pred)[0], -1))
 
         # Clip predictions to avoid log(0)
-        y_pred_clipped = ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
+        y_pred_clipped = keras.ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
 
         # DECISION plan-2026-08-18T140459-7991552f/D-028: this mean-over-pixels
         # reduction stays as is even though it makes kl_loss_weight != beta (a
         # switch to sum would rescale every shipped variant's meaning; see effective_kl_beta). See decisions.md.
-        reconstruction_loss = ops.mean(
+        reconstruction_loss = keras.ops.mean(
             keras.losses.binary_crossentropy(y_true_flat, y_pred_clipped)
         )
 
@@ -1037,30 +1036,30 @@ class VAE(keras.Model):
         # DECISION plan-2026-08-19T163559-499b6f0e/D-011: the whole KL runs in float32
         # regardless of compute_dtype -- exp(20) is +inf in float16 (max 65504), so
         # without this cast the clip below's safety margin is a lie. See decisions.md.
-        z_mean = ops.cast(z_mean, "float32")
-        z_log_var = ops.cast(z_log_var, "float32")
+        z_mean = keras.ops.cast(z_mean, "float32")
+        z_log_var = keras.ops.cast(z_log_var, "float32")
 
         if self.sampling_type == "vmf":
-            kl_loss = ops.mean(vmf_kl_divergence(z_log_var, self.latent_dim))
+            kl_loss = keras.ops.mean(vmf_kl_divergence(z_log_var, self.latent_dim))
             return kl_loss
 
         if self.sampling_type == "hypersphere":
-            rlv_clip = ops.clip(z_log_var, -20.0, 20.0)
-            kl_loss = ops.mean(0.5 * (ops.exp(rlv_clip) - rlv_clip - 1.0))
+            rlv_clip = keras.ops.clip(z_log_var, -20.0, 20.0)
+            kl_loss = keras.ops.mean(0.5 * (keras.ops.exp(rlv_clip) - rlv_clip - 1.0))
             return kl_loss
 
         # gaussian: standard diagonal-Gaussian KL.
         # Clip log variance to prevent numerical issues
-        z_log_var_clipped = ops.clip(z_log_var, -20.0, 20.0)
+        z_log_var_clipped = keras.ops.clip(z_log_var, -20.0, 20.0)
 
         # Compute KL divergence: KL(q||p) = -0.5 * sum(1 + log_var - mean^2 - exp(log_var))
-        kl_loss = -0.5 * ops.sum(
-            1.0 + z_log_var_clipped - ops.square(z_mean) - ops.exp(z_log_var_clipped),
+        kl_loss = -0.5 * keras.ops.sum(
+            1.0 + z_log_var_clipped - keras.ops.square(z_mean) - keras.ops.exp(z_log_var_clipped),
             axis=1,
         )
 
         # Take mean across batch
-        kl_loss = ops.mean(kl_loss)
+        kl_loss = keras.ops.mean(kl_loss)
 
         return kl_loss
 

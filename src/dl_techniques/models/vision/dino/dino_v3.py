@@ -35,7 +35,6 @@ References:
 """
 
 import keras
-from keras import layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 # ---------------------------------------------------------------------
@@ -304,10 +303,10 @@ class DINOv3(keras.Model):
         activation: Union[str, Callable] = 'gelu',
         # DECISION plan-2026-08-23T091307-9a110062/D-504: default to DINO_KERNEL_INITIALIZER, never the bare
         # string, which is Keras' stddev=0.05 not DINO's 0.02. See decisions.md.
-        kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = DINO_KERNEL_INITIALIZER,
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = DINO_KERNEL_INITIALIZER,
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
@@ -356,10 +355,10 @@ class DINOv3(keras.Model):
         self.rope_theta = rope_theta
         self.rope_percentage = rope_percentage
         self.activation = deserialize_activation(activation)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.include_top = include_top
 
         self.num_patches = (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1])
@@ -419,7 +418,7 @@ class DINOv3(keras.Model):
             # The 'learned' path gets its dropout from PositionalEmbedding, so
             # this path supplies its own.
             if self.dropout_rate > 0.0:
-                self.embed_dropout = layers.Dropout(
+                self.embed_dropout = keras.layers.Dropout(
                     self.dropout_rate, name="embedding_dropout"
                 )
                 x = self.embed_dropout(x)
@@ -507,9 +506,9 @@ class DINOv3(keras.Model):
             if self.num_classes > 0:
                 # DECISION plan-2026-08-23T091307-9a110062/D-504: DINO_KERNEL_INITIALIZER here too, never the
                 # bare string, which is Keras' stddev=0.05. See decisions.md.
-                self.classifier = layers.Dense(
+                self.classifier = keras.layers.Dense(
                     units=self.num_classes,
-                    kernel_initializer=initializers.get(DINO_KERNEL_INITIALIZER),
+                    kernel_initializer=keras.initializers.get(DINO_KERNEL_INITIALIZER),
                     kernel_regularizer=self.kernel_regularizer,
                     bias_regularizer=self.bias_regularizer,
                     name='classifier'
@@ -621,10 +620,10 @@ class DINOv3(keras.Model):
             'rope_theta': self.rope_theta,
             'rope_percentage': self.rope_percentage,
             'activation': serialize_activation(self.activation),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'include_top': self.include_top,
         })
         return config

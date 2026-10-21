@@ -23,7 +23,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal
 
 # ---------------------------------------------------------------------
@@ -314,8 +313,8 @@ class HierarchicalMLPStem(keras.layers.Layer):
             if i < num_stages - 1:
                 x = self.activation_fn(x)
 
-        batch_size, height, width, channels = ops.shape(x)
-        x = ops.reshape(x, [batch_size, height * width, channels])
+        batch_size, height, width, channels = keras.ops.shape(x)
+        x = keras.ops.reshape(x, [batch_size, height * width, channels])
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

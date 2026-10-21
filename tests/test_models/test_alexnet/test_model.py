@@ -572,10 +572,9 @@ class TestTheGuardFailsWhenTheArchitectureIsBroken:
 
     def test_using_same_padding_instead_of_explicit_pads_would_be_caught(self):
         """The trap this package exists to avoid, checked numerically."""
-        from keras import layers as L
 
         x = keras.Input((227, 227, 3))
-        h = L.Conv2D(96, 11, strides=4, padding="same")(x)
+        h = keras.layers.Conv2D(96, 11, strides=4, padding="same")(x)
         assert tuple(h.shape)[1] == 57, (
             "Keras 'same' no longer gives 57 for conv1; the README's warning "
             "about it is stale and should be re-measured"

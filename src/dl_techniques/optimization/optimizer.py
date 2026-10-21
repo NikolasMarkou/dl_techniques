@@ -27,8 +27,6 @@ import keras
 from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Union
 
-from keras.api.optimizers import Optimizer
-from keras.api.optimizers.schedules import LearningRateSchedule
 
 # ---------------------------------------------------------------------
 # local imports
@@ -83,8 +81,8 @@ class OptimizerType(str, Enum):
 
 def optimizer_builder(
         config: Dict[str, Any],
-        lr_schedule: Union[float, LearningRateSchedule]
-) -> Optimizer:
+        lr_schedule: Union[float, keras.optimizers.schedules.LearningRateSchedule]
+) -> keras.optimizers.Optimizer:
     """Build and configure a Keras optimizer from configuration dictionary.
 
     Creates an optimizer instance based on the specified type and configuration,
@@ -194,7 +192,7 @@ def optimizer_builder(
 
 
 def _apply_weight_decay_exclusions(
-        optimizer: Optimizer,
+        optimizer: keras.optimizers.Optimizer,
         var_names: Optional[Sequence[str]]
 ) -> None:
     """Exclude variables whose names match ``var_names`` from weight decay.

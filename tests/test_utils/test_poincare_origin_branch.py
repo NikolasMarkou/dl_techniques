@@ -25,7 +25,6 @@ pins that, with a liveness arm showing the bare form really is NaN there.
 import numpy as np
 import keras
 import tensorflow as tf
-from keras import ops
 import pytest
 
 from dl_techniques.utils.geometry import poincare_math
@@ -68,8 +67,8 @@ class TestTheLimitingBranchActuallyFires:
     def test_exp_map_0_takes_the_limit_at_the_origin(
             self, math_util, monkeypatch):
         monkeypatch.setattr(
-            poincare_math.ops, "tanh",
-            lambda x: ops.multiply(ops.zeros_like(x), float("nan")))
+            keras.ops, "tanh",
+            lambda x: keras.ops.multiply(keras.ops.zeros_like(x), float("nan")))
 
         result = np.asarray(math_util.exp_map_0(
             np.zeros((3, 4), dtype="float32"), 1.0))
@@ -84,8 +83,8 @@ class TestTheLimitingBranchActuallyFires:
     def test_log_map_0_takes_the_limit_at_the_origin(
             self, math_util, monkeypatch):
         monkeypatch.setattr(
-            poincare_math.ops, "arctanh",
-            lambda x: ops.multiply(ops.zeros_like(x), float("nan")))
+            keras.ops, "arctanh",
+            lambda x: keras.ops.multiply(keras.ops.zeros_like(x), float("nan")))
 
         result = np.asarray(math_util.log_map_0(
             np.zeros((3, 4), dtype="float32"), 1.0))
@@ -98,8 +97,8 @@ class TestTheLimitingBranchActuallyFires:
     def test_the_poison_really_is_poison(self, math_util, monkeypatch):
         """Liveness arm: away from the origin the poisoned path must show."""
         monkeypatch.setattr(
-            poincare_math.ops, "tanh",
-            lambda x: ops.multiply(ops.zeros_like(x), float("nan")))
+            keras.ops, "tanh",
+            lambda x: keras.ops.multiply(keras.ops.zeros_like(x), float("nan")))
 
         away = np.full((3, 4), 0.5, dtype="float32")
         result = np.asarray(math_util.exp_map_0(away, 1.0))
@@ -165,6 +164,6 @@ class TestTheOriginGradientIsFiniteUnderXla:
 
     def test_the_bare_norm_really_is_nan_under_xla(self):
         """Liveness: the instrument sees the defect the fix removes."""
-        bare = lambda x: ops.maximum(ops.norm(x, axis=-1), 1e-5)  # noqa: E731
+        bare = lambda x: keras.ops.maximum(keras.ops.norm(x, axis=-1), 1e-5)  # noqa: E731
         assert np.all(self._gradient(bare, False) == 0.0)
         assert np.all(np.isnan(self._gradient(bare, True)))

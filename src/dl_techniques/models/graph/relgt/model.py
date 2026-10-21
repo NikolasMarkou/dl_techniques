@@ -32,7 +32,6 @@ References:
 """
 
 import keras
-from keras import ops, layers
 from typing import Optional, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -251,7 +250,7 @@ class RELGT(keras.Model):
             )
             self.transformer_blocks.append(block)
 
-        self.seed_encoder = layers.Dense(
+        self.seed_encoder = keras.layers.Dense(
             embedding_dim,
             name="SeedEncoder"
         )
@@ -267,7 +266,7 @@ class RELGT(keras.Model):
                 dropout_rate=dropout_rate,
                 name="PredictionFFN"
             ),
-            layers.Dense(output_dim, name="FinalOutput")
+            keras.layers.Dense(output_dim, name="FinalOutput")
         ], name="PredictionHead")
 
     def build(self, input_shape: Any) -> None:
@@ -321,7 +320,7 @@ class RELGT(keras.Model):
 
         if current_representation is None:
             # No transformer blocks: fall back to mean-pooling the local tokens.
-            current_representation = ops.mean(local_tokens, axis=1)
+            current_representation = keras.ops.mean(local_tokens, axis=1)
 
         predictions = self.prediction_head(current_representation, training=training)
 

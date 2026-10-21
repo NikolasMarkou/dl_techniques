@@ -24,7 +24,6 @@ from __future__ import annotations
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from .precision_arm_oracle import (
     assert_precision_arm,
@@ -58,8 +57,8 @@ class _RaisingFFTModel(PublicAutoName, keras.Model):
 
     def call(self, inputs, training=None):
         x = self.dense(inputs)
-        real, _ = ops.fft2((ops.expand_dims(x, 1), ops.zeros_like(ops.expand_dims(x, 1))))
-        return ops.squeeze(real, 1)
+        real, _ = keras.ops.fft2((keras.ops.expand_dims(x, 1), keras.ops.zeros_like(keras.ops.expand_dims(x, 1))))
+        return keras.ops.squeeze(real, 1)
 
 
 class _Float32LeakModel(PublicAutoName, keras.Model):
@@ -70,7 +69,7 @@ class _Float32LeakModel(PublicAutoName, keras.Model):
         self.dense = keras.layers.Dense(4)
 
     def call(self, inputs, training=None):
-        return ops.cast(self.dense(inputs), "float32")
+        return keras.ops.cast(self.dense(inputs), "float32")
 
 
 class _VoidGuardModel(PublicAutoName, keras.Model):
@@ -85,7 +84,7 @@ class _VoidGuardModel(PublicAutoName, keras.Model):
 
     def call(self, inputs, training=None):
         x = self.dense(inputs)
-        return x / (ops.sum(ops.abs(x), axis=-1, keepdims=True) + 1e-9)
+        return x / (keras.ops.sum(keras.ops.abs(x), axis=-1, keepdims=True) + 1e-9)
 
 
 class _DeadBackwardModel(PublicAutoName, keras.Model):
@@ -97,7 +96,7 @@ class _DeadBackwardModel(PublicAutoName, keras.Model):
 
     def call(self, inputs, training=None):
         y = self.dense(inputs)
-        return ops.stop_gradient(y)
+        return keras.ops.stop_gradient(y)
 
 
 def _inputs():
@@ -264,7 +263,7 @@ def test_the_policy_context_restores_even_when_the_body_raises():
 
 
 def test_flatten_tensors_handles_dicts_lists_and_none_values():
-    x = ops.zeros((1, 2))
+    x = keras.ops.zeros((1, 2))
     assert len(flatten_tensors(x)) == 1
     assert len(flatten_tensors([x, x])) == 2
     assert len(flatten_tensors({"a": x, "b": None, "c": x})) == 2
@@ -285,7 +284,7 @@ class _IntAndFloatModel(PublicAutoName, keras.Model):
         self.dense = keras.layers.Dense(3)
 
     def call(self, x, training=None):
-        return {"logits": self.dense(x), "mask": ops.cast(x[:, :1] > 0, "int32")}
+        return {"logits": self.dense(x), "mask": keras.ops.cast(x[:, :1] > 0, "int32")}
 
 
 class _IntOnlyModel(PublicAutoName, keras.Model):
@@ -296,7 +295,7 @@ class _IntOnlyModel(PublicAutoName, keras.Model):
         self.dense = keras.layers.Dense(3)
 
     def call(self, x, training=None):
-        return ops.cast(self.dense(x) > 0, "int32")
+        return keras.ops.cast(self.dense(x) > 0, "int32")
 
 
 class _IntAndLeakingFloatModel(PublicAutoName, keras.Model):
@@ -308,8 +307,8 @@ class _IntAndLeakingFloatModel(PublicAutoName, keras.Model):
 
     def call(self, x, training=None):
         return {
-            "leak": ops.cast(self.dense(x), "float32"),
-            "mask": ops.cast(x[:, :1] > 0, "int32"),
+            "leak": keras.ops.cast(self.dense(x), "float32"),
+            "mask": keras.ops.cast(x[:, :1] > 0, "int32"),
         }
 
 
@@ -408,7 +407,7 @@ def test_the_ramp_loss_is_what_makes_the_uniform_softmax_arm_non_vacuous():
         x = _inputs()
         norms = {}
         for label, lossfn in (
-            ("symmetric", lambda t: ops.mean(ops.square(ops.cast(t, "float32")))),
+            ("symmetric", lambda t: keras.ops.mean(keras.ops.square(keras.ops.cast(t, "float32")))),
             ("ramp", _asymmetric_loss),
         ):
             with tf.GradientTape() as tape:
@@ -416,8 +415,8 @@ def test_the_ramp_loss_is_what_makes_the_uniform_softmax_arm_non_vacuous():
                 loss = lossfn(out)
             grads = tape.gradient(loss, model.trainable_variables)
             norms[label] = sum(
-                float(ops.convert_to_numpy(
-                    ops.sqrt(ops.sum(ops.square(ops.cast(g, "float32"))))))
+                float(keras.ops.convert_to_numpy(
+                    keras.ops.sqrt(keras.ops.sum(keras.ops.square(keras.ops.cast(g, "float32"))))))
                 for g in grads if g is not None
             )
     assert norms["symmetric"] == 0.0, (
@@ -502,8 +501,8 @@ class _EagerBranchModel(keras.Model):
     def call(self, inputs, training=False):
         import tensorflow as tf
         y = self.d(inputs)
-        return ops.where(
-            ops.convert_to_tensor(tf.executing_eagerly()), y, y * 2.0)
+        return keras.ops.where(
+            keras.ops.convert_to_tensor(tf.executing_eagerly()), y, y * 2.0)
 
 
 class _DriftingIntModel(keras.Model):
@@ -520,9 +519,9 @@ class _DriftingIntModel(keras.Model):
     def call(self, inputs, training=False):
         import tensorflow as tf
         y = self.d(inputs)
-        bump = ops.cast(ops.logical_not(
-            ops.convert_to_tensor(tf.executing_eagerly())), "int32")
-        return [y, ops.zeros((1, 3), "int32") + bump]
+        bump = keras.ops.cast(keras.ops.logical_not(
+            keras.ops.convert_to_tensor(tf.executing_eagerly())), "int32")
+        return [y, keras.ops.zeros((1, 3), "int32") + bump]
 
 
 class _NonDeterministic(keras.Model):
@@ -537,7 +536,7 @@ class _NonDeterministic(keras.Model):
         self.d = keras.layers.Dense(3)
 
     def call(self, inputs, training=False):
-        return self.d(inputs) + keras.random.normal(ops.shape(inputs)[:1] + (3,))
+        return self.d(inputs) + keras.random.normal(keras.ops.shape(inputs)[:1] + (3,))
 
 
 def _x4():
@@ -640,7 +639,7 @@ class _PinnedFloat32(PublicAutoName, keras.Model):
         self.d = keras.layers.Dense(3)
 
     def call(self, inputs, training=False):
-        return ops.cast(self.d(inputs), "float32")
+        return keras.ops.cast(self.d(inputs), "float32")
 
 
 def test_the_float64_arm_rejects_a_pinned_float32_output():

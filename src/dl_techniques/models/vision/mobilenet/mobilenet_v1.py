@@ -27,7 +27,6 @@ References:
 """
 
 import keras
-from keras import layers, regularizers
 from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -164,7 +163,7 @@ class MobileNetV1(keras.Model):
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         # Create regularizer
-        self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
         # Build the model layers
         self._build_layers()
@@ -172,7 +171,7 @@ class MobileNetV1(keras.Model):
     def _build_layers(self) -> None:
         """Build all layers of the model."""
         # Initial standard convolution (not depthwise separable)
-        self.initial_conv = layers.Conv2D(
+        self.initial_conv = keras.layers.Conv2D(
             filters=int(32 * self.width_multiplier),
             kernel_size=3,
             strides=2,
@@ -182,12 +181,12 @@ class MobileNetV1(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name='conv1'
         )
-        self.initial_bn = layers.BatchNormalization(
+        self.initial_bn = keras.layers.BatchNormalization(
             momentum=REFERENCE_BN_MOMENTUM,
             epsilon=REFERENCE_BN_EPSILON,
             name='conv1_bn',
         )
-        self.initial_relu = layers.ReLU(name='conv1_relu')
+        self.initial_relu = keras.layers.ReLU(name='conv1_relu')
 
         # Build depthwise separable blocks
         self.depthwise_blocks = []

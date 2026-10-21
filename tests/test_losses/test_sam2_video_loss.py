@@ -27,7 +27,6 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
 from dl_techniques.losses.sam2_video_loss import (
     ABSENT_ROW_FOCAL_RESIDUAL,
@@ -360,7 +359,7 @@ def logit_gradient(loss: keras.losses.Loss, truth: np.ndarray,
     """``d loss / d logits`` as a numpy array."""
     variable = tf.Variable(logits)
     with tf.GradientTape() as tape:
-        value = loss(ops.convert_to_tensor(truth), variable)
+        value = loss(keras.ops.convert_to_tensor(truth), variable)
     return np.asarray(tape.gradient(value, variable))
 
 
@@ -417,8 +416,8 @@ class TestGradientOnAbsentRows:
         class MultiplyGated(SAMMaskLoss):
             def call(self, y_true: Any, y_pred: Any) -> Any:
                 return super().call(
-                    y_true, y_pred * ops.reshape(
-                        ops.convert_to_tensor(gate), (2, 4, 1, 1)))
+                    y_true, y_pred * keras.ops.reshape(
+                        keras.ops.convert_to_tensor(gate), (2, 4, 1, 1)))
 
         gradient = logit_gradient(MultiplyGated(), truth, logits)
         assert np.count_nonzero(gradient[ground_truth_gate(truth) == 0]) == 0
@@ -636,7 +635,7 @@ class TestPresenceGate:
 
     def test_it_returns_a_broadcastable_boolean_row_flag(self) -> None:
         truth, _ = discriminating_fixture()
-        gate = np.asarray(mask_presence_gate(ops.convert_to_tensor(truth)))
+        gate = np.asarray(mask_presence_gate(keras.ops.convert_to_tensor(truth)))
         assert gate.shape == (2, 4, 1, 1)
         assert gate.dtype == bool
         np.testing.assert_array_equal(
@@ -651,7 +650,7 @@ class TestPresenceGate:
         """
         masks = np.zeros((1, 2, 8, 8), dtype="float32")
         masks[0, 1, 3, 4] = 1.0
-        gate = np.asarray(mask_presence_gate(ops.convert_to_tensor(masks)))
+        gate = np.asarray(mask_presence_gate(keras.ops.convert_to_tensor(masks)))
         assert gate[0, 0, 0, 0] == np.False_
         assert gate[0, 1, 0, 0] == np.True_
 
@@ -700,7 +699,7 @@ class TestDeadComponentPartition:
         """So the gradient guard is NOT evidence that dice is alive."""
         truth, logits = discriminating_fixture()
         loss = SAM2GatedMaskLoss()
-        loss._dice_rows = lambda truth, pred: ops.full((ops.shape(pred)[0],), 0.5)
+        loss._dice_rows = lambda truth, pred: keras.ops.full((keras.ops.shape(pred)[0],), 0.5)
         gradient = logit_gradient(loss, truth, logits)
         gate = ground_truth_gate(truth)
         assert np.count_nonzero(gradient[~gate]) == 0
@@ -710,6 +709,6 @@ class TestDeadComponentPartition:
         """And the value guard is what catches it."""
         truth, logits = discriminating_fixture()
         loss = SAM2GatedMaskLoss()
-        loss._dice_rows = lambda truth, pred: ops.full((ops.shape(pred)[0],), 0.5)
+        loss._dice_rows = lambda truth, pred: keras.ops.full((keras.ops.shape(pred)[0],), 0.5)
         expected = candidate_values(truth, logits)["gt_gated"]
         assert abs(float(loss(truth, logits)) - expected) > VALUE_TOLERANCE

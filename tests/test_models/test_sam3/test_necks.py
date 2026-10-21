@@ -22,7 +22,6 @@ import math
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.models.vision_language.sam.sam3.necks import (
     SUPPORTED_SCALES,
@@ -326,10 +325,10 @@ class TestBranchComposition:
         branch = _build_scale_stack(TINY_DIM, TINY_D_MODEL, 4.0, "p")
         probe = np.linspace(-5.0, 5.0, 201, dtype="float64")[None, :]
         exact = np.asarray(
-            keras.activations.gelu(ops.convert_to_tensor(probe), approximate=False)
+            keras.activations.gelu(keras.ops.convert_to_tensor(probe), approximate=False)
         )
         approx = np.asarray(
-            keras.activations.gelu(ops.convert_to_tensor(probe), approximate=True)
+            keras.activations.gelu(keras.ops.convert_to_tensor(probe), approximate=True)
         )
         # The probe SEPARATES the two candidates before it is used as an oracle.
         # The erf/tanh gap peaks near |x| ~ 2, so a probe confined to small |x|
@@ -337,7 +336,7 @@ class TestBranchComposition:
         # float32 noise -- that is a coincidence point, not a pass.
         assert np.abs(exact - approx).max() > 2e-4
         np.testing.assert_allclose(
-            np.asarray(branch[1](ops.convert_to_tensor(probe))), exact, atol=2e-6
+            np.asarray(branch[1](keras.ops.convert_to_tensor(probe))), exact, atol=2e-6
         )
         # The tolerance must stay far below the separation, or the oracle is
         # blind to the tanh candidate: 2e-6 vs a 2e-4 floor is a 100x margin.
@@ -574,9 +573,9 @@ class TestPositionalEncoding:
         """
         class _AlreadyChannelsLast(PublicAutoName, keras.layers.Layer):
             def call(self, inputs):
-                return ops.zeros_like(inputs)
+                return keras.ops.zeros_like(inputs)
 
-        feat = ops.zeros((1, 4, 6, TINY_D_MODEL))
+        feat = keras.ops.zeros((1, 4, 6, TINY_D_MODEL))
         with pytest.raises(ValueError, match="not transposed"):
             _encode_position(_AlreadyChannelsLast(), feat, TINY_D_MODEL)
 
@@ -586,7 +585,7 @@ class TestPositionalEncoding:
             PositionEmbeddingSine2D,
         )
         wide = PositionEmbeddingSine2D(num_pos_feats=TINY_D_MODEL)
-        feat = ops.zeros((1, 4, 6, TINY_D_MODEL))
+        feat = keras.ops.zeros((1, 4, 6, TINY_D_MODEL))
         with pytest.raises(ValueError, match="must match the feature"):
             _encode_position(wide, feat, TINY_D_MODEL)
 
@@ -926,7 +925,7 @@ class TestTrainingBehaviour:
         with tf.GradientTape() as tape:
             out = tiny_neck(tf.convert_to_tensor(tiny_trunk_map))
             loss = sum(
-                ops.sum(ops.square(t))
+                keras.ops.sum(keras.ops.square(t))
                 for t in out["sam3_features"] + out["sam2_features"]
             )
         grads = tape.gradient(loss, tiny_neck.trainable_weights)

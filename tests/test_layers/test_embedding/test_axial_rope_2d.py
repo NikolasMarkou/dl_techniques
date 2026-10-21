@@ -23,7 +23,6 @@ dead component rather than assuming they all die.
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.layers.embedding import AxialRoPE2D
 from tests.layer_naming import PublicAutoName
@@ -79,7 +78,7 @@ def _guard_oracle(cls) -> None:
     q = rng.standard_normal((2, 3, height * width, head_dim)).astype(np.float64)
 
     rope = cls(head_dim=head_dim, feat_shape=(height, width), theta=THETA, dtype="float64")
-    got = ops.convert_to_numpy(rope(q))
+    got = keras.ops.convert_to_numpy(rope(q))
     expected = _oracle_rotate(q, height, width)
 
     np.testing.assert_allclose(
@@ -110,8 +109,8 @@ def _guard_relative_position(cls) -> None:
 
     rope = cls(head_dim=head_dim, feat_shape=(height, width), theta=THETA, dtype="float64")
     q_rot, k_rot = rope(q, k)
-    q_rot = ops.convert_to_numpy(q_rot)[0, 0]
-    k_rot = ops.convert_to_numpy(k_rot)[0, 0]
+    q_rot = keras.ops.convert_to_numpy(q_rot)[0, 0]
+    k_rot = keras.ops.convert_to_numpy(k_rot)[0, 0]
     gram = q_rot @ k_rot.T                        # (N, N)
 
     flat = np.arange(num_tokens)
@@ -174,7 +173,7 @@ def _guard_repeat_k(cls) -> None:
         repeat_k=True, dtype="float64",
     )
     _, k_rot = rope(q, k)
-    k_rot = ops.convert_to_numpy(k_rot)
+    k_rot = keras.ops.convert_to_numpy(k_rot)
 
     first = k_rot[:, :, :num_tokens, :]
     for r in range(1, repeats):
@@ -211,7 +210,7 @@ def _guard_num_k_exclude(cls) -> None:
 
     rope = cls(head_dim=head_dim, feat_shape=(height, width), theta=THETA, dtype="float64")
     _, k_rot = rope(q, k, num_k_exclude=n_exclude)
-    k_rot = ops.convert_to_numpy(k_rot)
+    k_rot = keras.ops.convert_to_numpy(k_rot)
 
     assert k_rot.shape == k.shape
 
@@ -287,7 +286,7 @@ class TestComplexOracle:
         x[0, 0, :, 0] = 1.0  # real part of the x-axis pair only
 
         rope = AxialRoPE2D(head_dim=head_dim, feat_shape=(height, width), dtype="float64")
-        got = ops.convert_to_numpy(rope(x))[0, 0]
+        got = keras.ops.convert_to_numpy(rope(x))[0, 0]
 
         # token t: t_x = t % 2, t_y = t // 2. Pair 0 carries angle t_x, pair 1 angle t_y.
         for t in range(4):
@@ -360,7 +359,7 @@ class TestNumKExclude:
         q = rng.standard_normal((1, 1, 6, 8)).astype("float32")
         k = rng.standard_normal((1, 1, 5, 8)).astype("float32")
         _, k_rot = rope(q, k, num_k_exclude=5)
-        k_rot = ops.convert_to_numpy(k_rot)
+        k_rot = keras.ops.convert_to_numpy(k_rot)
         assert np.max(np.abs(k_rot - k)) == 0.0
         assert np.all(np.isfinite(k_rot))
 
@@ -383,7 +382,7 @@ class TestNumKExclude:
             head_dim=head_dim, feat_shape=(2, 3), repeat_k=True, dtype="float64"
         )
         _, k_rot = rope(q, k, num_k_exclude=n_exclude)
-        k_rot = ops.convert_to_numpy(k_rot)
+        k_rot = keras.ops.convert_to_numpy(k_rot)
         assert k_rot.shape == k.shape
         tail = float(np.max(np.abs(k_rot[:, :, -n_exclude:, :] - k[:, :, -n_exclude:, :])))
         assert tail == 0.0
@@ -561,8 +560,8 @@ class TestShapeAndConfig:
         clone = AxialRoPE2D.from_config(original.get_config())
         q1, k1 = clone(q, k, num_k_exclude=3)
 
-        assert np.max(np.abs(ops.convert_to_numpy(q0) - ops.convert_to_numpy(q1))) == 0.0
-        assert np.max(np.abs(ops.convert_to_numpy(k0) - ops.convert_to_numpy(k1))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(q0) - keras.ops.convert_to_numpy(q1))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(k0) - keras.ops.convert_to_numpy(k1))) == 0.0
 
     def test_keras_model_save_load_by_value(self, tmp_path) -> None:
         """A `.keras` round-trip reproduces outputs with max-abs-diff exactly 0.0."""
@@ -577,12 +576,12 @@ class TestShapeAndConfig:
         rng = np.random.default_rng(2026)
         q = rng.standard_normal((4, 2, num_tokens, head_dim)).astype("float32")
         k = rng.standard_normal((4, 2, 3 * num_tokens, head_dim)).astype("float32")
-        before = [ops.convert_to_numpy(t) for t in model([q, k])]
+        before = [keras.ops.convert_to_numpy(t) for t in model([q, k])]
 
         path = tmp_path / "axial_rope_2d.keras"
         model.save(path)
         restored = keras.models.load_model(path)
-        after = [ops.convert_to_numpy(t) for t in restored([q, k])]
+        after = [keras.ops.convert_to_numpy(t) for t in restored([q, k])]
 
         for name, b, a in zip(("query", "key"), before, after):
             assert np.max(np.abs(b - a)) == 0.0, f"{name} changed across a .keras round-trip"
@@ -614,8 +613,8 @@ class TestDtypePolicies:
         k = rng.standard_normal((2, 2, 2 * num_tokens + 2, head_dim)).astype("float32")
 
         q_rot, k_rot = rope(q, k, num_k_exclude=2)
-        q_rot = ops.convert_to_numpy(q_rot)
-        k_rot = ops.convert_to_numpy(k_rot)
+        q_rot = keras.ops.convert_to_numpy(q_rot)
+        k_rot = keras.ops.convert_to_numpy(k_rot)
 
         expected_dtype = rope.compute_dtype
         assert keras.backend.standardize_dtype(q_rot.dtype) == expected_dtype
@@ -648,7 +647,7 @@ class TestDtypePolicies:
         rope = AxialRoPE2D(head_dim=head_dim, feat_shape=(8, 8))
         rng = np.random.default_rng(8)
         q = rng.standard_normal((1, 1, 64, head_dim)).astype(np.float64)
-        got = ops.convert_to_numpy(rope(q)).astype(np.float64)
+        got = keras.ops.convert_to_numpy(rope(q)).astype(np.float64)
         reference = _oracle_rotate(q, 8, 8)
         np.testing.assert_allclose(got, reference, atol=1e-12, rtol=0.0)
 
@@ -681,8 +680,8 @@ class TestGraphSafety:
         q_g, k_g = traced(tf.constant(q), tf.constant(k))
 
         q_e, k_e = rope(q, k, num_k_exclude=3)
-        assert np.max(np.abs(ops.convert_to_numpy(q_g) - ops.convert_to_numpy(q_e))) == 0.0
-        assert np.max(np.abs(ops.convert_to_numpy(k_g) - ops.convert_to_numpy(k_e))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(q_g) - keras.ops.convert_to_numpy(q_e))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(k_g) - keras.ops.convert_to_numpy(k_e))) == 0.0
 
     def test_dynamic_token_axis_raises_clearly(self) -> None:
         """A dynamic token axis raises a named error rather than failing obscurely."""
@@ -814,8 +813,8 @@ class TestScalePos:
         explicit = AxialRoPE2D(
             head_dim=12, feat_shape=(3, 5), scale_pos=1.0, dtype="float64"
         )(q)
-        base_np = ops.convert_to_numpy(base)
-        explicit_np = ops.convert_to_numpy(explicit)
+        base_np = keras.ops.convert_to_numpy(base)
+        explicit_np = keras.ops.convert_to_numpy(explicit)
 
         assert np.max(np.abs(base_np - explicit_np)) == 0.0, (
             "scale_pos=1.0 is not bit-identical to the unscaled default"
@@ -845,7 +844,7 @@ class TestScalePos:
             scale_pos=SCALE_ONE_THIRD,
             dtype="float64",
         )
-        got = ops.convert_to_numpy(rope(q))
+        got = keras.ops.convert_to_numpy(rope(q))
         expected = _oracle_rotate_scaled(q, height, width, SCALE_ONE_THIRD)
 
         np.testing.assert_allclose(
@@ -907,7 +906,7 @@ class TestScalePos:
             scale_pos=SCALE_ONE_THIRD,
             dtype="float64",
         )
-        out = ops.convert_to_numpy(rope(q))[0, 0]
+        out = keras.ops.convert_to_numpy(rope(q))[0, 0]
 
         a, b = 1, 3
         assert a != b, "the probe must be OFF the diagonal or it is vacuous"
@@ -928,10 +927,10 @@ class TestScalePos:
         """LIVENESS: `scale_pos != 1` must measurably move the output."""
         rng = np.random.default_rng(3)
         q = rng.standard_normal((1, 1, 16, 12)).astype(np.float64)
-        unscaled = ops.convert_to_numpy(
+        unscaled = keras.ops.convert_to_numpy(
             AxialRoPE2D(head_dim=12, feat_shape=(4, 4), dtype="float64")(q)
         )
-        scaled = ops.convert_to_numpy(
+        scaled = keras.ops.convert_to_numpy(
             AxialRoPE2D(
                 head_dim=12, feat_shape=(4, 4), scale_pos=SCALE_ONE_THIRD,
                 dtype="float64",
@@ -984,8 +983,8 @@ class TestScalePos:
         assert clone.scale_pos == SCALE_ONE_THIRD
         q1, k1 = clone(q, k, num_k_exclude=3)
 
-        assert np.max(np.abs(ops.convert_to_numpy(q0) - ops.convert_to_numpy(q1))) == 0.0
-        assert np.max(np.abs(ops.convert_to_numpy(k0) - ops.convert_to_numpy(k1))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(q0) - keras.ops.convert_to_numpy(q1))) == 0.0
+        assert np.max(np.abs(keras.ops.convert_to_numpy(k0) - keras.ops.convert_to_numpy(k1))) == 0.0
 
     def test_scale_pos_keras_save_load_by_value(self, tmp_path) -> None:
         """A `.keras` round-trip preserves `scale_pos` by VALUE, not just by key."""
@@ -998,12 +997,12 @@ class TestScalePos:
 
         rng = np.random.default_rng(555)
         q = rng.standard_normal((3, 2, 16, head_dim)).astype("float32")
-        before = ops.convert_to_numpy(model(q))
+        before = keras.ops.convert_to_numpy(model(q))
 
         path = tmp_path / "axial_rope_2d_scaled.keras"
         model.save(path)
         restored = keras.models.load_model(path)
-        after = ops.convert_to_numpy(restored(q))
+        after = keras.ops.convert_to_numpy(restored(q))
 
         assert np.max(np.abs(before - after)) == 0.0
         layer = [ly for ly in restored.layers if isinstance(ly, AxialRoPE2D)]
@@ -1028,7 +1027,7 @@ class TestScalePos:
             scale_pos=SCALE_ONE_THIRD, repeat_k=True, dtype="float64",
         )
         _, k_rot = rope(q, k)
-        k_rot = ops.convert_to_numpy(k_rot)
+        k_rot = keras.ops.convert_to_numpy(k_rot)
         expected_block = _oracle_rotate_scaled(k_block, side, side, SCALE_ONE_THIRD)
         for block in range(3):
             np.testing.assert_allclose(
@@ -1050,7 +1049,7 @@ class TestScalePosDeadComponentProbe:
             head_dim=head_dim, feat_shape=(height, width), theta=THETA,
             scale_pos=SCALE_ONE_THIRD, dtype="float64",
         )
-        got = ops.convert_to_numpy(rope(q))
+        got = keras.ops.convert_to_numpy(rope(q))
         expected = _oracle_rotate_scaled(q, height, width, SCALE_ONE_THIRD)
         assert np.max(np.abs(got - expected)) > 1e-2, (
             "the scaled value oracle is GREEN with scale_pos dead"
@@ -1060,10 +1059,10 @@ class TestScalePosDeadComponentProbe:
         """The liveness guard must NOT survive a dead `scale_pos`."""
         rng = np.random.default_rng(3)
         q = rng.standard_normal((1, 1, 16, 12)).astype(np.float64)
-        unscaled = ops.convert_to_numpy(
+        unscaled = keras.ops.convert_to_numpy(
             AxialRoPE2D(head_dim=12, feat_shape=(4, 4), dtype="float64")(q)
         )
-        dead = ops.convert_to_numpy(
+        dead = keras.ops.convert_to_numpy(
             _ScalePosDeadRoPE(
                 head_dim=12, feat_shape=(4, 4), scale_pos=SCALE_ONE_THIRD,
                 dtype="float64",

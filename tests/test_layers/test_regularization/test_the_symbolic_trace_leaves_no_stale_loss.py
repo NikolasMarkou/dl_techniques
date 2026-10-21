@@ -42,7 +42,6 @@ import numpy as np
 import tensorflow as tf
 
 import keras
-from keras import ops
 
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialSmoothness
 from tests.layer_naming import PublicAutoName
@@ -91,7 +90,7 @@ class TestTheStableBehaviour:
         """
         tap = _built_tap()
         output = _parent(tap)(keras.Input(shape=(4, NUM_UNITS)), training=True)
-        assert ops.shape(output)[-1] == NUM_UNITS
+        assert keras.ops.shape(output)[-1] == NUM_UNITS
 
     def test_the_first_eager_pass_adds_exactly_one_loss(self):
         """The other arm: the guard skips SYMBOLIC inputs, not eager ones.

@@ -54,7 +54,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
@@ -146,8 +145,8 @@ class TheraTrainingModel(keras.Model):
         self.max_grad_norm = float(max_grad_norm)
 
         # THERA channel statistics as float32 constants (broadcast over B,H,W,C).
-        self._mean = ops.convert_to_tensor(THERA_MEAN)
-        self._std = ops.sqrt(ops.convert_to_tensor(THERA_VAR))
+        self._mean = keras.ops.convert_to_tensor(THERA_MEAN)
+        self._std = keras.ops.sqrt(keras.ops.convert_to_tensor(THERA_VAR))
 
         self._charbonnier = (
             CharbonnierLoss() if loss_name == "charbonnier" else None
@@ -206,7 +205,7 @@ class TheraTrainingModel(keras.Model):
         """
         source = (batch["source"] - self._mean) / self._std
         # Heat-kernel time t = scale ** -2 (inverse-square scale), shape (B, 1).
-        t = ops.reshape(batch["scale"], (-1, 1)) ** -2.0
+        t = keras.ops.reshape(batch["scale"], (-1, 1)) ** -2.0
 
         result = self.thera(
             (source, batch["target_coords"], t),
@@ -226,7 +225,7 @@ class TheraTrainingModel(keras.Model):
         """Reconstruction loss scalar (MAE or Charbonnier)."""
         if self._charbonnier is not None:
             return self._charbonnier(target, out)
-        return ops.mean(ops.abs(out - target))
+        return keras.ops.mean(keras.ops.abs(out - target))
 
     def _update_trackers(self, loss: Any, recon: Any, tv: Any, out: Any,
                          target: Any) -> Dict[str, Any]:
@@ -234,7 +233,7 @@ class TheraTrainingModel(keras.Model):
         self.loss_tracker.update_state(loss)
         self.mae_tracker.update_state(recon)
         self.tv_tracker.update_state(tv)
-        self.psnr_metric.update_state(target, ops.clip(out, 0.0, 1.0))
+        self.psnr_metric.update_state(target, keras.ops.clip(out, 0.0, 1.0))
         return {m.name: m.result() for m in self.metrics}
 
     # -----------------------------------------------------------------

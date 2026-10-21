@@ -51,7 +51,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import keras
 import numpy as np
-from keras import ops
 
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.layers.logic.arithmetic_operators import LearnableArithmeticOperator
@@ -232,7 +231,7 @@ def extract_hard_inplace(model: keras.Model) -> List[Tuple[Any, np.ndarray]]:
     for op in _iter_inner_ops(model):
         if op.operation_weights is None:
             continue
-        cur = np.array(ops.convert_to_numpy(op.operation_weights), copy=True)
+        cur = np.array(keras.ops.convert_to_numpy(op.operation_weights), copy=True)
         snapshot.append((op, cur))
         # operation_weights shape: (N,) global  OR  (C, N) per_channel.
         argmax = np.argmax(cur, axis=-1)

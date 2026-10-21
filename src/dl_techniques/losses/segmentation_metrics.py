@@ -28,7 +28,6 @@ reduced to produce a ``(batch,)`` result.
 from typing import Any, Optional
 
 import keras
-from keras import ops
 
 
 def _get_rank(x: Any) -> int:
@@ -46,7 +45,7 @@ def _reduce_non_batch(x: Any) -> Any:
     if rank <= 1:
         return x
     non_batch_axes = tuple(range(1, rank))
-    return ops.mean(x, axis=non_batch_axes)
+    return keras.ops.mean(x, axis=non_batch_axes)
 
 
 def _prepare_probs(y_pred: keras.KerasTensor, from_logits: bool) -> keras.KerasTensor:
@@ -112,18 +111,18 @@ def iou_per_sample(
     Returns:
         Loss tensor of shape ``(batch,)``.
     """
-    y_true = ops.cast(y_true, "float32")
+    y_true = keras.ops.cast(y_true, "float32")
     probs = _prepare_probs(y_pred, from_logits)
 
     # Per-sample, per-class TP, FP, FN summed over spatial axes
     spatial_axes = tuple(range(1, _get_rank(probs) - 1))
-    tp = ops.sum(y_true * probs, axis=spatial_axes)
-    fp = ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
-    fn = ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
+    tp = keras.ops.sum(y_true * probs, axis=spatial_axes)
+    fp = keras.ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
+    fn = keras.ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
 
     iou = (tp + smooth) / (tp + fp + fn + smooth)
     # Mean over classes per sample
-    return 1.0 - ops.mean(iou, axis=-1)
+    return 1.0 - keras.ops.mean(iou, axis=-1)
 
 
 def dice_per_sample(
@@ -143,16 +142,16 @@ def dice_per_sample(
     Returns:
         Loss tensor of shape ``(batch,)``.
     """
-    y_true = ops.cast(y_true, "float32")
+    y_true = keras.ops.cast(y_true, "float32")
     probs = _prepare_probs(y_pred, from_logits)
 
     spatial_axes = tuple(range(1, _get_rank(probs) - 1))
-    tp = ops.sum(y_true * probs, axis=spatial_axes)
-    fp = ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
-    fn = ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
+    tp = keras.ops.sum(y_true * probs, axis=spatial_axes)
+    fp = keras.ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
+    fn = keras.ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
 
     dice = (2.0 * tp + smooth) / (2.0 * tp + fp + fn + smooth)
-    return 1.0 - ops.mean(dice, axis=-1)
+    return 1.0 - keras.ops.mean(dice, axis=-1)
 
 
 def tversky_per_sample(
@@ -176,17 +175,17 @@ def tversky_per_sample(
     Returns:
         Loss tensor of shape ``(batch,)``.
     """
-    y_true = ops.cast(y_true, "float32")
+    y_true = keras.ops.cast(y_true, "float32")
     probs = _prepare_probs(y_pred, from_logits)
 
     spatial_axes = tuple(range(1, _get_rank(probs) - 1))
-    tp = ops.sum(y_true * probs, axis=spatial_axes)
-    fp = ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
-    fn = ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
+    tp = keras.ops.sum(y_true * probs, axis=spatial_axes)
+    fp = keras.ops.sum((1.0 - y_true) * probs, axis=spatial_axes)
+    fn = keras.ops.sum(y_true * (1.0 - probs), axis=spatial_axes)
 
     denominator = tp + alpha * fp + beta * fn
     tversky = (tp + smooth) / (denominator + smooth)
-    return 1.0 - ops.mean(tversky, axis=-1)
+    return 1.0 - keras.ops.mean(tversky, axis=-1)
 
 
 def focal_tversky_per_sample(
@@ -219,7 +218,7 @@ def focal_tversky_per_sample(
     # Focal Tversky applies gamma to the per-class (1-tversky) then means.
     # To match the original scalar behavior exactly, we'd need per-class tversky.
     # This implementation applies gamma to the per-sample loss (approximate).
-    return ops.power(tversky_loss, gamma)
+    return keras.ops.power(tversky_loss, gamma)
 
 
 def focal_per_sample(
@@ -247,23 +246,23 @@ def focal_per_sample(
     Returns:
         Loss tensor of shape ``(batch,)``.
     """
-    y_true = ops.cast(y_true, "float32")
+    y_true = keras.ops.cast(y_true, "float32")
     probs = _prepare_probs(y_pred, from_logits)
 
     # Clip for numerical stability in log terms
-    probs = ops.clip(probs, 1e-7, 1.0 - 1e-7)
+    probs = keras.ops.clip(probs, 1e-7, 1.0 - 1e-7)
 
     # p_t = prob for the true class, 1-p_t for negative class
     # y_true is one-hot, so sum over classes gives p_t for each sample
-    p_t = ops.sum(y_true * probs, axis=-1)
+    p_t = keras.ops.sum(y_true * probs, axis=-1)
 
     # Focal weight
-    focal_weight_pos = ops.power(1.0 - p_t, gamma)
-    focal_weight_neg = ops.power(p_t, gamma)
+    focal_weight_pos = keras.ops.power(1.0 - p_t, gamma)
+    focal_weight_neg = keras.ops.power(p_t, gamma)
 
     # Log terms
-    log_pos = ops.log(p_t + 1e-8)
-    log_neg = ops.log(1.0 - p_t + 1e-8)
+    log_pos = keras.ops.log(p_t + 1e-8)
+    log_neg = keras.ops.log(1.0 - p_t + 1e-8)
 
     loss = -alpha * focal_weight_pos * log_pos - (1.0 - alpha) * focal_weight_neg * log_neg
     return loss  # Already (batch,)
@@ -282,7 +281,7 @@ def iou_scalar(
     smooth: float = 1e-6,
 ) -> keras.KerasTensor:
     """Scalar IoU loss (batch mean). For SegmentationLosses / SAM compat."""
-    return ops.mean(iou_per_sample(y_true, y_pred, from_logits, smooth))
+    return keras.ops.mean(iou_per_sample(y_true, y_pred, from_logits, smooth))
 
 
 def dice_scalar(
@@ -292,7 +291,7 @@ def dice_scalar(
     smooth: float = 1e-6,
 ) -> keras.KerasTensor:
     """Scalar Dice loss (batch mean). For SegmentationLosses / SAM compat."""
-    return ops.mean(dice_per_sample(y_true, y_pred, from_logits, smooth))
+    return keras.ops.mean(dice_per_sample(y_true, y_pred, from_logits, smooth))
 
 
 def tversky_scalar(
@@ -304,7 +303,7 @@ def tversky_scalar(
     smooth: float = 1e-6,
 ) -> keras.KerasTensor:
     """Scalar Tversky loss (batch mean). For SegmentationLosses / SAM compat."""
-    return ops.mean(tversky_per_sample(y_true, y_pred, alpha, beta, from_logits, smooth))
+    return keras.ops.mean(tversky_per_sample(y_true, y_pred, alpha, beta, from_logits, smooth))
 
 
 def focal_tversky_scalar(
@@ -318,7 +317,7 @@ def focal_tversky_scalar(
 ) -> keras.KerasTensor:
     """Scalar Focal Tversky loss (batch mean). For SegmentationLosses / SAM compat."""
     # Note: original applies gamma per-class then means. This applies gamma to per-sample.
-    return ops.mean(focal_tversky_per_sample(y_true, y_pred, alpha, beta, gamma, from_logits, smooth))
+    return keras.ops.mean(focal_tversky_per_sample(y_true, y_pred, alpha, beta, gamma, from_logits, smooth))
 
 
 def focal_scalar(
@@ -329,7 +328,7 @@ def focal_scalar(
     from_logits: bool = False,
 ) -> keras.KerasTensor:
     """Scalar Focal loss (batch mean, two-sided). For SegmentationLosses."""
-    return ops.mean(focal_per_sample(y_true, y_pred, alpha, gamma, from_logits))
+    return keras.ops.mean(focal_per_sample(y_true, y_pred, alpha, gamma, from_logits))
 
 
 def cross_entropy_scalar(
@@ -352,21 +351,21 @@ def cross_entropy_scalar(
     Returns:
         Scalar loss tensor.
     """
-    y_true = ops.cast(y_true, "float32")
+    y_true = keras.ops.cast(y_true, "float32")
     if from_logits:
         log_probs = _log_probs_from_logits(y_pred)
     else:
         epsilon = 1e-7
-        probs = ops.clip(y_pred, epsilon, 1.0 - epsilon)
-        log_probs = ops.log(probs)
+        probs = keras.ops.clip(y_pred, epsilon, 1.0 - epsilon)
+        log_probs = keras.ops.log(probs)
 
-    ce_loss = -ops.sum(y_true * log_probs, axis=-1)
+    ce_loss = -keras.ops.sum(y_true * log_probs, axis=-1)
 
     if weights is not None:
-        weights = ops.cast(weights, "float32")
-        ce_loss = ce_loss * ops.sum(y_true * weights, axis=-1)
+        weights = keras.ops.cast(weights, "float32")
+        ce_loss = ce_loss * keras.ops.sum(y_true * weights, axis=-1)
 
-    return ops.mean(ce_loss)
+    return keras.ops.mean(ce_loss)
 
 
 # ---------------------------------------------------------------------------

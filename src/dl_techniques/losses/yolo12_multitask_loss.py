@@ -26,7 +26,6 @@ Key Components:
 """
 
 import keras
-from keras import ops
 from typing import Dict, Any, List, Union, Tuple, Optional
 
 # ---------------------------------------------------------------------
@@ -148,23 +147,23 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             h, w = H // stride, W // stride
 
             # Generate coordinate grids
-            x_coords = ops.arange(w, dtype="float32") + grid_cell_offset
-            y_coords = ops.arange(h, dtype="float32") + grid_cell_offset
-            y_grid, x_grid = ops.meshgrid(y_coords, x_coords, indexing="ij")
+            x_coords = keras.ops.arange(w, dtype="float32") + grid_cell_offset
+            y_coords = keras.ops.arange(h, dtype="float32") + grid_cell_offset
+            y_grid, x_grid = keras.ops.meshgrid(y_coords, x_coords, indexing="ij")
 
             # Stack and reshape coordinates
-            xy_grid = ops.stack([x_grid, y_grid], axis=-1)
-            xy_grid = ops.reshape(xy_grid, (-1, 2))
+            xy_grid = keras.ops.stack([x_grid, y_grid], axis=-1)
+            xy_grid = keras.ops.reshape(xy_grid, (-1, 2))
             anchor_points.append(xy_grid)
 
             # Create stride tensor for current level
             stride_tensor.append(
-                ops.full((h * w, 1), stride, dtype="float32")
+                keras.ops.full((h * w, 1), stride, dtype="float32")
             )
 
         return (
-            ops.concatenate(anchor_points, 0),
-            ops.concatenate(stride_tensor, 0)
+            keras.ops.concatenate(anchor_points, 0),
+            keras.ops.concatenate(stride_tensor, 0)
         )
 
     def _task_aligned_assigner(
@@ -205,14 +204,14 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             - target_gt_idx: The index of the GT box assigned to each anchor. Shape: (batch_size, num_anchors).
             - fg_mask: A boolean mask indicating which anchors are foreground (positive). Shape: (batch_size, num_anchors).
         """
-        num_anchors = ops.shape(pred_scores)[1]
+        num_anchors = keras.ops.shape(pred_scores)[1]
 
         # Prepare tensors for vectorized operations by adding new dimensions.
         # This allows for batch-wise comparison between all anchors and all GT boxes.
-        anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))
-        gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)
-        pred_bboxes_exp = ops.expand_dims(pred_bboxes, 1)
-        pred_scores_exp = ops.expand_dims(pred_scores, 1)
+        anchors_exp = keras.ops.reshape(anchors, (1, 1, num_anchors, 2))
+        gt_bboxes_exp = keras.ops.expand_dims(gt_bboxes, 2)
+        pred_bboxes_exp = keras.ops.expand_dims(pred_bboxes, 1)
+        pred_scores_exp = keras.ops.expand_dims(pred_scores, 1)
 
         # --- Candidate Selection ---
         # This is the core logic to counteract the small-box bias. We create a mask
@@ -222,10 +221,10 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # An anchor is a candidate if its center point is physically inside the GT box.
         # This is crucial for large objects, as it ensures anchors across the entire
         # object are considered, even if their initial predicted box is small and has poor IoU.
-        gt_x1y1, gt_x2y2 = ops.split(gt_bboxes_exp, 2, axis=-1)
+        gt_x1y1, gt_x2y2 = keras.ops.split(gt_bboxes_exp, 2, axis=-1)
         is_in_gt = (
-                ops.all(anchors_exp >= gt_x1y1, -1) &
-                ops.all(anchors_exp <= gt_x2y2, -1)
+                keras.ops.all(anchors_exp >= gt_x1y1, -1) &
+                keras.ops.all(anchors_exp <= gt_x2y2, -1)
         )  # Shape: (batch_size, num_gt, num_anchors)
 
         # 2. Select candidates based on IoU (`topk`).
@@ -239,15 +238,15 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # Find the top `k` IoU values and their indices along the last axis (num_anchors).
         # The `axis` argument is removed because it is not supported by `keras.ops.top_k`.
         # The function operates on the last axis by default, which is correct for our tensor shape.
-        _, topk_idx = ops.top_k(iou_candidates, k=min(topk, num_anchors))
+        _, topk_idx = keras.ops.top_k(iou_candidates, k=min(topk, num_anchors))
 
         # Create a one-hot mask from the top-k indices to identify which anchors were selected.
-        is_in_topk = ops.one_hot(topk_idx, num_anchors, dtype=iou_candidates.dtype)
-        is_in_topk = ops.sum(is_in_topk, axis=2)  # Shape: (batch_size, num_gt, num_anchors)
+        is_in_topk = keras.ops.one_hot(topk_idx, num_anchors, dtype=iou_candidates.dtype)
+        is_in_topk = keras.ops.sum(is_in_topk, axis=2)  # Shape: (batch_size, num_gt, num_anchors)
 
         # Combine the two candidate masks. An anchor is a candidate if it's in the GT box OR in the top-k IoU.
         # This provides a robust set of potential assignments for the next step.
-        candidate_mask = ops.where(is_in_gt, ops.cast(1.0, iou_candidates.dtype), is_in_topk) > 0
+        candidate_mask = keras.ops.where(is_in_gt, keras.ops.cast(1.0, iou_candidates.dtype), is_in_topk) > 0
 
         # --- Alignment Metric Calculation ---
         # Now we calculate the final metric, but only for the candidates we just selected.
@@ -255,17 +254,17 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # Calculate the final IoU (using CIoU for a more accurate regression signal).
         # We then use the candidate mask to zero out the IoU for all non-candidate pairs.
         ious = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False, CIoU=True)
-        ious = ops.where(candidate_mask, ious, 0.0)
+        ious = keras.ops.where(candidate_mask, ious, 0.0)
 
         # Prepare one-hot labels for classification score calculation.
-        gt_labels_int = ops.cast(ops.squeeze(gt_labels, -1), "int32")
-        gt_labels_one_hot = ops.one_hot(gt_labels_int, self.num_classes)
-        gt_labels_one_hot = ops.expand_dims(gt_labels_one_hot, 2)
+        gt_labels_int = keras.ops.cast(keras.ops.squeeze(gt_labels, -1), "int32")
+        gt_labels_one_hot = keras.ops.one_hot(gt_labels_int, self.num_classes)
+        gt_labels_one_hot = keras.ops.expand_dims(gt_labels_one_hot, 2)
 
         # Calculate classification alignment scores.
         # Zero out scores for all non-candidate pairs.
-        cls_scores = ops.sum(gt_labels_one_hot * ops.nn.sigmoid(pred_scores_exp), -1)
-        cls_scores = ops.where(candidate_mask, cls_scores, 0.0)
+        cls_scores = keras.ops.sum(gt_labels_one_hot * keras.ops.nn.sigmoid(pred_scores_exp), -1)
+        cls_scores = keras.ops.where(candidate_mask, cls_scores, 0.0)
 
         # The original alignment metric `cls**alpha * iou**beta` is a product,
         # which is numerically unstable. If the classification score for the
@@ -282,21 +281,21 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         align_metric = self.assigner_alpha * cls_scores + self.assigner_beta * ious
 
         # Apply the mask for valid (non-padded) ground truth boxes to ignore padded GTs.
-        mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
-        align_metric = ops.where(mask_gt_broadcast, align_metric, 0.0)
+        mask_gt_broadcast = keras.ops.cast(keras.ops.expand_dims(keras.ops.squeeze(mask_gt, -1), -1), "bool")
+        align_metric = keras.ops.where(mask_gt_broadcast, align_metric, 0.0)
 
         # We also need to ensure that we only consider candidates for the final assignment.
-        align_metric = ops.where(candidate_mask, align_metric, 0.0)
+        align_metric = keras.ops.where(candidate_mask, align_metric, 0.0)
 
         # --- Final Assignment ---
         # For each anchor, find the GT box that gives it the highest alignment score.
-        target_gt_idx = ops.argmax(align_metric, axis=1)
+        target_gt_idx = keras.ops.argmax(align_metric, axis=1)
 
         # An anchor is considered foreground (positive) if its best score is greater than 0.
-        fg_mask = ops.max(align_metric, axis=1) > 0
+        fg_mask = keras.ops.max(align_metric, axis=1) > 0
 
         # If an anchor is background, assign it to a dummy GT index (0) to prevent errors.
-        target_gt_idx = ops.where(fg_mask, target_gt_idx, 0)
+        target_gt_idx = keras.ops.where(fg_mask, target_gt_idx, 0)
 
         return target_gt_idx, fg_mask
 
@@ -324,40 +323,40 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # does not exist in the public `keras.ops` API. The original implementation
         # using manual index flattening is the correct and functional approach.
 
-        batch_size = ops.shape(target_gt_idx)[0]
-        num_anchors = ops.shape(target_gt_idx)[1]
-        max_gt = ops.shape(gt_labels)[1]
+        batch_size = keras.ops.shape(target_gt_idx)[0]
+        num_anchors = keras.ops.shape(target_gt_idx)[1]
+        max_gt = keras.ops.shape(gt_labels)[1]
 
         # Create batch indices for gathering.
-        batch_indices = ops.tile(
-            ops.expand_dims(ops.arange(batch_size, dtype=target_gt_idx.dtype), 1),
+        batch_indices = keras.ops.tile(
+            keras.ops.expand_dims(keras.ops.arange(batch_size, dtype=target_gt_idx.dtype), 1),
             [1, num_anchors]
         )
 
         # Flatten indices for the `ops.take` operation.
         # This correctly maps each anchor to its assigned ground truth within the flattened tensor.
-        flat_indices = ops.reshape(
+        flat_indices = keras.ops.reshape(
             batch_indices * max_gt + target_gt_idx,
             [-1]
         )
 
         # Gather target labels by taking from the flattened ground truth tensor.
-        target_labels = ops.reshape(
-            ops.take(ops.reshape(gt_labels, [-1, 1]), flat_indices, axis=0),
+        target_labels = keras.ops.reshape(
+            keras.ops.take(keras.ops.reshape(gt_labels, [-1, 1]), flat_indices, axis=0),
             [batch_size, num_anchors, 1]
         )
 
         # Gather target bounding boxes.
-        target_bboxes = ops.reshape(
-            ops.take(ops.reshape(gt_bboxes, [-1, 4]), flat_indices, axis=0),
+        target_bboxes = keras.ops.reshape(
+            keras.ops.take(keras.ops.reshape(gt_bboxes, [-1, 4]), flat_indices, axis=0),
             [batch_size, num_anchors, 4]
         )
 
         # Convert labels to one-hot scores with foreground mask.
-        target_labels_int = ops.cast(ops.squeeze(target_labels, -1), "int32")
+        target_labels_int = keras.ops.cast(keras.ops.squeeze(target_labels, -1), "int32")
         target_scores = (
-            ops.one_hot(target_labels_int, self.num_classes) *
-            ops.expand_dims(ops.cast(fg_mask, "float32"), -1)
+            keras.ops.one_hot(target_labels_int, self.num_classes) *
+            keras.ops.expand_dims(keras.ops.cast(fg_mask, "float32"), -1)
         )
 
         return target_bboxes, target_scores
@@ -378,8 +377,8 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         Returns:
             Bounding boxes in (x1, y1, x2, y2) format.
         """
-        lt, rb = ops.split(distance, 2, axis=-1)
-        return ops.concatenate([anchors - lt, anchors + rb], -1)
+        lt, rb = keras.ops.split(distance, 2, axis=-1)
+        return keras.ops.concatenate([anchors - lt, anchors + rb], -1)
 
     def call(
         self,
@@ -397,20 +396,20 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             Computed loss value.
         """
         # Split predictions into distance and classification components
-        pred_dist, pred_scores = ops.split(
+        pred_dist, pred_scores = keras.ops.split(
             y_pred,
             [4 * self.reg_max],
             -1
         )
 
         # Convert distance predictions to bounding boxes
-        pred_dist_reshaped = ops.reshape(
+        pred_dist_reshaped = keras.ops.reshape(
             pred_dist,
-            [ops.shape(y_pred)[0], -1, 4, self.reg_max]
+            [keras.ops.shape(y_pred)[0], -1, 4, self.reg_max]
         )
-        pred_dist_mean = ops.sum(
-            ops.nn.softmax(pred_dist_reshaped, -1) *
-            ops.arange(self.reg_max, dtype="float32"),
+        pred_dist_mean = keras.ops.sum(
+            keras.ops.nn.softmax(pred_dist_reshaped, -1) *
+            keras.ops.arange(self.reg_max, dtype="float32"),
             -1
         )
 
@@ -425,10 +424,10 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         gt_labels, gt_bboxes_normalized = y_true[..., :1], y_true[..., 1:]
 
         patch_h, patch_w = self.input_shape
-        scale_tensor = ops.cast([patch_w, patch_h, patch_w, patch_h], dtype=gt_bboxes_normalized.dtype)
+        scale_tensor = keras.ops.cast([patch_w, patch_h, patch_w, patch_h], dtype=gt_bboxes_normalized.dtype)
         gt_bboxes = gt_bboxes_normalized * scale_tensor
 
-        mask_gt = ops.sum(gt_bboxes, -1, keepdims=True) > 0
+        mask_gt = keras.ops.sum(gt_bboxes, -1, keepdims=True) > 0
 
         def compute_losses():
             """
@@ -459,14 +458,14 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 
             # Step 3: Calculate a normalization factor. This is the total number of positive
             # assignments across the batch, used to average the losses.
-            target_scores_sum = ops.maximum(ops.sum(target_scores), 1.0)
+            target_scores_sum = keras.ops.maximum(keras.ops.sum(target_scores), 1.0)
 
             # Step 4: Calculate the Classification Loss (BCE Focal Loss).
             # This is calculated for all anchors (both foreground and background).
             # The background anchors are penalized for any confident predictions, while
             # foreground anchors are rewarded for correctly classifying their target.
             loss_cls = (
-                    ops.sum(self.bce(target_scores, pred_scores)) /
+                    keras.ops.sum(self.bce(target_scores, pred_scores)) /
                     target_scores_sum
             )
 
@@ -479,67 +478,67 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                     A tuple of two scalar tensors: (loss_box, loss_dfl).
                 """
                 # Get a boolean mask for only the positive (foreground) anchors.
-                flat_fg_mask = ops.reshape(fg_mask, [-1])
+                flat_fg_mask = keras.ops.reshape(fg_mask, [-1])
 
                 # Gather the predictions and targets for only the positive anchors.
-                pred_bboxes_pos = ops.reshape(pred_bboxes, [-1, 4])[flat_fg_mask]
-                target_bboxes_pos = ops.reshape(target_bboxes, [-1, 4])[flat_fg_mask]
-                target_scores_pos = ops.reshape(target_scores, [-1, self.num_classes])[flat_fg_mask]
+                pred_bboxes_pos = keras.ops.reshape(pred_bboxes, [-1, 4])[flat_fg_mask]
+                target_bboxes_pos = keras.ops.reshape(target_bboxes, [-1, 4])[flat_fg_mask]
+                target_scores_pos = keras.ops.reshape(target_scores, [-1, self.num_classes])[flat_fg_mask]
 
                 # --- Bounding Box Regression Loss (CIoU Loss) ---
                 iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
                 loss_box = (
-                        ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) /
+                        keras.ops.sum((1.0 - iou) * keras.ops.sum(target_scores_pos, -1)) /
                         target_scores_sum
                 )
 
                 # Get the coordinates and strides of the positive anchors.
-                anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
-                anchors_pos = ops.take(self.anchors * self.strides, anchor_indices[flat_fg_mask], 0)
-                strides_pos = ops.take(ops.squeeze(self.strides), anchor_indices[flat_fg_mask], 0)
-                strides_pos = ops.expand_dims(strides_pos, -1)
+                anchor_indices = keras.ops.tile(keras.ops.arange(keras.ops.shape(pred_bboxes)[1]), [keras.ops.shape(pred_bboxes)[0]])
+                anchors_pos = keras.ops.take(self.anchors * self.strides, anchor_indices[flat_fg_mask], 0)
+                strides_pos = keras.ops.take(keras.ops.squeeze(self.strides), anchor_indices[flat_fg_mask], 0)
+                strides_pos = keras.ops.expand_dims(strides_pos, -1)
 
                 # Calculate scaled ground truth distances. Shape: (num_pos, 4)
-                target_ltrb_pixels = ops.concatenate([
+                target_ltrb_pixels = keras.ops.concatenate([
                     anchors_pos - target_bboxes_pos[..., :2],
                     target_bboxes_pos[..., 2:] - anchors_pos
                 ], -1)
                 target_ltrb = target_ltrb_pixels / strides_pos
-                target_ltrb = ops.clip(target_ltrb, 0, self.reg_max - 1.01)
+                target_ltrb = keras.ops.clip(target_ltrb, 0, self.reg_max - 1.01)
 
                 # Get integer bins and interpolation weights. Shape of all: (num_pos, 4)
-                target_ltrb_left = ops.floor(target_ltrb)
+                target_ltrb_left = keras.ops.floor(target_ltrb)
                 target_ltrb_right = target_ltrb_left + 1
                 weight_left = target_ltrb_right - target_ltrb
                 weight_right = target_ltrb - target_ltrb_left
 
                 # Gather DFL predictions. Shape: (num_pos, 4, reg_max)
-                pred_dist_pos = ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
+                pred_dist_pos = keras.ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
 
                 # Reshape all tensors to flatten the LTRB dimension into the batch dimension.
                 # This creates the (batch_size, num_classes) structure required by the loss function.
-                target_left_flat = ops.reshape(target_ltrb_left, [-1])  # Shape: (num_pos * 4,)
-                target_right_flat = ops.reshape(target_ltrb_right, [-1])  # Shape: (num_pos * 4,)
-                weight_left_flat = ops.reshape(weight_left, [-1])  # Shape: (num_pos * 4,)
-                weight_right_flat = ops.reshape(weight_right, [-1])  # Shape: (num_pos * 4,)
-                pred_dist_flat = ops.reshape(pred_dist_pos, [-1, self.reg_max])  # Shape: (num_pos * 4, reg_max)
+                target_left_flat = keras.ops.reshape(target_ltrb_left, [-1])  # Shape: (num_pos * 4,)
+                target_right_flat = keras.ops.reshape(target_ltrb_right, [-1])  # Shape: (num_pos * 4,)
+                weight_left_flat = keras.ops.reshape(weight_left, [-1])  # Shape: (num_pos * 4,)
+                weight_right_flat = keras.ops.reshape(weight_right, [-1])  # Shape: (num_pos * 4,)
+                pred_dist_flat = keras.ops.reshape(pred_dist_pos, [-1, self.reg_max])  # Shape: (num_pos * 4, reg_max)
 
                 # Compute the cross-entropy loss for both the left and right bins with the correct shapes.
                 loss_dfl_left = keras.losses.sparse_categorical_crossentropy(
-                    ops.cast(target_left_flat, "int32"),
+                    keras.ops.cast(target_left_flat, "int32"),
                     pred_dist_flat,
                     from_logits=True
                 )
                 loss_dfl_right = keras.losses.sparse_categorical_crossentropy(
-                    ops.cast(target_right_flat, "int32"),
+                    keras.ops.cast(target_right_flat, "int32"),
                     pred_dist_flat,
                     from_logits=True
                 )
 
                 # Combine the weighted losses and normalize.
                 loss_dfl = (
-                                   ops.sum(loss_dfl_left * weight_left_flat) +
-                                   ops.sum(loss_dfl_right * weight_right_flat)
+                                   keras.ops.sum(loss_dfl_left * weight_left_flat) +
+                                   keras.ops.sum(loss_dfl_right * weight_right_flat)
                            ) / target_scores_sum
                 # --- END DFL CORRECTION ---
 
@@ -548,18 +547,18 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             # Step 5: Conditionally compute the box and DFL losses.
             # These are only computed if there is at least one positive anchor in the batch
             # to avoid errors with empty tensors.
-            loss_box, loss_dfl = ops.cond(
-                ops.sum(ops.cast(fg_mask, "float32")) > 0,
+            loss_box, loss_dfl = keras.ops.cond(
+                keras.ops.sum(keras.ops.cast(fg_mask, "float32")) > 0,
                 compute_box_and_dfl_only,  # If true, call the function that returns 2 values
-                lambda: (ops.convert_to_tensor(0.0), ops.convert_to_tensor(0.0))  # If false, return 2 zero tensors
+                lambda: (keras.ops.convert_to_tensor(0.0), keras.ops.convert_to_tensor(0.0))  # If false, return 2 zero tensors
             )
 
             # Step 6: Return all three loss components.
             return loss_cls, loss_box, loss_dfl
 
         # Compute losses only if ground truth exists
-        loss_cls, loss_box, loss_dfl = ops.cond(
-            ops.sum(ops.cast(mask_gt, "float32")) > 0,
+        loss_cls, loss_box, loss_dfl = keras.ops.cond(
+            keras.ops.sum(keras.ops.cast(mask_gt, "float32")) > 0,
             compute_losses,
             lambda: (0.0, 0.0, 0.0)
         )
@@ -643,25 +642,25 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
         # Apply sigmoid/softmax if from_logits
         if self.from_logits:
             if self.num_classes == 1:
-                y_pred_prob = ops.sigmoid(y_pred)
+                y_pred_prob = keras.ops.sigmoid(y_pred)
             else:
-                y_pred_prob = ops.softmax(y_pred, axis=-1)
+                y_pred_prob = keras.ops.softmax(y_pred, axis=-1)
         else:
             y_pred_prob = y_pred
 
         # Compute Dice loss
         if self.num_classes == 1:
             # Binary Dice loss
-            intersection = ops.sum(y_true * y_pred_prob, axis=[1, 2])
-            union = ops.sum(y_true, axis=[1, 2]) + ops.sum(y_pred_prob, axis=[1, 2])
+            intersection = keras.ops.sum(y_true * y_pred_prob, axis=[1, 2])
+            union = keras.ops.sum(y_true, axis=[1, 2]) + keras.ops.sum(y_pred_prob, axis=[1, 2])
             dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
             dice_loss = 1.0 - dice  # Shape: [batch_size]
         else:
             # Multi-class Dice loss - compute per class and average
-            intersection = ops.sum(y_true * y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
-            union = ops.sum(y_true, axis=[1, 2]) + ops.sum(y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
+            intersection = keras.ops.sum(y_true * y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
+            union = keras.ops.sum(y_true, axis=[1, 2]) + keras.ops.sum(y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
             dice = (2.0 * intersection + 1e-7) / (union + 1e-7)  # [batch_size, num_classes]
-            dice_loss = ops.mean(1.0 - dice, axis=-1)  # Average over classes -> [batch_size]
+            dice_loss = keras.ops.mean(1.0 - dice, axis=-1)  # Average over classes -> [batch_size]
 
         return dice_loss
 
@@ -671,49 +670,49 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
             # Binary focal loss
             if self.from_logits:
                 # Manually compute binary focal loss from logits
-                p = ops.sigmoid(y_pred)
+                p = keras.ops.sigmoid(y_pred)
             else:
                 p = y_pred
 
             # Clip to prevent log(0)
-            p = ops.clip(p, 1e-7, 1.0 - 1e-7)
+            p = keras.ops.clip(p, 1e-7, 1.0 - 1e-7)
 
             # Compute focal weight
             alpha_t = y_true * self.focal_alpha + (1 - y_true) * (1 - self.focal_alpha)
             p_t = y_true * p + (1 - y_true) * (1 - p)
-            focal_weight = alpha_t * ops.power(1 - p_t, self.focal_gamma)
+            focal_weight = alpha_t * keras.ops.power(1 - p_t, self.focal_gamma)
 
             # Compute focal loss
             focal_loss = -focal_weight * (
-                y_true * ops.log(p) + (1 - y_true) * ops.log(1 - p)
+                y_true * keras.ops.log(p) + (1 - y_true) * keras.ops.log(1 - p)
             )
 
             # Reduce spatial dimensions: [batch_size, height, width, 1] -> [batch_size]
-            focal_loss = ops.mean(focal_loss, axis=[1, 2, 3])
+            focal_loss = keras.ops.mean(focal_loss, axis=[1, 2, 3])
 
         else:
             # Multi-class focal loss
             if self.from_logits:
                 # Manually compute categorical focal loss from logits
-                y_pred_softmax = ops.softmax(y_pred, axis=-1)
+                y_pred_softmax = keras.ops.softmax(y_pred, axis=-1)
             else:
                 y_pred_softmax = y_pred
 
             # Clip to prevent log(0)
-            y_pred_softmax = ops.clip(y_pred_softmax, 1e-7, 1.0 - 1e-7)
+            y_pred_softmax = keras.ops.clip(y_pred_softmax, 1e-7, 1.0 - 1e-7)
 
             # Compute cross entropy
-            ce_loss = -ops.sum(y_true * ops.log(y_pred_softmax), axis=-1)  # [batch_size, height, width]
+            ce_loss = -keras.ops.sum(y_true * keras.ops.log(y_pred_softmax), axis=-1)  # [batch_size, height, width]
 
             # Compute p_t for focal weighting
-            p_t = ops.sum(y_true * y_pred_softmax, axis=-1)  # [batch_size, height, width]
+            p_t = keras.ops.sum(y_true * y_pred_softmax, axis=-1)  # [batch_size, height, width]
 
             # Apply focal weighting
-            focal_weight = ops.power(1 - p_t, self.focal_gamma)
+            focal_weight = keras.ops.power(1 - p_t, self.focal_gamma)
             focal_loss = focal_weight * ce_loss
 
             # Reduce spatial dimensions: [batch_size, height, width] -> [batch_size]
-            focal_loss = ops.mean(focal_loss, axis=[1, 2])
+            focal_loss = keras.ops.mean(focal_loss, axis=[1, 2])
 
         return focal_loss
 
@@ -740,7 +739,7 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
                 pass
             elif y_pred.shape[-1] == 1 and len(y_true.shape) == 3:
                 # y_true has no channel dimension, add it
-                y_true = ops.expand_dims(y_true, -1)
+                y_true = keras.ops.expand_dims(y_true, -1)
             else:
                 logger.warning(f"Shape mismatch in binary segmentation: y_true.shape={y_true.shape}, y_pred.shape={y_pred.shape}")
 
@@ -748,7 +747,7 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
             # Multi-class segmentation
             if len(y_true.shape) == 3:
                 # Convert sparse labels to one-hot
-                y_true = ops.one_hot(ops.cast(y_true, "int32"), self.num_classes)
+                y_true = keras.ops.one_hot(keras.ops.cast(y_true, "int32"), self.num_classes)
             elif y_true.shape[-1] != self.num_classes:
                 logger.warning(f"Multi-class segmentation shape mismatch: y_true.shape={y_true.shape}, expected classes={self.num_classes}")
 
@@ -834,7 +833,7 @@ class ClassificationFocalLoss(keras.losses.Loss):
         """
         # Ensure y_true has the same shape as y_pred if it's a scalar target
         if len(y_true.shape) == 1:
-            y_true = ops.expand_dims(y_true, -1)
+            y_true = keras.ops.expand_dims(y_true, -1)
 
         return self.focal_loss(y_true, y_pred)
 
@@ -1054,7 +1053,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Return zero loss if task cannot be inferred or is not supported
         if task_name is None or task_name not in self._internal_losses:
-            return ops.convert_to_tensor(0.0, dtype=y_pred.dtype)
+            return keras.ops.convert_to_tensor(0.0, dtype=y_pred.dtype)
 
         # Compute raw loss using task-specific loss function
         raw_loss = self._internal_losses[task_name](y_true, y_pred)
@@ -1063,17 +1062,17 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         if self.use_uncertainty_weighting:
             if task_name == VisionTaskType.DETECTION.value:
                 return (
-                    ops.exp(-self.detection_log_var) * raw_loss +
+                    keras.ops.exp(-self.detection_log_var) * raw_loss +
                     self.detection_log_var
                 )
             elif task_name == VisionTaskType.SEGMENTATION.value:
                 return (
-                    ops.exp(-self.segmentation_log_var) * raw_loss +
+                    keras.ops.exp(-self.segmentation_log_var) * raw_loss +
                     self.segmentation_log_var
                 )
             else:  # Classification
                 return (
-                    ops.exp(-self.classification_log_var) * raw_loss +
+                    keras.ops.exp(-self.classification_log_var) * raw_loss +
                     self.classification_log_var
                 )
         else:
@@ -1098,15 +1097,15 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             # Extract weights from learnable uncertainty parameters
             if self.task_config.has_detection():
                 weights[VisionTaskType.DETECTION.value] = float(
-                    ops.exp(-self.detection_log_var)
+                    keras.ops.exp(-self.detection_log_var)
                 )
             if self.task_config.has_segmentation():
                 weights[VisionTaskType.SEGMENTATION.value] = float(
-                    ops.exp(-self.segmentation_log_var)
+                    keras.ops.exp(-self.segmentation_log_var)
                 )
             if self.task_config.has_classification():
                 weights[VisionTaskType.CLASSIFICATION.value] = float(
-                    ops.exp(-self.classification_log_var)
+                    keras.ops.exp(-self.classification_log_var)
                 )
         else:
             # Return static weights

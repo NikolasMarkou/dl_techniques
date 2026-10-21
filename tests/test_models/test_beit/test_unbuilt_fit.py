@@ -16,7 +16,6 @@ under GPU contention. Re-run it ALONE before reading a failure as a regression.
 
 import keras
 import numpy as np
-from keras import ops
 
 from tests.test_models.test_beit.beit_test_geometry import (
     NUM_PATCHES,
@@ -95,6 +94,6 @@ class TestBeitUnbuiltFit:
             f"expected one bias table per encoder layer, found {len(tables)}"
         )
         for table in tables:
-            assert float(np.abs(ops.convert_to_numpy(table)).max()) > 0.0, (
+            assert float(np.abs(keras.ops.convert_to_numpy(table)).max()) > 0.0, (
                 f"{table.path} is still all-zero after fit()"
             )

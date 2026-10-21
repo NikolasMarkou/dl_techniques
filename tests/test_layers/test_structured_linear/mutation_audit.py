@@ -56,13 +56,13 @@ _ALLOWED = (
 MUTATIONS = {
     'l2_normalize-drops-the-rescale': (
         os.path.join(_UTILS, 'tensors.py'),
-        "    peak = ops.max(ops.abs(x), axis=axis, keepdims=True)\n",
-        "    peak = ops.maximum(ops.abs(x), 1.0)\n",
+        "    peak = keras.ops.max(keras.ops.abs(x), axis=axis, keepdims=True)\n",
+        "    peak = keras.ops.maximum(keras.ops.abs(x), 1.0)\n",
         'rescale by a constant instead of the vector peak, which is a no-op',
     ),
     'l2_normalize-drops-the-zero-guard': (
         os.path.join(_UTILS, 'tensors.py'),
-        "    scaled = x / ops.where(peak > 0.0, peak, ops.ones_like(peak))\n",
+        "    scaled = x / keras.ops.where(peak > 0.0, peak, keras.ops.ones_like(peak))\n",
         "    scaled = x / peak\n",
         'remove the zero-divisor substitution, so an all-zero row divides 0/0',
     ),

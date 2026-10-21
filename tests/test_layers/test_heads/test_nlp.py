@@ -18,7 +18,6 @@ import tempfile
 import numpy as np
 import pytest
 import keras
-from keras import ops
 
 from dl_techniques.layers.heads.nlp import (
     NLPTaskType,
@@ -86,44 +85,44 @@ class TestPoolingEquivalence:
     @pytest.mark.parametrize("pooling_type", ["cls", "mean", "max", "attention"])
     def test_pool_shape_is_B_D(self, pooling_type, fixed_input, attention_mask) -> None:
         head = _make_head(pooling_type)
-        x = ops.convert_to_tensor(fixed_input)
-        m = ops.convert_to_tensor(attention_mask)
+        x = keras.ops.convert_to_tensor(fixed_input)
+        m = keras.ops.convert_to_tensor(attention_mask)
         pooled = head._pool_sequence(x, m)
         assert tuple(pooled.shape) == (B, D)
 
     def test_cls_pool_matches_first_token(self, fixed_input, attention_mask) -> None:
         head = _make_head("cls")
         pooled = head._pool_sequence(
-            ops.convert_to_tensor(fixed_input),
-            ops.convert_to_tensor(attention_mask),
+            keras.ops.convert_to_tensor(fixed_input),
+            keras.ops.convert_to_tensor(attention_mask),
         )
         np.testing.assert_allclose(
-            ops.convert_to_numpy(pooled), fixed_input[:, 0, :], atol=1e-6
+            keras.ops.convert_to_numpy(pooled), fixed_input[:, 0, :], atol=1e-6
         )
 
     def test_mean_pool_matches_masked_mean(self, fixed_input, attention_mask) -> None:
         head = _make_head("mean")
         pooled = head._pool_sequence(
-            ops.convert_to_tensor(fixed_input),
-            ops.convert_to_tensor(attention_mask),
+            keras.ops.convert_to_tensor(fixed_input),
+            keras.ops.convert_to_tensor(attention_mask),
         )
         # Analytical mask-weighted mean over valid positions.
         m = attention_mask[:, :, None]  # (B, S, 1)
         lengths = np.maximum(m.sum(axis=1), 1.0)  # (B, 1)
         ref = (fixed_input * m).sum(axis=1) / lengths
-        np.testing.assert_allclose(ops.convert_to_numpy(pooled), ref, atol=1e-6)
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(pooled), ref, atol=1e-6)
 
     def test_max_pool_matches_masked_max(self, fixed_input, attention_mask) -> None:
         head = _make_head("max")
         pooled = head._pool_sequence(
-            ops.convert_to_tensor(fixed_input),
-            ops.convert_to_tensor(attention_mask),
+            keras.ops.convert_to_tensor(fixed_input),
+            keras.ops.convert_to_tensor(attention_mask),
         )
         # Analytical masked max: masked positions pushed to -inf-equivalent.
         m = attention_mask[:, :, None]
         masked = fixed_input + (1.0 - m) * (-1e9)
         ref = masked.max(axis=1)
-        np.testing.assert_allclose(ops.convert_to_numpy(pooled), ref, atol=1e-6)
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(pooled), ref, atol=1e-6)
 
     def test_attention_pool_finite_and_BD(self, fixed_input, attention_mask) -> None:
         """attention path is the kept inline Dense(1, tanh) direct-score pooling
@@ -146,9 +145,9 @@ class TestPoolingEquivalence:
         that passes because nothing moves is impossible.
         """
         head = _make_head("attention")
-        x = ops.convert_to_tensor(fixed_input)
-        m = ops.convert_to_tensor(attention_mask)
-        pooled_np = ops.convert_to_numpy(head._pool_sequence(x, m))
+        x = keras.ops.convert_to_tensor(fixed_input)
+        m = keras.ops.convert_to_tensor(attention_mask)
+        pooled_np = keras.ops.convert_to_numpy(head._pool_sequence(x, m))
         assert pooled_np.shape == (B, D)
         assert np.all(np.isfinite(pooled_np))
 
@@ -160,8 +159,8 @@ class TestPoolingEquivalence:
             return out
 
         # LIVE CONTROL FIRST. Position 0 of row 0 is kept, so it must move.
-        live = ops.convert_to_numpy(
-            head._pool_sequence(ops.convert_to_tensor(_perturbed(0)), m)
+        live = keras.ops.convert_to_numpy(
+            head._pool_sequence(keras.ops.convert_to_tensor(_perturbed(0)), m)
         )
         live_delta = float(np.max(np.abs(live - pooled_np)))
         assert live_delta > 1e-2, (
@@ -171,8 +170,8 @@ class TestPoolingEquivalence:
         )
 
         # Row 0's last token is masked. Its content must not reach the output.
-        leaked = ops.convert_to_numpy(
-            head._pool_sequence(ops.convert_to_tensor(_perturbed(S - 1)), m)
+        leaked = keras.ops.convert_to_numpy(
+            head._pool_sequence(keras.ops.convert_to_tensor(_perturbed(S - 1)), m)
         )
         np.testing.assert_allclose(
             leaked, pooled_np, rtol=0, atol=0,
@@ -194,10 +193,10 @@ class TestPoolingEquivalence:
         head = _make_head("attention")
         mask = np.array(attention_mask, copy=True)
         mask[0, :] = 0.0
-        pooled = ops.convert_to_numpy(
+        pooled = keras.ops.convert_to_numpy(
             head._pool_sequence(
-                ops.convert_to_tensor(fixed_input),
-                ops.convert_to_tensor(mask),
+                keras.ops.convert_to_tensor(fixed_input),
+                keras.ops.convert_to_tensor(mask),
             )
         )
         assert np.all(np.isfinite(pooled)), (
@@ -208,9 +207,9 @@ class TestPoolingEquivalence:
     def test_mean_unmasked_is_plain_mean(self, fixed_input) -> None:
         """Without a mask, mean pooling == plain mean over the sequence axis."""
         head = _make_head("mean")
-        pooled = head._pool_sequence(ops.convert_to_tensor(fixed_input), None)
+        pooled = head._pool_sequence(keras.ops.convert_to_tensor(fixed_input), None)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(pooled), fixed_input.mean(axis=1), atol=1e-6
+            keras.ops.convert_to_numpy(pooled), fixed_input.mean(axis=1), atol=1e-6
         )
 
 
@@ -295,8 +294,8 @@ class TestNLPFactoryAndRoundtrip:
             loaded = keras.models.load_model(path)
         y1 = loaded(fixed_input)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(y0["logits"]),
-            ops.convert_to_numpy(y1["logits"]),
+            keras.ops.convert_to_numpy(y0["logits"]),
+            keras.ops.convert_to_numpy(y1["logits"]),
             atol=1e-4,
         )
 
@@ -347,10 +346,10 @@ class TestTheMaskedHeadsSurviveMixedFloat16:
         # dtype only on the public path, and it is the compute dtype that
         # materializes the sentinel.
         out = head({
-            "hidden_states": ops.convert_to_tensor(fixed_input),
-            "attention_mask": ops.convert_to_tensor(attention_mask),
+            "hidden_states": keras.ops.convert_to_tensor(fixed_input),
+            "attention_mask": keras.ops.convert_to_tensor(attention_mask),
         })
-        logits = ops.convert_to_numpy(out["logits"])
+        logits = keras.ops.convert_to_numpy(out["logits"])
         assert np.all(np.isfinite(logits)), (
             f"attention pooling produced non-finite output under "
             f"mixed_float16: {logits}. `0.0 * float16(-1e9)` is `0.0 * -inf` "
@@ -373,11 +372,11 @@ class TestTheMaskedHeadsSurviveMixedFloat16:
         assert head.compute_dtype == "float16"
 
         out = head({
-            "hidden_states": ops.convert_to_tensor(fixed_input),
-            "attention_mask": ops.convert_to_tensor(attention_mask),
+            "hidden_states": keras.ops.convert_to_tensor(fixed_input),
+            "attention_mask": keras.ops.convert_to_tensor(attention_mask),
         })
         for key in ("start_logits", "end_logits"):
-            values = ops.convert_to_numpy(out[key])
+            values = keras.ops.convert_to_numpy(out[key])
             assert np.all(np.isfinite(values)), (
                 f"{key} is non-finite under mixed_float16: {values}"
             )
@@ -405,20 +404,20 @@ class TestTheMaskedHeadsSurviveMixedFloat16:
         )
         head.build((B, S, D))
 
-        x = ops.convert_to_tensor(fixed_input)
+        x = keras.ops.convert_to_tensor(fixed_input)
         unmasked = head(x)
 
         for key in ("start_logits", "end_logits"):
-            winner = int(np.argmax(ops.convert_to_numpy(unmasked[key])[0]))
+            winner = int(np.argmax(keras.ops.convert_to_numpy(unmasked[key])[0]))
 
             # Mask exactly the unmasked winner, in row 0 only.
             mask = np.ones((B, S), dtype="float32")
             mask[0, winner] = 0.0
 
-            logits = ops.convert_to_numpy(
+            logits = keras.ops.convert_to_numpy(
                 head({
                     "hidden_states": x,
-                    "attention_mask": ops.convert_to_tensor(mask),
+                    "attention_mask": keras.ops.convert_to_tensor(mask),
                 })[key]
             )[0]
 

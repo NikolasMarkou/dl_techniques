@@ -19,7 +19,6 @@ This module provides extensive testing for the AccUNet implementation including:
 import pytest
 import numpy as np
 import keras
-from keras import ops
 import tempfile
 import os
 
@@ -409,8 +408,8 @@ class TestAccUNetSerialization:
 
             # Check that outputs are numerically identical
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Outputs should match after serialization"
             )
@@ -444,8 +443,8 @@ class TestAccUNetSerialization:
             # Check output shapes and numerical accuracy
             assert loaded_output.shape == original_output.shape
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Outputs should match after serialization"
             )
@@ -471,8 +470,8 @@ class TestAccUNetSerialization:
 
             # Verify outputs match
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6
             )
 

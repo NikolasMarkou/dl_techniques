@@ -1,6 +1,5 @@
 import keras
 import numpy as np
-from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Any, List, Union
 
@@ -474,10 +473,10 @@ def l2_normalize(
     # bounded by the vector length regardless of the input magnitude. Dividing
     # by a strictly positive peak is safe at ANY positive float32 -- including a
     # subnormal one -- because the quotient is bounded by 1 by construction.
-    peak = ops.max(ops.abs(x), axis=axis, keepdims=True)
+    peak = keras.ops.max(keras.ops.abs(x), axis=axis, keepdims=True)
 
-    scaled = x / ops.where(peak > 0.0, peak, ops.ones_like(peak))
-    norms = ops.sqrt(ops.sum(ops.square(scaled), axis=axis, keepdims=True) + eps)
+    scaled = x / keras.ops.where(peak > 0.0, peak, keras.ops.ones_like(peak))
+    norms = keras.ops.sqrt(keras.ops.sum(keras.ops.square(scaled), axis=axis, keepdims=True) + eps)
 
     return scaled / norms
 
@@ -711,10 +710,10 @@ def window_partition(x: keras.KerasTensor, window_size: int) -> keras.KerasTenso
     Returns:
         Windows tensor of shape (B*num_windows, window_size, window_size, C).
     """
-    B, H, W, C = ops.shape(x)[0], ops.shape(x)[1], ops.shape(x)[2], ops.shape(x)[3]
-    x = ops.reshape(x, (B, H // window_size, window_size, W // window_size, window_size, C))
-    windows = ops.transpose(x, (0, 1, 3, 2, 4, 5))
-    windows = ops.reshape(windows, (-1, window_size, window_size, C))
+    B, H, W, C = keras.ops.shape(x)[0], keras.ops.shape(x)[1], keras.ops.shape(x)[2], keras.ops.shape(x)[3]
+    x = keras.ops.reshape(x, (B, H // window_size, window_size, W // window_size, window_size, C))
+    windows = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
+    windows = keras.ops.reshape(windows, (-1, window_size, window_size, C))
     return windows
 
 # ---------------------------------------------------------------------
@@ -731,10 +730,10 @@ def window_reverse(windows: keras.KerasTensor, window_size: int, H: int, W: int)
     Returns:
         Feature map tensor of shape (B, H, W, C).
     """
-    B = ops.shape(windows)[0] // (H * W // window_size // window_size)
-    x = ops.reshape(windows, (B, H // window_size, W // window_size, window_size, window_size, -1))
-    x = ops.transpose(x, (0, 1, 3, 2, 4, 5))
-    x = ops.reshape(x, (B, H, W, -1))
+    B = keras.ops.shape(windows)[0] // (H * W // window_size // window_size)
+    x = keras.ops.reshape(windows, (B, H // window_size, W // window_size, window_size, window_size, -1))
+    x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
+    x = keras.ops.reshape(x, (B, H, W, -1))
     return x
 
 # ---------------------------------------------------------------------
@@ -757,17 +756,17 @@ def gaussian_probability(y: keras.KerasTensor, mu: keras.KerasTensor, sigma: ker
         Probability densities tensor of shape [batch_size, num_mixtures, output_dim]
     """
     # Ensure numerical stability with a minimum standard deviation
-    sigma = ops.maximum(1e-6, sigma)
-    sigma = ops.cast(sigma, "float32")
+    sigma = keras.ops.maximum(1e-6, sigma)
+    sigma = keras.ops.cast(sigma, "float32")
 
     # Compute normalized squared difference
-    norm = ops.sqrt(2.0 * np.pi) * sigma
-    y = ops.cast(y, "float32")
-    mu = ops.cast(mu, "float32")
-    norm = ops.cast(norm, "float32")
-    exp_term = -0.5 * ops.square((y - mu) / sigma)
+    norm = keras.ops.sqrt(2.0 * np.pi) * sigma
+    y = keras.ops.cast(y, "float32")
+    mu = keras.ops.cast(mu, "float32")
+    norm = keras.ops.cast(norm, "float32")
+    exp_term = -0.5 * keras.ops.square((y - mu) / sigma)
 
-    return ops.exp(exp_term) / norm
+    return keras.ops.exp(exp_term) / norm
 
 # ---------------------------------------------------------------------
 
@@ -823,15 +822,15 @@ def log_gamma(x: keras.KerasTensor) -> keras.KerasTensor:
           J. SIAM Numer. Anal. 1(1): 86-96.
     """
     dtype = getattr(x, "dtype", None) or keras.config.floatx()
-    z = ops.cast(x, dtype) - 1.0
+    z = keras.ops.cast(x, dtype) - 1.0
 
-    series = ops.full_like(z, _LANCZOS_COEFFS[0])
+    series = keras.ops.full_like(z, _LANCZOS_COEFFS[0])
     for i, coeff in enumerate(_LANCZOS_COEFFS[1:], start=1):
         series = series + coeff / (z + float(i))
 
     t = z + _LANCZOS_G + 0.5
     half_log_two_pi = 0.5 * float(np.log(2.0 * np.pi))
-    return half_log_two_pi + (z + 0.5) * ops.log(t) - t + ops.log(series)
+    return half_log_two_pi + (z + 0.5) * keras.ops.log(t) - t + keras.ops.log(series)
 
 # ---------------------------------------------------------------------
 
@@ -844,7 +843,7 @@ def length(vectors) -> Any:
     Returns:
         Length of vectors with shape [...]
     """
-    return ops.sqrt(ops.sum(ops.square(vectors), axis=-1) + keras.config.epsilon())
+    return keras.ops.sqrt(keras.ops.sum(keras.ops.square(vectors), axis=-1) + keras.config.epsilon())
 
 # ---------------------------------------------------------------------
 
@@ -877,8 +876,8 @@ def pairwise_squared_distance(
     :rtype: keras.KerasTensor
     """
     # (..., N, 1, D) - (M, D) -> (..., N, M, D), summed over D -> (..., N, M).
-    diff = ops.expand_dims(points, axis=-2) - centers
-    return ops.sum(ops.square(diff), axis=-1)
+    diff = keras.ops.expand_dims(points, axis=-2) - centers
+    return keras.ops.sum(keras.ops.square(diff), axis=-1)
 
 # ---------------------------------------------------------------------
 
@@ -913,6 +912,6 @@ def resolve_training_factor(training: Any, dtype: Any = "float32") -> Any:
         return None
     if training is True:
         return 1.0
-    return ops.cast(training, dtype)
+    return keras.ops.cast(training, dtype)
 
 # ---------------------------------------------------------------------

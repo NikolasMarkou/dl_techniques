@@ -34,7 +34,6 @@ References:
 """
 
 import keras
-from keras import ops, layers
 from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -177,7 +176,7 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         self.attention_type = attention_type
 
         # Create sub-layers in __init__
-        self.token_embeddings = layers.Embedding(
+        self.token_embeddings = keras.layers.Embedding(
             vocab_size,
             hidden_size,
             name='token_embeddings'
@@ -268,17 +267,17 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # non-padded position. take_along_axis requires the index tensor to match
         # the rank of `hidden_states` (B, T, D), so broadcast the per-row last
         # index to (B, 1, D) before gathering.
-        sequence_lengths = ops.sum(ops.cast(attention_mask, "int32"), axis=1) - 1
-        hidden_dim = ops.shape(hidden_states)[-1]
+        sequence_lengths = keras.ops.sum(keras.ops.cast(attention_mask, "int32"), axis=1) - 1
+        hidden_dim = keras.ops.shape(hidden_states)[-1]
 
-        gather_indices = ops.reshape(sequence_lengths, (-1, 1, 1))
-        gather_indices = ops.broadcast_to(
-            gather_indices, (ops.shape(hidden_states)[0], 1, hidden_dim)
+        gather_indices = keras.ops.reshape(sequence_lengths, (-1, 1, 1))
+        gather_indices = keras.ops.broadcast_to(
+            gather_indices, (keras.ops.shape(hidden_states)[0], 1, hidden_dim)
         )
-        pooled_embeddings = ops.take_along_axis(
+        pooled_embeddings = keras.ops.take_along_axis(
             hidden_states, gather_indices, axis=1
         )
-        pooled_embeddings = ops.squeeze(pooled_embeddings, axis=1)
+        pooled_embeddings = keras.ops.squeeze(pooled_embeddings, axis=1)
 
         # Apply optional dimension truncation (MRL)
         if self.truncate_dim:
@@ -286,7 +285,7 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
 
         # Apply optional L2 normalization
         if self.normalize:
-            pooled_embeddings = ops.normalize(pooled_embeddings, axis=1)
+            pooled_embeddings = keras.ops.normalize(pooled_embeddings, axis=1)
 
         return pooled_embeddings
 
@@ -454,7 +453,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         self.no_token_id = no_token_id
 
         # Create sub-layers in __init__
-        self.token_embeddings = layers.Embedding(
+        self.token_embeddings = keras.layers.Embedding(
             vocab_size,
             hidden_size,
             name='token_embeddings'
@@ -492,7 +491,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         )
 
         # Language modeling head
-        self.lm_head = layers.Dense(
+        self.lm_head = keras.layers.Dense(
             vocab_size,
             use_bias=False,
             name='lm_head'
@@ -565,17 +564,17 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Get the logits for the last token in each sequence. take_along_axis
         # needs the index tensor to match the rank of `logits` (B, T, V), so
         # broadcast the per-row last index to (B, 1, V) before gathering.
-        sequence_lengths = ops.sum(ops.cast(attention_mask, "int32"), axis=1) - 1
-        vocab_dim = ops.shape(logits)[-1]
+        sequence_lengths = keras.ops.sum(keras.ops.cast(attention_mask, "int32"), axis=1) - 1
+        vocab_dim = keras.ops.shape(logits)[-1]
 
-        gather_indices = ops.reshape(sequence_lengths, (-1, 1, 1))
-        gather_indices = ops.broadcast_to(
-            gather_indices, (ops.shape(logits)[0], 1, vocab_dim)
+        gather_indices = keras.ops.reshape(sequence_lengths, (-1, 1, 1))
+        gather_indices = keras.ops.broadcast_to(
+            gather_indices, (keras.ops.shape(logits)[0], 1, vocab_dim)
         )
-        last_token_logits = ops.take_along_axis(
+        last_token_logits = keras.ops.take_along_axis(
             logits, gather_indices, axis=1
         )
-        last_token_logits = ops.squeeze(last_token_logits, axis=1)
+        last_token_logits = keras.ops.squeeze(last_token_logits, axis=1)
 
         # Extract logits for "yes" and "no" tokens
         yes_logits = last_token_logits[:, self.yes_token_id]
@@ -584,7 +583,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # DECISION plan-2026-10-14T062616-81938e81/D-152: the output is P(yes), the
         # reference model card's score (log_softmax over [no, yes], then exp); a
         # named exception to the logits rule (models/GUIDE.md). Do not return yes - no.
-        combined_logits = ops.stack([no_logits, yes_logits], axis=1)
+        combined_logits = keras.ops.stack([no_logits, yes_logits], axis=1)
         probabilities = keras.activations.softmax(combined_logits, axis=1)
 
         # The score is the probability of "yes"

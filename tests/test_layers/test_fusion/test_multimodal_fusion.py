@@ -1,6 +1,5 @@
 import pytest
 import keras
-from keras import ops
 import numpy as np
 import tensorflow as tf
 import tempfile
@@ -78,7 +77,7 @@ class TestMultiModalFusion:
 
         assert layer.built, f"Layer should be built after forward pass for strategy '{strategy}'"
 
-        batch_size, seq_len = ops.shape(sample_input[0])[:2]
+        batch_size, seq_len = keras.ops.shape(sample_input[0])[:2]
 
         if strategy == 'attention_pooling':
             # Special case: attention pooling reduces the sequence dimension
@@ -128,8 +127,8 @@ class TestMultiModalFusion:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg=f"Predictions differ after serialization for strategy '{strategy}'"
             )
@@ -154,8 +153,8 @@ class TestMultiModalFusion:
             # Verify identical predictions for each output
             for orig, loaded in zip(original_preds, loaded_preds):
                 np.testing.assert_allclose(
-                    ops.convert_to_numpy(orig),
-                    ops.convert_to_numpy(loaded),
+                    keras.ops.convert_to_numpy(orig),
+                    keras.ops.convert_to_numpy(loaded),
                     rtol=1e-6, atol=1e-6,
                     err_msg="Predictions differ after serialization for cross-attention strategy"
                 )
@@ -379,7 +378,7 @@ class TestMultiModalFusion:
         )(inputs)
         model = keras.Model(inputs=inputs, outputs=outputs)
 
-        original_prediction = ops.convert_to_numpy(
+        original_prediction = keras.ops.convert_to_numpy(
             model(sample_input, training=False)
         )
 
@@ -388,7 +387,7 @@ class TestMultiModalFusion:
             model.save(filepath)
 
             loaded_model = keras.models.load_model(filepath)
-            loaded_prediction = ops.convert_to_numpy(
+            loaded_prediction = keras.ops.convert_to_numpy(
                 loaded_model(sample_input, training=False)
             )
 
@@ -419,7 +418,7 @@ class TestMultiModalFusion:
         outputs = fusion_layer(inputs)
         model = keras.Model(inputs=inputs, outputs=outputs)
 
-        original_prediction = ops.convert_to_numpy(
+        original_prediction = keras.ops.convert_to_numpy(
             model(sample_input, training=False)
         )
 
@@ -436,7 +435,7 @@ class TestMultiModalFusion:
             perturbed_weight = loaded_fusion_layer.trainable_weights[0]
             perturbed_weight.assign(perturbed_weight + 1.0)
 
-            perturbed_prediction = ops.convert_to_numpy(
+            perturbed_prediction = keras.ops.convert_to_numpy(
                 loaded_model(sample_input, training=False)
             )
 
@@ -456,7 +455,7 @@ class TestMultiModalFusion:
         with tf.GradientTape() as tape:
             tape.watch(sample_input)
             output = layer(sample_input)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         gradients = tape.gradient(loss, layer.trainable_variables)
 
@@ -471,7 +470,7 @@ class TestMultiModalFusion:
             tape.watch(sample_input)
             outputs = layer(sample_input)
             # Sum losses from all outputs
-            loss = sum(ops.mean(ops.square(o)) for o in outputs)
+            loss = sum(keras.ops.mean(keras.ops.square(o)) for o in outputs)
 
         gradients = tape.gradient(loss, layer.trainable_variables)
 

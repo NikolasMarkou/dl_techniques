@@ -26,7 +26,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List, get_args
 
 # ---------------------------------------------------------------------
@@ -203,10 +202,10 @@ class TextEncoder(keras.layers.Layer):
             stochastic_depth_rate: float = 0.0,
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             initializer_range: float = 0.02,
             layer_norm_eps: float = 1e-12,
             rope_theta: float = 10000.0,
@@ -308,10 +307,10 @@ class TextEncoder(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = resolve_activation(activation)
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.rope_theta = rope_theta
@@ -333,11 +332,11 @@ class TextEncoder(keras.layers.Layer):
         # Create token type embeddings if needed
         self.token_type_embeddings = None
         if use_token_type_embedding:
-            self.token_type_embeddings = layers.Embedding(
+            self.token_type_embeddings = keras.layers.Embedding(
                 input_dim=type_vocab_size,
                 output_dim=embed_dim,
                 mask_zero=False,
-                embeddings_initializer=initializers.TruncatedNormal(stddev=initializer_range),
+                embeddings_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range),
                 embeddings_regularizer=kernel_regularizer,
                 name='token_type_embeddings'
             )
@@ -353,7 +352,7 @@ class TextEncoder(keras.layers.Layer):
             **norm_config
         )
 
-        self.embed_dropout_layer = layers.Dropout(
+        self.embed_dropout_layer = keras.layers.Dropout(
             embed_dropout_rate,
             name='embed_dropout'
         ) if embed_dropout_rate > 0.0 else None
@@ -382,7 +381,7 @@ class TextEncoder(keras.layers.Layer):
                 stochastic_depth_rate=layer_drop_rate,
                 activation=activation,
                 use_bias=use_bias,
-                kernel_initializer=initializers.TruncatedNormal(stddev=initializer_range),
+                kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range),
                 bias_initializer=bias_initializer,
                 kernel_regularizer=kernel_regularizer,
                 bias_regularizer=bias_regularizer,
@@ -416,7 +415,7 @@ class TextEncoder(keras.layers.Layer):
         # DECISION plan-2026-08-22T035419-a11304c8/D-055: mask_zero defaults to
         # False; nothing downstream consumes the Embedding auto-mask, so True was numerically inert but warned. See decisions.md.
         base_args = {
-            'embeddings_initializer': initializers.TruncatedNormal(stddev=self.initializer_range),
+            'embeddings_initializer': keras.initializers.TruncatedNormal(stddev=self.initializer_range),
             'embeddings_regularizer': self.kernel_regularizer,
             'mask_zero': False,
         }
@@ -427,7 +426,7 @@ class TextEncoder(keras.layers.Layer):
         self.embed_projection_layer = None
 
         if self.embedding_type == 'learned':
-            self.word_embeddings = layers.Embedding(
+            self.word_embeddings = keras.layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=self.embed_dim,
                 name='word_embeddings',
@@ -437,20 +436,20 @@ class TextEncoder(keras.layers.Layer):
             factorized_dim = min(self.embed_dim, 128)
             factorized_dim = self.embedding_args.get('factorized_dim', factorized_dim)
 
-            self.factorized_embed_layer = layers.Embedding(
+            self.factorized_embed_layer = keras.layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=factorized_dim,
-                embeddings_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
+                embeddings_initializer=keras.initializers.TruncatedNormal(stddev=self.initializer_range),
                 embeddings_regularizer=self.kernel_regularizer,
                 # DECISION plan-2026-08-22T035419-a11304c8/D-055: same as
                 # base_args above -- factorized path drops the unconsumed auto-mask too.
                 mask_zero=False,
                 name='factorized_embed'
             )
-            self.embed_projection_layer = layers.Dense(
+            self.embed_projection_layer = keras.layers.Dense(
                 self.embed_dim,
                 use_bias=False,
-                kernel_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
+                kernel_initializer=keras.initializers.TruncatedNormal(stddev=self.initializer_range),
                 kernel_regularizer=self.kernel_regularizer,
                 name='embed_projection'
             )
@@ -541,7 +540,7 @@ class TextEncoder(keras.layers.Layer):
             self.cls_token = self.add_weight(
                 name="cls_token",
                 shape=(1, 1, self.embed_dim),
-                initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
+                initializer=keras.initializers.TruncatedNormal(stddev=self.initializer_range),
                 trainable=True
             )
 
@@ -641,7 +640,7 @@ class TextEncoder(keras.layers.Layer):
         else:
             input_ids = inputs
 
-        batch_size = ops.shape(input_ids)[0]
+        batch_size = keras.ops.shape(input_ids)[0]
 
         # Word embeddings
         if self.embedding_type == 'factorized':
@@ -654,7 +653,7 @@ class TextEncoder(keras.layers.Layer):
         if self.use_token_type_embedding and self.token_type_embeddings is not None:
             if token_type_ids is None:
                 # Default to all zeros (first segment)
-                token_type_ids = ops.zeros_like(input_ids)
+                token_type_ids = keras.ops.zeros_like(input_ids)
             type_embeddings = self.token_type_embeddings(token_type_ids, training=training)
             x = x + type_embeddings
 
@@ -667,12 +666,12 @@ class TextEncoder(keras.layers.Layer):
                     "would have to be invented); pass a 2D (batch, seq_len) "
                     "padding mask, or build the encoder without a CLS token."
                 )
-            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-            x = ops.concatenate([cls_tokens, x], axis=1)
+            cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+            x = keras.ops.concatenate([cls_tokens, x], axis=1)
             # Update attention mask to account for CLS token
             if attention_mask is not None:
-                cls_mask = ops.ones((batch_size, 1), dtype=attention_mask.dtype)
-                attention_mask = ops.concatenate([cls_mask, attention_mask], axis=1)
+                cls_mask = keras.ops.ones((batch_size, 1), dtype=attention_mask.dtype)
+                attention_mask = keras.ops.concatenate([cls_mask, attention_mask], axis=1)
 
         # Add positional embeddings
         if self.positional_embeddings is not None:
@@ -680,7 +679,7 @@ class TextEncoder(keras.layers.Layer):
                 x = self.positional_embeddings(x, training=training)
             else:  # sincos
                 # Create position coordinates
-                current_seq_len = ops.shape(x)[1]
+                current_seq_len = keras.ops.shape(x)[1]
                 # Cast to THIS layer's active compute dtype rather than a
                 # hardcoded 'float32', for consistency with the rest of the
                 # forward path. Cosmetic only: measured bit-identical under the
@@ -690,10 +689,10 @@ class TextEncoder(keras.layers.Layer):
                 # which does its own forced float32 cast against an autocast
                 # weight, and is out of scope here. Do not add a docstring
                 # claiming that gap is closed.
-                positions = ops.cast(ops.arange(current_seq_len), dtype=self.compute_dtype)
-                positions = ops.expand_dims(positions, axis=-1)  # (seq_len, 1)
-                positions = ops.expand_dims(positions, axis=0)  # (1, seq_len, 1)
-                positions = ops.broadcast_to(positions, (batch_size, current_seq_len, 1))
+                positions = keras.ops.cast(keras.ops.arange(current_seq_len), dtype=self.compute_dtype)
+                positions = keras.ops.expand_dims(positions, axis=-1)  # (seq_len, 1)
+                positions = keras.ops.expand_dims(positions, axis=0)  # (1, seq_len, 1)
+                positions = keras.ops.broadcast_to(positions, (batch_size, current_seq_len, 1))
 
                 pos_embeddings = self.positional_embeddings(positions, training=training)
                 x = x + pos_embeddings
@@ -719,9 +718,9 @@ class TextEncoder(keras.layers.Layer):
         # (mean == x[:, 0], measured) and 'none' zeroed the rest.
         pooling_mask = None
         if attention_mask is not None:
-            if len(ops.shape(attention_mask)) == 2:
+            if len(keras.ops.shape(attention_mask)) == 2:
                 pooling_mask = attention_mask
-            elif len(ops.shape(attention_mask)) == 3:
+            elif len(keras.ops.shape(attention_mask)) == 3:
                 pooling_mask = keras.ops.any(
                     keras.ops.cast(attention_mask, 'bool'), axis=1
                 )
@@ -887,10 +886,10 @@ class TextEncoder(keras.layers.Layer):
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'initializer_range': self.initializer_range,
             'layer_norm_eps': self.layer_norm_eps,
             'rope_theta': self.rope_theta,

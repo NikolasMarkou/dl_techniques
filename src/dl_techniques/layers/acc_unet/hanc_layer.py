@@ -19,7 +19,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, Any, List, Dict
 
 # ---------------------------------------------------------------------
@@ -210,12 +209,12 @@ class HANCLayer(keras.layers.Layer):
             concatenated = inputs
         else:
             features_list = [inputs]
-            input_shape = ops.shape(inputs)
+            input_shape = keras.ops.shape(inputs)
             height, width = input_shape[1], input_shape[2]
 
             for avg_pool, max_pool in zip(self.avg_pooling_layers, self.max_pooling_layers):
                 avg_feat = avg_pool(inputs)
-                avg_resized = ops.image.resize(
+                avg_resized = keras.ops.image.resize(
                     avg_feat,
                     size=(height, width),
                     interpolation='nearest'
@@ -223,7 +222,7 @@ class HANCLayer(keras.layers.Layer):
                 features_list.append(avg_resized)
 
                 max_feat = max_pool(inputs)
-                max_resized = ops.image.resize(
+                max_resized = keras.ops.image.resize(
                     max_feat,
                     size=(height, width),
                     interpolation='nearest'

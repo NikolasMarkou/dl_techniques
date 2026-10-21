@@ -16,7 +16,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 from typing import List, Dict, Any
 
 from dl_techniques.layers.ffn.kan_linear import KANLinear
@@ -185,8 +184,8 @@ class TestKAN:
 
         # Check output shape and validity
         assert output.shape == (16, 2)  # Final layer has 2 features
-        assert not ops.any(ops.isnan(output))
-        assert not ops.any(ops.isinf(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isinf(output))
 
     def test_forward_pass_complex(
         self,
@@ -203,8 +202,8 @@ class TestKAN:
 
         # Check output shape and validity
         assert output.shape == (16, 5)  # Final layer has 5 features
-        assert not ops.any(ops.isnan(output))
-        assert not ops.any(ops.isinf(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isinf(output))
 
     def test_empty_batch_handling(self, simple_layer_configs: List[Dict[str, Any]]) -> None:
         """Test handling of empty batches."""
@@ -214,7 +213,7 @@ class TestKAN:
         )
 
         # Create empty batch
-        empty_input = ops.zeros((0, 10))
+        empty_input = keras.ops.zeros((0, 10))
         output = model(empty_input)
 
         # Should return appropriately shaped empty tensor
@@ -366,7 +365,7 @@ class TestKAN:
             output = model(test_input)
 
             assert output.shape == (8, output_features)
-            assert not ops.any(ops.isnan(output))
+            assert not keras.ops.any(keras.ops.isnan(output))
 
 
 class TestKANVariants:
@@ -540,7 +539,7 @@ class TestEdgeCases:
         output = model(single_input)
 
         assert output.shape == (1, 4)
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_large_batch(self) -> None:
         """Test with large batch sizes."""
@@ -553,7 +552,7 @@ class TestEdgeCases:
         output = model(large_batch_input)
 
         assert output.shape == (1000, 5)
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_extreme_values(self) -> None:
         """Test with extreme input values."""
@@ -563,18 +562,18 @@ class TestEdgeCases:
         )
 
         # Test with large values
-        large_input = ops.ones((2, 4)) * 100.0
+        large_input = keras.ops.ones((2, 4)) * 100.0
         output_large = model(large_input)
 
         # Test with small values
-        small_input = ops.ones((2, 4)) * 1e-6
+        small_input = keras.ops.ones((2, 4)) * 1e-6
         output_small = model(small_input)
 
         # Should handle without NaN/Inf
-        assert not ops.any(ops.isnan(output_large))
-        assert not ops.any(ops.isnan(output_small))
-        assert not ops.any(ops.isinf(output_large))
-        assert not ops.any(ops.isinf(output_small))
+        assert not keras.ops.any(keras.ops.isnan(output_large))
+        assert not keras.ops.any(keras.ops.isnan(output_small))
+        assert not keras.ops.any(keras.ops.isinf(output_large))
+        assert not keras.ops.any(keras.ops.isinf(output_small))
 
     def test_numerical_stability_different_ranges(self) -> None:
         """Test numerical stability with different grid ranges."""
@@ -595,8 +594,8 @@ class TestEdgeCases:
             test_input = keras.random.normal([4, 3])
             output = model(test_input)
 
-            assert not ops.any(ops.isnan(output))
-            assert not ops.any(ops.isinf(output))
+            assert not keras.ops.any(keras.ops.isnan(output))
+            assert not keras.ops.any(keras.ops.isinf(output))
 
 
 class TestModelSaveLoad:
@@ -641,8 +640,8 @@ class TestModelSaveLoad:
             loaded_predictions = loaded_model.predict(x_test, verbose=0)
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_predictions),
-                ops.convert_to_numpy(loaded_predictions),
+                keras.ops.convert_to_numpy(original_predictions),
+                keras.ops.convert_to_numpy(loaded_predictions),
                 rtol=1e-5, atol=1e-6
             )
 
@@ -678,8 +677,8 @@ class TestModelSaveLoad:
             # random). The in-file exemplar is `test_model_save_load_with_kan`
             # above -- same instrument here.
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-5, atol=1e-6,
             )
             assert loaded_model.input_features == original_model.input_features
@@ -709,8 +708,8 @@ class TestModelSaveLoad:
             loaded_output = loaded_model(x_test)
             # Values, not shapes -- see `test_kan_model_save_load_direct`.
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-5, atol=1e-6,
             )
             assert loaded_model.input_features == original_model.input_features
@@ -759,7 +758,7 @@ class TestPerformance:
             output = model(test_input)
 
             assert output.shape == (batch_size, output_features)
-            assert not ops.any(ops.isnan(output))
+            assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_parameter_estimation_accuracy(self) -> None:
         """Test that parameter estimation is reasonable."""

@@ -261,7 +261,7 @@ def no_repo_root_results_writes():
 import random
 
 import numpy as np
-from keras.src.backend.common import global_state as _keras_global_state
+import keras
 from tensorflow.python.eager import context as _tf_eager_context
 from tensorflow.python.ops import stateful_random_ops as _tf_stateful_random
 
@@ -295,7 +295,7 @@ def _capture_global_rng_state() -> dict:
     """
     ctx = _tf_eager_context.context()
     tf_op_rng = getattr(ctx, "_rng", None)
-    keras_seed_generator = _keras_global_state.get_global_attribute(
+    keras_seed_generator = keras.src.backend.common.global_state.get_global_attribute(
         "global_seed_generator")
     tf_global_generator = _tf_stateful_random.global_generator
 
@@ -357,14 +357,14 @@ def _restore_global_rng_state(snapshot: dict) -> None:
     if previous_keras_generator is None:
         # Created during the test: drop the reference so the next unseeded
         # `keras.random.*` call rebuilds it from the (now restored) Python RNG.
-        if _keras_global_state.get_global_attribute(
+        if keras.src.backend.common.global_state.get_global_attribute(
                 "global_seed_generator") is not None:
-            _keras_global_state.set_global_attribute(
+            keras.src.backend.common.global_state.set_global_attribute(
                 "global_seed_generator", None)
     else:
         previous_keras_generator.state.assign(
             snapshot["keras_seed_generator_state"])
-        _keras_global_state.set_global_attribute(
+        keras.src.backend.common.global_state.set_global_attribute(
             "global_seed_generator", previous_keras_generator)
 
     previous_tf_generator = snapshot["tf_global_generator"]

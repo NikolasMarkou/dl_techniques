@@ -48,7 +48,6 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Tuple, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -68,7 +67,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class TripletAttentionBranch(layers.Layer):
+class TripletAttentionBranch(keras.layers.Layer):
     """
     Single branch of the Triplet Attention mechanism.
 
@@ -198,8 +197,8 @@ class TripletAttentionBranch(layers.Layer):
         self.kernel_size = kernel_size
         self.permute_pattern = pattern
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
@@ -231,7 +230,7 @@ class TripletAttentionBranch(layers.Layer):
         # to fan out. See `src/dl_techniques/initializers/clone.py` and
         # decisions.md D-010.
         # Layers defined in init, built in build
-        self.conv = layers.Conv2D(
+        self.conv = keras.layers.Conv2D(
             filters=1,
             kernel_size=kernel_size,
             strides=1,
@@ -241,7 +240,7 @@ class TripletAttentionBranch(layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name="conv"
         )
-        self.batch_norm = layers.BatchNormalization(name="bn")
+        self.batch_norm = keras.layers.BatchNormalization(name="bn")
         self.sigmoid = resolve_activation_layer(
             self.gate_activation_type,
             name="gate_activation",
@@ -301,15 +300,15 @@ class TripletAttentionBranch(layers.Layer):
             # permute_pattern is relative to spatial+channel dims (0,1,2)
             # We map (0,1,2,3) -> (0, p0+1, p1+1, p2+1)
             perm_order = [0] + [p + 1 for p in self.permute_pattern]
-            x = ops.transpose(inputs, perm_order)
+            x = keras.ops.transpose(inputs, perm_order)
         else:
             x = inputs
 
         # 2. Z-Pooling (Concatenate Avg and Max along last dimension)
         # Result shape: (B, D1, D2, 2)
-        avg_pool = ops.mean(x, axis=-1, keepdims=True)
-        max_pool = ops.max(x, axis=-1, keepdims=True)
-        pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+        avg_pool = keras.ops.mean(x, axis=-1, keepdims=True)
+        max_pool = keras.ops.max(x, axis=-1, keepdims=True)
+        pooled = keras.ops.concatenate([avg_pool, max_pool], axis=-1)
 
         # 3. Attention Map Generation
         attention = self.conv(pooled)
@@ -321,7 +320,7 @@ class TripletAttentionBranch(layers.Layer):
         # 4. Apply Attention
         # x shape: (B, D1, D2, D3), attention shape: (B, D1, D2, 1)
         # Broadcasting handles the multiplication automatically
-        scaled = ops.multiply(x, attention)
+        scaled = keras.ops.multiply(x, attention)
 
         # 5. Inverse Permute
         if self.permute_pattern != (0, 1, 2):
@@ -334,7 +333,7 @@ class TripletAttentionBranch(layers.Layer):
             
             # Add batch dim back
             inv_order = [0] + [p + 1 for p in inv_pattern]
-            scaled = ops.transpose(scaled, inv_order)
+            scaled = keras.ops.transpose(scaled, inv_order)
 
         return scaled
 
@@ -360,8 +359,8 @@ class TripletAttentionBranch(layers.Layer):
             "kernel_size": self.kernel_size,
             "permute_pattern": self.permute_pattern,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "gate_activation_type": self.gate_activation_type,
             "gate_activation_args": self.gate_activation_args,
         })
@@ -370,7 +369,7 @@ class TripletAttentionBranch(layers.Layer):
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class TripSE1(layers.Layer):
+class TripSE1(keras.layers.Layer):
     """
     TripSE1: Triplet Attention with Post-Fusion Squeeze-and-Excitation.
 
@@ -458,8 +457,8 @@ class TripSE1(layers.Layer):
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
@@ -569,7 +568,7 @@ class TripSE1(layers.Layer):
         # TripSE1 sums its branches; TripSE2 and TripSE3 divide by 3 instead.
         # The SE block that follows recalibrates channels, so it absorbs the
         # magnitude difference the sum introduces.
-        combined = ops.add(ops.add(out_hw, out_cw), out_hc)
+        combined = keras.ops.add(keras.ops.add(out_hw, out_cw), out_hc)
 
         output = self.se_block(combined, training=training)
         return output
@@ -596,8 +595,8 @@ class TripSE1(layers.Layer):
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "gate_activation_type": self.gate_activation_type,
             "gate_activation_args": self.gate_activation_args,
         })
@@ -606,7 +605,7 @@ class TripSE1(layers.Layer):
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class TripSE2(layers.Layer):
+class TripSE2(keras.layers.Layer):
     """
     TripSE2: Pre-Process Squeeze-and-Excitation.
 
@@ -693,8 +692,8 @@ class TripSE2(layers.Layer):
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
@@ -708,8 +707,8 @@ class TripSE2(layers.Layer):
 
         # Containers for sub-layers
         self.se_layers: List[SqueezeExcitation] = []
-        self.conv_layers: List[layers.Conv2D] = []
-        self.bn_layers: List[layers.BatchNormalization] = []
+        self.conv_layers: List[keras.layers.Conv2D] = []
+        self.bn_layers: List[keras.layers.BatchNormalization] = []
         self.gate_activations: List[keras.layers.Layer] = []
 
         for suffix in self._suffixes:
@@ -730,7 +729,7 @@ class TripSE2(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_{suffix}"
             ))
-            self.conv_layers.append(layers.Conv2D(
+            self.conv_layers.append(keras.layers.Conv2D(
                 filters=1,
                 kernel_size=kernel_size,
                 padding="same",
@@ -739,7 +738,7 @@ class TripSE2(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
-            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            self.bn_layers.append(keras.layers.BatchNormalization(name=f"bn_{suffix}"))
             self.gate_activations.append(resolve_activation_layer(
                 self.gate_activation_type,
                 name=f"gate_activation_{suffix}",
@@ -800,7 +799,7 @@ class TripSE2(layers.Layer):
             # 1. Permute
             if pattern != (0, 1, 2):
                 perm_order = [0] + [p + 1 for p in pattern]
-                x = ops.transpose(inputs, perm_order)
+                x = keras.ops.transpose(inputs, perm_order)
             else:
                 x = inputs
             
@@ -808,16 +807,16 @@ class TripSE2(layers.Layer):
             x_se = self.se_layers[i](x, training=training)
             
             # 3. Triplet Attention Core
-            avg_pool = ops.mean(x_se, axis=-1, keepdims=True)
-            max_pool = ops.max(x_se, axis=-1, keepdims=True)
-            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            avg_pool = keras.ops.mean(x_se, axis=-1, keepdims=True)
+            max_pool = keras.ops.max(x_se, axis=-1, keepdims=True)
+            pooled = keras.ops.concatenate([avg_pool, max_pool], axis=-1)
             
             att = self.conv_layers[i](pooled)
             att = self.bn_layers[i](att, training=training)
             att = self.gate_activations[i](att, training=training)
 
             # 4. Scale
-            branch_out = ops.multiply(x_se, att)
+            branch_out = keras.ops.multiply(x_se, att)
             
             # 5. Inverse Permute
             if pattern != (0, 1, 2):
@@ -825,13 +824,13 @@ class TripSE2(layers.Layer):
                 for idx, p in enumerate(pattern):
                     inv_pattern[p] = idx
                 inv_order = [0] + [p + 1 for p in inv_pattern]
-                branch_out = ops.transpose(branch_out, inv_order)
+                branch_out = keras.ops.transpose(branch_out, inv_order)
             
             outputs.append(branch_out)
 
         # Average results
-        total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
-        return ops.divide(total, 3.0)
+        total = keras.ops.add(keras.ops.add(outputs[0], outputs[1]), outputs[2])
+        return keras.ops.divide(total, 3.0)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Return the output shape, which equals the input shape.
@@ -855,8 +854,8 @@ class TripSE2(layers.Layer):
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "gate_activation_type": self.gate_activation_type,
             "gate_activation_args": self.gate_activation_args,
         })
@@ -865,7 +864,7 @@ class TripSE2(layers.Layer):
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class TripSE3(layers.Layer):
+class TripSE3(keras.layers.Layer):
     """
     TripSE3: Parallel Squeeze-and-Excitation.
 
@@ -959,8 +958,8 @@ class TripSE3(layers.Layer):
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
@@ -971,8 +970,8 @@ class TripSE3(layers.Layer):
         self._suffixes = ["hw", "cw", "hc"]
 
         self.se_layers: List[SqueezeExcitation] = []
-        self.conv_layers: List[layers.Conv2D] = []
-        self.bn_layers: List[layers.BatchNormalization] = []
+        self.conv_layers: List[keras.layers.Conv2D] = []
+        self.bn_layers: List[keras.layers.BatchNormalization] = []
         self.gate_activations: List[keras.layers.Layer] = []
 
         for suffix in self._suffixes:
@@ -993,7 +992,7 @@ class TripSE3(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_{suffix}"
             ))
-            self.conv_layers.append(layers.Conv2D(
+            self.conv_layers.append(keras.layers.Conv2D(
                 filters=1,
                 kernel_size=kernel_size,
                 padding="same",
@@ -1002,7 +1001,7 @@ class TripSE3(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
-            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            self.bn_layers.append(keras.layers.BatchNormalization(name=f"bn_{suffix}"))
             self.gate_activations.append(resolve_activation_layer(
                 self.gate_activation_type,
                 name=f"gate_activation_{suffix}",
@@ -1056,7 +1055,7 @@ class TripSE3(layers.Layer):
             # 1. Permute
             if pattern != (0, 1, 2):
                 perm_order = [0] + [p + 1 for p in pattern]
-                x = ops.transpose(inputs, perm_order)
+                x = keras.ops.transpose(inputs, perm_order)
             else:
                 x = inputs
             
@@ -1064,9 +1063,9 @@ class TripSE3(layers.Layer):
             x_se_scaled = self.se_layers[i](x, training=training)
             
             # 3. Parallel Path 2: Spatial Attention Map
-            avg_pool = ops.mean(x, axis=-1, keepdims=True)
-            max_pool = ops.max(x, axis=-1, keepdims=True)
-            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            avg_pool = keras.ops.mean(x, axis=-1, keepdims=True)
+            max_pool = keras.ops.max(x, axis=-1, keepdims=True)
+            pooled = keras.ops.concatenate([avg_pool, max_pool], axis=-1)
             
             att_spatial = self.conv_layers[i](pooled)
             att_spatial = self.bn_layers[i](att_spatial, training=training)
@@ -1074,7 +1073,7 @@ class TripSE3(layers.Layer):
             
             # 4. Combine: SE_Output * Spatial_Map
             # equivalent to X * ChannelWeights * SpatialWeights
-            branch_out = ops.multiply(x_se_scaled, att_spatial)
+            branch_out = keras.ops.multiply(x_se_scaled, att_spatial)
             
             # 5. Inverse Permute
             if pattern != (0, 1, 2):
@@ -1082,12 +1081,12 @@ class TripSE3(layers.Layer):
                 for idx, p in enumerate(pattern):
                     inv_pattern[p] = idx
                 inv_order = [0] + [p + 1 for p in inv_pattern]
-                branch_out = ops.transpose(branch_out, inv_order)
+                branch_out = keras.ops.transpose(branch_out, inv_order)
                 
             outputs.append(branch_out)
 
-        total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
-        return ops.divide(total, 3.0)
+        total = keras.ops.add(keras.ops.add(outputs[0], outputs[1]), outputs[2])
+        return keras.ops.divide(total, 3.0)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Return the output shape, which equals the input shape.
@@ -1111,8 +1110,8 @@ class TripSE3(layers.Layer):
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "gate_activation_type": self.gate_activation_type,
             "gate_activation_args": self.gate_activation_args,
         })
@@ -1121,7 +1120,7 @@ class TripSE3(layers.Layer):
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class _SEWeights(layers.Layer):
+class _SEWeights(keras.layers.Layer):
     """
     Internal helper: SE channel logits, pre-sigmoid, with no scaling applied.
 
@@ -1186,10 +1185,10 @@ class _SEWeights(layers.Layer):
         self.activation = deserialize_activation(activation)
         self.activation_args = activation_args
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        self.global_pool = layers.GlobalAveragePooling2D(keepdims=True)
+        self.global_pool = keras.layers.GlobalAveragePooling2D(keepdims=True)
         self.reduction_activation = resolve_activation_layer(
             self.activation,
             name="reduction_activation",
@@ -1237,7 +1236,7 @@ class _SEWeights(layers.Layer):
         # names. Pinned by `tests/test_layers/test_attention/
         # test_the_se_weights_carry_explicit_names.py` and decisions.md D-011.
         if self.conv_reduce is None:
-            self.conv_reduce = layers.Conv2D(
+            self.conv_reduce = keras.layers.Conv2D(
                 filters=bottleneck_channels,
                 kernel_size=1,
                 use_bias=self.use_bias,
@@ -1246,7 +1245,7 @@ class _SEWeights(layers.Layer):
                 name="conv_reduce"
             )
         if self.conv_restore is None:
-            self.conv_restore = layers.Conv2D(
+            self.conv_restore = keras.layers.Conv2D(
                 filters=input_channels,
                 kernel_size=1,
                 use_bias=self.use_bias,
@@ -1322,15 +1321,15 @@ class _SEWeights(layers.Layer):
             "activation": serialize_activation(self.activation),
             "activation_args": self.activation_args,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.tripse_attention")
-class TripSE4(layers.Layer):
+class TripSE4(keras.layers.Layer):
     """
     TripSE4: Hybrid 3D Attention with Affine Fusion.
 
@@ -1442,8 +1441,8 @@ class TripSE4(layers.Layer):
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
         self.se_reduction_activation_type = se_reduction_activation_type
@@ -1454,8 +1453,8 @@ class TripSE4(layers.Layer):
 
         # Components
         self.se_logit_layers: List[_SEWeights] = []
-        self.conv_layers: List[layers.Conv2D] = []
-        self.bn_layers: List[layers.BatchNormalization] = []
+        self.conv_layers: List[keras.layers.Conv2D] = []
+        self.bn_layers: List[keras.layers.BatchNormalization] = []
         self.gate_activations: List[keras.layers.Layer] = []
 
         for suffix in self._suffixes:
@@ -1479,7 +1478,7 @@ class TripSE4(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_logits_{suffix}"
             ))
-            self.conv_layers.append(layers.Conv2D(
+            self.conv_layers.append(keras.layers.Conv2D(
                 filters=1,
                 kernel_size=kernel_size,
                 padding="same",
@@ -1488,7 +1487,7 @@ class TripSE4(layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
-            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            self.bn_layers.append(keras.layers.BatchNormalization(name=f"bn_{suffix}"))
             self.gate_activations.append(resolve_activation_layer(
                 self.gate_activation_type,
                 name=f"gate_activation_{suffix}",
@@ -1563,14 +1562,14 @@ class TripSE4(layers.Layer):
             # 1. Permute
             if pattern != (0, 1, 2):
                 perm_order = [0] + [p + 1 for p in pattern]
-                x = ops.transpose(inputs, perm_order)
+                x = keras.ops.transpose(inputs, perm_order)
             else:
                 x = inputs
                 
             # 2. Path A: Spatial Logits
-            avg_pool = ops.mean(x, axis=-1, keepdims=True)
-            max_pool = ops.max(x, axis=-1, keepdims=True)
-            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            avg_pool = keras.ops.mean(x, axis=-1, keepdims=True)
+            max_pool = keras.ops.max(x, axis=-1, keepdims=True)
+            pooled = keras.ops.concatenate([avg_pool, max_pool], axis=-1)
             
             logits_spatial = self.conv_layers[i](pooled)
             logits_spatial = self.bn_layers[i](logits_spatial, training=training)
@@ -1583,11 +1582,11 @@ class TripSE4(layers.Layer):
             # 4. Fusion: Broadcast Add
             # (B, D1, D2, 1) + (B, 1, 1, D3) -> (B, D1, D2, D3)
             # This creates a 3D attention tensor
-            fused_logits = ops.add(logits_spatial, logits_channel)
+            fused_logits = keras.ops.add(logits_spatial, logits_channel)
             attention_3d = self.gate_activations[i](fused_logits, training=training)
             
             # 5. Apply
-            scaled = ops.multiply(x, attention_3d)
+            scaled = keras.ops.multiply(x, attention_3d)
             
             # 6. Inverse Permute
             if pattern != (0, 1, 2):
@@ -1595,12 +1594,12 @@ class TripSE4(layers.Layer):
                 for idx, p in enumerate(pattern):
                     inv_pattern[p] = idx
                 inv_order = [0] + [p + 1 for p in inv_pattern]
-                scaled = ops.transpose(scaled, inv_order)
+                scaled = keras.ops.transpose(scaled, inv_order)
                 
             outputs.append(scaled)
             
         # Sum branches
-        combined = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
+        combined = keras.ops.add(keras.ops.add(outputs[0], outputs[1]), outputs[2])
         
         # Final SE
         output = self.final_se(combined, training=training)
@@ -1628,8 +1627,8 @@ class TripSE4(layers.Layer):
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "gate_activation_type": self.gate_activation_type,
             "gate_activation_args": self.gate_activation_args,
             "se_reduction_activation_type": self.se_reduction_activation_type,

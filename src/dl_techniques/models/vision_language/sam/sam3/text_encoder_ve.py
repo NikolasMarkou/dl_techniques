@@ -25,7 +25,6 @@ References:
 """
 
 import keras
-from keras import layers
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -134,7 +133,7 @@ class Sam3TextEncoder(keras.layers.Layer):
             attention_dropout_rate=0.0, embed_dropout_rate=0.0,
             name="text_transformer",
         )
-        self.resizer = layers.Dense(self.d_model, use_bias=True, name="resizer")
+        self.resizer = keras.layers.Dense(self.d_model, use_bias=True, name="resizer")
 
         logger.info(
             f"Sam3TextEncoder: width={self.width}, depth={self.depth}, "

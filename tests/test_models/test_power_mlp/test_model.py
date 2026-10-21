@@ -28,7 +28,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 from typing import Dict, Any, List
 import tensorflow as tf
 
@@ -217,10 +216,10 @@ class TestPowerMLPForwardPass:
         """A shift of the output bias moves the output by exactly the shift."""
         model = PowerMLP(hidden_units=[10, 8, 3])
         x = keras.random.normal(shape=(4, 10), seed=0)
-        out = ops.convert_to_numpy(model(x))
+        out = keras.ops.convert_to_numpy(model(x))
         shift = -50.0
         model.output_layer.bias.assign(model.output_layer.bias + shift)
-        moved = ops.convert_to_numpy(model(x))
+        moved = keras.ops.convert_to_numpy(model(x))
         bound = 8 * np.finfo(np.float32).eps * (np.abs(out).max() + abs(shift))
         np.testing.assert_allclose(moved - out, shift, rtol=0, atol=bound)
 
@@ -306,8 +305,8 @@ class TestPowerMLPSerialization:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6,
                 atol=1e-6,
                 err_msg="Predictions differ after serialization in inference mode"
@@ -320,7 +319,7 @@ class TestPowerMLPSerialization:
         """Test serialization cycle after training."""
         # Create simple dataset
         x_train = keras.random.normal(shape=(32, 50))
-        y_train = ops.convert_to_tensor(np.random.randint(0, 10, size=(32,)))
+        y_train = keras.ops.convert_to_tensor(np.random.randint(0, 10, size=(32,)))
 
         # Create, compile, and train model
         model = PowerMLP(**model_config)
@@ -345,8 +344,8 @@ class TestPowerMLPSerialization:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6,
                 atol=1e-6,
                 err_msg="Predictions differ after serialization of trained model"
@@ -493,7 +492,7 @@ class TestPowerMLPGradients:
     @pytest.fixture
     def sample_input(self) -> keras.KerasTensor:
         """Create sample input."""
-        return ops.convert_to_tensor(
+        return keras.ops.convert_to_tensor(
             np.random.randn(4, 10).astype('float32')
         )
 
@@ -525,11 +524,11 @@ class TestPowerMLPGradients:
             hidden_units=[10, 8, 5],
             kernel_regularizer='l2'
         )
-        x = ops.convert_to_tensor(np.random.randn(4, 10).astype('float32'))
+        x = keras.ops.convert_to_tensor(np.random.randn(4, 10).astype('float32'))
 
         with tf.GradientTape() as tape:
             output = model(x, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         gradients = tape.gradient(loss, model.trainable_variables)
         assert all(g is not None for g in gradients)
@@ -635,11 +634,11 @@ class TestPowerMLPTrainingModes:
         infer_outputs = [model(x, training=False) for _ in range(10)]
 
         # Training outputs should vary (due to dropout)
-        train_np = [ops.convert_to_numpy(o) for o in train_outputs]
+        train_np = [keras.ops.convert_to_numpy(o) for o in train_outputs]
         assert not all(np.allclose(train_np[0], o) for o in train_np[1:])
 
         # Inference outputs should be identical (no dropout)
-        infer_np = [ops.convert_to_numpy(o) for o in infer_outputs]
+        infer_np = [keras.ops.convert_to_numpy(o) for o in infer_outputs]
         assert all(np.allclose(infer_np[0], o, atol=1e-6) for o in infer_np[1:])
 
 
@@ -757,7 +756,7 @@ class TestPowerMLPHelperFunctions:
 
         # Create dummy data
         x = keras.random.normal(shape=(32, 20))
-        y = ops.convert_to_tensor(np.random.randint(0, 5, size=(32,)))
+        y = keras.ops.convert_to_tensor(np.random.randint(0, 5, size=(32,)))
 
         # Train should work
         history = model.fit(x, y, epochs=2, verbose=0)
@@ -782,9 +781,9 @@ class TestPowerMLPIntegration:
 
         # Create dummy dataset
         x_train = keras.random.normal(shape=(64, 20))
-        y_train = ops.convert_to_tensor(np.random.randint(0, 3, size=(64,)))
+        y_train = keras.ops.convert_to_tensor(np.random.randint(0, 3, size=(64,)))
         x_val = keras.random.normal(shape=(16, 20))
-        y_val = ops.convert_to_tensor(np.random.randint(0, 3, size=(16,)))
+        y_val = keras.ops.convert_to_tensor(np.random.randint(0, 3, size=(16,)))
 
         # Train
         history = model.fit(
@@ -811,7 +810,7 @@ class TestPowerMLPIntegration:
 
         assert predictions.shape == (5, 3)
         # Logits: a softmax of them is a distribution.
-        probabilities = ops.convert_to_numpy(ops.softmax(predictions, axis=-1))
+        probabilities = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
         assert np.allclose(np.sum(probabilities, axis=-1), 1.0, atol=1e-6)
 
     def test_summary(self) -> None:
@@ -833,7 +832,7 @@ class TestPowerMLPIntegration:
         )
 
         x = keras.random.normal(shape=(32, 20))
-        y = ops.convert_to_tensor(np.random.randint(0, 5, size=(32,)))
+        y = keras.ops.convert_to_tensor(np.random.randint(0, 5, size=(32,)))
 
         # Train with early stopping callback
         early_stopping = keras.callbacks.EarlyStopping(
@@ -872,7 +871,7 @@ class TestPowerMLPEdgeCases:
         output = model(x)
 
         assert output.shape == (4, 5)
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_no_dropout(self) -> None:
         """Test model without dropout."""
@@ -931,7 +930,7 @@ class TestPowerMLPNumericalStability:
         x = keras.random.normal(shape=(4, 10))
         output = model(x)
 
-        assert not ops.any(ops.isnan(output))
+        assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_no_infs_in_output(self) -> None:
         """Test that output doesn't contain inf values."""
@@ -940,23 +939,23 @@ class TestPowerMLPNumericalStability:
         x = keras.random.normal(shape=(4, 10))
         output = model(x)
 
-        assert not ops.any(ops.isinf(output))
+        assert not keras.ops.any(keras.ops.isinf(output))
 
     def test_gradients_not_nan(self) -> None:
         """Test that gradients don't become NaN."""
         model = PowerMLP(hidden_units=[10, 8, 5], k=4)
 
-        x = ops.convert_to_tensor(np.random.randn(4, 10).astype('float32'))
+        x = keras.ops.convert_to_tensor(np.random.randn(4, 10).astype('float32'))
 
         with tf.GradientTape() as tape:
             output = model(x, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         gradients = tape.gradient(loss, model.trainable_variables)
 
         for grad in gradients:
-            assert not ops.any(ops.isnan(grad))
-            assert not ops.any(ops.isinf(grad))
+            assert not keras.ops.any(keras.ops.isnan(grad))
+            assert not keras.ops.any(keras.ops.isinf(grad))
 
 
 # ---------------------------------------------------------------------
