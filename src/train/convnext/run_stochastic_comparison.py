@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from train.common.gpu import env_with_visible_devices, hide_gpus, visible_device_for
+from train.common.gpu import child_visible_devices, env_with_visible_devices, hide_gpus
 from train.common.args import resolved_run_dir
 from train.common.compare_runs import compare_runs
 from train.common.run_io import default_experiment_name
@@ -40,11 +40,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--gpu', type=int, default=0,
+    parser.add_argument('--gpu', type=int, default=None,
                         help='GPU index for each training subprocess; counts within '
                              'an exported CUDA_VISIBLE_DEVICES, else names a physical '
                              'GPU (the driver itself stays CPU-only); a negative '
-                             'value hides every GPU (CPU training).')
+                             'value hides every GPU (CPU training). Default: the '
+                             'exported list as is, else physical GPU 0.')
     parser.add_argument('--strides', type=int, default=None,
                         help='Stem + inter-stage downsample stride; forwarded only when '
                              'given, so the trainer default (2: 16,8 feature maps for the '
@@ -91,8 +92,8 @@ def run_comparison(
     run_dirs = {}
     # Resolved once, before the first mode (an index outside the inherited list
     # is refused here). A negative --gpu is this driver's CPU mode.
-    visible_devices = ('' if args.gpu < 0
-                       else visible_device_for(args.gpu, inherited_visible_devices))
+    visible_devices = ('' if args.gpu is not None and args.gpu < 0
+                       else child_visible_devices(args.gpu, inherited_visible_devices, 0))
     logger.info(f"children get CUDA_VISIBLE_DEVICES={visible_devices!r}")
 
     for mode in args.modes:

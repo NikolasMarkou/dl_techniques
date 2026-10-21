@@ -59,6 +59,7 @@ import keras
 import tensorflow as tf
 
 from train.common import (
+    log_gpu_peak_memory,
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
@@ -640,22 +641,9 @@ def train_sam(config: SAMTrainingConfig) -> Tuple[SAMTrainingModel, Any]:
         verbose=1,
     )
     logger.info("Training finished in %.2f s", time.time() - start)
-    # IN-PROCESS peak, never `nvidia-smi` polling: `setup_gpu`'s
-    # `set_memory_growth` is a repo-wide no-op and TF pre-allocates ~85% of the
-    # card, so an external reading measures the allocator, not this run.
-    for device in tf.config.list_physical_devices("GPU"):
-        try:
-            info = tf.config.experimental.get_memory_info(
-                f"GPU:{device.name.split(':')[-1]}"
-            )
-            logger.info(
-                "GPU peak on %s: %.1f MiB (current %.1f MiB)",
-                device.name,
-                info["peak"] / 1024 ** 2,
-                info["current"] / 1024 ** 2,
-            )
-        except Exception as error:  # pragma: no cover - reporting path
-            logger.warning("Could not read GPU memory info: %s", error)
+    # IN-PROCESS peak (log_gpu_peak_memory), never `nvidia-smi` polling: an
+    # external reading is the allocator's arena, not this run's working set.
+    log_gpu_peak_memory()
 
     # A failed final save or history write fails the run; the model is saved
     # first (D-102, D-174 of plan-2026-10-14T062616-81938e81).

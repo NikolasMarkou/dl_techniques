@@ -167,18 +167,6 @@ _OPTIONAL_OUTPUT = {
         ('_peak_mem_mb_or_nan', 'peak_mem unavailable (', 'info = tf.config.experimental.get_memory_info',
          'peak-memory telemetry (NaN when unavailable)'),
     ],
-    'train/sam/train_sam.py': [
-        ('train_sam', 'Could not read GPU memory info: %s', 'info = tf.config.experimental.get_memory_info',
-         'GPU memory log line'),
-    ],
-    'train/sam2/train_sam2.py': [
-        ('train_sam2', 'Could not read GPU memory info: %s', 'info = tf.config.experimental.get_memory_info',
-         'GPU memory log line'),
-    ],
-    'train/sam3/train_sam3.py': [
-        ('train_sam3', 'Could not read GPU memory info: %s', 'info = tf.config.experimental.get_memory_info',
-         'GPU memory log line'),
-    ],
     'train/som_nd_soft/train_cifar.py': [
         ('on_epoch_end', 'Failed to create visualizations:', 'reconstructed = self.model.predict(self.x_viz',
          'SOM figures'),
@@ -560,13 +548,17 @@ def test_each_table_entry_names_exactly_one_handler():
 
 
 def test_the_census_counts_are_pinned():
-    """A new handler, or one that changes kind, moves a count and is looked at."""
+    """A new handler, or one that changes kind, moves a count and is looked at.
+
+    Optional 60 -> 57 at plan-2026-10-14T062616-81938e81 step 11.1: the SAM,
+    SAM 2 and SAM 3 trainers' copies of the GPU-peak loop became calls to
+    ``train.common.gpu.log_gpu_peak_memory``, whose handler is listed once."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 60, "exempt": 60, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 60
+                      "optional": 57, "exempt": 60, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 57
     assert sum(len(entries) for entries in _EXEMPT.values()) == 60
 
 

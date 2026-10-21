@@ -677,7 +677,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     run = parser.add_argument_group("run")
     run.add_argument("--output-dir", type=str, default=defaults.output_dir)
     run.add_argument("--experiment-name", type=str, default=defaults.experiment_name)
-    run.add_argument("--gpu", type=int, default=defaults.gpu)
+    run.add_argument("--gpu", type=int, default=None,
+                     help="GPU index; counts within an exported CUDA_VISIBLE_DEVICES, "
+                          "else names a physical GPU. Default: every visible GPU.")
     run.add_argument("--mixed-bfloat16", action="store_true", default=defaults.mixed_bfloat16)
 
     return parser.parse_args(argv)

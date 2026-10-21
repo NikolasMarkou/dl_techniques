@@ -65,6 +65,7 @@ from dl_techniques.metrics.psnr_metric import PsnrMetric
 
 from train.common import setup_gpu, set_seeds, create_callbacks, save_config_json
 from train.common.callbacks import EpochMetricsPlotCallback
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 from train.thera.data import build_arbitrary_scale_dataset
 
 
@@ -342,7 +343,8 @@ class TheraConfig:
 
     # Runtime
     seed: int = 42
-    gpu: int = 0
+    #: ``None``: the exported ``CUDA_VISIBLE_DEVICES`` as is, else physical GPU 0.
+    gpu: Optional[int] = None
     result_dir: str = "results"
     visualize_every_n_epochs: int = 5
 
@@ -392,7 +394,7 @@ def train(config: TheraConfig) -> None:
         f"Starting THERA training: backbone={config.backbone}, size={config.size}"
     )
 
-    setup_gpu(config.gpu)
+    setup_gpu(gpu_or_default(config.gpu, os.environ.get(VISIBLE_DEVICES), 0))
     set_seeds(config.seed)
 
     data_root = Path(config.data_dir)
@@ -587,7 +589,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=TheraConfig.patience)
     # Runtime
     parser.add_argument("--seed", type=int, default=TheraConfig.seed)
-    parser.add_argument("--gpu", type=int, default=TheraConfig.gpu)
+    parser.add_argument("--gpu", type=int, default=None,
+                        help="GPU index; counts within an exported "
+                             "CUDA_VISIBLE_DEVICES, else names a physical GPU. "
+                             "Default: the exported list as is, else physical GPU 0.")
     parser.add_argument("--result-dir", type=str, default=TheraConfig.result_dir)
     parser.add_argument("--visualize-every-n-epochs", type=int,
                         default=TheraConfig.visualize_every_n_epochs)

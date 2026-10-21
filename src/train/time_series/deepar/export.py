@@ -50,15 +50,6 @@ Usage:
 """
 
 import os
-
-# CRITICAL: Disable GPU BEFORE importing TensorFlow/Keras
-# This forces CPU-based LSTM implementation instead of CudnnRNNV3
-# Through the one writer of the variable (D-116). Importing it imports
-# TensorFlow, which lists no device, so the pin still precedes device setup.
-from train.common.gpu import hide_gpus  # noqa: E402
-
-hide_gpus()
-
 import sys
 import argparse
 import numpy as np
@@ -66,6 +57,7 @@ import numpy as np
 import keras
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import hide_gpus
 
 # Shared: the window-length detection is the standard piece DeepAR can reuse
 # (the dict-input export/verify below are model-specific per INV-8).
@@ -324,6 +316,9 @@ def verify_onnx(
 
 
 def main():
+    # CPU-only before anything loads (portable ops, no CudnnRNN). In main, not at
+    # import: importing this module must not hide an importer's GPUs (D-235).
+    hide_gpus()
     args = parse_args()
 
     if not os.path.exists(args.model_path):

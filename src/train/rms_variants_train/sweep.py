@@ -43,8 +43,8 @@ import pandas as pd
 from dl_techniques.utils.logger import logger
 from train.common.gpu import (
     VISIBLE_DEVICES,
+    child_visible_devices,
     env_with_visible_devices,
-    visible_device_for,
 )
 from train.rms_variants_train.config import NORM_VARIANTS
 
@@ -268,8 +268,9 @@ def run_one(
     """Launch one subprocess. Returns (success, stderr_tail).
 
     ``visible_devices`` is the cell's ``CUDA_VISIBLE_DEVICES`` value, resolved
-    ONCE by :func:`main` from ``--gpu`` with ``visible_device_for`` (D-110:
-    ``--gpu`` counts within the parent's exported list). It is **hard-set**
+    ONCE by :func:`main` from ``--gpu`` with ``child_visible_devices`` (D-110:
+    ``--gpu`` counts within the parent's exported list; without it the export
+    is used as is, else physical GPU 0). It is **hard-set**
     (not ``setdefault``), so an unresolved parent value cannot leak through and
     silently re-bind the cell to the wrong GPU (the bug that killed
     plan_74a935a2's sweep, LESSONS L93).
@@ -389,11 +390,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--global-cap-s", type=int, default=12 * 3600,
                    help="Total wall-clock cap (default 12h)")
     p.add_argument("--python-exe", type=str, default=sys.executable)
-    p.add_argument("--gpu", type=int, default=0,
+    p.add_argument("--gpu", type=int, default=None,
                    help="GPU index; counts within an exported "
                         "CUDA_VISIBLE_DEVICES, else names a physical GPU. "
-                        "Resolved once; every cell subprocess gets that one "
-                        "device (LESSONS L93 / D-002, D-116). Default 0.")
+                        "Resolved once; every cell subprocess gets that "
+                        "device (LESSONS L93 / D-002, D-116). Default: the "
+                        "exported list as is, else physical GPU 0.")
     p.add_argument("--no-report", action="store_true",
                    help="Skip the report.py invocation at the end.")
     # Plan plan_e1f12eab Step 5 / D-003 additions.
@@ -416,7 +418,8 @@ def main() -> int:
         args.modes = [args.mode]
     # Before anything is created or launched: an index outside the exported
     # list is refused here, not in the first cell.
-    visible_devices = visible_device_for(args.gpu, os.environ.get(VISIBLE_DEVICES))
+    visible_devices = child_visible_devices(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), 0)
     logger.info(f"[sweep] --gpu {args.gpu}: cells get "
                 f"{VISIBLE_DEVICES}={visible_devices}")
 

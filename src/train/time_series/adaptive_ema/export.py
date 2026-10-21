@@ -2,7 +2,7 @@
 """
 Standalone ONNX Export Script for AdaptiveEMA Models.
 
-Mirrors ``src/train/tirex/export.py``: forces CPU before importing TF/Keras,
+Mirrors ``src/train/tirex/export.py``: forces CPU first thing in ``main()``,
 optional numpy round-trip verification against the Keras model.
 
 The AdaptiveEMA model emits a dict; ONNX export captures every key, but the
@@ -16,14 +16,6 @@ Usage:
 """
 
 import os
-
-# CRITICAL: disable GPU BEFORE importing TF/Keras to keep ONNX export portable.
-# Through the one writer of the variable (D-116). Importing it imports
-# TensorFlow, which lists no device, so the pin still precedes device setup.
-from train.common.gpu import hide_gpus  # noqa: E402
-
-hide_gpus()
-
 import sys
 import argparse
 from typing import Optional
@@ -32,6 +24,7 @@ import numpy as np
 import keras
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import hide_gpus
 
 # Trigger registration of the two custom classes used by saved checkpoints.
 # Without these imports `keras.saving.load_model` cannot resolve
@@ -316,6 +309,9 @@ def verify_onnx(
 
 
 def main() -> None:
+    # CPU-only before anything loads (portable ops, no CudnnRNN). In main, not at
+    # import: importing this module must not hide an importer's GPUs (D-235).
+    hide_gpus()
     args = parse_args()
 
     if not os.path.exists(args.model_path):

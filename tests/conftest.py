@@ -14,6 +14,31 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "integration: mark test as an integration test"
     )
+    _enable_memory_growth_before_any_test()
+
+
+def _enable_memory_growth_before_any_test():
+    """Do for the test process what ``train.common.gpu.setup_gpu`` does first
+    in a trainer: memory growth on every visible GPU, before TensorFlow
+    initialises its devices.
+
+    Since plan-2026-10-14T062616-81938e81 step 11.1 (D-234) ``setup_gpu``
+    raises when growth cannot be enabled, which is every in-process call made
+    after some earlier test ran an op. Without this, ~200 trainer tests that
+    call a ``main`` in-process passed or failed by collection order (measured:
+    130 failed and 78 errors over the 71 caller files with TensorFlow
+    initialised first; all green run file by file). With growth already on,
+    TensorFlow returns early for each device and an in-process ``setup_gpu``
+    is the no-op it is in a real process after its first call.
+
+    Not ``setup_gpu(None)`` itself: importing ``train.common`` here would load
+    its whole package (matplotlib included) into every test session at
+    configure time.
+    """
+    import tensorflow as tf
+
+    for device in tf.config.list_physical_devices("GPU"):
+        tf.config.experimental.set_memory_growth(device, True)
 
 
 # --- Golden-value reference device -----------------------------------------

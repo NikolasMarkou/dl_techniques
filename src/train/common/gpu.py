@@ -67,8 +67,10 @@ def gpu_or_default(
     Interface contract (callers: :func:`child_visible_devices`,
     ``bfunet/eval_per_pixel_uncertainty.py``, ``nam/eval_dfsa.py``,
     ``nam/test_extreme.py``, ``cliffordnet/eval_clip_retrieval.py``,
-    ``cliffordnet/filter_cc3m_clipscore.py``; a script with a preferred GPU
-    defaults ``--gpu`` to ``None`` and picks it here, D-118):
+    ``cliffordnet/filter_cc3m_clipscore.py``, ``logic/train_e5_clevr_hans.py``,
+    ``mothnet/train_mothnet.py``, ``thera/train_thera.py``; a script with a
+    preferred GPU defaults ``--gpu`` to ``None`` and picks it here, D-118,
+    D-234):
 
     * An explicit ``gpu_id`` wins and is returned unchanged.
     * With no ``gpu_id``, an exported ``CUDA_VISIBLE_DEVICES`` (``visible`` is
@@ -91,6 +93,8 @@ def child_visible_devices(
 
     Interface contract (callers: ``vae/run_sampler_comparison.py``,
     ``logic/multiseed_sweep.py``, ``mothnet/multiseed_sweep.py``,
+    ``convnext/run_stochastic_comparison.py``, ``rms_variants_train/sweep.py``,
+    ``embeddings_experimental/sweep.py``,
     ``bfunet/run_gabor_depthwise_depth_sweep.sh``): :func:`gpu_or_default`
     picks the index, and
     :func:`visible_device_for` resolves it against ``visible`` (the launcher's
@@ -133,7 +137,8 @@ def hide_gpus() -> Optional[str]:
 
     Interface contract (callers: the comparison drivers' ``main``, which
     orchestrate GPU children and must not hold a GPU context themselves; the
-    time-series export scripts, whose exported graph must be device-neutral):
+    time-series export scripts' ``main``, whose exported graph must be
+    device-neutral, D-235):
 
     * Sets ``CUDA_VISIBLE_DEVICES`` to the empty string in ``os.environ``.
     * Returns the value it replaced (``None`` if the variable was unset), so a
@@ -149,33 +154,68 @@ def hide_gpus() -> Optional[str]:
     return inherited
 
 
+#: Why a selection or a memory-growth call can come too late; both refusals
+#: in :func:`setup_gpu` end with it.
+_TOO_LATE = (
+    "TensorFlow listed or initialised its devices before setup_gpu ran (an op, "
+    "a device listing or a model build at import time or earlier in the "
+    "process); call setup_gpu first, or select the device by exporting "
+    "CUDA_VISIBLE_DEVICES before Python starts")
+
+
 def setup_gpu(gpu_id: Optional[int] = None):
-    """Configure GPU settings for optimal training.
+    """Select the GPU and enable memory growth, or raise.
+
+    Interface contract (callers: the 133 modules under ``src/train`` that call
+    it, D-234 census; each once, before building anything):
+
+    * With ``gpu_id``, ``CUDA_VISIBLE_DEVICES`` is restricted to the device
+      :func:`visible_device_for` resolves, and the process must then list
+      exactly one GPU; otherwise ``RuntimeError`` (the selection did not take
+      effect: TensorFlow had already read the variable).
+    * With ``None`` the environment is left alone.
+    * Memory growth is enabled on every listed GPU. A failure raises
+      ``RuntimeError`` naming the import-order cause; it is never logged and
+      swallowed. Calling again after a successful call is a no-op (TensorFlow
+      returns early for a device whose growth is already enabled).
 
     Args:
         gpu_id: Index of the GPU to use, resolved by :func:`visible_device_for`:
             it counts within an exported ``CUDA_VISIBLE_DEVICES`` and names a
-            physical device only when that variable is unset. The result
-            restricts ``CUDA_VISIBLE_DEVICES`` to that one GPU. If None, the
+            physical device only when that variable is unset. If None, the
             environment is left alone and memory growth is enabled on every
             visible GPU.
 
     Raises:
         ValueError: ``gpu_id`` is negative or outside the visible list.
+        RuntimeError: ``gpu_id`` was given and the process does not list
+            exactly one GPU, or memory growth could not be enabled.
     """
+    selected = None
     if gpu_id is not None:
         selected = visible_device_for(gpu_id, os.environ.get(VISIBLE_DEVICES))
         os.environ[VISIBLE_DEVICES] = selected
         logger.info(f"--gpu {gpu_id}: set CUDA_VISIBLE_DEVICES={selected}")
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
+    # DECISION plan-2026-10-14T062616-81938e81/D-234
+    # Raise when the selection or the memory growth did not take effect; do NOT
+    # go back to logging the RuntimeError and continuing: that ran a "--gpu 0"
+    # trainer on whatever TensorFlow had already picked, with the exit code 0.
+    if gpu_id is not None and len(gpus) != 1:
+        raise RuntimeError(
+            f"--gpu {gpu_id} set CUDA_VISIBLE_DEVICES={selected}, but this "
+            f"process lists {len(gpus)} GPU(s), not 1: the selection did not "
+            f"take effect. {_TOO_LATE}.")
+    for gpu in gpus:
         try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
-        except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as error:
+            raise RuntimeError(
+                f"Could not enable memory growth on {gpu.name}: {error}. "
+                f"{_TOO_LATE}.") from error
+    if gpus:
+        logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
     else:
         logger.info("No GPUs found, using CPU")
 

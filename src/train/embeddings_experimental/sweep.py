@@ -17,8 +17,9 @@ properties worth preserving, each of which that harness paid for:
 - **``MPLBACKEND`` and ``CUDA_VISIBLE_DEVICES`` are hard-set, not defaulted.**
   ``setdefault`` inherits whatever the parent shell exported, which is how a
   sweep silently lands on the wrong GPU. The device is ``--gpu`` resolved once
-  against the parent's exported list (``train.common.gpu.visible_device_for``,
-  D-110), so ``CUDA_VISIBLE_DEVICES=1 ... --gpu 0`` runs every cell on GPU 1.
+  against the parent's exported list (``train.common.gpu.child_visible_devices``,
+  D-110), so ``CUDA_VISIBLE_DEVICES=1 ... --gpu 0`` runs every cell on GPU 1;
+  without ``--gpu`` the export is used as is, else physical GPU 0.
 """
 
 import argparse
@@ -39,8 +40,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from dl_techniques.utils.logger import logger
 from train.common.gpu import (
     VISIBLE_DEVICES,
+    child_visible_devices,
     env_with_visible_devices,
-    visible_device_for,
 )
 
 from .train_embeddings import resolve_output_dir
@@ -461,10 +462,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--gpu", type=int, default=0,
+        "--gpu", type=int, default=None,
         help=(
             "GPU index; counts within an exported CUDA_VISIBLE_DEVICES, else "
-            "names a physical GPU. Resolved once; every cell gets that device."
+            "names a physical GPU. Default: the exported list as is, else "
+            "physical GPU 0. Resolved once; every cell gets that device."
         ),
     )
     parser.add_argument("--max-cells", type=int, default=DEFAULT_MAX_CELLS)
@@ -553,7 +555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.sweep_root = resolve_output_dir(args.sweep_root)
     # Resolved before the grid is even listed, so a bad index fails a dry run
     # too, and every cell gets the same device.
-    visible_devices = visible_device_for(args.gpu, os.environ.get(VISIBLE_DEVICES))
+    visible_devices = child_visible_devices(
+        args.gpu, os.environ.get(VISIBLE_DEVICES), 0)
     logger.info(f"--gpu {args.gpu}: cells get {VISIBLE_DEVICES}={visible_devices}")
 
     try:

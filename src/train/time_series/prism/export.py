@@ -10,9 +10,8 @@ flag.
 
 The standard single-tensor-input export/verify core is delegated to the shared
 ``train.common.ts_export`` helper; this script keeps only the PRISM-specific
-CLI surface, the ``main()`` orchestration, and the CPU pinning (which MUST be
-set before importing TensorFlow/Keras and therefore stays here, not in the
-shared module).
+CLI surface, the ``main()`` orchestration, and the CPU pinning (the first
+statement of ``main()``, so importing this module hides no GPU).
 
 Usage:
     python -m train.time_series.prism.export --model_path results/experiment/best_model.keras
@@ -20,21 +19,13 @@ Usage:
 """
 
 import os
-
-# CRITICAL: Disable GPU BEFORE importing TensorFlow/Keras.
-# This forces CPU-based implementations and avoids non-portable cuda ops.
-# Through the one writer of the variable (D-116). Importing it imports
-# TensorFlow, which lists no device, so the pin still precedes device setup.
-from train.common.gpu import hide_gpus  # noqa: E402
-
-hide_gpus()
-
 import sys
 import argparse
 
 import keras
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import hide_gpus
 from train.common.ts_export import (
     create_ts_export_argument_parser,
     detect_input_length,
@@ -58,6 +49,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    # CPU-only before anything loads (portable ops, no CudnnRNN). In main, not at
+    # import: importing this module must not hide an importer's GPUs (D-235).
+    hide_gpus()
     args = parse_args()
 
     # Validate model path

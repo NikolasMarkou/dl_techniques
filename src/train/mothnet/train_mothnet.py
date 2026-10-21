@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -50,6 +51,7 @@ from train.common import (
     setup_gpu,
 )
 from train.common.callbacks import best_checkpoint_path
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 
 
 # `parents[3]` reaches the repo root from THIS file
@@ -178,8 +180,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--gpu", type=int, default=0,
-        help="GPU index to use (default: 0).",
+        "--gpu", type=int, default=None,
+        help=("GPU index; counts within an exported CUDA_VISIBLE_DEVICES, else "
+              "names a physical GPU. Default: the exported list as is, else "
+              "physical GPU 0."),
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
@@ -802,7 +806,7 @@ def main(argv=None) -> int:
     # (`src/train/AGENTS.md` § What lives in `train.common`); fixed here rather than
     # deferred, since a stale README example (`README.md`'s "Larger-scale run") was
     # already instructing users to pass `--gpu 1` with no effect.
-    setup_gpu(gpu_id=args.gpu)
+    setup_gpu(gpu_id=gpu_or_default(args.gpu, os.environ.get(VISIBLE_DEVICES), 0))
 
     # Unified run directory (matches `train_kan.py`'s own preamble): a single
     # results/<run>/ directory, resolved once here, that `prepare_run_dir` both

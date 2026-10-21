@@ -262,7 +262,7 @@ epoch).
 | `--mixed-bfloat16` | off | No LossScaleOptimizer needed; `logit_scale` stays fp32. |
 | `--seed` | `42` | Seeds Python, numpy and Keras/TF (`set_seeds`) and the LM-pretrain loader. |
 | `--output-dir` | `results/cliffordclip_<variant>_<timestamp>` | Run directory. |
-| `--gpu` | none | Parsed from `sys.argv` before `import tensorflow`, so the late "GPU setup error" log line is benign. |
+| `--gpu` | none | Index within an exported `CUDA_VISIBLE_DEVICES` (D-110), selected by `setup_gpu` at the start of the run; `setup_gpu` raises if the selection or the memory growth does not take effect. |
 
 Training is stock `compile`/`fit` on the contrastive bridge of `src/train/clip/train_clip.py`
 (`compile_for_contrastive_training` with the `--loss` loss as its inner loss). Output:

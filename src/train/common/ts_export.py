@@ -30,8 +30,8 @@ Design notes:
     In particular it does NOT set ``CUDA_VISIBLE_DEVICES``. CPU-pinning (needed
     to avoid non-portable CudnnRNN ops) remains the caller's ``export.py``
     responsibility — those scripts call ``train.common.gpu.hide_gpus()`` (the
-    one writer of the variable, D-116) at the top, before TensorFlow lists a
-    device, which a shared module imported later cannot guarantee.
+    one writer of the variable, D-116) as the first statement of ``main()``,
+    never at import (D-235), before TensorFlow lists a device.
   - ``onnxruntime`` is an optional dependency: it is imported lazily inside
     :func:`verify_standard_ts_model` so that ``import ts_export`` (and therefore
     the export-only path) never hard-requires it.

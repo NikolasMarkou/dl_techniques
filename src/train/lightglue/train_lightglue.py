@@ -194,7 +194,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Fixed pairs summarized each viz epoch (first plotted).")
     parser.add_argument("--seed", type=int, default=default.seed,
                         help="Seed of the weights, the pair sampling and the validation split.")
-    parser.add_argument("--gpu", type=int, default=default.gpu, help="GPU index to use.")
+    parser.add_argument("--gpu", type=int, default=None,
+                        help="GPU index; counts within an exported CUDA_VISIBLE_DEVICES, "
+                             "else names a physical GPU. Default: every visible GPU.")
     parser.add_argument("--output-dir", type=str, default=default.output_dir,
                         help="Base directory of the run (default: <repo>/results).")
     parser.add_argument("--experiment-name", type=str, default=default.experiment_name,

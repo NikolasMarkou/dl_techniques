@@ -2,8 +2,8 @@
 """
 Standalone ONNX Export Script for ETS Models.
 
-Mirrors the prism/tirex exporters: the GPU is disabled before TensorFlow is
-imported, and the standard single-tensor-input export/verify core is delegated
+Mirrors the prism/tirex exporters: the GPU is disabled first thing in
+``main()``, and the standard single-tensor-input export/verify core is delegated
 to ``train.common.ts_export``. ``ETSModel`` emits a single dense rank-3 tensor
 ``[B, H, 1]`` in every variant, so there is no ``--output-key`` flag.
 
@@ -17,20 +17,13 @@ Usage:
 """
 
 import os
-
-# CRITICAL: Disable GPU BEFORE importing TensorFlow/Keras.
-# Through the one writer of the variable (D-116). Importing it imports
-# TensorFlow, which lists no device, so the pin still precedes device setup.
-from train.common.gpu import hide_gpus  # noqa: E402
-
-hide_gpus()
-
 import sys
 import argparse
 
 import keras
 
 from dl_techniques.utils.logger import logger
+from train.common.gpu import hide_gpus
 from train.common.ts_export import (
     create_ts_export_argument_parser,
     detect_input_length,
@@ -51,6 +44,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    # CPU-only before anything loads (portable ops, no CudnnRNN). In main, not at
+    # import: importing this module must not hide an importer's GPUs (D-235).
+    hide_gpus()
     args = parse_args()
 
     if not os.path.exists(args.model_path):

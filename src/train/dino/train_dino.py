@@ -75,16 +75,11 @@ images). A top-1 over a 4x smaller bank is a DIFFERENT ESTIMATOR, not a noisier 
 of the same one. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` to compare against
 one of those figures.
 
-**Memory, and why ``--gpu`` will not help you.** The measured smoke-scale peak, the probe
-that produced it, and why polling ``nvidia-smi`` answers a different question (TF's ARENA,
-not the working set) are all in ``research/2026_dino_ssl_measurements.md`` § 7; the
-probe method is also in the comment above :data:`SMOKE_OVERRIDES`. What you must ACT on:
-in this trainer's import order TF is initialized before ``train.common.setup_gpu``, which
-then logs ``GPU setup error: Physical devices cannot be modified after being initialized``.
-That same import order makes ``--gpu N`` INERT in BOTH halves -- its
-``CUDA_VISIBLE_DEVICES`` assignment lands after TF picked a device, and its other half IS
-that failed ``set_memory_growth``. **Select the device by prefixing
-``CUDA_VISIBLE_DEVICES=N``**, as every ``Usage`` line below does.
+**Memory.** The measured smoke-scale peak, the probe that produced it, and why polling
+``nvidia-smi`` answers a different question (TF's ARENA, not the working set) are all in
+``research/2026_dino_ssl_measurements.md`` § 7; the probe method is also in the comment
+above :data:`SMOKE_OVERRIDES`. Select the device by prefixing ``CUDA_VISIBLE_DEVICES=N``,
+as every ``Usage`` line below does.
 
 -------------------------------------------------------------------------------
 Validation, and the reason a decreasing loss is not enough

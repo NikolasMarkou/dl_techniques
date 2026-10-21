@@ -25,6 +25,7 @@ import importlib
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,9 +45,16 @@ def _isolated_visible_devices(monkeypatch):
     ``monkeypatch.delenv`` records nothing when the variable is absent, so a
     write by the code under test would otherwise outlive the test.
     """
+    # One GPU listed, growth a no-op: what a selection that took effect leaves
+    # (setup_gpu raises otherwise since step 11.1, D-234).
     monkeypatch.setattr(
         gpu_module.tf.config.experimental, "list_physical_devices",
-        lambda *_args, **_kwargs: [],
+        lambda *_args, **_kwargs: [SimpleNamespace(
+            name="/physical_device:GPU:0", device_type="GPU")],
+    )
+    monkeypatch.setattr(
+        gpu_module.tf.config.experimental, "set_memory_growth",
+        lambda *_args, **_kwargs: None,
     )
     before = os.environ.get(VAR)
     yield
@@ -348,10 +356,14 @@ def test_the_mothnet_sweep_child_gets_the_resolved_device(
 
     cmd, env = _mothnet_child(monkeypatch, tmp_path, visible, argv)
     assert env[VAR] == expected
-    # The child selects with its own --gpu (its default when none is passed);
-    # that selection must be the device the sweep resolved, not a refusal.
+    # The child selects with its own --gpu (its default when none is passed:
+    # None since step 11.1, so the exported list is kept, D-234); that
+    # selection must be the device the sweep resolved, not a refusal.
     child_args = train_mothnet.parse_arguments(cmd[cmd.index("-m") + 2:])
-    assert gpu_module.visible_device_for(child_args.gpu, env[VAR]) == expected
+    selection = gpu_module.gpu_or_default(child_args.gpu, env[VAR], 0)
+    child_device = (env[VAR] if selection is None
+                    else gpu_module.visible_device_for(selection, env[VAR]))
+    assert child_device == expected
 
 
 def test_the_mothnet_sweep_refuses_an_index_outside_the_visible_list(
@@ -368,10 +380,18 @@ def test_the_mothnet_sweep_refuses_an_index_outside_the_visible_list(
         multiseed_sweep.main(["--seeds", "1", "--gpu", "1"])
 
 
-# --- a --gpu default is an index; above 0 no one-entry export holds it ------
+# --- a --gpu default is None; any index raises under some export ------------
+#
+# Step 14 (D-118) found defaults above 0, which no one-entry export holds. Step
+# 11.1 (D-234) extends the census to "not None": a default of 0 raises under an
+# exported empty CUDA_VISIBLE_DEVICES (CPU on purpose) and overrides a
+# multi-entry export. At 6cb295f1d eight scripts still had one: a literal 0
+# in the three launchers, mothnet and clevr_hans, a config field in three.
 
-def _gpu_defaults_above_zero(source):
-    """Line numbers of ``add_argument("--gpu", ..., default=N)`` with N >= 1."""
+def _gpu_defaults_not_none(source):
+    """Line numbers of ``add_argument("--gpu", ..., default=X)`` with X not the
+    literal ``None`` (a constant, a name or a config attribute alike: a census
+    cannot evaluate the last two, and the repo default is ``None``)."""
     lines = []
     with warnings.catch_warnings():  # invalid escapes in scanned sources
         warnings.simplefilter("ignore", (DeprecationWarning, SyntaxWarning))
@@ -382,36 +402,127 @@ def _gpu_defaults_above_zero(source):
                 and node.args[0].value == "--gpu"):
             continue
         for keyword in node.keywords:
-            if (keyword.arg == "default" and isinstance(keyword.value, ast.Constant)
-                    and isinstance(keyword.value.value, int)
-                    and not isinstance(keyword.value.value, bool)
-                    and keyword.value.value >= 1):
+            if keyword.arg == "default" and not (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None):
                 lines.append(node.lineno)
     return sorted(lines)
 
 
-def test_the_default_census_sees_an_index_above_zero():
-    """Positive control: only the default-1 forms are found."""
+def test_the_default_census_sees_every_default_but_none():
+    """Positive control: an index, 0, a config field and a name are found;
+    ``None``, no default and ``--gpus`` are not."""
     source = (
         'p.add_argument("--gpu", type=int, default=1)\n'
         'p.add_argument("--gpu", type=int, default=0)\n'
         'p.add_argument("--gpu", type=int, default=None)\n'
         'p.add_argument(\n    "--gpu", type=int, default=2, help="x")\n'
         'p.add_argument("--gpus", type=int, default=1)\n'
+        'p.add_argument("--gpu", type=int, default=Config.gpu)\n'
+        'p.add_argument("--gpu", type=int, default=DEFAULT_GPU)\n'
+        'p.add_argument("--gpu", type=int)\n'
     )
-    assert _gpu_defaults_above_zero(source) == [1, 4]
+    assert _gpu_defaults_not_none(source) == [1, 2, 4, 7, 8]
 
 
-def test_no_gpu_option_defaults_to_an_index_above_zero():
+def test_every_gpu_option_defaults_to_none():
     offenders = [
         f"{path.relative_to(_SRC)}:{line}"
         for path in sorted(_SRC.rglob("*.py"))
-        for line in _gpu_defaults_above_zero(path.read_text(encoding="utf-8"))
+        for line in _gpu_defaults_not_none(path.read_text(encoding="utf-8"))
     ]
     assert offenders == [], (
-        "a --gpu default above 0 raises under CUDA_VISIBLE_DEVICES=1; default "
-        "to None and pick a preferred GPU with gpu_or_default:\n"
+        "a --gpu default other than None selects an index under every export "
+        "(0 raises under an empty CUDA_VISIBLE_DEVICES); default to None and "
+        "pick a preferred GPU with gpu_or_default / child_visible_devices:\n"
         + "\n".join(offenders))
+
+
+@pytest.mark.parametrize("module_name, argv", [
+    ("train.logic.train_e5_clevr_hans", ["train_e5_clevr_hans"]),
+    ("train.mothnet.train_mothnet", ["train_mothnet"]),
+])
+@pytest.mark.parametrize("visible, expected", [
+    ("", None),      # GPUs hidden on purpose: setup_gpu(0) raised ValueError
+    ("0,1", None),   # an export is used as is
+    (None, 0),       # nothing exported: physical GPU 0, the old default
+])
+def test_a_trainer_without_gpu_flag_keeps_the_export(
+        monkeypatch, module_name, argv, visible, expected):
+    _set_visible(monkeypatch, visible)
+    module = importlib.import_module(module_name)
+    seen = []
+
+    def stop(gpu_id=None):
+        seen.append(gpu_id)
+        raise _Stop
+
+    monkeypatch.setattr(module, "setup_gpu", stop)
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(_Stop):
+        module.main()
+    assert seen == [expected]
+
+
+def test_thera_without_gpu_flag_keeps_the_export(monkeypatch):
+    import train.thera.train_thera as thera
+    assert thera.TheraConfig.gpu is None
+    _set_visible(monkeypatch, "")
+    seen = []
+
+    def stop(gpu_id=None):
+        seen.append(gpu_id)
+        raise _Stop
+
+    monkeypatch.setattr(thera, "setup_gpu", stop)
+    with pytest.raises(_Stop):
+        thera.train(thera.TheraConfig())
+    assert seen == [None]
+
+
+_NO_FLAG = [("", ""), ("0,1", "0,1"), (None, "0"), ("1", "1")]
+
+
+@pytest.mark.parametrize("visible, expected", _NO_FLAG)
+def test_the_rms_sweep_without_gpu_flag_keeps_the_export(
+        monkeypatch, tmp_path, visible, expected):
+    from train.rms_variants_train import sweep
+
+    _set_visible(monkeypatch, visible)
+    seen = _capture_launch(monkeypatch, sweep)
+    monkeypatch.setattr(sys, "argv", [
+        "sweep", "--experiments", "e5", "--norms", "rms_norm", "--seeds", "0",
+        "--out-dir", str(tmp_path)])
+    with pytest.raises(_Stop):
+        sweep.main()
+    assert seen[0][1][VAR] == expected
+
+
+@pytest.mark.parametrize("visible, expected", _NO_FLAG)
+def test_the_embeddings_sweep_without_gpu_flag_keeps_the_export(
+        monkeypatch, tmp_path, visible, expected):
+    from train.embeddings_experimental import sweep
+
+    _set_visible(monkeypatch, visible)
+    seen = _capture_launch(monkeypatch, sweep)
+    with pytest.raises(_Stop):
+        sweep.main([
+            "--models", "ascii_bert", "--variants", "tiny", "--pooling", "mean",
+            "--seeds", "0", "--sweep-root", str(tmp_path)])
+    assert seen[0][1][VAR] == expected
+
+
+@pytest.mark.parametrize("visible, expected", _NO_FLAG)
+def test_the_convnext_driver_without_gpu_flag_keeps_the_export(
+        monkeypatch, tmp_path, visible, expected):
+    _set_visible(monkeypatch, visible)
+    driver = importlib.import_module("train.convnext.run_stochastic_comparison")
+    seen = _capture_launch(monkeypatch, driver)
+    args = driver.build_argument_parser().parse_args(
+        ["--output-dir", str(tmp_path)])
+    with pytest.raises(_Stop):
+        driver.run_comparison(args, visible)
+    assert seen[0][1][VAR] == expected
 
 
 @pytest.mark.parametrize("script, argv", [
@@ -629,3 +740,94 @@ def test_a_driver_main_hides_the_gpus_and_keeps_what_it_inherited(
     monkeypatch.setattr(sys, "argv", ["prog"])
     driver.main()
     assert seen == [(visible, "")]
+
+
+# --- step 11.1 (D-235): the time-series exports hide GPUs in main, not at import
+
+_EXPORTS = [f"train.time_series.{name}.export" for name in (
+    "ets", "nbeats", "tirex", "xlstm", "adaptive_ema", "mdn", "prism", "deepar")]
+
+
+def _module_level_hide_gpus(source):
+    """Line numbers of ``hide_gpus()`` calls that run at import: anywhere in
+    the module body outside a ``def``/``class`` and outside an
+    ``if __name__ == "__main__":`` block."""
+    with warnings.catch_warnings():  # invalid escapes in scanned sources
+        warnings.simplefilter("ignore", (DeprecationWarning, SyntaxWarning))
+        tree = ast.parse(source)
+
+    def is_main_guard(node):
+        return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__")
+
+    lines, stack = [], list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.Lambda)) or is_main_guard(node):
+            continue
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "hide_gpus":
+                lines.append(node.lineno)
+        stack.extend(ast.iter_child_nodes(node))
+    return sorted(lines)
+
+
+def test_the_import_time_census_sees_a_module_level_call_only():
+    """Positive control: the three import-time forms are found; calls in a
+    function, a method and the ``__main__`` block are not."""
+    source = (
+        "from train.common.gpu import hide_gpus\n"
+        "hide_gpus()\n"
+        "if True:\n"
+        "    gpu.hide_gpus()\n"
+        "x = hide_gpus()\n"
+        "def main():\n"
+        "    hide_gpus()\n"
+        "class A:\n"
+        "    def f(self):\n"
+        "        hide_gpus()\n"
+        "if __name__ == '__main__':\n"
+        "    hide_gpus()\n"
+    )
+    assert _module_level_hide_gpus(source) == [2, 4, 5]
+
+
+def test_no_module_hides_the_gpus_at_import():
+    offenders = [
+        f"{path.relative_to(_SRC)}:{line}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for line in _module_level_hide_gpus(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], (
+        "hide_gpus() at import hides every GPU from the importing process for "
+        "good (D-118); call it first thing in main:\n" + "\n".join(offenders))
+
+
+@pytest.mark.parametrize("module_name", _EXPORTS)
+def test_an_export_main_hides_the_gpus_before_anything_else(
+        monkeypatch, tmp_path, module_name):
+    """``main`` pins the process to the CPU before it reads its model: a
+    missing model file exits 1 with the variable already empty."""
+    _set_visible(monkeypatch, "1")
+    module = importlib.import_module(module_name)
+    assert os.environ.get(VAR) == "1", "importing the export wrote the variable"
+    monkeypatch.setattr(sys, "argv", [
+        "export", "--model_path", str(tmp_path / "missing.keras")])
+    with pytest.raises(SystemExit) as exited:
+        module.main()
+    assert exited.value.code == 1
+    assert os.environ.get(VAR) == ""
+
+
+def test_importing_the_exports_leaves_the_gpus_visible():
+    """Fresh process, real devices: the importer keeps its GPUs (at 6cb295f1d
+    each export hid them at import, D-118's driver trap in eight programs)."""
+    control = _gpus_seen_after("")
+    if control == ["GPUS 0"]:
+        pytest.skip("no GPU visible: the probe cannot see one being hidden")
+    after = _gpus_seen_after("".join(f"import {name}\n" for name in _EXPORTS))
+    assert after == control

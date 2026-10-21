@@ -205,9 +205,10 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     """Parse the CLI for Wikipedia+BookCorpus BERT pre-training.
 
     Kept deliberately small: one flag per `PretrainConfig` field it overrides,
-    no invented knobs. `--gpu` is interface parity with every other trainer --
-    `setup_gpu`'s `set_memory_growth` is a known repo-wide no-op, so device
-    selection is still the `CUDA_VISIBLE_DEVICES=N` shell prefix.
+    no invented knobs. `--gpu` selects the device through `setup_gpu`, the
+    first thing `main` does after parsing: it indexes into an exported
+    `CUDA_VISIBLE_DEVICES` (D-110), and `setup_gpu` raises if the selection or
+    the memory growth did not take effect.
     """
     parser = argparse.ArgumentParser(
         description="BERT MLM Pre-training on Wikipedia + BookCorpus"

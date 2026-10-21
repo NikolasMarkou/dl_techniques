@@ -8,12 +8,19 @@ Ruling: when ``CUDA_VISIBLE_DEVICES`` is set, ``gpu_id`` indexes into that
 list (out of range raises); only when it is unset does ``gpu_id`` name a
 physical device.
 
+Step 11.1 (D-234): ``setup_gpu`` logged and swallowed the ``RuntimeError``
+``set_memory_growth`` raises once TensorFlow has initialised its devices, and
+nothing checked that a ``gpu_id`` selection took effect (a process that had
+already listed its devices kept all of them). Both now raise, naming the
+import-order cause.
+
 Environment-isolated: ``monkeypatch`` owns ``CUDA_VISIBLE_DEVICES`` and the TF
-device listing is replaced by a stub, so no test here touches a real device.
+device calls are replaced by stubs, so no test here touches a real device.
 """
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,13 +29,32 @@ import train.common.gpu as gpu_module
 VAR = "CUDA_VISIBLE_DEVICES"
 
 
+def _devices(count):
+    return [SimpleNamespace(name=f"/physical_device:GPU:{i}", device_type="GPU")
+            for i in range(count)]
+
+
+def _stub_devices(monkeypatch, count, growth_error=None):
+    """``count`` listed GPUs; ``set_memory_growth`` records, or raises."""
+    grown = []
+
+    def set_memory_growth(device, enable):
+        if growth_error is not None:
+            raise growth_error
+        grown.append((device.name, enable))
+
+    monkeypatch.setattr(gpu_module.tf.config.experimental,
+                        "list_physical_devices", lambda *_a, **_k: _devices(count))
+    monkeypatch.setattr(gpu_module.tf.config.experimental,
+                        "set_memory_growth", set_memory_growth)
+    return grown
+
+
 @pytest.fixture(autouse=True)
 def _no_device_access(monkeypatch):
-    """Stub the only device call ``setup_gpu`` makes."""
-    monkeypatch.setattr(
-        gpu_module.tf.config.experimental, "list_physical_devices",
-        lambda *_args, **_kwargs: [],
-    )
+    """Stub the two device calls ``setup_gpu`` makes: one GPU listed, as a
+    selection that took effect leaves."""
+    _stub_devices(monkeypatch, 1)
 
 
 def _run(monkeypatch, visible, gpu_id):
@@ -74,6 +100,45 @@ def test_an_index_outside_the_visible_list_is_refused(monkeypatch, visible, gpu_
 @pytest.mark.parametrize("visible", [None, "1", "0,1"])
 def test_no_gpu_id_leaves_the_environment_alone(monkeypatch, visible):
     assert _run(monkeypatch, visible, None) == visible
+
+
+# --- step 11.1: a selection or memory growth that did not take effect raises ---
+
+@pytest.mark.parametrize("listed", [0, 2])
+def test_a_selection_that_did_not_take_effect_raises(monkeypatch, listed):
+    """With ``gpu_id`` the process must list exactly one GPU afterwards. Two
+    listed means TensorFlow read the variable before the write (the devices
+    are cached at the first listing); none means the selection names no GPU."""
+    _stub_devices(monkeypatch, listed)
+    monkeypatch.setenv(VAR, "1")
+    with pytest.raises(RuntimeError, match=rf"lists {listed} GPU\(s\), not 1"):
+        gpu_module.setup_gpu(0)
+
+
+@pytest.mark.parametrize("listed", [0, 2])
+def test_no_gpu_id_accepts_any_device_count(monkeypatch, listed):
+    grown = _stub_devices(monkeypatch, listed)
+    monkeypatch.setenv(VAR, "0,1")
+    gpu_module.setup_gpu(None)
+    assert grown == [(f"/physical_device:GPU:{i}", True) for i in range(listed)]
+
+
+@pytest.mark.parametrize("gpu_id", [None, 0])
+def test_a_memory_growth_failure_raises_and_names_the_cause(monkeypatch, gpu_id):
+    """It was logged as "GPU setup error" and the run went on."""
+    cause = RuntimeError("Physical devices cannot be modified after being initialized")
+    _stub_devices(monkeypatch, 1, growth_error=cause)
+    monkeypatch.setenv(VAR, "1")
+    with pytest.raises(RuntimeError, match="before setup_gpu ran") as raised:
+        gpu_module.setup_gpu(gpu_id)
+    assert raised.value.__cause__ is cause
+
+
+def test_memory_growth_is_enabled_on_the_selected_gpu(monkeypatch):
+    grown = _stub_devices(monkeypatch, 1)
+    monkeypatch.setenv(VAR, "1")
+    gpu_module.setup_gpu(0)
+    assert grown == [("/physical_device:GPU:0", True)]
 
 
 def test_the_downsampling_trainer_selects_through_setup_gpu(monkeypatch):

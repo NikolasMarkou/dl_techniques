@@ -47,6 +47,7 @@ import numpy as np
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.utils.logger import logger
 from train.common import setup_gpu, set_seeds
+from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 from train.logic.clevr_hans_data import (
     FEATURE_WIDTH,
     build_image_dataset,
@@ -332,7 +333,10 @@ def parse_args() -> argparse.Namespace:
                    help="Use existing data on disk; do not attempt download.")
     p.add_argument("--download-only", action="store_true",
                    help="Download (if needed) and exit; do not train.")
-    p.add_argument("--gpu", type=int, default=0)
+    p.add_argument("--gpu", type=int, default=None,
+                   help="GPU index; counts within an exported "
+                        "CUDA_VISIBLE_DEVICES, else names a physical GPU. "
+                        "Default: the exported list as is, else physical GPU 0.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--patience", type=int, default=5)
@@ -343,7 +347,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    setup_gpu(args.gpu)
+    setup_gpu(gpu_or_default(args.gpu, os.environ.get(VISIBLE_DEVICES), 0))
     set_seeds(args.seed)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
