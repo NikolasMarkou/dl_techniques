@@ -9,6 +9,11 @@ differs from the model package they train.
 VLM) plus a metric-definition reference. Consult them **before** starting a run at the relevant
 scale, so the target is realistic rather than ten points below open weights.
 
+> **Read [`GUIDE.md`](GUIDE.md) before changing a trainer.** It records the defect patterns found
+> in these entry points (failed runs that exit 0, writes that cost the weights, GPU selection,
+> CSV logs, seeding), each with the guard that now prevents it. Model-side patterns are in
+> `src/dl_techniques/models/GUIDE.md`.
+
 ## File naming
 
 Name scripts `train_<model>.py`, **not** `train.py`. A file named `train.py` shadows the `train`

@@ -435,8 +435,10 @@ named without a directory sit in the directory of the previous path in the same 
 - **Shared initializer instances replay one draw.** One seedless instance across many convs gives
   each kernel the same draw or its prefix (MobileNet V1-V3: 351 to 1128 pairs; every ConvNeXt
   block). *Detected:* correlating every kernel pair; an equal-shape check misses prefixes. *Guard:*
-  `tests/test_models/initializer_replay_oracle.py`, used by both
-  `test_no_two_conv_kernels_replay_one_draw.py` files. *Example:* D-014, D-076, D-091. Refines § 5.
+  `tests/test_models/initializer_replay_oracle.py`, used by
+  `tests/test_models/test_mobilenet/test_no_two_conv_kernels_replay_one_draw.py` and
+  `tests/test_models/test_convnext/test_no_two_conv_kernels_replay_one_draw.py`. *Example:* D-014,
+  D-076, D-091. Refines § 5.
 - **Creating a layer shifts later fixed-seed draws.** A `Dropout`, or a weightless pooler that
   resolved a glorot initializer, takes a Python RNG seed at construction. *Detected:* fixed-seed
   weight census before and after. *Guard:*
@@ -454,41 +456,10 @@ named without a directory sit in the directory of the previous path in the same 
 
 ### 10.3 Trainers and entry points
 
-- **Entry points and default paths no test runs.** Trainers died before step one: a tokenizer in
-  `tf.data.map`, `astype` on a symbolic tensor, a stale attribute on a default path the test
-  skipped. *Detected:* running each trainer. *Rule:* test the default path. *Guard:*
-  `tests/test_train/test_cliffordnet/test_the_trainer_entry_point_pretrains_both_towers.py`,
-  `tests/test_train/test_alexnet/test_the_cifar_pipeline_builds_a_batch.py`. *Example:* D-034,
-  D-069, D-098. Refines § 8.
-- **A failed run that exits 0.** A swallowed training error, save, history write, evaluation,
-  analysis, reload check or Ctrl-C ended with the code of a finished run. *Detected:* stubbing each
-  step to raise. *Guard:* `tests/test_train/test_a_failed_trainer_run_does_not_exit_zero.py`
-  (with a census of `except KeyboardInterrupt`),
-  `tests/test_callbacks/test_a_failed_epoch_analysis_fails_the_epoch.py`. *Example:* D-095,
-  D-102, D-111, D-117, D-118.
-- **`--output-dir` ignored, and tests writing into `results/`.** Callbacks went to a second
-  directory; a RED proof created a run under `results/`. *Detected:* the `results/` name set grew.
-  *Guard:* `tests/test_train/test_a_trainer_writes_under_its_output_dir.py`,
-  `tests/test_the_results_session_guard_fails_a_session_that_writes.py`. *Example:* D-048, D-094.
-- **`--gpu` overwrote `CUDA_VISIBLE_DEVICES`.** `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` ran on GPU 0,
-  launchers forwarded an index their child could not resolve, and a `--gpu 1` default cannot fit
-  a one-entry export. *Detected:* the Step 13.5 smokes ran on the RTX 4090. *Rule:*
-  `train/common/gpu.py` is the only writer; `--gpu` counts within an export. *Guard:*
-  `tests/test_train/test_common_setup_gpu_respects_visible_devices.py`,
-  `tests/test_train/test_launchers_select_their_gpu_by_the_d110_rule.py`. *Example:* D-110,
-  D-116, D-118.
-- **`steps_per_epoch` on a finite dataset.** Keras 3.8 keeps one iterator across epochs, so 3
-  batches at 2 steps train 2, 1, 2. *Detected:* counting steps per epoch. *Rule:* repeat the
-  dataset. *Guard:* `test_every_epoch_trains_its_steps_per_epoch_batches` in
-  `tests/test_train/test_clip/test_the_trainer_entry_point_trains_end_to_end.py`. *Example:* D-036.
-- **A measurement that measures nothing.** Depth metrics read 0.0 because a wrapper cut the mask
-  channel; validation crops changed every epoch. *Detected:* exact zeros in the CSV log. *Guard:*
-  `tests/test_train/test_depth_anything/test_the_compiled_depth_metrics_see_valid_pixels.py`.
-  *Example:* D-100, D-109.
-- **One fact in several places.** Three CIFAR-100 statistics pairs, three positive-int
-  validators that refused different values. *Detected:* re-deriving the values. *Guard:*
-  `tests/test_train/test_common_cifar100_statistics_have_one_home.py`,
-  `tests/test_utils/test_the_positive_int_rule_has_one_home.py`. *Example:* D-088, D-112.
+Moved to [`src/train/GUIDE.md`](../../train/GUIDE.md): § 1 holds the patterns that stood here, § 2
+the trainer patterns of iteration 2 (history after the save, writers that raise, `main` exiting
+non-zero, classified broad handlers, disjoint batches, `setup_gpu` raising and `--gpu None`, the
+shared CSV logger and best-submodel checkpoint, the shared seed).
 
 ### 10.4 Tests and guards
 
@@ -515,6 +486,23 @@ named without a directory sit in the directory of the previous path in the same 
   run that collected one ran later GPU tests on CPU. *Detected:* a device listing after the import.
   *Rule:* process-wide changes belong in `main`. *Guard:* the launcher test above. *Example:*
   D-118. Refines § 4.
+- **LayerNorm mean-removal blinds a constant-shift probe.** Adding one constant to every channel
+  of a token is removed by a LayerNorm's per-token mean subtraction, so a probe that shifts an
+  input by a constant sees no response through a normalized path and reads a live path as dead:
+  `+= 1.0` on an SD3 text token left the final block's image output unchanged, and a uniform bump
+  moved a distant token of a SAM 3 global ViTDet block by 0.25 to 2.5 ulp. *Detected:* a probe that
+  stayed silent on a path known to be live. *Rule:* perturb with a pattern that varies across
+  channels (a ramp). *Guard:* `test_the_final_block_image_output_matches_the_old_layout` in
+  `tests/test_models/test_sd3_mmdit/test_blocks.py`, `test_a_uniform_across_channel_bump_is_mean_centred_away`
+  in `tests/test_models/test_sam3/test_vitdet.py`. *Example:* D-043, D-044. Refines § 8.
+- **A Python float is not a float32 value.** CLIP's `logit_scale_init` is the Python float
+  2.6592; the float32 variable initialised from it holds a different number, so `variable !=
+  init` evaluated in float64 is true for a model that never trained, and a "the temperature
+  trained" check passes with no update. *Detected:* writing the CLIP trainer's end-to-end test.
+  *Rule:* compare a float32 variable with `np.float32(value)`. *Guard:*
+  `test_synthetic_run_trains_two_steps_and_saves_a_loadable_model` in
+  `tests/test_train/test_clip/test_the_trainer_entry_point_trains_end_to_end.py`. *Example:*
+  D-036. Refines § 8.
 
 ### 10.5 Framework and numerics traps
 
@@ -535,3 +523,86 @@ named without a directory sit in the directory of the previous path in the same 
 - **Symmetric fusion in a causal model leaks the future.** *Detected:* a later token moved earlier
   logits. *Guard:* `tests/test_models/test_nano_vlm/test_the_text_logits_are_causal.py`. *Example:*
   D-039. Refines § 5.
+
+### 10.6 Patterns from iteration 2
+
+The trainer patterns of this iteration are in [`src/train/GUIDE.md`](../../train/GUIDE.md) § 2.
+
+- **A classifier output that is not logits.** § 5's rule named four exceptions and nothing
+  enforced it; CoShNet, AccUNet, the DocScanner segmenter, SHGCN, RelGT, PowerMLP, KAN and NAM's
+  validity head ended in a softmax or sigmoid. *Rule:* every softmax or sigmoid in `models/` is
+  internal, a range map, or a named class-score exception (the Qwen3 reranker's score stays a
+  probability). *Detected:* an AST census of every softmax and sigmoid. *Guard:*
+  `tests/test_models/test_every_classifier_output_is_logits_or_a_named_exception.py`.
+  *Example:* D-150, D-151, D-152, D-153. Refines § 5.
+- **"The loss moved" is not training.** AccUNet's loss fell while inference mode predicted the
+  majority class for every pixel; a from-scratch Depth Anything tied the average-layout baseline.
+  *Rule:* a training claim beats a trivial baseline measured in the same run (majority class,
+  constant prediction, seasonal naive). *Detected:* scoring the baseline beside the model.
+  *Guard:* `tests/test_models/test_accunet/test_the_logits_head_memorises_a_batch.py`,
+  `test_the_held_out_metrics_compare_the_forecaster_with_both_baselines` in
+  `tests/test_train/test_timestral/test_train_timestral.py`. *Example:* D-132, D-156, D-170,
+  D-246.
+- **A mask literal that is `-inf` in float16.** Timestral filled masked scores with `-1e30`; in
+  float16 that is `-inf`, and a fully masked row gives NaN. *Rule:* masked scores take
+  `utils.dtype_policy.mask_sentinel(dtype)`. *Detected:* the sentinel census. *Guard:*
+  `tests/test_the_mask_sentinel_population_is_closed.py`. *Example:* D-190. Refines § 4.
+- **A factory that drops unknown keywords.** `create_sequence_pooling_layer('attention',
+  dropout=0.5)` built a pooler with `dropout_rate=0.0`. *Rule:* a strict factory refuses an
+  undeclared keyword (Keras base keywords exempt). *Detected:* passing a misspelt keyword.
+  *Guard:* `tests/test_layers/test_the_sequence_pooling_factory_refuses_an_unknown_keyword.py`.
+  *Example:* D-200. Refines § 10.2.
+- **A knob stored for a stage that is off.** `use_attention=False, attention_type='differential'`
+  was accepted, stored and serialized by the vision heads and read by nothing; the NLP heads did
+  the same. *Rule:* a stage knob defaults to `None` and is refused when its flag turns the stage
+  off. *Detected:* bit-identical outputs across knob values. *Guard:*
+  `tests/test_layers/test_heads/test_a_vision_head_refuses_a_stage_knob_its_flag_turns_off.py`,
+  `test_an_nlp_head_refuses_a_stage_knob_its_flag_turns_off.py`. *Example:* D-210, D-211.
+  Refines § 10.2.
+- **A task set that meant different things per container.** The vision multi-task factory
+  refused a tuple, collapsed a list naming a task twice and built a head returning `{}` from an
+  empty one; the VLM factory raised `TypeError` on a tuple. *Rule:* the three multi-task factories
+  take a list or a tuple with one meaning (keyed by task or name, a repeat refused) and raise a
+  `ValueError` for anything else. *Detected:* each container through each factory. *Guard:*
+  `tests/test_layers/test_heads/test_the_multi_task_factories_take_a_list_or_a_tuple.py`.
+  *Example:* D-207.
+- **Two import surfaces for one helper set.** The 15 headed language models imported the head
+  helpers in five different subsets, partly from a submodule, because `heads.nlp` exported 5 of
+  the 8. *Rule:* import them from `layers.heads.nlp`, which exports all eight. *Detected:* an AST
+  walk of the imports. *Guard:* `tests/test_models/test_the_language_models_import_one_head_surface.py`.
+  *Example:* D-208.
+- **A census with a hand-listed subject set.** The logits census listed its classifiers by hand,
+  so a new classifier would not be checked. *Rule:* a census discovers its subjects by AST, its
+  hand table must equal what it discovers, and a planted source proves it fires. *Detected:*
+  reading the census against the tree. *Guard:*
+  `tests/test_models/test_a_vision_classifier_emits_logits.py`,
+  `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py`. *Example:* D-209,
+  D-247. Refines § 8.
+- **A shape check cannot see a layout.** A restore that reshaped a map to `(B, W, H, -1)` and
+  transposed back kept all 24 shape arms of the layout guard green. *Rule:* check a layout by
+  value, on a position-coded non-square input. *Detected:* an in-place mutation. *Guard:*
+  `tests/test_layers/test_heads/test_a_vision_head_runs_attention_in_its_own_layout.py`.
+  *Example:* D-209. Refines § 8.
+- **An underscore auto-name leaks a name scope.** Keras names an unnamed `_Child` `__child`,
+  which TensorFlow refuses as a root scope; an eager call left the parent's name on Keras' global
+  scope stack and every later layer's variable path carried it. *Rule:* a test layer class takes
+  `tests.layer_naming.PublicAutoName` as its first base; a `src/` class gets a public default name.
+  *Detected:* variable paths that changed with test order. *Guard:*
+  `tests/test_no_underscore_named_layer_takes_its_auto_name.py`, `tests/layer_naming.py`.
+  *Example:* D-220, D-242.
+- **A port checked against itself.** MobileNetV3's SE bottleneck and gate, and the PFT-SR body,
+  differed from the reference while the port's own tests passed. *Rule:* compare a port's
+  `count_params()` and output with the live reference where it is installed (Keras Applications),
+  else with a hand sum of the official modules, at every width or variant. *Detected:* the
+  comparison. *Guard:*
+  `tests/test_models/test_mobilenet/test_the_v3_widths_follow_keras_applications_at_every_width.py`,
+  `tests/test_models/test_pft_sr/test_the_parameter_count_is_the_official_hand_sum.py`.
+  *Example:* D-212, D-226, D-232. Refines § 5.
+- **Training never reached a module inference uses.** SAM 2 trained mask token 0 only, and the
+  inference stability fallback answered with the three untrained multimask tokens (validation
+  mask loss 1.712 with it on, 1.043 off). *Rule:* train what inference can select, as the
+  reference does (three candidates on a single click, the lowest-loss one supervised, the IoU
+  head on all), or switch the inference path off. *Detected:* a train/inference gap on the same
+  clips. *Guard:* `tests/test_models/test_sam2/test_the_multimask_tokens_train_as_the_reference_does.py`,
+  `tests/test_models/test_sam2/test_inference_decodes_the_mask_token_training_trains.py`.
+  *Example:* D-245, D-249.
