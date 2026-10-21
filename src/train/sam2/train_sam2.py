@@ -18,13 +18,14 @@ Run it::
 
 What this trainer is, and is not
 --------------------------------
-It proves the multi-frame training path RUNS with live gradients: the graph
-traces under stock ``fit()``, the object-score head and the mask decoder both
-receive gradient, and the loss descends on synthetic clips. **It is a WIRING
-result, not a segmentation result.** No official Meta SAM 2 checkpoint has ever
-been loaded in this repository, no annotated video-object-segmentation dataset
-exists on this machine, and this trainer therefore makes no accuracy or
-convergence claim whatsoever.
+It trains the multi-frame path under stock ``fit()``: on the synthetic clips its
+own ``--smoke --num-clips-train 2 --batch-size 2 --epochs 150`` command memorises
+the batch (mask loss 0.042 on 8 fixed clicks in inference mode against a best
+constant of 0.959) and a 32-clip run beats a constant on 4 held-out clips (0.347
+against 0.921); plan-2026-10-14T062616-81938e81 D-261, the SAM 2 README section 7.
+**That is the whole claim.** No official Meta SAM 2 checkpoint has ever been
+loaded in this repository, no annotated video-object-segmentation dataset exists
+on this machine, and this trainer makes no accuracy claim on real video.
 
 ``jit_compile=False`` is MANDATORY, and it has ONE home
 -------------------------------------------------------
@@ -629,9 +630,9 @@ def train_sam2(config: SAM2TrainingConfig) -> Tuple[SAM2TrainingModel, Any]:
     """
     output_dir = prepare_run_dir(config, output_dir=resolved_output_dir(config))
     logger.info(
-        "SAM 2 video training run '%s' (%s, %dpx, T=%d) -> %s. This is a "
-        "WIRING result, not a segmentation result: no Meta SAM 2 checkpoint "
-        "has ever been loaded in this repository.",
+        "SAM 2 video training run '%s' (%s, %dpx, T=%d) -> %s. Synthetic "
+        "clips, random init: no Meta SAM 2 checkpoint has ever been loaded in "
+        "this repository, so this is not a segmentation-quality result.",
         config.experiment_name, config.variant, config.image_size,
         config.num_frames, output_dir,
     )

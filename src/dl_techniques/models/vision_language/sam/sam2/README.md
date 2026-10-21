@@ -18,11 +18,13 @@ additionally emits an object score and an object pointer.
 >   package is an architectural argument, not a measurement against real
 >   weights.
 > - **It makes no accuracy claim and no segmentation-quality claim.** Nothing
->   here has been trained to any quality. `SAM2TrainingModel` is proven only to
->   RUN, with live gradients, under stock graph-mode `fit()`.
-> - **The mask head does not learn under joint training** on the one setup that
->   was measured (§7). The cause is known and it is UNFIXED. Read §7 before
->   reading any training run of this package as a result.
+>   here has been trained to any quality. What is measured is that the trainer's
+>   own command memorises its 2-clip batch and that a 32-clip smoke run beats a
+>   constant on 4 held-out synthetic clips (§7); nothing else.
+> - **The mask head did not learn under joint training until step 12.8 of
+>   plan-2026-10-14T062616-81938e81**: the image encoder was fed `[0, 255]`
+>   pixels where upstream feeds standardized ones (§7). Training runs logged
+>   before that step are not results.
 > - **This package was reimplemented, never transliterated**, because upstream's
 >   licence forbids the alternative. See §10 — that constraint binds any future
 >   extension of this package too.
@@ -37,7 +39,7 @@ additionally emits an object score and an object pointer.
 4. [Two Entry Points, Deliberately Different in Kind](#4-two-entry-points-deliberately-different-in-kind)
 5. [Component Reference](#5-component-reference)
 6. [Variants](#6-variants)
-7. [Training, and the Mask Head That Does Not Learn](#7-training-and-the-mask-head-that-does-not-learn)
+7. [Training, and Why the Mask Head Did Not Learn](#7-training-and-why-the-mask-head-did-not-learn)
 8. [Serialization and Checkpoints](#8-serialization-and-checkpoints)
 9. [Testing](#9-testing)
 10. [Licensing — read this before extending](#10-licensing--read-this-before-extending)
@@ -86,8 +88,11 @@ README points at those rather than restating them, so each fact has one home.
 ## 2. Architecture
 
 ```
-image (B, H, W, 3)
+image (B, H, W, 3), RGB in [0, 255]
   │
+  ▼
+standardize ────────── (x - pixel_mean) / pixel_std, upstream's ImageNet statistics
+  │                    (inside SAM2ImageEncoder, so every entry point gets it)
   ▼
 Hiera ──────────────── stem (one strided conv, 4x) → four stages
   │                    at each boundary: width x2, heads x2, grid /2 by
@@ -177,8 +182,8 @@ location so a reader knows where to look, not restated:
 | Where | What is silent if wrong | Guard |
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
-| [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken | `test_neck.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) it still raised the loss, scored on the same 8 draws of frame-0 points for both (D-252; held-out clips: 1.451 against 1.185 and 2.164 against 1.983 for two runs of the 32-clip command) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
+| [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken; `SAM2ImageEncoder` standardizes `[0, 255]` pixels with upstream's `NormalizeAPI` statistics before the trunk (`pixel_mean` / `pixel_std`, config). Without it the trainer never got below a constant (D-260) | `test_neck.py`, `test_the_image_encoder_standardizes_its_input.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) and the input standardized (D-260) it still raises the loss, scored on the same 8 fixed draws of frame-0 points for both: 4 held-out clips of the 32-clip run 0.367 on against 0.347 off (D-261) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
@@ -199,7 +204,7 @@ from `Hiera.MODEL_VARIANTS` and the neck/scalp geometry from
 `SAM2ImageEncoder.MODEL_VARIANTS`, so each geometry has exactly one home. A
 geometry restated in two places is a latent defect.
 
-## 7. Training, and the Mask Head That Does Not Learn
+## 7. Training, and Why the Mask Head Did Not Learn
 
 `SAM2TrainingModel` (see [`training_model.py`](training_model.py)) runs the
 image encoder ONCE over a flattened `(B * T, ...)` batch and then drives SAM 2's
@@ -241,40 +246,54 @@ Four properties of that wrapper are load-bearing and stated at the class:
   `_use_multimask` at the `SAM2Base` defaults `multimask_min_pt_num =
   multimask_max_pt_num = 1`, tracking off; the released configs turn tracking on,
   which this wrapper does not train). `multimask_output=True` still returns all three
-  candidates. Measured (mask loss, inference mode, through `evaluate`, every answer
-  scored on the SAME frame-0 points, 8 draws of the pipeline's random points; D-252):
-  on the smoke models no single-click answer beats the best constant logit, and which
-  of the two answers is better changes between two runs of one command. The 32-clip,
-  30-epoch run of step 12.6, on its held-out clips: best-IoU candidate 1.185, token 0
-  1.925, lowest-loss candidate 1.116, constant 0.921; the same command rerun at step
-  12.7: 1.984, 1.519, 1.094, 0.921. The 2-clip memorisation run of step 12.6 on its
-  own clips: 1.070, 1.077, 0.958, constant 0.959. The step-12.6 figures that beat the
-  constant (0.547 memorised, 0.790 held out) were single draws: the pipeline redraws
-  the frame-0 point on every pass, and two consecutive `evaluate` calls of one answer
-  scored 0.531 and 1.999. This is section 7's finding, not a new one.
+  candidates. Measured (mask loss, inference mode, every answer scored on the SAME 8
+  fixed frame-0 clicks per clip, numpy draws of one foreground cell; D-261): on the
+  2-clip memorisation run the best-IoU candidate and the lowest-loss candidate are the
+  same mask on every draw (0.042) and token 0 scores 0.060; on 4 held-out clips of the
+  32-clip run the best-IoU candidate scores 0.347 and token 0 0.397.
 
-### The mask head does not learn jointly
+### Why the mask head did not learn, and what fixed it
 
-**SAM 2's mask head does not learn under joint training, the cause is known,
-and it is UNFIXED.** Every objective arm fails — plain BCE, the shipped
-focal+dice, upstream's `alpha_t` weighting, and dice-only. The binding
-constraint is **the jointly-trained image encoder**, not the loss family and
-not the step budget: on the trainer's own 8 diverse targets and within the same
-step budget, the SAME decoder with a **frozen** encoder reaches mask IoU
-**1.0000**, against **0.0091** for the jointly-trained arm.
+Until step 12.8 of plan-2026-10-14T062616-81938e81 this section said the mask head
+does not learn under joint training and blamed the jointly-trained image encoder.
+Two defects were behind it (D-258, D-260):
 
-This is the reason the scope note above says the package makes no accuracy
-claim: the training path demonstrably runs, and on the one configuration that
-was measured it demonstrably does not learn masks jointly.
+- **The encoder was fed raw pixels.** Upstream SAM 2 standardizes its input with
+  ImageNet statistics before the image encoder (`NormalizeAPI` in the training
+  transforms, `SAM2Transforms` in both predictors). This port fed `[0, 255]` pixels
+  straight into Hiera's patch embedding: 255 x 0.226, about 58 times upstream's input
+  scale, and centred near 115 instead of 0, from all three entry points. `SAM2ImageEncoder` now standardizes them itself
+  (`pixel_mean` / `pixel_std`, upstream's values, config). The earlier "unbounded
+  activation-scale growth" finding was this input scale, not the neck's missing
+  normalization: upstream's neck has none either.
+- **The logged loss was half the true loss.** The clip source is a
+  `from_generator` dataset; with unknown cardinality Keras 3.8 counts one phantom
+  zero-loss batch per epoch, so the logged loss was `n / (n + 1)` of the mean over `n`
+  batches. A 2-clip run logged 0.48 for a model whose loss on that batch was 0.95,
+  against a best constant of 0.96. The pipeline now states its length. It also
+  redraws the frame-0 click on every pass: before, the trainer's global seed made the
+  stateful random op repeat the same clicks every epoch (D-259).
 
-Measured since, on the trainer's synthetic clips with the encoder trained jointly
-(plan-2026-10-14T062616-81938e81, D-246, D-249, D-252): a 2-clip run's logged mask
-loss falls from 7.34 to 0.48 on the frame-0 points it was drawn last, but the
-pipeline redraws those points on every pass, and scored on 8 draws its lowest-loss
-candidate reaches 0.958 on its own clips against a best constant of 0.959; a 32-clip,
-30-epoch run scores 1.094 to 1.116 on 4 held-out clips against 0.921. The step-12.6
-figures that beat the constant (0.48, 0.744) were single draws. The statement above
-stands for this trainer's configuration.
+Measured after both fixes on the RTX 4070 (scores are the hand mask loss of an
+inference-mode call on arrays, 8 fixed clicks per clip, the same clicks for every
+answer; D-261):
+
+| Run | Clips scored | Model's answer | Per-draw range | Token 0 | Best constant |
+|---|---|---|---|---|---|
+| `--smoke --num-clips-train 2 --batch-size 2 --epochs 150` | its 2 training clips | 0.042 | 0.041 to 0.043 | 0.060 | 0.959 |
+| same run | 4 held-out clips | 0.956 | 0.954 to 0.957 | 0.996 | 0.921 |
+| `--smoke --num-clips-train 32 --epochs 30` | its 32 training clips | 0.261 | 0.224 to 0.331 | 0.249 | 0.947 |
+| same run | 4 held-out clips | 0.347 | 0.346 to 0.348 | 0.397 | 0.921 |
+
+Both checkpoints are the epoch `EarlyStopping` restored (lowest `val_loss`: epoch 80 of
+150 and epoch 14 of 30). A 2-clip run memorises and generalises to nothing, as
+expected. In the 32-clip run the training mask loss jumps from 0.22 to 2.6-22 at epoch
+16 and stays high until epoch 28, and the held-out mask loss sits at 5.3 from epoch 16
+on (except epoch 19), while the object-score loss keeps falling: those are present
+frames the score head calls absent, scored against the `-1024` sentinel. That is the
+reference loss's behaviour (D-250), and it is why the restored epoch, not the last
+one, is the result. The trainer's own memorisation guard is
+`tests/test_train/test_sam2/test_the_trainer_memorises_one_batch.py`.
 
 ## 8. Serialization and Checkpoints
 

@@ -15,11 +15,12 @@ Gradients use truncated backpropagation-through-time: the memory encoder's
 inputs are detached in :meth:`~SAM2TrainingModel._store`, so the backward
 pass reaches ``memory_encoder`` and stops there rather than recursing
 through the whole clip. ``compile(jit_compile=False)`` is required --
-``Hiera``'s stem uses a bicubic resize with no XLA GPU kernel, and the mask
-head does not learn under this wrapper's joint training (see README.md
-section 7 for the diagnosis). This module proves the training path runs
-with live gradients; it makes no accuracy claim and no SAM 2 checkpoint has
-been loaded in this repository.
+``Hiera``'s stem uses a bicubic resize with no XLA GPU kernel. The trainer's
+own command memorises one batch, measured on fixed prompts in inference mode
+(README.md section 7; before plan-2026-10-14T062616-81938e81 D-260 the
+encoder was fed unstandardized pixels and the mask head did not learn). It
+makes no accuracy claim and no SAM 2 checkpoint has been loaded in this
+repository.
 
 References:
     - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.

@@ -19,7 +19,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -44,6 +43,16 @@ _SUPPORTED_INTERP_MODELS = frozenset({"nearest", "bilinear"})
 #: :class:`keras.layers.UpSampling2D` does not accept. Applied by
 #: ``from_config`` only, after ``.lower().strip()``.
 _LEGACY_INTERP_ALIASES = {"nn": "nearest"}
+
+#: Per-channel mean and standard deviation the image encoder standardizes
+#: ``[0, 255]`` RGB pixels with: upstream SAM 2's ``NormalizeAPI`` statistics
+#: (``mean=[0.485, 0.456, 0.406]``, ``std=[0.229, 0.224, 0.225]`` on ``[0, 1]``,
+#: ``sam2.1_hiera_b+_MOSE_finetune.yaml`` at facebookresearch/sam2 2b90b9f5)
+#: times 255. Defaults of :class:`SAM2ImageEncoder`'s ``pixel_mean`` /
+#: ``pixel_std``, which are config (SAM 1's ``SAM`` carries the same values as
+#: its own constructor defaults).
+SAM2_PIXEL_MEAN: Tuple[float, float, float] = (123.675, 116.28, 103.53)
+SAM2_PIXEL_STD: Tuple[float, float, float] = (58.395, 57.12, 57.375)
 
 # ---------------------------------------------------------------------
 
@@ -330,8 +339,8 @@ class SAM2FpnNeck(keras.layers.Layer):
         :rtype: Any
         """
         position = self.position_encoding(features)
-        position = ops.transpose(position, (0, 2, 3, 1))
-        return ops.cast(position, features.dtype)
+        position = keras.ops.transpose(position, (0, 2, 3, 1))
+        return keras.ops.cast(position, features.dtype)
 
     def call(
             self,
@@ -519,11 +528,23 @@ class SAM2ImageEncoder(keras.layers.Layer):
     :type neck: Union[SAM2FpnNeck, Dict[str, Any]]
     :param scalp: Number of coarsest levels to discard.
     :type scalp: int
+    :param pixel_mean: Per-channel RGB mean subtracted from the ``[0, 255]``
+        input before the trunk. Defaults to :data:`SAM2_PIXEL_MEAN`.
+    :type pixel_mean: Sequence[float]
+    :param pixel_std: Per-channel RGB standard deviation the centred input is
+        divided by. Defaults to :data:`SAM2_PIXEL_STD`.
+    :type pixel_std: Sequence[float]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``scalp`` is negative or would discard every level,
-        or if the trunk and neck disagree on the number of levels or on their
-        channel widths.
+        if the trunk and neck disagree on the number of levels or on their
+        channel widths, or if ``pixel_mean`` / ``pixel_std`` are not three
+        values (``pixel_std`` all positive).
+
+    Input: ``(batch, height, width, 3)`` RGB pixels in ``[0, 255]``, the range
+    the trainer's pipeline emits. The encoder standardizes them itself, so
+    ``SAM2.call``, ``SAM2.stream_step`` and ``SAM2TrainingModel`` (which calls
+    this layer directly) all feed the trunk what upstream's does.
 
     Example:
         >>> import numpy as np
@@ -554,9 +575,19 @@ class SAM2ImageEncoder(keras.layers.Layer):
             trunk: Union[Hiera, Dict[str, Any]],
             neck: Union[SAM2FpnNeck, Dict[str, Any]],
             scalp: int = 1,
+            pixel_mean: Sequence[float] = SAM2_PIXEL_MEAN,
+            pixel_std: Sequence[float] = SAM2_PIXEL_STD,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        self.pixel_mean = tuple(float(v) for v in pixel_mean)
+        self.pixel_std = tuple(float(v) for v in pixel_std)
+        if len(self.pixel_mean) != 3 or len(self.pixel_std) != 3:
+            raise ValueError(
+                f"pixel_mean and pixel_std must have 3 values (RGB); got "
+                f"{self.pixel_mean} and {self.pixel_std}")
+        if min(self.pixel_std) <= 0.0:
+            raise ValueError(f"pixel_std must be positive; got {self.pixel_std}")
 
         # Sub-layers -- created unconditionally, built explicitly in build().
         self.trunk = (
@@ -638,7 +669,7 @@ class SAM2ImageEncoder(keras.layers.Layer):
     ) -> Dict[str, Any]:
         """Encode one batch of images.
 
-        :param inputs: ``(batch, height, width, channels)``.
+        :param inputs: ``(batch, height, width, 3)`` RGB pixels in ``[0, 255]``.
         :type inputs: Any
         :param training: Keras training flag.
         :type training: Optional[bool]
@@ -647,8 +678,18 @@ class SAM2ImageEncoder(keras.layers.Layer):
             ascending stage order; ``vision_features`` is the coarsest of them.
         :rtype: Dict[str, Any]
         """
+        # DECISION plan-2026-10-14T062616-81938e81/D-260: standardize HERE, the
+        # one layer every entry point reaches (SAM2TrainingModel calls this
+        # layer directly, past SAM2.call). Do NOT feed raw [0, 255] pixels to
+        # the trunk: upstream's input is NormalizeAPI-standardized, and at ~58x
+        # that scale (centred near 115) the trainer never memorised one batch (README section 7's
+        # "the mask head does not learn jointly" was this).
+        pixels = keras.ops.cast(inputs, self.compute_dtype)
+        standardized = (
+            (pixels - keras.ops.convert_to_tensor(self.pixel_mean, pixels.dtype))
+            / keras.ops.convert_to_tensor(self.pixel_std, pixels.dtype))
         levels, positions = self.neck(
-            self.trunk(inputs, training=training), training=training)
+            self.trunk(standardized, training=training), training=training)
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-014: drop from the coarse
         # end (levels[:-scalp]) before reading vision_features, never levels[scalp:] -- both keep the count at three but the wrong drop hands downstream the wrong skips with no shape error. See decisions.md.
@@ -695,6 +736,8 @@ class SAM2ImageEncoder(keras.layers.Layer):
             "trunk": keras.saving.serialize_keras_object(self.trunk),
             "neck": keras.saving.serialize_keras_object(self.neck),
             "scalp": self.scalp,
+            "pixel_mean": self.pixel_mean,
+            "pixel_std": self.pixel_std,
         })
         return config
 

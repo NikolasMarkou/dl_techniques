@@ -15,9 +15,9 @@ This ``__init__`` imports ``memory_bank`` and ``model`` only, never
 ``SAM2TrainingModel`` under either its current or legacy key. Loading a
 ``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an
 explicit ``import dl_techniques.models.vision_language.sam.sam2.training_model``
-first. The mask head does not learn under joint training; see
-``training_model``'s docstring and ``README.md`` section 7 for the measured
-constraint.
+first. ``README.md`` section 7 has what training is measured to do (the
+trainer memorises one batch; before plan-2026-10-14T062616-81938e81 D-260 the
+mask head did not learn, because the encoder was fed unstandardized pixels).
 
 References:
     - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
