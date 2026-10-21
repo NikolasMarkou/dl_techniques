@@ -357,8 +357,41 @@ DATA_SOURCES = {
 # ---------------------------------------------------------------------------
 # Prompt sampling (a `tf.data` map fn -- the model never does this)
 # ---------------------------------------------------------------------------
+# DECISION plan-2026-10-14T062616-81938e81/D-259
+# Prompts are drawn from a per-element seed that `with_prompt_seeds` zips in
+# from `tf.data.Dataset.random(..., rerandomize_each_iteration=True)`, NOT from
+# a stateful `tf.random` op inside the map. Do NOT go back to the stateful op:
+# under a set global seed (every trainer sets one) its kernel restarts from the
+# same seed on every new iterator, so every epoch draws the SAME points; with a
+# shuffle only the assignment of draws to elements changes. MEASURED on the
+# SAM 2 memorisation run: two point configurations per clip over 150 epochs.
+def with_prompt_seeds(dataset: tf.data.Dataset, seed: int) -> tf.data.Dataset:
+    """
+    Pair every element with a fresh ``(2,)`` int64 seed, new on every pass.
+
+    Interface contract (callers: the SAM 2 video pipeline; any pipeline whose
+    map draws prompts): ``dataset`` yields one element per record; the return
+    yields ``(element, seed)`` with ``seed`` a ``(2,)`` int64 tensor drawn from
+    ``tf.data.Dataset.random(seed=seed, rerandomize_each_iteration=True)``. Two
+    datasets built with the same ``seed`` yield the same seed sequence pass for
+    pass; each new iterator (each epoch) yields a different one. The
+    cardinality is ``dataset``'s. It never raises.
+
+    Args:
+        dataset: The per-record dataset, before the prompt-drawing map.
+        seed: Integer seed of the stream.
+
+    Returns:
+        The zipped dataset.
+    """
+    seeds = tf.data.Dataset.random(
+        seed=seed, rerandomize_each_iteration=True).batch(2)
+    return tf.data.Dataset.zip((dataset, seeds))
+
+
 def _sample_from_indicator(
-    indicator: tf.Tensor, image_size: int, label: int
+    indicator: tf.Tensor, image_size: int, label: int,
+    seed: Optional[tf.Tensor] = None,
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one pixel uniformly from wherever ``indicator`` is non-zero.
@@ -371,6 +404,10 @@ def _sample_from_indicator(
         indicator: ``(mh, mw)`` float, non-zero inside the eligible region.
         image_size: Side of the padded image frame.
         label: Label emitted when the region is non-empty.
+        seed: Optional ``(2,)`` integer seed. Given, the draw is
+            ``tf.random.stateless_categorical`` on it (see
+            :func:`with_prompt_seeds`); ``None`` keeps the stateful op, which
+            under a set global seed repeats its sequence on every new iterator.
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
@@ -383,7 +420,11 @@ def _sample_from_indicator(
     logits = tf.where(
         flat > 0.5, tf.zeros_like(flat), tf.fill(tf.shape(flat), OUTSIDE_MASK_LOGIT)
     )
-    index = tf.cast(tf.random.categorical(logits, 1)[0, 0], tf.int32)
+    if seed is None:
+        draw = tf.random.categorical(logits, 1)
+    else:
+        draw = tf.random.stateless_categorical(logits, 1, seed=seed)
+    index = tf.cast(draw[0, 0], tf.int32)
     row = tf.cast(index // width, tf.float32)
     col = tf.cast(index % width, tf.float32)
 
@@ -405,7 +446,7 @@ def _sample_from_indicator(
 
 
 def sample_point_in_mask(
-    mask: tf.Tensor, image_size: int
+    mask: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one FOREGROUND point uniformly from a mask's interior.
@@ -413,15 +454,16 @@ def sample_point_in_mask(
     Args:
         mask: ``(mh, mw)`` binary float tensor at ``low_res_logits`` resolution.
         image_size: Side of the padded image frame the coordinate must land in.
+        seed: Optional ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
     """
-    return _sample_from_indicator(mask, image_size, FOREGROUND_LABEL)
+    return _sample_from_indicator(mask, image_size, FOREGROUND_LABEL, seed)
 
 
 def sample_point_outside_mask(
-    mask: tf.Tensor, image_size: int
+    mask: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one BACKGROUND point uniformly from outside a mask.
@@ -429,6 +471,7 @@ def sample_point_outside_mask(
     Args:
         mask: ``(mh, mw)`` binary float tensor.
         image_size: Side of the padded image frame.
+        seed: Optional ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` and ``(1,)``. A mask that
@@ -436,17 +479,21 @@ def sample_point_outside_mask(
         empty mask does for the foreground point.
     """
     return _sample_from_indicator(
-        tf.cast(mask <= 0.5, mask.dtype), image_size, BACKGROUND_LABEL
+        tf.cast(mask <= 0.5, mask.dtype), image_size, BACKGROUND_LABEL, seed
     )
 
 
-def jitter_box(box: tf.Tensor, image_size: int) -> tf.Tensor:
+def jitter_box(
+    box: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
+) -> tf.Tensor:
     """
     Add bounded Gaussian noise to a ground-truth box, as reference SAM does.
 
     Args:
         box: ``(4,)`` xyxy in image pixels.
         image_size: Side of the padded image frame.
+        seed: Optional ``(2,)`` seed; given, the noise is
+            ``tf.random.stateless_normal`` on it (:func:`with_prompt_seeds`).
 
     Returns:
         ``(4,)`` xyxy, inside ``[0, image_size]`` and never inverted.
@@ -467,7 +514,8 @@ def jitter_box(box: tf.Tensor, image_size: int) -> tf.Tensor:
     sides = tf.stack([width, height, width, height])
     std = tf.minimum(sides * JITTER_STD_FRACTION, MAX_JITTER_PIXELS)
     offset = tf.clip_by_value(
-        tf.random.normal((4,), dtype=box.dtype) * std,
+        (tf.random.normal((4,), dtype=box.dtype) if seed is None
+         else tf.random.stateless_normal((4,), seed=seed, dtype=box.dtype)) * std,
         -MAX_JITTER_PIXELS,
         MAX_JITTER_PIXELS,
     )

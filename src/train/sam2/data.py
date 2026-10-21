@@ -92,6 +92,7 @@ from train.sam.data import (
     jitter_box,
     sample_point_in_mask,
     sample_point_outside_mask,
+    with_prompt_seeds,
 )
 
 #: Slack added to the bar's coverage margin, in pixels. Any value >= 1 makes
@@ -453,6 +454,7 @@ def to_video_training_record(
         image_size: int,
         num_background_points: int = 0,
         include_box: bool = False,
+        seed: Optional[tf.Tensor] = None,
 ) -> Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]:
     """Turn one clip into ``(inputs, targets)`` for ``SAM2TrainingModel``.
 
@@ -465,6 +467,12 @@ def to_video_training_record(
     :type num_background_points: int
     :param include_box: Whether to add a jittered frame-0 box prompt.
     :type include_box: bool
+    :param seed: ``(2,)`` stateless seed of this clip's prompt draws (the
+        foreground point, the box jitter, each background point get
+        independent seeds split from it). :func:`build_sam2_video_dataset`
+        always passes one from ``with_prompt_seeds``, so the draws change every
+        pass; ``None`` falls back to stateful ops (one-off calls only).
+    :type seed: Optional[tf.Tensor]
     :return: ``(inputs, targets)``. ``targets`` is keyed by the wrapper's own
         exported output-key constants.
     :rtype: Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]
@@ -475,10 +483,15 @@ def to_video_training_record(
     # leaves its frame-0 location, and prompting frame t instead would put the
     # prompt somewhere the conditioning frame's object is not.
     frame_zero = mask[0]
-    coords, labels = sample_point_in_mask(frame_zero, image_size)
-    for _ in range(num_background_points):
+    seeds = (
+        [None] * (2 + num_background_points) if seed is None
+        else tf.unstack(tf.random.experimental.stateless_split(
+            seed, num=2 + num_background_points))
+    )
+    coords, labels = sample_point_in_mask(frame_zero, image_size, seeds[0])
+    for index in range(num_background_points):
         background_coords, background_labels = sample_point_outside_mask(
-            frame_zero, image_size
+            frame_zero, image_size, seeds[2 + index]
         )
         coords = tf.concat([coords, background_coords], axis=0)
         labels = tf.concat([labels, background_labels], axis=0)
@@ -499,7 +512,7 @@ def to_video_training_record(
     }
     if include_box:
         inputs[INPUT_BOXES] = tf.expand_dims(
-            jitter_box(record[RECORD_BOX], image_size), axis=0
+            jitter_box(record[RECORD_BOX], image_size, seeds[1]), axis=0
         )
     # DECISION plan-2026-08-04T044628-4c240b4c/D-058
     # THREE target keys, each sourced from `models/vision_language/sam/sam2/training_model.py`'s
@@ -571,7 +584,9 @@ def build_sam2_video_dataset(
     :type include_box: bool
     :return: A batched dataset of ``(inputs, targets)`` dicts. The batch axis
         is STATIC (``drop_remainder=True``) -- see D-068 below; a partial last
-        batch is dropped, and the drop is counted and logged.
+        batch is dropped, and the drop is counted and logged. Its cardinality
+        is ``num_clips // batch_size`` (D-258), and the frame-0 prompts are
+        redrawn on every pass from a stream seeded by ``seed`` (D-259).
     :rtype: tensorflow.data.Dataset
     """
     mask_size = mask_size or image_size // MASK_DIVISOR
@@ -594,14 +609,26 @@ def build_sam2_video_dataset(
         ),
         output_signature=signature,
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-258
+    # The source yields EXACTLY `num_clips` clips (or raises), so its length is
+    # stated here. Do NOT drop this as redundant: a `from_generator` dataset has
+    # unknown cardinality, Keras 3.8 then finds the epoch end by one more
+    # train/test function call that raises OutOfRange, and the loss trackers'
+    # data-independent `count` update still runs in it -- every logged loss is
+    # n / (n + 1) of the true mean over n batches. MEASURED: one batch per
+    # epoch logged 0.477 for a model whose loss on that batch is 0.954.
+    dataset = dataset.apply(tf.data.experimental.assert_cardinality(num_clips))
     if shuffle_buffer > 0:
         dataset = dataset.shuffle(shuffle_buffer, seed=seed)
+    # D-259: the prompt draws are seeded per element and per pass.
+    dataset = with_prompt_seeds(dataset, seed)
     dataset = dataset.map(
-        lambda record: to_video_training_record(
+        lambda record, prompt_seed: to_video_training_record(
             record,
             image_size,
             num_background_points=num_background_points,
             include_box=include_box,
+            seed=prompt_seed,
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )

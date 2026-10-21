@@ -1079,6 +1079,11 @@ class TestTheTrainersOwnFactoriesTrain:
 # ---------------------------------------------------------------------
 
 
+#: Model-init seed of both gate arms: the unopened gate is closed on every frame
+#: at this seed with the pipeline's draws (see the RED arm's docstring).
+GATE_SEED = 3
+
+
 class TestTheObjectScoreGateOpensAtStepZero:
     """D-075: the trainer's model starts predicting "the object is present".
 
@@ -1110,7 +1115,7 @@ class TestTheObjectScoreGateOpensAtStepZero:
 
     def test_the_trainers_model_predicts_present_on_every_frame(self) -> None:
         """The GREEN arm: every score is positive, so no frame is suppressed."""
-        keras.utils.set_random_seed(1)
+        keras.utils.set_random_seed(GATE_SEED)
         config = SAM2TrainingConfig(
             variant="tiny", num_frames=2, occlusion_frames=0,
             num_clips_train=2, num_clips_val=2, batch_size=2, seed=7)
@@ -1131,9 +1136,13 @@ class TestTheObjectScoreGateOpensAtStepZero:
         MEASURED at seed 1: without :func:`open_object_score_gate` the score
         head predicts "absent" and the whole mask output collapses to the
         ``-1024`` sentinel with ONE unique value per frame -- the exact
-        signature iteration 2 shipped.
+        signature iteration 2 shipped. Re-pinned to :data:`GATE_SEED` = 3 at
+        step 12.8 of plan-2026-10-14T062616-81938e81: the pipeline's prompt
+        draws became per-pass stateless draws (D-259), and over model seeds
+        0-11 the unopened gate is closed on every frame at 3 and 9, on some
+        frames at 4, 5, 6 and 11, and open at 0, 1, 2, 7, 8 and 10.
         """
-        keras.utils.set_random_seed(1)
+        keras.utils.set_random_seed(GATE_SEED)
         config = SAM2TrainingConfig(
             variant="tiny", num_frames=2, occlusion_frames=0,
             num_clips_train=2, num_clips_val=2, batch_size=2, seed=7)
