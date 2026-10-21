@@ -529,7 +529,13 @@ class SAM2(keras.Model):
             pred_obj_scores=True,
             pred_obj_scores_mlp=True,
             use_multimask_token_for_obj_ptr=True,
-            dynamic_multimask_via_stability=True,
+            # DECISION plan-2026-10-14T062616-81938e81/D-245: off. Training here
+            # decodes token 0 only (SAM2TrainingModel, multimask_output=False), so
+            # the multimask tokens stay at their initialisation; upstream's
+            # inference fallback to them (on) answered an unstable mask with an
+            # untrained token (val mask loss 1.712 against 1.043). Do NOT turn it
+            # back on unless the multimask tokens are trained.
+            dynamic_multimask_via_stability=False,
         )
         memory_attention = SAM2MemoryAttention(
             d_model=hidden_dim,

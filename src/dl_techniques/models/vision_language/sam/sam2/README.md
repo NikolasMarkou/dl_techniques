@@ -178,7 +178,7 @@ location so a reader knows where to look, not restated:
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
 | [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken | `test_neck.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT | `test_mask_decoder.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: training here decodes token 0 only, so the fallback's multimask tokens are untrained (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
