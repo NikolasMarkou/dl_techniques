@@ -38,6 +38,7 @@ import keras
 import tensorflow as tf
 
 from train.common import setup_gpu, set_seeds, save_config_json
+from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.optimization import optimizer_builder, WarmupSchedule
 from dl_techniques.models.vision.levjepa.model import create_levjepa, SCALE_CONFIGS
@@ -358,7 +359,7 @@ def main(argv: Optional[Sequence[str]] = None):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     callbacks = [
         keras.callbacks.TerminateOnNaN(),
-        keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
+        EpochCSVLogger(str(output_dir / "training_log.csv")),
         EMAShadowCallback(decay=config.ema_decay, update_every=config.ema_update_every),
         keras.callbacks.ModelCheckpoint(
             filepath=str(checkpoint_dir / "model.keras"),

@@ -927,7 +927,10 @@ class TestConstruction:
             "the teacher-temperature warmup rides a stock LambdaCallback; a sixth "
             "schedule-callback class is explicitly not wanted here"
         )
-        assert "CSVLogger" in kinds and "ModelCheckpoint" in kinds
+        # The shared EpochCSVLogger (no phantom val_ columns, D-236), a
+        # CSVLogger subclass.
+        assert "EpochCSVLogger" in kinds and "ModelCheckpoint" in kinds
+        assert any(isinstance(cb, keras.callbacks.CSVLogger) for cb in callbacks)
         assert any(isinstance(cb, TeacherEMACallback) for cb in callbacks)
 
         # The PLUMBING, not the arithmetic. `test_shipped_defaults_reproduce_the_measured

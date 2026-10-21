@@ -45,7 +45,7 @@ from train.common import (
     save_config_json,
     save_training_history_json,
 )
-from train.common.callbacks import EpochLogLine, LearningRateLogger
+from train.common.callbacks import EpochCSVLogger, EpochLogLine, LearningRateLogger
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
 from dl_techniques.models.vision_language.nano_vlm.model import NanoVLM, create_nanovlm
@@ -371,7 +371,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
         # First: `lr` must be in `logs` before CSVLogger writes the row; read
         # at the epoch start, so it is the rate the epoch trained at.
         LearningRateLogger(at_epoch_start=True),
-        keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+        EpochCSVLogger(str(run_dir / "training_log.csv")),
         # After every epoch, so the file is the last completed epoch even if
         # the run dies later.
         keras.callbacks.ModelCheckpoint(str(run_dir / "final_model.keras")),

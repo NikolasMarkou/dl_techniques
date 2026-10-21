@@ -69,7 +69,7 @@ from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
 )
-from train.common.callbacks import best_checkpoint_path
+from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.neural_hmm.data import (
     OBS_TYPES, HMMDataset, accuracy, hungarian_mapping, majority_rate, matched_accuracy,
@@ -519,7 +519,7 @@ def main(argv=None) -> int:
         callbacks = [
             keras.callbacks.ModelCheckpoint(str(best_path), monitor="val_loss", mode="min",
                                             save_best_only=True),
-            keras.callbacks.CSVLogger(str(run_dir / TRAINING_LOG_NAME)),
+            EpochCSVLogger(str(run_dir / TRAINING_LOG_NAME)),
             keras.callbacks.EarlyStopping(monitor="val_loss", mode="min", patience=args.patience,
                                           restore_best_weights=True),
             keras.callbacks.TerminateOnNaN(),

@@ -42,9 +42,8 @@ from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.keypoint_extraction import decode_superpoint
 from dl_techniques.utils.keypoint_matching import homography_matches, label_statistics
-from dl_techniques.utils.logger import logger
 
-from train.common.callbacks import resolve_monitor_mode
+from train.common.callbacks import BestSubmodelCheckpoint
 
 # ---------------------------------------------------------------------
 
@@ -345,13 +344,13 @@ class LightGlueTrainingModel(keras.Model):
 # serialises (measured) but writes the frozen SuperPoint at every improvement; the
 # evaluation script reloads only the LightGlue. Guard: test_lightglue_checkpoint_saves_the_
 # lightglue_alone_on_improvement. See decisions.md D-014.
-class LightGlueCheckpoint(keras.callbacks.Callback):
+class LightGlueCheckpoint(BestSubmodelCheckpoint):
     """Save the LightGlue ALONE whenever the monitored value improves.
 
     The stock ``ModelCheckpoint`` of ``create_callbacks`` would write the wrapper,
     frozen SuperPoint included, at every improvement. This callback writes only the
-    ``pipeline.lightglue`` sub-model, which is what the evaluation script reloads.
-    It is not serialised with a model (callbacks never are).
+    ``pipeline.lightglue`` sub-model, which is what the evaluation script reloads:
+    :class:`train.common.callbacks.BestSubmodelCheckpoint` on ``lightglue``.
 
     :param filepath: ``.keras`` path (use ``best_checkpoint_path(run_dir)``).
     :param monitor: Log key, e.g. ``val_loss``.
@@ -360,28 +359,4 @@ class LightGlueCheckpoint(keras.callbacks.Callback):
     """
 
     def __init__(self, filepath: str, monitor: str = "val_loss", mode: Optional[str] = None) -> None:
-        super().__init__()
-        self.filepath = filepath
-        self.monitor = monitor
-        self.mode = resolve_monitor_mode(monitor, mode)
-        self.best: Optional[float] = None
-        self.best_epoch: Optional[int] = None
-
-    def _improved(self, value: float) -> bool:
-        if self.best is None:
-            return True
-        return value < self.best if self.mode == "min" else value > self.best
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        """Save ``model.lightglue`` when ``logs[monitor]`` is a finite improvement."""
-        value = (logs or {}).get(self.monitor)
-        if value is None or value != value:
-            logger.warning(f"LightGlueCheckpoint: {self.monitor!r} missing or NaN at epoch {epoch}")
-            return
-        value = float(value)
-        if self._improved(value):
-            self.best, self.best_epoch = value, epoch
-            self.model.lightglue.save(self.filepath)
-            logger.info(
-                f"Epoch {epoch + 1}: {self.monitor} improved to {value:.6g}, saved "
-                f"{self.filepath}")
+        super().__init__(filepath, "lightglue", monitor=monitor, mode=mode)

@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 from train.common import setup_gpu, set_seeds
+from train.common.callbacks import EpochCSVLogger
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.sut import OptimizedSUTDataset
 from dl_techniques.models.vision.yolo12.multitask import create_yolov12_multitask
@@ -546,7 +547,7 @@ def create_callbacks(
             monitor=monitor, factor=0.5, patience=max(patience // 3, 5),
             min_lr=1e-7, verbose=1, cooldown=2
         ),
-        keras.callbacks.CSVLogger(
+        EpochCSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv'),
             append=False, separator=','
         ),

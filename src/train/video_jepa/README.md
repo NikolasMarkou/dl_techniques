@@ -55,8 +55,8 @@ loss mass. `L_mask` is MSE on tube-masked patch positions. `L_sigreg` is an
 Epps-Pulley Gaussianity statistic averaged over random projections.
 
 Trackers: `next_frame_loss_h{h}` per horizon, plus an aggregated
-`next_frame_loss`, `mask_loss`, `sigreg_loss`. `CSVLogger` writes one column
-each, with `val_` twins when validation is on.
+`next_frame_loss`, `mask_loss`, `sigreg_loss`. `EpochCSVLogger` writes one column
+each, with `val_` twins only when validation is on.
 
 ## CLI
 

@@ -45,6 +45,7 @@ import keras
 import tensorflow as tf
 
 from train.common import setup_gpu, create_base_argument_parser, set_seeds, save_config_json
+from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.models.vision.lewm.config import LeWMConfig
 from dl_techniques.models.vision.lewm.model import LeWM
@@ -133,7 +134,7 @@ def _build_callbacks(results_dir: Path) -> list:
     results_dir.mkdir(parents=True, exist_ok=True)
     return [
         keras.callbacks.TerminateOnNaN(),
-        keras.callbacks.CSVLogger(str(results_dir / "training_log.csv")),
+        EpochCSVLogger(str(results_dir / "training_log.csv")),
         keras.callbacks.ModelCheckpoint(
             filepath=str(results_dir / "last.keras"),
             save_best_only=False,

@@ -1518,10 +1518,11 @@ class TestEvaluation:
         callbacks = build_callbacks(tiny_config, tmp_path, val_dataset)
         kinds = [type(callback) for callback in callbacks]
         assert _Sam3EvalCallback in kinds, "the metrics callback is not wired"
-        assert keras.callbacks.CSVLogger in kinds, (
-            "no CSVLogger; this test's premise is gone")
-        assert kinds.index(_Sam3EvalCallback) < kinds.index(
-            keras.callbacks.CSVLogger)
+        # The shared EpochCSVLogger is a CSVLogger subclass (D-236).
+        csv_at = [i for i, callback in enumerate(callbacks)
+                  if isinstance(callback, keras.callbacks.CSVLogger)]
+        assert csv_at, "no CSVLogger; this test's premise is gone"
+        assert kinds.index(_Sam3EvalCallback) < csv_at[0]
         for reader in (keras.callbacks.EarlyStopping,
                        keras.callbacks.ModelCheckpoint):
             assert kinds.index(_Sam3EvalCallback) < kinds.index(reader)

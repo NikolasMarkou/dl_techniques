@@ -21,7 +21,9 @@ defects the step-level tests could not see:
   ``<unk>`` run and the text tower saw ONE input for the whole dataset.
 
 This file drives `main(argv)` itself, on a tiny configuration, with every
-output under `tmp_path`. The autouse guard in `tests/conftest.py` fails the
+output under `tmp_path`, and ``--val-fraction 0`` (the validation split and the
+best checkpoint have their own file,
+`test_the_best_checkpoint_is_the_lowest_val_loss_epoch.py`). The autouse guard in `tests/conftest.py` fails the
 test if anything lands in the repo-root `results/`.
 
 Since plan-2026-10-14T062616-81938e81 D-036 the trainer has no loop of its
@@ -94,6 +96,7 @@ def test_synthetic_run_trains_two_steps_and_saves_a_loadable_model(tmp_path, mon
     fit_calls = _spy_on_fit(monkeypatch)
     run_dir = main([
         *_TINY, "--synthetic", "--synthetic-samples", str(_BATCH),
+        "--val-fraction", "0",
         "--batch-size", str(_BATCH), "--epochs", "2", "--steps-per-epoch", "1",
         "--output-dir", str(tmp_path / "run"),
     ])
@@ -144,6 +147,7 @@ def test_every_epoch_trains_its_steps_per_epoch_batches(tmp_path, monkeypatch):
     fit_calls = _spy_on_fit(monkeypatch)
     run_dir = main([
         *_TINY, "--synthetic", "--synthetic-samples", str(3 * _BATCH),
+        "--val-fraction", "0",
         "--batch-size", str(_BATCH), "--epochs", "2", "--steps-per-epoch", "2",
         "--output-dir", str(tmp_path / "run"),
     ])
@@ -167,7 +171,7 @@ def test_file_run_tokenizes_each_caption_from_the_captions_vocabulary(tmp_path):
 
     run_dir = main([
         *_TINY, "--image-dir", str(image_dir),
-        "--captions-file", str(captions_file),
+        "--captions-file", str(captions_file), "--val-fraction", "0",
         "--batch-size", str(_BATCH), "--epochs", "1",
         "--output-dir", str(tmp_path / "run"),
     ])
@@ -210,7 +214,7 @@ def test_a_dataset_smaller_than_one_batch_is_refused(tmp_path):
     """drop_remainder empties it; the epoch used to log a loss of exactly 0.0."""
     with pytest.raises(ValueError, match="no batch"):
         main([
-            *_TINY, "--synthetic", "--synthetic-samples", "4",
+            *_TINY, "--synthetic", "--synthetic-samples", "4", "--val-fraction", "0",
             "--batch-size", str(_BATCH), "--epochs", "1",
             "--output-dir", str(tmp_path / "run"),
         ])

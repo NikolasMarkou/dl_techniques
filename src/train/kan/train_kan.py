@@ -38,7 +38,7 @@ from train.common import (
     prepare_run_dir,
     save_training_history_json,
 )
-from train.common.callbacks import best_checkpoint_path
+from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
 
 
 # Resolved once in `main()` to compute `run_dir` (plan-2026-09-17T064004-0d194df2
@@ -702,7 +702,7 @@ def main() -> None:
                 mode='min',
                 save_best_only=True,
             ),
-            keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+            EpochCSVLogger(str(run_dir / "training_log.csv")),
             KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
             KANVisualizationCallback(
                 viz_manager, freq=args.viz_freq,

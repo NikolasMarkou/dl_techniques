@@ -84,7 +84,7 @@ from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
 )
-from train.common.callbacks import best_checkpoint_path
+from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
 from train.common.run_artifacts import (
     RESULTS_SUMMARY_NAME, RUN_LOG_NAME, attach_run_log, refuse_existing_run,
     write_summary_json,
@@ -462,7 +462,7 @@ def run_repeat(
                     save_best_only=True,
                     initial_value_threshold=(
                         start_mse if start_mse is not None and np.isfinite(start_mse) else None)),
-                keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+                EpochCSVLogger(str(run_dir / "training_log.csv")),
             ]
         history = model.fit(
             x_fit, y_fit.astype(np.float32), validation_data=(x_monitor, y_monitor),

@@ -108,7 +108,8 @@ Intentionally minimal (does NOT use `train.common.create_callbacks` — the
 shared `EpochAnalyzerCallback` does not understand dict inputs / `add_loss`):
 
 - `TerminateOnNaN`
-- `CSVLogger(training_log.csv)`
+- `EpochCSVLogger(training_log.csv)` (`train.common.callbacks`: no `val_` column
+  unless the fit validates; the stock logger added one per metric, all `NA`)
 - `ModelCheckpoint(last.keras, save_best_only=False)`
 
 ### Outputs

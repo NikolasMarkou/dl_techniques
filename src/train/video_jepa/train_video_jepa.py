@@ -50,6 +50,7 @@ import keras
 import tensorflow as tf
 
 from train.common import setup_gpu, create_base_argument_parser, set_seeds
+from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.vision.video_jepa.model import VideoJEPA
@@ -188,7 +189,7 @@ def _build_callbacks(
     monitor = "val_loss" if has_validation else "loss"
     cbs = [
         keras.callbacks.TerminateOnNaN(),
-        keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
+        EpochCSVLogger(str(output_dir / "training_log.csv")),
         keras.callbacks.ModelCheckpoint(
             filepath=str(output_dir / "last.keras"),
             save_best_only=False,

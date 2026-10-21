@@ -84,6 +84,7 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
 )
+from train.common.callbacks import BestSubmodelCheckpoint
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -1056,7 +1057,7 @@ class SuperPointJointModel(keras.Model):
 # does not reload (SuperPointJointModel.__init__() missing 'superpoint') while
 # final_model.keras (the backbone) does. Same trap LightGlue fixed with
 # LightGlueCheckpoint. Guard: test_backbone_checkpoint_reloads_as_superpoint.
-class SuperPointBackboneCheckpoint(keras.callbacks.Callback):
+class SuperPointBackboneCheckpoint(BestSubmodelCheckpoint):
     """Save the joint model's backbone whenever the monitored value improves.
 
     Mirrors :class:`train.lightglue.pipeline.LightGlueCheckpoint`: the stock
@@ -1064,7 +1065,8 @@ class SuperPointBackboneCheckpoint(keras.callbacks.Callback):
     :class:`SuperPointJointModel` wrapper), which is not the reusable artifact
     and does not deserialize. This callback writes only ``model.superpoint``,
     which is what downstream consumers (homographic adaptation, the LightGlue
-    front end) load. It is not serialised with a model (callbacks never are).
+    front end) load: :class:`train.common.callbacks.BestSubmodelCheckpoint` on
+    ``superpoint``.
 
     :param filepath: ``.keras`` path (use ``best_checkpoint_path(run_dir)``).
     :param monitor: Log key, e.g. ``"loss"``.
@@ -1072,39 +1074,7 @@ class SuperPointBackboneCheckpoint(keras.callbacks.Callback):
     """
 
     def __init__(self, filepath: str, monitor: str = "loss", mode: Optional[str] = None) -> None:
-        super().__init__()
-        self.filepath = filepath
-        self.monitor = monitor
-        self.best: Optional[float] = None
-        self.best_epoch: Optional[int] = None
-        self._mode = mode
-
-    def on_train_begin(self, logs=None) -> None:
-        from train.common.callbacks import resolve_monitor_mode
-        if self._mode is None:
-            self._mode = resolve_monitor_mode(self.monitor, None)
-
-    def _improved(self, value: float) -> bool:
-        if self.best is None:
-            return True
-        return value < self.best if self._mode == "min" else value > self.best
-
-    def on_epoch_end(self, epoch: int, logs=None) -> None:
-        """Save ``model.superpoint`` when ``logs[monitor]`` is a finite improvement."""
-        value = (logs or {}).get(self.monitor)
-        if value is None or value != value:
-            logger.warning(
-                f"SuperPointBackboneCheckpoint: {self.monitor!r} missing or NaN "
-                f"at epoch {epoch}"
-            )
-            return
-        value = float(value)
-        if self._improved(value):
-            self.best, self.best_epoch = value, epoch
-            self.model.superpoint.save(self.filepath)
-            logger.info(
-                f"Epoch {epoch + 1}: {self.monitor} improved to {value:.6g}, saved "
-                f"{self.filepath}")
+        super().__init__(filepath, "superpoint", monitor=monitor, mode=mode)
 
 
 # ---------------------------------------------------------------------

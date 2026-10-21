@@ -58,6 +58,29 @@ def best_checkpoint_path(results_dir: str) -> str:
     return os.path.join(results_dir, BEST_CHECKPOINT_FILENAME)
 
 
+class EpochCSVLogger(keras.callbacks.CSVLogger):
+    """``keras.callbacks.CSVLogger`` whose columns are exactly epoch 0's keys.
+
+    Interface contract (callers: :func:`create_callbacks` and every trainer
+    that writes ``training_log.csv`` itself; a census forbids
+    ``keras.callbacks.CSVLogger(`` elsewhere under ``src/train``):
+
+    * Same arguments, file and row format as ``keras.callbacks.CSVLogger``.
+    * The header is ``epoch`` plus the sorted keys of the first epoch's logs.
+      Keras 3.8 adds ``val_<key>`` for every key when epoch 0 has no ``val_``
+      key (meant for ``validation_freq > 1``), so a run without validation
+      got a ``val_`` column per metric, every cell ``NA``. With validation
+      data the ``val_`` keys are in epoch 0's logs and appear as before.
+    * Like the stock logger, a key that first appears after epoch 0 is not
+      written (no trainer here uses ``validation_freq``).
+    """
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.keys is None:
+            self.keys = sorted((logs or {}).keys())
+        super().on_epoch_end(epoch, logs)
+
+
 # ---------------------------------------------------------------------
 # Monitor-direction resolution
 # ---------------------------------------------------------------------
@@ -243,7 +266,7 @@ def create_callbacks(
             verbose=1,
             mode=monitor_mode,
         ),
-        keras.callbacks.CSVLogger(
+        EpochCSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv')
         ),
     ]
@@ -436,6 +459,61 @@ def read_current_lr(model: keras.Model) -> float:
         return float(keras.ops.convert_to_numpy(lr))
     except Exception:
         return float("nan")
+
+
+# NOT @register_dl_technique: callbacks are never serialized with a model.
+class BestSubmodelCheckpoint(keras.callbacks.Callback):
+    """Save one sub-model of the fitted model whenever the monitor improves.
+
+    Interface contract (callers: ``train.clip.train_clip`` (``clip_model`` of
+    the contrastive wrapper), ``train.lightglue.train_lightglue``
+    (``lightglue``), ``train.superpoint.train_superpoint`` (``superpoint``)):
+
+    * The stock ``ModelCheckpoint`` writes ``self.model``, the training
+      scaffold (a wrapper with a loss, a frozen front end, stacked outputs),
+      which is not the reusable artefact and may not deserialize. This writes
+      ``getattr(self.model, attribute)`` to ``filepath`` instead.
+    * An epoch whose ``logs[monitor]`` is a finite improvement (strict, in
+      ``mode``) saves; a missing or NaN value logs a warning and saves
+      nothing. ``best`` and ``best_epoch`` (0-based) hold the last save.
+    * ``mode`` ``None`` resolves from the key with
+      :func:`resolve_monitor_mode`.
+
+    :param filepath: ``.keras`` path (use ``best_checkpoint_path(run_dir)``).
+    :param attribute: Name of the sub-model attribute on the fitted model.
+    :param monitor: Log key, e.g. ``"val_loss"``.
+    :param mode: ``"min"``, ``"max"`` or ``None``.
+    """
+
+    def __init__(self, filepath: str, attribute: str, monitor: str = "val_loss",
+                 mode: Optional[str] = None) -> None:
+        super().__init__()
+        self.filepath = filepath
+        self.attribute = attribute
+        self.monitor = monitor
+        self.mode = resolve_monitor_mode(monitor, mode)
+        self.best: Optional[float] = None
+        self.best_epoch: Optional[int] = None
+
+    def _improved(self, value: float) -> bool:
+        if self.best is None:
+            return True
+        return value < self.best if self.mode == "min" else value > self.best
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        value = (logs or {}).get(self.monitor)
+        if value is None or not math.isfinite(float(value)):
+            logger.warning(
+                f"BestSubmodelCheckpoint: {self.monitor!r} missing or not finite "
+                f"at epoch {epoch}")
+            return
+        value = float(value)
+        if self._improved(value):
+            self.best, self.best_epoch = value, epoch
+            getattr(self.model, self.attribute).save(self.filepath)
+            logger.info(
+                f"Epoch {epoch + 1}: {self.monitor} improved to {value:.6g}, saved "
+                f"{self.attribute} to {self.filepath}")
 
 
 # NOT @register_dl_technique: callbacks are never

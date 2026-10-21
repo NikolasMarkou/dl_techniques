@@ -39,7 +39,7 @@ evaluation pass over the fit rows per epoch, in every repeat.
 There is no custom `train_step`. `train.common.create_callbacks()` is not used: it
 always adds early stopping, which would stop repeats at different epochs, and it has
 no role in the closed-form mode. The backprop modes use `ModelCheckpoint` and
-`CSVLogger` directly.
+`train.common.callbacks.EpochCSVLogger` directly.
 
 ## 2. Data
 
