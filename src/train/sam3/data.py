@@ -740,6 +740,13 @@ def build_sam3_dataset(
 
     dataset = tf.data.Dataset.from_generator(
         _source, output_signature=signature)
+    # DECISION plan-2026-10-14T062616-81938e81/D-262
+    # `synthetic_prompt_samples` yields EXACTLY `num_samples` records, so the
+    # length is stated. Do NOT drop it: with unknown cardinality Keras 3.8 logs
+    # every compiled loss (`loss`, `val_loss`, the per-term losses) as
+    # n / (n + 1) of the mean over n batches (D-258). `val_box_iou` comes from
+    # `evaluate_sam3`'s own loop and was never affected.
+    dataset = dataset.apply(tf.data.experimental.assert_cardinality(num_samples))
     if shuffle_buffer > 0:
         dataset = dataset.shuffle(shuffle_buffer, seed=seed)
 

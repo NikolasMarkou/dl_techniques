@@ -92,6 +92,7 @@ from train.sam.data import (
     jitter_box,
     sample_point_in_mask,
     sample_point_outside_mask,
+    split_prompt_seed,
     with_prompt_seeds,
 )
 
@@ -483,11 +484,7 @@ def to_video_training_record(
     # leaves its frame-0 location, and prompting frame t instead would put the
     # prompt somewhere the conditioning frame's object is not.
     frame_zero = mask[0]
-    seeds = (
-        [None] * (2 + num_background_points) if seed is None
-        else tf.unstack(tf.random.experimental.stateless_split(
-            seed, num=2 + num_background_points))
-    )
+    seeds = split_prompt_seed(seed, 2 + num_background_points)
     coords, labels = sample_point_in_mask(frame_zero, image_size, seeds[0])
     for index in range(num_background_points):
         background_coords, background_labels = sample_point_outside_mask(

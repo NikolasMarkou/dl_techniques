@@ -106,3 +106,23 @@ Moved from `models/GUIDE.md` § 10.3 (iteration 1 of that plan).
   `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py`,
   `tests/test_train/test_nam/test_the_quick_eval_leaves_the_training_stream_alone.py`.
   *Example:* D-247, D-248.
+- **A generator dataset of unknown length that shrank every logged loss.** With a
+  `from_generator` source and no `steps_per_epoch`, Keras 3.8 finds the epoch end through one
+  more train or test function call that raises OutOfRange, and the loss trackers' `count`
+  update still runs in it: every logged loss is `n / (n + 1)` of the mean over `n` batches. A 2-clip SAM 2 run logged 0.48 for a model whose loss was 0.95, a constant's 0.96.
+  *Rule:* a source that yields a known number of records states it with
+  `tf.data.experimental.assert_cardinality`; otherwise `fit` gets `steps_per_epoch` (and
+  `validation_steps`) on a repeated dataset. *Detected:* `evaluate` on the live dataset against
+  the same batches materialised. *Guard:*
+  `tests/test_train/test_sam2/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`,
+  `tests/test_train/test_sam/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`,
+  `tests/test_train/test_sam3/test_the_pipeline_states_its_length.py`. *Example:* D-258, D-262.
+- **A random draw in a `tf.data` map that repeated every epoch.** A stateful `tf.random` op in
+  a `map` restarts from its seed on every new iterator once a global seed is set, so every
+  epoch drew the same SAM prompts and a shuffle only moved them between records. *Rule:* draw
+  from a per-record seed zipped in from `tf.data.Dataset.random(...,
+  rerandomize_each_iteration=True)` (`train.sam.data.with_prompt_seeds`). *Detected:* two passes
+  over the dataset compared. *Guard:*
+  `tests/test_train/test_sam2/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`,
+  `tests/test_train/test_sam/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`.
+  *Example:* D-259, D-262.

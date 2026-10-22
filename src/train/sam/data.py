@@ -389,6 +389,30 @@ def with_prompt_seeds(dataset: tf.data.Dataset, seed: int) -> tf.data.Dataset:
     return tf.data.Dataset.zip((dataset, seeds))
 
 
+def split_prompt_seed(
+    seed: Optional[tf.Tensor], count: int
+) -> List[Optional[tf.Tensor]]:
+    """
+    Split one record's prompt seed into ``count`` independent seeds.
+
+    Interface contract (callers: ``to_training_record`` here and the SAM 2
+    pipeline's ``to_video_training_record``): ``seed`` is the ``(2,)`` seed
+    :func:`with_prompt_seeds` pairs with a record, or ``None``; the return is a
+    list of ``count`` ``(2,)`` seeds from ``stateless_split``, or ``count``
+    ``None`` entries (the samplers then use stateful ops). It never raises.
+
+    Args:
+        seed: The record's seed, or ``None``.
+        count: How many prompt draws need a seed.
+
+    Returns:
+        The per-draw seeds.
+    """
+    if seed is None:
+        return [None] * count
+    return tf.unstack(tf.random.experimental.stateless_split(seed, num=count))
+
+
 def _sample_from_indicator(
     indicator: tf.Tensor, image_size: int, label: int,
     seed: Optional[tf.Tensor] = None,
@@ -537,6 +561,7 @@ def to_training_record(
     image_size: int,
     num_background_points: int = 0,
     include_box: bool = False,
+    seed: Optional[tf.Tensor] = None,
 ) -> Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]:
     """
     Turn one source record into ``(inputs, y_true)`` for ``SAMTrainingModel``.
@@ -547,6 +572,10 @@ def to_training_record(
         num_background_points: Background points to add beside the foreground
             one. ``0`` reproduces the single-positive-point regime.
         include_box: Whether to add a jittered box prompt.
+        seed: ``(2,)`` stateless seed of this record's prompt draws, split into
+            the foreground point, the box jitter and each background point.
+            :func:`build_sam_dataset` always passes one from
+            :func:`with_prompt_seeds`; ``None`` uses stateful ops (one-off calls).
 
     Returns:
         ``(inputs, y_true)``. ``y_true`` carries a SINGLE-instance GT stack
@@ -555,10 +584,11 @@ def to_training_record(
         ``num_refinement_rounds``.
     """
     mask = record[RECORD_MASK]
-    coords, labels = sample_point_in_mask(mask, image_size)
-    for _ in range(num_background_points):
+    seeds = split_prompt_seed(seed, 2 + num_background_points)
+    coords, labels = sample_point_in_mask(mask, image_size, seeds[0])
+    for index in range(num_background_points):
         background_coords, background_labels = sample_point_outside_mask(
-            mask, image_size
+            mask, image_size, seeds[2 + index]
         )
         coords = tf.concat([coords, background_coords], axis=0)
         labels = tf.concat([labels, background_labels], axis=0)
@@ -571,7 +601,7 @@ def to_training_record(
     }
     if include_box:
         inputs[INPUT_BOXES] = tf.expand_dims(
-            jitter_box(record[RECORD_BOX], image_size), axis=0
+            jitter_box(record[RECORD_BOX], image_size, seeds[1]), axis=0
         )
     targets = {
         LOW_RES_LOGITS: gt_stack,
@@ -612,7 +642,9 @@ def build_sam_dataset(
             ``{"split": "val2017", "max_images": 64}`` for COCO.
 
     Returns:
-        A batched ``tf.data.Dataset`` of ``(inputs, y_true)`` dicts.
+        A batched ``tf.data.Dataset`` of ``(inputs, y_true)`` dicts, of
+        cardinality ``ceil(num_samples / batch_size)`` (D-262), whose prompts
+        are redrawn on every pass from a stream seeded by ``seed`` (D-259).
 
     Raises:
         ValueError: on an unknown ``source`` name; the message lists the known
@@ -645,14 +677,22 @@ def build_sam_dataset(
     dataset = tf.data.Dataset.from_generator(
         lambda: generator(**kwargs), output_signature=signature
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-262
+    # Both sources yield EXACTLY `num_samples` records (or raise), so the length
+    # is stated. Do NOT drop it: with unknown cardinality Keras 3.8 logs every
+    # compiled loss as n / (n + 1) of the mean over n batches (D-258).
+    dataset = dataset.apply(tf.data.experimental.assert_cardinality(num_samples))
     if shuffle_buffer > 0:
         dataset = dataset.shuffle(shuffle_buffer, seed=seed)
+    # D-259: prompt draws seeded per element and per pass.
+    dataset = with_prompt_seeds(dataset, seed)
     dataset = dataset.map(
-        lambda record: to_training_record(
+        lambda record, prompt_seed: to_training_record(
             record,
             image_size,
             num_background_points=num_background_points,
             include_box=include_box,
+            seed=prompt_seed,
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )

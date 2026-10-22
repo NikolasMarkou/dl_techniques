@@ -606,3 +606,13 @@ The trainer patterns of this iteration are in [`src/train/GUIDE.md`](../../train
   clips. *Guard:* `tests/test_models/test_sam2/test_the_multimask_tokens_train_as_the_reference_does.py`,
   `tests/test_models/test_sam2/test_inference_decodes_the_mask_token_training_trains.py`.
   *Example:* D-245, D-249.
+- **A port that skips the reference's input normalization.** SAM 2's image encoder took
+  `[0, 255]` pixels where upstream's input is standardized with ImageNet statistics by its data
+  transforms and predictors, so the trunk saw about 58 times the reference's input scale; the
+  trainer never memorised one batch, and the earlier diagnosis blamed joint training. *Rule:*
+  find where the reference normalizes (often outside the model: the dataset transforms, the
+  predictor), and put it in the one layer every entry point of the port reaches. *Detected:* an
+  intervention that standardizes the input and changes nothing else (0.028 against a constant's
+  0.959 at 100 steps). *Guard:*
+  `tests/test_models/test_sam2/test_the_image_encoder_standardizes_its_input.py`,
+  `tests/test_train/test_sam2/test_the_trainer_memorises_one_batch.py`. *Example:* D-260.
