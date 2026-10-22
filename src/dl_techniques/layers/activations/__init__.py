@@ -1,7 +1,7 @@
 """
 Public surface of ``dl_techniques.layers.activations``.
 
-Re-exports every activation layer in the package, the five serializable
+Re-exports every activation layer in the package, the seven serializable
 activation functions, and the six factory helpers. Import from here rather
 than from the individual modules::
 
@@ -12,8 +12,8 @@ Three groups, matching the sections of ``__all__`` below:
 - **Factory utilities** (``factory.py``). Build a layer from a registry key
   or from a config dict. ``ActivationType`` is the ``Literal`` alias listing
   every valid key.
-- **Activation functions** (``gelu_tanh.py``, ``sigsoftmax.py``,
-  ``soft_value_range.py``).
+- **Activation functions** (``exact_activations.py``, ``gelu_tanh.py``,
+  ``sigsoftmax.py``, ``soft_value_range.py``).
   Plain callables, registered with Keras so they survive a ``.keras``
   round-trip. Everything else exported here is a Layer.
 - **Layer classes**. One entry per activation module.
@@ -25,7 +25,7 @@ which extends ``keras.activations.get`` with the tanh-GELU spellings.
 callable and rejects Layer instances, is **not** exported and must be
 imported as ``from .common import resolve_activation``.
 
-``__all__`` is a contract: 35 names. Every name in it must also appear in an
+``__all__`` is a contract: 38 names. Every name in it must also appear in an
 import above, or ``from ... import *`` raises ``AttributeError`` on that
 name. Add the import and the ``__all__`` entry in the same change.
 """
@@ -43,6 +43,7 @@ from .factory import (
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
 from .basis_function import BasisFunction
 from .differentiable_step import DifferentiableStep
+from .exact_activations import ExactLeakyReLU, exact_gelu, exact_leaky_relu
 from .expanded_activations import (
     GELU, SiLU, xATLU, xGELU, xSiLU, EluPlusOne
 )
@@ -72,6 +73,8 @@ __all__ = [
     "create_activation_from_config",
 
     # Activation Functions (serializable, registered)
+    "exact_gelu",
+    "exact_leaky_relu",
     "gelu_tanh",
     "log_sigsoftmax",
     "resolve_activation",
@@ -82,6 +85,7 @@ __all__ = [
     "AdaptiveTemperatureSoftmax",
     "BasisFunction",
     "DifferentiableStep",
+    "ExactLeakyReLU",
     "GELU", "SiLU", "xATLU", "xGELU", "xSiLU", "EluPlusOne",
     "GoLU",
     "HardSigmoid",

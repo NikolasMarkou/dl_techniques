@@ -784,9 +784,10 @@ class TestActivationFactory:
 class TestExportContract:
     """The package's public surface after the four new names were added."""
 
-    def test_all_declares_thirty_five_names(self) -> None:
-        """``__all__`` grew from 31 to 35: two functions and two layers."""
-        assert len(activations.__all__) == 35
+    def test_all_declares_thirty_eight_names(self) -> None:
+        """``__all__`` grew from 31 to 35 (two functions and two layers), then
+        to 38 (``exact_gelu``, ``exact_leaky_relu``, ``ExactLeakyReLU``)."""
+        assert len(activations.__all__) == 38
 
     def test_every_exported_name_resolves(self) -> None:
         """Every name in ``__all__`` is actually importable from the package.
