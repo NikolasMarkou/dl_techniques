@@ -197,10 +197,10 @@ def _build_gabor_stem(
     :raises ValueError: If `gabor_stem_projection=False` and
         `gabor_filters != initial_filters`.
     """
-    # DECISION standalone-2026-09-06-gabor-warm-start/D-002: the Gabor stem is now the
+    # DECISION plan-2026-09-06T021835-fea022cf/D-002: the Gabor stem is now the
     # PAPER'S construction — a TRAINABLE CROSS-CHANNEL Conv2D warm start (Ozbulak &
     # Ekenel, SIU 2018), built by `create_gabor_conv2d`. This is the SAME deliberate
-    # reversal recorded at `# DECISION standalone-2026-09-06-gabor-warm-start/D-001`
+    # reversal recorded at `# DECISION plan-2026-09-06T021835-fea022cf/D-001`
     # in `models/vision/convunext/model.py`, applied here so the two independent stem
     # implementations do not diverge. Recorded consequences:
     #   * The per-channel Gabor front-end is GIVEN UP on purpose. The depthwise bank

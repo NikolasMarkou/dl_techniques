@@ -1,7 +1,7 @@
 """
 Test suite for the optional TRAINABLE Gabor warm-start stem of the bias-free ConvUNext
 denoiser (models/vision/bias_free_denoisers/bfconvunext.py,
-`# DECISION standalone-2026-09-06-gabor-warm-start/D-001`).
+`# DECISION plan-2026-09-06T021835-fea022cf/D-001`).
 
 The stem is the construction of Ozbulak & Ekenel (SIU 2018): a bias-free CROSS-CHANNEL
 `keras.layers.Conv2D` whose kernel is initialized from a Gabor bank and then TRAINED.

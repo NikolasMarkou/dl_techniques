@@ -307,7 +307,7 @@ class BitsPerCharacter(keras.metrics.Metric):
 # Probe-time helpers (pure Python, NLTK-free).
 # ---------------------------------------------------------------------
 
-# DECISION <gen-metrics-2026-10-18>/D-003
+# DECISION plan-2026-10-18T101616-38efdafc/D-003
 # The tokenizer and the n-gram extractor moved to `generation_metrics`, which
 # owns them as the public `whitespace_tokenize` / `ngrams`, and the two names
 # below are now aliases rather than a second implementation. Two copies of an

@@ -55,7 +55,7 @@ from dl_techniques.utils.weight_transfer import refuse_pretrained
 from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 
 # DECISION plan-2026-08-13T183738-24486492/D-001
-# DECISION plan-2026-08-14T135600-mcsplit/D-001: text tower is shared from
+# DECISION plan-2026-08-14T135600-b092fcc4/D-001: text tower is shared from
 # .components, never re-implemented or copied here -- a copy would open a third block-keep mask-adapter site. See decisions.md.
 from .components import MobileClipTextEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique

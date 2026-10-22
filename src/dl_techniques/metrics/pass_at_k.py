@@ -75,7 +75,7 @@ from scipy.special import gammaln
 #: Supported ``estimator`` values for :func:`pass_at_k`.
 PASS_AT_K_ESTIMATORS: Tuple[str, ...] = ("unbiased", "plug_in")
 
-# DECISION <ssp-2026-10-05>/D-001
+# DECISION plan-2026-10-05T140000-38ca11aa/D-001
 # The binomial ratio is evaluated through `gammaln`, never through `math.comb` or
 # integer binomials. Two reasons, and the second is the load-bearing one:
 #   (a) `C(n, k)` overflows float64 above n ~ 1300, so an exact-integer path is not

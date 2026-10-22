@@ -1,7 +1,7 @@
 """Guard: `gabor_filters_per_channel` builds a REAL per-channel Gabor stem, opt-in.
 
 `# DECISION standalone-2026-09-07-depthwise-gabor-stem/D-001` re-opened the depthwise
-Gabor bank that `standalone-2026-09-06-gabor-warm-start/D-001` had given up, as a second
+Gabor bank that `plan-2026-09-06T021835-fea022cf/D-001` had given up, as a second
 arm of `create_convunext`'s stem keyed on `gabor_filters_per_channel`. Re-adding a
 construction that was deliberately deleted is exactly the change that rots into a flag
 which parses and does nothing, so this module pins the mechanism rather than the flag:

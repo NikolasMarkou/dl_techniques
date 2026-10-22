@@ -77,7 +77,7 @@ FUSION_MODES: Tuple[str, ...] = ("linear", "task_arithmetic")
 #: Supported ``scheme`` values for :func:`fusion_weights_from_scores`.
 FUSION_WEIGHT_SCHEMES: Tuple[str, ...] = ("uniform", "score_softmax")
 
-# DECISION <ssp-2026-10-05>/D-003
+# DECISION plan-2026-10-05T140000-38ca11aa/D-003
 # Fusion accumulates in float64 and casts back ONCE at the end. Accumulating in the
 # inputs' own dtype (typically float32, occasionally bfloat16 under a mixed policy)
 # makes the rounding depend on the summation ORDER, so reordering the specialist
@@ -417,7 +417,7 @@ def fuse_specialists(
     reference = weight_sets[0]
     n_vars = len(reference)
 
-    # DECISION <ssp-2026-10-05>/D-004 -- the exact-identity short circuit. Fusing N
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-004 -- the exact-identity short circuit. Fusing N
     # identical inputs computes `sum_i w_i * x_i` in float64 and divides by N; with
     # w_i = 1/N that is exactly x in real arithmetic, but the multiply-add sequence
     # rounds, and the result lands within an ulp of -- not on -- the input. Any caller

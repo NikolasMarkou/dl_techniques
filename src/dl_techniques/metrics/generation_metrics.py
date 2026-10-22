@@ -155,7 +155,7 @@ DEFAULT_METEOR_GAMMA: float = 0.5
 #: Default CIDEr standard deviation for the Gaussian length penalty.
 DEFAULT_CIDER_SIGMA: float = 6.0
 
-# DECISION <gen-metrics-2026-10-18>/D-001
+# DECISION plan-2026-10-18T101616-38efdafc/D-001
 # The floor-smoothing delta and the add-k value are BOTH 0.1 / 1.0 by the
 # Chen & Cherry defaults, and they are named constants because they are
 # DIFFERENT operations that a reader will otherwise merge into "an epsilon":
@@ -167,7 +167,7 @@ DEFAULT_CIDER_SIGMA: float = 6.0
 FLOOR_SMOOTHING_DELTA: float = 0.1
 ADD_K_SMOOTHING_K: float = 1.0
 
-# DECISION <gen-metrics-2026-10-18>/D-002
+# DECISION plan-2026-10-18T101616-38efdafc/D-002
 # METEOR exposes `beta`, NOT the reference paper's `alpha`. The paper writes
 #     F_mean = P*R / (alpha*P + (1-alpha)*R)     with alpha = 0.9, beta = 3.0
 # where its `beta` is the FRAGMENTATION exponent, and the "10PR/(R + 9P)" form

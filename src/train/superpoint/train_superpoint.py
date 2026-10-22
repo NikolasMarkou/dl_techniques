@@ -417,7 +417,7 @@ def _pair_generator(
     homography-warped keypoints (:func:`_warped_grid_label`), so the detector
     head trains on the rotated / zero-filled distribution too (DeTone joint
     training supervises both views; supervising only the clean one leaves the
-    warped distribution out-of-distribution -- plan-2026-10-05_warped-detector).
+    warped distribution out-of-distribution -- plan-2026-10-05T035553-000826d4).
 
     Yields:
         ``image (H, W, 1) f32``, ``warped (H, W, 1) f32``,
@@ -1055,7 +1055,7 @@ class SuperPointJointModel(keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
 
-# DECISION plan-2026-10-05_warped-detector/D-001
+# DECISION plan-2026-10-05T035553-000826d4/D-001
 # The best checkpoint is the SuperPoint BACKBONE, not the joint wrapper. Do NOT
 # put the stock ModelCheckpoint of create_callbacks back "for consistency": it
 # saves the wrapper, whose config carries no `superpoint` entry, so the file

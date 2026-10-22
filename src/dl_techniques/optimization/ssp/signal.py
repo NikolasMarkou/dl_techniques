@@ -146,7 +146,7 @@ MGPO_TARGET_CHANNELS: Tuple[str, str] = ("old_log_probs", "advantage")
 #: resolution that keeps `binary_entropy(1e-7)` from reading as `-0.0`.
 _COMPUTE_DTYPE: str = "float32"
 
-# DECISION <ssp-2026-10-05>/D-002
+# DECISION plan-2026-10-05T140000-38ca11aa/D-002
 # `0 * log(0)` is defined as 0, and it is evaluated as 0 -- NOT as `nan`, and not
 # by clipping `p` into `[eps, 1 - eps]`. The clip is the tempting one-word version
 # and it is wrong at both ends: `binary_entropy(0)` would return
@@ -333,7 +333,7 @@ def binary_entropy(p, axis: Optional[int] = None) -> keras.KerasTensor:
     probs = _as_float(p, "p")
     _check_unit_interval(probs, "p")
 
-    # DECISION <ssp-2026-10-05>/D-002: the `where` guard, not a clip. See the
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-002: the `where` guard, not a clip. See the
     # module-level note. `where(p > 0, p, 1.0)` keeps log() finite and multiplies
     # by p = 0 anyway, so the term is exactly 0 at both endpoints.
     log_p = keras.ops.log(keras.ops.where(probs > 0.0, probs, keras.ops.ones_like(probs)))
@@ -386,7 +386,7 @@ def max_entropy_deviation(p, p0: float = DEFAULT_MGPO_P0) -> keras.KerasTensor:
     log_1mp0 = keras.ops.log1p(-target_t)
 
     log_p = keras.ops.log(keras.ops.where(probs > 0.0, probs, keras.ops.ones_like(probs)))
-    # DECISION <ssp-2026-10-05>/D-006: `log` of `(1 - p)`, NOT `log1p` of `(1 - p)`.
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-006: `log` of `(1 - p)`, NOT `log1p` of `(1 - p)`.
     # `log1p(x)` is `log(1 + x)`, so `log1p(1 - p)` is `log(2 - p)`, which is neither
     # term of the Bernoulli KL. It is a one-character-looking slip with a large
     # effect and no error: at `p = 0` it returned `2 ln 2` instead of `ln 2`, and at
@@ -662,7 +662,7 @@ def mgpo_advantages(
         mean_weight = keras.ops.mean(weights)
         weights = keras.ops.divide_no_nan(weights, mean_weight)
 
-    # DECISION <ssp-2026-10-05>/D-007: re-insert the group axis as a singleton before
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-007: re-insert the group axis as a singleton before
     # multiplying. `group_success_rate` drops it, so the weight vector is
     # `rewards.shape[:-1]` -- for a (batch, G) reward tensor that is (batch,), and
     # numpy/TF broadcast aligns TRAILING axes, so `(batch,) * (batch, G)` compares
@@ -763,7 +763,7 @@ def mgpo_surrogate(
             f"position by position, so a broadcast here would mean comparing "
             f"different tokens."
         )
-    # DECISION <ssp-2026-10-05>/D-007: `_broadcast_per_row` promotes a `(batch,)`
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-007: `_broadcast_per_row` promotes a `(batch,)`
     # advantage to `(batch, 1)` before broadcasting. The group axis was removed by
     # `group_relative_advantages`, so the weight vector is `rewards.shape[:-1]`; for
     # a (batch, G) reward tensor that is `(batch,)`, and trailing-axis broadcasting

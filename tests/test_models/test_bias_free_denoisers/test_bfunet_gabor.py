@@ -1,7 +1,7 @@
 """
 Test suite for the optional TRAINABLE Gabor warm-start stem of the bias-free U-Net
 denoiser (models/vision/bias_free_denoisers/bfunet.py,
-`# DECISION standalone-2026-09-06-gabor-warm-start/D-002`).
+`# DECISION plan-2026-09-06T021835-fea022cf/D-002`).
 
 `bfunet.py` carries its OWN `_build_gabor_stem`, independent of the one in
 `models/vision/convunext/model.py`. Two independent implementations of one pattern is

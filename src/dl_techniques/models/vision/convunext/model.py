@@ -35,7 +35,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, List, Dict, Any, FrozenSet
 
 # ---------------------------------------------------------------------
@@ -266,7 +265,7 @@ class SpatialLinearAttention(keras.layers.Layer):
 
     ``LinearAttention`` accepts 3D sequence input ``(B, N, dim)`` and raises on 4D
     input. This wrapper flattens ``(B, H, W, C)`` to ``(B, H*W, C)`` with dynamic
-    ``ops.shape``, so it also works when H and W are ``None`` at graph-build time,
+    ``keras.ops.shape``, so it also works when H and W are ``None`` at graph-build time,
     attends, and reshapes back. The inner attention is built with a fixed
     ``'linear'`` type, ``use_bias=False`` and the default ``feature_map='relu'``,
     which keeps it degree-1 homogeneous. That inner flag is not threaded from
@@ -350,11 +349,11 @@ class SpatialLinearAttention(keras.layers.Layer):
         :param training: Forwarded to the attention sub-layer.
         :return: Output tensor of the same shape as the input.
         """
-        shape = ops.shape(inputs)
+        shape = keras.ops.shape(inputs)
         b, h, w = shape[0], shape[1], shape[2]
-        seq = ops.reshape(inputs, [b, h * w, self.dim])
+        seq = keras.ops.reshape(inputs, [b, h * w, self.dim])
         attended = self.attn(seq, training=training)
-        return ops.reshape(attended, [b, h, w, self.dim])
+        return keras.ops.reshape(attended, [b, h, w, self.dim])
 
     def compute_output_shape(self, input_shape):
         """Return the input shape, since the layer preserves it."""
@@ -985,7 +984,7 @@ def create_convunext(
 
         Output channel ``(c, j)`` is Gabor filter ``j``'s response to input channel
         ``c`` alone, so the stem is colour-selective at initialization rather than
-        colour-blind (see the stem's ``standalone-2026-09-06-gabor-warm-start/D-001``
+        colour-blind (see the stem's ``plan-2026-09-06T021835-fea022cf/D-001``
         anchor). The bank is built ``trainable=True``, which overrides
         ``create_gabor_depthwise_conv2d``'s own default, so that
         ``--freeze-gabor-stem`` stays the single knob that freezes a stem of either

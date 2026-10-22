@@ -1,4 +1,4 @@
-"""Guards for warped-view detector supervision (plan-2026-10-05_warped-detector).
+"""Guards for warped-view detector supervision (plan-2026-10-05T035553-000826d4).
 
 The joint trainer supervises the detector head on BOTH views: the warped label
 is the clean keypoints warped through H and re-encoded. These tests pin:

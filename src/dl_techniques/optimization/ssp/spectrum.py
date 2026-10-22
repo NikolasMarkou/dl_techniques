@@ -83,7 +83,7 @@ SAMPLING_MODES: Tuple[str, ...] = (
 #: How many significant digits a normalised weight vector is logged to.
 _LOG_PRECISION: int = 4
 
-# DECISION <ssp-2026-10-05>/D-005
+# DECISION plan-2026-10-05T140000-38ca11aa/D-005
 # `select_specialists` breaks score ties toward the LOWEST checkpoint index rather
 # than toward the last one seen. `np.argmax` already does this, so the rule is free
 # -- but it is stated because the alternative is a real reproducibility hazard: a
@@ -283,7 +283,7 @@ def select_specialists(
                 f"{n_subdomains} columns; one label per column."
             )
 
-    # DECISION <ssp-2026-10-05>/D-005: np.argmax returns the FIRST maximal index, so
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-005: np.argmax returns the FIRST maximal index, so
     # ties resolve to the lowest checkpoint deterministically.
     checkpoint_index = np.argmax(matrix, axis=0).astype(np.int64)
     selected_scores = matrix[checkpoint_index, np.arange(n_subdomains)]
@@ -417,7 +417,7 @@ def spectrum_sampling_weights(
         )
     weights = weights / total
     positive = weights[weights > 0.0]
-    # DECISION <ssp-2026-10-05>/D-008: report the max/min weight ratio only over the
+    # DECISION plan-2026-10-05T140000-38ca11aa/D-008: report the max/min weight ratio only over the
     # POSITIVE weights. `proportional` on a coverage vector containing a zero yields
     # an exact zero, and the ratio against it is ~1e308 -- a log line that fills the
     # screen with digits and tells the reader nothing. "some items get exactly zero"
