@@ -236,6 +236,11 @@ def topk_mask(scores: keras.KerasTensor, k: int) -> keras.KerasTensor:
     # indices into the mask. Do NOT threshold at the k-th value (it keeps every
     # tie, so more than k keys on a flat map) and do NOT one_hot the indices
     # (an n * n * k tensor). See decisions.md.
+    # SUPERSEDED in part by plan-2026-10-14T062616-81938e81/D-276
+    # (2026-10-22): the mask stays, because the gather form that carries the
+    # top_k indices instead was measured and not shipped (the D-212 note in
+    # PFTLayer._attend). "Exactly k, never a threshold" holds in both forms.
+    # See decisions.md.
     n = scores.shape[-1]
     rows_2d = keras.ops.reshape(scores, (-1, n))
     _, indices = keras.ops.top_k(rows_2d, k)
@@ -439,6 +444,15 @@ class PFTLayer(keras.layers.Layer):
         # an (n, k, d) tensor per window and head, larger than the n x n map
         # wherever k * d > n (the first sparse layers of both released configs),
         # and keras has no sparse matmul. See decisions.md.
+        # SUPERSEDED in part by plan-2026-10-14T062616-81938e81/D-276
+        # (2026-10-22); the ruling stands. The gather form (flat-row take,
+        # indices ascending) was built and measured on the RTX 4090: under XLA
+        # its backward keeps the gathered keys and values, (k_prev + k) * d
+        # floats per query, so the whole-model training-step peak fell only to
+        # 0.709 of this form (light, 64 px, batch 2) and 0.449 (base, 64 px,
+        # batch 1), short of the 0.70 bar. Unfused (jit_compile=False) it was
+        # 1.03x (light) and out of memory on 24 GB where this form needs
+        # 13.1 GiB (base). See decisions.md.
         if prev_mask is None:
             if self.shift_size > 0:
                 region = shifted_window_mask(height, width, self.window_size, self.shift_size)

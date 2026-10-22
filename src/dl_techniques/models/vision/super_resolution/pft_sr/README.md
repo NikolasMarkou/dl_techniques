@@ -175,6 +175,15 @@ One official `PFTransformerLayer` with its `WindowAttention`.
 -   **LePE**: a depthwise conv (kernel `convffn_kernel_size`) plus GELU on V over the whole map, added to `attn @ v`.
 -   **Attention inheritance**: called as `y, values, mask = layer(x, prev_values=..., prev_mask=...)`. The model threads two chains through every stage, one for the plain-window layers and one for the shifted ones (the official `pfa_values[shift]`), so each layer inherits from the previous layer of its chain.
 -   **Top-k as a mask**: the official code stores the kept keys as indices and multiplies with custom CUDA kernels (`smm_cuda`). This port keeps the dense `(windows, heads, n, n)` map and a boolean mask of the kept keys: the softmax runs over the kept keys only, dropped keys hold exactly 0, and each top-k ranks the kept keys only. The numbers are the same (pinned at float64 against a numpy transcription of the sparse code); the memory is that of dense attention, which the port had before.
+-   **Why not the gather form (measured 2026-10-22, RTX 4090, D-276).** A gather form that carries the official `(values, indices)` state and gathers each query's kept keys and values with a flat-row `take` was built (equal to the same oracle at 1e-12) and measured on the whole-model training step (`scale=4`, Adam, L1, one warm-up step, then the peak of one measured step):
+
+    | Config | Dense mask, XLA | Gather, XLA | Ratio | Dense mask, `jit_compile=False` | Gather, `jit_compile=False` |
+    |:---|---:|---:|---:|---:|---:|
+    | `light`, 64 px, batch 2 | 10,085 MiB | 7,150 MiB | 0.709 | 10,556 MiB | 10,852 MiB (1.03x) |
+    | `base`, 64 px, batch 1 | 11,277 MiB | 5,063 MiB | 0.449 | 13,455 MiB | out of memory (24 GB) |
+    | `light`, 128 px, batch 1 | 15,751 MiB | 12,565 MiB | 0.798 | 20,741 MiB | 21,696 MiB (1.05x) |
+
+    Under XLA the backward keeps the gathered keys and values, about `(k_prev + k) * d` floats per query, which is more than an `n x n` map wherever that exceeds `n` (the 256- and 128-key layers of both schedules). The form was required to reach 0.70 at both 64 px configs and did not at `light`, so the dense mask stays: no second code path, no knob.
 -   **ConvFFN**: `fc1`, GELU, `u + GELU(depthwise(u))`, `fc2`.
 
 ### 4.2 `PFTSR` (The Model)
@@ -202,7 +211,7 @@ shift and mirror pad by value. What still differs, each labelled:
 
 | Official `PFT` | This port | Label |
 |:---|:---|:---|
-| Top-k via index tensors and the `smm_cuda` sparse kernels | A dense map under an inherited boolean mask | Same numbers, different memory: the dense map costs `(windows, heads, n, n)` per layer, as plain window attention does; the official kernels cost `(windows, heads, n, k)` |
+| Top-k via index tensors and the `smm_cuda` sparse kernels | A dense map under an inherited boolean mask | Same numbers, different memory: the dense map costs `(windows, heads, n, n)` per layer, as plain window attention does; the official kernels cost `(windows, heads, n, k)`. A `keras.ops` gather of the kept keys measured 0.709 (`light`) and 0.449 (`base`) of the dense training-step peak under XLA and worse without it (section 4.1), so it was not adopted |
 | `torch.topk(..., sorted=False)`: tie order unspecified | TensorFlow `top_k`: ties to the lower index | Identical away from exact ties; on a tie (a flat map) the two can keep different keys |
 | torch `PixelShuffle` channel order `(c, i, j)` | `PixelShuffle2D`'s `(i, j, c)` | A fixed permutation of the preceding conv's output channels: same function class, matters only when porting torch weights |
 | Conv weights: torch's default init (`kaiming_uniform_(a=sqrt(5))`, uniform bias) | Keras' default (`glorot_uniform`, zero bias) | Initialisation only. Linear layers and the bias table do follow the official `N(0, 0.02)` |
