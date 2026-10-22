@@ -9,6 +9,7 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import tempfile
 import os
 
@@ -54,7 +55,7 @@ class TestOrthoBlock:
 
         # Check custom values
         assert layer.units == 64
-        assert layer.activation == keras.activations.gelu
+        assert layer.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.use_bias is False
         assert layer.ortho_reg_factor == 0.02
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)

@@ -39,6 +39,7 @@ because the activation comes back as the serialized dict.
 import json
 import numpy as np
 import keras
+from dl_techniques.layers.activations.common import resolve_activation as repo_resolve_activation
 import pytest
 
 from dl_techniques.models.vision.vit_siglip.model import SigLIPVisionTransformer
@@ -170,4 +171,5 @@ class TestActivationSerialization:
         # and the from_config-reconstructed instance -- not a raw string.
         model = _build(activation)
         restored = SigLIPVisionTransformer.from_config(model.get_config())
-        assert restored.activation == keras.activations.get(activation)
+        # D-277: the repo resolver, not keras.activations.get ("gelu" is exact_gelu)
+        assert restored.activation is repo_resolve_activation(activation)

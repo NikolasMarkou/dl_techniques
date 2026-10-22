@@ -4,6 +4,7 @@ import os
 import tempfile
 
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import numpy as np
 import pytest
 
@@ -113,7 +114,7 @@ def test_config_roundtrip():
     assert rebuilt.res_scale == 0.1
     # activation is now stored as a resolved Keras activation object; compare by
     # its serialized name rather than a bare string.
-    assert keras.activations.serialize(rebuilt.activation) == "gelu"
+    assert rebuilt.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
     assert len(rebuilt.res_blocks) == 5
 
 

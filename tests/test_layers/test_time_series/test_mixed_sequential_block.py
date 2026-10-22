@@ -4,6 +4,7 @@ import os
 import numpy as np
 import tensorflow as tf
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from typing import Any, Dict
 
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
@@ -554,7 +555,7 @@ class TestMixedSequentialBlockFFNStrictness:
         """Anti-vacuity for the test above: 'relu' must differ from the default."""
         from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
         default = DifferentialFFN(hidden_dim=32, output_dim=16)
-        assert keras.activations.serialize(default.branch_activation) == 'gelu'
+        assert default.branch_activation is exact_gelu  # D-277: "gelu" resolves to the exact form
 
     def test_differential_ffn_has_no_gate_activation_to_leak_into(self) -> None:
         """DifferentialFFN has no gate at all; confirm nothing resurrects one.

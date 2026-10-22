@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import tempfile
 import os
 from typing import Dict, Any
@@ -53,7 +54,7 @@ class TestDifferentialFFN:
         # Check stored configuration
         assert layer.hidden_dim == 128
         assert layer.output_dim == 64
-        assert layer.branch_activation.__name__ == 'gelu'
+        assert layer.branch_activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
         # tie_branches defaults to True -- the only setting that yields the
@@ -233,7 +234,9 @@ class TestDifferentialFFN:
             assert not keras.ops.any(keras.ops.isnan(output))
 
             # Verify activations are set (handle swish->silu conversion)
-            expected_branch_names = [branch_act] if branch_act != 'swish' else ['swish', 'silu']
+            # D-277: "gelu" resolves to the registered exact form, exact_gelu
+            expected_branch_names = {'swish': ['swish', 'silu'], 'gelu': ['exact_gelu']}.get(
+                branch_act, [branch_act])
             assert layer.branch_activation.__name__ in expected_branch_names
 
     def test_custom_activation_callable(self, sample_input):

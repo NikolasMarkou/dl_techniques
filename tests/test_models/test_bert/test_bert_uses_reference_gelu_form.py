@@ -26,6 +26,7 @@ Nothing here re-asserts the form itself; see the module named above for that.
 """
 
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import numpy as np
 import pytest
 from dl_techniques.layers.activations import gelu_tanh
@@ -108,6 +109,6 @@ def test_the_exact_form_is_still_reachable_for_hf_style_checkpoints() -> None:
     keras.utils.set_random_seed(1234)
     model = BERT(**_KW, hidden_act="gelu")
     model(_inputs(), training=False)
-    assert model.encoder_layers[0].ffn_layer.activation_fn is keras.activations.gelu
+    assert model.encoder_layers[0].ffn_layer.activation_fn is exact_gelu  # D-277: "gelu" resolves to the exact form
 
 # ---------------------------------------------------------------------

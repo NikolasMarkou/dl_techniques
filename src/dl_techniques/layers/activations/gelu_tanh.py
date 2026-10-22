@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import EXACT_ACTIVATIONS
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -85,14 +86,17 @@ def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
 # ---------------------------------------------------------------------
 
 #: Extra activation identifiers understood by :func:`resolve_activation` on top
-#: of the stock Keras vocabulary. All three keys map to the same function. The
-#: keys are the spellings the upstream references use, so a port can name its
-#: reference's activation verbatim.
+#: of the stock Keras vocabulary. The three tanh keys map to the same function;
+#: they are the spellings the upstream references use, so a port can name its
+#: reference's activation verbatim. ``"gelu"`` and ``"leaky_relu"`` come from
+#: ``exact_activations.EXACT_ACTIVATIONS`` and shadow the stock names with forms
+#: that are exact at float64 and bit-identical to stock at float32 (D-277).
 _EXTENDED_ACTIVATIONS: Dict[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = {
     "gelu_tanh": gelu_tanh,
     "gelu_approximate": gelu_tanh,
     # "gelu_pytorch_tanh" is HuggingFace's spelling.
     "gelu_pytorch_tanh": gelu_tanh,
+    **EXACT_ACTIVATIONS,
 }
 
 
@@ -112,7 +116,9 @@ def resolve_activation(
 
     - **Accepts** anything ``keras.activations.get`` accepts (``str``, callable,
       serialized ``dict``, ``None``), plus the extra string keys in
-      :data:`_EXTENDED_ACTIVATIONS`.
+      :data:`_EXTENDED_ACTIVATIONS`. Two of those keys, ``"gelu"`` and
+      ``"leaky_relu"``, shadow stock names: they return ``exact_gelu`` and
+      ``exact_leaky_relu`` instead of the TensorFlow-backed stock functions.
     - **Returns** a callable ``f(tensor) -> tensor``. For the extended keys the
       returned callable is a *registered serializable* function, so a layer that
       stores it and emits ``keras.activations.serialize(...)`` from
@@ -134,14 +140,15 @@ def resolve_activation(
              ┌──────────┴──────────┐
              │ yes                 │ no
              ▼                     ▼
-         gelu_tanh                keras.activations.get
-         (registered,             (str, callable, dict
-          serializes               or None; ValueError
-          by name)                 on an unknown
-                                   identifier)
+         gelu_tanh,               keras.activations.get
+         exact_gelu or            (str, callable, dict
+         exact_leaky_relu         or None; ValueError
+         (registered,             on an unknown
+          serializes by name)     identifier)
 
     Only a ``str`` can take the left branch. Everything else goes right,
-    including a callable that happens to be ``gelu_tanh`` itself.
+    including a callable that happens to be ``gelu_tanh`` itself, and the
+    stock ``keras.activations.gelu`` callable.
 
     :param identifier: Activation name, callable, or serialized config.
     :type identifier: Union[str, Callable, Dict[str, Any], None]

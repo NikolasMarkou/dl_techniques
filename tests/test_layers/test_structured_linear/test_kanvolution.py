@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from keras import ops, layers, models, initializers, regularizers
 import tempfile
 import os
@@ -101,7 +102,7 @@ class TestKANvolution:
         assert layer.strides == (1, 1)
         assert layer.padding == 'valid'
         assert layer.dilation_rate == (1, 2)
-        assert layer.activation is keras.activations.gelu
+        assert layer.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.kernel_regularizer is not None
         assert layer.bias_regularizer is not None
 

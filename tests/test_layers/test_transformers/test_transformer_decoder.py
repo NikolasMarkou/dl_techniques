@@ -9,6 +9,7 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from keras import ops, layers, models
 
 from dl_techniques.layers.transformers.transformer_decoder import TransformerDecoderLayer
@@ -254,7 +255,7 @@ class TestDecoderDifferentialFFNActivation:
     def test_differential_default_is_not_the_probe_value(self):
         """Anti-vacuity: the probe activation must not be DifferentialFFN's default."""
         default_ffn = DifferentialFFN(hidden_dim=self.INTER, output_dim=self.HIDDEN)
-        assert keras.activations.serialize(default_ffn.branch_activation) == 'gelu'
+        assert default_ffn.branch_activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert self.NON_DEFAULT_ACTIVATION != 'gelu'
 
     def test_site_activation_reaches_branch_activation(self):

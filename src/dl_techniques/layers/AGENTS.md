@@ -106,6 +106,13 @@ different functions — `common.py`'s rejects a `keras.layers.Layer`; `gelu_tanh
 `from .common import resolve_activation`; never rely on the package-level re-export when you mean
 `common.py`'s version.
 
+**`"gelu"` and `"leaky_relu"` are the exact forms (D-277).** Both resolvers map these two strings
+to `exact_activations.exact_gelu` / `exact_leaky_relu` before `keras.activations.get`
+(`EXACT_ACTIVATIONS` is the one table), because TensorFlow builds their constants in float32 at
+float64 input. The forms are bit-identical to stock at float32. `common.serialize_activation`
+maps them back to the two strings, so a layer that serializes its resolved callable keeps a
+string config. A stock Keras layer handed the callable directly stores a function dict instead.
+
 **5 files deliberately stay off this path (Tier-3, D-008 through D-012)** — audited individually,
 not migrated: `bias_free_conv2d.py` and `convunext/model.py`'s supervision head both need
 Layer-serialize round-trip semantics `common.py`'s Layer-rejecting contract cannot provide;

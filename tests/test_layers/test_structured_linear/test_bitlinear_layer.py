@@ -56,6 +56,7 @@ import os
 import json
 
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import numpy as np
 import pytest
 import tensorflow as tf
@@ -538,7 +539,7 @@ class TestBitLinearSerialization:
         restored = loaded.get_layer("bl")
         assert restored.weight_range == (-3.0, 3.0)
         assert restored.weight_per_channel is True
-        assert keras.activations.serialize(restored.activation) == "gelu"
+        assert restored.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert restored.ste_clip_gradient is False
         assert restored.seed == 11
         assert restored.norm_epsilon == pytest.approx(1e-5)

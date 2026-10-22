@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.layers.activations import gelu_tanh, resolve_activation
+from dl_techniques.layers.activations import exact_gelu, gelu_tanh, resolve_activation
 
 # ---------------------------------------------------------------------
 
@@ -82,9 +82,10 @@ def test_keras_still_has_no_string_alias_for_the_approximation() -> None:
 def test_resolve_activation_maps_every_reference_spelling(grid: np.ndarray) -> None:
     for name in ("gelu_tanh", "gelu_approximate", "gelu_pytorch_tanh"):
         assert resolve_activation(name) is gelu_tanh, name
-    # and does not swallow the stock vocabulary
+    # and does not swallow the stock vocabulary; "gelu" is the repo's exact
+    # form since D-277 (stock's float32 sqrt(2) is not used at float64)
     assert resolve_activation("relu") is keras.activations.relu
-    assert resolve_activation("gelu") is keras.activations.gelu
+    assert resolve_activation("gelu") is exact_gelu
     with pytest.raises(ValueError):
         resolve_activation("no_such_activation")
 

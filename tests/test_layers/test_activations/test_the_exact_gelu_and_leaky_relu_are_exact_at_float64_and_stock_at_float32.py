@@ -261,3 +261,40 @@ def test_the_exact_layer_round_trips_its_config():
     assert type(clone) is ExactLeakyReLU
     assert clone.negative_slope == 0.01
     assert clone.dtype_policy.name == "float64"
+
+
+# ---------------------------------------------------------------------
+# the shared resolvers (step 2.2)
+# ---------------------------------------------------------------------
+
+
+def test_both_shared_resolvers_return_the_exact_forms_for_the_stock_names():
+    """``"gelu"`` and ``"leaky_relu"`` resolve to the repo forms; every other
+    name, and every callable, is resolved exactly as before."""
+    from dl_techniques.layers.activations.common import resolve_activation as common_resolve
+    from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
+    from dl_techniques.layers.activations.gelu_tanh import resolve_activation as tanh_resolve
+
+    for resolve in (common_resolve, tanh_resolve):
+        assert resolve("gelu") is exact_gelu
+        assert resolve("leaky_relu") is exact_leaky_relu
+        assert resolve("relu") is keras.activations.relu
+        assert resolve("silu") is keras.activations.silu
+        assert resolve(keras.activations.gelu) is keras.activations.gelu
+    assert tanh_resolve("gelu_tanh") is gelu_tanh
+    assert common_resolve(None) is keras.activations.linear
+
+
+def test_the_trio_serializes_an_exact_form_back_to_its_stock_name():
+    """``common.serialize_activation`` is the inverse of ``common.resolve_activation``
+    on the two shadowed names, so a repo layer that stores the resolved callable
+    and serializes it in ``get_config`` keeps writing ``"gelu"`` / ``"leaky_relu"``
+    (configs do not change shape), and reloading resolves the exact form again."""
+    from dl_techniques.layers.activations.common import resolve_activation as common_resolve
+    from dl_techniques.layers.activations.common import serialize_activation
+
+    for name, fn in EXACT_ACTIVATIONS.items():
+        assert serialize_activation(common_resolve(name)) == name
+        assert common_resolve(serialize_activation(fn)) is fn
+    assert serialize_activation(keras.activations.relu) == "relu"
+    assert serialize_activation("gelu") == "gelu"

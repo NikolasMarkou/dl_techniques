@@ -27,6 +27,7 @@ alone breaks the other direction.
 import json
 
 import keras
+from dl_techniques.layers.activations.common import resolve_activation as repo_resolve_activation
 import numpy as np
 import pytest
 
@@ -157,4 +158,5 @@ class TestViTHMLPActivationSerialization:
         # and the from_config-reconstructed instance -- not a raw string.
         model = _build(activation)
         restored = ViTHMLP.from_config(model.get_config())
-        assert restored.activation == keras.activations.get(activation)
+        # D-277: the repo resolver, not keras.activations.get ("gelu" is exact_gelu)
+        assert restored.activation is repo_resolve_activation(activation)

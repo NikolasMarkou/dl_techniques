@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import tempfile
 import os
 from typing import Dict, Any
@@ -77,7 +78,7 @@ class TestResidualBlock:
         assert layer.hidden_dim == 256
         assert layer.output_dim == 128
         assert layer.dropout_rate == 0.2
-        assert keras.activations.serialize(layer.activation) == 'gelu'
+        assert layer.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)

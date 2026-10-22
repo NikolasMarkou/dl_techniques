@@ -42,6 +42,7 @@ from typing import (
     Callable,
 )
 
+from dl_techniques.layers.activations.exact_activations import EXACT_ACTIVATIONS
 from dl_techniques.utils.activation_serialization import (
     deserialize_activation as _deserialize_activation,
     serialize_activation as _serialize_activation,
@@ -89,7 +90,10 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
 
     Checks are applied in the order shown below, and the first match wins.
     ``None`` maps to ``keras.activations.linear``, which is the identity.
-    Strings go through ``keras.activations.get``. Serialized dicts go through
+    The strings ``"gelu"`` and ``"leaky_relu"`` map to the repo's exact forms
+    (``exact_activations.EXACT_ACTIVATIONS``: bit-identical to stock at
+    float32, exact at float64); every other string goes through
+    ``keras.activations.get``. Serialized dicts go through
     ``keras.activations.deserialize``. Anything left over must be callable;
     a non-callable value raises ``ValueError``, matching
     ``keras.activations.get``'s contract.
@@ -117,8 +121,8 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
                       │ no
                       ▼
         ┌───────────────────────────┐
-        │ is a str?                 │──── yes ──► activations.get
-        └─────────────┬─────────────┘
+        │ is a str?                 │──── yes ──► EXACT_ACTIVATIONS,
+        └─────────────┬─────────────┘            else activations.get
                       │ no
                       ▼
         ┌───────────────────────────┐
@@ -167,7 +171,15 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
     if activation is None:
         resolved = keras.activations.linear
     elif isinstance(activation, str):
-        resolved = keras.activations.get(activation)
+        # DECISION plan-2026-10-14T062616-81938e81/D-277
+        # Do NOT send "gelu" / "leaky_relu" to keras.activations.get: the
+        # TensorFlow kernels behind both build their constant in float32, so a
+        # float64 layer was off by 5.0e-9 (gelu) or 2.2e-8 relative (slope).
+        # The repo forms are bit-identical to stock at float32. See D-277.
+        if activation in EXACT_ACTIVATIONS:
+            resolved = EXACT_ACTIVATIONS[activation]
+        else:
+            resolved = keras.activations.get(activation)
     elif isinstance(activation, dict):
         resolved = keras.activations.deserialize(activation)
     else:
@@ -197,9 +209,12 @@ def serialize_activation(activation: Any) -> Any:
     """
     Serialize an activation spec for ``get_config``.
 
-    ``None`` and strings pass through unchanged. Anything else goes through
-    ``keras.saving.serialize_keras_object``, so a config holding a raw
-    function object is still JSON-serialisable.
+    ``None`` and strings pass through unchanged. The two exact forms that
+    :func:`resolve_activation` returns for ``"gelu"`` and ``"leaky_relu"``
+    serialize back to those names, so the pair is a round trip and a layer
+    that stores the resolved callable keeps writing the string. Anything else
+    goes through ``keras.saving.serialize_keras_object``, so a config holding
+    a raw function object is still JSON-serialisable.
 
     Pass the value :func:`activation_spec` produced, not the raw constructor
     argument.
@@ -220,6 +235,14 @@ def serialize_activation(activation: Any) -> Any:
     # DECISION plan-2026-09-15T034909-a7edc8da/D-003
     # This is the one function of the three verified safe for FULL delegation
     # -- see decisions.md D-003.
+    # DECISION plan-2026-10-14T062616-81938e81/D-277
+    # The inverse of the str branch of resolve_activation: an exact form goes
+    # back to its stock name, so about 40 layers that serialize their resolved
+    # callable keep a string config. Do NOT drop this: they would write a
+    # function dict instead of "gelu". See D-277.
+    for name, exact in EXACT_ACTIVATIONS.items():
+        if activation is exact:
+            return name
     return _serialize_activation(activation)
 
 # ---------------------------------------------------------------------------

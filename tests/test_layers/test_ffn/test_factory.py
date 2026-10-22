@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import numpy as np
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import (
@@ -2485,7 +2486,7 @@ class TestFormerlyDroppingConstructionSites:
         silent behaviour change nobody notices.
         """
         ffn = self._sites[site]('differential')
-        assert keras.activations.serialize(ffn.branch_activation) == 'gelu'
+        assert ffn.branch_activation is exact_gelu  # D-277: "gelu" resolves to the exact form
 
 
 # =========================================================================

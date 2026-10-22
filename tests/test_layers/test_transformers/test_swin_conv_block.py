@@ -16,6 +16,7 @@ Test suite for ``SwinConvBlock`` -- plus a legacy ``SwinMLP`` suite.
 import pytest
 import numpy as np
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import tempfile
 import os
 from keras import ops
@@ -46,7 +47,7 @@ class TestSwinMLP:
         assert layer.output_dim is None
         # activation is stored via keras.activations.get() -> a function; assert
         # functional equivalence, not the raw string token.
-        assert keras.activations.serialize(layer.activation) == "gelu"
+        assert layer.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)

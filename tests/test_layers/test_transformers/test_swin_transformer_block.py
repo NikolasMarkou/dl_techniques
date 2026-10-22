@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 import os
 import tempfile
 
@@ -40,7 +41,7 @@ class TestSwinTransformerBlock:
         assert layer.attention_dropout_rate == 0.0
         assert layer.stochastic_depth_rate == 0.0
         # activation stored via keras.activations.get() -> function; assert serialized token
-        assert keras.activations.serialize(layer.activation) == "gelu"
+        assert layer.activation is exact_gelu  # D-277: "gelu" resolves to the exact form
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
