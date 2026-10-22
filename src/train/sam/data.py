@@ -389,33 +389,59 @@ def with_prompt_seeds(dataset: tf.data.Dataset, seed: int) -> tf.data.Dataset:
     return tf.data.Dataset.zip((dataset, seeds))
 
 
-def split_prompt_seed(
-    seed: Optional[tf.Tensor], count: int
-) -> List[Optional[tf.Tensor]]:
+# DECISION plan-2026-10-14T062616-81938e81/D-263
+# Every prompt draw takes a REQUIRED seed; `None` is refused. Do NOT restore an
+# optional `seed=None` that falls back to `tf.random.categorical` /
+# `tf.random.normal`: a caller that omits the seed then gets prompts that
+# repeat every epoch (D-259) with no error. One-off calls pass a constant seed.
+def _require_seed(seed: Any, caller: str) -> None:
+    """
+    Refuse a missing prompt seed.
+
+    Interface contract (callers: :func:`split_prompt_seed`,
+    :func:`_sample_from_indicator`, :func:`jitter_box`): ``seed`` is the value a
+    caller passed for its ``seed`` parameter; returns ``None`` when it is not
+    ``None`` and raises otherwise. It does not check the seed's shape: the
+    stateless op it feeds refuses a malformed one.
+
+    Args:
+        seed: The seed to check.
+        caller: Name of the refusing function, for the message.
+
+    Raises:
+        TypeError: If ``seed`` is ``None``.
+    """
+    if seed is None:
+        raise TypeError(
+            f"{caller}: seed is required (a (2,) integer seed, e.g. from "
+            f"with_prompt_seeds); seed=None drew from a stateful op that "
+            f"repeats its sequence every epoch (D-259, D-263)"
+        )
+
+
+def split_prompt_seed(seed: tf.Tensor, count: int) -> List[tf.Tensor]:
     """
     Split one record's prompt seed into ``count`` independent seeds.
 
     Interface contract (callers: ``to_training_record`` here and the SAM 2
     pipeline's ``to_video_training_record``): ``seed`` is the ``(2,)`` seed
-    :func:`with_prompt_seeds` pairs with a record, or ``None``; the return is a
-    list of ``count`` ``(2,)`` seeds from ``stateless_split``, or ``count``
-    ``None`` entries (the samplers then use stateful ops). It never raises.
+    :func:`with_prompt_seeds` pairs with a record; the return is a list of
+    ``count`` ``(2,)`` seeds from ``stateless_split``. A ``None`` seed raises
+    ``TypeError`` (:func:`_require_seed`).
 
     Args:
-        seed: The record's seed, or ``None``.
+        seed: The record's ``(2,)`` seed.
         count: How many prompt draws need a seed.
 
     Returns:
         The per-draw seeds.
     """
-    if seed is None:
-        return [None] * count
+    _require_seed(seed, "split_prompt_seed")
     return tf.unstack(tf.random.experimental.stateless_split(seed, num=count))
 
 
 def _sample_from_indicator(
-    indicator: tf.Tensor, image_size: int, label: int,
-    seed: Optional[tf.Tensor] = None,
+    indicator: tf.Tensor, image_size: int, label: int, seed: tf.Tensor,
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one pixel uniformly from wherever ``indicator`` is non-zero.
@@ -428,10 +454,9 @@ def _sample_from_indicator(
         indicator: ``(mh, mw)`` float, non-zero inside the eligible region.
         image_size: Side of the padded image frame.
         label: Label emitted when the region is non-empty.
-        seed: Optional ``(2,)`` integer seed. Given, the draw is
+        seed: ``(2,)`` integer seed; the draw is
             ``tf.random.stateless_categorical`` on it (see
-            :func:`with_prompt_seeds`); ``None`` keeps the stateful op, which
-            under a set global seed repeats its sequence on every new iterator.
+            :func:`with_prompt_seeds`). Required: ``None`` raises ``TypeError``.
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
@@ -444,10 +469,8 @@ def _sample_from_indicator(
     logits = tf.where(
         flat > 0.5, tf.zeros_like(flat), tf.fill(tf.shape(flat), OUTSIDE_MASK_LOGIT)
     )
-    if seed is None:
-        draw = tf.random.categorical(logits, 1)
-    else:
-        draw = tf.random.stateless_categorical(logits, 1, seed=seed)
+    _require_seed(seed, "the prompt point sampler")
+    draw = tf.random.stateless_categorical(logits, 1, seed=seed)
     index = tf.cast(draw[0, 0], tf.int32)
     row = tf.cast(index // width, tf.float32)
     col = tf.cast(index % width, tf.float32)
@@ -470,7 +493,7 @@ def _sample_from_indicator(
 
 
 def sample_point_in_mask(
-    mask: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
+    mask: tf.Tensor, image_size: int, seed: tf.Tensor
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one FOREGROUND point uniformly from a mask's interior.
@@ -478,7 +501,7 @@ def sample_point_in_mask(
     Args:
         mask: ``(mh, mw)`` binary float tensor at ``low_res_logits`` resolution.
         image_size: Side of the padded image frame the coordinate must land in.
-        seed: Optional ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
+        seed: Required ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
@@ -487,7 +510,7 @@ def sample_point_in_mask(
 
 
 def sample_point_outside_mask(
-    mask: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
+    mask: tf.Tensor, image_size: int, seed: tf.Tensor
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Draw one BACKGROUND point uniformly from outside a mask.
@@ -495,7 +518,7 @@ def sample_point_outside_mask(
     Args:
         mask: ``(mh, mw)`` binary float tensor.
         image_size: Side of the padded image frame.
-        seed: Optional ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
+        seed: Required ``(2,)`` stateless seed (:func:`_sample_from_indicator`).
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` and ``(1,)``. A mask that
@@ -508,7 +531,7 @@ def sample_point_outside_mask(
 
 
 def jitter_box(
-    box: tf.Tensor, image_size: int, seed: Optional[tf.Tensor] = None
+    box: tf.Tensor, image_size: int, seed: tf.Tensor
 ) -> tf.Tensor:
     """
     Add bounded Gaussian noise to a ground-truth box, as reference SAM does.
@@ -516,8 +539,9 @@ def jitter_box(
     Args:
         box: ``(4,)`` xyxy in image pixels.
         image_size: Side of the padded image frame.
-        seed: Optional ``(2,)`` seed; given, the noise is
+        seed: Required ``(2,)`` seed; the noise is
             ``tf.random.stateless_normal`` on it (:func:`with_prompt_seeds`).
+            ``None`` raises ``TypeError``.
 
     Returns:
         ``(4,)`` xyxy, inside ``[0, image_size]`` and never inverted.
@@ -532,14 +556,14 @@ def jitter_box(
         bound exists that a test can actually attack. Widening this later is a
         deliberate change, not a bug fix.
     """
+    _require_seed(seed, "jitter_box")
     limit = float(image_size)
     width = box[2] - box[0]
     height = box[3] - box[1]
     sides = tf.stack([width, height, width, height])
     std = tf.minimum(sides * JITTER_STD_FRACTION, MAX_JITTER_PIXELS)
     offset = tf.clip_by_value(
-        (tf.random.normal((4,), dtype=box.dtype) if seed is None
-         else tf.random.stateless_normal((4,), seed=seed, dtype=box.dtype)) * std,
+        tf.random.stateless_normal((4,), seed=seed, dtype=box.dtype) * std,
         -MAX_JITTER_PIXELS,
         MAX_JITTER_PIXELS,
     )
@@ -561,7 +585,8 @@ def to_training_record(
     image_size: int,
     num_background_points: int = 0,
     include_box: bool = False,
-    seed: Optional[tf.Tensor] = None,
+    *,
+    seed: tf.Tensor,
 ) -> Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]:
     """
     Turn one source record into ``(inputs, y_true)`` for ``SAMTrainingModel``.
@@ -574,8 +599,8 @@ def to_training_record(
         include_box: Whether to add a jittered box prompt.
         seed: ``(2,)`` stateless seed of this record's prompt draws, split into
             the foreground point, the box jitter and each background point.
-            :func:`build_sam_dataset` always passes one from
-            :func:`with_prompt_seeds`; ``None`` uses stateful ops (one-off calls).
+            :func:`build_sam_dataset` passes one from :func:`with_prompt_seeds`;
+            a one-off call passes a constant ``(2,)`` seed. Required (D-263).
 
     Returns:
         ``(inputs, y_true)``. ``y_true`` carries a SINGLE-instance GT stack

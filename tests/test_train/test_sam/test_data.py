@@ -77,6 +77,11 @@ pytestmark = [
 LOW_RES = 4 * GRID_SIZE
 
 
+def _seed(index: int) -> tf.Tensor:
+    """A distinct ``(2,)`` prompt seed per draw: the samplers require one (D-263)."""
+    return tf.constant([index, 0], tf.int64)
+
+
 class TestSyntheticSource:
     """The source's record contract, and that its masks are per-instance."""
 
@@ -179,7 +184,7 @@ class TestInitialPointPrompt:
         mask = np.zeros((LOW_RES, LOW_RES), dtype="float32")
         mask[10:30, 40:55] = 1.0
         coords, labels = sample_point_in_mask(
-            tf.constant(mask), image_size=IMG_SIZE
+            tf.constant(mask), image_size=IMG_SIZE, seed=_seed(0)
         )
         scale = IMG_SIZE / LOW_RES
         x, y = np.asarray(coords)[0]
@@ -190,7 +195,7 @@ class TestInitialPointPrompt:
 
     def test_an_empty_mask_yields_a_padding_label(self) -> None:
         _, labels = sample_point_in_mask(
-            tf.zeros((LOW_RES, LOW_RES)), image_size=IMG_SIZE
+            tf.zeros((LOW_RES, LOW_RES)), image_size=IMG_SIZE, seed=_seed(0)
         )
         assert int(np.asarray(labels)[0]) == PADDING_LABEL
 
@@ -199,7 +204,9 @@ class TestInitialPointPrompt:
         above."""
         mask = np.zeros((LOW_RES, LOW_RES), dtype="float32")
         mask[0:4, 0:4] = 1.0
-        _, labels = sample_point_in_mask(tf.constant(mask), image_size=IMG_SIZE)
+        _, labels = sample_point_in_mask(
+            tf.constant(mask), image_size=IMG_SIZE, seed=_seed(0)
+        )
         assert int(np.asarray(labels)[0]) == 1
 
 
@@ -442,7 +449,7 @@ class TestPointPromptProperties:
         cells = set()
         for index, mask in enumerate(masks):
             coords, labels = sample_point_in_mask(
-                tf.constant(mask), image_size=IMG_SIZE
+                tf.constant(mask), image_size=IMG_SIZE, seed=_seed(index)
             )
             row, col = _cell_of(np.asarray(coords)[0])
             cells.add((row, col))
@@ -462,7 +469,7 @@ class TestPointPromptProperties:
         cells = set()
         for index, mask in enumerate(masks):
             coords, labels = sample_point_outside_mask(
-                tf.constant(mask), image_size=IMG_SIZE
+                tf.constant(mask), image_size=IMG_SIZE, seed=_seed(index)
             )
             row, col = _cell_of(np.asarray(coords)[0])
             cells.add((row, col))
@@ -494,7 +501,7 @@ class TestPointPromptProperties:
     def test_a_fully_covered_mask_yields_a_padding_background_label(self) -> None:
         """The mirror of the empty-mask edge case, on the background side."""
         _, labels = sample_point_outside_mask(
-            tf.ones((LOW_RES, LOW_RES)), image_size=IMG_SIZE
+            tf.ones((LOW_RES, LOW_RES)), image_size=IMG_SIZE, seed=_seed(0)
         )
         assert int(np.asarray(labels)[0]) == PADDING_LABEL
 
@@ -548,8 +555,8 @@ class TestBoxJitterProperties:
         cap = MAX_JITTER_PIXELS + MIN_BOX_SIDE
         worst = 0.0
         moved = 0
-        for box in boxes:
-            jittered = np.asarray(jitter_box(tf.constant(box), IMG_SIZE))
+        for index, box in enumerate(boxes):
+            jittered = np.asarray(jitter_box(tf.constant(box), IMG_SIZE, _seed(index)))
             deviation = float(np.max(np.abs(jittered - box)))
             worst = max(worst, deviation)
             moved += int(deviation > 0.0)
@@ -577,8 +584,8 @@ class TestBoxJitterProperties:
 
         def spread(box: np.ndarray) -> float:
             draws = [
-                np.asarray(jitter_box(tf.constant(box), IMG_SIZE)) - box
-                for _ in range(200)
+                np.asarray(jitter_box(tf.constant(box), IMG_SIZE, _seed(draw))) - box
+                for draw in range(200)
             ]
             return float(np.std(np.stack(draws)))
 
@@ -594,8 +601,9 @@ class TestBoxJitterProperties:
         """
         box = np.asarray([0.0, 0.0, float(IMG_SIZE), float(IMG_SIZE)], dtype="float32")
         deviations = [
-            float(np.max(np.abs(np.asarray(jitter_box(tf.constant(box), IMG_SIZE)) - box)))
-            for _ in range(200)
+            float(np.max(np.abs(
+                np.asarray(jitter_box(tf.constant(box), IMG_SIZE, _seed(draw))) - box)))
+            for draw in range(200)
         ]
         assert max(deviations) <= MAX_JITTER_PIXELS + MIN_BOX_SIDE + 1e-4
         assert max(deviations) > 10.0, "the cap was never approached"

@@ -455,7 +455,8 @@ def to_video_training_record(
         image_size: int,
         num_background_points: int = 0,
         include_box: bool = False,
-        seed: Optional[tf.Tensor] = None,
+        *,
+        seed: tf.Tensor,
 ) -> Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]:
     """Turn one clip into ``(inputs, targets)`` for ``SAM2TrainingModel``.
 
@@ -471,9 +472,10 @@ def to_video_training_record(
     :param seed: ``(2,)`` stateless seed of this clip's prompt draws (the
         foreground point, the box jitter, each background point get
         independent seeds split from it). :func:`build_sam2_video_dataset`
-        always passes one from ``with_prompt_seeds``, so the draws change every
-        pass; ``None`` falls back to stateful ops (one-off calls only).
-    :type seed: Optional[tf.Tensor]
+        passes one from ``with_prompt_seeds``, so the draws change every pass;
+        a one-off call passes a constant ``(2,)`` seed. Required: ``None``
+        raises ``TypeError`` (D-263).
+    :type seed: tf.Tensor
     :return: ``(inputs, targets)``. ``targets`` is keyed by the wrapper's own
         exported output-key constants.
     :rtype: Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]

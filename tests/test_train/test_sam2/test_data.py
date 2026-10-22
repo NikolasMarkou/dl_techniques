@@ -55,6 +55,9 @@ IMAGE_SIZE = 64
 MASK_SIZE = 16
 NUM_FRAMES = 4
 STRIDE = IMAGE_SIZE // MASK_SIZE
+#: The record mapper requires a prompt seed (D-263); one constant seed suffices
+#: for these one-off calls, which test the record's structure, not its draws.
+PROMPT_SEED = tf.constant([5, 0], tf.int64)
 
 
 def _clips(
@@ -261,7 +264,7 @@ class TestPresenceIsDerived:
     ) -> None:
         for clip in _clips(num_clips=8, occlusion_frames=1, occlusion_start=2):
             record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
-            _, targets = to_video_training_record(record, IMAGE_SIZE)
+            _, targets = to_video_training_record(record, IMAGE_SIZE, seed=PROMPT_SEED)
             presence = np.asarray(targets[SAM2_OBJECT_SCORE_LOGITS])
             derived = (
                 clip[RECORD_MASK].reshape(NUM_FRAMES, -1).max(axis=1) > 0.0
@@ -275,7 +278,7 @@ class TestPresenceIsDerived:
     def test_a_never_occluded_clip_is_present_at_every_frame(self) -> None:
         clip = _clips(num_clips=1, occlusion_frames=0, seed=4)[0]
         record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
-        _, targets = to_video_training_record(record, IMAGE_SIZE)
+        _, targets = to_video_training_record(record, IMAGE_SIZE, seed=PROMPT_SEED)
         presence = np.asarray(targets[SAM2_OBJECT_SCORE_LOGITS])
         np.testing.assert_array_equal(presence, np.ones((NUM_FRAMES, 1), "float32"))
 
@@ -305,7 +308,7 @@ class TestFrameZeroPrompt:
             if float(mask[NUM_FRAMES - 1].sum()) == 0.0:
                 continue
             record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
-            inputs, _ = to_video_training_record(record, IMAGE_SIZE)
+            inputs, _ = to_video_training_record(record, IMAGE_SIZE, seed=PROMPT_SEED)
             coords = np.asarray(inputs[INPUT_POINT_COORDS])
             labels = np.asarray(inputs[INPUT_POINT_LABELS])
             assert coords.shape == (1, 2)
@@ -324,7 +327,7 @@ class TestFrameZeroPrompt:
         clip = _clips(num_clips=1, seed=9)[0]
         record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
         inputs, _ = to_video_training_record(
-            record, IMAGE_SIZE, num_background_points=2
+            record, IMAGE_SIZE, num_background_points=2, seed=PROMPT_SEED
         )
         coords = np.asarray(inputs[INPUT_POINT_COORDS])
         labels = np.asarray(inputs[INPUT_POINT_LABELS])
@@ -340,10 +343,10 @@ class TestFrameZeroPrompt:
     def test_the_box_prompt_is_optional_and_frame_zero_shaped(self) -> None:
         clip = _clips(num_clips=1, seed=9)[0]
         record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
-        without, _ = to_video_training_record(record, IMAGE_SIZE)
+        without, _ = to_video_training_record(record, IMAGE_SIZE, seed=PROMPT_SEED)
         assert INPUT_BOXES not in without
         with_box, _ = to_video_training_record(
-            record, IMAGE_SIZE, include_box=True
+            record, IMAGE_SIZE, include_box=True, seed=PROMPT_SEED
         )
         assert np.asarray(with_box[INPUT_BOXES]).shape == (1, 4)
 
@@ -528,7 +531,7 @@ class TestDatasetAssembly:
         # fail `compile(loss={...})` in ways that name a key, not a cause.
         clip = _clips(num_clips=1)[0]
         record = {k: tf.convert_to_tensor(v) for k, v in clip.items()}
-        _, targets = to_video_training_record(record, IMAGE_SIZE)
+        _, targets = to_video_training_record(record, IMAGE_SIZE, seed=PROMPT_SEED)
         assert set(targets) == set(OUTPUT_KEYS)
 
     def test_the_dataset_epoch_is_the_requested_clip_count(self) -> None:
