@@ -16,6 +16,8 @@ Available Functions:
     - LRMultiplierAdamW: AdamW with a per-variable learning-rate multiplier
       (parameter groups under stock fit; the builder returns it for an
       ``"adamw"`` config that carries ``lr_multipliers``)
+    - HoistedAdamW: AdamW whose decoupled weight decay reads the
+      learning-rate schedule once per step instead of once per variable
     - learning_rate_schedule_builder: Creates LR schedules with warmup
     - create_learning_rate_schedule: Epoch-facing cosine/exponential/constant LR
     - create_warmup_lr_schedule: Epoch-facing warmup-ratio + cosine LR
@@ -69,6 +71,7 @@ from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
 from .gefen_optimizer import Gefen
 from .lr_multiplier_adamw import LRMultiplierAdamW
+from .hoisted_adamw import HoistedAdamW
 from .ww_pgd_optimizer import WWTailConfig, ww_pgd_project, WWPGDProjectionCallback
 from .ssp import (
     SSPStrategy,
@@ -95,6 +98,7 @@ __all__ = [
     "VSGD",
     "Gefen",
     "LRMultiplierAdamW",
+    "HoistedAdamW",
     "WWTailConfig",
     "ww_pgd_project",
     "WWPGDProjectionCallback",

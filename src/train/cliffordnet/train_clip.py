@@ -154,6 +154,7 @@ import tensorflow as tf
 
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
 from dl_techniques.optimization import (
+    HoistedAdamW,
     learning_rate_schedule_builder,
     optimizer_builder,
 )
@@ -1115,15 +1116,19 @@ def _build_optimizer(
             "warmup_start_lr": train_cfg.min_warmup_lr,
         }
     )
-    optimizer = optimizer_builder(
-        {
-            "type": "adamw",
-            "beta_1": 0.9,
-            "beta_2": 0.98,
-            "epsilon": 1e-6,
-            "weight_decay": train_cfg.weight_decay,
-        },
-        schedule,
+    # DECISION plan-2026-10-14T062616-81938e81/D-280: HoistedAdamW, not the
+    # builder's stock AdamW. Stock AdamW traces the schedule once per decayed
+    # variable in the first step; reading it once cut that step 246 s -> 204 s
+    # on the RTX 4090 at an unchanged steady step (README Gotcha 5). Same
+    # values as the stock AdamW within 1e-6 (test_hoisted_adamw.py); do not
+    # route this back through optimizer_builder("adamw").
+    optimizer = HoistedAdamW(
+        name="AdamW",
+        learning_rate=schedule,
+        beta_1=0.9,
+        beta_2=0.98,
+        epsilon=1e-6,
+        weight_decay=train_cfg.weight_decay,
     )
 
     # Exclude the CLIP learnable temperature from weight decay. AdamW

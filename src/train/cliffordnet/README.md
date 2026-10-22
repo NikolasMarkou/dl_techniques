@@ -322,12 +322,38 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.resize_cc3m_to_ssd \
 4. **Do not raise resolution mid-run.** A multi-resolution curriculum keeps the
    lower-res compiled kernels resident while the higher-res ones compile,
    spiking VRAM and OOMing on a 12 GB card. Use one fixed `--image-size`.
-5. **The first CLIP step takes about 4.5 minutes.** Measured on the RTX 4070,
-   `--variant nano --synthetic --image-size 112 --skip-pretrain`, batch 128
-   (plan-2026-10-14T062616-81938e81 D-244): the first step 264 s, a steady step
-   0.25 s. Stochastic depth 0 does not cut it (250 s, the run-to-run spread);
-   without XLA the first step is 135 s and every later step 0.66 s, so XLA
-   (the default, `jit_compile="auto"`) pays for itself after about 320 steps.
-   The first step is Python tracing of the forward, backward and per-variable
-   AdamW update graph (about half) and XLA compiling it. Each pretraining
-   stage compiles its own graph once more.
+5. **The first CLIP step takes about 3.5 minutes.** Measured on the RTX 4090
+   (plan-2026-10-14T062616-81938e81 D-280), `--variant nano --synthetic
+   --image-size 112 --epochs 1 --steps-per-epoch 12 --skip-pretrain --seed 42`,
+   batch 128, one run per row, all in one session. First step = wall time of
+   training batch 0; steady = median of batches 1 to 11; ratios are against the
+   A0 median (246.1 s first, 0.151 s steady):
+
+   | Arm | First step s | x A0 | Steady s | x A0 | Epoch train loss |
+   |---|---|---|---|---|---|
+   | A0: stock AdamW, run 1 / run 2 | 246.2 / 246.0 | 1.00 | 0.150 / 0.152 | 1.00 | 2.16589 / 2.16589 |
+   | A: `HoistedAdamW`, the schedule read once for the decay (**the default now**) | 203.7 | 0.83 | 0.155 | 1.03 | 2.16590 |
+   | B: A plus Adam's scalars (`iterations + 1`, both powers, `alpha`) once per step | 190.0 | 0.77 | 0.152 | 1.01 | 2.16591 |
+   | C: `keras.optimizers.SGD`, no decay (bounds the optimizer's share; not shippable) | 149.3 | 0.61 | 0.138 | 0.91 | 5.46 |
+   | D: A0 with `XLA_FLAGS="--xla_gpu_autotune_level=0 --xla_gpu_enable_llvm_module_compilation_parallelism=true"` | 205.6 | 0.84 | 0.261 | 1.73 | 2.16590 |
+   | E cold: A0 with `TF_XLA_FLAGS=--tf_xla_persistent_cache_directory=<absolute dir>` | 249.1 | 1.01 | 0.153 | 1.01 | 2.16590 |
+   | E warm: the same command again, cache filled | 125.1 | 0.51 | 0.149 | 0.99 | 2.16589 |
+
+   Stock AdamW reads the learning-rate schedule once per decayed variable, so
+   the first step traced one `WarmupSchedule` per variable; `_build_optimizer`
+   now builds `HoistedAdamW` (`dl_techniques.optimization`), which reads it once
+   per step and equals AdamW within 1e-6. The rule fixed before the runs (D-274
+   (e)): first step at most 0.85x A0, the cut above twice the A0 spread (0.16 s
+   here), steady step at most 1.3x A0. A and B both met it; the simpler, A,
+   ships, and B's further 14 s is not taken. D cuts as much as A by skipping
+   GPU autotuning but runs every later step 1.73x slower: not recommended. E is
+   the cheapest relaunch: with a persistent XLA cache the second launch of the
+   same configuration skips the compile (about 121 s), at an unchanged steady
+   step; set `TF_XLA_FLAGS=--tf_xla_persistent_cache_directory=/absolute/dir`
+   when you rerun one configuration (the cache is keyed on the graph, so a new
+   variant, image size or batch compiles afresh; 4 entries, 49 MB here). What
+   remains of the first step is Python tracing of the forward, backward and
+   optimizer graph. History on the RTX 4070 (D-244): first step 264 s, steady
+   0.25 s; without XLA 135 s and 0.66 s per later step, so XLA (the default,
+   `jit_compile="auto"`) pays for itself after about 320 steps. Each
+   pretraining stage compiles its own graph once more, with stock AdamW.
