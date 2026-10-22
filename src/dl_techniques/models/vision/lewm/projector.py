@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -67,7 +68,7 @@ class MLPProjector(keras.layers.Layer):
             keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
             if use_layer_norm else None
         )
-        self.act = keras.layers.Activation("gelu", name="act")
+        self.act = keras.layers.Activation(exact_gelu, name="act")  # D-277: float64-exact, bit-identical to stock at float32
         self.fc2 = keras.layers.Dense(self.output_dim, activation=None, name="fc2")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

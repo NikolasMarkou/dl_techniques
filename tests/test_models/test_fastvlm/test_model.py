@@ -3,6 +3,7 @@ import tempfile
 import os
 import numpy as np
 import keras
+from dl_techniques.layers.activations.common import resolve_activation as repo_resolve_activation
 import tensorflow as tf
 from typing import Dict, Any, Optional
 
@@ -71,7 +72,7 @@ class TestFastVLM:
         assert model.use_layer_scale == base_config['use_layer_scale']
         # D-008: __init__ now resolves the activation spec eagerly (Invariant 1),
         # so `model.activation` is the resolved callable, not the raw string.
-        assert model.activation == keras.activations.get(base_config['activation'])
+        assert model.activation is repo_resolve_activation(base_config['activation'])  # D-277: "gelu" resolves to the exact form
         assert model.include_top == base_config['include_top']
         assert model._input_shape == base_config['input_shape']
 
@@ -547,7 +548,7 @@ class TestFastVLM:
         assert model.use_layer_scale is True
         # D-008: __init__ now resolves the activation spec eagerly (Invariant 1),
         # so `model.activation` is the resolved callable, not the raw string.
-        assert model.activation == keras.activations.get('gelu')
+        assert model.activation is repo_resolve_activation('gelu')  # D-277: "gelu" resolves to the exact form
         assert model.include_top is True
         assert model._input_shape == (224, 224, 3)
 

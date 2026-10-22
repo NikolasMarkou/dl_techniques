@@ -41,6 +41,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 from dl_techniques.layers.structured_linear.crystal_frames import (
     haar_orthogonal,
     hyperspherical_simplex
@@ -297,7 +298,9 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
         features = keras.ops.einsum(
             '...hd,hdv->...hv', normalized_heads, normalized_prisms
         ) * self.scale
-        features = keras.ops.gelu(features)
+        # keras.ops.gelu defaults to approximate=True: the tanh form, float64-exact
+        # here (D-277), bit-identical to the stock call at float32.
+        features = gelu_tanh(features)
 
         total_features = self.num_heads * self._vertices_per_head
         # `features` is (..., H, V): the einsum has ALREADY split the head axis

@@ -29,6 +29,7 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -205,7 +206,7 @@ class HierarchicalMLPStem(keras.layers.Layer):
 
         self.dim1 = embed_dim // 4
         self.num_patches = (img_size[0] // p_size) * (img_size[1] // p_size)
-        self.activation_fn = keras.activations.get(self.activation)
+        self.activation_fn = resolve_activation(self.activation)  # D-277: float64-exact, bit-identical to stock at float32
 
         self.conv_stages = []
         self.norm_stages = []

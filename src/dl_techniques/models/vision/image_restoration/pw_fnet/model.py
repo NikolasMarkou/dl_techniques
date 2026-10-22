@@ -34,6 +34,7 @@ from typing import Optional, Tuple, List, Dict, Any
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.signal_processing.fft_layers import FFTLayer, IFFTLayer
 from dl_techniques.layers.norms import create_normalization_layer
@@ -375,7 +376,7 @@ class PW_FNet_Block(keras.layers.Layer):
 
         x_fft = self.fft(x_expanded)
         x_freq = self.freq_conv(x_fft)
-        x_freq = keras.activations.gelu(x_freq, approximate=False)
+        x_freq = exact_gelu(x_freq)  # D-277: float64-exact, bit-identical to stock at float32
         x_ifft = self.ifft(x_freq)
 
         x_token_mixed = self.token_mixer_project(x_ifft)
@@ -394,7 +395,7 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         x_ffn_expanded = self.ffn_expand(x)
         x_ffn_depthwise = self.ffn_depthwise(x_ffn_expanded)
-        x_ffn_depthwise = keras.activations.gelu(x_ffn_depthwise, approximate=False)
+        x_ffn_depthwise = exact_gelu(x_ffn_depthwise)  # D-277: float64-exact, bit-identical to stock at float32
         x_ffn_projected = self.ffn_project(x_ffn_depthwise)
 
         return x_ffn_projected

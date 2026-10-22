@@ -51,6 +51,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
@@ -217,7 +218,7 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
         )
         self.ffn_dense_1 = keras.layers.Dense(
             self.ffn_intermediate_size,
-            activation="gelu",
+            activation=exact_gelu,  # D-277: float64-exact, bit-identical to stock at float32
             kernel_initializer=kernel_init,
             name="ffn_dense_1",
         )

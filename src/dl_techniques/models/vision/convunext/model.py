@@ -41,6 +41,7 @@ from typing import Optional, Union, Tuple, List, Dict, Any, FrozenSet
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
@@ -182,8 +183,8 @@ class ConvUNextStem(keras.layers.Layer):
 
         # Normalization keeps the shape, so the activation takes conv_output_shape.
         self.activation_layer = keras.layers.Activation(
-            self.activation_name, name='stem_activation'
-        )
+            substitute_exact(self.activation_name), name='stem_activation'
+        )  # D-277: float64-exact, bit-identical to stock at float32
         self.activation_layer.build(conv_output_shape)
 
         super().build(input_shape)

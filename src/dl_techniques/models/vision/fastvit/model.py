@@ -54,6 +54,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Mapping
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_name
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
@@ -434,7 +436,7 @@ class FastVitImageEncoder(keras.Model):
         self.down_patch_size = int(down_patch_size)
         self.down_stride = int(down_stride)
         self.repmixer_kernel_size = int(repmixer_kernel_size)
-        self.activation = activations.get(activation)
+        self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -793,7 +795,7 @@ class FastVitImageEncoder(keras.Model):
             'down_patch_size': self.down_patch_size,
             'down_stride': self.down_stride,
             'repmixer_kernel_size': self.repmixer_kernel_size,
-            'activation': activations.serialize(self.activation),
+            'activation': exact_name(self.activation) or activations.serialize(self.activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
         })
@@ -809,7 +811,8 @@ class FastVitImageEncoder(keras.Model):
         """
         config = dict(config)
         config['input_shape'] = tuple(config['input_shape'])
-        config['activation'] = activations.deserialize(config['activation'])
+        # resolve, not activations.deserialize: "gelu" must come back as exact_gelu (D-277)
+        config['activation'] = resolve_activation(config['activation'])
         config['kernel_initializer'] = initializers.deserialize(
             config['kernel_initializer'])
         config['kernel_regularizer'] = regularizers.deserialize(

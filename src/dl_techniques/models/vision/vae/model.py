@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.generative.sampling import create_sampling_layer, vmf_kl_divergence
 from dl_techniques.utils.activation_serialization import (
@@ -454,7 +455,8 @@ class VAE(keras.Model):
             x = keras.layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(
                 x
             )
-        x = keras.layers.Activation(self.activation, name="encoder_stem_activation")(x)
+        x = keras.layers.Activation(
+            substitute_exact(self.activation), name="encoder_stem_activation")(x)  # D-277: float64-exact, bit-identical to stock at float32
 
         # Encoder blocks with downsampling
         for depth in range(self.depths):
@@ -537,7 +539,7 @@ class VAE(keras.Model):
                 center=self.use_bias, name=f"encoder_downsample_bn_{stage_idx}"
             )(x)
         x = keras.layers.Activation(
-            self.activation, name=f"encoder_downsample_activation_{stage_idx}"
+            substitute_exact(self.activation), name=f"encoder_downsample_activation_{stage_idx}"
         )(x)
 
         # Residual blocks
@@ -570,7 +572,8 @@ class VAE(keras.Model):
             x = keras.layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(
                 x
             )
-        x = keras.layers.Activation(self.activation, name=f"{prefix}_activation_1")(x)
+        x = keras.layers.Activation(
+            substitute_exact(self.activation), name=f"{prefix}_activation_1")(x)
 
         if self.dropout_rate > 0:
             x = keras.layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")(x)
@@ -594,7 +597,8 @@ class VAE(keras.Model):
 
         # Residual connection
         x = keras.layers.Add(name=f"{prefix}_add")([x, residual])
-        x = keras.layers.Activation(self.activation, name=f"{prefix}_activation_final")(x)
+        x = keras.layers.Activation(
+            substitute_exact(self.activation), name=f"{prefix}_activation_final")(x)
 
         return x
 
@@ -680,7 +684,8 @@ class VAE(keras.Model):
             x = keras.layers.BatchNormalization(
                 center=self.use_bias, name=f"decoder_bn_{stage_idx}"
             )(x)
-        x = keras.layers.Activation(self.activation, name=f"decoder_activation_{stage_idx}")(
+        x = keras.layers.Activation(
+            substitute_exact(self.activation), name=f"decoder_activation_{stage_idx}")(
             x
         )
 

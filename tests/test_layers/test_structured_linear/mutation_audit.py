@@ -122,7 +122,7 @@ MUTATIONS = {
     ),
     'multihead-drops-the-gelu': (
         os.path.join(_PACKAGE, 'crystal_multihead_projection.py'),
-        "        features = keras.ops.gelu(features)",
+        "        features = gelu_tanh(features)",
         "        features = features * 1.0",
         'make the non-linearity a no-op',
     ),

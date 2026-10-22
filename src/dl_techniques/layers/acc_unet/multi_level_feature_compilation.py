@@ -22,6 +22,7 @@ from typing import Optional, Union, Tuple, List, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
@@ -184,7 +185,7 @@ class MLFCLayer(keras.layers.Layer):
             self.squeeze_excitations.append(se)
 
         # Activation layer
-        self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
+        self.activation = ExactLeakyReLU(negative_slope=0.01, name='activation', dtype=self.dtype_policy)
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build the layer and all its sub-layers.

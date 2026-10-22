@@ -298,3 +298,31 @@ def test_the_trio_serializes_an_exact_form_back_to_its_stock_name():
         assert common_resolve(serialize_activation(fn)) is fn
     assert serialize_activation(keras.activations.relu) == "relu"
     assert serialize_activation("gelu") == "gelu"
+
+
+# ---------------------------------------------------------------------
+# the two site helpers (step 2.3)
+# ---------------------------------------------------------------------
+
+
+def test_substitute_exact_swaps_only_the_two_stock_names():
+    """For a stock ``Activation`` / ``Dense`` site: the two names become the exact
+    forms, everything else (other names, None, callables, dicts, layers) is
+    handed to the stock layer unchanged."""
+    from dl_techniques.layers.activations.exact_activations import substitute_exact
+
+    assert substitute_exact("gelu") is exact_gelu
+    assert substitute_exact("leaky_relu") is exact_leaky_relu
+    layer = keras.layers.ReLU()
+    for other in ("relu", "gelu_tanh", None, keras.activations.gelu, layer,
+                  {"class_name": "function", "config": "relu"}):
+        assert substitute_exact(other) is other
+
+
+def test_exact_name_inverts_the_table_and_nothing_else():
+    from dl_techniques.layers.activations.exact_activations import exact_name
+
+    assert exact_name(exact_gelu) == "gelu"
+    assert exact_name(exact_leaky_relu) == "leaky_relu"
+    for other in (keras.activations.gelu, keras.activations.leaky_relu, "gelu", None):
+        assert exact_name(other) is None

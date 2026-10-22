@@ -25,6 +25,7 @@ from typing import Optional, Tuple, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -138,7 +139,8 @@ class ModalityProjection(keras.layers.Layer):
         )
         self.projection_activation = None
         if self.use_gelu:
-            self.projection_activation = keras.layers.Activation('gelu', name='projection_gelu')
+            self.projection_activation = keras.layers.Activation(
+                exact_gelu, name='projection_gelu')  # D-277: float64-exact, bit-identical to stock at float32
 
         self.projection_norm = None
         if self.use_layer_norm:

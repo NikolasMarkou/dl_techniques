@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -274,7 +275,9 @@ class GatedDConvFeedForward(keras.layers.Layer):
         # layer's float32 parity bound. Pinning it means a future Keras
         # default flip cannot silently swap the activation underneath the
         # port. Do NOT "simplify" this to `keras.activations.gelu(x1)`.
-        x = keras.activations.gelu(x1, approximate=False) * x2
+        # Since D-277 the erf form is `exact_gelu`, whose constant follows
+        # the input dtype (bit-identical to the stock call at float32).
+        x = exact_gelu(x1) * x2
 
         return self.project_out(x)
 

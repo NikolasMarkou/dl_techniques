@@ -35,6 +35,7 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.transformers import TransformerLayer
@@ -514,7 +515,7 @@ class SigLIPVisionTransformer(keras.Model):
             # not layers.LayerNormalization directly; that default eps=1e-3 is a 100x divergence
             # from the model's final norm (1e-6). See decisions.md.
             create_normalization_layer('layer_norm', name='patch_embed_norm1'),
-            keras.layers.Activation('gelu', name='patch_embed_activation1'),
+            keras.layers.Activation(exact_gelu, name='patch_embed_activation1'),  # D-277: float64-exact, bit-identical to stock at float32
 
             # Stage 2: Refinement to final embedding dimension
             keras.layers.Conv2D(

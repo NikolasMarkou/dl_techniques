@@ -26,6 +26,8 @@ from keras import layers, initializers, regularizers, activations
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_name
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -335,7 +337,7 @@ class MobileOneBlock(keras.layers.Layer):
         self.se_reduction_ratio = se_reduction_ratio
         self.se_use_bias = se_use_bias
         self.se_position = se_position
-        self.activation = activations.get(activation)
+        self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
@@ -622,7 +624,7 @@ class MobileOneBlock(keras.layers.Layer):
             'se_reduction_ratio': self.se_reduction_ratio,
             'se_use_bias': self.se_use_bias,
             'se_position': self.se_position,
-            'activation': activations.serialize(self.activation),
+            'activation': exact_name(self.activation) or activations.serialize(self.activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),

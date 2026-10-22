@@ -50,6 +50,8 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
+from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import refuse_pretrained
@@ -260,10 +262,13 @@ class SharedTokenDecoder(keras.Model):
         :rtype: keras.KerasTensor
         """
         x = self.normalize_tokens(inputs)
+        # D-277: the two GELU forms with float64-exact constants, chosen by
+        # GELU_APPROXIMATE as before; bit-identical to keras.ops.gelu at float32.
+        gelu = gelu_tanh if GELU_APPROXIMATE else exact_gelu
         x = self.mlp_in(x, training=training)
-        x = keras.ops.gelu(x, approximate=GELU_APPROXIMATE)
+        x = gelu(x)
         x = self.mlp_hidden(x, training=training)
-        x = keras.ops.gelu(x, approximate=GELU_APPROXIMATE)
+        x = gelu(x)
         return self.mlp_out(x, training=training)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:

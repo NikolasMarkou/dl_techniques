@@ -8,6 +8,7 @@ validation, two-stage patch embedding, and integration testing.
 
 import os
 import keras
+from dl_techniques.layers.activations.common import resolve_activation as repo_resolve_activation
 import pytest
 import tempfile
 import numpy as np
@@ -41,7 +42,7 @@ class TestSigLIPInitialization:
         assert model.normalization_type == "layer_norm"
         assert model.normalization_position == "post"
         assert model.ffn_type == "mlp"
-        assert model.activation == keras.activations.get("gelu")
+        assert model.activation is repo_resolve_activation("gelu")  # D-277: "gelu" resolves to the exact form
         assert not model.built
 
     def test_custom_initialization(self):

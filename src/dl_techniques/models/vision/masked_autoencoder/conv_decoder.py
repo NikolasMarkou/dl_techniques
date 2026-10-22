@@ -18,6 +18,7 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -195,9 +196,9 @@ class ConvDecoder(keras.layers.Layer):
                     keras.layers.BatchNormalization(name=f"decoder_refine_bn_{i}"))
 
             self.act_upsamples.append(
-                keras.layers.Activation(activation, name=f"decoder_act_{i}"))
+                keras.layers.Activation(substitute_exact(activation), name=f"decoder_act_{i}"))
             self.act_refines.append(
-                keras.layers.Activation(activation, name=f"decoder_refine_act_{i}"))
+                keras.layers.Activation(substitute_exact(activation), name=f"decoder_refine_act_{i}"))
 
         self.final_conv = keras.layers.Conv2D(
             filters=output_channels,

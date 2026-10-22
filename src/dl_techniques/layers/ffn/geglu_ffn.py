@@ -28,6 +28,8 @@ from typing import Optional, Union, Any, Dict, Callable, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_name
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -249,7 +251,7 @@ class GeGLUFFN(keras.layers.Layer):
         # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -381,7 +383,7 @@ class GeGLUFFN(keras.layers.Layer):
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': exact_name(self.activation) or keras.activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),

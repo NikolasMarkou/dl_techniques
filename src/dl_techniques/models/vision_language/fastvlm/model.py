@@ -52,6 +52,7 @@ from dl_techniques.utils.weight_transfer import (
 
 from .components import AttentionBlockVLM
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.common import (
     resolve_activation,
     serialize_activation,
@@ -553,7 +554,9 @@ class FastVLM(keras.Model):
                 # The model's activation by name. No reference block applies it;
                 # a block added by an override does, and the head's activation
                 # factory refuses a name it cannot build.
-                'activation_type': getattr(
+                # exact_name first: "gelu" resolves to exact_gelu (D-277), whose
+                # __name__ is not a factory key; the factory's "gelu" is exact too.
+                'activation_type': exact_name(self.activation) or getattr(
                     self.activation, '__name__', str(self.activation)),
                 'dropout_rate': 0.0,
                 'classifier_dropout_rate': self.dropout_rate,

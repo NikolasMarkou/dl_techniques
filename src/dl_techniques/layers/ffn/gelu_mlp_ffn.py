@@ -28,6 +28,7 @@ from typing import Optional, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -308,7 +309,7 @@ class GELUMLPFFN(keras.layers.Layer):
         """
         x = self.fc1(inputs)
         # Tanh approximation of GELU, not the exact-erf form.
-        x = keras.ops.gelu(x, approximate=True)
+        x = gelu_tanh(x)  # D-277: float64-exact, bit-identical to keras.ops.gelu(approximate=True) at float32
         x = self.dropout(x, training=training)
         x = self.fc2(x)
         return x

@@ -24,6 +24,7 @@ from typing import Optional, Union, Tuple, Literal, Any, Callable
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -367,7 +368,7 @@ class GatedMLP(keras.layers.Layer):
         if activation == "relu":
             return keras.activations.relu
         elif activation == "gelu":
-            return keras.activations.gelu
+            return exact_gelu  # D-277: float64-exact, bit-identical to stock at float32
         elif activation == "swish" or activation == "silu":
             return keras.activations.swish
         elif activation == "linear":

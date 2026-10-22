@@ -43,6 +43,7 @@ import tempfile
 from typing import Any, Dict, Optional, Callable, Tuple
 
 import keras
+from dl_techniques.layers.activations.exact_activations import exact_name
 import numpy as np
 import pytest
 import tensorflow as tf
@@ -1164,8 +1165,10 @@ class TestHeadDepthAndActivationDefault:
                 depth=1, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
             ),
         )
+        # D-277: the upscaler's stock Activation layers hold the exact GELU
+        # callable; exact_name maps it back to the name it stands for.
         upsample_acts = [
-            keras.activations.serialize(layer.activation)
+            exact_name(layer.activation) or keras.activations.serialize(layer.activation)
             for layer in decoder.output_upscaling.layers
             if isinstance(layer, keras.layers.Activation)
         ]
@@ -1258,7 +1261,7 @@ class TestHeadDepthAndActivationDefault:
             f"expected {mlp_activation!r}"
         )
         restored_upsample = [
-            keras.activations.serialize(layer.activation)
+            exact_name(layer.activation) or keras.activations.serialize(layer.activation)
             for layer in restored.output_upscaling.layers
             if isinstance(layer, keras.layers.Activation)
         ]

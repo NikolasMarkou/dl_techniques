@@ -37,6 +37,8 @@ from keras import layers, initializers, regularizers, activations
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_name
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from ..norms.factory import create_normalization_layer
 from .reference import REFERENCE_NORM_EPSILON
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -193,7 +195,7 @@ class FastVitConvMlp(keras.layers.Layer):
         self.hidden_dim = dim if hidden_dim is None else hidden_dim
         self.out_dim = resolved_out_dim
         self.kernel_size = kernel_size
-        self.activation = activations.get(activation)
+        self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         self.dropout_rate = dropout_rate
         # CONSTRUCTED PER INSTANCE, never as a default argument. A default
         # argument is evaluated ONCE at import time, so every FastVitConvMlp in
@@ -329,7 +331,7 @@ class FastVitConvMlp(keras.layers.Layer):
             'hidden_dim': self.hidden_dim,
             'out_dim': self.out_dim,
             'kernel_size': self.kernel_size,
-            'activation': activations.serialize(self.activation),
+            'activation': exact_name(self.activation) or activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
@@ -348,7 +350,8 @@ class FastVitConvMlp(keras.layers.Layer):
         :rtype: FastVitConvMlp
         """
         config = dict(config)
-        config['activation'] = activations.deserialize(config['activation'])
+        # resolve, not activations.deserialize: "gelu" must come back as exact_gelu (D-277)
+        config['activation'] = resolve_activation(config['activation'])
         config['kernel_initializer'] = initializers.deserialize(
             config['kernel_initializer'])
         config['bias_initializer'] = initializers.deserialize(

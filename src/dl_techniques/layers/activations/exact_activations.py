@@ -48,7 +48,7 @@ dict in its own ``activation`` config entry.
 """
 
 import keras
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 # ---------------------------------------------------------------------
 # local imports
@@ -144,5 +144,53 @@ EXACT_ACTIVATIONS: Dict[str, Callable[..., Any]] = {
     "gelu": exact_gelu,
     "leaky_relu": exact_leaky_relu,
 }
+
+
+def substitute_exact(identifier: Any) -> Any:
+    """Swap the two stock names for their exact forms; return anything else as is.
+
+    For a site that hands an activation to a stock Keras layer
+    (``keras.layers.Activation(substitute_exact(spec))``,
+    ``keras.layers.Dense(..., activation=substitute_exact(spec))``). Unlike a
+    resolver it does not resolve: every other string, ``None``, a callable, a
+    serialized dict or a layer instance reaches the stock layer exactly as it
+    did before, so the stock layer's own handling of them is unchanged.
+
+    Interface contract (shared by the stock-layer sites): accepts any value;
+    returns ``EXACT_ACTIVATIONS[identifier]`` when ``identifier`` is a ``str``
+    key of that table, else ``identifier`` itself (same object). Never raises.
+
+    :param identifier: An activation spec in any form a stock layer accepts.
+    :type identifier: Any
+    :return: The exact form, or ``identifier`` unchanged.
+    :rtype: Any
+    """
+    if isinstance(identifier, str) and identifier in EXACT_ACTIVATIONS:
+        return EXACT_ACTIVATIONS[identifier]
+    return identifier
+
+
+def exact_name(activation: Any) -> Optional[str]:
+    """The stock name an exact form stands for, or ``None``.
+
+    The inverse of :data:`EXACT_ACTIVATIONS` for a ``get_config``: a layer that
+    resolved ``"gelu"`` to :func:`exact_gelu` writes ``"gelu"`` back, so its
+    config keeps the string it was given and reloading resolves the exact form
+    again.
+
+    Interface contract (shared by ``common.serialize_activation`` and the
+    layers that serialize a resolved callable): returns the table key whose
+    value IS ``activation`` (identity, not equality), else ``None``. Never
+    raises.
+
+    :param activation: Any value, usually a resolved activation callable.
+    :type activation: Any
+    :return: ``"gelu"``, ``"leaky_relu"`` or ``None``.
+    :rtype: Optional[str]
+    """
+    for name, exact in EXACT_ACTIVATIONS.items():
+        if activation is exact:
+            return name
+    return None
 
 # ---------------------------------------------------------------------

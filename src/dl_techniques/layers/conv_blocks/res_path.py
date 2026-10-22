@@ -28,6 +28,7 @@ from typing import Optional, Union, Tuple, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
@@ -128,7 +129,7 @@ class ResPath(keras.layers.Layer):
                 name=f'se_block_{i}'
             ))
 
-        self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
+        self.activation = ExactLeakyReLU(negative_slope=0.01, name='activation', dtype=self.dtype_policy)
         self.final_se = SqueezeExcitation(
             reduction_ratio=0.25,
             kernel_initializer=self.kernel_initializer,

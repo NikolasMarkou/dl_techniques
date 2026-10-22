@@ -17,6 +17,7 @@ from typing import Optional, Dict, Union, Tuple, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from ...constraints.value_range_constraint import ValueRangeConstraint
 from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -305,7 +306,7 @@ class ConvNextV1Block(keras.layers.Layer):
 
         # Activation layer
         self.activation_layer = keras.layers.Activation(
-            self.activation_name,
+            substitute_exact(self.activation_name),  # D-277: float64-exact, bit-identical to stock at float32
             name="activation"
         )
 

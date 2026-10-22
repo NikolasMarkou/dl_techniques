@@ -31,6 +31,7 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking.strategies import apply_mlm_masking
 from dl_techniques.utils.model_build import materialize_sublayers
@@ -257,7 +258,7 @@ class MaskedLanguageModel(keras.Model):
 
         self.mlm_dense = keras.layers.Dense(
             self.hidden_size,
-            activation=self.mlm_head_activation,
+            activation=substitute_exact(self.mlm_head_activation),  # D-277: float64-exact, bit-identical to stock at float32
             kernel_initializer=keras.initializers.TruncatedNormal(
                 stddev=self.initializer_range
             ),

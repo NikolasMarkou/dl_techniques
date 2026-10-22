@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import keras
 from keras import ops
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
@@ -142,7 +143,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.ln2 = keras.layers.LayerNormalization(
             epsilon=_NORM_EPSILON, name="ln_mlp"
         )
-        self.mlp_hidden = keras.layers.Dense(mlp_dim, activation="gelu",
+        self.mlp_hidden = keras.layers.Dense(mlp_dim, activation=exact_gelu,  # D-277: float64-exact, bit-identical to stock at float32
                                              name="mlp_hidden")
         # DECISION plan_2026-05-24_ca745a6c/D-005: skip instantiating Dropout at
         # rate=0.0 -- Dropout.call(training=<symbolic tensor>) raises under

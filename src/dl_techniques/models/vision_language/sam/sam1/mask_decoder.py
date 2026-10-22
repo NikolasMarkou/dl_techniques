@@ -28,6 +28,7 @@ from typing import Optional, Tuple, Any, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import substitute_exact
 from .transformer import TwoWayTransformer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.activation_serialization import (
@@ -243,14 +244,14 @@ class MaskDecoder(keras.layers.Layer):
                 name="upsample_conv1"
             ),
             create_normalization_layer(normalization_type, name="upsample_norm1"),
-            keras.layers.Activation(activation, name="upsample_act1"),
+            keras.layers.Activation(substitute_exact(activation), name="upsample_act1"),  # D-277: float64-exact, bit-identical to stock at float32
             keras.layers.Conv2DTranspose(
                 transformer_dim // 8,
                 kernel_size=2,
                 strides=2,
                 name="upsample_conv2"
             ),
-            keras.layers.Activation(activation, name="upsample_act2"),
+            keras.layers.Activation(substitute_exact(activation), name="upsample_act2"),
         ], name="output_upscaling")
 
         # Hypernetwork MLPs: one per mask token, each mapping a mask token

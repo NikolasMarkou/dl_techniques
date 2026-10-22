@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_leaky_relu
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.transformers.swin_transformer_block import (
     SwinTransformerBlock,
@@ -533,7 +534,7 @@ class TheraTailPro(keras.layers.Layer):
         x = x[:, :h, :w, :]
 
         x = self.conv_before_upsample(x, training=training)
-        x = keras.activations.leaky_relu(x, negative_slope=LEAKY_RELU_SLOPE)
+        x = exact_leaky_relu(x, negative_slope=LEAKY_RELU_SLOPE)  # D-277: float64-exact, bit-identical to stock at float32
         return x
 
     def compute_output_shape(

@@ -42,7 +42,7 @@ from typing import (
     Callable,
 )
 
-from dl_techniques.layers.activations.exact_activations import EXACT_ACTIVATIONS
+from dl_techniques.layers.activations.exact_activations import EXACT_ACTIVATIONS, exact_name
 from dl_techniques.utils.activation_serialization import (
     deserialize_activation as _deserialize_activation,
     serialize_activation as _serialize_activation,
@@ -240,9 +240,9 @@ def serialize_activation(activation: Any) -> Any:
     # back to its stock name, so about 40 layers that serialize their resolved
     # callable keep a string config. Do NOT drop this: they would write a
     # function dict instead of "gelu". See D-277.
-    for name, exact in EXACT_ACTIVATIONS.items():
-        if activation is exact:
-            return name
+    name = exact_name(activation)
+    if name is not None:
+        return name
     return _serialize_activation(activation)
 
 # ---------------------------------------------------------------------------

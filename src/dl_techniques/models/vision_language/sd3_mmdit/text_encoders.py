@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -84,7 +85,7 @@ def _resolve_act(act_fn: str):
     if act_fn == "quick_gelu":
         return _quick_gelu
     if act_fn == "gelu":
-        return lambda x: keras.activations.gelu(x, approximate=False)
+        return exact_gelu  # D-277: float64-exact, bit-identical to stock at float32
     raise ValueError(
         f"act_fn must be 'quick_gelu' or 'gelu', got {act_fn!r}"
     )
@@ -749,7 +750,7 @@ class T5Encoder(keras.Model):
             # --- gated-GELU FFN ----------------------------------------
             residual = x
             n = self.ff_norm[i](x, training=training)
-            gated = keras.activations.gelu(self.wi_0[i](n, training=training)) * \
+            gated = exact_gelu(self.wi_0[i](n, training=training)) * \
                 self.wi_1[i](n, training=training)
             x = residual + self.wo[i](gated, training=training)
 

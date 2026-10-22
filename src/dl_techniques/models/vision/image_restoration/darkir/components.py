@@ -13,6 +13,7 @@ only the 1x1-conv MLP between them runs at ``compute_dtype``.
 
 import keras
 from typing import List, Optional, Tuple, Dict, Any
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -277,7 +278,7 @@ class FreMLP(keras.layers.Layer):
             padding='valid',
             name='conv1'
         )
-        self.act = keras.layers.LeakyReLU(negative_slope=0.1, name='leaky_relu')
+        self.act = ExactLeakyReLU(negative_slope=0.1, name='leaky_relu', dtype=self.dtype_policy)
         self.conv2 = keras.layers.Conv2D(
             channels,
             kernel_size=1,

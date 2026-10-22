@@ -29,6 +29,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.acc_unet.reference_batch_norm import reference_batch_norm
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
@@ -227,7 +228,7 @@ class HANCBlock(keras.layers.Layer):
         )
 
         # Stateless, so one instance serves all three activation sites.
-        self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
+        self.activation = ExactLeakyReLU(negative_slope=0.01, name='activation', dtype=self.dtype_policy)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all its sub-layers in computational order.

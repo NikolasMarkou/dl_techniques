@@ -8,6 +8,7 @@ validation, hMLP stem functionality, and masked self-supervised learning integra
 
 import os
 import keras
+from dl_techniques.layers.activations.common import resolve_activation as repo_resolve_activation
 import pytest
 import tempfile
 import numpy as np
@@ -115,7 +116,7 @@ class TestViTHMLPInitialization:
         assert model.normalization_type == "layer_norm"
         assert model.normalization_position == "pre"
         assert model.ffn_type == "mlp"
-        assert model.activation == keras.activations.get("gelu")
+        assert model.activation is repo_resolve_activation("gelu")  # D-277: "gelu" resolves to the exact form
         assert model.use_stochastic_depth is False
         assert model.stochastic_depth_rate == 0.1
         assert not model.built

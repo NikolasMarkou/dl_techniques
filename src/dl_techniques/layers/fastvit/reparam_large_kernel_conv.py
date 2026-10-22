@@ -59,6 +59,8 @@ from keras import layers, ops, initializers, regularizers, activations
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_name
+from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from ..norms.factory import create_normalization_layer
 from ..conv_blocks.squeeze_excitation import SqueezeExcitation
 # Single definition of timm's `num_groups` mapping, shared with MobileOneBlock.
@@ -236,7 +238,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         self.small_kernel = small_kernel
         self.use_se = use_se
         self.activation = (
-            None if activation is None else activations.get(activation)
+            None if activation is None else resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         )
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -455,7 +457,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             'use_se': self.use_se,
             'activation': (
                 None if self.activation is None
-                else activations.serialize(self.activation)
+                else exact_name(self.activation) or activations.serialize(self.activation)
             ),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
@@ -473,7 +475,8 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         """
         config = dict(config)
         if config.get('activation') is not None:
-            config['activation'] = activations.deserialize(config['activation'])
+            # resolve, not activations.deserialize: "gelu" must come back as exact_gelu (D-277)
+            config['activation'] = resolve_activation(config['activation'])
         config['kernel_initializer'] = initializers.deserialize(
             config['kernel_initializer'])
         config['kernel_regularizer'] = regularizers.deserialize(
