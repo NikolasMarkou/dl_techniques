@@ -20,15 +20,19 @@ So each advisory gets two arms here:
 * a **control** arm asserting the non-provoking configuration does NOT warn, so
   the positive arm cannot pass by the advisory having become unconditional.
 
-Coverage: **6 of 6** suppressed families, over 29 ``pytestmark`` sites -- zero
+Coverage: **6 of 6** suppressed families, over 23 ``pytestmark`` sites -- zero
 suppressions in this tree are unpaired. Two families are emitted by this repo's
 own ``src/`` (W-03, retired; W-14, which no module suppresses any more: it fires
 only on a real MoE expert-width fallback or on ``ffn_type``/``ffn_args`` that
 ``moe_config`` makes unused). The other four are emitted by Keras and are reached
 here through the public API: softmax-over-a-size-1-axis (22 sites),
-input-ran-out-of-data (6 sites), model-not-yet-built-on-save (1 site) and
-input-structure-mismatch (0 sites since 2026-10-14, when its one darkir site
-stopped provoking it; the arm stays, as W-14's does).
+model-not-yet-built-on-save (1 site), input-ran-out-of-data (0 sites since
+2026-10-22: its seven sites, one more than this docstring counted, stopped
+provoking it once the SAM, SAM 2, SAM 3 and bfunet pipelines stated their length;
+each was retired by flipping it to ``error:`` and seeing every test pass, D-265 of
+plan-2026-10-14T062616-81938e81) and input-structure-mismatch (0 sites since
+2026-10-14, when its one darkir site stopped provoking it). Both empty families
+keep their arms, as W-14's does.
 
 **A new ``ignore:`` mark anywhere under ``tests/`` needs a positive arm here in
 the same commit.** That is the whole contract; there is no other instrument.
@@ -44,9 +48,11 @@ evidence of nothing until you can prove the provoking test actually ran. MEASURE
 machinery, so a hit is recorded whether or not a filter would drop it:
 ``tests/test_train/test_sam/test_train_sam.py`` fires ``ran out of data`` in 5
 tests (``TestEveryCLIExpressibleCombinationTrains``) and ``not yet been built``
-twice in each of 3 (``TestConfigToConsumptionWiring``). Both marks are load-
+twice in each of 3 (``TestConfigToConsumptionWiring``). Both marks were load-
 bearing; neither was deleted. Confirmed independently by flipping the first
-mark's ``ignore:`` to ``error:``, which turned 79 passed into 5 failed.
+mark's ``ignore:`` to ``error:``, which turned 79 passed into 5 failed. The same
+flip on 2026-10-22, after the SAM pipeline stated its length (D-262), gave 79
+passed: that mark was retired then (D-265), by the flip, not by stripping it.
 
 See ``plans/plan-2026-08-22T035419-a11304c8/decisions.md`` D-252 (R-038 closure)
 and ``plans/plan-2026-08-23T091307-9a110062/decisions.md`` D-442.
@@ -246,10 +252,11 @@ class TestTheSoftmaxOverASizeOneAxisAdvisory:
 
 
 class TestTheInputRanOutOfDataAdvisory:
-    """`keras/src/trainers/epoch_iterator.py:81`. Suppressed at 6 sites that run
-    a real trainer over a deliberately tiny corpus while `steps_per_epoch` comes
-    from the shipped config -- padding the corpus would change what they
-    measure."""
+    """`keras/src/trainers/epoch_iterator.py:81`. Suppressed at no site since
+    2026-10-22 (D-265 of plan-2026-10-14T062616-81938e81): the seven sites ran a
+    real trainer over a tiny corpus whose pipeline had no stated length; once the
+    pipelines stated it, flipping each filter to `error:` passed every test. The
+    arms stay so a future site has its pair."""
 
     @staticmethod
     def _one_batch_model_and_dataset():
@@ -267,7 +274,7 @@ class TestTheInputRanOutOfDataAdvisory:
             model.fit(dataset, epochs=1, steps_per_epoch=4, verbose=0)
 
     def test_the_message_names_the_repeat_remedy(self):
-        """The payload the 6 suppressing sites are choosing NOT to apply."""
+        """The payload a suppressing site would be choosing NOT to apply."""
         model, dataset = self._one_batch_model_and_dataset()
         with pytest.warns(UserWarning) as rec:
             model.fit(dataset, epochs=1, steps_per_epoch=4, verbose=0)

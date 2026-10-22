@@ -62,22 +62,10 @@ from train.sam2.train_sam2 import (
 )
 
 
-# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
-# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
-# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
-# shipped config, so the iterator is legitimately exhausted before the epoch
-# ends. Padding the corpus to match would change what the test measures (the
-# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
-# starved input in any other module still fails under `error::UserWarning`.
-# MEASURED 2026-08-23: fires in 4 of the 87 tests here, all in
-# `TestTheTrainersOwnFactoriesTrain::test_the_pipeline_and_the_model_agree_on_every_axis`.
-# The paired positive arm lives in
-# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
-# anywhere needs one there in the same commit.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:Your input ran out of data:UserWarning"),
-]
+# No "Your input ran out of data" filter here any more: the pipelines this
+# module fits state their length (D-258, D-262, D-265 of
+# plan-2026-10-14T062616-81938e81), and with the filter flipped to `error:`
+# every test passes (MEASURED at step 12.10: 89 passed, none skipped).
 
 
 # ---------------------------------------------------------------------------

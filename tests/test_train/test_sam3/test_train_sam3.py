@@ -70,23 +70,10 @@ from train.sam3.train_sam3 import (
 )
 
 
-# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
-# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
-# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
-# shipped config, so the iterator is legitimately exhausted before the epoch
-# ends. Padding the corpus to match would change what the test measures (the
-# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
-# starved input in any other module still fails under `error::UserWarning`.
-# MEASURED 2026-08-23: fires in 3 of the 114 tests here -- the
-# `test_a_..._takes_a_real_training_step` arms of TestDeepSupervision,
-# TestPromptConditionedQueriesCli and TestQuerySelectionCli.
-# The paired positive arm lives in
-# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
-# anywhere needs one there in the same commit.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:Your input ran out of data:UserWarning"),
-]
+# No "Your input ran out of data" filter here any more: the pipelines this
+# module fits state their length (D-258, D-262, D-265 of
+# plan-2026-10-14T062616-81938e81), and with the filter flipped to `error:`
+# every test passes (MEASURED at step 12.10: 115 passed, none skipped).
 
 #: A `tiny`-variant config small enough to build, compile and step in a test.
 TINY_KWARGS: Dict[str, Any] = dict(

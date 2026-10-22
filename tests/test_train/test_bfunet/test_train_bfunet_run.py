@@ -53,11 +53,10 @@ FIXTURE_BUDGET_SECONDS = 90.0
 N_TEST_IMAGES = 3        # per generated held-out set; fewer than TEST_NUM_SAMPLES on purpose
 TEST_NUM_SAMPLES = 5     # crops per held-out set, so the crop list wraps around the images
 
-# Keras ignores an unfinished-epoch advisory here for the same reason the self-iterate
-# fit test does: the tiny generated corpus is smaller than ``steps_per_epoch`` batches.
-pytestmark = [
-    pytest.mark.filterwarnings("ignore:Your input ran out of data:UserWarning"),
-]
+# No "Your input ran out of data" filter here any more: the pipelines this
+# module fits state their length (D-258, D-262, D-265 of
+# plan-2026-10-14T062616-81938e81), and with the filter flipped to `error:`
+# every test passes (MEASURED at step 12.10: 136 passed, none skipped).
 
 
 def _write_pngs(directory: Path, count: int, seed: int) -> None:
