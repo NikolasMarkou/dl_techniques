@@ -20,6 +20,7 @@ from train.common.callbacks import best_checkpoint_path
 from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
+from dl_techniques.datasets.cardinality import state_counted_length
 from dl_techniques.models.common.masked_language_model import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
@@ -179,6 +180,7 @@ def preprocess_clm_dataset(
     preprocessor: TiktokenPreprocessor,
     max_seq_length: int,
     batch_size: int,
+    repeat: bool = False,
 ) -> tf.data.Dataset:
     """Tokenize, pack, and batch a text dataset for CLM pretraining.
 
@@ -212,6 +214,10 @@ def preprocess_clm_dataset(
         needed for the causal shift. After the shift, the model input
         and label tensors both have length ``max_seq_length - 1``.
     :param batch_size: Output batch size.
+    :param repeat: Passed to :func:`preprocess_clm_packed_dataset`: ``True``
+        gives an infinite stream for a ``fit`` driven by ``steps_per_epoch``;
+        ``False`` (default) a finite one whose batch count is counted once at
+        build time. Pass ``True`` for a corpus too large to count (Wikipedia).
     :return: Batched ``tf.data.Dataset`` of ``(input_ids, labels)``
         tuples with shape ``(batch, max_seq_length - 1)``.
 
@@ -230,6 +236,7 @@ def preprocess_clm_dataset(
         chunk_length=max_seq_length,
         batch_size=batch_size,
         eot_token_id=eot_token_id,
+        repeat=repeat,
     )
 
 
@@ -281,7 +288,11 @@ def preprocess_clm_packed_dataset(
         pass ``steps_per_epoch`` to ``fit`` must leave this at
         ``False`` — otherwise training runs forever.
     :return: Batched dataset of ``(input_ids, labels)`` tuples with
-        shape ``(batch, chunk_length - 1)``.
+        shape ``(batch, chunk_length - 1)``. With ``repeat=False`` its
+        cardinality is the stated batch count, found by running the pipeline
+        once here (one tokenization pass over ``dataset``: use it for a
+        validation split or a corpus small enough to tokenize twice); with
+        ``repeat=True`` it is infinite. Never unknown.
     """
     if chunk_length < 2:
         raise ValueError(
@@ -316,8 +327,14 @@ def preprocess_clm_packed_dataset(
         packed.shuffle(buffer_size=shuffle_buffer)
         .batch(batch_size, drop_remainder=True)
     )
-    if repeat:
-        packed = packed.repeat()
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The finite stream states its counted length. Do NOT return it with an
+    # unknown cardinality: Keras 3.8 then logs n/(n+1) of every loss and
+    # metric in a non-XLA step (the batch axis is static here), and under
+    # steps_per_epoch trains
+    # an empty epoch every other epoch. A corpus too large to count passes
+    # repeat=True and steps_per_epoch instead. See decisions.md D-265.
+    packed = packed.repeat() if repeat else state_counted_length(packed)
     packed = packed.prefetch(tf.data.AUTOTUNE)
     logger.info(
         f"Packed CLM dataset: encoding={encoding_name}, "

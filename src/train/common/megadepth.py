@@ -813,7 +813,8 @@ def pair_labeled_unlabeled(
         batch_size: Per-batch size (must match both datasets).
 
     Returns:
-        A ``tf.data.Dataset`` yielding ``((x_lab, x_unlab), y_lab)``.
+        A ``tf.data.Dataset`` yielding ``((x_lab, x_unlab), y_lab)``, whose
+        cardinality is the stated ``len(labeled_ds)``.
     """
     import tensorflow as tf
 
@@ -835,12 +836,18 @@ def pair_labeled_unlabeled(
             for i in range(len(unlabeled_ds)):
                 yield unlabeled_ds[i].astype(np.float32)
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # Both streams state their length: the labeled one len(labeled_ds), the
+    # unlabeled one INFINITE, so the zip has the labeled count. Do NOT leave
+    # them unknown: the trainer passes steps_per_epoch = len(train_ds), and on
+    # an unknown-length dataset fit keeps one iterator across epochs, so every
+    # second epoch trained ZERO batches and logged loss 0.0 (MEASURED). D-265.
     lab_tf = tf.data.Dataset.from_generator(
         _lab_gen, output_signature=(rgb_spec, y_spec)
-    )
+    ).apply(tf.data.experimental.assert_cardinality(len(labeled_ds)))
     unlab_tf = tf.data.Dataset.from_generator(
         _unlab_gen, output_signature=rgb_spec
-    )
+    ).apply(tf.data.experimental.assert_cardinality(tf.data.INFINITE_CARDINALITY))
 
     paired = tf.data.Dataset.zip((lab_tf, unlab_tf)).map(
         lambda lab, unlab: ((lab[0], unlab), lab[1]),

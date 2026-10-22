@@ -140,7 +140,9 @@ def make_tf_dataset(
     :type horizon: int
     :param batch_size: Batch size.
     :type batch_size: int
-    :return: TensorFlow dataset yielding (x, y).
+    :return: TensorFlow dataset yielding (x, y). Its cardinality is stated:
+        the number of stride-1 windows over every series long enough to hold
+        one, batched.
     :rtype: tf.data.Dataset
     """
     if pipeline_config is None:
@@ -169,6 +171,14 @@ def make_tf_dataset(
         tf.TensorSpec(shape=(horizon, 1), dtype=tf.float32)
     )
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The window count is computable without a pass (stride 1: n - total + 1
+    # per series with n >= total, as `_data_generator` yields), so it is stated.
+    # Do NOT leave it unknown: `fit` on it then ends each epoch with one extra
+    # call that logs n/(n+1) of every loss under a static batch axis. D-265.
+    total_len = window_size + horizon
+    series_lengths = df.groupby(id_col).size().to_numpy()
+    num_windows = int(np.maximum(series_lengths - total_len + 1, 0).sum())
     dataset = tf.data.Dataset.from_generator(
         generator=lambda: _data_generator(
             df=df,
@@ -181,7 +191,7 @@ def make_tf_dataset(
             stride=1
         ),
         output_signature=output_signature
-    )
+    ).apply(tf.data.experimental.assert_cardinality(num_windows))
 
     if pipeline_config.cache:
         dataset = dataset.cache()
@@ -233,7 +243,7 @@ def make_tf_dataset_from_arrays(
                 tf.TensorSpec(shape=x_data.shape[1:], dtype=tf.float32),
                 tf.TensorSpec(shape=y_data.shape[1:], dtype=tf.float32)
             )
-        )
+        ).apply(tf.data.experimental.assert_cardinality(len(x_data)))
     else:
         dataset = tf.data.Dataset.from_tensor_slices((
             x_data.astype(np.float32),

@@ -46,22 +46,12 @@ from dl_techniques.callbacks.self_iterate_pool import SelfIteratePoolCallback
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 
-# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
-# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
-# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
-# shipped config, so the iterator is legitimately exhausted before the epoch
-# ends. Padding the corpus to match would change what the test measures (the
-# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
-# starved input in any other module still fails under `error::UserWarning`.
-# MEASURED 2026-08-23: fires twice, in
-# `test_self_iterate_trains_multiple_epochs_and_pool_reread`.
-# The paired positive arm lives in
-# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
-# anywhere needs one there in the same commit.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:Your input ran out of data:UserWarning"),
-]
+# No "Your input ran out of data" filter here any more. It suppressed the
+# epoch-end advisory of the self-iterate pool, a finite generator of unknown
+# length; the pool now states its length (D-265 of
+# plan-2026-10-14T062616-81938e81), and with the filter set to `error:` the
+# module passes (MEASURED: 39 passed; at fa4505bb5 the same flip failed
+# `test_self_iterate_trains_multiple_epochs_and_pool_reread`).
 
 TRAINER_REL_PATH = "src/train/bfunet/train_convunext_denoiser.py"
 

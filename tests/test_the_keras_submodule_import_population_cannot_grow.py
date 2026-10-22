@@ -38,7 +38,9 @@ edited, and these were edited without it), leaving **431 statements in 412
 files**, none of them a file this plan touched; then **430 in 411** after
 ``tests/test_layers/test_the_kan_actually_splines.py``, edited for D-257, was
 converted with it; then **429 in 410** after ``models/vision_language/sam/sam2/neck.py``,
-edited for D-260 at step 12.8, was converted with it. The rest stay as they are (the
+edited for D-260 at step 12.8, was converted with it; then **428 in 409** after
+``train/cliffordnet/train_cliffordnet_nlp.py``, edited for D-265 at step 12.10, was
+converted with it. The rest stay as they are (the
 2026-08-25 ruling). The ceilings became an exact census: :data:`KERAS_SUBMODULE_IMPORTS`
 pins the statement count of every file, so a conversion, a new statement in a
 new file, a second statement in a listed file, and a swap (one file fixed,
@@ -58,7 +60,8 @@ ROOTS = ("src", "tests")
 #: Exact census, ``{path relative to the repo root: statements}``, re-derived at
 #: Step 15.2 of plan-2026-10-14T062616-81938e81 (D-254): 431 statements, 412 files;
 #: 430 / 411 after ``test_the_kan_actually_splines.py`` was edited for D-257;
-#: 429 / 410 after ``sam2/neck.py`` was edited for D-260 (step 12.8).
+#: 429 / 410 after ``sam2/neck.py`` was edited for D-260 (step 12.8);
+#: 428 / 409 after ``train_cliffordnet_nlp.py`` was edited for D-265 (step 12.10).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -256,7 +259,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/utils/clip_utils.py": 1,
     "src/dl_techniques/utils/corruption.py": 1,
     "src/dl_techniques/utils/masking/factory.py": 1,
-    "src/train/cliffordnet/train_cliffordnet_nlp.py": 1,
     "src/train/common/token_superposition.py": 1,
     "src/train/logic/clevr_hans_data.py": 1,
     "src/train/sam3/baselines.py": 1,
@@ -535,7 +537,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (429, 410), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (428, 409), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

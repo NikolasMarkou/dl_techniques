@@ -40,6 +40,7 @@ import tensorflow as tf
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.datasets.cardinality import state_counted_length
 from dl_techniques.layers.tokenizers.ascii_char import (
     CLS_ID,
     SEP_ID,
@@ -142,6 +143,9 @@ def build_packed_mlm_dataset(
     :type normalize_unicode: bool
     :return: Dataset of ``{"input_ids", "attention_mask"}`` int32 batches, both
         of shape ``(batch_size, seq_len)``; the mask is all ones by construction.
+        With ``repeat=False`` its cardinality is the stated batch count, counted
+        by one pass over ``text_dataset`` at build time; with ``repeat=True`` it
+        is infinite. Never unknown (``dl_techniques.datasets.cardinality``).
     :rtype: tf.data.Dataset
     """
 
@@ -160,8 +164,11 @@ def build_packed_mlm_dataset(
 
     if training:
         windows = windows.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
-    if repeat:
-        windows = windows.repeat()
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The finite stream states its counted length. Do NOT leave the validation
+    # stream at UNKNOWN cardinality: with its static batch axis Keras 3.8 logs
+    # n/(n+1) of every val loss in a non-XLA step. See decisions.md D-265.
+    windows = windows.repeat() if repeat else state_counted_length(windows)
 
     def to_inputs(ids: tf.Tensor) -> Dict[str, tf.Tensor]:
         return {

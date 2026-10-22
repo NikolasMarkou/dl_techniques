@@ -692,6 +692,8 @@ def build_tudataset_graph_dataset(
         ``tf.data.Dataset`` yielding the contract above and ``metadata`` extends
         the loader metadata with ``split``, ``split_sizes``, ``k_pe``,
         ``max_nodes``, ``batch_size`` and ``num_node_features``.
+        The dataset's cardinality is the split's batch count,
+        ``ceil(split size / batch_size)``; it is never unknown.
     """
     # tf imported lazily to keep the parser/PE/collate path tf-free (loader
     # unit tests exercise those without importing tensorflow).
@@ -764,8 +766,16 @@ def build_tudataset_graph_dataset(
         tf.TensorSpec(shape=(None,), dtype=tf.int32),
     )
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The split's batch count is stated: one pass yields exactly
+    # ceil(len(indices) / batch_size) batches (the last one partial). Do NOT
+    # leave it unknown: `fit` without `steps_per_epoch` then ends each epoch
+    # with an extra call, and an LR horizon has to be guessed. See D-265.
+    num_batches = -(-len(indices) // batch_size)
     dataset = tf.data.Dataset.from_generator(
         _generator, output_signature=output_signature
+    ).apply(
+        tf.data.experimental.assert_cardinality(num_batches)
     ).prefetch(tf.data.AUTOTUNE)
 
     metadata = dict(metadata)

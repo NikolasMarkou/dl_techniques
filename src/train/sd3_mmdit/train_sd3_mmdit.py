@@ -321,8 +321,13 @@ def make_synthetic_dataset(
         "weight": tf.TensorSpec(shape=(B,), dtype=tf.float32),
     }
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # A never-ending generator states INFINITE cardinality (the trainer passes
+    # steps_per_epoch). Do NOT leave it UNKNOWN: the census in
+    # tests/test_train/test_a_dataset_reaching_fit_states_its_length.py holds
+    # every from_generator site to a stated length. See decisions.md D-265.
     ds = tf.data.Dataset.from_generator(_gen, output_signature=output_signature)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = ds.apply(tf.data.experimental.assert_cardinality(tf.data.INFINITE_CARDINALITY)).prefetch(tf.data.AUTOTUNE)
     return ds
 
 

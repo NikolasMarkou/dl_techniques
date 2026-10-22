@@ -245,11 +245,18 @@ def _load_hf_train_val(
             continue
 
     logger.warning("No val/test split found — using last 10% of train")
-    total = tf.data.experimental.cardinality(train_raw).numpy()
-    if total > 0:
-        val_size = max(int(total * config.val_fraction), 1)
-        val_raw = train_raw.skip(total - val_size)
-        train_raw = train_raw.take(total - val_size)
+    # The HF source states its row count (D-265 of plan-2026-10-14T062616-81938e81);
+    # before it did, this read -2, skipped the split and returned an unbound `val_raw`.
+    total = int(tf.data.experimental.cardinality(train_raw).numpy())
+    if total < 2:
+        raise ValueError(
+            f"cannot hold out a validation split from a train split of {total} "
+            f"rows (cardinality {total}); pass a dataset with a validation or "
+            f"test split, or more rows"
+        )
+    val_size = max(int(total * config.val_fraction), 1)
+    val_raw = train_raw.skip(total - val_size)
+    train_raw = train_raw.take(total - val_size)
     return train_raw, val_raw
 
 
@@ -424,17 +431,16 @@ def finetune_gpt2(
     # Data
     train_dataset, val_dataset = load_finetune_datasets(config, preprocessor)
 
-    # Estimate steps_per_epoch via the canonical helper.
-    # tf.data.Dataset.cardinality() returns UNKNOWN_CARDINALITY for the
-    # generator-backed packed CLM pipeline, so we cannot count chunks
-    # directly. Fall back to the helper's default Wikipedia-token estimate
-    # (or --steps-per-epoch override). Domain-specific finetune corpora
-    # should set --steps-per-epoch explicitly.
+    # The LR horizon. The packed pipeline states its counted batch count (D-265
+    # of plan-2026-10-14T062616-81938e81), so one epoch's steps are exact; it
+    # used to fall back to the whole-Wikipedia token estimate for any corpus.
+    # --steps-per-epoch still overrides the horizon.
     steps_per_epoch = estimate_clm_steps_per_epoch(
         num_articles=None,
         max_seq_length=config.max_seq_length,
         batch_size=config.batch_size,
-        override=config.steps_per_epoch,
+        override=(config.steps_per_epoch if config.steps_per_epoch is not None
+                  else int(train_dataset.cardinality())),
     )
     logger.info(f"steps_per_epoch={steps_per_epoch:,}")
 

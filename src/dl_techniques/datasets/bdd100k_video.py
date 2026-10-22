@@ -206,9 +206,14 @@ def bdd100k_video_dataset(
         tf.TensorSpec(shape=(T, img_size, img_size, 3), dtype=tf.float32),
         tf.TensorSpec(shape=(), dtype=tf.float32),
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # A never-ending generator states INFINITE cardinality (the trainer passes
+    # steps_per_epoch). Do NOT leave it UNKNOWN: the census in
+    # tests/test_train/test_a_dataset_reaching_fit_states_its_length.py holds
+    # every from_generator site to a stated length. See decisions.md D-265.
     ds = tf.data.Dataset.from_generator(
         _gen, output_signature=output_signature,
-    )
+    ).apply(tf.data.experimental.assert_cardinality(tf.data.INFINITE_CARDINALITY))
     ds = ds.map(
         lambda c, y: ({"pixels": c}, y),
         num_parallel_calls=tf.data.AUTOTUNE,

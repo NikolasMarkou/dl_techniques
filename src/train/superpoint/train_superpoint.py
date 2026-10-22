@@ -827,10 +827,15 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
         tf.TensorSpec(shape=(n, n), dtype=tf.float32),
     )
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # A never-ending generator states INFINITE cardinality (the trainer passes
+    # steps_per_epoch). Do NOT leave it UNKNOWN: the census in
+    # tests/test_train/test_a_dataset_reaching_fit_states_its_length.py holds
+    # every from_generator site to a stated length. See decisions.md D-265.
     dataset = tf.data.Dataset.from_generator(
         lambda: _pair_generator(config),
         output_signature=output_signature,
-    )
+    ).apply(tf.data.experimental.assert_cardinality(tf.data.INFINITE_CARDINALITY))
 
     dataset = dataset.map(
         lambda img, warped, label, warped_label, h_mat, corr: (

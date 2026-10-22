@@ -318,7 +318,7 @@ def train_wave_field_llm(
         config, preprocessor, data_seed=data_seed, wrap_for_dict_output=False,
     )
 
-    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
+    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles, train_dataset)
 
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
@@ -375,9 +375,17 @@ def train_wave_field_llm(
         f"steps_per_epoch~{steps_per_epoch:,}, "
         f"batch_size={config.batch_size}"
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The train stream is repeated and the epoch is `steps_per_epoch` (the TFDS
+    # stream's counted batch count, or the Wikipedia estimate). Do NOT go back
+    # to fit(train_dataset) with no steps: the packed stream had UNKNOWN
+    # cardinality and a static batch axis, so in a non-XLA step every logged
+    # loss and metric was n/(n+1) of the mean; a Wikipedia stream is too large
+    # to count.
     history = model.fit(
-        train_dataset,
+        train_dataset.repeat(),
         epochs=config.num_epochs,
+        steps_per_epoch=steps_per_epoch,
         callbacks=callbacks,
         validation_data=val_dataset,
         verbose=1,

@@ -153,12 +153,17 @@ def create_dataset(config: MagicPointConfig) -> tf.data.Dataset:
         tf.TensorSpec(shape=(Hc, Wc), dtype=tf.int32),
     )
 
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # A never-ending generator states INFINITE cardinality (the trainer passes
+    # steps_per_epoch). Do NOT leave it UNKNOWN: the census in
+    # tests/test_train/test_a_dataset_reaching_fit_states_its_length.py holds
+    # every from_generator site to a stated length. See decisions.md D-265.
     dataset = tf.data.Dataset.from_generator(
         lambda: synthetic_shapes_generator(
             H, W, seed=config.seed, cell=config.cell, n_samples=None
         ),
         output_signature=output_signature,
-    )
+    ).apply(tf.data.experimental.assert_cardinality(tf.data.INFINITE_CARDINALITY))
 
     # Wrap the integer grid label in the detector-head dict key so Keras keys the
     # detector loss to "keypoints" and leaves the descriptor head ungradiented.

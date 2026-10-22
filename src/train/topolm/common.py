@@ -1211,7 +1211,8 @@ def train_topolm(
         wrap_for_dict_output=False,
     )
 
-    real_steps_per_epoch = make_clm_steps_per_epoch(config, n_train_articles)
+    real_steps_per_epoch = make_clm_steps_per_epoch(
+        config, n_train_articles, train_dataset)
     epochs, steps_per_epoch = resolve_cadence(config, real_steps_per_epoch)
 
     results_dir = str(

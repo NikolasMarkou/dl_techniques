@@ -370,6 +370,12 @@ class UniversalDatasetLoader:
           returned by transform_fn.
         - Auto-sharding distributes data across workers in distributed training.
         - Prefetching overlaps data loading with model computation.
+        - The dataset's cardinality is UNKNOWN: a streaming source has no
+          length, and ``filter_fn``/``skip_errors`` drop items. Do not pass it
+          to ``fit``/``evaluate`` as a finite epoch; repeat it and drive it
+          with ``steps_per_epoch``/``steps`` (Keras 3.8 otherwise logs
+          ``n / (n + 1)`` of every loss under ``drop_remainder=True``; D-265 of
+          plan-2026-10-14T062616-81938e81).
 
         See Also
         --------
@@ -475,7 +481,12 @@ class UniversalDatasetLoader:
         ...     batch_size=64,
         ...     transform_fn=to_tuple
         ... )
-        >>> model.fit(dataset, epochs=10)
+        >>> model.fit(dataset.repeat(), epochs=10, steps_per_epoch=1000)
+
+        Notes
+        -----
+        The cardinality is UNKNOWN (see :meth:`to_tf_dataset`), so ``fit`` is
+        driven with ``steps_per_epoch`` over the repeated stream.
         """
 
         def tuple_generator() -> Generator[tuple[Any, ...], None, None]:

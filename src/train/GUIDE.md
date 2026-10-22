@@ -108,15 +108,27 @@ Moved from `models/GUIDE.md` § 10.3 (iteration 1 of that plan).
   *Example:* D-247, D-248.
 - **A generator dataset of unknown length that shrank every logged loss.** With a
   `from_generator` source and no `steps_per_epoch`, Keras 3.8 finds the epoch end through one
-  more train or test function call that raises OutOfRange, and the loss trackers' `count`
-  update still runs in it: every logged loss is `n / (n + 1)` of the mean over `n` batches. A 2-clip SAM 2 run logged 0.48 for a model whose loss was 0.95, a constant's 0.96.
-  *Rule:* a source that yields a known number of records states it with
-  `tf.data.experimental.assert_cardinality`; otherwise `fit` gets `steps_per_epoch` (and
-  `validation_steps`) on a repeated dataset. *Detected:* `evaluate` on the live dataset against
-  the same batches materialised. *Guard:*
+  more train or test function call that raises OutOfRange, and when that step is not
+  XLA-compiled (`jit_compile=False`, or `"auto"` on a CPU-only machine) and the batch axis is
+  STATIC (`drop_remainder=True`, a fixed-batch generator signature), the loss and `Mean` metric
+  trackers' `count` update has no data dependency and still runs in it: every logged loss and
+  metric is `n / (n + 1)` of the mean over `n` batches. A dynamic batch axis makes the count
+  data-dependent, and an XLA step never runs; both log the true value. A 2-clip SAM 2 run logged 0.48 for a model whose loss was
+  0.95, a constant's 0.96. The same unknown length under `steps_per_epoch` equal to it trains
+  ZERO batches every second epoch (loss 0.0): `fit` keeps one iterator and resets it only
+  once it runs dry. *Rule:* a source states its length: a computable count with
+  `tf.data.experimental.assert_cardinality`, a stream countable only by running it with
+  `dl_techniques.datasets.cardinality.state_counted_length`, a never-ending one with
+  `assert_cardinality(tf.data.INFINITE_CARDINALITY)` or `repeat()` and `steps_per_epoch`. A
+  source whose length is truly unknowable is named in the census with the reason its consumer
+  is safe. *Detected:* `evaluate` on the live dataset against the same batches materialised;
+  batches counted per epoch. *Guard:*
+  `tests/test_train/test_a_dataset_reaching_fit_states_its_length.py` (the census),
+  `tests/test_train/test_the_logged_loss_is_the_mean_over_batches.py`,
   `tests/test_train/test_sam2/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`,
   `tests/test_train/test_sam/test_the_pipeline_states_its_length_and_redraws_its_prompts.py`,
-  `tests/test_train/test_sam3/test_the_pipeline_states_its_length.py`. *Example:* D-258, D-262.
+  `tests/test_train/test_sam3/test_the_pipeline_states_its_length.py`. *Example:* D-258, D-262,
+  D-265.
 - **A random draw in a `tf.data` map that repeated every epoch.** A stateful `tf.random` op in
   a `map` restarts from its seed on every new iterator once a global seed is set, so every
   epoch drew the same SAM prompts and a shuffle only moved them between records. *Rule:* draw

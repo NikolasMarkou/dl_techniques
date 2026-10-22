@@ -56,10 +56,13 @@ class _StubModel:
     def __init__(self, history: Optional[_StubHistory] = None):
         self.history = history or _StubHistory()
         self.fit_calls = 0
+        self.fit_args: tuple = ()
+        self.fit_kwargs: Dict[str, Any] = {}
         self.save_calls: List[str] = []
 
     def fit(self, *args, **kwargs):
         self.fit_calls += 1
+        self.fit_args, self.fit_kwargs = args, kwargs
         return self.history
 
     def save(self, path, *args, **kwargs):
@@ -70,10 +73,24 @@ class _StubModel:
 
 
 class _StubDataset:
-    """`tf.data`-shaped stand-in supporting only `.take()`."""
+    """`tf.data`-shaped stand-in: `.take()`, `.repeat()` and `.cardinality()`.
+
+    `repeat()` returns a copy flagged `repeated=True`, so a guard can see that a
+    trainer fitted the repeated stream (D-265 of plan-2026-10-14T062616-81938e81);
+    `cardinality()` answers a fixed stated count, 5.
+    """
+
+    def __init__(self, repeated: bool = False):
+        self.repeated = repeated
 
     def take(self, n):
         return self
+
+    def repeat(self, count=None):
+        return _StubDataset(repeated=True)
+
+    def cardinality(self):
+        return 5
 
 
 def _noop(*args, **kwargs):

@@ -263,10 +263,9 @@ def train_anomaly(config: TrainingConfig) -> Dict[str, Any]:
         train_ds = train_ds.repeat()
 
     # ---- Optimization ----
-    # steps_per_epoch for the LR horizon: unknown a priori for the from_generator dataset, so
-    # use a coarse estimate from the train split size (cosine decay only needs a horizon).
-    split_sizes_est = max(1, config.synth_nodes if config.dataset == "synthetic" else 10000)
-    horizon_steps = steps_per_epoch or max(1, split_sizes_est // config.batch_size)
+    # steps_per_epoch for the LR horizon: one finite pass per epoch, whose batch count the
+    # dataset states (D-265 of plan-2026-10-14T062616-81938e81), so the horizon is exact.
+    horizon_steps = steps_per_epoch or max(1, int(train_ds.cardinality()))
     optimizer = build_optimizer(config, horizon_steps)
 
     # STOCK compile. The head emits a LOGIT (no sigmoid) -> from_logits=True on loss AND AUC.

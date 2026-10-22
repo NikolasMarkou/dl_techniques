@@ -346,7 +346,9 @@ def load_tfds_clm_datasets(
         preprocessor: The ``TiktokenPreprocessor`` used to tokenize/chunk.
 
     Returns:
-        ``(train_ds, val_ds)`` -- the TFDS ``"train"`` and ``"test"`` splits.
+        ``(train_ds, val_ds)`` -- the TFDS ``"train"`` and ``"test"`` splits,
+        both finite with a stated (counted) batch count: one tokenization pass
+        each at build time (D-265 of plan-2026-10-14T062616-81938e81).
     """
     train = preprocess_clm_dataset(
         load_text_dataset(config.dataset_name, "train", config.max_samples),
@@ -375,7 +377,10 @@ def load_hf_clm_datasets(
 
     Returns:
         ``(train_ds, val_ds, n_train_articles)`` with the POST-filter train article
-        count, suitable for :func:`make_clm_steps_per_epoch`.
+        count, suitable for :func:`make_clm_steps_per_epoch`. ``train_ds`` is
+        INFINITE (a Wikipedia-scale corpus is too large to count; the trainer
+        drives it with ``steps_per_epoch``); ``val_ds`` is finite with a stated,
+        counted batch count (D-265 of plan-2026-10-14T062616-81938e81).
     """
     train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
         cache_dir=config.hf_cache_dir,
@@ -391,6 +396,7 @@ def load_hf_clm_datasets(
     train = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
+        repeat=True,
     )
     val = preprocess_clm_dataset(
         val_raw, preprocessor,
@@ -406,21 +412,30 @@ def load_hf_clm_datasets(
 
 def make_clm_steps_per_epoch(
     config: Any, n_train_articles: Optional[int],
+    train_dataset: Optional[tf.data.Dataset] = None,
 ) -> int:
     """Resolve ``steps_per_epoch`` via the canonical helper (D-001).
 
-    The TFDS branch short-circuits: TFDS gives a sample count, not an article count,
-    so the chunk-aware estimator does not apply there.
+    Precedence: ``config.steps_per_epoch`` when set; else the train dataset's
+    STATED batch count when it has one (the TFDS branch, whose packed stream is
+    counted at build time, D-265 of plan-2026-10-14T062616-81938e81); else the
+    chunk-aware article estimate (the Wikipedia branch, whose stream is infinite).
 
     Args:
         config: Trainer config; reads ``dataset_source``, ``max_samples``,
             ``steps_per_epoch``, ``max_train_samples``, ``max_seq_length``,
             ``batch_size``.
         n_train_articles: Post-filter train article count, or ``None`` (TFDS path).
+        train_dataset: The train dataset :func:`load_train_val_datasets` returned,
+            or ``None``. Its cardinality is used only when it is a count.
 
     Returns:
         The resolved number of optimizer steps per epoch.
     """
+    if config.steps_per_epoch is None and train_dataset is not None:
+        stated = int(train_dataset.cardinality())
+        if stated >= 0:
+            return max(1, stated)
     if config.dataset_source == "tfds" and config.max_samples and config.steps_per_epoch is None:
         return max(1, config.max_samples // config.batch_size)
     return estimate_clm_steps_per_epoch(

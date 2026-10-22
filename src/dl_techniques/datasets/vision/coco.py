@@ -207,7 +207,11 @@ def create_dummy_coco_dataset(
         '_segmentation_mask': tf.TensorSpec(shape=(img_size, img_size, 1), dtype=tf.float32)
     }
 
-    dataset = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The generator yields exactly num_samples records: stated. See D-265.
+    dataset = tf.data.Dataset.from_generator(
+        generator, output_signature=output_signature
+    ).apply(tf.data.experimental.assert_cardinality(num_samples))
     return dataset
 
 

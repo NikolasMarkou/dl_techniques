@@ -378,7 +378,11 @@ def create_self_iterate_dataset(
 
     The dataset is FINITE (no ``.repeat()``), sized to
     ``steps_per_epoch * batch_size`` items, so ``model.fit`` re-instantiates the
-    generator each epoch and re-reads the mutated pool.
+    generator each epoch and re-reads the mutated pool. It STATES that size
+    (cardinality ``steps_per_epoch``): unstated, ``fit`` found each epoch's end
+    by one more call, and with this static batch axis a non-XLA step logged every
+    loss and metric at ``steps_per_epoch / (steps_per_epoch + 1)`` of its mean
+    (D-265 of plan-2026-10-14T062616-81938e81).
 
     Returns ``(dataset, steps_per_epoch)``.
     """
@@ -419,9 +423,15 @@ def create_self_iterate_dataset(
         tf.TensorSpec(shape=(patch, patch, channels), dtype=tf.float32),
         tf.TensorSpec(shape=(patch, patch, channels), dtype=tf.float32),
     )
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The pool source states its item count. Do NOT drop the assertion: fit runs
+    # this finite dataset with steps_per_epoch=None (D-005); at UNKNOWN
+    # cardinality Keras 3.8 ends every epoch with one extra call whose data-free
+    # count update logs n/(n+1) of each loss in a non-XLA step (mixed precision
+    # and the symmetry penalty set jit_compile=False). See D-265.
     dataset = tf.data.Dataset.from_generator(
         _gen, output_signature=output_signature
-    )
+    ).apply(tf.data.experimental.assert_cardinality(n_items))
     dataset = dataset.shuffle(
         buffer_size=min(config.patch_shuffle_buffer, n_items),
         reshuffle_each_iteration=True,

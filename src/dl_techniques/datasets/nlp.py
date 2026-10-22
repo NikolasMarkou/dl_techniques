@@ -153,6 +153,8 @@ def _hf_to_tf_dataset(
         ``tf.data.Dataset.sample_from_datasets``. This reshuffles per
         iterator restart (epoch) and unblocks parallel tokenization
         because tiktoken releases the GIL during ``.encode``.
+    :return: A dataset of raw text strings whose cardinality is the stated
+        row count ``len(hf_dataset)``, never unknown.
     """
     n_shards = max(1, int(num_shards))
 
@@ -164,10 +166,14 @@ def _hf_to_tf_dataset(
             for item in shard_hf:
                 yield item["text"]
 
+        # DECISION plan-2026-10-14T062616-81938e81/D-265
+        # The shard states its row count. Do NOT leave a from_generator text
+        # source at UNKNOWN cardinality: a consumer reading it (the gpt2
+        # finetune val split) silently got -2 and no split. See D-265.
         return tf.data.Dataset.from_generator(
             generator,
             output_signature=tf.TensorSpec(shape=(), dtype=tf.string),
-        )
+        ).apply(tf.data.experimental.assert_cardinality(len(shard_hf)))
 
     if n_shards == 1:
         return _build_single_shard(hf_dataset, seed)
@@ -181,11 +187,13 @@ def _hf_to_tf_dataset(
         shard_seed = None if seed is None else int(seed) + i
         shards.append(_build_single_shard(shard_hf, shard_seed))
 
+    # Every shard drains (stop_on_empty_dataset=False), so the mix yields
+    # exactly the rows of all shards; state it (sample_from_datasets does not).
     return tf.data.Dataset.sample_from_datasets(
         shards,
         seed=seed,
         stop_on_empty_dataset=False,
-    )
+    ).apply(tf.data.experimental.assert_cardinality(len(hf_dataset)))
 
 
 def load_hf_text_dataset(

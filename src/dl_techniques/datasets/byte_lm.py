@@ -38,6 +38,7 @@ from typing import Iterable, Iterator, List, Optional, Sequence, Union
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.cardinality import state_counted_length
 from dl_techniques.datasets.nlp import DEFAULT_WIKIPEDIA_CACHE_DIR
 from dl_techniques.utils.logger import logger
 
@@ -238,7 +239,10 @@ def build_byte_clm_dataset(
         hits ``StopIteration`` mid-epoch. Callers that do not pass
         ``steps_per_epoch`` to ``fit`` must leave this ``False``.
     :return: ``tf.data.Dataset`` of ``(input_ids, labels)`` ``int32`` tensors
-        of shape ``(batch_size, seq_len - 1)``.
+        of shape ``(batch_size, seq_len - 1)``. With ``repeat=False`` its
+        cardinality is the stated batch count, found by running the pipeline
+        once at build time (one pass over ``text_ds``); with ``repeat=True`` it
+        is infinite. Never unknown (``dl_techniques.datasets.cardinality``).
     :raises ValueError: If ``seq_len < 2`` (a window of 1 byte leaves nothing
         after the shift).
     """
@@ -270,8 +274,13 @@ def build_byte_clm_dataset(
     packed = packed.shuffle(buffer_size=max(1, shuffle_buffer)).batch(
         batch_size, drop_remainder=True
     )
-    if repeat:
-        packed = packed.repeat()
+    # DECISION plan-2026-10-14T062616-81938e81/D-265
+    # The finite stream states its counted length. Do NOT return it with an
+    # unknown cardinality: Keras 3.8 then logs n/(n+1) of every loss (a
+    # non-XLA step, static batch axis) or trains an empty epoch every other
+    # epoch under
+    # steps_per_epoch. See decisions.md D-265.
+    packed = packed.repeat() if repeat else state_counted_length(packed)
     packed = packed.prefetch(tf.data.AUTOTUNE)
     logger.info(
         f"Packed byte-level CLM dataset: seq_len={seq_len}, "

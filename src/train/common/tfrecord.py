@@ -421,6 +421,13 @@ def read_tfrecord_dataset(
     :param deterministic: Pass through to ``interleave`` —
         ``False`` allows out-of-order outputs for higher throughput.
     :param file_seed: Optional seed for shard-shuffle reproducibility.
+    :return: The parsed dataset. Its cardinality is UNKNOWN (a TFRecord
+        stream has no length until read): repeat it and drive ``fit`` with
+        ``steps_per_epoch``, or state a known example count with
+        ``tf.data.experimental.assert_cardinality`` (the ``num_examples`` that
+        :func:`write_tfrecord_shards` returns). Unstated, Keras 3.8 logs
+        ``n / (n + 1)`` of every loss over a static batch axis (D-265 of
+        plan-2026-10-14T062616-81938e81).
     """
     files = list_tfrecord_shards(file_pattern_or_dir, prefix=prefix)
     cycle_length = cycle_length or num_parallel_reads

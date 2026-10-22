@@ -154,7 +154,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet_nlp \
 | `--shuffle-shards` | `4` | 1 = deterministic single-thread. |
 | `--hf-cache-dir` | none | |
 | `--seed` | `42` | On `--resume` the data seed is shifted by the initial step. |
-| `--steps-per-epoch` | none | Overrides the chunk-aware estimate. |
+| `--steps-per-epoch` | none | One epoch is `steps_per_epoch` steps over the repeated stream: the TFDS stream's counted batch count, or the chunk-aware Wikipedia estimate; this flag overrides both (D-265 of plan-2026-10-14T062616-81938e81). |
 | `--checkpoint-every-steps` | `25000` | Wikipedia epochs are long; checkpointing is step-based. |
 | `--analyze-every-steps` | `50000` | 0 disables. |
 | `--max-checkpoints` | `3` | Rolling window. |

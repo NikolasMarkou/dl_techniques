@@ -331,9 +331,9 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         train_ds = train_ds.repeat()
 
     # ---- Optimization ----
-    # steps_per_epoch for the LR horizon: the TUDataset generator yields one finite pass per
-    # epoch. Estimate the horizon from the train split size when not smoke-capped.
-    horizon_steps = steps_per_epoch or max(1, split_size_estimate(config, num_classes))
+    # steps_per_epoch for the LR horizon: one finite pass per epoch, whose batch count the
+    # dataset states (D-265 of plan-2026-10-14T062616-81938e81), so the horizon is exact.
+    horizon_steps = steps_per_epoch or max(1, int(train_ds.cardinality()))
     optimizer = build_optimizer(config, horizon_steps)
 
     # STOCK compile. Head emits LOGITS (no softmax in-graph) -> from_logits=True. Labels are
@@ -395,20 +395,6 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         "jit_compile": config.jit_compile,
         "history": history,
     }
-
-
-def split_size_estimate(config: TrainingConfig, num_classes: int) -> int:
-    """Coarse train-split step count for the LR horizon.
-
-    The exact train-split size is only known after the loader runs; use a small conservative
-    estimate that keeps the cosine horizon sane for the tiny TUDataset benchmarks (MUTAG has
-    ~150 train graphs). The horizon only needs to be the right order of magnitude.
-    """
-    approx_train_graphs = {
-        "mutag": 150, "proteins": 890, "nci1": 3288, "enzymes": 480,
-        "dd": 942, "ptc_mr": 275,
-    }.get(config.dataset, 500)
-    return max(1, approx_train_graphs // config.batch_size)
 
 
 # ---------------------------------------------------------------------
