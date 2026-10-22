@@ -70,7 +70,10 @@ MetricScaleHead        |           |
   (head-specific `output_channels`/`output_activation`) feeding `layers/geometric/
   ray_point_combinator.py::RayPointCombinator` for the ray+distance head (L2-normalize `r_hat`,
   positive-activation `d_hat`, `P = d_hat * r_hat`); `MetricScaleHead` is a small pooled MLP over
-  the ViT's own CLS token.
+  the ViT's own CLS token. Each `DPTDecoder` stage is `Conv2D` + `BatchNormalization` + ReLU.
+  The paper's heads follow MoGe V2, whose conv heads use `GroupNorm(C // 32, C)` and no
+  BatchNorm. A GroupNorm version was built and measured, and it was not adopted. See "BatchNorm
+  heads at small batches" under Known limitations.
 - **Loss** (`losses/omnipoint_losses.py`): `OmniPointCombinedLoss` decouples ray direction,
   point distance (projected along the GT ray, never the predicted ray), online metric scale
   alignment, mask BCE, and simplified normal/local-consistency terms into separate, independently
@@ -118,3 +121,27 @@ weights exist for the backbone or for this model as a whole, anywhere in this re
   smoothness term, in place of the paper's PCA/eigendecomposition-based normal estimator and its
   own (unspecified) local-consistency mechanism — a deliberate, documented simplification for
   compute cost and unit-testability (`decisions.md` D-004).
+- **BatchNorm heads at small batches (measured 2026-10-22, RTX 4090,
+  `plan-2026-10-14T062616-81938e81/D-279`)**: the 8 `BatchNormalization` layers in the two
+  dense heads use batch statistics in training and moving averages (momentum 0.99) in inference.
+  At the trainer's smoke batch of 2 the same weights therefore give a different loss in the two
+  modes. The test was a memorisation run of `omnipoint_base` at 56 px: 2 fixed batches of 2
+  (KITTI + MegaDepth), 100 epochs (200 steps), AdamW with clipnorm 1.0. After that run the
+  inference-mode loss on the memorised batches was 2.61x to 4.60x the training-mode loss
+  (mean 3.27x, 8 seeds) under the trainer's default cosine schedule, and 2.14x to 2.95x
+  (5 runs) at a constant 1e-4. Stock `fit(validation_data=...)` and `evaluate` run in
+  inference mode, so their numbers at small batches carry this gap.
+  The reference heads (MoGe V2) use `GroupNorm(C // 32)` with no BatchNorm. With that change
+  the gap was gone in every run (ratio 1.0000 in 24 of 24). Fit was no worse: the final loss
+  under cosine averaged 0.762 for GroupNorm against 0.775 for BatchNorm (8 paired seeds,
+  paired difference -0.013, sd 0.218). Every run of both versions cut the loss by at least
+  90%. GroupNorm was not adopted because of rare one-epoch loss spikes, where the loss rose
+  more than 2x from one epoch to the next and was back the epoch after:
+  - Cosine schedule: 1 of 8 GroupNorm runs (3.72x at seed 44, epoch 15: 3.34, then 12.43,
+    then 3.66).
+  - Constant 1e-4: 2 of 16 GroupNorm runs (both 2.88x; 2 of 8 repeats at seed 42, 0 of 8 at
+    seeds 42 to 49).
+  - BatchNorm: 0 of 13 runs (8 cosine, 5 constant).
+
+  The adoption rule, fixed before these runs, needed 0 of 8 spikes under cosine, so the heads
+  stay BatchNorm.
