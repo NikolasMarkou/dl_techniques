@@ -320,7 +320,8 @@ class TestSmokePreset:
                 "num_frames", "occlusion_frames", "occlusion_start", "variant",
                 "mask_weight", "object_score_weight", "iou_weight",
                 "include_box", "num_background_points", "seed",
-                "learning_rate", "steps_per_epoch", "output_dir",
+                "learning_rate", "gradient_clip_norm", "steps_per_epoch",
+                "output_dir",
         ):
             assert getattr(base, field) == getattr(smoke, field), (
                 f"--smoke changed {field}, which decides WHAT is measured, not "
@@ -339,6 +340,7 @@ class TestSmokePreset:
             "num_frames", "occlusion_frames", "occlusion_start", "variant",
             "mask_weight", "object_score_weight", "iou_weight", "seed",
             "include_box", "num_background_points", "learning_rate",
+            "gradient_clip_norm",
         }
         offenders = sorted(shaping & set(SMOKE_PRESET))
         assert not offenders, (
@@ -462,6 +464,7 @@ class TestConfigValidation:
             ({"epochs": 0}, "epochs"),
             ({"steps_per_epoch": 0}, "steps_per_epoch"),
             ({"learning_rate": 0.0}, "learning_rate"),
+            ({"gradient_clip_norm": -0.1}, "gradient_clip_norm"),
             ({"mask_weight": -1.0}, "non-negative"),
             ({"iou_weight": -1.0}, "non-negative"),
             ({"early_stopping_patience": 0}, "early_stopping_patience"),
@@ -795,6 +798,10 @@ def _obs_learning_rate(config: SAM2TrainingConfig) -> Any:
     return float(create_sam2_training_model(config).optimizer.learning_rate)
 
 
+def _obs_global_clipnorm(config: SAM2TrainingConfig) -> Any:
+    return create_sam2_training_model(config).optimizer.global_clipnorm
+
+
 def _obs_wrapper_frames(config: SAM2TrainingConfig) -> Any:
     """The MODEL's unrolled loop bound -- the other side of ``num_frames``."""
     return create_sam2_training_model(config).num_frames
@@ -897,6 +904,8 @@ FIELD_CONSUMPTION: Dict[
         {}, {"object_score_weight": 7.0}, _obs_compiled_loss_value),
     "iou_weight": ({}, {"iou_weight": 7.0}, _obs_compiled_loss_value),
     "learning_rate": ({}, {"learning_rate": 0.5}, _obs_learning_rate),
+    "gradient_clip_norm": (
+        {}, {"gradient_clip_norm": 0.5}, _obs_global_clipnorm),
     # --- output paths ------------------------------------------------------
     "output_dir": ({}, {"output_dir": "/sentinel/runs"}, _obs_output_path),
     "experiment_name": (

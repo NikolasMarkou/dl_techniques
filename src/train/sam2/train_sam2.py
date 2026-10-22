@@ -18,11 +18,13 @@ Run it::
 
 What this trainer is, and is not
 --------------------------------
-It trains the multi-frame path under stock ``fit()``: on the synthetic clips its
-own ``--smoke --num-clips-train 2 --batch-size 2 --epochs 150`` command memorises
-the batch (mask loss 0.042 on 8 fixed clicks in inference mode against a best
-constant of 0.959) and a 32-clip run beats a constant on 4 held-out clips (0.347
-against 0.921); plan-2026-10-14T062616-81938e81 D-261, the SAM 2 README section 7.
+It trains the multi-frame path under stock ``fit()``, with upstream's global
+gradient-norm clip at 0.1 (``--gradient-clip-norm``, D-264): on the synthetic clips
+its own ``--smoke --num-clips-train 2 --batch-size 2 --epochs 150`` command
+memorises the batch (its restored checkpoint scores a mask loss of 0.165 on 8 fixed
+clicks in inference mode against a best constant of 0.959) and a 32-clip run beats a
+constant on 4 held-out clips (0.375 against 0.921); plan-2026-10-14T062616-81938e81
+D-261 and D-264, the SAM 2 README section 7.
 **That is the whole claim.** No official Meta SAM 2 checkpoint has ever been
 loaded in this repository, no annotated video-object-segmentation dataset exists
 on this machine, and this trainer makes no accuracy claim on real video.
@@ -168,6 +170,11 @@ class SAM2TrainingConfig:
     epochs: int = 20
     steps_per_epoch: Optional[int] = None
     learning_rate: float = 1e-4
+    #: Clip the GLOBAL gradient norm (over every trainable weight) to this
+    #: value before each Adam update; ``0`` turns clipping off. Upstream SAM 2
+    #: training clips at ``max_norm 0.1`` with ``torch.nn.utils.
+    #: clip_grad_norm_`` over ``model.parameters()``, a global norm (D-264).
+    gradient_clip_norm: float = 0.1
     early_stopping_patience: int = 5
 
     # Reproducibility
@@ -253,6 +260,11 @@ class SAM2TrainingConfig:
             raise ValueError(
                 f"learning_rate must be > 0; got {self.learning_rate}"
             )
+        if self.gradient_clip_norm < 0.0:
+            raise ValueError(
+                f"gradient_clip_norm must be >= 0 (0 turns clipping off); got "
+                f"{self.gradient_clip_norm}"
+            )
         if min(self.mask_weight, self.object_score_weight,
                self.iou_weight) < 0.0:
             raise ValueError("loss weights must be non-negative")
@@ -303,6 +315,7 @@ CLI_TO_CONFIG: Dict[str, str] = {
     "epochs": "epochs",
     "steps_per_epoch": "steps_per_epoch",
     "learning_rate": "learning_rate",
+    "gradient_clip_norm": "gradient_clip_norm",
     "early_stopping_patience": "early_stopping_patience",
     "seed": "seed",
     "output_dir": "output_dir",
@@ -398,6 +411,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "--num-clips-train.")
     training.add_argument("--learning-rate", type=float,
                           default=defaults.learning_rate)
+    training.add_argument("--gradient-clip-norm", type=float,
+                          default=defaults.gradient_clip_norm,
+                          help="Global gradient-norm clip, upstream SAM 2's "
+                               "max_norm 0.1; 0 turns clipping off.")
     training.add_argument("--early-stopping-patience", type=int,
                           default=defaults.early_stopping_patience)
     training.add_argument("--seed", type=int, default=defaults.seed)
@@ -607,9 +624,18 @@ def create_sam2_training_model(
     )
     model.build(None)
     open_object_score_gate(model)
+    # DECISION plan-2026-10-14T062616-81938e81/D-264
+    # `global_clipnorm`, NOT `clipnorm`: upstream's GradientClipper calls
+    # `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)`, one
+    # norm over ALL gradients scaled together. Keras' `clipnorm` clips each
+    # variable's gradient to the norm on its own, which changes the update's
+    # direction; do not swap it in. See decisions.md D-264.
     compile_sam2_video_trainer(
         model,
-        optimizer=keras.optimizers.Adam(learning_rate=config.learning_rate),
+        optimizer=keras.optimizers.Adam(
+            learning_rate=config.learning_rate,
+            global_clipnorm=config.gradient_clip_norm or None,
+        ),
         mask_weight=config.mask_weight,
         object_score_weight=config.object_score_weight,
         iou_weight=config.iou_weight,

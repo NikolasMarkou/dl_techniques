@@ -183,7 +183,7 @@ location so a reader knows where to look, not restated:
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
 | [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken; `SAM2ImageEncoder` standardizes `[0, 255]` pixels with upstream's `NormalizeAPI` statistics before the trunk (`pixel_mean` / `pixel_std`, config). Without it the trainer never got below a constant (D-260) | `test_neck.py`, `test_the_image_encoder_standardizes_its_input.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) and the input standardized (D-260) it still raises the loss, scored on the same 8 fixed draws of frame-0 points for both: 4 held-out clips of the 32-clip run 0.367 on against 0.347 off (D-261) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) and the input standardized (D-260) it still raises the loss, scored on the same 8 fixed draws of frame-0 points for both: 4 held-out clips of the 32-clip run 0.401 on against 0.375 off with the trainer's gradient clip (D-264; 0.367 against 0.347 without it, D-261) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
@@ -247,10 +247,10 @@ Four properties of that wrapper are load-bearing and stated at the class:
   multimask_max_pt_num = 1`, tracking off; the released configs turn tracking on,
   which this wrapper does not train). `multimask_output=True` still returns all three
   candidates. Measured (mask loss, inference mode, every answer scored on the SAME 8
-  fixed frame-0 clicks per clip, numpy draws of one foreground cell; D-261): on the
-  2-clip memorisation run the best-IoU candidate and the lowest-loss candidate are the
-  same mask on every draw (0.042) and token 0 scores 0.060; on 4 held-out clips of the
-  32-clip run the best-IoU candidate scores 0.347 and token 0 0.397.
+  fixed frame-0 clicks per clip, numpy draws of one foreground cell; D-261, D-264): on
+  the 2-clip memorisation run the best-IoU candidate and the lowest-loss candidate are
+  the same mask on every draw (0.165) and token 0 scores 0.200; on 4 held-out clips of
+  the 32-clip run the best-IoU candidate scores 0.375 and token 0 0.420.
 
 ### Why the mask head did not learn, and what fixed it
 
@@ -274,25 +274,38 @@ Two defects were behind it (D-258, D-260):
   redraws the frame-0 click on every pass: before, the trainer's global seed made the
   stateful random op repeat the same clicks every epoch (D-259).
 
-Measured after both fixes on the RTX 4070 (scores are the hand mask loss of an
-inference-mode call on arrays, 8 fixed clicks per clip, the same clicks for every
-answer; D-261):
+The trainer clips the GLOBAL gradient norm at 0.1 before each Adam update, as upstream
+does (`optim.gradient_clip`: `GradientClipper(max_norm=0.1, norm_type=2)`, which calls
+`torch.nn.utils.clip_grad_norm_` over every parameter, in
+`sam2.1_hiera_b+_MOSE_finetune.yaml` at 2b90b9f5): Keras' `global_clipnorm`, not the
+per-variable `clipnorm` (D-264; `--gradient-clip-norm 0` turns it off).
+
+Measured after both fixes, with the clip, on the RTX 4070 (scores are the hand mask
+loss of an inference-mode call on arrays, 8 fixed clicks per clip, the same clicks for
+every answer; D-261, D-264):
 
 | Run | Clips scored | Model's answer | Per-draw range | Token 0 | Best constant |
 |---|---|---|---|---|---|
-| `--smoke --num-clips-train 2 --batch-size 2 --epochs 150` | its 2 training clips | 0.042 | 0.041 to 0.043 | 0.060 | 0.959 |
-| same run | 4 held-out clips | 0.956 | 0.954 to 0.957 | 0.996 | 0.921 |
-| `--smoke --num-clips-train 32 --epochs 30` | its 32 training clips | 0.261 | 0.224 to 0.331 | 0.249 | 0.947 |
-| same run | 4 held-out clips | 0.347 | 0.346 to 0.348 | 0.397 | 0.921 |
+| `--smoke --num-clips-train 2 --batch-size 2 --epochs 150` | its 2 training clips | 0.165 | 0.162 to 0.169 | 0.200 | 0.959 |
+| same run | 4 held-out clips | 0.718 | 0.715 to 0.719 | 0.751 | 0.921 |
+| `--smoke --num-clips-train 32 --epochs 30` | its 32 training clips | 0.252 | 0.222 to 0.340 | 0.239 | 0.947 |
+| same run | 4 held-out clips | 0.375 | 0.374 to 0.375 | 0.420 | 0.921 |
 
-Both checkpoints are the epoch `EarlyStopping` restored (lowest `val_loss`: epoch 80 of
-150 and epoch 14 of 30). A 2-clip run memorises and generalises to nothing, as
-expected. In the 32-clip run the training mask loss jumps from 0.22 to 2.6-22 at epoch
-16 and stays high until epoch 28, and the held-out mask loss sits at 5.3 from epoch 16
-on (except epoch 19), while the object-score loss keeps falling: those are present
-frames the score head calls absent, scored against the `-1024` sentinel. That is the
-reference loss's behaviour (D-250), and it is why the restored epoch, not the last
-one, is the result. The trainer's own memorisation guard is
+Both checkpoints are the epoch `EarlyStopping` restored (lowest `val_loss`: epoch 32 of
+150 and epoch 12 of 30). The 2-clip run memorises (training mask loss 0.0045 at epoch
+150) and generalises to nothing, as expected; its validation loss is lowest early, so
+the restored checkpoint is not the memorised one. In the 32-clip run the training mask
+loss jumps from 0.21 to 23 at epoch 15 and stays high until epoch 23, and the held-out
+mask loss sits at 5.3 from epoch 15 on (except epoch 17), while the object-score loss
+keeps falling: those are present frames the score head calls absent, scored against
+the `-1024` sentinel. That is the reference loss's behaviour (D-250), and it is why the
+restored epoch, not the last one, is the result. The clip does not remove those
+spikes: without it the same command jumps to 22 at epoch 16 and is still at 3.9 at
+epoch 30. Held out, the clip moves the answer by less than the seed does (32-clip
+command, clip on against off: seed 42 0.375 against 0.353, seed 43 0.225 against
+0.265; D-261's own run of the seed-42 command without the clip scored 0.347 at epoch
+14, which is this GPU's run-to-run variation), so it stays on because it is
+upstream's. The trainer's own memorisation guard is
 `tests/test_train/test_sam2/test_the_trainer_memorises_one_batch.py`.
 
 ## 8. Serialization and Checkpoints
