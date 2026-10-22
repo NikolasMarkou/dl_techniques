@@ -565,7 +565,7 @@ class TestSerialization:
 
 
 class TestPretrainedWeightLoading:
-    """D-024: `load_pretrained_weights` was repaired; these pin the repair.
+    """`load_pretrained_weights` was repaired (096dd6526); these pin the repair.
 
     It previously raised on BOTH routes (unbuilt: `keras.random.uniform(...,
     dtype='int32')`, which Keras rejects; built: `load_weights(...,

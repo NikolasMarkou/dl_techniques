@@ -50,7 +50,7 @@ def save_pretrained_encoder(encoder: Any, results_dir: str, save_dir: str) -> Tu
     run_copy = pretrained_encoder_path(results_dir)
     encoder.save(run_copy)
 
-    # DECISION plan-2026-08-12T123743-e798a9e1/D-023
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-020
     # The second, STATIC copy is the whole point: `results_dir` carries a per-run
     # timestamp, so `finetune.py` cannot name it ahead of time. Writing only the
     # run copy is what left `finetune`'s default pointing at an empty directory
@@ -67,7 +67,7 @@ def pretrained_encoder_path(root: str) -> str:
 
     Single producer of this filename, so the write site here and the read site in
     ``finetune.FinetuneConfig.pretrained_encoder_path`` cannot drift apart. See the
-    ``D-023`` anchor at the encoder save site in :func:`train_tree_transformer_mlm`.
+    ``D-020`` anchor at the encoder save site in :func:`train_tree_transformer_mlm`.
 
     Args:
         root: Directory to place the checkpoint in -- either a timestamped run

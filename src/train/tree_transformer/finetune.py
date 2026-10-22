@@ -46,7 +46,7 @@ class FinetuneConfig:
     seed: int = 42  # train.common.set_seeds: Python, NumPy and Keras
 
     # Model and paths
-    # DECISION plan-2026-08-12T123743-e798a9e1/D-023
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-020
     # Derived from the pre-training script's own producer rather than spelled out
     # here: this default and the encoder save site must name the same file, and
     # when they were two hand-written strings they silently disagreed (F-24). Do

@@ -327,7 +327,7 @@ def main(argv: Optional[list] = None):
             "warmup_start_lr": 0.0,
         })
 
-        # DECISION plan-2026-08-13T045759-fde437ba/D-004
+        # DECISION plan-2026-08-13T045759-fde437ba/D-002
         # Do NOT pass `jit_compile=` to a Keras 3 optimizer constructor, and do
         # NOT "fix" that by moving it to `mlm_model.compile(jit_compile=True)`.
         #

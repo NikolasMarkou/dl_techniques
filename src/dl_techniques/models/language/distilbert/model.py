@@ -757,7 +757,7 @@ class DistilBERT(RecordedBuildShapeMixin, keras.Model):
                 model = DistilBERT.from_variant("base", vocab_size=50000)
                 model.load_pretrained_weights("distilbert_base_uncased.keras")
         """
-        # DECISION plan-2026-08-10T183739-b007f435/D-024: dummy input uses randint, not
+        # DECISION plan-2026-08-10T183739-b007f435/D-012: dummy input uses randint, not
         # uniform(dtype="int32") -- Keras rejects an integer dtype on uniform. See decisions.md.
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: no inline restored-variable count here; the
         # shared transfer below is complete-or-raise (plan-2026-10-11T004932-b83935e1 D-031). See decisions.md.
