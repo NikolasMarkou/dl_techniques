@@ -49,6 +49,7 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.dtype_policy import accumulation_dtype
@@ -522,7 +523,9 @@ class PFTLayer(keras.layers.Layer):
                 f"model mirror-pads its input to one.")
         shortcut = inputs
         qkv = self.wqkv(self.norm1(inputs))
-        lepe = keras.ops.gelu(self.v_lepe(qkv[..., 2 * self.dim:]), approximate=False)
+        # D-277: exact_gelu, not keras.ops.gelu: TensorFlow's sqrt(2) is a float32
+        # constant at float64; bit-identical to it at float32.
+        lepe = exact_gelu(self.v_lepe(qkv[..., 2 * self.dim:]))
         tokens = keras.ops.concatenate([qkv, lepe], axis=-1)
         if self.shift_size > 0:
             tokens = keras.ops.roll(tokens, shift=(-self.shift_size, -self.shift_size),
@@ -537,8 +540,8 @@ class PFTLayer(keras.layers.Layer):
             out = self.drop_path(out, training=training)
         x = shortcut + out
 
-        u = keras.ops.gelu(self.fc1(self.norm2(x)), approximate=False)
-        u = u + keras.ops.gelu(self.ffn_dwconv(u), approximate=False)
+        u = exact_gelu(self.fc1(self.norm2(x)))
+        u = u + exact_gelu(self.ffn_dwconv(u))
         y = self.fc2(u)
         if self.drop_path is not None:
             y = self.drop_path(y, training=training)

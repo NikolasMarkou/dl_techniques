@@ -79,16 +79,33 @@ def test_window_partition_and_reverse_are_inverse():
     np.testing.assert_array_equal(ref.window_reverse(w, 4, 8, 12), x)
 
 
-def test_the_framework_still_rounds_the_two_constants_the_oracle_rounds():
-    """If TensorFlow ever computes ``gelu``'s ``sqrt(2)`` or ``LeakyRelu``'s
-    slope in float64, the oracle's emulation of the float32 rounding is stale
-    and this arm says so (the guards would then fail at ~1e-9)."""
+def test_the_port_applies_the_exact_constants_the_oracle_uses():
+    """PFT-SR calls the repo's exact forms (D-277), so the oracle's constants are
+    the true ``sqrt(2)`` and slopes, and the port applies them at float64 with no
+    float32 rounding: its GELU equals the oracle's within float64 noise and every
+    tail LeakyReLU of a float64 model returns ``-slope`` for ``-1`` exactly.
+    (TensorFlow's own float32 constants are pinned, as a record of stock
+    behaviour, only in ``test_the_activation_constants_follow_the_input_dtype.py``.)"""
     import keras
+    from dl_techniques.layers.activations.exact_activations import (
+        ExactLeakyReLU,
+        exact_gelu,
+    )
+    from dl_techniques.models.vision.super_resolution.pft_sr import PFTSR
+    from ..precision_arm_oracle import float64_scope
+
     x = np.linspace(-4.0, 4.0, 4001)
-    got = np.asarray(keras.ops.gelu(keras.ops.convert_to_tensor(x, "float64"),
-                                    approximate=False))
+    got = np.asarray(exact_gelu(keras.ops.convert_to_tensor(x, "float64")))
     np.testing.assert_allclose(got, ref.gelu(x), rtol=0, atol=1e-15)
-    assert np.abs(got - ref.gelu(x, sqrt2=np.sqrt(2.0))).max() > 1e-10
-    neg = np.asarray(keras.layers.LeakyReLU(negative_slope=0.01, dtype="float64")(
-        np.array([-1.0])))
-    assert neg[0] == -ref.tf_slope(0.01) and neg[0] != -0.01
+    assert ref.SQRT2 == np.sqrt(2.0)
+
+    for upsampler, slopes in (("pixelshuffle", [0.01]), ("nearest+conv", [0.01, 0.2, 0.2, 0.2])):
+        with float64_scope():
+            model = PFTSR(scale=4, embed_dim=16, num_blocks=[1], num_heads=2,
+                          window_size=4, mlp_ratio=2.0, upsampler=upsampler)
+            leaky = [layer for layer in model.tail_layers if layer.name.endswith("lrelu")]
+            assert [type(layer) for layer in leaky] == [ExactLeakyReLU] * len(slopes)
+            assert [layer.negative_slope for layer in leaky] == slopes
+            for layer, slope in zip(leaky, slopes):
+                neg = np.asarray(layer(keras.ops.convert_to_tensor([-1.0], "float64")))
+                assert neg.dtype == np.float64 and neg[0] == -slope, (layer.name, neg)

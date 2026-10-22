@@ -35,23 +35,14 @@ PFA_EPS = 1e-20
 #: ``PFT.__init__`` (:915), used when ``in_chans == 3``.
 RGB_MEAN = np.array([0.4488, 0.4371, 0.4040])
 
-#: TensorFlow builds two constants of the port's ops in float32 even when the
-#: tensor is float64 (measured 2026-10-20, TF 2.18 / Keras 3.8):
-#: ``tf.nn.gelu(approximate=False)`` divides by ``cast(1.4142135623730951)``,
-#: a float32 constant cast up, and ``LeakyRelu``'s ``alpha`` is a float32
-#: attribute. At float64 that moves a GELU by up to 5e-9 and the 0.01 slope by
-#: 2.2e-10 (2.2e-8 relative; 0.2 moves by 3.0e-9, 1.5e-8 relative), above
-#: float64 reassociation noise and far below anything a structural error
-#: moves. The oracle uses the same two roundings so the guards can hold the
-#: port to float64 noise; ``test_pft_reference_numpy.py`` pins that the
-#: framework still rounds them. Both are TensorFlow-internal and stay (step
-#: 7.1, D-218): the port calls ``keras.ops.gelu`` and ``keras.layers.LeakyReLU``.
-TF_SQRT2 = float(np.float32(np.sqrt(2.0)))
-
-
-def tf_slope(slope: float) -> float:
-    """A LeakyReLU slope as TensorFlow applies it (a float32 attribute)."""
-    return float(np.float32(slope))
+#: Exact constants. TensorFlow builds GELU's ``sqrt(2)`` and LeakyReLU's slope
+#: in float32 even for a float64 tensor (D-218); until plan-2026-10-14T062616-81938e81
+#: iteration 3 step 2.4 this oracle emulated that rounding (``TF_SQRT2``,
+#: ``tf_slope``). The port now calls the repo's exact forms (``exact_gelu``,
+#: ``ExactLeakyReLU``, D-277), so the oracle uses the true values and the
+#: stock-rounding record lives only in the activations guard
+#: (``test_the_activation_constants_follow_the_input_dtype.py``).
+SQRT2 = float(np.sqrt(2.0))
 
 
 def to_np(t: Any) -> np.ndarray:
@@ -66,10 +57,9 @@ def layer_norm(x: np.ndarray, layer: Any) -> np.ndarray:
     return (x - mu) / np.sqrt(var + LN_EPS) * to_np(layer.gamma) + to_np(layer.beta)
 
 
-def gelu(x: np.ndarray, sqrt2: float = TF_SQRT2) -> np.ndarray:
-    """torch ``nn.GELU()``: the exact erf form (with TensorFlow's float32
-    ``sqrt(2)`` by default, see :data:`TF_SQRT2`)."""
-    return 0.5 * x * (1.0 + erf(x / sqrt2))
+def gelu(x: np.ndarray) -> np.ndarray:
+    """torch ``nn.GELU()``: the exact erf form, float64 constants."""
+    return 0.5 * x * (1.0 + erf(x / SQRT2))
 
 
 def dense(x: np.ndarray, layer: Any) -> np.ndarray:
@@ -295,7 +285,7 @@ def model_forward(model: Any, x: np.ndarray, num_topk: Optional[Sequence[int]]) 
         x = pixel_shuffle(conv2d(x, layers["upsample_conv"]), scale)
     elif model.upsampler == "pixelshuffle":
         x = conv2d(x, layers["conv_before_upsample"])
-        x = np.where(x >= 0, x, tf_slope(0.01) * x)
+        x = np.where(x >= 0, x, 0.01 * x)
         factors = [3] if scale == 3 else [2] * (scale.bit_length() - 1)
         for i, r in enumerate(factors):
             x = pixel_shuffle(conv2d(x, layers[f"upsample_conv_{i}"]), r)

@@ -11,9 +11,9 @@ LayerNorm, ``conv_after_body`` plus the shallow features, the tail, divide by
 The input is ``7 x 10``, not a multiple of the window (padded to ``8 x 12``),
 and the ``num_topk`` schedule shrinks the kept keys in both chains, inside a
 stage and across a stage boundary. float64 on the CPU, so the bound is float64
-reassociation (measured 4.0e-15 at most over the six cases, on CPU and GPU;
-``pft_reference_numpy.TF_SQRT2`` says which two TensorFlow constants the oracle
-rounds to float32 to get there).
+reassociation. The port calls the repo's exact GELU and LeakyReLU (D-277) and
+the oracle uses the true constants, so no TensorFlow float32 rounding is
+emulated any more; the bound is ten times the measured worst residual (D-277).
 """
 
 import keras
@@ -25,7 +25,9 @@ from dl_techniques.models.vision.super_resolution.pft_sr import PFTSR
 from . import pft_reference_numpy as ref
 from ..precision_arm_oracle import float64_scope
 
-ATOL = 1e-12          # measured max 4.0e-15 over these 6 cases, CPU and GPU
+#: Ten times the measured worst residual (D-277): 2.665e-15 over these 6 cases, CPU
+#: and GPU 0, with the port's exact GELU / LeakyReLU and the oracle's true constants.
+ATOL = 3e-14
 
 #: 6 layers in stages [2, 4]; window 4 so 16 keys. Chain 0 (stage-local even
 #: layers) is global layers 0, 2, 4; chain 1 is 1, 3, 5.

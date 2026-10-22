@@ -15,10 +15,9 @@ dense map under a boolean mask. They share no code.
 Every arm runs at float64 on a non-square ``8 x 12`` map with ``window_size=4``
 (6 windows), so a transposed window order, a swapped H/W or a square-only
 shortcut cannot pass, and the bound is float64 reassociation, not float32
-noise. The oracle rounds two constants as TensorFlow does (GELU's ``sqrt(2)``
-and the LeakyReLU slope are float32 inside TF even at float64; see
-``pft_reference_numpy.TF_SQRT2``); with exact constants the gap is 4e-11,
-still four orders below any structural error.
+noise. The port's GELU is the repo's exact form (D-277) and the oracle's
+constants are the true ones, so no TensorFlow float32 rounding is emulated; the
+bound is ten times the measured worst residual (D-277).
 """
 
 import keras
@@ -32,7 +31,9 @@ from ..precision_arm_oracle import float64_scope
 
 DIM, HEADS, WS, H, W = 16, 2, 4, 8, 12
 N = WS * WS
-ATOL = 1e-12          # measured max 4e-15 (CPU and GPU), float64 reassociation
+#: Ten times the measured worst residual (D-277): 8.88e-16 over the 23 comparisons of
+#: this file, CPU and GPU 0, with the port's exact GELU and the oracle's true constants.
+ATOL = 9e-15
 
 
 def _layer(shift_size, keep_topk, seed):

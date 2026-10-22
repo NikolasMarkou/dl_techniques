@@ -197,7 +197,7 @@ A Keras `Model` subclass that orchestrates the stages.
     -   `pixelshuffledirect` (any scale): `conv(embed_dim -> scale^2 * 3)` + pixel shuffle `scale`, nothing after it.
     -   `nearest+conv` (x4 only, as the official `assert`): `conv_before_upsample` + LeakyReLU(0.01), two stages of nearest 2x + `conv(F -> F)` + LeakyReLU(0.2), `conv_hr` + LeakyReLU(0.2), `conv_last`.
 
-    The 0.01 is torch `nn.LeakyReLU()`'s default, passed explicitly (Keras' default is 0.3). The model builds this tail itself rather than through the shared `EnhancementHead`, whose super-resolution path is a stride-`scale` transposed conv that none of the official tails use (the SqueezeNet precedent: a reference head the shared head cannot express is model-owned).
+    The 0.01 is torch `nn.LeakyReLU()`'s default, passed explicitly (Keras' default is 0.3). Every GELU and LeakyReLU of the port is the repo's exact form (`exact_gelu`, `ExactLeakyReLU` from `layers/activations/exact_activations.py`): bit-identical to the stock ops at float32, and at float64 free of TensorFlow's float32 `sqrt(2)` and slope (D-277), so the float64 oracle guards compare against the true constants. The model builds this tail itself rather than through the shared `EnhancementHead`, whose super-resolution path is a stride-`scale` transposed conv that none of the official tails use (the SqueezeNet precedent: a reference head the shared head cannot express is model-owned).
 -   **`include_top=False`**: no tail is built, and the model returns the features the tail reads, `conv_after_body(body(x)) + x`, cropped to `(B, H, W, embed_dim)` (no mean added back).
 
 ### 4.3 Differences from the official code

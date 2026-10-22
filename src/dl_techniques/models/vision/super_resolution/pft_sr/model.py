@@ -58,6 +58,7 @@ from typing import Any, Dict, Optional, List, Literal, Sequence, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -498,8 +499,11 @@ class PFTSR(keras.Model):
         # torch nn.LeakyReLU()'s default, which the official tail uses; do NOT
         # fall back to Keras' LeakyReLU default of 0.3. See decisions.md.
         tail.append(self._conv3x3(NUM_FEAT, "conv_before_upsample"))
-        tail.append(keras.layers.LeakyReLU(
-            negative_slope=0.01, name="conv_before_upsample_lrelu"))
+        # D-277: ExactLeakyReLU applies the slope in the input dtype (the stock
+        # layer's is a float32 attribute); bit-identical to it at float32.
+        tail.append(ExactLeakyReLU(
+            negative_slope=0.01, name="conv_before_upsample_lrelu",
+            dtype=self.dtype_policy))
 
         if self.upsampler == 'pixelshuffle':
             # The official `Upsample(scale, num_feat)`.
@@ -515,10 +519,11 @@ class PFTSR(keras.Model):
                 tail.append(keras.layers.UpSampling2D(
                     size=(2, 2), interpolation='nearest', name=f"nearest_up{i}"))
                 tail.append(self._conv3x3(NUM_FEAT, f"conv_up{i}"))
-                tail.append(keras.layers.LeakyReLU(
-                    negative_slope=0.2, name=f"conv_up{i}_lrelu"))
+                tail.append(ExactLeakyReLU(
+                    negative_slope=0.2, name=f"conv_up{i}_lrelu", dtype=self.dtype_policy))
             tail.append(self._conv3x3(NUM_FEAT, "conv_hr"))
-            tail.append(keras.layers.LeakyReLU(negative_slope=0.2, name="conv_hr_lrelu"))
+            tail.append(ExactLeakyReLU(
+                negative_slope=0.2, name="conv_hr_lrelu", dtype=self.dtype_policy))
 
         tail.append(self._conv3x3(self.in_channels, "conv_last"))
         return tail
