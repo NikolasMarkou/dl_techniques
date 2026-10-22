@@ -38,6 +38,29 @@ The following layers are supported by the factory system:
 | `xgelu` | `xGELU` | Expanded GELU with trainable alpha. |
 | `xsilu` | `xSiLU` | Expanded SiLU with trainable alpha. |
 
+## Exact GELU and LeakyReLU (`exact_activations.py`)
+
+TensorFlow 2.18 builds GELU's `sqrt(2)` and LeakyReLU's slope in float32 even for a float64
+input: `keras.ops.gelu`, `keras.activations.gelu`, the string `"gelu"`, `keras.layers.LeakyReLU`
+and `keras.activations.leaky_relu` are off by up to 5.0e-9 (GELU) or 2.2e-8 relative (slope) at
+float64. The package's registered forms write the constants as Python floats, which follow the
+input dtype:
+
+| Name | Kind | Float64 | Float32 |
+|------|------|---------|---------|
+| `exact_gelu` | function | 8.9e-16 from an erf reference | bit-identical to `keras.ops.gelu(approximate=False)` |
+| `exact_leaky_relu` | function (default slope 0.2) | exact | bit-identical to `keras.ops.leaky_relu` |
+| `ExactLeakyReLU` | layer (default slope 0.3) | exact | bit-identical to `keras.layers.LeakyReLU` |
+
+Float32 identity was measured over 300,000 points for GELU and the slopes 0.01, 0.2 and 0.3,
+values and gradients. `common.resolve_activation` and `gelu_tanh.resolve_activation` return the
+exact forms for `"gelu"` and `"leaky_relu"`, and `common.serialize_activation` writes those names
+back, so a layer configured with the string keeps it in its config. A stock Keras layer handed
+one of these callables stores a function dict in its own config. Two guards hold the repo to
+them: `tests/test_the_raw_gelu_and_leaky_relu_calls_cannot_grow.py` (a per-file census of the raw
+spellings) and `tests/test_models/test_no_float64_forward_reaches_the_float32_gelu_constants.py`
+(no float64 forward of a registered model reaches `tf.nn.gelu` or `tf.nn.leaky_relu`).
+
 ## Factory Interface
 
 ### Basic Usage
