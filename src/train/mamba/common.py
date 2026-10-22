@@ -669,7 +669,7 @@ def build_datasets(
 # `pre_shifted=True` (no more double-shift against
 # `preprocess_clm_packed_dataset`'s own pre-shift) and `Mamba2` gained a
 # `hidden_size` property alias for `d_model`. The `build_causal_lm_model`
-# function this comment originally anchored has been REMOVED;
+# function this comment originally anchored has been REMOVED.
 # `build_model` below wraps `Mamba2` in `CausalLanguageModel(skip_head=False,
 # pre_shifted=True, verify_causality=True)` instead. This does not mean the
 # original decision above was wrong when written -- it correctly diagnosed

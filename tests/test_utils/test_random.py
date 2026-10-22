@@ -77,17 +77,20 @@ def test_rayleigh_scale_parameter(set_random_seed):
         )
 
 
-# TODO fix this
-# def test_rayleigh_invalid_inputs():
-#     """Test if the function handles invalid inputs correctly."""
-#     with pytest.raises(ValueError, match="All dimensions in shape must be non-negative"):
-#         rayleigh([-1, 100])
-#
-#     with pytest.raises(ValueError, match="Scale parameter must be positive"):
-#         rayleigh([100], scale=-1.0)
-#
-#     with pytest.raises(ValueError, match="Scale parameter must be positive"):
-#         rayleigh([100], scale=0.0)
+def test_rayleigh_invalid_inputs():
+    """Invalid inputs raise ``tf.errors.InvalidArgumentError``, as ``rayleigh`` documents.
+
+    The checks are ``tf.debugging`` assertions, so the error is TensorFlow's, not
+    ``ValueError``.
+    """
+    with pytest.raises(tf.errors.InvalidArgumentError, match="All dimensions in shape must be non-negative"):
+        rayleigh([-1, 100])
+
+    with pytest.raises(tf.errors.InvalidArgumentError, match="Scale parameter must be positive"):
+        rayleigh([100], scale=-1.0)
+
+    with pytest.raises(tf.errors.InvalidArgumentError, match="Scale parameter must be positive"):
+        rayleigh([100], scale=0.0)
 
 
 def test_rayleigh_distribution_properties(set_random_seed):

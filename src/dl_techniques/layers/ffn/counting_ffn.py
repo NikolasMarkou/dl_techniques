@@ -671,8 +671,8 @@ class CountingFFN(keras.layers.Layer):
         # of which is specific to this layer's own logic --
         # (1) its recursive `_scan` helper has no base case for a length-1
         # axis (only lengths 2 and 3 short-circuit; a length-1 input reduces
-        # to a length-0 array and recurses forever), so T == 1 -- ordinary
-        # for single-token decoding -- crashed with a bare RecursionError;
+        # to a length-0 array and recurses forever), so T == 1 -- ordinary for
+        # single-token decoding -- crashed with a bare RecursionError;
         # (2) independently of sequence length, tracing it inside a
         # `tf.function` (which is what `model.fit()` uses by default)
         # crashed with a SECOND RecursionError, this time deep inside

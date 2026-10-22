@@ -99,10 +99,10 @@ class PTRMInference:
             - best_q_values: Q values of selected rollout per batch item, shape (B,)
             - all_q_values: Q values for all rollouts, shape (K, B)
         """
-        # Python loop over rollouts (parallelizable; see note below)
-        # TODO: Vectorize with tf.vectorized_map or tf.map_fn for true parallel execution
-        # on accelerators. Current implementation uses Python loop for clarity and
-        # debuggability; at K=100 this is the main inference bottleneck.
+        # Python loop over rollouts, kept for clarity and debuggability. The
+        # rollouts are independent, so tf.vectorized_map or tf.map_fn could run
+        # them in parallel on an accelerator; at K=100 this loop is the main
+        # inference bottleneck.
 
         batch_size = keras.ops.shape(batch["inputs"])[0]
         all_logits = []

@@ -2535,8 +2535,8 @@ class TestTrainingIsForwardedExplicitly:
 #
 # PROVEN RED at pristine HEAD `a9c7b300b`, in a `git worktree`, with the
 # registered callable below:
-#   * `json.dumps(get_config()['activation'])` -> `TypeError: Object of type
-#     function is not JSON serializable`;
+#   * `json.dumps(get_config()['activation'])` -> `TypeError: Object of
+#     type function is not JSON serializable`;
 #   * `model.save(...)` succeeded and `keras.models.load_model(...)` then raised
 #     `TypeError: <class 'keras.src.models.functional.Functional'> could not be
 #     deserialized properly`.
