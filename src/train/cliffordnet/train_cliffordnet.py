@@ -24,7 +24,7 @@ from PIL import Image, ImageOps, ImageEnhance
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vision.cliffordnet import CliffordNet
+from dl_techniques.models.vision.cliffordnet import CliffordNet, HierarchicalCliffordNet
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -58,7 +58,14 @@ Variant = str  # a key of CliffordNet.MODEL_VARIANTS, or "custom"
 
 # DropPath of the authors' networks.py: 0.4 for cliffordnet_64_5, 0.3 for the rest.
 _DEFAULT_STOCHASTIC_DEPTH = 0.3
-_STOCHASTIC_DEPTH_BY_VARIANT: Dict[str, float] = {"cn_64_5": 0.4}
+_STOCHASTIC_DEPTH_BY_VARIANT: Dict[str, float] = {
+    "cn_64_5": 0.4,
+    # The authors' HierarchicalCliffordNet constructor default.
+    "hier_345": 0.1,
+    "custom_hier": 0.1,
+}
+# Variants built by HierarchicalCliffordNet: the presets of its own table plus "custom_hier".
+_HIERARCHICAL_VARIANTS = (*HierarchicalCliffordNet.MODEL_VARIANTS, "custom_hier")
 
 
 # ---------------------------------------------------------------------
@@ -370,6 +377,23 @@ def build_eval_dataset(
 # ---------------------------------------------------------------------
 
 
+def _parse_int_list(text: Optional[str], flag: str) -> Optional[List[int]]:
+    """Parse a comma-separated integer list; ``None`` or empty gives ``None``.
+
+    :param text: The flag's value.
+    :param flag: The flag name, for the error message.
+    :raises ValueError: If an entry is not an integer.
+    """
+    if not text:
+        return None
+    try:
+        return [int(part.strip()) for part in text.split(",") if part.strip()]
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {flag} value {text!r}. Expected comma-separated integers."
+        ) from exc
+
+
 def build_model(
     variant: Variant,
     num_classes: int,
@@ -383,8 +407,15 @@ def build_model(
     stochastic_depth_rate: float,
     dropout_rate: float,
     weight_decay: float,
-) -> CliffordNet:
-    """Instantiate a CliffordNet model.
+    stage_depths: Optional[List[int]] = None,
+    stage_dims: Optional[List[int]] = None,
+) -> keras.Model:
+    """Instantiate a CliffordNet or HierarchicalCliffordNet model.
+
+    ``channels``, ``depth`` and ``use_global_context`` belong to the isotropic
+    variants; ``stage_depths`` and ``stage_dims`` to ``custom_hier``. The
+    hierarchical model has no global branch, so it refuses
+    ``use_global_context=True`` instead of dropping it.
 
     Note: weight decay is handled solely by the AdamW optimiser
     (decoupled weight decay), matching the reference PyTorch recipe.
@@ -399,7 +430,25 @@ def build_model(
         dropout_rate=dropout_rate,
     )
 
-    if variant in CliffordNet.MODEL_VARIANTS:
+    if variant in _HIERARCHICAL_VARIANTS:
+        if use_global_context:
+            raise ValueError(
+                f"{variant!r} is hierarchical and has no global-context branch"
+            )
+        hier_kwargs = {k: v for k, v in shared_kwargs.items() if k != "use_global_context"}
+        if variant == "custom_hier":
+            model = HierarchicalCliffordNet(
+                num_classes=num_classes,
+                stage_depths=stage_depths,
+                stage_dims=stage_dims,
+                shifts=shifts,
+                **hier_kwargs,
+            )
+        else:
+            model = HierarchicalCliffordNet.from_variant(
+                variant, num_classes=num_classes, **hier_kwargs
+            )
+    elif variant in CliffordNet.MODEL_VARIANTS:
         model = CliffordNet.from_variant(
             variant, num_classes=num_classes, **shared_kwargs
         )
@@ -444,18 +493,10 @@ def train_model(args) -> None:
     val_ds = build_eval_dataset(x_test, y_test, args.batch_size, args.dataset)
     steps_per_epoch = len(x_train) // args.batch_size
 
-    # ---- Shifts parsing ----------------------------------------------
-    shifts: List[int]
-    if args.shifts:
-        try:
-            shifts = [int(s.strip()) for s in args.shifts.split(",") if s.strip()]
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid --shifts value {args.shifts!r}. "
-                "Expected comma-separated integers."
-            ) from exc
-    else:
-        shifts = [1, 2]
+    # ---- Shifts and stage lists parsing ------------------------------
+    shifts: List[int] = _parse_int_list(args.shifts, "--shifts") or [1, 2]
+    stage_depths = _parse_int_list(args.stage_depths, "--stage-depths")
+    stage_dims = _parse_int_list(args.stage_dims, "--stage-dims")
 
     # ---- Model -------------------------------------------------------
     model = build_model(
@@ -464,6 +505,8 @@ def train_model(args) -> None:
         channels=args.channels,
         depth=args.depth,
         shifts=shifts,
+        stage_depths=stage_depths,
+        stage_dims=stage_dims,
         cli_mode=args.cli_mode,
         ctx_mode=args.ctx_mode,
         use_global_context=args.use_global_context,
@@ -519,7 +562,10 @@ def train_model(args) -> None:
     )
 
     # ---- Callbacks ---------------------------------------------------
-    custom_objects = {"CliffordNet": CliffordNet}
+    custom_objects = {
+        "CliffordNet": CliffordNet,
+        "HierarchicalCliffordNet": HierarchicalCliffordNet,
+    }
     callbacks, results_dir = create_callbacks(
         model_name=f"{args.variant}_{args.dataset}",
         results_dir_prefix="cliffordnet",
@@ -569,6 +615,7 @@ def train_model(args) -> None:
         "use_global_context": args.use_global_context,
         "warmup_epochs": args.warmup_epochs,
         "random_erasing_prob": args.random_erasing_prob,
+        "stage_depths": stage_depths, "stage_dims": stage_dims,
         "epoch_analysis_every": args.epoch_analysis_every,
         "input_shape": list(input_shape),
         "num_classes": num_classes,
@@ -677,14 +724,25 @@ def main() -> None:
 
     # Model variant
     parser.add_argument('--variant', type=str, default='nano',
-                        choices=[*CliffordNet.MODEL_VARIANTS, 'custom'],
-                        help='Preset from CliffordNet.MODEL_VARIANTS or custom.')
+                        choices=[*CliffordNet.MODEL_VARIANTS,
+                                 *HierarchicalCliffordNet.MODEL_VARIANTS,
+                                 'custom', 'custom_hier'],
+                        help='A preset of CliffordNet.MODEL_VARIANTS or of '
+                             'HierarchicalCliffordNet.MODEL_VARIANTS, custom '
+                             '(isotropic, --channels/--depth/--shifts) or '
+                             'custom_hier (--stage-depths/--stage-dims/--shifts).')
 
     # Custom variant overrides
-    parser.add_argument('--channels', type=int, default=128,
-                        help='Feature dimension D (custom variant only).')
-    parser.add_argument('--depth', type=int, default=12,
-                        help='Number of blocks L (custom variant only).')
+    # None means "not given"; the isotropic variants resolve them to 128 / 12 in main().
+    parser.add_argument('--channels', type=int, default=None,
+                        help='Feature dimension D (custom variant only; default 128).')
+    parser.add_argument('--depth', type=int, default=None,
+                        help='Number of blocks L (custom variant only; default 12).')
+    parser.add_argument('--stage-depths', type=str, default=None, dest='stage_depths',
+                        help="custom_hier only: blocks per stage, e.g. '3,4,5'.")
+    parser.add_argument('--stage-dims', type=str, default=None, dest='stage_dims',
+                        help="custom_hier only: width per stage, e.g. '32,64,128' "
+                             "(default: 32 doubling per stage).")
     parser.add_argument('--shifts', type=str, default=None,
                         help="Comma-separated shift offsets, e.g. '1,2,4,8,16'.")
 
@@ -744,7 +802,27 @@ def main() -> None:
     # three flags their own defaults again: always passing cli_mode='full' and
     # use_global_context=False as overrides made `--variant lite_g` train without
     # its global branch and would have turned cn_32_5 / cn_64_5 into 'full'.
-    preset = CliffordNet.MODEL_VARIANTS.get(args.variant, {})
+    hierarchical = args.variant in _HIERARCHICAL_VARIANTS
+    # A flag that does not apply to the chosen architecture is refused, never ignored.
+    if hierarchical:
+        for flag, given in (("--channels", args.channels), ("--depth", args.depth),
+                            ("--use-global-context", args.use_global_context)):
+            if given is not None:
+                parser.error(
+                    f"{flag} does not apply to the hierarchical variant "
+                    f"{args.variant!r} (it has no such parameter)"
+                )
+    if args.variant != "custom_hier":
+        for flag, given in (("--stage-depths", args.stage_depths),
+                            ("--stage-dims", args.stage_dims)):
+            if given is not None:
+                parser.error(f"{flag} only applies with --variant custom_hier")
+    if not hierarchical:
+        args.channels = 128 if args.channels is None else args.channels
+        args.depth = 12 if args.depth is None else args.depth
+    preset = {
+        **CliffordNet.MODEL_VARIANTS, **HierarchicalCliffordNet.MODEL_VARIANTS
+    }.get(args.variant, {})
     for name, fallback in (("cli_mode", "full"), ("ctx_mode", "diff"),
                            ("use_global_context", False)):
         if getattr(args, name) is None:
