@@ -95,8 +95,8 @@ number in the first table is arithmetic on the grid, not a measurement
 
 The correlation matmul is `(K, P, M) x (K, M, P)`, so its work scales as
 `K * M * P**2` (`K` = `num_neighborhoods`, `M` = samples per step). Against the
-paper's 2D neighbourhood that is a factor of `(1331/121)**2 = 121` for a radius-5
-cube (885,115 / 7,260 = 121.9 in pairs) and about 36 for `paper3d`'s radius 4
+paper's 2D neighbourhood that is about 121x, a factor of `(1331/121)**2 = 121` for a radius-5
+cube (885,115 / 7,260 = 121.9 in pairs) and about 36x for `paper3d`'s radius 4
 (`P**2` ratio 36.3, pair ratio 36.55). **Derived, not measured.** No radius-5 3D
 model exists to time: a radius-5 patch needs 11 cells on every axis, and the
 shipped 3D widths (1000 and 343) have axes of 10 and 7.

@@ -55,7 +55,7 @@ Known before implementation:
    1331 units, and `1331 * 1330 / 2` is 885,115.
 3. **The cost growth** was understated by an order of magnitude. Pairs and the
    `K * M * P ** 2` correlation matmul both grow with `P ** 2`, so a radius-5 cube
-   is about 121 times the paper's 2D neighbourhood, not about a tenth of that.
+   is about 121x (121 times) the paper's 2D neighbourhood, not about a tenth of that.
 4. **"Integer arithmetic throughout, never a float power"** contradicted the
    draft's own sketch, which computed the cube root with a float power.
 5. **Axis order.** The draft named the factored triple `(h, w, d)` ascending, the
@@ -390,9 +390,9 @@ Not measurements:
 | 3D, `paper3d`, radius 4 | 729 | 265,356 | 36.30 | 36.55 | 8 |
 | 3D, `tiny3d`, radius 2 | 125 | 7,750 | 1.067 | 1.067 | 27 |
 
-So a radius-5 cube costs about 121 times the paper's 2D neighbourhood in pairs and
+So a radius-5 cube costs about 121x (121 times) the paper's 2D neighbourhood in pairs and
 in the matmul (`(1331 / 121) ** 2 = 121`, `885,115 / 7,260 = 121.9`), and the
-shipped `paper3d` about 36 times. The full 784-unit 2D grid has 306,936 pairs, which
+shipped `paper3d` about 36x (36 times). The full 784-unit 2D grid has 306,936 pairs, which
 is why the layer samples `K` neighbourhoods per step rather than scoring the grid.
 `max_samples` (the cap on the batch-times-sequence rows) and a smaller 3D radius are
 the mitigations the code offers.
