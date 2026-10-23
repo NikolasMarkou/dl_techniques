@@ -1,5 +1,8 @@
 """
-R-002 / R-070 lazy-build rows for ``cliffordnet``, settled by measurement.
+R-002 / R-070 lazy-build rows for ``cliffordlm`` (``CliffordNetLM``), settled by measurement.
+
+This file lived in ``tests/test_models/test_cliffordnet/`` until ``CliffordNetLM`` moved to
+``models/language/cliffordlm/``; the measurements below predate the move.
 
 Batch 6 charged ``CliffordNetLM.build()`` with materializing **1 of 19 tensors /
 64 of 1,288 params** -- 1,224 params, **95.0% of the model**, the worst ratio in

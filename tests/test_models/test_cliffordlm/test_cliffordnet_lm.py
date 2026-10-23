@@ -543,3 +543,24 @@ class TestCliffordNetLMTiedLogitsDtype:
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
+
+
+class TestCliffordNetLMRegisteredRoundTrip:
+    """The registry key is the module path the class lives at; a `.keras`
+    archive stores it, so a wrong key makes the archive unloadable."""
+
+    def test_registered_name_and_keras_roundtrip(self, tiny_model, tiny_config, tmp_path):
+        assert keras.saving.get_registered_name(CliffordNetLM) == (
+            "dl_techniques.models.cliffordlm.model>CliffordNetLM"
+        )
+
+        ids = _random_ids((2, 16), tiny_config["vocab_size"])
+        expected = keras.ops.convert_to_numpy(tiny_model(ids, training=False)["logits"])
+
+        path = str(tmp_path / "cliffordlm.keras")
+        tiny_model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert type(loaded) is CliffordNetLM
+        actual = keras.ops.convert_to_numpy(loaded(ids, training=False)["logits"])
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
