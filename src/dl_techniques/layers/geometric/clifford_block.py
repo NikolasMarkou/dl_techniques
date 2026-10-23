@@ -1413,7 +1413,7 @@ class CliffordNetBlock(keras.layers.Layer):
         # these DepthwiseConv2D layers with a native ``DepthwiseConv1D``: that
         # would change the registered kernels from ``(1, K, D, 1)`` to
         # ``(K, D, 1)`` and break by-name ``.keras`` loading for EVERY existing
-        # causal checkpoint (cliffordnet/lm.py, the CLIP text tower, the
+        # causal checkpoint (language/cliffordlm/model.py, the CLIP text tower, the
         # video_jepa causal blocks). Rank-3 support is therefore a call()-level
         # expand/squeeze around an unchanged 4-D body.
         # Image mode deliberately keeps the ``(K, K)`` kernel: on an H=1 input a

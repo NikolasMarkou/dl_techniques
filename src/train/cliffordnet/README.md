@@ -11,7 +11,7 @@ image-text contrastive learning.
 |---|---|---|
 | `train_cliffordnet.py` | `CliffordNet` (`models/vision/cliffordnet/model.py`) | CIFAR-10/100 classification. |
 | `train_downsampling_techniques.py` | hand-composed `CliffordNetBlock` stacks | CIFAR-100 ablation of 6 downsampling compositions. |
-| `train_cliffordnet_nlp.py` | `CliffordNetLM` (`models/vision/cliffordnet/lm.py`) | Causal LM pretraining on Wikipedia or TFDS text. |
+| `train_cliffordnet_nlp.py` | `CliffordNetLM` (`models/language/cliffordlm/model.py`, see `models/language/cliffordlm/README.md`) | Causal LM pretraining on Wikipedia or TFDS text. |
 | `train_clip.py` | `CliffordCLIP` (`models/vision_language/clifford_clip/model.py`) | Dual-encoder CLIP, both towers Clifford. |
 | `infer_cliffordnet_nlp.py` | `CliffordNetLM` | Generation: nucleus, MCMC power sampling, max-swap. |
 | `eval_clip_retrieval.py` | `CliffordCLIP` | COCO 2017 zero-shot retrieval, R@1/5/10 both directions. |

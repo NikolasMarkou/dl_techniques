@@ -6,7 +6,7 @@ projection (`logits = hidden_states @ embedding_weights.T`, optionally
 `use_weight_tying` / `use_shared_embedding` flag is `True`: `gpt2/gpt2.py`,
 `hnet/model.py`, `wave_field/model.py`, `zamba2/model.py` (unconditional there
 -- it has no untied path), `masked_language_model/clm.py` (the one site with a
-learned bias), `vision/cliffordnet/lm.py`, and `vision_language/nano_vlm/model.py`
+learned bias), `language/cliffordlm/model.py`, and `vision_language/nano_vlm/model.py`
 (two call sites, `call()` and `generate()`). This module extracts the one
 expression that is genuinely identical across all of them -- the
 matmul/transpose/floor-to-float32/bias -- into a single helper.

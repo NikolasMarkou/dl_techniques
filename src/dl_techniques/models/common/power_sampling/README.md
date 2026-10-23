@@ -320,7 +320,7 @@ A fixed-shape model with GPT-2-style special tokens. Behavior is preserved by pa
 
 ```python
 import tiktoken
-from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.language.cliffordlm.model import CliffordNetLM
 from dl_techniques.models.common.power_sampling import PowerSampler, PowerSamplingConfig
 
 enc = tiktoken.get_encoding("gpt2")

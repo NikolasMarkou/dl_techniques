@@ -2,7 +2,7 @@
 
 The shared helper backing the weight-tied LM-head sites in ``models/``
 (``gpt2``, ``hnet``, ``wave_field``, ``zamba2``, ``masked_language_model``,
-and -- as of the D-005 completion-fix -- ``vision/cliffordnet/lm.py`` and
+and -- as of the D-005 completion-fix -- ``language/cliffordlm/model.py`` and
 ``vision_language/nano_vlm``). See ``plans/plan-2026-09-12T123331-28fd855f``'s
 ``decisions.md`` D-002 (why this helper exists), D-003 (the CRITICAL
 mixed-precision regression an adversarial review caught), D-004 (the
