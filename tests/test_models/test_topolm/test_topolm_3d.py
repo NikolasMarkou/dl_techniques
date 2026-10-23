@@ -155,8 +155,13 @@ class TestTwoDimensionalHole:
             "variant."
         )
 
-    def test_every_shipped_row_still_builds_its_own_patch(self):
-        for name, config in MODEL_VARIANTS.items():
+    def test_every_shipped_two_dimensional_row_still_builds_its_own_patch(self):
+        """Rows with no ``grid_dim`` are the 2D ones and keep the default radius
+        (the 3D rows carry their own and are judged in TestThreeDimensionalVariantRows).
+        Anti-vacuity: the filter must leave the three rows that predate them."""
+        rows = {n: c for n, c in MODEL_VARIANTS.items() if "grid_dim" not in c}
+        assert sorted(rows) == ["paper", "small", "tiny"]
+        for name, config in rows.items():
             grid = grid_shape_of(config["embed_dim"])
             assert min(grid) >= 2 * DEFAULT_RADIUS + 1, name
 
@@ -570,10 +575,15 @@ class TestThreeDimensionalValidationThroughTheModel:
         assert model.grid_shape == (7, 6, 5)
         assert model.get_config()["grid_shape"] == (7, 6, 5)
 
-    def test_every_shipped_variant_is_still_two_dimensional(self):
-        """The rows were not touched by this step."""
+    def test_only_the_two_documented_rows_are_three_dimensional(self):
+        """``paper``, ``small`` and ``tiny`` are 2D; ``paper3d`` and ``tiny3d`` are
+        the only rows that ask for another rank."""
+        assert {
+            name for name, config in MODEL_VARIANTS.items()
+            if config.get("grid_dim", 2) != 2
+        } == {"paper3d", "tiny3d"}
         assert all(
-            config.get("grid_dim", 2) == 2 for config in MODEL_VARIANTS.values()
+            "grid_dim" not in MODEL_VARIANTS[n] for n in ("paper", "small", "tiny")
         )
 
 
@@ -930,3 +940,100 @@ class TestACheckpointOfTheOtherRankIsRefused:
         _strip_key_from_archive(path, legacy, "grid_dim")
         with pytest.raises(ValueError, match=r"saved with grid_dim=2"):
             create_topolm("tiny", pretrained=legacy, **base, grid_dim=3)
+
+
+_ROWS_3D = {
+    # name: (embed_dim, depth, heads, ffn, max_seq_len, radius, grid, centres, P)
+    "paper3d": (1000, 12, 8, 4000, 1024, 4, (10, 10, 10), 8, 729),
+    "tiny3d": (343, 4, 7, 1372, 256, 2, (7, 7, 7), 27, 125),
+}
+
+
+class TestThreeDimensionalVariantRows:
+    """``paper3d`` and ``tiny3d``: repo-authored rows carrying ``grid_dim`` and
+    ``radius`` in ``MODEL_VARIANTS`` (step 6).
+
+    The expected numbers are written out, not read back from the table, so a row
+    edited to another width fails here rather than agreeing with itself. Centres
+    are ``(n - 2r) ** 3``: (10 - 8) ** 3 = 8 and (7 - 4) ** 3 = 27; a patch holds
+    ``(2r + 1) ** 3``: 729 and 125.
+    """
+
+    @pytest.mark.parametrize("name", sorted(_ROWS_3D))
+    def test_the_row_carries_exactly_the_documented_values(self, name):
+        embed, depth, heads, ffn, seq, radius, _, _, _ = _ROWS_3D[name]
+        row = MODEL_VARIANTS[name]
+        assert {k: v for k, v in row.items() if k != "description"} == {
+            "embed_dim": embed, "depth": depth, "num_heads": heads,
+            "ffn_intermediate_size": ffn, "max_seq_len": seq,
+            "radius": radius, "grid_dim": 3,
+        }
+
+    @pytest.mark.parametrize("name", sorted(_ROWS_3D))
+    def test_the_description_says_it_is_ours_and_not_the_papers(self, name):
+        description = MODEL_VARIANTS[name]["description"]
+        assert "repo-authored" in description.lower()
+        assert "not in the paper" in description
+        assert "Rathi" not in description
+
+    def test_the_rows_that_predate_them_are_two_dimensional_and_untouched(self):
+        for name in ("paper", "small", "tiny"):
+            assert "grid_dim" not in MODEL_VARIANTS[name], name
+            assert "radius" not in MODEL_VARIANTS[name], name
+        paper = MODEL_VARIANTS["paper"]
+        assert (paper["embed_dim"], paper["depth"], paper["num_heads"]) == (784, 12, 16)
+
+    @pytest.mark.parametrize("name", sorted(_ROWS_3D))
+    def test_each_row_validates_at_its_own_radius_and_would_not_at_the_default(
+        self, name
+    ):
+        config = MODEL_VARIANTS[name]
+        validate_variant(name, config, config["radius"], grid_dim=3)
+        validate_all_variants(DEFAULT_RADIUS)
+        # Anti-vacuity: the default radius 5 needs 11 cells on every axis.
+        with pytest.raises(ValueError, match=rf"'{name}'.*radius-5"):
+            validate_variant(name, config, DEFAULT_RADIUS, grid_dim=3)
+
+    @pytest.mark.parametrize("name", sorted(_ROWS_3D))
+    def test_from_variant_builds_with_the_rows_rank_radius_and_grid(self, name):
+        _, _, _, _, _, radius, grid, _, _ = _ROWS_3D[name]
+        model = TopoLM.from_variant(name, vocab_size=64, depth=1, max_seq_len=16)
+        assert model.grid_dim == 3
+        assert model.radius == radius
+        assert model.grid_shape == grid
+        assert "description" not in model.get_config()
+        assert model.get_config()["grid_dim"] == 3
+
+    @pytest.mark.parametrize("name", sorted(_ROWS_3D))
+    def test_every_tap_is_cut_on_the_rows_cube(self, name):
+        _, _, _, _, _, _, grid, centres, patch_units = _ROWS_3D[name]
+        model = TopoLM.from_variant(name, vocab_size=64, depth=1, max_seq_len=16)
+        model(_tokens(vocab=64, length=8), training=False)
+        assert len(model.tap_layers) == 2
+        for tap in model.tap_layers:
+            assert tuple(tap.layout.grid_shape) == grid
+            assert tuple(tap.patch_table.shape) == (centres, patch_units)
+
+    def test_the_rows_radius_can_be_overridden(self):
+        model = TopoLM.from_variant(
+            "tiny3d", vocab_size=64, depth=1, max_seq_len=16, radius=1
+        )
+        assert model.radius == 1
+        assert model.grid_dim == 3
+        model(_tokens(vocab=64, length=8), training=False)
+        # (7 - 2) ** 3 centres of 3 ** 3 units.
+        assert tuple(model.tap_layers[0].patch_table.shape) == (125, 27)
+
+    def test_an_override_too_large_for_the_cube_names_the_largest_usable_radius(self):
+        """343 = 7 x 7 x 7 holds one radius-3 patch (side 7) and no radius-4 one."""
+        with pytest.raises(ValueError, match=r"below the 729 units.*radius this grid can use is 3"):
+            TopoLM.from_variant("tiny3d", vocab_size=64, depth=1, radius=4)
+        model = TopoLM.from_variant(
+            "tiny3d", vocab_size=64, depth=1, max_seq_len=16, radius=3
+        )
+        model(_tokens(vocab=64, length=8), training=False)
+        assert tuple(model.tap_layers[0].patch_table.shape) == (1, 343)
+
+    def test_the_factory_delegates_the_row_unchanged(self):
+        model = create_topolm("tiny3d", vocab_size=64, depth=1, max_seq_len=16)
+        assert (model.grid_dim, model.radius) == (3, 2)

@@ -12,6 +12,10 @@ claims to be somebody else's architecture:
   They are deliberately NOT pinned by the upstream guard: quoting a derived
   number as if it were published is exactly the false citation that guard exists
   to prevent.
+* ``paper3d`` and ``tiny3d`` are **repo-authored** and not in the paper, which is
+  2D throughout. They carry ``"grid_dim": 3`` and their own ``"radius"`` (the
+  default radius 5 needs 11 cells on every axis, which no width here reaches), and
+  are not pinned by the upstream guard either.
 
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM.
@@ -69,6 +73,32 @@ MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "ffn_intermediate_size": 1024,
         "max_seq_len": 256,
         "description": "Repo-authored smoke scale, 16x16 grid",
+    },
+    # Repo-authored, not in the paper: the paper's depth at a 3D layout. 1000 =
+    # 10 x 10 x 10 (the nearest cube to 784), heads 8 (head dim 125). Radius 4
+    # (a 9x9x9 patch) is the largest a 10-cell axis holds, which leaves
+    # (10-8)**3 = 8 centres.
+    "paper3d": {
+        "embed_dim": 1000,
+        "depth": 12,
+        "num_heads": 8,
+        "ffn_intermediate_size": 4000,
+        "max_seq_len": 1024,
+        "radius": 4,
+        "grid_dim": 3,
+        "description": "Repo-authored, not in the paper: 10x10x10 unit grid, radius 4",
+    },
+    # Repo-authored, not in the paper: smoke scale for the 3D layout. 343 = 7 x 7
+    # x 7; radius 2 (a 5x5x5 patch) leaves (7-4)**3 = 27 centres.
+    "tiny3d": {
+        "embed_dim": 343,
+        "depth": 4,
+        "num_heads": 7,
+        "ffn_intermediate_size": 1372,
+        "max_seq_len": 256,
+        "radius": 2,
+        "grid_dim": 3,
+        "description": "Repo-authored, not in the paper: 7x7x7 unit grid, radius 2",
     },
 }
 

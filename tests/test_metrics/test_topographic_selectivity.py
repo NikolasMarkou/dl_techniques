@@ -390,6 +390,20 @@ class TestGrowClusters:
         with pytest.raises(ValueError, match="does not match t_grid shape"):
             grow_clusters(np.zeros((5, 5)), np.ones((6, 6), dtype=bool))
 
+    @pytest.mark.parametrize("shape", [(7, 7, 7), (4, 5, 6), (9,)])
+    def test_a_map_that_is_not_two_dimensional_is_named_not_unpacked(self, shape):
+        """A 3-D map used to die in ``height, width = t_grid.shape``.
+
+        That unpack error names nothing, so a caller holding a 3-D layout's map
+        could not tell a rank problem from a bug. The guard comes before the
+        shape-agreement check, so two maps that AGREE in a non-2-D shape get the
+        rank message, not a pass.
+        """
+        with pytest.raises(ValueError, match=r"2-D \(height, width\) map") as caught:
+            grow_clusters(np.zeros(shape), np.ones(shape, dtype=bool))
+        assert "unpack" not in str(caught.value)
+        assert str(shape) in str(caught.value)
+
 
 class TestClusterResponse:
     def _activations(self, units=(0, 1, 2), conditions=("a", "b")):

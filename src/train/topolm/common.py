@@ -110,7 +110,7 @@ from dl_techniques.metrics.topographic_selectivity import (
 from dl_techniques.models.common.masked_language_model import (
     CausalLanguageModel,
 )
-from dl_techniques.models.language.topolm import TopoLM
+from dl_techniques.models.language.topolm import TopoLM, grid_shape_of
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.utils.logger import logger
 
@@ -174,8 +174,8 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
 
     :ivar spatial_alpha: Weight on every tap's spatial loss. ``0`` trains the
         non-topographic control, with an identical weight set.
-    :ivar spatial_radius: Neighbourhood radius; a radius-``r`` patch holds
-        ``(2 * r + 1) ** 2`` units, so the width must be at least that.
+    :ivar spatial_radius: Neighbourhood radius; in this 2D trainer a radius-``r``
+        patch holds ``(2 * r + 1) ** 2`` units, so the width must be at least that.
     :ivar spatial_neighborhoods: Neighbourhoods sampled per tap per step, and
         averaged. ``5`` is the paper's value.
     :ivar spatial_distance: Distance metric behind each tap's prior. ``'linf'`` is
@@ -310,6 +310,57 @@ def _require_vocab_covers_tokenizer(
     )
 
 
+def _grid_label(grid: Sequence[int]) -> str:
+    """Format a unit grid of any rank, ``16x32`` for two axes, ``7x7x7`` for three."""
+    return "x".join(str(int(g)) for g in grid)
+
+
+def _require_two_dimensional_variant(variant: str) -> None:
+    """Refuse a variant whose row asks for a grid of another rank than two, by name.
+
+    The trainer's evaluation and plots are 2D-only (the t-map panels, cluster
+    growth, Moran's I and the Gaussian readout all take a ``(height, width)``
+    map), and evaluation runs only after the whole training run, so a 3D model
+    that got this far would train to the end and then die inside
+    ``grow_clusters``. This is checked on the variant's ROW, before anything is
+    built or written, for two reasons: the row's own ``radius`` is overridden by
+    the trainer's ``spatial_radius`` (default 5, which a 3D width cannot hold), so
+    building first would raise a less helpful axis error; and
+    :func:`train_topolm` calls it before ``os.makedirs`` so a refusal leaves no
+    directory behind.
+
+    An unknown name is not this function's business: it returns, and
+    ``TopoLM.from_variant`` lists the available names exactly as before.
+
+    :param variant: The ``model_variant`` of the run.
+    :type variant: str
+    :raises ValueError: If the row carries ``grid_dim != 2`` -- naming the variant,
+        its width and grid, and that the trainer is 2D-only.
+    """
+    # DECISION plan-2026-10-23T141429-390f3815/D-010: refuse on the variant's ROW,
+    # by name, before anything is built or written. Do NOT leave it to the built
+    # backbone's rank (the trainer overrides the row's radius with
+    # spatial_radius=5, so the build raises an axis error that never mentions the
+    # trainer) and do NOT leave it to a `height, width = grid_shape` unpack (which
+    # names nothing, and is now rank-agnostic). Do NOT add a --grid-dim flag
+    # instead: the 3D evaluation does not exist (see decisions.md D-010).
+    row = TopoLM.MODEL_VARIANTS.get(variant)
+    if row is None:
+        return
+    grid_dim = int(row.get("grid_dim", 2))
+    if grid_dim == 2:
+        return
+    grid = _grid_label(grid_shape_of(int(row["embed_dim"]), grid_dim))
+    raise ValueError(
+        f"variant {variant!r} lays its {int(row['embed_dim'])} units out on a "
+        f"{grid} grid (grid_dim={grid_dim}), but this trainer's evaluation and "
+        f"plots are 2D-only: the t-map panels, cluster growth, Moran's I and the "
+        f"Gaussian readout all take a (height, width) map. Train it by calling "
+        f"the model directly, or choose a 2D variant "
+        f"{sorted(n for n, r in TopoLM.MODEL_VARIANTS.items() if int(r.get('grid_dim', 2)) == 2)}."
+    )
+
+
 def build_backbone(
     config: TopoLMTrainingConfig,
     required_vocab_size: Optional[int] = None,
@@ -325,9 +376,12 @@ def build_backbone(
     :type required_vocab_size: Optional[int]
     :return: A randomly initialised TopoLM matching ``config``.
     :rtype: TopoLM
-    :raises ValueError: If ``config.tap_sites`` is not a recognised value, or
-        ``config.vocab_size`` is below ``required_vocab_size``.
+    :raises ValueError: If ``config.tap_sites`` is not a recognised value,
+        ``config.vocab_size`` is below ``required_vocab_size``, or the variant
+        (or the built backbone) is not laid out on a 2D grid.
     """
+    _require_two_dimensional_variant(config.model_variant)
+
     if required_vocab_size is not None and config.vocab_size < int(
         required_vocab_size
     ):
@@ -372,11 +426,20 @@ def build_backbone(
             f"the first batch dies in positional_embeddings with an "
             f"out-of-range Gather"
         )
-    height, width = backbone.grid_shape
+    # The row check above covers a variant that carries grid_dim; this one covers
+    # every other route to a non-2D backbone, so the unpack-free form below cannot
+    # hand a 3D grid to the 2D evaluation.
+    if len(backbone.grid_shape) != 2:
+        raise ValueError(
+            f"variant {config.model_variant!r} built a "
+            f"{_grid_label(backbone.grid_shape)} grid (grid_dim="
+            f"{backbone.grid_dim}), but this trainer's evaluation and plots are "
+            f"2D-only"
+        )
     logger.info(
         f"Backbone: variant={config.model_variant}, "
         f"embed_dim={backbone.embed_dim}, depth={backbone.depth}, "
-        f"heads={backbone.num_heads}, grid={height}x{width}, "
+        f"heads={backbone.num_heads}, grid={_grid_label(backbone.grid_shape)}, "
         f"{len(backbone.tap_layers)} taps at alpha={config.spatial_alpha} "
         f"(radius {config.spatial_radius}, {config.spatial_distance}, "
         f"permute={config.spatial_permute}, sites={list(backbone.tap_sites)})"
@@ -778,7 +841,7 @@ def evaluate_topography(
 
     grid_shape = backbone.grid_shape
     report: Dict[str, Any] = {
-        "grid_shape": [int(grid_shape[0]), int(grid_shape[1])],
+        "grid_shape": [int(g) for g in grid_shape],
         "contrast": [condition_a, condition_b],
         "conditions": sorted(stimuli),
         "stimuli_are_smoke_set": bool(is_smoke_set),
@@ -1172,7 +1235,13 @@ def train_topolm(
     :return: ``{"model", "backbone", "history", "results_dir",
         "epochs", "steps_per_epoch", "topography"}``.
     :rtype: Dict[str, Any]
+    :raises ValueError: If ``config.model_variant`` is laid out on a 3D grid; the
+        evaluation is 2D-only, so this is refused before any directory is made.
     """
+    # FIRST, before the seed, the output directory, the tokenizer and the dataset:
+    # a refusal must leave nothing behind and cost no data work.
+    _require_two_dimensional_variant(config.model_variant)
+
     set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 

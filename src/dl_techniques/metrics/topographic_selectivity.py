@@ -287,11 +287,18 @@ def grow_clusters(
     :return: ``(clusters, label_grid)`` -- each cluster an array of unit ids (or
         cell indices), and the grid labelling with ``0`` for unassigned.
     :rtype: Tuple[List[numpy.ndarray], numpy.ndarray]
-    :raises ValueError: If the maps disagree in shape, ``sign`` is not ``+1`` or
-        ``-1``, ``connectivity`` is unknown, or ``max_size`` is below 1.
+    :raises ValueError: If ``t_grid`` is not 2-D, the maps disagree in shape,
+        ``sign`` is not ``+1`` or ``-1``, ``connectivity`` is unknown, or
+        ``max_size`` is below 1.
     """
     t_grid = np.asarray(t_grid, dtype="float64")
     sig_grid = np.asarray(sig_grid, dtype=bool)
+    # Named here because the walk below unpacks ``height, width`` and steps with
+    # a 3x3 structure: a 3-D map would otherwise die in a bare unpack error.
+    if t_grid.ndim != 2:
+        raise ValueError(
+            f"t_grid must be a 2-D (height, width) map, got shape {t_grid.shape}"
+        )
     if t_grid.shape != sig_grid.shape:
         raise ValueError(
             f"sig_grid shape {sig_grid.shape} does not match t_grid shape "

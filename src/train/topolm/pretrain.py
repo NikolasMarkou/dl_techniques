@@ -75,7 +75,9 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=sorted(MODEL_VARIANTS),
         help=(
             "Model variant. 'paper' is the published shape (784 units on a 28x28 "
-            "grid, 12 blocks); 'small' and 'tiny' are repo-authored scales."
+            "grid, 12 blocks); 'small' and 'tiny' are repo-authored scales. "
+            "'paper3d' and 'tiny3d' are 3D layouts, refused here: this "
+            "trainer's evaluation is 2D-only."
         ),
     )
     parser.add_argument(
@@ -128,8 +130,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help=(
-            "Neighbourhood radius; a radius-r patch needs (2r+1)^2 units, so "
-            "the model's width must be at least that."
+            "Neighbourhood radius; in this 2D trainer a radius-r patch needs "
+            "(2r+1)^2 units, so the model's width must be at least that."
         ),
     )
     parser.add_argument(

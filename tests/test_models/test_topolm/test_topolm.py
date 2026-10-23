@@ -163,10 +163,18 @@ class TestVariantRegistry:
 
     def test_every_variant_factors_into_a_grid_the_radius_can_use(self):
         for name, config in MODEL_VARIANTS.items():
-            height, width = grid_shape_of(config["embed_dim"])
-            assert height * width == config["embed_dim"], name
+            # Each row is judged by its OWN rank and radius (a 2D row carries
+            # neither key and keeps the defaults). Applying the 2D grid to a 3D
+            # row would pass vacuously: 343 factors to (7, 49) in two axes.
+            grid_dim = config.get("grid_dim", 2)
+            radius = config.get("radius", DEFAULT_RADIUS)
+            side = 2 * radius + 1
+            grid = grid_shape_of(config["embed_dim"], config.get("grid_dim", 2))
+            assert len(grid) == config.get("grid_dim", 2), name
+            assert int(np.prod(grid)) == config["embed_dim"], name
             assert config["embed_dim"] % config["num_heads"] == 0, name
-            assert config["embed_dim"] >= (2 * DEFAULT_RADIUS + 1) ** 2, name
+            assert config["embed_dim"] >= side ** grid_dim, name
+            assert all(axis >= side for axis in grid), (name, grid, side)
 
     def test_a_variant_that_cannot_host_a_neighbourhood_is_rejected(self):
         with pytest.raises(ValueError, match="below the"):
