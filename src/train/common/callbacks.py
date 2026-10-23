@@ -232,6 +232,8 @@ def create_callbacks(
         include_analyzer: bool = True,
         analyzer_config: Optional[Any] = None,
         analyzer_start_epoch: int = 1,
+        analyzer_on_train_begin: bool = True,
+        analyzer_first_epoch: bool = True,
 ) -> Tuple[List, str]:
     """
     Create standard training callbacks.
@@ -273,6 +275,12 @@ def create_callbacks(
         Custom AnalysisConfig for EpochAnalyzerCallback. None uses defaults.
     analyzer_start_epoch : int
         Epoch to start running the analyzer (default: 1).
+    analyzer_on_train_begin : bool
+        Also analyze the untrained model into ``epoch_000`` (default True).
+    analyzer_first_epoch : bool
+        Also analyze after epoch 1 whatever the cadence says (default True).
+        With both on, the schedule is the repository standard: ``epoch_000``,
+        ``epoch_001``, then ``analyzer_start_epoch + k * analyzer_epoch_frequency``.
 
     Returns
     -------
@@ -317,6 +325,8 @@ def create_callbacks(
             model_name=model_name,
             epoch_frequency=analyzer_epoch_frequency,
             start_epoch=analyzer_start_epoch,
+            analyze_on_train_begin=analyzer_on_train_begin,
+            analyze_first_epoch=analyzer_first_epoch,
         )
         if analyzer_config is not None:
             analyzer_kwargs["analysis_config"] = analyzer_config

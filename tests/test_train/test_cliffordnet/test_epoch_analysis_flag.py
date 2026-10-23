@@ -1,9 +1,10 @@
-"""The CliffordNet trainer's per-epoch model analysis is opt-in and lands on N, 2N, ...
+"""The CliffordNet trainer's per-epoch model analysis is opt-in and lands on 0, 1, N, 2N, ...
 
 Guard for plan-2026-10-23T100412-e7eaaa02 (D-002). Before the flag, the trainer
 passed ``include_analyzer=False`` and analysed once after ``fit``. With
-``--epoch-analysis-every N`` the shared ``EpochAnalyzerCallback`` must run at
-epochs N, 2N, ... : its default ``start_epoch=1`` would instead give 1, N+1, ...
+``--epoch-analysis-every N`` the shared ``EpochAnalyzerCallback`` must run before
+training, at epoch 1, then at N, 2N, ... : its default ``start_epoch=1`` would
+instead give 1, N+1, ... (the 0 and 1 snapshots are D-003).
 """
 
 import sys
@@ -89,6 +90,8 @@ def test_the_analyzer_fires_on_multiples_of_the_flag(monkeypatch, tmp_path):
         c for c in callbacks
         if isinstance(c, analyzer_callback.EpochAnalyzerCallback)
     )
+    analyzer.set_model(_tiny_classifier())
+    analyzer.on_train_begin()
     for epoch in range(25):
         analyzer.on_epoch_end(epoch)
-    assert fired == ["010", "020"]
+    assert fired == ["000", "001", "010", "020"]

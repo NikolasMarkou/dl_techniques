@@ -50,6 +50,17 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
     :param model_name: A descriptive name for the model being trained, used
         for labeling in the analysis results. Defaults to "TrainingModel".
     :type model_name: str
+    :param analyze_on_train_begin: Also analyze the model once before training
+        starts, into ``epoch_000``. Skipped with a warning when the model is
+        not built yet (its weights do not exist). Defaults to True.
+    :type analyze_on_train_begin: bool
+    :param analyze_first_epoch: Also analyze after epoch 1 whatever
+        ``start_epoch`` and ``epoch_frequency`` say. Defaults to True.
+    :type analyze_first_epoch: bool
+
+    The standard schedule is therefore ``epoch_000``, ``epoch_001``, then
+    ``start_epoch + k * epoch_frequency``. Both flags False give the schedule
+    this callback had before they existed.
     """
 
     def __init__(
@@ -58,13 +69,17 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
         analysis_config: Optional[AnalysisConfig] = None,
         start_epoch: int = 1,
         epoch_frequency: int = 1,
-        model_name: str = "TrainingModel"
+        model_name: str = "TrainingModel",
+        analyze_on_train_begin: bool = True,
+        analyze_first_epoch: bool = True,
     ):
         super().__init__()
         self.output_dir = output_dir
         self.start_epoch = start_epoch
         self.epoch_frequency = epoch_frequency
         self.model_name = model_name
+        self.analyze_on_train_begin = analyze_on_train_begin
+        self.analyze_first_epoch = analyze_first_epoch
 
         # If no config is provided, create a default one focused on fast,
         # data-free weight and spectral analysis.
@@ -86,6 +101,60 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
             f"{self.epoch_frequency} epochs, starting from epoch {self.start_epoch}."
         )
 
+    def _analyze(self, epoch_number: int) -> None:
+        """Run the analyzer into ``epoch_<NNN>`` for the current model state.
+
+        :param epoch_number: 0 for the pre-training snapshot, else the
+            1-indexed epoch that just finished.
+        :type epoch_number: int
+        """
+        epoch_output_dir = os.path.join(self.output_dir, f"epoch_{epoch_number:03d}")
+        logger.info(
+            f"Running EpochAnalyzerCallback for epoch {epoch_number} ---"
+        )
+        logger.info(f"Saving results to: {epoch_output_dir}")
+
+        # DECISION plan-2026-10-14T062616-81938e81/D-117
+        # No try/except here: a failed analysis raises out of fit. Do NOT
+        # log-and-continue; that hid the Step 13 DarkIR run's NaN weights
+        # ("SVD did not converge" at every epoch) behind an exit code of 0.
+        # 1. Instantiate the ModelAnalyzer with the current model state
+        analyzer = ModelAnalyzer(
+            models={self.model_name: self.model},
+            config=self.analysis_config,
+            output_dir=epoch_output_dir
+        )
+
+        # 2. Run the analysis (no data needed for this configuration)
+        # The `analyze` method will save plots and JSON to the epoch_output_dir
+        _ = analyzer.analyze()
+
+        logger.info(
+            f" Epoch {epoch_number} analysis complete ---"
+        )
+
+    def on_train_begin(self, logs: Optional[dict] = None):
+        """Analyze the untrained model into ``epoch_000``.
+
+        :param logs: Unused.
+        :type logs: Optional[dict]
+        :raises Exception: Whatever the analysis raises (D-117).
+        """
+        if not self.analyze_on_train_begin:
+            return
+        # DECISION plan-2026-10-23T100412-e7eaaa02/D-003
+        # An unbuilt model has no weights to analyze; skip it loudly instead of
+        # letting a lazily-built model fail here when it would have trained fine.
+        # This is a precondition, not a swallowed error: any failure of a built
+        # model still raises (D-117).
+        if not self.model.built:
+            logger.warning(
+                "EpochAnalyzerCallback: model is not built, skipping the "
+                "pre-training snapshot (epoch_000)."
+            )
+            return
+        self._analyze(0)
+
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None):
         """Runs the model analysis at the end of an epoch.
 
@@ -99,31 +168,9 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
         # Keras epochs are 0-indexed, but we often think of them as 1-indexed.
         current_epoch = epoch + 1
 
-        # Check if this is an epoch we should analyze
-        if (current_epoch >= self.start_epoch and
-                (current_epoch - self.start_epoch) % self.epoch_frequency == 0):
-
-            epoch_output_dir = os.path.join(self.output_dir, f"epoch_{current_epoch:03d}")
-            logger.info(
-                f"Running EpochAnalyzerCallback for epoch {current_epoch} ---"
-            )
-            logger.info(f"Saving results to: {epoch_output_dir}")
-
-            # DECISION plan-2026-10-14T062616-81938e81/D-117
-            # No try/except here: a failed analysis raises out of fit. Do NOT
-            # log-and-continue; that hid the Step 13 DarkIR run's NaN weights
-            # ("SVD did not converge" at every epoch) behind an exit code of 0.
-            # 1. Instantiate the ModelAnalyzer with the current model state
-            analyzer = ModelAnalyzer(
-                models={self.model_name: self.model},
-                config=self.analysis_config,
-                output_dir=epoch_output_dir
-            )
-
-            # 2. Run the analysis (no data needed for this configuration)
-            # The `analyze` method will save plots and JSON to the epoch_output_dir
-            _ = analyzer.analyze()
-
-            logger.info(
-                f" Epoch {current_epoch} analysis complete ---"
-            )
+        on_cadence = (
+            current_epoch >= self.start_epoch
+            and (current_epoch - self.start_epoch) % self.epoch_frequency == 0
+        )
+        if on_cadence or (self.analyze_first_epoch and current_epoch == 1):
+            self._analyze(current_epoch)
