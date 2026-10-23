@@ -511,3 +511,282 @@ class TestProfileConsistency:
     def test_an_empty_profile_list_is_rejected(self):
         with pytest.raises(ValueError, match="must not be empty"):
             profile_consistency([])
+
+# =====================================================================
+# plan-2026-10-23T190557-972a9ac5, step 1: pins and RED tests
+#
+# ``*GoldenPins`` record what the 2-D functions return at commit 9a1a446ec and
+# must stay green through every later step. The ``*3D`` classes were RED when
+# written (``grow_clusters`` and ``label_islands`` refused any map that is not
+# 2-D); each compares the code with something that does not import the code:
+# ``scipy.ndimage.label``, ``SpatialLayout.positions``, a hand-built block.
+# =====================================================================
+
+import hashlib
+
+from scipy import ndimage
+
+from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
+
+
+def _digest(array):
+    """First 16 hex digits of the SHA-256 of an array's bytes (same environment pin)."""
+    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()[:16]
+
+
+def _growth_digest(clusters, labels):
+    """One digest over the unit ids of every cluster, in order, and the label grid."""
+    state = hashlib.sha256()
+    for cluster in clusters:
+        state.update(np.asarray(cluster, "int64").tobytes())
+        state.update(b"|")
+    state.update(np.asarray(labels, "int64").tobytes())
+    return state.hexdigest()[:16]
+
+
+class TestLabelIslandsGoldenPins:
+    """The cluster module's own copy of ``label_islands``, label grid for label grid."""
+
+    #: ``(connectivity, min_size)`` -> ``(count, digest of the int64 labels)``.
+    LABELS = {
+        ("queen", 1): (5, "432c951917e662f7"),
+        ("queen", 3): (2, "a9041cc11d334002"),
+        ("queen", 10): (1, "3e27b20019bd2f35"),
+        ("rook", 1): (6, "e502a5a8de96b98e"),
+        ("rook", 3): (2, "a9041cc11d334002"),
+        ("rook", 10): (1, "3e27b20019bd2f35"),
+    }
+
+    @staticmethod
+    def _mask():
+        """A 20-cell block, a 9-cell block, a 2-cell island, a diagonal pair and a lone cell."""
+        mask = np.zeros((14, 14), dtype=bool)
+        mask[1:6, 1:5] = True
+        mask[8:11, 2:5] = True
+        mask[2, 9] = mask[2, 10] = True
+        mask[7, 8] = mask[8, 9] = True
+        mask[12, 12] = True
+        return mask
+
+    @pytest.mark.parametrize("key", list(LABELS), ids=lambda k: f"{k[0]}-min{k[1]}")
+    def test_label_islands_is_bit_identical(self, key):
+        connectivity, minimum = key
+        labels, count = label_islands(
+            self._mask(), connectivity=connectivity, min_size=minimum
+        )
+        assert (count, _digest(labels)) == self.LABELS[key]
+        assert labels.dtype == np.int64
+
+
+class TestGrowClustersGoldenPins:
+    """``grow_clusters`` over 6 seeds x 2 signs x 2 connectivities x {no cap, cap 4}.
+
+    Each map is a smoothed noise field thresholded at ``|t| > 1`` (so clusters are
+    big enough for the cap to bite: it changes the result in all 24 cases), grown
+    with ``min_size=2`` through a permuted ``SpatialLayout`` so the unit ids are
+    pinned too, not only the cell labels.
+    """
+
+    #: ``(seed, sign, connectivity)`` -> ``(clusters, digest)`` without a cap, then
+    #: with ``max_size=4``.
+    GOLDEN = {
+        (0, 1, 'queen'): (4, 'c107a29218c2a596', 21, '68c5f3aa5a3f71a4'),
+        (0, 1, 'rook'): (5, 'fc19b704b3eaca85', 19, '28ecd032f9412f09'),
+        (0, -1, 'queen'): (4, '03cd2a2a7c5300f7', 6, '135d45594160f867'),
+        (0, -1, 'rook'): (5, '51c683eeff8bfe91', 7, 'a0c34b90f0e6ebb9'),
+        (1, 1, 'queen'): (6, 'bee4046477ea7301', 10, 'dbbbcbfe94b26003'),
+        (1, 1, 'rook'): (6, 'e8f608d3a26b9f9e', 8, '07ab778465cd8518'),
+        (1, -1, 'queen'): (2, '80437756e15d61d9', 20, 'f22b65e73e71f083'),
+        (1, -1, 'rook'): (3, 'd5ec3c6c7fae8445', 18, '2030505addcd8612'),
+        (2, 1, 'queen'): (6, '2e80d25df21f82e5', 10, '76691b17538391ec'),
+        (2, 1, 'rook'): (7, 'e620deb62cc426ee', 10, 'b2b3ec6512c3bc0c'),
+        (2, -1, 'queen'): (4, 'a9362c2023e1dab3', 15, 'd490a278ddb0dda6'),
+        (2, -1, 'rook'): (4, 'a9362c2023e1dab3', 15, '1996362aa5153f52'),
+        (3, 1, 'queen'): (6, '2e176b63768d57c8', 14, '2b782349fcd43e96'),
+        (3, 1, 'rook'): (6, '2e176b63768d57c8', 14, 'f620573e59ccae86'),
+        (3, -1, 'queen'): (7, 'bbf9ce13a382a823', 10, '4a703f717f403d70'),
+        (3, -1, 'rook'): (6, '6303df2c7e416f04', 9, 'b63b7c2a6e6de9b3'),
+        (4, 1, 'queen'): (6, '826f185bf038f31f', 17, 'ba2489f6712147fe'),
+        (4, 1, 'rook'): (6, '826f185bf038f31f', 16, 'dbb08fa288e1ff64'),
+        (4, -1, 'queen'): (5, '338c5bdebdf9d2dd', 8, '2acc8b7eebfa2189'),
+        (4, -1, 'rook'): (5, '338c5bdebdf9d2dd', 8, '71b83db51983a44f'),
+        (5, 1, 'queen'): (7, '3961d83877c3b720', 15, 'b8fc023388acc75c'),
+        (5, 1, 'rook'): (7, '3961d83877c3b720', 14, 'ebdfb7cf17930ec1'),
+        (5, -1, 'queen'): (4, '41fbde36051c0bce', 15, '7bcd2ecdb922df95'),
+        (5, -1, 'rook'): (4, '4790fd3c616dbd2b', 14, '5f4e16baa7423c44'),
+    }
+
+    @pytest.mark.parametrize("key", list(GOLDEN), ids=lambda k: f"seed{k[0]}-sign{k[1]:+d}-{k[2]}")
+    def test_clusters_and_label_grids_are_bit_identical(self, key):
+        seed, sign, connectivity = key
+        field = ndimage.gaussian_filter(
+            np.random.default_rng(100 + seed).normal(size=(14, 14)), 1.0
+        ) * 5.0
+        layout = SpatialLayout(196, seed=seed)
+        observed = []
+        for cap in (None, 4):
+            clusters, labels = grow_clusters(
+                field, np.abs(field) > 1.0, sign=sign, min_size=2,
+                connectivity=connectivity, max_size=cap,
+                cell_to_unit=layout.cell_to_unit,
+            )
+            observed.extend([len(clusters), _growth_digest(clusters, labels)])
+        assert tuple(observed) == self.GOLDEN[key]
+
+
+# ---------------------------------------------------------------------
+# rank 3
+# ---------------------------------------------------------------------
+
+
+def _smooth_volume(shape, seed, sigma=1.0, scale=6.0):
+    return scale * ndimage.gaussian_filter(
+        np.random.default_rng(seed).normal(size=shape), sigma
+    )
+
+
+def _scipy_labels(mask, connectivity):
+    """``scipy.ndimage.label`` with the structure written out, not imported."""
+    rank = mask.ndim
+    return ndimage.label(
+        mask,
+        structure=ndimage.generate_binary_structure(
+            rank, rank if connectivity == "queen" else 1
+        ),
+    )
+
+
+class TestLabelIslands3D:
+    @pytest.mark.parametrize("shape", [(10, 10, 10), (7, 8, 14)], ids=str)
+    @pytest.mark.parametrize("connectivity", ["queen", "rook"])
+    def test_islands_are_scipys_components(self, shape, connectivity):
+        mask = _smooth_volume(shape, seed=9) > 1.0
+        reference, count = _scipy_labels(mask, connectivity)
+        assert count >= 3, "the fixture must have several islands to mean anything"
+        labels, found = label_islands(mask, connectivity=connectivity, min_size=1)
+        assert found == count
+        np.testing.assert_array_equal(labels, reference)
+
+    def test_queen_merges_a_pair_that_touches_only_at_a_corner(self):
+        mask = np.zeros((4, 4, 4), dtype=bool)
+        mask[1, 1, 1] = mask[2, 2, 2] = True
+        assert label_islands(mask, "queen", min_size=1)[1] == 1
+        assert label_islands(mask, "rook", min_size=1)[1] == 2
+
+    def test_small_islands_are_dropped_and_the_rest_renumbered(self):
+        mask = np.zeros((6, 6, 6), dtype=bool)
+        mask[0, 0, 0] = True
+        mask[2:4, 2:4, 2:4] = True
+        mask[5, 5, 4:6] = True
+        labels, count = label_islands(mask, "queen", min_size=2)
+        assert count == 2
+        assert sorted(np.unique(labels).tolist()) == [0, 1, 2]
+        assert int((labels == 1).sum()) == 8 and int((labels == 2).sum()) == 2
+
+
+class TestGrowClusters3D:
+    @pytest.mark.parametrize("shape", [(10, 10, 10), (7, 8, 14)], ids=str)
+    @pytest.mark.parametrize("connectivity", ["queen", "rook"])
+    def test_without_a_cap_the_partition_is_scipys_components(
+        self, shape, connectivity
+    ):
+        """The equivalence the module docstring claims, now for a volume."""
+        volume = _smooth_volume(shape, seed=10)
+        significant = np.abs(volume) > 1.0
+        for sign in (1, -1):
+            candidate = significant & (sign * volume > 0)
+            reference, count = _scipy_labels(candidate, connectivity)
+            assert count >= 2, "the fixture must have several components"
+            clusters, labels = grow_clusters(
+                volume, significant, sign=sign, min_size=1, connectivity=connectivity
+            )
+            assert len(clusters) == count
+            assert labels.shape == shape
+            assert np.array_equal(labels > 0, candidate)
+            pairs = set(zip(reference[candidate].tolist(), labels[candidate].tolist()))
+            assert len(pairs) == count, "the partition differs from scipy's"
+            assert len({a for a, _ in pairs}) == len({b for _, b in pairs}) == count
+
+    def test_unit_ids_map_back_to_the_labelled_cells_through_positions(self):
+        """``layout.positions`` is the independent oracle: it knows where each
+        unit sits without ever reading ``cell_to_unit``, which the function
+        under test indexes. The expected cells come from scipy plus a size
+        filter, so nothing here is derived from ``grow_clusters`` itself."""
+        layout = SpatialLayout(1000, seed=5, grid_dim=3)
+        assert layout.grid_shape == (10, 10, 10)
+        volume = _smooth_volume(layout.grid_shape, seed=11, sigma=1.5, scale=8.0)
+        significant = volume > 1.0
+        components, count = _scipy_labels(significant, "queen")
+        sizes = np.bincount(components.ravel())
+        kept = {
+            tuple(int(v) for v in cell)
+            for cell in np.argwhere(significant)
+            if sizes[components[tuple(cell)]] >= 5
+        }
+        assert kept and len(kept) < int(significant.sum()), (
+            "the fixture must drop at least one small component"
+        )
+
+        clusters, labels = grow_clusters(
+            volume, significant, sign=1, min_size=5, connectivity="queen",
+            cell_to_unit=layout.cell_to_unit,
+        )
+        recovered = set()
+        for cluster in clusters:
+            recovered |= {tuple(int(v) for v in layout.positions[u]) for u in cluster}
+        assert recovered == kept
+        assert {tuple(int(v) for v in cell) for cell in np.argwhere(labels > 0)} == kept
+
+    def test_a_non_cubic_block_pins_the_axis_order(self):
+        """A 2x3x6 block of a (7, 8, 14) volume is 36 cells whatever the order of
+        the axes, so the count alone would pass a transposed implementation. The
+        bounding box of the recovered positions does not: it is (1, 2, 6) to
+        (2, 4, 11) only if axis 0 is the slowest and axis 2 the fastest."""
+        layout = SpatialLayout(7 * 8 * 14, seed=2, grid_dim=3)
+        assert layout.grid_shape == (7, 8, 14)
+        volume = np.zeros(layout.grid_shape)
+        volume[1:3, 2:5, 6:12] = 5.0
+        clusters, labels = grow_clusters(
+            volume, volume > 1.0, sign=1, min_size=1, connectivity="queen",
+            cell_to_unit=layout.cell_to_unit,
+        )
+        assert len(clusters) == 1 and len(clusters[0]) == 36
+        cells = layout.positions[clusters[0]]
+        assert cells.min(axis=0).tolist() == [1, 2, 6]
+        assert cells.max(axis=0).tolist() == [2, 4, 11]
+        assert int((labels > 0).sum()) == 36
+
+    def test_a_cap_splits_a_3d_component_like_the_2d_one(self):
+        """The both-ways twin: 27 cells capped at 9 give three clusters of 9."""
+        volume = np.full((7, 7, 7), -0.1)
+        volume[2:5, 2:5, 2:5] = 5.0
+        capped, _ = grow_clusters(
+            volume, volume > 1.5, sign=1, min_size=1, max_size=9
+        )
+        uncapped, _ = grow_clusters(volume, volume > 1.5, sign=1, min_size=1)
+        assert [len(c) for c in capped] == [9, 9, 9]
+        assert [len(c) for c in uncapped] == [27]
+
+    def test_queen_joins_a_corner_pair_and_rook_does_not(self):
+        volume = np.zeros((5, 5, 5))
+        volume[1, 1, 1] = volume[2, 2, 2] = 4.0
+        queen, _ = grow_clusters(volume, volume > 1, 1, 1, "queen")
+        rook, _ = grow_clusters(volume, volume > 1, 1, 1, "rook")
+        assert [len(c) for c in queen] == [2]
+        assert sorted(len(c) for c in rook) == [1, 1]
+
+    @pytest.mark.parametrize("shape", [(9,), (3, 3, 3, 3)], ids=["1D", "4D"])
+    def test_ranks_one_and_four_are_still_refused_by_name(self, shape):
+        """True before and after the 3-D support: the message keeps the
+        (height, width) wording and the offending shape."""
+        with pytest.raises(ValueError, match=r"2-D \(height, width\) map") as caught:
+            grow_clusters(np.zeros(shape), np.ones(shape, dtype=bool))
+        assert str(shape) in str(caught.value)
+
+    def test_a_3d_map_is_accepted(self):
+        """The other half of the rank guard."""
+        clusters, labels = grow_clusters(
+            np.full((3, 3, 3), 4.0), np.ones((3, 3, 3), dtype=bool), min_size=1
+        )
+        assert len(clusters) == 1 and len(clusters[0]) == 27
+        assert labels.shape == (3, 3, 3)

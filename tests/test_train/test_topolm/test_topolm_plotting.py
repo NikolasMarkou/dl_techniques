@@ -398,3 +398,421 @@ class TestTheFigureAgreesWithTheAnalysis:
         assert axis.get_lines(), "no cluster boundaries were drawn"
         assert len(_hatched(axis)) == 1
         plt.close(fig)
+
+
+# =====================================================================
+# plan-2026-10-23T190557-972a9ac5, step 1: pins and RED tests
+#
+# The old ``TestClusterBoundaries`` above pins the integers the drawer emits, and
+# the drawer is wrong (D-002): the new class compares the drawn segments with a
+# brute-force edge set derived from cell geometry. The old tests are NOT edited
+# here; step 3 rewrites them with the reason in each docstring.
+# =====================================================================
+
+import hashlib
+from collections import Counter
+
+import matplotlib.image as mpimg
+from matplotlib.collections import LineCollection
+from matplotlib.figure import Figure
+
+
+def _pieces(x0, y0, x1, y1):
+    """Split one axis-aligned segment into unit pieces keyed by (kind, fixed, start).
+
+    Keyed this way a builder that merges collinear runs and one that draws one
+    segment per cell edge are compared on the same footing, while a missing,
+    shifted or doubled edge still shows (the keys are compared as a multiset).
+    """
+    assert x0 == x1 or y0 == y1, "a boundary segment must be axis-aligned"
+    if y0 == y1:
+        low, high = sorted((x0, x1))
+        return [("h", round(float(y0), 6), round(float(low) + k, 6))
+                for k in range(int(round(high - low)))]
+    low, high = sorted((y0, y1))
+    return [("v", round(float(x0), 6), round(float(low) + k, 6))
+            for k in range(int(round(high - low)))]
+
+
+def _drawn_pieces(axis):
+    """Every boundary segment on ``axis`` as a multiset of unit pieces."""
+    found = Counter()
+    for line in axis.get_lines():
+        xs, ys = line.get_xdata(), line.get_ydata()
+        for (xa, ya), (xb, yb) in zip(zip(xs, ys), zip(xs[1:], ys[1:])):
+            found.update(_pieces(xa, ya, xb, yb))
+    for collection in axis.collections:
+        if isinstance(collection, LineCollection):
+            for segment in collection.get_segments():
+                for (xa, ya), (xb, yb) in zip(segment[:-1], segment[1:]):
+                    found.update(_pieces(xa, ya, xb, yb))
+    return found
+
+
+def _expected_pieces(labels):
+    """The cell-edge set, from geometry alone.
+
+    Cell ``(r, c)`` spans ``x`` in ``[c - 0.5, c + 0.5]`` and ``y`` in
+    ``[r - 0.5, r + 0.5]`` under ``imshow``. An edge of a cell is a boundary when
+    the cell across it carries a different label, the outside of the grid
+    counting as label 0 -- so a cluster touching the border is closed there, and
+    two zero cells never draw anything between them.
+    """
+    labels = np.asarray(labels)
+    height, width = labels.shape
+
+    def label_at(row, col):
+        if 0 <= row < height and 0 <= col < width:
+            return labels[row, col]
+        return 0
+
+    edges = set()
+    for row in range(height):
+        for col in range(width):
+            here = labels[row, col]
+            if label_at(row - 1, col) != here:
+                edges.add(("h", row - 0.5, col - 0.5))
+            if label_at(row + 1, col) != here:
+                edges.add(("h", row + 0.5, col - 0.5))
+            if label_at(row, col - 1) != here:
+                edges.add(("v", col - 0.5, row - 0.5))
+            if label_at(row, col + 1) != here:
+                edges.add(("v", col + 0.5, row - 0.5))
+    return Counter(
+        {(kind, round(fixed, 6), round(start, 6)): 1 for kind, fixed, start in edges}
+    )
+
+
+def _boundary_fixtures():
+    single = np.zeros((8, 8), dtype=int)
+    single[3, 4] = 1
+    border = np.zeros((8, 8), dtype=int)
+    border[0:3, 0:3] = 1
+    corner = np.zeros((8, 8), dtype=int)
+    corner[7, 7] = corner[7, 6] = 1
+    ring = np.zeros((8, 8), dtype=int)
+    ring[2:6, 2:6] = 1
+    ring[3:5, 3:5] = 2
+    touching = np.zeros((8, 8), dtype=int)
+    touching[1:4, 1:4] = 1
+    touching[4:7, 1:4] = 2          # two clusters sharing a whole edge
+    touching[2, 5] = 3              # and a lone third one
+    return {"single": single, "border": border, "corner": corner,
+            "ring": ring, "touching": touching}
+
+
+class TestClusterBoundariesSitOnTheirCells:
+    """D-002. RED on the baseline: the integers the old code draws are shifted off
+    the cells (MEASURED: a cell at row 3, column 4 spans x 3.5 to 4.5 and y 2.5 to
+    3.5, but the segments sat at x 5 to 6 and 4 to 5)."""
+
+    @pytest.mark.parametrize("name", list(_boundary_fixtures()))
+    def test_the_drawn_edges_are_the_cell_edges_of_the_label_grid(self, name):
+        labels = _boundary_fixtures()[name]
+        fig, axis = plt.subplots()
+        axis.imshow(np.zeros(labels.shape))
+        _draw_boundaries(axis, labels)
+        drawn = _drawn_pieces(axis)
+        plt.close(fig)
+
+        expected = _expected_pieces(labels)
+        assert drawn == expected, {
+            "missing": sorted((expected - drawn).elements())[:6],
+            "unexpected": sorted((drawn - expected).elements())[:6],
+        }
+
+    def test_one_cell_at_row_3_col_4_is_outlined_on_x_3p5_to_4p5_and_y_2p5_to_3p5(self):
+        """The literal case from the measurement, without the brute-force helper."""
+        labels = np.zeros((8, 8), dtype=int)
+        labels[3, 4] = 1
+        fig, axis = plt.subplots()
+        axis.imshow(np.zeros((8, 8)))
+        _draw_boundaries(axis, labels)
+        drawn = _drawn_pieces(axis)
+        plt.close(fig)
+        assert drawn == Counter({
+            ("h", 2.5, 3.5): 1,   # top edge, x from 3.5 to 4.5
+            ("h", 3.5, 3.5): 1,   # bottom edge
+            ("v", 3.5, 2.5): 1,   # left edge, y from 2.5 to 3.5
+            ("v", 4.5, 2.5): 1,   # right edge
+        })
+
+    def test_a_cluster_on_the_border_is_closed_on_the_edge_of_the_image(self):
+        """The image's own edge is x = -0.5 / y = -0.5, so that is where the
+        outline of a cluster in the top-left corner must run."""
+        labels = np.zeros((8, 8), dtype=int)
+        labels[0:3, 0:3] = 1
+        fig, axis = plt.subplots()
+        axis.imshow(np.zeros((8, 8)))
+        _draw_boundaries(axis, labels)
+        drawn = _drawn_pieces(axis)
+        plt.close(fig)
+        assert {k for k in drawn if k[0] == "h" and k[1] == -0.5} == {
+            ("h", -0.5, -0.5), ("h", -0.5, 0.5), ("h", -0.5, 1.5)
+        }
+        assert {k for k in drawn if k[0] == "v" and k[1] == -0.5} == {
+            ("v", -0.5, -0.5), ("v", -0.5, 0.5), ("v", -0.5, 1.5)
+        }
+
+    def test_the_t_map_panel_draws_the_outline_where_the_drawer_does(self, tmp_path):
+        """Through ``plot_t_maps`` rather than the helper: no caller may add or
+        remove an offset between the drawer and the panel."""
+        labels = _boundary_fixtures()["touching"]
+        fig, axes = _capture_axes(
+            {"t": np.zeros((8, 8))},
+            label_grids={"t": labels},
+            output_path=str(tmp_path / "panel.png"),
+            _fn="plot_t_maps",
+        )
+        drawn = _drawn_pieces(np.atleast_2d(axes)[0, 0])
+        plt.close(fig)
+        assert drawn == _expected_pieces(labels)
+
+    def test_the_cluster_overlay_draws_the_outline_where_the_drawer_does(self, tmp_path):
+        labels = _boundary_fixtures()["ring"]
+        fig, axes = _capture_axes(
+            labels, output_path=str(tmp_path / "overlay.png"), _fn="plot_cluster_overlay"
+        )
+        drawn = _drawn_pieces(axes)
+        plt.close(fig)
+        assert drawn == _expected_pieces(labels)
+
+
+# ---------------------------------------------------------------------
+# 2-D figures WITHOUT clusters must not move (pixel pins)
+# ---------------------------------------------------------------------
+
+
+def _pixel_digest(path):
+    """Shape and SHA-256 of the decoded RGBA pixels (same environment pin: the
+    hash depends on the matplotlib, freetype and font build, not just on us)."""
+    pixels = mpimg.imread(path)
+    return pixels.shape, hashlib.sha256(
+        np.ascontiguousarray(pixels).tobytes()
+    ).hexdigest()[:16]
+
+
+class TestTwoDimensionalUnchangedPixels:
+    """The fix for D-002 and the rank dispatch for 3-D may change a figure with
+    cluster outlines; they may not change a pixel of one without. Measured on
+    the unmodified code (matplotlib 3.10.0, Agg), identical across processes."""
+
+    @staticmethod
+    def _maps():
+        rng = np.random.default_rng(31)
+        maps = {f"blocks.{i}.ffn/attn_pre": rng.normal(size=(8, 8)) * (1 + i)
+                for i in range(5)}
+        return maps, {k: np.abs(v) > 1.5 for k, v in maps.items()}
+
+    def test_a_t_map_row_without_overlays(self, tmp_path):
+        maps, _ = self._maps()
+        path = plot_t_maps(maps, output_path=str(tmp_path / "a.png"))
+        assert _pixel_digest(path) == ((547, 1983, 4), "351efc58717dda02")
+
+    def test_a_t_map_row_with_the_hatch_and_the_legend_but_no_clusters(self, tmp_path):
+        maps, sig = self._maps()
+        path = plot_t_maps(
+            maps, sig_grids=sig, arm="raw", condition_a="a", condition_b="b",
+            output_path=str(tmp_path / "b.png"),
+        )
+        assert _pixel_digest(path) == ((547, 1983, 4), "eab7091b764aa543")
+
+    def test_an_all_zero_label_grid_changes_nothing(self, tmp_path):
+        """No cluster, no outline: the same pixels as passing no label grids."""
+        maps, sig = self._maps()
+        empty = {k: np.zeros((8, 8), dtype=int) for k in maps}
+        path = plot_t_maps(
+            maps, sig_grids=sig, label_grids=empty, arm="raw",
+            condition_a="a", condition_b="b", output_path=str(tmp_path / "c.png"),
+        )
+        assert _pixel_digest(path) == ((547, 1983, 4), "eab7091b764aa543")
+
+    def test_the_moran_profile(self, tmp_path):
+        maps, _ = self._maps()
+        path = plot_morans_i_profile(
+            {k: i / 10 - 0.1 for i, k in enumerate(maps)},
+            output_path=str(tmp_path / "d.png"), arm="raw",
+        )
+        assert _pixel_digest(path) == ((463, 783, 4), "2bf6cdf35fed80ed")
+
+
+class TestTwoDimensionalUnchangedInputValidation:
+    """What the rank dispatch must keep: a rank that is neither 2 nor 3 is an
+    error that names the tap (or the label grid) and says ``2-D``."""
+
+    def test_a_4d_map_names_the_tap_and_says_2d(self):
+        with pytest.raises(ValueError) as caught:
+            plot_t_maps({"tap-4d": np.zeros((2, 2, 2, 2))})
+        assert "tap-4d" in str(caught.value) and "2-D" in str(caught.value)
+
+    def test_a_4d_label_grid_says_2d(self):
+        with pytest.raises(ValueError, match="2-D"):
+            plot_cluster_overlay(np.zeros((2, 2, 2, 2), dtype=int))
+
+    def test_a_2d_map_followed_by_a_3d_map_names_the_second(self):
+        with pytest.raises(ValueError, match="tap-3d"):
+            plot_t_maps({"tap-2d": np.zeros((4, 4)), "tap-3d": np.zeros((4, 4, 4))})
+
+
+# ---------------------------------------------------------------------
+# 3-D figures (D-004)
+# ---------------------------------------------------------------------
+
+_VOLUME = (7, 8, 14)
+
+
+def _captured_figure(monkeypatch, call):
+    """Run ``call()`` and hand back the figure it saved, before it was closed.
+
+    Intercepting ``Figure.savefig`` instead of ``plt.subplots`` keeps the test
+    independent of how the 3-D drawer builds its layout.
+    """
+    holder = {}
+    original = Figure.savefig
+
+    def recording(self, *args, **kwargs):
+        holder["fig"] = self
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", recording)
+    call()
+    return holder["fig"]
+
+
+def _image_axes(fig):
+    return [ax for ax in fig.axes if ax.images]
+
+
+def _volume_fixture():
+    """One tap: significant +4 at (2, 3, 4), significant -6 at (5, 1, 9), and a
+    larger +9 at (0, 7, 13) that is NOT significant -- so an argmax over t, over
+    |t|, or over everything each pick a different voxel."""
+    volume = np.random.default_rng(1).normal(scale=0.1, size=_VOLUME)
+    volume[2, 3, 4] = 4.0
+    volume[5, 1, 9] = -6.0
+    volume[0, 7, 13] = 9.0
+    significant = np.zeros(_VOLUME, dtype=bool)
+    significant[4:7, 0:3, 8:11] = True      # the block around (5, 1, 9)
+    significant[2, 3, 4] = True
+    return volume, significant
+
+
+class TestThreeDimensionalFigures:
+    """RED on the baseline: ``plot_t_maps`` and ``plot_cluster_overlay`` raise on a
+    3-D array (``_panel_shape`` demands 2-D), and the 3-D drawers do not exist."""
+
+    def test_the_drawers_exist(self):
+        from train.topolm.plotting import (  # noqa: F401
+            plot_cluster_montage_3d,
+            plot_t_maps_3d,
+        )
+
+    def test_a_3d_t_map_row_is_dispatched_and_written(self, tmp_path):
+        volume, significant = _volume_fixture()
+        maps = {f"blocks.{i}.ffn/attn_pre": volume * (1 + i) for i in range(3)}
+        path = plot_t_maps(
+            maps, sig_grids={k: significant for k in maps},
+            output_path=str(tmp_path / "t3d.png"),
+        )
+        assert path is not None and (tmp_path / "t3d.png").stat().st_size > 0
+
+    def test_each_tap_gets_three_panels(self, monkeypatch, tmp_path):
+        volume, significant = _volume_fixture()
+        maps = {f"blocks.{i}.ffn/attn_pre": volume for i in range(4)}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids={k: significant for k in maps},
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        assert len(_image_axes(fig)) == 3 * len(maps)
+        plt.close(fig)
+
+    def test_the_crosshair_is_the_largest_significant_abs_t(self, monkeypatch, tmp_path):
+        """(5, 1, 9) is the answer: -6 beats +4 in |t| among the significant
+        voxels, and the +9 voxel is ignored because it is not significant. The
+        three panels are the planes through it, in axis order 0, 1, 2; the
+        (7, 8, 14) shape tells the planes apart, and a plane may be shown
+        transposed."""
+        volume, significant = _volume_fixture()
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {"blocks.0.ffn/attn_pre": volume},
+                sig_grids={"blocks.0.ffn/attn_pre": significant},
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        planes = [volume[5, :, :], volume[:, 1, :], volume[:, :, 9]]
+        shown = [np.asarray(ax.images[0].get_array()) for ax in _image_axes(fig)]
+        plt.close(fig)
+        assert len(shown) == 3
+        for index, (image, plane) in enumerate(zip(shown, planes)):
+            assert np.array_equal(image, plane) or np.array_equal(image, plane.T), (
+                f"panel {index} is not the plane through (5, 1, 9) on axis {index}"
+            )
+
+    def test_all_panels_share_the_pooled_colour_limit(self, monkeypatch, tmp_path):
+        volume, significant = _volume_fixture()
+        maps = {"a/attn_pre": volume, "b/attn_pre": 3.0 * volume}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(maps, output_path=str(tmp_path / "t3d.png")),
+        )
+        limits = {ax.images[0].get_clim() for ax in _image_axes(fig)}
+        plt.close(fig)
+        pooled = np.concatenate([np.abs(v).ravel() for v in maps.values()])
+        expected = float(np.percentile(pooled, 99.0))
+        assert limits == {(-expected, expected)}, limits
+
+    def test_the_hatch_covers_the_rejected_cells_of_every_plane(self, monkeypatch, tmp_path):
+        """Same direction as in 2-D (``contourf`` fills the unmasked cells): on each
+        plane the hatch spans the panel and leaves a hole at the significant block."""
+        volume, significant = _volume_fixture()
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {"t": volume}, sig_grids={"t": significant},
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        for ax in _image_axes(fig):
+            rows, cols = np.asarray(ax.images[0].get_array()).shape
+            hatched = _hatched(ax)
+            assert len(hatched) == 1, "the plane has no hatch, or two"
+            extent = hatched[0].get_paths()[0].get_extents()
+            assert extent.x0 <= 0.5 and extent.y0 <= 0.5
+            assert extent.x1 >= cols - 1.5 and extent.y1 >= rows - 1.5
+        plt.close(fig)
+
+    def test_a_3d_cluster_grid_is_a_montage_with_one_panel_per_slice(
+        self, monkeypatch, tmp_path
+    ):
+        labels = np.zeros((5, 6, 6), dtype=int)
+        labels[1:4, 1:3, 1:3] = 1
+        labels[2:5, 3:6, 3:6] = 2
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_cluster_overlay(labels, output_path=str(tmp_path / "m.png")),
+        )
+        assert len(_image_axes(fig)) == 5
+        plt.close(fig)
+        assert (tmp_path / "m.png").stat().st_size > 0
+
+    def test_the_montage_reports_the_clusters_it_could_not_colour(
+        self, monkeypatch, tmp_path
+    ):
+        """Same truncation rule as the 2-D overlay: 14 ids, 12 coloured, the other
+        two named in the figure rather than silently dropped."""
+        flat = np.zeros(4 * 6 * 6, dtype=int)
+        flat[np.arange(14) * 5] = np.arange(1, 15)      # 14 distinct single cells
+        labels = flat.reshape(4, 6, 6)
+        assert len(np.unique(labels[labels > 0])) == 14
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_cluster_overlay(labels, output_path=str(tmp_path / "m.png")),
+        )
+        texts = [t.get_text() for t in fig.findobj(matplotlib.text.Text)]
+        plt.close(fig)
+        assert any("+2 not coloured" in text for text in texts), texts

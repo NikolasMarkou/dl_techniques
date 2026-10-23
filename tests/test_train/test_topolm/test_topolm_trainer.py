@@ -1479,3 +1479,517 @@ def _load_synthetic(rows=16, batch_size=4):
         (tokens[:8], labels[:8])
     ).batch(batch_size)
     return train, validation, rows
+
+# =====================================================================
+# plan-2026-10-23T190557-972a9ac5, step 1: pins and RED tests
+#
+# ``TestTwoDimensionalUnchanged*`` record what the trainer produces for a 2-D
+# variant at commit 9a1a446ec and stay green through every later step (the only
+# permitted change is the additive ``viz_every_steps`` field). The remaining
+# classes were RED when written, each for the reason in its docstring; the old
+# tests that pin the behaviour being replaced are NOT edited here (step 3 and
+# step 5 rewrite them, with the reason in each docstring).
+# =====================================================================
+
+import types
+
+from scipy import ndimage
+
+from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
+from dl_techniques.metrics.spatial_autocorrelation import morans_i_grid
+from dl_techniques.metrics.topographic_selectivity import fdr_across_layers
+
+from .test_cli_contract import BASELINE_2D_CONFIG
+
+_PLANT_STIMULI = {
+    "a": [f"a sentence {i}" for i in range(5)],
+    "b": [f"b sentence {i}" for i in range(5)],
+}
+#: Zero-mean jitter, identical in every unit and condition ``a`` only. With
+#: condition ``b`` held at zero, the Student t of a unit with effect ``e`` is
+#: ``e / 0.0707`` (pooled variance 0.0125, five rows each), i.e. linear in ``e``
+#: and exactly ``0`` for ``e = 0``.
+_JITTER = 0.1 * np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+
+
+def _stub_backbone(
+    num_units=256, grid_dim=2, permute=True, seeds=(11, 12, 13), grid_shape=None
+):
+    """A model-free backbone: what ``evaluate_topography`` reads and nothing else.
+
+    Real :class:`SpatialLayout` objects, one per tap with its own seed, so each
+    tap has its own unit order -- but no weights, no tokenizer and no forward, so
+    the test controls the activations exactly (see :func:`_plant`).
+    """
+    layouts = [
+        SpatialLayout(
+            num_units, grid_shape=grid_shape, permute=permute, seed=seed,
+            grid_dim=grid_dim,
+        )
+        for seed in seeds
+    ]
+    taps = [
+        types.SimpleNamespace(path=f"blocks.{index}.ffn/attn_pre", layout=layout)
+        for index, layout in enumerate(layouts)
+    ]
+    return types.SimpleNamespace(
+        grid_shape=layouts[0].grid_shape, grid_dim=grid_dim, tap_layers=taps,
+        built=True,
+    )
+
+
+def _plant(monkeypatch, backbone, effects):
+    """Replace the forward pass with planted activations; return them per condition.
+
+    Condition ``a`` is ``effect + jitter`` and condition ``b`` is zero, per tap
+    and per unit, so the t-value of a unit is a known function of its effect and
+    nothing else. ``effects`` is ``{tap_path: (num_units,)}`` in UNIT order.
+    Returns ``{condition: {tap_path: (5, num_units)}}``, the arrays the patched
+    ``extract_tap_activations`` hands out, so an oracle can start from them.
+    """
+    def activations_for(prompts):
+        is_a = prompts[0].startswith("a")
+        activations = {}
+        for tap in backbone.tap_layers:
+            effect = np.asarray(effects[tap.path], dtype="float64")
+            rows = np.zeros((len(prompts), effect.size))
+            if is_a:
+                rows = rows + effect[None, :] + _JITTER[:, None]
+            activations[tap.path] = rows
+        return activations
+
+    monkeypatch.setattr(
+        C, "extract_tap_activations",
+        lambda backbone_, prompts, preprocessor, batch_size=32: activations_for(
+            list(prompts)
+        ),
+    )
+    return {
+        condition: activations_for(prompts)
+        for condition, prompts in _PLANT_STIMULI.items()
+    }
+
+
+def _evaluate_planted(backbone, readout_fwhm=None, **overrides):
+    settings = dict(
+        stimuli=_PLANT_STIMULI, contrast_conditions=("a", "b"),
+        preprocessor=None, readout_fwhm=readout_fwhm, min_cluster_size=2,
+    )
+    settings.update(overrides)
+    return evaluate_topography(backbone, **settings)
+
+
+def _block_effect(layout, lows, highs, value=1.0):
+    """Unit-order effects: ``value`` for units whose POSITION lies in the box."""
+    effect = np.zeros(layout.num_units)
+    for unit in range(layout.num_units):
+        cell = tuple(int(c) for c in layout.positions[unit])
+        if all(lo <= c < hi for c, lo, hi in zip(cell, lows, highs)):
+            effect[unit] = value
+    return effect
+
+
+def _on_grid_by_positions(layout, per_unit):
+    """The expected map: a plain loop through ``layout.positions``.
+
+    Shares nothing with the code under test (no ``to_grid``, no
+    ``cell_to_unit``, no reshape), which is the whole point of an oracle.
+    """
+    grid = np.zeros(layout.grid_shape, dtype=np.asarray(per_unit).dtype)
+    for unit in range(layout.num_units):
+        grid[tuple(int(c) for c in layout.positions[unit])] = per_unit[unit]
+    return grid
+
+
+def _expected_arm(backbone, activations, arm_activations=None):
+    """Per tap: the unit-order t and BH-FDR rejection, then placed by positions."""
+    from dl_techniques.metrics.topographic_selectivity import contrast_tmap
+
+    t_units, p_units = {}, {}
+    for tap in backbone.tap_layers:
+        source = (arm_activations or activations)
+        t_units[tap.path], p_units[tap.path] = contrast_tmap(
+            source["a"][tap.path], source["b"][tap.path]
+        )
+    rejected = fdr_across_layers(p_units, alpha=0.05)
+    return {
+        tap.path: (
+            _on_grid_by_positions(tap.layout, t_units[tap.path]),
+            _on_grid_by_positions(
+                tap.layout, np.asarray(rejected[tap.path]["reject"], dtype=bool)
+            ),
+        )
+        for tap in backbone.tap_layers
+    }
+
+
+class TestTheMapPlacementFollowsTheLayout:
+    """D-001: unit ``i`` sits at cell ``layout.positions[i]``, so a unit-order
+    t-vector must be SCATTERED onto the grid, not reshaped.
+
+    RED on the baseline for the reason the plan names: ``evaluate_topography``
+    reshapes (``t_maps[name].reshape(grid_shape)``), which is only the right
+    placement when the layout is the identity. Every oracle here is a loop
+    through ``layout.positions``.
+    """
+
+    def _blocks(self, backbone):
+        """A different 5x5 block per tap, as (low, high) boxes on the 16x16 grid."""
+        return {
+            tap.path: ((3 + k, 4 + 2 * k), (8 + k, 9 + 2 * k))
+            for k, tap in enumerate(backbone.tap_layers)
+        }
+
+    def test_the_raw_arm_puts_t_and_significance_on_the_cells_of_their_units(
+        self, monkeypatch
+    ):
+        backbone = _stub_backbone()
+        boxes = self._blocks(backbone)
+        effects = {
+            tap.path: _block_effect(tap.layout, *boxes[tap.path])
+            for tap in backbone.tap_layers
+        }
+        activations = _plant(monkeypatch, backbone, effects)
+
+        report, arrays = _evaluate_planted(backbone)
+
+        expected = _expected_arm(backbone, activations)
+        for tap in backbone.tap_layers:
+            t_expected, sig_expected = expected[tap.path]
+            t_drawn = arrays["arms"]["raw"]["t_maps"][tap.path]
+            sig_drawn = arrays["arms"]["raw"]["sig_grids"][tap.path]
+            np.testing.assert_allclose(t_drawn, t_expected, rtol=1e-9, atol=1e-9)
+            np.testing.assert_array_equal(sig_drawn, sig_expected)
+            # The planted block IS the significant set (25 cells), on the grid.
+            lows, highs = boxes[tap.path]
+            block = np.zeros(tap.layout.grid_shape, dtype=bool)
+            block[lows[0]:highs[0], lows[1]:highs[1]] = True
+            np.testing.assert_array_equal(sig_drawn, block)
+
+    def test_the_planted_block_is_one_cluster_on_its_own_cells(self, monkeypatch):
+        """Clusters grown on a scrambled map are scattered singletons; on the
+        placed map the block is ONE cluster of 25 whose label grid is the block."""
+        backbone = _stub_backbone()
+        boxes = self._blocks(backbone)
+        effects = {
+            tap.path: _block_effect(tap.layout, *boxes[tap.path])
+            for tap in backbone.tap_layers
+        }
+        _plant(monkeypatch, backbone, effects)
+
+        report, arrays = _evaluate_planted(backbone)
+
+        for tap in backbone.tap_layers:
+            entry = report["arms"]["raw"]["per_tap"][tap.path]
+            assert entry["cluster_sizes_a"] == [25], entry["cluster_sizes_a"]
+            assert entry["cluster_sizes_b"] == []
+            lows, highs = boxes[tap.path]
+            labels = arrays["arms"]["raw"]["label_grids"][tap.path]
+            assert {tuple(int(v) for v in c) for c in np.argwhere(labels > 0)} == {
+                (r, c)
+                for r in range(lows[0], highs[0])
+                for c in range(lows[1], highs[1])
+            }
+
+    def test_the_readout_arm_is_placed_the_same_way(self, monkeypatch):
+        """The readout returns activations in UNIT order (pinned below), so its
+        t-map needs the same scatter; the expected map blurs the same planted
+        activations with the same readout and places them by positions."""
+        backbone = _stub_backbone()
+        boxes = self._blocks(backbone)
+        effects = {
+            tap.path: _block_effect(tap.layout, *boxes[tap.path])
+            for tap in backbone.tap_layers
+        }
+        activations = _plant(monkeypatch, backbone, effects)
+        blurred = {
+            condition: C._apply_readout(values, backbone, 2.0, 1.0)
+            for condition, values in activations.items()
+        }
+
+        _, arrays = _evaluate_planted(backbone, readout_fwhm=2.0)
+
+        expected = _expected_arm(backbone, activations, arm_activations=blurred)
+        for tap in backbone.tap_layers:
+            t_expected, sig_expected = expected[tap.path]
+            np.testing.assert_allclose(
+                arrays["arms"]["readout"]["t_maps"][tap.path], t_expected,
+                rtol=1e-9, atol=1e-9,
+            )
+            np.testing.assert_array_equal(
+                arrays["arms"]["readout"]["sig_grids"][tap.path], sig_expected
+            )
+        # The two arms must also differ, or the readout assertion above would be
+        # satisfied by the raw map.
+        tap = backbone.tap_layers[0].path
+        assert not np.allclose(
+            arrays["arms"]["raw"]["t_maps"][tap],
+            arrays["arms"]["readout"]["t_maps"][tap],
+        )
+
+    def test_a_field_smooth_on_the_layout_scores_high_placement_permute_true(
+        self, monkeypatch
+    ):
+        """The user-visible symptom: a map that is smooth on the layout grid has a
+        high Moran's I only if it is placed on that grid. MEASURED on 28x28 by the
+        explorer: 0.7927 through ``to_grid`` against 0.0005 through ``reshape``;
+        here on 16x16: 0.7541 for the field itself against -0.0048 on the
+        baseline, whose reshape scrambles it."""
+        backbone = _stub_backbone()
+        field = ndimage.gaussian_filter(
+            np.random.default_rng(3).normal(size=(16, 16)), 2.0, mode="nearest"
+        )
+        effects = {
+            tap.path: np.array(
+                [field[tuple(int(c) for c in tap.layout.positions[u])]
+                 for u in range(256)]
+            )
+            for tap in backbone.tap_layers
+        }
+        _plant(monkeypatch, backbone, effects)
+
+        report, arrays = _evaluate_planted(backbone)
+
+        # t is linear in the effect, so its Moran's I is the field's own.
+        target = morans_i_grid(field)
+        assert target > 0.5, "the fixture is not smooth enough to discriminate"
+        for tap in backbone.tap_layers:
+            standard = report["arms"]["raw"]["per_tap"][tap.path]["morans_i"]["standard"]
+            assert standard == pytest.approx(target, abs=1e-9)
+            drawn = arrays["arms"]["raw"]["t_maps"][tap.path]
+            assert morans_i_grid(drawn) == pytest.approx(target, abs=1e-9)
+
+
+class TestTwoDimensionalUnchangedPlacementWithoutPermutation:
+    """The half of D-001 that must NOT move: with an identity layout the reshape
+    and the scatter are the same map, and the correct code keeps returning it."""
+
+    def test_permute_false_old_reshape_and_new_placement_agree(self, monkeypatch):
+        backbone = _stub_backbone(permute=False)
+        effects = {
+            tap.path: _block_effect(tap.layout, (3 + k, 4 + k), (8 + k, 9 + k))
+            for k, tap in enumerate(backbone.tap_layers)
+        }
+        activations = _plant(monkeypatch, backbone, effects)
+
+        _, arrays = _evaluate_planted(backbone)
+
+        from dl_techniques.metrics.topographic_selectivity import contrast_tmap
+
+        for tap in backbone.tap_layers:
+            t_units = contrast_tmap(
+                activations["a"][tap.path], activations["b"][tap.path]
+            )[0]
+            drawn = arrays["arms"]["raw"]["t_maps"][tap.path]
+            np.testing.assert_allclose(drawn, t_units.reshape(16, 16), atol=1e-12)
+            np.testing.assert_allclose(
+                drawn, _on_grid_by_positions(tap.layout, t_units), atol=1e-12
+            )
+            assert drawn.max() > 5.0, "the planted block was not detected"
+
+    def test_the_readout_returns_unit_order_so_it_needs_the_same_scatter(self):
+        """The assumption D-001 rests for the readout arm (plan Assumption 2):
+        an impulse on unit ``u`` blurs into a bump around ``positions[u]`` on the
+        grid, i.e. ``_apply_readout`` hands back UNIT order, not grid order. Seen
+        through positions only; the same vector reshaped has its peak elsewhere."""
+        layout = SpatialLayout(256, seed=7)
+        backbone = types.SimpleNamespace(
+            tap_layers=[types.SimpleNamespace(path="t0", layout=layout)]
+        )
+        impulse = np.zeros((1, 256))
+        impulse[0, 37] = 1.0
+        blurred = C._apply_readout({"t0": impulse}, backbone, 2.0, 1.0)["t0"][0]
+
+        by_position = _on_grid_by_positions(layout, blurred)
+        assert tuple(np.unravel_index(by_position.argmax(), by_position.shape)) == tuple(
+            int(c) for c in layout.positions[37]
+        )
+        near = [
+            u for u in range(256)
+            if np.abs(layout.positions[u] - layout.positions[37]).max() <= 2
+        ]
+        assert blurred[near].sum() / blurred.sum() > 0.99
+        assert tuple(np.unravel_index(blurred.argmax(), (16, 16))) != tuple(
+            int(c) for c in layout.positions[37]
+        ), "the permutation is the identity here, so this proves nothing"
+
+
+# ---------------------------------------------------------------------
+# 2-D pins that must survive the 3-D enablement
+# ---------------------------------------------------------------------
+
+
+class TestTwoDimensionalUnchangedReport:
+    """The shape of ``topography_report.json`` and of the figure set for a 2-D run."""
+
+    def _report(self):
+        backbone = build_backbone(_config())
+        return evaluate_topography(
+            backbone, stimuli=SMOKE_STIMULI, contrast_conditions=("a", "b"),
+            preprocessor=StubTokenizer(), readout_fwhm=2.0, min_cluster_size=2,
+        )
+
+    def test_the_report_has_exactly_these_keys_at_every_level(self):
+        report, arrays = self._report()
+        assert sorted(report) == [
+            "arms", "conditions", "contrast", "fdr_alpha", "fdr_scope",
+            "grid_shape", "num_taps", "stimuli_are_smoke_set",
+        ]
+        assert sorted(report["arms"]) == ["raw", "readout"]
+        for arm in report["arms"].values():
+            assert sorted(arm) == [
+                "mean_morans_i", "mean_num_significant_units", "per_tap",
+                "readout_fwhm", "total_clusters_a", "total_clusters_b",
+            ]
+            for tap in arm["per_tap"].values():
+                assert sorted(tap) == [
+                    "cluster_sizes_a", "cluster_sizes_b", "morans_i",
+                    "num_significant_units",
+                ]
+                assert sorted(tap["morans_i"]) == [
+                    "connectivity", "islands", "num_permutations", "num_units",
+                    "permutation_p", "standard",
+                ]
+        assert report["grid_shape"] == [16, 16]
+        assert report["fdr_scope"] == "joint across all taps"
+        assert sorted(arrays) == ["arms"]
+        assert sorted(arrays["arms"]["raw"]) == ["label_grids", "sig_grids", "t_maps"]
+
+    def test_the_raw_only_report_has_the_same_keys_without_a_readout_section(self):
+        backbone = build_backbone(_config())
+        report, _ = evaluate_topography(
+            backbone, stimuli=SMOKE_STIMULI, contrast_conditions=("a", "b"),
+            preprocessor=StubTokenizer(), readout_fwhm=None, min_cluster_size=2,
+        )
+        assert sorted(report["arms"]) == ["raw"]
+        assert "readout_skipped" not in report
+
+    @staticmethod
+    def _synthetic(with_cluster):
+        """A report and arrays for two arms, drawn without a model."""
+        names = [f"blocks.{i}.ffn/attn_pre" for i in range(3)]
+        grid = np.random.default_rng(5).normal(size=(8, 8))
+        labels = np.zeros((8, 8), dtype=int)
+        if with_cluster:
+            labels[2:5, 2:5] = 1
+        report = {
+            "contrast": ["a", "b"],
+            "arms": {
+                arm: {"per_tap": {n: {"morans_i": {"standard": 0.1 * i}}
+                                  for i, n in enumerate(names)}}
+                for arm in ("raw", "readout")
+            },
+        }
+        arrays = {
+            "arms": {
+                arm: {
+                    "t_maps": {n: grid for n in names},
+                    "sig_grids": {n: np.abs(grid) > 1.5 for n in names},
+                    "label_grids": {n: labels for n in names},
+                }
+                for arm in ("raw", "readout")
+            }
+        }
+        return report, arrays
+
+    def test_the_figure_files_are_named_per_arm(self, tmp_path):
+        report, arrays = self._synthetic(with_cluster=True)
+        written = plot_topography(report, arrays, str(tmp_path))
+        assert sorted(os.path.basename(p) for p in written) == [
+            "clusters_raw.png", "clusters_readout.png", "morans_i_raw.png",
+            "morans_i_readout.png", "t_maps_raw.png", "t_maps_readout.png",
+        ]
+        assert sorted(os.listdir(tmp_path)) == sorted(
+            os.path.basename(p) for p in written
+        )
+
+    def test_no_cluster_means_no_cluster_figure(self, tmp_path):
+        report, arrays = self._synthetic(with_cluster=False)
+        written = plot_topography(report, arrays, str(tmp_path))
+        assert sorted(os.path.basename(p) for p in written) == [
+            "morans_i_raw.png", "morans_i_readout.png", "t_maps_raw.png",
+            "t_maps_readout.png",
+        ]
+
+
+class TestTwoDimensionalUnchangedConfig:
+    def test_config_json_keys_are_the_baseline_fields(self, tmp_path):
+        """``config.json`` is the dataclass, field for field. The one permitted
+        addition (later) is ``viz_every_steps``; any other new, renamed or
+        removed key fails here."""
+        import json
+
+        config = pretrain_cli._config_from_args(
+            pretrain_cli._build_parser().parse_args([])
+        )
+        C.prepare_run_dir(
+            config, output_dir=str(tmp_path), config_filename="config.json"
+        )
+        written = json.loads((tmp_path / "config.json").read_text())
+        assert sorted(set(written) - {"viz_every_steps"}) == sorted(BASELINE_2D_CONFIG)
+        if "viz_every_steps" in written:
+            assert written["viz_every_steps"] == 0
+
+    def test_a_2d_variant_keeps_radius_five_and_readout_two(self):
+        """The config-level defaults the resolver must not move for 2-D rows."""
+        parser = pretrain_cli._build_parser()
+        for name in ("small", "tiny", "paper"):
+            config = pretrain_cli._config_from_args(
+                parser.parse_args(["--variant", name])
+            )
+            assert config.spatial_radius == 5, name
+            assert config.readout_fwhm == 2.0, name
+
+
+# ---------------------------------------------------------------------
+# D-006: the radius comes from the variant row
+# ---------------------------------------------------------------------
+
+
+class TestRadiusResolution:
+    """RED on the baseline: ``resolve_spatial_radius`` does not exist, and
+    ``build_backbone`` always passes ``config.spatial_radius`` (default 5), which
+    overrides the row's own radius and fits no 3-D width in the table."""
+
+    def test_the_resolver_is_importable(self):
+        from train.topolm.common import resolve_spatial_radius  # noqa: F401
+
+    @pytest.mark.parametrize(
+        "variant,expected",
+        [("small", 5), ("tiny", 5), ("paper", 5), ("tiny3d", 2), ("paper3d", 4)],
+    )
+    def test_an_unset_radius_is_the_rows_own_or_the_default(self, variant, expected):
+        from train.topolm.common import resolve_spatial_radius
+
+        config = TopoLMTrainingConfig(model_variant=variant, spatial_radius=None)
+        assert resolve_spatial_radius(config) == expected
+
+    @pytest.mark.parametrize("variant", ["small", "tiny3d", "paper3d"])
+    def test_an_explicit_radius_wins_over_the_row(self, variant):
+        from train.topolm.common import resolve_spatial_radius
+
+        config = TopoLMTrainingConfig(model_variant=variant, spatial_radius=3)
+        assert resolve_spatial_radius(config) == 3
+
+    def test_the_dataclass_default_means_unset(self):
+        assert TopoLMTrainingConfig().spatial_radius is None
+
+    def test_a_3d_backbone_is_built_at_the_rows_radius(self):
+        """No refusal and no override: ``tiny3d`` at its own radius 2."""
+        backbone = build_backbone(
+            _config(model_variant="tiny3d", spatial_radius=None, num_layers=2)
+        )
+        assert tuple(backbone.grid_shape) == (7, 7, 7)
+        assert backbone.radius == 2
+
+
+class TestVizEveryStepsField:
+    """RED on the baseline: the field does not exist."""
+
+    def test_it_defaults_to_off(self):
+        assert TopoLMTrainingConfig().viz_every_steps == 0
+
+    def test_it_is_additive_to_the_inherited_fields(self):
+        names = [f.name for f in TopoLMTrainingConfig.__dataclass_fields__.values()]
+        assert "viz_every_steps" in names
+        assert names.index("viz_every_steps") > names.index("spatial_radius")
