@@ -159,13 +159,29 @@ class CliffordNet(keras.Model):
 
     .. code-block:: text
 
-        variant   channels  depth  shifts           global context
-        nano           128     12  1, 2             no
-        lite           128     12  1, 2, 4, 8, 16   no
-        lite_g         128     12  1, 2, 4, 8, 16   yes
+        variant   channels  depth  patch  shifts           cli_mode  global
+        nano           128     12      2  1, 2             full      no
+        lite           128     12      2  1, 2, 4, 8, 16   full      no
+        lite_g         128     12      2  1, 2, 4, 8, 16   full      yes
+        nano_g         128     12      2  1, 2             full      yes
+        cn_12_3        160     12      1  1, 2, 4          full      no
+        cn_18_5        128     18      2  1, 2, 4, 8, 16   full      no
+        cn_32_3        128     32      2  1, 2, 4          full      no
+        cn_32_5        128     32      2  1, 2, 4, 8, 16   inner     no
+        cn_64_5        128     64      2  1, 2, 4, 8, 16   inner     no
 
-    All three use ``patch_size=2``, ``cli_mode='full'``, ``ctx_mode='diff'``,
-    ``layer_scale_init=1e-5`` and ``TruncatedNormal(0.02)`` kernels.
+    ``nano``, ``lite`` and ``nano_g``/``lite_g`` are CliffordNet-Nano, -Lite and
+    their +gFFN-G rows of the paper (arXiv:2601.06793v2, table 3). ``cn_<depth>_<shifts>``
+    are the factories of the authors' ``networks.py`` (github.com/ParaMind2025/CAN,
+    read through a fetch summary): ``cn_32_3`` is the paper's CliffordNet-32 and
+    ``cn_64_5`` its CliffordNet-64. The authors train ``cn_64_5`` with drop path 0.4
+    and every other preset with 0.3; that rate is a trainer argument here, not part
+    of the preset. ``cn_12_3`` uses ``patch_size=1``, whose stem was not compared
+    with the authors'. Parameter counts at 100 classes are pinned in
+    ``tests/test_models/test_cliffordnet/test_paper_v2_variants.py``.
+
+    Every preset uses ``ctx_mode='diff'``, ``layer_scale_init=1e-5`` and
+    ``TruncatedNormal(0.02)`` kernels.
 
     :param num_classes: Number of output classes. Must be positive.
     :param channels: Feature dimensionality ``D`` (constant throughout). Must
@@ -684,6 +700,72 @@ class CliffordNet(keras.Model):
             layer_scale_init=1e-5,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
+        "nano_g": dict(
+            channels=128,
+            depth=12,
+            patch_size=2,
+            shifts=[1, 2],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=True,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "cn_12_3": dict(
+            channels=160,
+            depth=12,
+            patch_size=1,
+            shifts=[1, 2, 4],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "cn_18_5": dict(
+            channels=128,
+            depth=18,
+            patch_size=2,
+            shifts=[1, 2, 4, 8, 16],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "cn_32_3": dict(
+            channels=128,
+            depth=32,
+            patch_size=2,
+            shifts=[1, 2, 4],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "cn_32_5": dict(
+            channels=128,
+            depth=32,
+            patch_size=2,
+            shifts=[1, 2, 4, 8, 16],
+            cli_mode="inner",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "cn_64_5": dict(
+            channels=128,
+            depth=64,
+            patch_size=2,
+            shifts=[1, 2, 4, 8, 16],
+            cli_mode="inner",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
     }
 
     @classmethod
@@ -698,7 +780,7 @@ class CliffordNet(keras.Model):
     ) -> "CliffordNet":
         """Create a :class:`CliffordNet` from a predefined variant.
 
-        :param variant: One of ``"nano"``, ``"lite"``, ``"lite_g"``.
+        :param variant: A key of :attr:`MODEL_VARIANTS` (see the class docstring table).
         :param num_classes: Number of output classes.
         :param pretrained: A local path to a ``.keras`` weights file. ``True``
             attempts a download, which always raises ``NotImplementedError``
@@ -844,7 +926,7 @@ def create_cliffordnet(
     :func:`dl_techniques.models.vision.resnet.model.create_resnet` and
     :func:`dl_techniques.models.language.tree_transformer.model.create_tree_transformer`.
 
-    :param variant: Model variant, one of ``"nano"``, ``"lite"``, ``"lite_g"``.
+    :param variant: Model variant, a key of ``CliffordNet.MODEL_VARIANTS``.
     :type variant: str
     :param num_classes: Number of output classes.
     :type num_classes: int
