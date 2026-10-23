@@ -110,7 +110,10 @@ from dl_techniques.metrics.topographic_selectivity import (
 from dl_techniques.models.common.masked_language_model import (
     CausalLanguageModel,
 )
-from dl_techniques.models.language.topolm import TopoLM, grid_shape_of
+from dl_techniques.models.language.topolm import (
+    DEFAULT_RADIUS,
+    TopoLM,
+)
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.utils.logger import logger
 
@@ -164,6 +167,11 @@ SMOKE_STIMULI: Dict[str, List[str]] = {
 }
 
 
+#: The readout FWHM a 2D run gets when none is typed: the config default, and what
+#: the CLI resolves an unset ``--readout-fwhm`` to on a 2D variant.
+DEFAULT_READOUT_FWHM = 2.0
+
+
 @dataclass
 class TopoLMTrainingConfig(ClmPretrainConfig):
     """Configuration for TopoLM pre-training.
@@ -174,8 +182,11 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
 
     :ivar spatial_alpha: Weight on every tap's spatial loss. ``0`` trains the
         non-topographic control, with an identical weight set.
-    :ivar spatial_radius: Neighbourhood radius; in this 2D trainer a radius-``r``
-        patch holds ``(2 * r + 1) ** 2`` units, so the width must be at least that.
+    :ivar spatial_radius: Neighbourhood radius, or ``None`` for "the variant's
+        own" (:func:`resolve_spatial_radius`: the row's ``radius``, else the
+        paper's 5). A radius-``r`` patch holds ``(2 * r + 1) ** grid_dim`` units,
+        so every axis of the grid must be at least ``2 * r + 1`` across; the 3D
+        rows carry the radius their grid can hold (``tiny3d`` 2, ``paper3d`` 4).
     :ivar spatial_neighborhoods: Neighbourhoods sampled per tap per step, and
         averaged. ``5`` is the paper's value.
     :ivar spatial_distance: Distance metric behind each tap's prior. ``'linf'`` is
@@ -194,7 +205,10 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
     :ivar early_stop_patience: Consecutive increases tolerated. The paper's 3.
     :ivar spatial_log_every: Batches between spatial-loss log entries.
     :ivar readout_fwhm: FWHM for the simulated fMRI readout. ``None`` disables
-        the smoothed arm of the evaluation.
+        the smoothed arm of the evaluation. The Gaussian readout is 2-D, so on a
+        3D backbone a value set here is skipped with one log line and a
+        ``readout_skipped`` note in the report (the CLI refuses a typed value for
+        a 3D variant instead).
     :ivar readout_unit_spacing: Inter-unit spacing for the readout kernel.
     :ivar min_cluster_size: Smallest cluster the post-hoc sweep keeps.
     :ivar permutation_p_value: Also score Moran's I against spatial randomness
@@ -212,7 +226,7 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
 
     # Topographic objective
     spatial_alpha: float = 2.5
-    spatial_radius: int = 5
+    spatial_radius: Optional[int] = None
     spatial_neighborhoods: int = 5
     spatial_distance: str = "linf"
     spatial_permute: bool = True
@@ -226,7 +240,7 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
     spatial_log_every: int = 100
 
     # Topographic evaluation
-    readout_fwhm: Optional[float] = 2.0
+    readout_fwhm: Optional[float] = DEFAULT_READOUT_FWHM
     readout_unit_spacing: float = 1.0
     min_cluster_size: int = 10
     permutation_p_value: bool = False
@@ -315,50 +329,41 @@ def _grid_label(grid: Sequence[int]) -> str:
     return "x".join(str(int(g)) for g in grid)
 
 
-def _require_two_dimensional_variant(variant: str) -> None:
-    """Refuse a variant whose row asks for a grid of another rank than two, by name.
+def resolve_spatial_radius(config: TopoLMTrainingConfig) -> int:
+    """The neighbourhood radius a run actually uses.
 
-    The trainer's evaluation and plots are 2D-only (the t-map panels, cluster
-    growth, Moran's I and the Gaussian readout all take a ``(height, width)``
-    map), and evaluation runs only after the whole training run, so a 3D model
-    that got this far would train to the end and then die inside
-    ``grow_clusters``. This is checked on the variant's ROW, before anything is
-    built or written, for two reasons: the row's own ``radius`` is overridden by
-    the trainer's ``spatial_radius`` (default 5, which a 3D width cannot hold), so
-    building first would raise a less helpful axis error; and
-    :func:`train_topolm` calls it before ``os.makedirs`` so a refusal leaves no
-    directory behind.
+    An explicit ``config.spatial_radius`` wins. Unset (``None``), the variant's
+    own row decides (``tiny3d`` 2, ``paper3d`` 4: the largest radius their grid
+    holds), and a row without a ``radius`` (the three 2D variants) gets the
+    paper's :data:`~dl_techniques.models.language.topolm.DEFAULT_RADIUS`. An
+    unknown variant name falls through to the default and is reported by
+    ``TopoLM.from_variant`` with the list of available names, as before.
 
-    An unknown name is not this function's business: it returns, and
-    ``TopoLM.from_variant`` lists the available names exactly as before.
+    Contract: ``config`` needs ``model_variant`` and ``spatial_radius``; returns
+    a plain ``int``; never raises. Called by :func:`build_backbone`, the CLI's
+    ``_config_from_args`` and :func:`train_topolm`, so the model, ``config.json``
+    and the log lines all name the same integer.
 
-    :param variant: The ``model_variant`` of the run.
-    :type variant: str
-    :raises ValueError: If the row carries ``grid_dim != 2`` -- naming the variant,
-        its width and grid, and that the trainer is 2D-only.
+    :param config: The run's configuration.
+    :type config: TopoLMTrainingConfig
+    :return: The radius, in grid units.
+    :rtype: int
     """
-    # DECISION plan-2026-10-23T141429-390f3815/D-010: refuse on the variant's ROW,
-    # by name, before anything is built or written. Do NOT leave it to the built
-    # backbone's rank (the trainer overrides the row's radius with
-    # spatial_radius=5, so the build raises an axis error that never mentions the
-    # trainer) and do NOT leave it to a `height, width = grid_shape` unpack (which
-    # names nothing, and is now rank-agnostic). Do NOT add a --grid-dim flag
-    # instead: the 3D evaluation does not exist (see decisions.md D-010).
-    row = TopoLM.MODEL_VARIANTS.get(variant)
-    if row is None:
-        return
-    grid_dim = int(row.get("grid_dim", 2))
-    if grid_dim == 2:
-        return
-    grid = _grid_label(grid_shape_of(int(row["embed_dim"]), grid_dim))
-    raise ValueError(
-        f"variant {variant!r} lays its {int(row['embed_dim'])} units out on a "
-        f"{grid} grid (grid_dim={grid_dim}), but this trainer's evaluation and "
-        f"plots are 2D-only: the t-map panels, cluster growth, Moran's I and the "
-        f"Gaussian readout all take a (height, width) map. Train it by calling "
-        f"the model directly, or choose a 2D variant "
-        f"{sorted(n for n, r in TopoLM.MODEL_VARIANTS.items() if int(r.get('grid_dim', 2)) == 2)}."
-    )
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-006: an unset radius is the
+    # variant row's own, resolved HERE and recorded as an integer. Do NOT default
+    # it to 5 for a variant whose row carries a radius: 5 needs every axis at
+    # least 11 across, which no 3D width in the table has, and it overrode the row
+    # through from_variant's `config.update(kwargs)`. Do NOT resolve it inside
+    # build_backbone only: the CLI's _config_from_args and train_topolm resolve it
+    # too, so config.json, the log lines and the model all see the same integer
+    # (a 2D variant still records 5). Do NOT add a --grid-dim flag: the rank is a
+    # property of the variant row. See decisions.md D-006; guarded by
+    # TestRadiusResolution, TestRadiusPerVariant and
+    # TestThreeDimensionalVariantsTrain.
+    if config.spatial_radius is not None:
+        return int(config.spatial_radius)
+    row = TopoLM.MODEL_VARIANTS.get(config.model_variant, {})
+    return int(row.get("radius", DEFAULT_RADIUS))
 
 
 def build_backbone(
@@ -376,12 +381,10 @@ def build_backbone(
     :type required_vocab_size: Optional[int]
     :return: A randomly initialised TopoLM matching ``config``.
     :rtype: TopoLM
-    :raises ValueError: If ``config.tap_sites`` is not a recognised value,
-        ``config.vocab_size`` is below ``required_vocab_size``, or the variant
-        (or the built backbone) is not laid out on a 2D grid.
+    :raises ValueError: If ``config.tap_sites`` is not a recognised value or
+        ``config.vocab_size`` is below ``required_vocab_size``; the model itself
+        raises when a grid axis cannot hold the radius.
     """
-    _require_two_dimensional_variant(config.model_variant)
-
     if required_vocab_size is not None and config.vocab_size < int(
         required_vocab_size
     ):
@@ -405,7 +408,7 @@ def build_backbone(
         "attention_dropout_rate": config.attention_dropout_rate,
         "tie_word_embeddings": config.tie_word_embeddings,
         "alpha": config.spatial_alpha,
-        "radius": config.spatial_radius,
+        "radius": resolve_spatial_radius(config),
         "num_neighborhoods": config.spatial_neighborhoods,
         "distance": config.spatial_distance,
         "permute": config.spatial_permute,
@@ -426,22 +429,12 @@ def build_backbone(
             f"the first batch dies in positional_embeddings with an "
             f"out-of-range Gather"
         )
-    # The row check above covers a variant that carries grid_dim; this one covers
-    # every other route to a non-2D backbone, so the unpack-free form below cannot
-    # hand a 3D grid to the 2D evaluation.
-    if len(backbone.grid_shape) != 2:
-        raise ValueError(
-            f"variant {config.model_variant!r} built a "
-            f"{_grid_label(backbone.grid_shape)} grid (grid_dim="
-            f"{backbone.grid_dim}), but this trainer's evaluation and plots are "
-            f"2D-only"
-        )
     logger.info(
         f"Backbone: variant={config.model_variant}, "
         f"embed_dim={backbone.embed_dim}, depth={backbone.depth}, "
         f"heads={backbone.num_heads}, grid={_grid_label(backbone.grid_shape)}, "
         f"{len(backbone.tap_layers)} taps at alpha={config.spatial_alpha} "
-        f"(radius {config.spatial_radius}, {config.spatial_distance}, "
+        f"(radius {backbone.radius}, {config.spatial_distance}, "
         f"permute={config.spatial_permute}, sites={list(backbone.tap_sites)})"
     )
     return backbone
@@ -757,8 +750,13 @@ def evaluate_topography(
     num_permutations: int = 9999,
     seed: int = 0,
     is_smoke_set: bool = False,
+    readout_skipped: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
     """Score the model's topographic organisation against one contrast.
+
+    The grid may be two- or three-dimensional: every statistic and the maps
+    follow ``backbone.grid_shape``. The readout arm is 2-D only (the Gaussian
+    readout is a ``Conv2D``), so asking for it on a 3D backbone is refused.
 
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
 
@@ -786,7 +784,8 @@ def evaluate_topography(
     :type preprocessor: Any
     :param output_dir: Directory for the JSON report, or ``None`` to skip writing.
     :type output_dir: Optional[str]
-    :param readout_fwhm: FWHM for the smoothed arm, or ``None`` to skip it.
+    :param readout_fwhm: FWHM for the smoothed arm, or ``None`` to skip it. Must
+        be ``None`` on a backbone whose grid is not 2-D.
     :type readout_fwhm: Optional[float]
     :param readout_unit_spacing: Inter-unit spacing for the readout kernel.
     :type readout_unit_spacing: float
@@ -811,6 +810,11 @@ def evaluate_topography(
     :param is_smoke_set: Record in the report that the stimuli are the built-in
         stand-in rather than a published set.
     :type is_smoke_set: bool
+    :param readout_skipped: Why a requested readout arm was NOT computed (set by
+        :func:`run_topographic_evaluation` on a 3D backbone). Recorded as the
+        report's top-level ``readout_skipped``; ``None`` adds no key, so a 2D
+        report keeps exactly its keys.
+    :type readout_skipped: Optional[str]
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
         ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
         grids **for that arm specifically**, so :func:`plot_topography` draws
@@ -819,7 +823,8 @@ def evaluate_topography(
         these are not.
     :rtype: Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :raises ValueError: If the two contrast conditions are absent from
-        ``stimuli`` -- naming them -- or ``num_permutations`` is not positive.
+        ``stimuli`` -- naming them --, ``num_permutations`` is not positive, or a
+        readout is requested on a backbone whose grid is not 2-D.
     """
     condition_a, condition_b = contrast_conditions
     missing = [
@@ -840,6 +845,15 @@ def evaluate_topography(
         )
 
     grid_shape = backbone.grid_shape
+    if readout_fwhm and len(grid_shape) != 2:
+        raise ValueError(
+            f"a readout (readout_fwhm={readout_fwhm}) was requested on a "
+            f"{_grid_label(grid_shape)} grid (grid_dim={len(grid_shape)}), but "
+            f"the Gaussian readout is a Conv2D and stays 2-D: a 3D backbone is "
+            f"evaluated on its raw arm only. Pass readout_fwhm=None "
+            f"(run_topographic_evaluation does this and records "
+            f"readout_skipped)."
+        )
     report: Dict[str, Any] = {
         "grid_shape": [int(g) for g in grid_shape],
         "contrast": [condition_a, condition_b],
@@ -850,6 +864,8 @@ def evaluate_topography(
         "num_taps": len(backbone.tap_layers),
         "arms": {},
     }
+    if readout_skipped:
+        report["readout_skipped"] = str(readout_skipped)
 
     # PER-ARM. Keyed by arm, because the arms are NOT interchangeable and a
     # single set of arrays cannot serve both: the readout arm's t-maps are a
@@ -1247,12 +1263,11 @@ def train_topolm(
     :return: ``{"model", "backbone", "history", "results_dir",
         "epochs", "steps_per_epoch", "topography"}``.
     :rtype: Dict[str, Any]
-    :raises ValueError: If ``config.model_variant`` is laid out on a 3D grid; the
-        evaluation is 2D-only, so this is refused before any directory is made.
     """
-    # FIRST, before the seed, the output directory, the tokenizer and the dataset:
-    # a refusal must leave nothing behind and cost no data work.
-    _require_two_dimensional_variant(config.model_variant)
+    # The radius is resolved ONCE here, so config.json (written below from this
+    # config), the model and the logs name the same integer even when the caller
+    # left it unset (D-006). A 2D variant resolves to 5, as it always did.
+    config = replace(config, spatial_radius=resolve_spatial_radius(config))
 
     set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
@@ -1385,22 +1400,37 @@ def run_topographic_evaluation(
     :type preprocessor: Any
     :param results_dir: Directory for the JSON report.
     :type results_dir: str
-    :return: The report dictionary.
+    :return: The report dictionary. On a 3D backbone with a readout configured
+        it carries ``readout_skipped`` (the reason) and only the raw arm.
     :rtype: Dict[str, Any]
     """
+    readout_fwhm = config.readout_fwhm
+    readout_skipped: Optional[str] = None
+    if readout_fwhm and len(backbone.grid_shape) != 2:
+        # D-005: the Gaussian readout is a Conv2D. A programmatic config left at
+        # the dataclass default 2.0 still runs on a 3D backbone, raw arm only;
+        # the CLI refuses a TYPED value for a 3D variant before it gets here.
+        readout_skipped = (
+            f"the Gaussian readout is 2-D and this backbone's grid is "
+            f"{_grid_label(backbone.grid_shape)}; readout_fwhm={readout_fwhm} "
+            f"was not applied and only the raw arm was computed"
+        )
+        logger.info(f"Readout arm skipped: {readout_skipped}")
+        readout_fwhm = None
     report, arrays = evaluate_topography(
         backbone,
         config.stimuli if config.stimuli else SMOKE_STIMULI,
         config.contrast_conditions,
         preprocessor,
         output_dir=results_dir,
-        readout_fwhm=config.readout_fwhm,
+        readout_fwhm=readout_fwhm,
         readout_unit_spacing=config.readout_unit_spacing,
         min_cluster_size=config.min_cluster_size,
         permutation_p_value=config.permutation_p_value,
         num_permutations=config.num_permutations,
         seed=config.seed,
         is_smoke_set=config.stimuli is None,
+        readout_skipped=readout_skipped,
     )
     for arm, values in report["arms"].items():
         logger.info(
@@ -1477,7 +1507,7 @@ def train_paired(
     logger.info("=" * 60)
     logger.info(
         f"ARM 1/2: topographic (alpha = {config.spatial_alpha}, "
-        f"{config.spatial_radius}-radius neighbourhoods)"
+        f"{resolve_spatial_radius(config)}-radius neighbourhoods)"
     )
     topographic = train_topolm(
         replace(config),

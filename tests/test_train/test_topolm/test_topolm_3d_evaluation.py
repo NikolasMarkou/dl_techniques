@@ -293,3 +293,47 @@ class TestTheTrainerTrainsA3DVariant:
             assert t_map.shape == (7, 7, 7), name
             assert np.all(np.isfinite(t_map)), name
             assert np.any(t_map != 0.0), name
+
+    def test_a_tiny3d_run_leaves_real_maps_and_a_consistent_figure_set(
+        self, monkeypatch
+    ):
+        """Added with step 5 (the test above is the step-1 RED oracle, kept as it
+        was). What a person opening the run directory needs to be true: the
+        config records the radius the model used, every t-map is a finite
+        7x7x7 volume that is not all zero (a dead map would plot fine and mean
+        nothing), the figure set matches the report (a cluster figure exactly
+        when a cluster was found), and no readout file exists."""
+        _patch_data(monkeypatch)
+        config = _config(
+            model_variant="tiny3d", spatial_radius=None, num_layers=2,
+            save_dir="run3d_real",
+        )
+
+        result = train_topolm(config, preprocessor=StubTokenizer())
+
+        results_dir = result["results_dir"]
+        written = set(os.listdir(results_dir))
+        recorded = json.loads(open(os.path.join(results_dir, "config.json")).read())
+        assert recorded["spatial_radius"] == 2
+        assert recorded["model_variant"] == "tiny3d"
+
+        report = json.loads(
+            open(os.path.join(results_dir, "topography_report.json")).read()
+        )
+        assert report["grid_shape"] == [7, 7, 7]
+        assert report["num_taps"] == len(result["backbone"].tap_layers) > 0
+        raw = report["arms"]["raw"]
+        found = raw["total_clusters_a"] + raw["total_clusters_b"]
+        assert ("clusters_raw.png" in written) == (found > 0), (found, sorted(written))
+        assert not any(name.endswith("_readout.png") for name in written)
+
+        _, arrays = evaluate_topography(
+            result["backbone"], SMOKE_STIMULI, ("a", "b"), StubTokenizer(),
+            readout_fwhm=None, min_cluster_size=2,
+        )
+        t_maps = arrays["arms"]["raw"]["t_maps"]
+        assert len(t_maps) == report["num_taps"]
+        for name, t_map in t_maps.items():
+            assert t_map.shape == (7, 7, 7), name
+            assert np.all(np.isfinite(t_map)), name
+            assert np.any(t_map != 0.0), f"{name}: an all-zero t-map"

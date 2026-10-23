@@ -204,7 +204,12 @@ class TestConfig:
         assert config.weight_decay == 0.1
         assert config.dropout_rate == 0.0
         assert config.spatial_alpha == 2.5
-        assert config.spatial_radius == 5
+        # Rewritten deliberately (plan 972a9ac5 step 5, D-006): the dataclass
+        # default is now None ("the variant's own radius") so a 3D row's radius
+        # can reach the model; the paper's 5 is what that resolves to for the
+        # default 2D variant, which is the recipe this test exists to pin.
+        assert config.spatial_radius is None
+        assert C.resolve_spatial_radius(config) == 5
         assert config.spatial_neighborhoods == 5
         assert config.spatial_distance == "linf"
         assert config.spatial_permute is True
@@ -212,22 +217,22 @@ class TestConfig:
         assert config.early_stop_patience == 3
 
     def test_the_defaults_describe_a_model_that_can_exist(self):
-        """``alpha`` defaults and the radius default must agree on width.
+        """Every variant row builds at the radius its own row resolves to.
 
-        The paper's width is 784, which a radius-5 patch (121 units) fits. A
-        config default that only works for some variants is a default that
-        fails on the first one a caller reaches for.
+        Rewritten deliberately (plan 972a9ac5 step 5, D-006): it used to expect a
+        ``ValueError`` for the 3D rows, which the trainer refused by name. They
+        build now, so the loop covers EVERY ``MODEL_VARIANTS`` row, with the
+        radius left unset (``None``): a 2D row gets the paper's 5, which its grid
+        holds, and a 3D row gets its own, which the radius-5 default could not
+        (5 needs every axis 11 across). A default that only works for some
+        variants fails on the first one a caller reaches for.
         """
-        for name in MODEL_VARIANTS:
-            config = _config(model_variant=name)
-            if MODEL_VARIANTS[name].get("grid_dim", 2) != 2:
-                # A 3D row is refused by name (see
-                # TestThreeDimensionalVariantsAreRefused); every 2D row builds.
-                with pytest.raises(ValueError, match=f"variant '{name}'"):
-                    build_backbone(config)
-                continue
+        for name, row in MODEL_VARIANTS.items():
+            config = _config(model_variant=name, spatial_radius=None)
             backbone = build_backbone(config)
             assert len(backbone.tap_layers) > 0, name
+            assert backbone.radius == row.get("radius", 5), name
+            assert len(backbone.grid_shape) == row.get("grid_dim", 2), name
 
     def test_the_smoke_stimuli_cover_every_default_contrast(self):
         assert set(_config().contrast_conditions) <= set(SMOKE_STIMULI)
@@ -837,120 +842,108 @@ _VARIANTS_3D = sorted(
 )
 
 
-class TestThreeDimensionalVariantsAreRefused:
-    """The trainer's evaluation and plots are 2D-only, so a 3D row is refused.
+class TestThreeDimensionalVariantsTrain:
+    """A 3D row builds at its OWN radius and trains; nothing refuses it.
 
-    Evaluation runs only AFTER the whole training run, and ``grow_clusters`` takes
-    a ``(height, width)`` map, so a 3D model that got through would train to the
-    end and then die. Before this refusal the only thing in the way was an
-    incidental ``height, width = backbone.grid_shape`` unpack, which names
-    nothing. The refusal is checked on the variant's ROW, ahead of
-    ``TopoLM.from_variant``: the trainer overrides the row's radius with
-    ``spatial_radius`` (default 5), which no 3D width in the table can hold, so
-    building first raises an axis error that never mentions the trainer.
+    Rewritten deliberately from ``TestThreeDimensionalVariantsAreRefused`` (plan
+    972a9ac5 step 5, D-005 and D-006). The refusal existed because the trainer
+    overrode the row's radius with ``spatial_radius=5`` (no 3D width holds that)
+    and because evaluation, plots and the readout were 2D-only. The radius is
+    now resolved from the row, the metrics and plots follow the grid's rank, and
+    the readout arm is skipped. What stays pinned: the rank comes from the
+    variant (no grid flag), an explicit radius the grid cannot hold is still an
+    error from the model, and an unknown variant is still reported by the model.
+    Removed with the refusal, because the behaviour they pinned is gone:
+    ``test_the_refusal_lists_the_variants_that_do_work`` and
+    ``test_the_rank_of_the_built_backbone_is_checked_too``.
     """
 
     def test_the_table_has_the_two_rows_this_class_is_about(self):
         assert _VARIANTS_3D == ["paper3d", "tiny3d"]
 
-    @pytest.mark.parametrize("name", _VARIANTS_3D)
-    @pytest.mark.parametrize("radius", [2, 5], ids=["row-radius", "default-radius"])
-    def test_build_backbone_refuses_by_name_at_any_radius(self, name, radius):
-        """At radius 5 the BUILD itself fails on the axis, with a message that
-        never says the trainer is 2D-only; the by-name refusal has to come first."""
-        with pytest.raises(ValueError, match=f"variant '{name}'") as caught:
-            build_backbone(_config(model_variant=name, spatial_radius=radius))
-        message = str(caught.value)
-        assert "2D" in message
-        assert "grid_dim=3" in message
-        assert "unpack" not in message
-        assert "below the" not in message and "needs every axis" not in message
-        assert "x".join(
-            str(n) for n in {"paper3d": (10, 10, 10), "tiny3d": (7, 7, 7)}[name]
-        ) in message
+    @pytest.mark.parametrize(
+        "name,grid,radius",
+        [("paper3d", (10, 10, 10), 4), ("tiny3d", (7, 7, 7), 2)],
+    )
+    def test_build_backbone_builds_at_the_rows_radius(self, name, grid, radius):
+        backbone = build_backbone(
+            _config(model_variant=name, spatial_radius=None, num_layers=1)
+        )
+        assert tuple(backbone.grid_shape) == grid
+        assert backbone.radius == radius
+        assert backbone.grid_dim == 3
 
-    def test_the_refusal_lists_the_variants_that_do_work(self):
-        with pytest.raises(ValueError) as caught:
-            build_backbone(_config(model_variant="tiny3d"))
-        assert "['paper', 'small', 'tiny']" in str(caught.value)
-
-    def test_the_rank_of_the_built_backbone_is_checked_too(self, monkeypatch):
-        """The row check covers a variant that carries ``grid_dim``; this covers
-        any other route to a 3D backbone. Proven by disabling the row check, so
-        the model really is built (tiny3d at its own radius 2) and the second
-        check is the only thing left."""
-        monkeypatch.setattr(C, "_require_two_dimensional_variant", lambda v: None)
-        with pytest.raises(ValueError, match=r"variant 'tiny3d'.*7x7x7.*2D-only"):
-            build_backbone(_config(model_variant="tiny3d", spatial_radius=2))
+    def test_a_radius_the_grid_cannot_hold_is_still_an_error_from_the_model(self):
+        """The trainer no longer pre-empts it, so the model's own message (which
+        names the largest usable radius) is what the user reads."""
+        with pytest.raises(ValueError, match=r"largest radius this grid can use is 3"):
+            build_backbone(_config(model_variant="tiny3d", spatial_radius=5))
 
     def test_an_unknown_variant_is_still_reported_by_the_model(self):
         with pytest.raises(ValueError, match=r"Unknown variant 'nope'"):
             build_backbone(_config(model_variant="nope"))
 
-    @pytest.mark.parametrize("name", _VARIANTS_3D)
-    def test_train_topolm_refuses_before_any_directory_or_data_work(
-        self, monkeypatch, tmp_path, name
+    def test_train_topolm_writes_the_resolved_radius_and_a_3d_report(
+        self, monkeypatch
     ):
-        """Nothing is created, tokenized or loaded for a run that cannot finish."""
-        save_dir = tmp_path / "must_not_exist"
-        touched = []
+        """Through the REAL ``train_topolm`` on ``tiny3d`` with ``spatial_radius``
+        left unset: ``config.json`` records the integer the model was built with
+        (the other half of D-006: resolving only inside ``build_backbone`` would
+        write ``null``), the report's ``grid_shape`` is a 3-list and only the raw
+        arm exists. ``paper3d`` trains in the GPU step; its build is pinned above.
+        """
+        import json
 
-        def _reached(label):
-            def _raise(*args, **kwargs):
-                touched.append(label)
-                raise AssertionError(f"{label} reached for a refused variant")
-            return _raise
-
-        monkeypatch.setattr(C, "create_tokenizer", _reached("tokenizer"))
-        monkeypatch.setattr(C, "load_train_val_datasets", _reached("dataset"))
-        monkeypatch.setattr(C, "prepare_run_dir", _reached("prepare_run_dir"))
-        monkeypatch.setattr(C, "create_topolm_model", _reached("model"))
-
-        config = _config(model_variant=name, save_dir=str(save_dir))
-        with pytest.raises(ValueError, match=f"variant '{name}'.*2D"):
-            train_topolm(config)
-        assert touched == []
-        assert not save_dir.exists(), "a refused run created its output directory"
-
-    def test_train_paired_refuses_before_its_first_arm_makes_anything(
-        self, monkeypatch, tmp_path
-    ):
-        save_dir = tmp_path / "must_not_exist_paired"
-        monkeypatch.setattr(
-            C, "load_train_val_datasets",
-            lambda *a, **k: pytest.fail("dataset reached for a refused variant"),
+        _patch_data(monkeypatch)
+        result = train_topolm(
+            _config(model_variant="tiny3d", spatial_radius=None, num_layers=1),
+            preprocessor=StubTokenizer(),
         )
-        with pytest.raises(ValueError, match=r"variant 'tiny3d'.*2D"):
-            train_paired(
-                _config(model_variant="tiny3d", save_dir=str(save_dir)),
-                preprocessor=StubTokenizer(),
-            )
-        assert not save_dir.exists()
+        written = json.loads(
+            open(os.path.join(result["results_dir"], "config.json")).read()
+        )
+        assert written["spatial_radius"] == 2
+        assert result["backbone"].radius == 2
+        report = result["topography"]
+        assert report["grid_shape"] == [7, 7, 7]
+        assert list(report["arms"]) == ["raw"]
+
+    def test_train_paired_reaches_both_arms_for_a_3d_variant(self, monkeypatch):
+        """Nothing in the paired driver refuses a 3D row now: both arms are
+        handed to ``train_topolm`` (stubbed here; the arm itself is covered above)."""
+        seen = []
+
+        def _fake_train(config, preprocessor=None, run_topography=True):
+            seen.append((config.model_variant, config.spatial_alpha))
+            return {"summary": {}}
+
+        monkeypatch.setattr(C, "train_topolm", _fake_train)
+        train_paired(_config(model_variant="tiny3d", spatial_radius=None))
+        assert seen == [("tiny3d", 2.5), ("tiny3d", 0.0)]
 
     @pytest.mark.parametrize("name", _VARIANTS_3D)
-    def test_the_cli_entry_refuses_with_an_absolute_scratch_output_path(
+    def test_the_cli_entry_hands_the_trainer_the_resolved_3d_config(
         self, monkeypatch, tmp_path, name
     ):
-        """Through the real ``main``: argument parsing, ``_config_from_args``, then
-        the trainer. ``setup_gpu`` is replaced (it configures the process's
-        devices, which a test must not), and every data hook raises if reached."""
-        save_dir = tmp_path / "cli_must_not_exist"
+        """Through the real ``main``: argument parsing and ``_config_from_args``,
+        with the trainer itself replaced by a recorder (``setup_gpu`` too, which
+        configures the process's devices)."""
+        captured = {}
+
+        def _record(config, run_topography=True):
+            captured["config"] = config
+            return {"results_dir": str(tmp_path)}
+
         monkeypatch.setattr(pretrain_cli, "setup_gpu", lambda gpu_id=None: None)
-        monkeypatch.setattr(
-            C, "create_tokenizer",
-            lambda *a, **k: pytest.fail("tokenizer reached for a refused variant"),
-        )
-        monkeypatch.setattr(
-            C, "load_train_val_datasets",
-            lambda *a, **k: pytest.fail("dataset reached for a refused variant"),
-        )
+        monkeypatch.setattr(pretrain_cli, "train_topolm", _record)
         monkeypatch.setattr(
             "sys.argv",
-            ["pretrain", "--variant", name, "--save-dir", str(save_dir)],
+            ["pretrain", "--variant", name, "--save-dir", str(tmp_path / "out")],
         )
-        with pytest.raises(ValueError, match=f"variant '{name}'.*2D"):
-            pretrain_cli.main()
-        assert not save_dir.exists()
+        pretrain_cli.main()
+        config = captured["config"]
+        assert config.spatial_radius == MODEL_VARIANTS[name]["radius"]
+        assert config.readout_fwhm is None
 
     def test_the_cli_adds_no_grid_flag_and_still_offers_every_variant(self):
         parser = pretrain_cli._build_parser()

@@ -15,6 +15,9 @@
     # The Fig. 12 ablation: one shared unit layout instead of one per tap.
     MPLBACKEND=Agg python -m train.topolm.pretrain --no-permute
 
+    # A 3D unit grid (7x7x7, radius 2 from the variant row, raw arm only).
+    MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny3d
+
     # A single-tap ablation, and the paper's stopping rule relaxed.
     MPLBACKEND=Agg python -m train.topolm.pretrain \\
         --tap-sites attention --early-stop-patience 10
@@ -39,16 +42,24 @@ References:
 """
 
 import argparse
+from typing import Optional
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from train.common import setup_gpu
-from dl_techniques.models.language.topolm import MODEL_VARIANTS
+from dl_techniques.models.language.topolm import MODEL_VARIANTS, grid_shape_of
 from dl_techniques.utils.logger import logger
 
-from .common import TopoLMTrainingConfig, train_paired, train_topolm
+from .common import (
+    DEFAULT_READOUT_FWHM,
+    TopoLMTrainingConfig,
+    _grid_label,
+    resolve_spatial_radius,
+    train_paired,
+    train_topolm,
+)
 
 # ---------------------------------------------------------------------
 
@@ -57,7 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser.
 
     Every default here mirrors the dataclass default, so an unflagged run is the
-    paper's recipe rather than the trainer's idea of one.
+    paper's recipe rather than the trainer's idea of one. Two flags are the
+    exception on purpose: ``--radius`` and ``--readout-fwhm`` default to ``None``
+    ("not typed") and :func:`_config_from_args` resolves them per variant, because
+    a typed value and an untyped one must be distinguishable (a 3D variant has its
+    own radius and no readout) and the resolved integer is what ``config.json``
+    records.
     """
     parser = argparse.ArgumentParser(
         description="TopoLM topographic causal language-model pre-training",
@@ -76,8 +92,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Model variant. 'paper' is the published shape (784 units on a 28x28 "
             "grid, 12 blocks); 'small' and 'tiny' are repo-authored scales. "
-            "'paper3d' and 'tiny3d' are 3D layouts, refused here: this "
-            "trainer's evaluation is 2D-only."
+            "'paper3d' (10x10x10, radius 4) and 'tiny3d' (7x7x7, radius 2) "
+            "are 3D layouts: the grid's rank comes from the variant, there is "
+            "no grid flag, and they are scored on the raw arm only."
         ),
     )
     parser.add_argument(
@@ -128,10 +145,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--radius",
         type=int,
-        default=5,
+        default=None,
         help=(
-            "Neighbourhood radius; in this 2D trainer a radius-r patch needs "
-            "(2r+1)^2 units, so the model's width must be at least that."
+            "Neighbourhood radius; a radius-r patch needs (2r+1)**grid_dim "
+            "units, so every axis of the grid must be at least 2r+1 across. "
+            "Unset takes the variant's own radius (tiny3d 2, paper3d 4) and "
+            "5 for the 2D variants, the paper's."
         ),
     )
     parser.add_argument(
@@ -288,10 +307,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--readout-fwhm",
         type=float,
-        default=2.0,
+        default=None,
         help=(
             "Full width at half maximum of the simulated fMRI readout, in "
-            "grid units. Pass 0 to score the raw activations only."
+            "grid units. Unset is 2.0 on a 2D variant and no readout on a 3D "
+            "one (the Gaussian readout is 2-D, so a value typed for a 3D "
+            "variant is refused). Pass 0 to score the raw activations only."
         ),
     )
     parser.add_argument("--readout-unit-spacing", type=float, default=1.0)
@@ -358,13 +379,50 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_readout_fwhm(args: argparse.Namespace) -> Optional[float]:
+    """The readout FWHM the run gets: typed value, else the variant's rule.
+
+    Unset gives :data:`~train.topolm.common.DEFAULT_READOUT_FWHM` on a 2D variant
+    (the config and ``config.json`` as they were before 3D support) and ``None``
+    on a 3D one; ``0`` gives ``None``. The Gaussian readout is a ``Conv2D``, so a
+    nonzero value TYPED for a 3D variant is refused here, by flag and variant,
+    rather than silently dropped.
+
+    :param args: Parsed arguments (``variant`` is one of ``MODEL_VARIANTS``).
+    :type args: argparse.Namespace
+    :return: The FWHM, or ``None`` for the raw arm only.
+    :rtype: Optional[float]
+    :raises ValueError: If a nonzero ``--readout-fwhm`` is typed for a 3D variant.
+    """
+    row = MODEL_VARIANTS[args.variant]
+    grid_dim = int(row.get("grid_dim", 2))
+    value = args.readout_fwhm
+    if grid_dim == 2:
+        return DEFAULT_READOUT_FWHM if value is None else (value or None)
+    if value:
+        grid = _grid_label(grid_shape_of(int(row["embed_dim"]), grid_dim))
+        raise ValueError(
+            f"--readout-fwhm {value:g} was typed for variant {args.variant!r}, "
+            f"which lays its {int(row['embed_dim'])} units out on a {grid} grid "
+            f"(grid_dim={grid_dim}); the Gaussian readout is 2-D, so a 3D "
+            f"variant is scored on its raw arm only. Drop --readout-fwhm (or pass "
+            f"0), or choose a 2D variant."
+        )
+    return None
+
+
 def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
     """Map parsed CLI arguments onto one :class:`TopoLMTrainingConfig`.
 
     Every argument appears here exactly once, so a new flag cannot be added
-    without deciding where in the dataclass it lands.
+    without deciding where in the dataclass it lands. ``--radius`` and
+    ``--readout-fwhm`` are RESOLVED here (see :func:`_build_parser`), so the
+    returned config, and the ``config.json`` written from it, hold the values the
+    run uses.
+
+    :raises ValueError: If a nonzero ``--readout-fwhm`` is typed for a 3D variant.
     """
-    return TopoLMTrainingConfig(
+    config = TopoLMTrainingConfig(
         # Model
         model_variant=args.variant,
         vocab_size=args.vocab_size,
@@ -414,7 +472,7 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
         steps_per_epoch=args.steps_per_epoch,
         resume_from=args.resume,
         # Topographic evaluation
-        readout_fwhm=(args.readout_fwhm or None),
+        readout_fwhm=_resolve_readout_fwhm(args),
         readout_unit_spacing=args.readout_unit_spacing,
         min_cluster_size=args.min_cluster_size,
         permutation_p_value=args.permutation_p_value,
@@ -423,6 +481,8 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
         # Output
         save_dir=args.save_dir,
     )
+    config.spatial_radius = resolve_spatial_radius(config)
+    return config
 
 
 def main() -> None:
