@@ -1152,6 +1152,15 @@ class TestEvaluation:
         both arms have identical shapes and identical tap keys, which is exactly
         why the previous version of this test passed on the broken code while its
         docstring claimed to compare against a re-extraction.
+
+        Rewritten deliberately for D-001. The expected arrays used to be
+        ``contrast_tmap(...)[0].reshape(grid)``, i.e. the test pinned the same
+        unit-order reshape the code under test had, which is the wrong map under
+        the trainer's default ``permute=True`` (unit ``i`` sits at cell
+        ``perm[i]``). The expected arrays are now placed through
+        ``layout.positions`` by ``_on_grid_by_positions``, a plain loop that
+        shares neither ``to_grid`` nor ``cell_to_unit`` with the code under test.
+        The arm-versus-arm discrimination this test exists for is unchanged.
         """
         backbone, report, arrays = self._report()
 
@@ -1159,20 +1168,20 @@ class TestEvaluation:
             condition: extract_tap_activations(backbone, prompts, StubTokenizer())
             for condition, prompts in SMOKE_STIMULI.items()
         }
-        grid = tuple(report["grid_shape"])
+        tap_layout = backbone.tap_layers[0].layout
         tap_path = backbone.tap_layers[0].path
 
         expected = {}
-        expected["raw"] = contrast_tmap(
+        expected["raw"] = _on_grid_by_positions(tap_layout, contrast_tmap(
             activations["a"][tap_path], activations["b"][tap_path]
-        )[0].reshape(grid)
+        )[0])
         smoothed = {
             condition: C._apply_readout(values, backbone, 2.0, 1.0)
             for condition, values in activations.items()
         }
-        expected["readout"] = contrast_tmap(
+        expected["readout"] = _on_grid_by_positions(tap_layout, contrast_tmap(
             smoothed["a"][tap_path], smoothed["b"][tap_path]
-        )[0].reshape(grid)
+        )[0])
 
         # The fixture must genuinely discriminate, or the assertions below are
         # satisfied by an array that matches both arms.

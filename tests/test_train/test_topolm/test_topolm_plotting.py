@@ -220,6 +220,14 @@ class TestClusterBoundaries:
 
         Without it a cluster on the border is drawn as an open shape, which
         reads as a cluster that runs off the grid.
+
+        Rewritten deliberately for D-002. It used to assert the outline at the
+        raw integers ``0`` (y and x), the PADDED-grid indices, which is where the
+        drawer put a cluster in the top-left corner and is one cell off: under
+        ``imshow`` the image's own top and left edges are at ``-0.5``, so that is
+        where the outline of a corner cluster must run. The geometry oracle in
+        ``TestClusterBoundariesSitOnTheirCells`` compares every segment; this
+        test keeps the edge-closure claim in its original small form.
         """
         labels = np.zeros((GRID, GRID), dtype=int)
         labels[0:3, 0:3] = 1
@@ -230,14 +238,18 @@ class TestClusterBoundaries:
         plt.close(fig)
 
         assert lines, "no boundaries drawn at all"
-        assert any(line.get_ydata()[0] == 0 for line in lines), (
+        assert any(line.get_ydata()[0] == -0.5 for line in lines), (
             "no line on the top edge of a cluster that touches it"
         )
-        assert any(line.get_xdata()[0] == 0 for line in lines), (
+        assert any(line.get_xdata()[0] == -0.5 for line in lines), (
             "no line on the left edge of a cluster that touches it"
         )
 
     def test_a_single_cell_cluster_is_outlined_on_all_four_sides(self):
+        """Rewritten deliberately for D-002. It used to pin ``{2.0, 3.0}`` for a
+        cell at (2, 2), the padded-grid integers, which are one cell to the right
+        and below the cell. Cell (2, 2) spans 1.5 to 2.5 on both axes, so its four
+        sides are at 1.5 and 2.5."""
         labels = np.zeros((GRID, GRID), dtype=int)
         labels[2, 2] = 1
 
@@ -248,8 +260,8 @@ class TestClusterBoundaries:
 
         rows = {line.get_ydata()[0] for line in lines}
         cols = {line.get_xdata()[0] for line in lines}
-        assert rows == {2.0, 3.0}, rows
-        assert cols == {2.0, 3.0}, cols
+        assert rows == {1.5, 2.5}, rows
+        assert cols == {1.5, 2.5}, cols
 
     def test_an_interior_cluster_gets_only_its_own_border(self):
         """A hollow centre is outlined at the hole, not as a filled blob.
@@ -259,6 +271,11 @@ class TestClusterBoundaries:
         outer bottom, and 2 on each side of the hole. Asserting the counts per
         ROW is what makes this fail if the hole is drawn over or skipped -- a
         bare total of 24 would also match a cluster whose border was drawn twice.
+
+        Rewritten deliberately for D-002: the per-row counts are unchanged and
+        the row keys moved. They used to be the padded-grid integers 2, 3, 5, 6,
+        which sit one cell below the edges they stand for. The edge between
+        image rows 1 and 2 is at ``y = 1.5``, so the keys are 1.5, 2.5, 4.5, 5.5.
         """
         labels = np.zeros((GRID, GRID), dtype=int)
         labels[2:6, 2:6] = 1
@@ -276,10 +293,10 @@ class TestClusterBoundaries:
         for line in horizontal:
             by_row.setdefault(line.get_ydata()[0], []).append(line)
         assert {row: len(seg) for row, seg in sorted(by_row.items())} == {
-            2.0: 4,
-            3.0: 2,
-            5.0: 2,
-            6.0: 4,
+            1.5: 4,
+            2.5: 2,
+            4.5: 2,
+            5.5: 4,
         }, {row: len(seg) for row, seg in sorted(by_row.items())}
         assert len(horizontal) == 12, len(horizontal)
 
@@ -403,10 +420,11 @@ class TestTheFigureAgreesWithTheAnalysis:
 # =====================================================================
 # plan-2026-10-23T190557-972a9ac5, step 1: pins and RED tests
 #
-# The old ``TestClusterBoundaries`` above pins the integers the drawer emits, and
-# the drawer is wrong (D-002): the new class compares the drawn segments with a
-# brute-force edge set derived from cell geometry. The old tests are NOT edited
-# here; step 3 rewrites them with the reason in each docstring.
+# The old ``TestClusterBoundaries`` above pinned the integers the drawer emitted,
+# and the drawer was wrong (D-002): the new class compares the drawn segments with
+# a brute-force edge set derived from cell geometry. Step 3 fixed the drawer and
+# rewrote the old tests to the corrected coordinates, with the reason in each
+# docstring.
 # =====================================================================
 
 import hashlib

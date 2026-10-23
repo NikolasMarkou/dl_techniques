@@ -893,10 +893,22 @@ def evaluate_topography(
         tap_reports: Dict[str, Any] = {}
         for tap in backbone.tap_layers:
             name = tap.path
-            sig_grid = np.asarray(
-                corrected[name]["reject"], dtype=bool
-            ).reshape(grid_shape)
-            t_grid = t_maps[name].reshape(grid_shape)
+            # DECISION plan-2026-10-23T190557-972a9ac5/D-001: the t and
+            # significance vectors are in UNIT order, and unit i sits at cell
+            # perm[i], not at cell i. They go onto the grid through the tap's own
+            # layout. Do NOT write `.reshape(grid_shape)` here: that is the same
+            # map only when the layout is the identity (permute=False) and
+            # scrambles every other one, so Moran's I, the clusters and the
+            # figures all describe noise (measured: 0.7927 through to_grid
+            # against 0.0005 through reshape on a layout-smooth 28x28 field).
+            # The readout arm needs the same call: _apply_readout hands back
+            # unit order too. See decisions.md D-001; guarded by
+            # TestTheMapPlacementFollowsTheLayout and
+            # TestThreeDimensionalPlacement.
+            sig_grid = tap.layout.to_grid(
+                np.asarray(corrected[name]["reject"], dtype=bool)
+            )
+            t_grid = tap.layout.to_grid(t_maps[name])
 
             clusters: Dict[str, List[List[int]]] = {}
             for sign, label in ((1, condition_a), (-1, condition_b)):

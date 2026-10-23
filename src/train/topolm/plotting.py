@@ -237,6 +237,10 @@ def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
 
     Boundaries are traced between cells whose labels differ, so a cluster's edge
     is its own -- not the bounding box of the coloured cells underneath.
+
+    The segments are in the coordinates ``imshow`` gives the same axis: cell
+    ``(row, col)`` spans ``x`` in ``[col - 0.5, col + 0.5]`` and ``y`` in
+    ``[row - 0.5, row + 0.5]``, so the outline lies ON the cells it encloses.
     """
     values = np.asarray(labels)
     if values.ndim != 2 or not np.any(values > 0):
@@ -244,6 +248,15 @@ def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
     padded = np.zeros((values.shape[0] + 2, values.shape[1] + 2), dtype=values.dtype)
     padded[1:-1, 1:-1] = values
 
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-002: the zero frame shifts every
+    # index by one, and imshow's cell centres sit on integers, so a padded index p
+    # is the image coordinate p - 1 and an edge between padded lines p and p + 1 is
+    # at p - 0.5. Do NOT draw at the raw padded integers (the previous code did,
+    # [col, col + 1] at y = row): that hangs the outline one cell off to the right
+    # and the bottom of the cells it encloses, off the panel for a cluster on the
+    # last row or column. Guarded by TestClusterBoundariesSitOnTheirCells, which
+    # compares the drawn segments with an edge set derived from cell geometry.
+    #
     # The zero frame is what makes this correct at the edges: padded[r] is the
     # cell ABOVE the boundary at row r, and the frame row stands in for "outside
     # the grid", so a cluster touching the top edge gets a closed outline.
@@ -251,12 +264,18 @@ def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
         above = padded[row]
         below = padded[row + 1]
         for col in np.where(above != below)[0]:
-            axis.plot([col, col + 1], [row, row], color="black", linewidth=1.1)
+            axis.plot(
+                [col - 1.5, col - 0.5], [row - 0.5, row - 0.5],
+                color="black", linewidth=1.1,
+            )
     for col in range(values.shape[1] + 1):
         left = padded[:, col]
         right = padded[:, col + 1]
         for row in np.where(left != right)[0]:
-            axis.plot([col, col], [row, row + 1], color="black", linewidth=1.1)
+            axis.plot(
+                [col - 0.5, col - 0.5], [row - 1.5, row - 0.5],
+                color="black", linewidth=1.1,
+            )
 
 
 def plot_cluster_overlay(
