@@ -55,7 +55,7 @@ __all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names",
 #: was a REAL fp16 defect with a package-specific before/after to record.
 CHARGED_PACKAGES: Tuple[str, ...] = (
     "SAM", "accunet", "beit", "bert", "bias_free_denoisers",
-    "blt", "capsnet", "cbam", "cliffordnet", "convnext",
+    "blt", "capsnet", "cbam", "cliffordlm", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
     "gpt2", "hnet", "hrm", "ideogram4", "lewm",
     "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "neural_hmm", "ntm",
@@ -237,6 +237,28 @@ def _b_cliffordnet():
 
 
 _sub("cliffordnet", _b_cliffordnet, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_cliffordlm():
+    from dl_techniques.models.language.cliffordlm import CliffordNetLM
+    return CliffordNetLM(vocab_size=64, max_seq_length=32, channels=32,
+                         depth=2, shifts=[1, 2], dropout_rate=0.0,
+                         stochastic_depth_rate=0.0)
+
+
+# ``expected_compute_dtype="float32"``: MEASURED 2026-10-23 -- ``call()`` returns
+# ``{"logits": ...}`` ONLY (one output), and under mixed_float16 that tensor is
+# float32: the default ``tie_word_embeddings=True`` routes it through
+# `dl_techniques.utils.tied_embeddings.tied_embedding_logits` (the float32
+# floor documented for ``gpt2`` above), so the arm reads ['float32']. Same
+# shape as ``zamba2``. There is no second output to leave charged, so
+# ``dtype_exempt_outputs=(0,)`` would exempt the whole result and charge
+# nothing; ``expected_compute_dtype="float32"`` keeps the one output asserted.
+# The blocks themselves compute in float16 (MEASURED: a
+# ``CausalCliffordNetBlock``'s ``compute_dtype`` is ``float16``) and are
+# exercised end to end by the same forward and gradient pass.
+_sub("cliffordlm", _b_cliffordlm, lambda: _ids(64, 2, 16),
+     expected_compute_dtype="float32")
 
 
 def _b_superpoint():

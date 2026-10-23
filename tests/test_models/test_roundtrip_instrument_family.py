@@ -360,7 +360,12 @@ def test_every_model_package_has_a_roundtrip_subject():
     # user's `timestral` (6d757c6a6, a real subject, `_b_timestral`) and the
     # doc-only `metaformer` directory (087ee882a, see DOC_ONLY_PACKAGES in
     # model_package_discovery). Re-derived with the command above.
-    assert len(on_disk) == 109, f"expected 109 packages, found {len(on_disk)}"
+    #
+    # 110 as of 2026-10-23 (plan-2026-10-23T085907-617e21bb step 4): the
+    # `cliffordlm` leaf under `models/language/` (CliffordNetLM moved out of
+    # `vision/cliffordnet/`), with a real subject (`_b_cliffordlm`). Re-derived
+    # with the command above.
+    assert len(on_disk) == 110, f"expected 110 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

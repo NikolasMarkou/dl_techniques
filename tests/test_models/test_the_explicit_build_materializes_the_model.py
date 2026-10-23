@@ -312,11 +312,15 @@ def test_two_keras_round_trips_preserve_the_weight_population(name):
 
 
 def test_the_cliffordnet_lm_build_materializes_all_nineteen():
-    """``CliffordNetLM`` is not a ``roundtrip_subject``; it is charged here.
+    """``CliffordNetLM`` is charged here with its own tiny config.
+
+    It is also a ``roundtrip_subject`` (the ``cliffordlm`` leaf), but that arm
+    uses the shared subject build; this test pins the exact 19-weight count of
+    this configuration.
 
     MEASURED: 19 weights after one call, **1 after ``.build()`` alone** before
     the fix -- 95% of the model, the worst ratio the prior plan found (see
-    ``tests/test_models/test_cliffordnet/test_lazy_build_contract.py``). Now 19.
+    ``tests/test_models/test_cliffordlm/test_lazy_build_contract.py``). Now 19.
     """
     from dl_techniques.models.language.cliffordlm.model import CliffordNetLM
 
