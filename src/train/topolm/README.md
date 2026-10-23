@@ -162,6 +162,11 @@ MPLBACKEND=Agg python -m train.topolm.pretrain \
     --tap-sites attention --early-stop-patience 10
 ```
 
+There is **no 3D flag**. `--variant` offers every row of `MODEL_VARIANTS`, so
+`paper3d` and `tiny3d` are accepted by the parser, but the trainer is 2D-only and
+refuses them by name (see section 8). `--radius` means a radius-`r` patch of
+`(2r+1)**2` units in this trainer.
+
 Every flag maps onto exactly one field of `TopoLMTrainingConfig`, so `--help` and
 `config.json` describe the same run — and
 `tests/test_train/test_topolm/test_cli_contract.py` drives the real parser and the
@@ -304,6 +309,19 @@ set**. Neither is in this repository.
 
 The encoding probe, RSA and bootstrap CIs are deferred to a later pass.
 
+**The trainer's evaluation and plots are 2D-only, and a 3D variant is refused by
+name.** The t-map panels, cluster growth, Moran's I and the Gaussian readout all take
+a `(height, width)` map. The `paper3d` and `tiny3d` variants of the model package lay
+their units out on a 3D box, and the evaluation runs only after the whole training
+run, so a 3D model would train to the end and then fail in `grow_clusters`.
+`build_backbone` and `train_topolm` therefore raise a `ValueError` that names the
+variant, its width and grid, and says the evaluation is 2D-only, before the output
+directory, the tokenizer or the dataset is touched (the check reads the variant's
+row first, because the trainer's own `--radius` default of 5 would otherwise raise a
+less helpful axis error). The built backbone's rank is checked too. There is no
+`--grid-dim` flag. Deferred, not built: 3D Moran's I, 3D cluster growth and a 3D
+readout. `grow_clusters` itself also refuses a map that is not 2-D, by name.
+
 Moran's I **permutation test** is now implemented and reaches the report via
 `--permutation-p-value` (off by default). It is the paper's third Moran
 statistic; the standard and islands values are reported either way. The p-value
@@ -343,6 +361,16 @@ on anything else). It used to take a `{"text": [...]}` mapping — a shape that
 matched neither the real preprocessor nor anything else — and that agreement
 between two unlike stubs is what hid the live `TypeError` in
 `extract_tap_activations` for the whole first pass of this code.
+
+The 3D refusal is pinned by `TestThreeDimensionalVariantsAreRefused` in
+`test_topolm_trainer.py` (`test_build_backbone_refuses_by_name_at_any_radius`,
+`test_train_topolm_refuses_before_any_directory_or_data_work`,
+`test_train_paired_refuses_before_its_first_arm_makes_anything`,
+`test_the_cli_entry_refuses_with_an_absolute_scratch_output_path`,
+`test_the_cli_adds_no_grid_flag_and_still_offers_every_variant`), and the grid
+label and report shape at their own rank by `TestTheGridIsReportedAtItsOwnRank`.
+The `grow_clusters` guard is `test_a_map_that_is_not_two_dimensional_is_named_not_unpacked`
+in `tests/test_metrics/test_topographic_selectivity.py`.
 
 **Do not run the full suite as a routine check.** It takes about 1.5 hours and is
 also the pre-push hook; scope pytest to the modules you touched.

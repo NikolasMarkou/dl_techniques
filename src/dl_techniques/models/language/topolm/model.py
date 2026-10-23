@@ -7,10 +7,11 @@ a weight matrix, so nothing about the representation is spatial: two units that
 learn to encode the same thing have no reason to sit near each other, and the
 emergent clustering is a property of the initialisation rather than of anything
 the objective asked for. TopoLM gives the units of every attention and
-feed-forward branch a distinct cell on an ``h x w`` grid and adds a penalty
-``SL = 0.5 * (1 - corr(r, d))`` alongside the next-token cross-entropy, where
-``r`` is the vector of pairwise activation correlations over a sampled square
-neighbourhood and ``d`` the matching inverse distances. Minimising it makes
+feed-forward branch a distinct cell on an ``h x w`` grid (an ``h x w x d`` box
+with ``grid_dim=3``, a repo-authored extension; the paper is 2D) and adds a
+penalty ``SL = 0.5 * (1 - corr(r, d))`` alongside the next-token cross-entropy,
+where ``r`` is the vector of pairwise activation correlations over a sampled
+square (3D: cubic) neighbourhood and ``d`` the matching inverse distances. Minimising it makes
 nearby units co-activate, which is an efficient proxy for short wiring length,
 and functional clusters emerge as a consequence of the objective rather than as
 a post-hoc clustering of whatever the model happened to learn.
@@ -173,14 +174,21 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
 
         .. code-block:: text
 
-            variant  embed_dim  depth  heads  max_seq_len  grid     provenance
-            paper    784        12     16     1024         28 x 28  Rathi et al. 2025
-            small    512        6      8      512          16 x 32  repo-authored
-            tiny     256        4      4      256          16 x 16  repo-authored
+            variant  embed_dim  depth  heads  max_seq_len  grid          radius  provenance
+            paper    784        12     16     1024         28 x 28       5       Rathi et al. 2025
+            small    512        6      8      512          16 x 32       5       repo-authored
+            tiny     256        4      4      256          16 x 16       5       repo-authored
+            paper3d  1000       12     8      1024         10 x 10 x 10  4       repo-authored, not in the paper
+            tiny3d   343        4      7      256          7 x 7 x 7     2       repo-authored, not in the paper
 
     Only ``paper`` is quoted data; see
-    :mod:`~dl_techniques.models.topolm.config` for why the other two are not
-    pinned by the upstream-variant guard.
+    :mod:`~dl_techniques.models.topolm.config` for why the other four are not
+    pinned by the upstream-variant guard. The 3D rows carry ``grid_dim=3`` and
+    their own radius (the default 5 needs every axis at least 11 across), and
+    784 is not a 3D width: it factors to (7, 8, 14), whose shortest axis holds a
+    radius of at most 3. Variant validation checks every axis in both ranks; this
+    constructor's per-axis check is 3D-only, so a directly built 2D model with an
+    explicit short-axis grid constructs as before and fails at tap build.
 
     :param vocab_size: Vocabulary size. Default 100277 (cl100k_base).
     :type vocab_size: int

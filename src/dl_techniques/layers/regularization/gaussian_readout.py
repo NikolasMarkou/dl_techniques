@@ -18,6 +18,9 @@ half-maximum, and gather back. The kernel is a **non-trainable** weight: this is
 an instrument for simulating a sensor, not a learned filter, and a trained one
 would be a second place for the two producers of this quantity to drift.
 
+The readout is 2D only: the blur is one ``Conv2D``, and a three-entry
+``grid_shape`` (such as the grid of a 3D layout) is refused at build.
+
 Order matters and is not interchangeable. Smooth *activations*, then compute a
 statistic on the smoothed values. Smoothing a t-map or any other already-derived
 statistic is a different operation that inflates apparent spatial structure, and

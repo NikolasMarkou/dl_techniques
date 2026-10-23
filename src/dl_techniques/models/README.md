@@ -126,7 +126,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `modern_bert/` | ModernBERT |
 | `qwen/` | Qwen LLM |
 | `trm/` | tiny recursive model |
-| `topolm/` | TopoLM — GPT-2-shaped decoder whose every attention and feed-forward branch output carries a spatial-smoothness penalty over a `h x w` unit grid (`h * w == embed_dim`). Only the `paper` variant is quoted data (784 units, 28x28 grid, 12 blocks); `small`/`tiny` are repo-authored scales and are deliberately unpinned. No pretrained weights |
+| `topolm/` | TopoLM — GPT-2-shaped decoder whose every attention and feed-forward branch output carries a spatial-smoothness penalty over a `h x w` unit grid (`h * w == embed_dim`), or an `h x w x d` box with `grid_dim=3`. Only the `paper` variant is quoted data (784 units, 28x28 grid, 12 blocks); `small`/`tiny` and the 3D `paper3d`/`tiny3d` are repo-authored and are deliberately unpinned. No pretrained weights |
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
 | `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. Owns an optional task head (`include_top=True`, `task_config`). No pretrained weights |

@@ -39,6 +39,10 @@ The taps sit ON the branch outputs, not around them: their forward pass is the
 identity, so the residual arithmetic is byte-identical to a plain GPT-2 block and
 any difference in the loss curve is attributable to the added term alone.
 
+The block carries ``grid_dim`` (2, the paper's layout, or 3) and forwards it to
+every tap it makes; a tap resolves its grid lazily at its own build, so a dropped
+argument would leave a silently 2D tap in a 3D model.
+
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM.
       ICLR 2025. (https://arxiv.org/abs/2410.11516)

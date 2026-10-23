@@ -271,7 +271,10 @@ overwrite before the add — **it is gone by the time `call` returns**. A backbo
 whose objective needs that tensor *before* normalization and *before* the residual
 add cannot reach it: no flag, no hook, no `activity_regularizer`.
 
-- `topolm/` — `TopoLMBlock`, whose two taps carry `SpatialSmoothness`. It composes
+- `topolm/` — `TopoLMBlock`, whose two taps carry `SpatialSmoothness` (`grid_dim` 2, the paper's
+  layout and the default, or 3, repo-authored: `paper3d` and `tiny3d` rows with their own radius,
+  refused by name by the 2D-only trainer; the model constructor's per-axis check is 3D-only while
+  `validate_variant` is strict in both ranks). It composes
   `create_attention_layer` / `create_ffn_layer` / `create_normalization_layer`
   rather than reimplementing them, so the reuse order (factories first, a bespoke
   layer last) is unchanged. The three factory calls pass **positional string
@@ -292,7 +295,8 @@ with RED proofs there: double-shift, probe degradation, metric-name clash.
 
 In `test_topolm/` the load-bearing claims are pinned by measurement rather than
 by shape: a smooth field scores 0.172 and the same field against a negated
-distance prior scores 0.826 (the sign-discriminating probe), `alpha = 0` holds a
-byte-identical weight set *and* identical permutations, and `build()`
-materialises the tree so a reload has somewhere to land.
+distance prior scores 0.826 (the sign-discriminating probe; the 3D pair, measured
+on 512 units on an 8 x 8 x 8 box at radius 2, is 0.2002 and 0.7998), `alpha = 0`
+holds a byte-identical weight set *and* identical permutations in both ranks, and
+`build()` materialises the tree so a reload has somewhere to land.
 

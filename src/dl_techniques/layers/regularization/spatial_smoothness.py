@@ -1,4 +1,4 @@
-"""Spatial smoothness regularization over a fixed 2D layout of a layer's units.
+"""Spatial smoothness regularization over a fixed 2D or 3D layout of a layer's units.
 
 The problem
 -----------
@@ -16,9 +16,11 @@ The mechanism
 -------------
 Every unit of the tapped tensor is assigned a distinct cell of a ``h x w`` grid,
 with ``h * w == num_units``, by a permutation that is drawn once per layer and
-then frozen. For one square neighbourhood of radius ``rho`` centred on the grid,
-covering ``P = (2*rho + 1)**2`` units, the loss compares two things that should
-agree:
+then frozen. With ``grid_dim=3`` (a repo-authored extension; the paper's layout
+is 2D) the grid is an ``h x w x d`` box with ``h * w * d == num_units`` and a
+neighbourhood is a cube. For one square (3D: cubic) neighbourhood of radius
+``rho`` centred on the grid, covering ``P = (2*rho + 1)**grid_dim`` units, the
+loss compares two things that should agree:
 
 * ``r``, the Pearson correlation of every unit pair's activations across the
   ``M`` samples in the batch;
@@ -41,12 +43,26 @@ rather than by each layer learning its own, and the resulting model has one map
 rather than ``depth`` of them. It is on by default.
 
 **The whole grid is never scored at once.** ``r`` for all ``N`` units is
-``N*(N-1)/2`` numbers -- 306 936 of them at the paper's ``N = 784``, computed
-from a ``K x M x P`` gather every step. The loss instead samples ``K``
-neighbourhoods per step, which is what makes it affordable, and is why
-neighbourhood centres are restricted to those whose patch fits entirely inside
-the grid: a constant ``P`` means ``d`` is identical for every neighbourhood and
-can be precomputed once, at build time, and shared.
+``N*(N-1)/2`` numbers -- 306 936 of them at the paper's ``N = 784`` (a 2D
+grid), computed from a ``K x M x P`` gather every step. The loss instead
+samples ``K`` neighbourhoods per step, which is what makes it affordable, and is
+why neighbourhood centres are restricted to those whose patch fits entirely
+inside the grid: a constant ``P`` means ``d`` is identical for every
+neighbourhood and can be precomputed once, at build time, and shared.
+
+**Rank, axis order and cost in 3D.** ``grid_dim`` is a stated argument (2 or 3,
+default 2) and is never inferred from ``len(grid_shape)``;
+:func:`build_patch_tables` is the one place that reads the rank from its array
+(``cell_to_unit.ndim``), so the two cannot disagree. ``grid_shape ==
+cell_to_unit.shape``, row-major, and nothing reorders the axes. An implicit 3D
+grid is the most cubic ``(h, w, d)`` with ``h <= w <= d`` (784 -> (7, 8, 14),
+343 -> (7, 7, 7)), and a neighbourhood needs every axis at least ``2*rho + 1``
+across. The pair count ``P*(P-1)/2`` and the correlation matmul
+(``K * M * P**2``) grow with ``P**2``: a radius-5 cube (``P = 1331``, 885 115
+pairs) is a factor of 121 over the paper's 2D neighbourhood (``P = 121``, 7260
+pairs). Derived, not measured; measured numbers are in
+``models/language/topolm/README.md``. ``GaussianReadout``
+(``gaussian_readout.py``) shares this module's resolver and stays 2D only.
 
 Numerics
 --------
@@ -73,8 +89,8 @@ Checked before authoring, per the layer-reuse policy:
   between assignment profiles, and adopting it here would make the model a
   vector-quantised autoencoder rather than a regularised transformer.
 * ``layers/generative/topographic_product.py`` carries reusable grid/window
-  machinery, but in one dimension over capsules, not a square neighbourhood over
-  a transformer's residual branches.
+  machinery, but in one dimension over capsules, not a square or cubic
+  neighbourhood over a transformer's residual branches.
 
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM:
@@ -931,7 +947,8 @@ class SpatialSmoothness(keras.layers.Layer):
             # belt-and-braces, not load-bearing.
             #
             # It is kept for two reasons. The first is that the skip is cheap and
-            # the alternative -- a sampled 7260-term reduction against an
+            # the alternative -- a sampled reduction (7260 terms per
+            # neighbourhood at the paper's 2D settings) against an
             # unrealisable shape -- is work whose result is thrown away. The
             # second is that the ORIGINAL justification, recorded in an earlier
             # draft of this comment, was that `add_loss` accepts a `KerasTensor`,

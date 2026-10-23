@@ -1,4 +1,4 @@
-"""TopoLM — a language model whose units are laid out on a 2D grid of tissue.
+"""TopoLM — a language model whose units are laid out on a grid of tissue (2D; 3D is an extension).
 
 The package assembles a GPT-2-shaped causal decoder whose attention and
 feed-forward branch outputs each carry a spatial smoothness penalty, so that
@@ -6,6 +6,10 @@ functional clusters emerge from the training objective rather than from a
 post-hoc clustering of whatever the model happened to learn. Every unit of every
 tapped tensor is assigned a distinct cell of an ``h x w`` grid with ``h * w ==
 embed_dim``, and the penalty makes nearby units co-activate across the batch.
+With ``grid_dim=3`` the grid is an ``h x w x d`` box (``h <= w <= d``, ``h * w *
+d == embed_dim``) and a neighbourhood is a cube. The paper is 2D; the 3D layout is
+repo-authored, and the trainer, the post-hoc analysis and the Gaussian readout stay
+2D-only.
 
 .. code-block:: python
 
@@ -37,10 +41,12 @@ backbone's own ``add_loss`` contribution into the scalar it backpropagates:
 ``aggregate_backbone_losses=True`` is load-bearing. Without it the smoothness term
 is computed every step and thrown away, and the run looks healthy.
 
-The three shipped variants differ in PROVENANCE, and that matters when quoting
+The five shipped variants differ in PROVENANCE, and that matters when quoting
 any of them: ``paper`` is transcribed from Rathi et al. (2025) and is pinned
-against its source, while ``small`` and ``tiny`` are repo-authored scales that
-exist nowhere in the paper and are deliberately not pinned. See
+against its source, while ``small``, ``tiny``, ``paper3d`` (1000 units on a
+10 x 10 x 10 box, radius 4) and ``tiny3d`` (343 units on a 7 x 7 x 7 box, radius 2)
+are repo-authored, exist nowhere in the paper and are deliberately not pinned. The
+two 3D rows carry their own ``grid_dim`` and ``radius`` keys. See
 :mod:`~dl_techniques.models.topolm.config`.
 
 **No pretrained weights are distributed** — ``pretrained=True`` raises
