@@ -2,9 +2,12 @@
 Training script for CliffordNet vision backbone.
 
 Trains CliffordNet on CIFAR-10 or CIFAR-100 following the protocol from
-arXiv:2601.06793v2: AdamW optimiser, cosine LR schedule with linear warmup,
-AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation,
-and random erasing.
+arXiv:2601.06793v2 and its authors' train.py (github.com/ParaMind2025/CAN):
+200 epochs, batch 128, AdamW (lr 1e-3, weight decay 0.1), cosine decay with NO
+warm-up ("without using warm-up training epochs"), DropPath 0.3 (0.4 for cn_64_5),
+AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation, and
+random erasing 0.25. Remaining differences from the authors' run: the cosine here
+decays per step and ends at 1e-5 (alpha 0.01), theirs per epoch to 0.
 """
 
 import os
@@ -51,7 +54,11 @@ from train.common.run_io import save_training_history_json
 # ---------------------------------------------------------------------
 
 Dataset = Literal["cifar10", "cifar100"]
-Variant = Literal["nano", "lite", "lite_g", "custom"]
+Variant = str  # a key of CliffordNet.MODEL_VARIANTS, or "custom"
+
+# DropPath of the authors' networks.py: 0.4 for cliffordnet_64_5, 0.3 for the rest.
+_DEFAULT_STOCHASTIC_DEPTH = 0.3
+_STOCHASTIC_DEPTH_BY_VARIANT: Dict[str, float] = {"cn_64_5": 0.4}
 
 
 # ---------------------------------------------------------------------
@@ -392,12 +399,10 @@ def build_model(
         dropout_rate=dropout_rate,
     )
 
-    if variant == "nano":
-        model = CliffordNet.nano(num_classes=num_classes, **shared_kwargs)
-    elif variant == "lite":
-        model = CliffordNet.lite(num_classes=num_classes, **shared_kwargs)
-    elif variant == "lite_g":
-        model = CliffordNet.lite_g(num_classes=num_classes, **shared_kwargs)
+    if variant in CliffordNet.MODEL_VARIANTS:
+        model = CliffordNet.from_variant(
+            variant, num_classes=num_classes, **shared_kwargs
+        )
     elif variant == "custom":
         model = CliffordNet(
             num_classes=num_classes,
@@ -672,8 +677,8 @@ def main() -> None:
 
     # Model variant
     parser.add_argument('--variant', type=str, default='nano',
-                        choices=['nano', 'lite', 'lite_g', 'custom'],
-                        help='Pre-defined variant or custom.')
+                        choices=[*CliffordNet.MODEL_VARIANTS, 'custom'],
+                        help='Preset from CliffordNet.MODEL_VARIANTS or custom.')
 
     # Custom variant overrides
     parser.add_argument('--channels', type=int, default=128,
@@ -684,18 +689,22 @@ def main() -> None:
                         help="Comma-separated shift offsets, e.g. '1,2,4,8,16'.")
 
     # Algebraic / context options
-    parser.add_argument('--cli-mode', type=str, default='full',
+    # None means "the preset's value" (custom: full / diff / off), resolved in main().
+    parser.add_argument('--cli-mode', type=str, default=None,
                         choices=['inner', 'wedge', 'full'], dest='cli_mode')
-    parser.add_argument('--ctx-mode', type=str, default='diff',
+    parser.add_argument('--ctx-mode', type=str, default=None,
                         choices=['diff', 'abs'], dest='ctx_mode')
-    parser.add_argument('--use-global-context', action='store_true', default=False,
-                        dest='use_global_context')
+    parser.add_argument('--use-global-context', action='store_true', default=None,
+                        dest='use_global_context',
+                        help='Add the gFFN-G branch (on in lite_g and nano_g).')
 
     # Regularisation
     parser.add_argument('--layer-scale-init', type=float, default=1e-5,
                         dest='layer_scale_init')
-    parser.add_argument('--stochastic-depth-rate', type=float, default=0.3,
-                        dest='stochastic_depth_rate')
+    parser.add_argument('--stochastic-depth-rate', type=float, default=None,
+                        dest='stochastic_depth_rate',
+                        help='Maximum DropPath rate, linearly ramped over depth. '
+                             'Default: 0.4 for cn_64_5, else 0.3.')
     parser.add_argument('--dropout-rate', type=float, default=0.0,
                         dest='dropout_rate')
 
@@ -711,7 +720,8 @@ def main() -> None:
                              '(0 = off).')
 
     # Warmup
-    parser.add_argument('--warmup-epochs', type=int, default=5, dest='warmup_epochs')
+    parser.add_argument('--warmup-epochs', type=int, default=0, dest='warmup_epochs',
+                        help='Linear warm-up epochs (paper v2: none).')
 
     # Output
     parser.add_argument('--output-dir', type=str, default='results', dest='output_dir',
@@ -729,6 +739,20 @@ def main() -> None:
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
+    # DECISION plan-2026-10-23T100412-e7eaaa02/D-008
+    # Flags the user did not pass take the PRESET's value. Do NOT give these
+    # three flags their own defaults again: always passing cli_mode='full' and
+    # use_global_context=False as overrides made `--variant lite_g` train without
+    # its global branch and would have turned cn_32_5 / cn_64_5 into 'full'.
+    preset = CliffordNet.MODEL_VARIANTS.get(args.variant, {})
+    for name, fallback in (("cli_mode", "full"), ("ctx_mode", "diff"),
+                           ("use_global_context", False)):
+        if getattr(args, name) is None:
+            setattr(args, name, preset.get(name, fallback))
+    if args.stochastic_depth_rate is None:
+        args.stochastic_depth_rate = _STOCHASTIC_DEPTH_BY_VARIANT.get(
+            args.variant, _DEFAULT_STOCHASTIC_DEPTH
+        )
 
     try:
         train_model(args)
