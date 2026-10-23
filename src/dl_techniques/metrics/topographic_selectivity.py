@@ -1,4 +1,4 @@
-"""Selectivity maps, multiplicity correction, and cluster growing on a unit grid.
+"""Selectivity maps, multiplicity correction, and cluster growing on a 2-D or 3-D unit grid.
 
 The measurement chain
 ---------------------
@@ -31,6 +31,15 @@ provably the connected components of the same-sign significant cells -- the
 greedy traversal visits them all in the same partition -- and the two
 implementations are pinned against each other rather than left as a claim.
 
+Ranks
+-----
+The two grid steps, :func:`label_islands` and :func:`grow_clusters`, take a 2-D
+``(height, width)`` or a 3-D ``(depth, height, width)`` map (a 3-D unit grid is
+what a ``grid_dim=3`` TopoLM lays out); any other rank is refused by name.
+Queen is the full ``3**ndim`` neighbourhood (8 cells in 2-D, 26 in 3-D), rook
+the face neighbours (4 and 6). ``contrast_tmap`` and the FDR functions act on
+per-unit arrays and do not care.
+
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM.
       ICLR 2025. (https://arxiv.org/abs/2410.11516)
@@ -53,9 +62,9 @@ from scipy import ndimage
 # ---------------------------------------------------------------------
 
 from dl_techniques.metrics.spatial_autocorrelation import (
-    QUEEN_STRUCTURE,
-    ROOK_STRUCTURE,
     CONNECTIVITIES,
+    connectivity_structure,
+    require_grid_rank,
 )
 
 # ---------------------------------------------------------------------
@@ -203,9 +212,12 @@ def label_islands(
     """Label connected significant same-sign cells, discarding the small ones.
 
     Queen contiguity, matching both the training metric and
-    :func:`~dl_techniques.metrics.spatial_autocorrelation.morans_i_grid`.
+    :func:`~dl_techniques.metrics.spatial_autocorrelation.morans_i_grid`; the
+    structuring element comes from
+    :func:`~dl_techniques.metrics.spatial_autocorrelation.connectivity_structure`
+    for either rank.
 
-    :param mask: 2-D boolean map of candidate cells.
+    :param mask: 2-D or 3-D boolean map of candidate cells.
     :type mask: numpy.ndarray
     :param connectivity: One of :data:`~dl_techniques.metrics.spatial_autocorrelation.CONNECTIVITIES`.
     :type connectivity: str
@@ -213,12 +225,11 @@ def label_islands(
     :type min_size: int
     :return: ``(labels, count)``; ``0`` marks a dropped or absent cell.
     :rtype: Tuple[numpy.ndarray, int]
-    :raises ValueError: If ``mask`` is not 2-D, ``connectivity`` is unknown, or
-        ``min_size`` is below 1.
+    :raises ValueError: If ``mask`` is not 2-D or 3-D, ``connectivity`` is
+        unknown, or ``min_size`` is below 1.
     """
     mask = np.asarray(mask, dtype=bool)
-    if mask.ndim != 2:
-        raise ValueError(f"mask must be a 2-D map, got shape {mask.shape}")
+    require_grid_rank(mask.shape, "mask")
     if min_size < 1:
         raise ValueError(f"min_size must be >= 1, got {min_size}")
     if connectivity not in CONNECTIVITIES:
@@ -227,7 +238,7 @@ def label_islands(
             f"got {connectivity!r}"
         )
 
-    structure = QUEEN_STRUCTURE if connectivity == "queen" else ROOK_STRUCTURE
+    structure = connectivity_structure(mask.ndim, connectivity)
     labels, count = ndimage.label(mask, structure=structure)
     if count and min_size > 1:
         sizes = ndimage.sum_labels(mask, labels, index=np.arange(1, count + 1))
@@ -268,9 +279,16 @@ def grow_clusters(
     order matters only once a cap stops a cluster early -- and then it is part of
     the definition, which is why the cap is an argument and not a comment.
 
-    :param t_grid: ``(height, width)`` contrast values, unthresholded.
+    Works on a 2-D ``(height, width)`` or a 3-D ``(depth, height, width)`` map.
+    Cells are identified by their row-major flat index, which is both the
+    frontier's tie-break (the lowest flat index wins an equal score) and the key
+    into ``cell_to_unit``; the 2-D clusters and label grids are bit-identical to
+    what the 2-D-only implementation returned.
+
+    :param t_grid: ``(height, width)`` or ``(depth, height, width)`` contrast
+        values, unthresholded.
     :type t_grid: numpy.ndarray
-    :param sig_grid: ``(height, width)`` boolean significance map.
+    :param sig_grid: Boolean significance map of the same shape.
     :type sig_grid: numpy.ndarray
     :param sign: ``+1`` for units selective to condition A, ``-1`` for B.
     :type sign: int
@@ -281,24 +299,25 @@ def grow_clusters(
     :type connectivity: str
     :param max_size: Stop a cluster at this many cells, or ``None`` for no cap.
     :type max_size: Optional[int]
-    :param cell_to_unit: ``(height, width)`` unit ids, so clusters come back
-        indexed by unit. ``None`` returns grid row-major indices instead.
+    :param cell_to_unit: Unit ids with ``cell_to_unit.shape == t_grid.shape``,
+        row-major in the same axis order as the cells (a ``SpatialLayout``'s
+        ``cell_to_unit``), so clusters come back indexed by unit. ``None``
+        returns grid row-major indices instead. A table whose axes are in
+        another order is not detected and returns the wrong units.
     :type cell_to_unit: Optional[numpy.ndarray]
     :return: ``(clusters, label_grid)`` -- each cluster an array of unit ids (or
         cell indices), and the grid labelling with ``0`` for unassigned.
     :rtype: Tuple[List[numpy.ndarray], numpy.ndarray]
-    :raises ValueError: If ``t_grid`` is not 2-D, the maps disagree in shape,
+    :raises ValueError: If ``t_grid`` is not 2-D or 3-D, the maps disagree in shape,
         ``sign`` is not ``+1`` or ``-1``, ``connectivity`` is unknown, or
         ``max_size`` is below 1.
     """
     t_grid = np.asarray(t_grid, dtype="float64")
     sig_grid = np.asarray(sig_grid, dtype=bool)
-    # Named here because the walk below unpacks ``height, width`` and steps with
-    # a 3x3 structure: a 3-D map would otherwise die in a bare unpack error.
-    if t_grid.ndim != 2:
-        raise ValueError(
-            f"t_grid must be a 2-D (height, width) map, got shape {t_grid.shape}"
-        )
+    # Named here because the walk below steps with ``t_grid.ndim``-long offsets
+    # taken from a structuring element of that rank: any other rank would
+    # otherwise die inside the walk with an error that names nothing.
+    require_grid_rank(t_grid.shape, "t_grid")
     if t_grid.shape != sig_grid.shape:
         raise ValueError(
             f"sig_grid shape {sig_grid.shape} does not match t_grid shape "
@@ -314,10 +333,10 @@ def grow_clusters(
     if max_size is not None and max_size < 1:
         raise ValueError(f"max_size must be >= 1 or None, got {max_size}")
 
-    height, width = t_grid.shape
+    shape = t_grid.shape
     score = sign * t_grid
     candidates = sig_grid & (score > 0.0)
-    structure = QUEEN_STRUCTURE if connectivity == "queen" else ROOK_STRUCTURE
+    steps = _neighbour_steps(connectivity_structure(t_grid.ndim, connectivity))
 
     labels = np.zeros(t_grid.shape, dtype="int64")
     clusters: List[np.ndarray] = []
@@ -325,30 +344,29 @@ def grow_clusters(
 
     while candidates.any():
         seed_flat = int(np.argmax(np.where(candidates, score, -np.inf)))
-        seed = divmod(seed_flat, width)
+        seed = _cell_of(seed_flat, shape)
 
         cluster_cells = {seed}
         frontier: List[Tuple[float, int]] = []
-        for neighbour in _neighbours(seed, height, width, structure):
+        for neighbour in _neighbours(seed, shape, steps):
             if candidates[neighbour]:
-                heapq.heappush(frontier, (-score[neighbour], neighbour[0] * width + neighbour[1]))
+                heapq.heappush(
+                    frontier, (-score[neighbour], _flat_of(neighbour, shape))
+                )
 
         while frontier:
             if max_size is not None and len(cluster_cells) >= max_size:
                 break
             negative_score, flat = heapq.heappop(frontier)
-            cell = divmod(flat, width)
+            cell = _cell_of(flat, shape)
             if cell in cluster_cells or not candidates[cell]:
                 continue
             cluster_cells.add(cell)
-            for neighbour in _neighbours(cell, height, width, structure):
+            for neighbour in _neighbours(cell, shape, steps):
                 if candidates[neighbour] and neighbour not in cluster_cells:
                     heapq.heappush(
                         frontier,
-                        (
-                            -score[neighbour],
-                            neighbour[0] * width + neighbour[1],
-                        ),
+                        (-score[neighbour], _flat_of(neighbour, shape)),
                     )
 
         if len(cluster_cells) < min_size:
@@ -360,37 +378,54 @@ def grow_clusters(
         for cell in cluster_cells:
             candidates[cell] = False
             labels[cell] = next_label
-        clusters.append(_to_units(cluster_cells, cell_to_unit, width))
+        clusters.append(_to_units(cluster_cells, cell_to_unit, shape))
 
     return clusters, labels
 
 
+def _neighbour_steps(structure: np.ndarray) -> List[Tuple[int, ...]]:
+    """The per-axis steps to every neighbour a structuring element admits.
+
+    ``structure`` is the ``(3,) * ndim`` boolean block of
+    :func:`~dl_techniques.metrics.spatial_autocorrelation.connectivity_structure`;
+    the centre (all-zero step) is excluded.
+    """
+    return [
+        tuple(int(v) - 1 for v in index)
+        for index in np.argwhere(structure)
+        if any(int(v) != 1 for v in index)
+    ]
+
+
+def _cell_of(flat: int, shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    """The grid cell of a row-major flat index."""
+    return tuple(int(v) for v in np.unravel_index(flat, shape))
+
+
+def _flat_of(cell: Tuple[int, ...], shape: Tuple[int, ...]) -> int:
+    """The row-major flat index of a grid cell."""
+    return int(np.ravel_multi_index(cell, shape))
+
+
 def _neighbours(
-    cell: Tuple[int, int],
-    height: int,
-    width: int,
-    structure: np.ndarray,
-) -> Iterable[Tuple[int, int]]:
-    """Yield the in-bounds cells sharing an edge or corner with ``cell``."""
-    row, col = cell
-    for row_step in (-1, 0, 1):
-        for col_step in (-1, 0, 1):
-            if row_step == 0 and col_step == 0:
-                continue
-            if not structure[row_step + 1, col_step + 1]:
-                continue
-            neighbour = (row + row_step, col + col_step)
-            if 0 <= neighbour[0] < height and 0 <= neighbour[1] < width:
-                yield neighbour
+    cell: Tuple[int, ...],
+    shape: Tuple[int, ...],
+    steps: Sequence[Tuple[int, ...]],
+) -> Iterable[Tuple[int, ...]]:
+    """Yield the in-bounds cells at one of ``steps`` from ``cell``."""
+    for step in steps:
+        neighbour = tuple(c + d for c, d in zip(cell, step))
+        if all(0 <= n < size for n, size in zip(neighbour, shape)):
+            yield neighbour
 
 
 def _to_units(
-    cells: Iterable[Tuple[int, int]],
+    cells: Iterable[Tuple[int, ...]],
     cell_to_unit: Optional[np.ndarray],
-    width: int,
+    shape: Tuple[int, ...],
 ) -> np.ndarray:
     """Translate grid cells to unit ids, or to row-major cell indices."""
-    flat = np.array([row * width + col for row, col in cells], dtype="int64")
+    flat = np.array([_flat_of(cell, shape) for cell in cells], dtype="int64")
     if cell_to_unit is None:
         return np.sort(flat)
     table = np.asarray(cell_to_unit, dtype="int64")

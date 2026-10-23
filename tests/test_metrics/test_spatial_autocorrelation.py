@@ -177,8 +177,13 @@ class TestMoransIGrid:
         # And the two are not interchangeable in sign of difference either way.
         assert float(mask.astype("float64").sum()) < noisy_ramp.size
 
-    @pytest.mark.parametrize("bad", [np.zeros(4), np.zeros((2, 2, 2))])
+    @pytest.mark.parametrize("bad", [np.zeros(4), np.zeros((2, 2, 2, 2))])
     def test_a_non_2d_map_is_rejected(self, bad):
+        """Rewritten in plan 972a9ac5 step 2 (D-003). It used to parametrize
+        ``np.zeros((2, 2, 2))`` as a map that must be refused; a 3-D map is now
+        scored (``TestMoransIGrid3D``), so the refused ranks are the ones the
+        grid functions still do not support: 1-D and 4-D. The message still names
+        the rank form."""
         with pytest.raises(ValueError, match="must be a 2-D"):
             morans_i_grid(bad)
 
@@ -393,8 +398,12 @@ class TestLabelIslands:
         assert count == 0
         assert labels.sum() == 0
 
-    @pytest.mark.parametrize("bad", [np.zeros((2, 2, 2)), np.zeros(5)])
+    @pytest.mark.parametrize("bad", [np.zeros((2, 2, 2, 2)), np.zeros(5)])
     def test_a_non_2d_mask_is_rejected(self, bad):
+        """Rewritten in plan 972a9ac5 step 2 (D-003): ``np.zeros((2, 2, 2))`` is
+        no longer an example of a refused mask, because ``label_islands`` labels
+        a 3-D mask (``TestLabelIslands3D``). 4-D and 1-D are still refused, by
+        name."""
         with pytest.raises(ValueError, match="must be a 2-D"):
             label_islands(bad)
 

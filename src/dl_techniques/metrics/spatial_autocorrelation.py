@@ -1,4 +1,4 @@
-"""Spatial autocorrelation of a map laid out on a grid or a cortical mesh.
+"""Spatial autocorrelation of a map laid out on a 2-D or 3-D grid or a cortical mesh.
 
 What this measures
 ------------------
@@ -25,6 +25,15 @@ neighbourhood, which is the metric the spatial loss trains with, so the
 measurement and the objective agree about what "nearby" means. Using rook here
 would make the reported clustering a statement about a different neighbourhood
 than the one that was optimised.
+
+**Two ranks: 2-D ``(height, width)`` and 3-D ``(depth, height, width)``.** The grid
+functions take a map of either rank. In 3-D the same two rules hold with the
+cube in place of the square: queen is the 26 cells of the 3x3x3 l-infinity ball
+around a cell (the neighbourhood a 3-D spatial loss trains with), rook is the 6
+that share a face. The weights stay binary and unnormalised, ``W = sum w_ij``.
+Any other rank is refused by name. The 2-D results are bit-identical to what
+the 2-D-only code returned: the 2-D offset order is kept, because a different
+summation order moves the last bits.
 
 **Unthresholded maps only.** Thresholding a contrast map produces contiguous
 patches of zero, and a patch of zeros is a patch of agreement, so the statistic
@@ -61,40 +70,116 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-#: The offset pairs each contiguity counts, as ``(row_step, col_step)``. Each
-#: undirected edge appears once; ``morans_i_grid`` multiplies by two, so the
-#: weight matrix it implies is symmetric.
-QUEEN_OFFSETS = ((0, 1), (1, 0), (1, 1), (1, -1))
-ROOK_OFFSETS = ((0, 1), (1, 0))
+#: Map ranks the grid functions accept: ``(height, width)`` and
+#: ``(depth, height, width)``.
+GRID_RANKS = (2, 3)
 
-#: Queen contiguity is the eight cells sharing an edge or a corner, which for a
-#: square grid is exactly a 3x3 structuring element.
-QUEEN_STRUCTURE = np.ones((3, 3), dtype=bool)
-ROOK_STRUCTURE = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
-
-#: Connectivity names accepted by :func:`grid_weights` and
-#: :func:`morans_i_grid`.
+#: Connectivity names accepted by :func:`grid_weights`, :func:`grid_weights_nd`
+#: and :func:`morans_i_grid`.
 CONNECTIVITIES = ("queen", "rook")
 
+# DECISION plan-2026-10-23T190557-972a9ac5/D-003: the 2-D tuples keep this exact
+# order and are NOT rebuilt from ``itertools.product``, and ``grid_weights``
+# is NOT rewritten to delegate to ``grid_weights_nd``. The generated order is
+# (0,1),(1,-1),(1,0),(1,1): it sums the same terms in a different order and
+# moves ``morans_i_grid`` by 1.2e-18 on a 28x28 map (measured), which breaks the
+# bit-identical 2-D contract that ``TestMoransIGoldenPins`` pins as float.hex
+# literals. Rank 3 got its own tables for that reason, beside these.
 
-def _offset_set(connectivity: str) -> Tuple[Tuple[int, int], ...]:
-    """Resolve a connectivity name to its offset pairs."""
-    if connectivity == "queen":
-        return QUEEN_OFFSETS
-    if connectivity == "rook":
-        return ROOK_OFFSETS
-    raise ValueError(
-        f"connectivity must be one of {list(CONNECTIVITIES)}, got {connectivity!r}"
+#: The offset tuples each contiguity counts, one per undirected edge (the first
+#: non-zero component is positive); ``morans_i_grid`` multiplies by two, so the
+#: weight matrix it implies is symmetric. 2-D tuples are
+#: ``(row_step, col_step)``; the 3-D tables are ``(depth, row, col)`` steps and
+#: hold 13 (queen) and 3 (rook) tuples.
+QUEEN_OFFSETS = ((0, 1), (1, 0), (1, 1), (1, -1))
+ROOK_OFFSETS = ((0, 1), (1, 0))
+QUEEN_OFFSETS_3D = (
+    (0, 0, 1), (0, 1, -1), (0, 1, 0), (0, 1, 1),
+    (1, -1, -1), (1, -1, 0), (1, -1, 1),
+    (1, 0, -1), (1, 0, 0), (1, 0, 1),
+    (1, 1, -1), (1, 1, 0), (1, 1, 1),
+)
+ROOK_OFFSETS_3D = ((0, 0, 1), (0, 1, 0), (1, 0, 0))
+
+_OFFSET_TABLES = {
+    (2, "queen"): QUEEN_OFFSETS,
+    (2, "rook"): ROOK_OFFSETS,
+    (3, "queen"): QUEEN_OFFSETS_3D,
+    (3, "rook"): ROOK_OFFSETS_3D,
+}
+
+
+def _require_connectivity(connectivity: str) -> None:
+    """Raise the shared ``connectivity must be one of`` error for an unknown name."""
+    if connectivity not in CONNECTIVITIES:
+        raise ValueError(
+            f"connectivity must be one of {list(CONNECTIVITIES)}, "
+            f"got {connectivity!r}"
+        )
+
+
+def connectivity_structure(ndim: int, connectivity: str = "queen") -> np.ndarray:
+    """The boolean structuring element of a contiguity, for any rank.
+
+    Queen is the full ``3**ndim`` block (all faces, edges and corners), rook the
+    face neighbours only. This is the one place both metrics modules take their
+    structure from, so a labelled island and a Moran neighbour pair can never
+    disagree about what "adjacent" means. In 2-D it equals
+    :data:`QUEEN_STRUCTURE` / :data:`ROOK_STRUCTURE`.
+
+    :param ndim: Number of grid axes (``>= 1``).
+    :type ndim: int
+    :param connectivity: One of :data:`CONNECTIVITIES`.
+    :type connectivity: str
+    :return: A ``(3,) * ndim`` boolean array, centre included.
+    :rtype: numpy.ndarray
+    :raises ValueError: If ``connectivity`` is unknown.
+    """
+    _require_connectivity(connectivity)
+    return ndimage.generate_binary_structure(
+        ndim, ndim if connectivity == "queen" else 1
     )
 
 
-def _as_2d_map(grid: np.ndarray, name: str = "grid") -> np.ndarray:
-    """Validate that a value argument is a 2-D map."""
-    grid = np.asarray(grid, dtype="float64")
-    if grid.ndim != 2:
+#: Queen contiguity is the eight cells sharing an edge or a corner, which for a
+#: square grid is exactly a 3x3 structuring element. Derived from
+#: :func:`connectivity_structure`, so the 2-D constants and the N-d helper cannot
+#: drift apart.
+QUEEN_STRUCTURE = connectivity_structure(2, "queen")
+ROOK_STRUCTURE = connectivity_structure(2, "rook")
+
+
+def require_grid_rank(shape: Sequence[int], name: str = "grid") -> None:
+    """Raise a named error unless ``shape`` has one of the supported ranks.
+
+    The single home of the rank rule (:data:`GRID_RANKS`) and of its message,
+    which every grid function in this module and in ``topographic_selectivity``
+    uses, so the allowed ranks are written down once.
+
+    :param shape: Shape of the map being validated.
+    :type shape: Sequence[int]
+    :param name: Argument name, for the message.
+    :type name: str
+    :raises ValueError: If ``len(shape)`` is not in :data:`GRID_RANKS`. The
+        message names the argument and the offending shape.
+    """
+    if len(shape) not in GRID_RANKS:
         raise ValueError(
-            f"{name} must be a 2-D (height, width) map, got shape {grid.shape}"
+            f"{name} must be a 2-D (height, width) map or a 3-D "
+            f"(depth, height, width) map, got shape {tuple(shape)}"
         )
+
+
+def _offset_set(connectivity: str, ndim: int = 2) -> Tuple[Tuple[int, ...], ...]:
+    """Resolve a connectivity name and a rank to its offset tuples."""
+    _require_connectivity(connectivity)
+    return _OFFSET_TABLES[(ndim, connectivity)]
+
+
+def _as_grid_map(grid: np.ndarray, name: str = "grid") -> np.ndarray:
+    """Validate that a value argument is a 2-D or 3-D map, as ``float64``."""
+    grid = np.asarray(grid, dtype="float64")
+    require_grid_rank(grid.shape, name)
     return grid
 
 
@@ -136,7 +221,13 @@ def grid_weights(
     width: int,
     connectivity: str = "queen",
 ) -> scipy.sparse.csr_matrix:
-    """Build the binary neighbour matrix of a rectangular grid.
+    """Build the binary neighbour matrix of a rectangular 2-D grid.
+
+    The 2-D entry point, kept with its ``(height, width, connectivity)``
+    signature because ``connectivity`` is its third positional argument; a 3-D
+    grid goes through :func:`grid_weights_nd`. The two builders are separate
+    bodies, and ``grid_weights_nd((height, width), c)`` is pinned equal to this
+    one array for array.
 
     :param height: Number of grid rows.
     :type height: int
@@ -169,6 +260,64 @@ def grid_weights(
     shape = (height * width, height * width)
     forward = scipy.sparse.coo_matrix(
         (np.ones(len(rows)), (rows, cols)), shape=shape
+    )
+    return (forward + forward.T).tocsr()
+
+
+def grid_weights_nd(
+    shape: Sequence[int],
+    connectivity: str = "queen",
+) -> scipy.sparse.csr_matrix:
+    """Build the binary neighbour matrix of a 2-D or 3-D rectangular grid.
+
+    Cells are numbered row-major (C order), so cell ``(i, j, k)`` of a
+    ``(D, H, W)`` grid is ``(i * H + j) * W + k`` -- the order of
+    ``numpy.ravel`` and of ``SpatialLayout.cell_to_unit``. Queen gives 26
+    neighbours to an interior 3-D cell (7 to a corner), rook gives 6. For a
+    2-D ``shape`` the returned CSR arrays equal those of :func:`grid_weights`.
+
+    :param shape: ``(height, width)`` or ``(depth, height, width)``.
+    :type shape: Sequence[int]
+    :param connectivity: One of :data:`CONNECTIVITIES`.
+    :type connectivity: str
+    :return: A symmetric sparse matrix with a zero diagonal, ``float64`` data.
+    :rtype: scipy.sparse.csr_matrix
+    :raises ValueError: If ``shape`` does not have 2 or 3 axes, an extent is not
+        positive, or ``connectivity`` is unknown.
+    """
+    shape = tuple(int(n) for n in shape)
+    if len(shape) not in GRID_RANKS:
+        raise ValueError(
+            f"shape must have 2 or 3 axes, got {shape}"
+        )
+    if any(n <= 0 for n in shape):
+        raise ValueError(
+            f"grid dimensions must be positive, got {'x'.join(map(str, shape))}"
+        )
+    offsets = _offset_set(connectivity, len(shape))
+
+    num_cells = int(np.prod(shape))
+    index = np.arange(num_cells).reshape(shape)
+    rows: List[np.ndarray] = []
+    cols: List[np.ndarray] = []
+    for offset in offsets:
+        # The same two overlapping windows as ``morans_i_grid``: the cells that
+        # have a neighbour at ``offset``, and those neighbours.
+        source = tuple(
+            slice(max(0, -step), size - max(0, step))
+            for step, size in zip(offset, shape)
+        )
+        target = tuple(
+            slice(max(0, step), size - max(0, -step))
+            for step, size in zip(offset, shape)
+        )
+        rows.append(index[source].reshape(-1))
+        cols.append(index[target].reshape(-1))
+
+    row = np.concatenate(rows)
+    col = np.concatenate(cols)
+    forward = scipy.sparse.coo_matrix(
+        (np.ones(row.size), (row, col)), shape=(num_cells, num_cells)
     )
     return (forward + forward.T).tocsr()
 
@@ -218,24 +367,26 @@ def mesh_weights(
 
 
 def morans_i_grid(grid: np.ndarray, connectivity: str = "queen") -> float:
-    """Moran's I of a 2-D map, without forming an ``N x N`` matrix.
+    """Moran's I of a 2-D or 3-D map, without forming an ``N x N`` matrix.
 
     The general form allocates a dense ``N x N`` weight matrix; at a 28x28 grid
     that is 614 656 entries, and at a 32 492-vertex mesh it is a gigabyte. This
-    walks the four (or two) offset classes instead and never materialises it.
+    walks the offset classes instead (four queen / two rook in 2-D, thirteen /
+    three in 3-D) and never materialises it.
 
-    :param grid: ``(height, width)`` values. Never threshold this.
+    :param grid: ``(height, width)`` or ``(depth, height, width)`` values. Never
+        threshold this.
     :type grid: numpy.ndarray
     :param connectivity: One of :data:`CONNECTIVITIES`.
     :type connectivity: str
-    :return: The statistic, or ``nan`` when undefined (a 1x1 grid, or a constant
-        map).
+    :return: The statistic, or ``nan`` when undefined (a single cell, or a
+        constant map).
     :rtype: float
-    :raises ValueError: If ``grid`` is not 2-D or ``connectivity`` is unknown.
+    :raises ValueError: If ``grid`` is not 2-D or 3-D, or ``connectivity`` is
+        unknown.
     """
-    grid = _as_2d_map(grid)
-    offsets = _offset_set(connectivity)
-    height, width = grid.shape
+    grid = _as_grid_map(grid)
+    offsets = _offset_set(connectivity, grid.ndim)
 
     centred = grid - grid.mean()
     denominator = float(np.sum(centred ** 2))
@@ -244,16 +395,20 @@ def morans_i_grid(grid: np.ndarray, connectivity: str = "queen") -> float:
 
     cross = 0.0
     weight = 0
-    for row_step, col_step in offsets:
-        # Slice the two overlapping windows of one offset class. Each (dy, dx)
-        # pair contributes one neighbour per cell, and the transpose supplies
-        # the other direction, hence the factor of two.
-        rows_a = slice(0, height - row_step)
-        cols_a = slice(max(0, -col_step), width - max(0, col_step))
-        rows_b = slice(row_step, height)
-        cols_b = slice(max(0, col_step), width - max(0, -col_step))
-        block_a = centred[rows_a, cols_a]
-        block_b = centred[rows_b, cols_b]
+    for offset in offsets:
+        # Slice the two overlapping windows of one offset class, one slice per
+        # axis. Each offset contributes one neighbour per cell, and the
+        # transpose supplies the other direction, hence the factor of two.
+        window_a = tuple(
+            slice(max(0, -step), size - max(0, step))
+            for step, size in zip(offset, grid.shape)
+        )
+        window_b = tuple(
+            slice(max(0, step), size - max(0, -step))
+            for step, size in zip(offset, grid.shape)
+        )
+        block_a = centred[window_a]
+        block_b = centred[window_b]
         cross += 2.0 * float(np.sum(block_a * block_b))
         weight += 2 * block_a.size
 
@@ -320,10 +475,12 @@ def label_islands(
     """Label the connected components of a boolean map.
 
     Queen contiguity here means the same thing it means in
-    :func:`morans_i_grid` -- the 3x3 structuring element -- so an island is a set
-    of cells the training loss would have scored as neighbours.
+    :func:`morans_i_grid` -- the full ``3**ndim`` structuring element, from
+    :func:`connectivity_structure` -- so an island is a set of cells the training
+    loss would have scored as neighbours. In 3-D, queen joins cells that touch
+    at a corner and rook only those that share a face.
 
-    :param mask: 2-D boolean map.
+    :param mask: 2-D or 3-D boolean map.
     :type mask: numpy.ndarray
     :param connectivity: One of :data:`CONNECTIVITIES`.
     :type connectivity: str
@@ -332,27 +489,17 @@ def label_islands(
     :return: ``(labels, count)`` where ``labels`` is an int array with ``0`` for
         unlabelled and ``1..count`` for the retained islands.
     :rtype: Tuple[numpy.ndarray, int]
-    :raises ValueError: If ``mask`` is not 2-D, ``connectivity`` is unknown, or
-        ``min_island_size`` is below ``1``.
+    :raises ValueError: If ``mask`` is not 2-D or 3-D, ``connectivity`` is
+        unknown, or ``min_island_size`` is below ``1``.
     """
     mask = np.asarray(mask)
-    if mask.ndim != 2:
-        raise ValueError(
-            f"mask must be a 2-D map, got shape {mask.shape}"
-        )
+    require_grid_rank(mask.shape, "mask")
     if min_island_size < 1:
         raise ValueError(
             f"min_island_size must be >= 1, got {min_island_size}"
         )
 
-    structure = (
-        QUEEN_STRUCTURE if connectivity == "queen" else ROOK_STRUCTURE
-    )
-    if connectivity not in CONNECTIVITIES:
-        raise ValueError(
-            f"connectivity must be one of {list(CONNECTIVITIES)}, "
-            f"got {connectivity!r}"
-        )
+    structure = connectivity_structure(mask.ndim, connectivity)
 
     labels, count = ndimage.label(mask, structure=structure)
     if count and min_island_size > 1:
@@ -395,9 +542,10 @@ def islands_morans_i(
     largest island stand in for every other one, which is the same domination by
     a different route.
 
-    :param t_grid: ``(height, width)`` contrast values, unthresholded.
+    :param t_grid: ``(height, width)`` or ``(depth, height, width)`` contrast
+        values, unthresholded.
     :type t_grid: numpy.ndarray
-    :param sig_grid: ``(height, width)`` boolean significance map.
+    :param sig_grid: Boolean significance map of the same shape.
     :type sig_grid: numpy.ndarray
     :param connectivity: One of :data:`CONNECTIVITIES`.
     :type connectivity: str
@@ -406,9 +554,10 @@ def islands_morans_i(
     :return: The mean over islands, or ``nan`` when no island qualifies -- the
         honest answer, and what the paper reports as "not applicable".
     :rtype: float
-    :raises ValueError: If the two maps disagree in shape.
+    :raises ValueError: If ``t_grid`` is not 2-D or 3-D, or the two maps disagree
+        in shape.
     """
-    t_grid = _as_2d_map(t_grid, "t_grid")
+    t_grid = _as_grid_map(t_grid, "t_grid")
     sig_grid = np.asarray(sig_grid, dtype=bool)
     if sig_grid.shape != t_grid.shape:
         raise ValueError(
@@ -425,7 +574,7 @@ def islands_morans_i(
     scores = []
     # Built once, not once per island: the restricted sub-matrix is a cheap slice
     # of the same sparse structure.
-    full_weights = grid_weights(*t_grid.shape, connectivity=connectivity)
+    full_weights = grid_weights_nd(t_grid.shape, connectivity)
     for island in range(1, count + 1):
         member = labels == island
         values = t_grid[member]
@@ -482,9 +631,10 @@ def morans_i_summary(
     should build the weights once and call :func:`morans_i_permutation_test`
     directly.
 
-    :param t_grid: ``(height, width)`` contrast values, unthresholded.
+    :param t_grid: ``(height, width)`` or ``(depth, height, width)`` contrast
+        values, unthresholded.
     :type t_grid: numpy.ndarray
-    :param sig_grid: Optional ``(height, width)`` significance map. Omitting it
+    :param sig_grid: Optional significance map of the same shape. Omitting it
         makes :func:`islands_morans_i` ``nan`` rather than silently scoring the
         whole grid as one island.
     :type sig_grid: Optional[numpy.ndarray]
@@ -501,9 +651,10 @@ def morans_i_summary(
     :return: ``{"standard", "islands", "permutation_p", "num_permutations",
         "num_units", "connectivity"}``.
     :rtype: dict
-    :raises ValueError: If ``num_permutations`` is not positive and not ``None``.
+    :raises ValueError: If ``t_grid`` is not 2-D or 3-D, or ``num_permutations``
+        is not positive and not ``None``.
     """
-    t_grid = _as_2d_map(t_grid)
+    t_grid = _as_grid_map(t_grid, "t_grid")
     if sig_grid is None:
         islands = float("nan")
     else:
@@ -515,10 +666,9 @@ def morans_i_summary(
     if num_permutations is None:
         permutation_p = float("nan")
     else:
-        height, width = t_grid.shape
         _, permutation_p = morans_i_permutation_test(
             t_grid,
-            grid_weights(height, width, connectivity=connectivity),
+            grid_weights_nd(t_grid.shape, connectivity),
             num_permutations=num_permutations,
             seed=seed,
         )

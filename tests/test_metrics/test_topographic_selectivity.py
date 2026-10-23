@@ -390,14 +390,20 @@ class TestGrowClusters:
         with pytest.raises(ValueError, match="does not match t_grid shape"):
             grow_clusters(np.zeros((5, 5)), np.ones((6, 6), dtype=bool))
 
-    @pytest.mark.parametrize("shape", [(7, 7, 7), (4, 5, 6), (9,)])
+    @pytest.mark.parametrize("shape", [(9,), (3, 3, 3, 3), (2, 2, 2, 2, 2)])
     def test_a_map_that_is_not_two_dimensional_is_named_not_unpacked(self, shape):
-        """A 3-D map used to die in ``height, width = t_grid.shape``.
+        """A map of an unsupported rank used to die in ``height, width = t_grid.shape``.
 
-        That unpack error names nothing, so a caller holding a 3-D layout's map
-        could not tell a rank problem from a bug. The guard comes before the
-        shape-agreement check, so two maps that AGREE in a non-2-D shape get the
-        rank message, not a pass.
+        That unpack error names nothing, so a caller could not tell a rank
+        problem from a bug. The guard comes before the shape-agreement check, so
+        two maps that AGREE in an unsupported shape get the rank message, not a
+        pass.
+
+        Rewritten in plan 972a9ac5 step 2 (D-003): the parametrization used to
+        hold the 3-D shapes ``(7, 7, 7)`` and ``(4, 5, 6)`` as examples of a
+        refused map. ``grow_clusters`` now grows clusters on a 3-D map
+        (``TestGrowClusters3D``), so the shapes that must still be refused are
+        the ones of rank 1 and 4 or more.
         """
         with pytest.raises(ValueError, match=r"2-D \(height, width\) map") as caught:
             grow_clusters(np.zeros(shape), np.ones(shape, dtype=bool))
