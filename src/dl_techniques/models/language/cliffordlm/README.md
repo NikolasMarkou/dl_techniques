@@ -17,7 +17,7 @@ the channel mixing. Cost is linear in sequence length and there is no KV cache.
 > `ValueError` ("Unrecognized keyword arguments passed to CliffordNetLM"), because the keyword
 > falls through to `keras.Model`. It does not raise `NotImplementedError`, and it never returns a
 > model; a boolean and a path fail the same way. A trained model comes from `keras.models.load_model` on a `.keras` file you produced
-> (section 6).
+> (section 7).
 
 ---
 
@@ -36,7 +36,7 @@ The model is the CliffordNet vision backbone read along a sequence axis instead 
 - **Embeddings are tied by default** (`tie_word_embeddings=True`): the head multiplies by the
   transposed token-embedding matrix and adds a separate learned `output_bias` of shape
   `(vocab_size,)`.
-- **No `generate()`.** Sampling is outside the class (section 5).
+- **No `generate()`.** Sampling is outside the class (section 6).
 - **No sequence-length guard.** `max_seq_length` sizes the position table and nothing refuses a
   longer input (section 8).
 
