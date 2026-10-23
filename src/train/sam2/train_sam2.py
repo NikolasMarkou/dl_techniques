@@ -29,6 +29,38 @@ Those numbers were measured before plan-2026-10-14T062616-81938e81 D-285: since 
 every SAM 2 loss term and the total are summed over the clip's frames and averaged over
 the clips, as upstream does, ``num_frames`` times the earlier mean, so no SAM 2 loss
 value before D-285 compares with one after.
+
+The 0.1 clip against ``--gradient-clip-norm 0``, paired by seed
+(plan-2026-10-14T062616-81938e81 D-287): 18 seed pairs of::
+
+    CUDA_VISIBLE_DEVICES=<gpu> MPLBACKEND=Agg PYTHONPATH=src \\
+        .venv/bin/python -m train.sam2.train_sam2 --smoke --num-clips-train 32 \\
+        --num-clips-val 32 --epochs 30 --early-stopping-patience 100 \\
+        --seed <s> [--gradient-clip-norm 0]
+
+each restored checkpoint scored on 32 held-out clips (inference mode, the answer on 8
+fixed frame-0 clicks per clip, the per-frame mean ``SAM2GatedMaskLoss`` with the loss
+terms of D-283 and D-285; the plan's scratch scorer ``score_ckpt.py``, sha256
+4fba4b06a1abeff63cc3b87098f86996190581f6edd1cfb6bcc5caa32087be33). Seeds 42-56 on
+GPU 0 (RTX 4090), 57-59 on GPU 1 (RTX 4070); d = clip - off, restored epochs
+clip / off:
+
+    seed GPU  clip    off     d        epochs | seed GPU  clip    off     d        epochs
+    42   0    0.3131  0.3532  -0.0402  14/15  | 51   0    0.3980  0.3609  +0.0371  26/27
+    43   0    0.3951  0.3946  +0.0005  26/26  | 52   0    0.2439  0.4662  -0.2224  18/20
+    44   0    0.3333  0.4092  -0.0760  18/21  | 53   0    0.3323  0.3773  -0.0450   5/6
+    45   0    0.3280  0.2695  +0.0584  17/26  | 54   0    0.4040  0.4270  -0.0229  21/21
+    46   0    0.3757  0.3112  +0.0646  26/16  | 55   0    0.3400  0.3896  -0.0496  17/18
+    47   0    0.4230  0.3342  +0.0888  23/22  | 56   0    0.2542  0.2980  -0.0438  27/30
+    48   0    0.2825  0.4188  -0.1363  24/28  | 57   1    0.3202  0.3311  -0.0109  30/30
+    49   0    0.3655  0.3225  +0.0430  22/21  | 58   1    0.3780  0.3758  +0.0022  18/18
+    50   0    0.2623  0.3279  -0.0657  13/12  | 59   1    0.2339  0.2108  +0.0231  24/24
+
+N = 18: mean d -0.0219, sd 0.0757, 95% t interval [-0.0596, +0.0157], Wilcoxon p
+0.347; GPU-0 pairs (15) mean -0.0273, GPU-1 pairs (3) +0.0048. Every run beats the
+best constant (0.21-0.47 against 0.90-0.94). No effect resolved at this scale
+(unresolved at N = 18); the default stays 0.1, upstream's value. The SAM 2 README
+section 7 states the decision rule.
 **That is the whole claim.** No official Meta SAM 2 checkpoint has ever been
 loaded in this repository, no annotated video-object-segmentation dataset exists
 on this machine, and this trainer makes no accuracy claim on real video.
@@ -634,6 +666,10 @@ def create_sam2_training_model(
     # norm over ALL gradients scaled together. Keras' `clipnorm` clips each
     # variable's gradient to the norm on its own, which changes the update's
     # direction; do not swap it in. See decisions.md D-264.
+    # Note (plan-2026-10-14T062616-81938e81/D-287): the 0.1 default was A/B'd against
+    # 0 on 18 seed pairs, 32 held-out clips: d = clip - off mean -0.0219, 95% interval
+    # [-0.0596, +0.0157], Wilcoxon p 0.347. Unresolved at N = 18, so the default stays
+    # 0.1, upstream's value; do not flip it on this evidence.
     compile_sam2_video_trainer(
         model,
         optimizer=keras.optimizers.Adam(

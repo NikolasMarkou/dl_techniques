@@ -19,8 +19,11 @@ additionally emits an object score and an object pointer.
 >   weights.
 > - **It makes no accuracy claim and no segmentation-quality claim.** Nothing
 >   here has been trained to any quality. What is measured is that the trainer's
->   own command memorises its 2-clip batch and that a 32-clip smoke run beats a
->   constant on 4 held-out synthetic clips (§7); nothing else.
+>   own command memorises its 2-clip batch, that a 32-clip smoke run beats a
+>   constant on 4 held-out synthetic clips, and that in a paired 18-seed A/B of the
+>   0.1 gradient clip every restored checkpoint beats the constant on 32 held-out
+>   synthetic clips while no effect of the clip is resolved at that scale (§7);
+>   nothing else.
 > - **The mask head did not learn under joint training until step 12.8 of
 >   plan-2026-10-14T062616-81938e81**: the image encoder was fed `[0, 255]`
 >   pixels where upstream feeds standardized ones (§7). Training runs logged
@@ -183,7 +186,7 @@ location so a reader knows where to look, not restated:
 |---|---|---|
 | [`hiera.py`](hiera.py) | window size lags one block behind the stage transition; query pooling is asymmetric (`q` only) | `test_hiera.py` |
 | [`neck.py`](neck.py) | lateral-conv index orientation `convs[n - i]`; the `scalp` drop happens BEFORE `vision_features` is taken; `SAM2ImageEncoder` standardizes `[0, 255]` pixels with upstream's `NormalizeAPI` statistics before the trunk (`pixel_mean` / `pixel_std`, config). Without it the trainer never got below a constant (D-260) | `test_neck.py`, `test_the_image_encoder_standardizes_its_input.py` |
-| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) and the input standardized (D-260) it still raises the loss, scored on the same 8 fixed draws of frame-0 points for both: 4 held-out clips of the 32-clip run 0.401 on against 0.375 off with the trainer's gradient clip (D-264; 0.367 against 0.347 without it, D-261) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
+| [`mask_decoder.py`](mask_decoder.py) | the object-score token is PREPENDED (every index shifts by 1); skips are ADDED not concatenated; the stability score is self-consistency, not IoU-vs-GT; the unstable fallback is PER BATCH ELEMENT. `SAM2.from_variant` builds the decoder with the fallback OFF: when training decoded token 0 only, the fallback answered with untrained tokens (validation mask loss 1.712 with it on against 1.043 off, plan-2026-10-14T062616-81938e81 D-245); with the multimask tokens trained (D-249) and the input standardized (D-260) it still raises the loss, scored on the same 8 fixed draws of frame-0 points for both: 4 held-out clips of the 32-clip run 0.401 on against 0.375 off with the trainer's gradient clip (D-264; 0.367 against 0.347 without it, D-261). Single runs; the clip's own effect on the held-out answer is unresolved at N = 18 seed pairs (§7, D-287) | `test_mask_decoder.py`, `test_inference_decodes_the_mask_token_training_trains.py` |
 | [`memory_encoder.py`](memory_encoder.py) | `20 * sigmoid(x) - 10`, affine AFTER the sigmoid; the downsampler's layer COUNT (both plausible readings give total stride 16); the fusion is additive | `test_memory_encoder.py` |
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
@@ -250,7 +253,9 @@ Four properties of that wrapper are load-bearing and stated at the class:
   fixed frame-0 clicks per clip, numpy draws of one foreground cell; D-261, D-264): on
   the 2-clip memorisation run the best-IoU candidate and the lowest-loss candidate are
   the same mask on every draw (0.165) and token 0 scores 0.200; on 4 held-out clips of
-  the 32-clip run the best-IoU candidate scores 0.375 and token 0 0.420.
+  the 32-clip run the best-IoU candidate scores 0.375 and token 0 0.420. That is one
+  seed; the paired clip A/B at the end of this section, scored with today's loss terms
+  on 32 held-out clips, spans 0.21 to 0.47 over its 36 runs.
 
 ### Why the mask head did not learn, and what fixed it
 
@@ -322,9 +327,67 @@ spikes: without it the same command jumps to 22 at epoch 16 and is still at 3.9 
 epoch 30. Held out, the clip moves the answer by less than the seed does (32-clip
 command, clip on against off: seed 42 0.375 against 0.353, seed 43 0.225 against
 0.265; D-261's own run of the seed-42 command without the clip scored 0.347 at epoch
-14, which is this GPU's run-to-run variation), so it stays on because it is
-upstream's. The trainer's own memorisation guard is
+14, which is this GPU's run-to-run variation); the paired A/B below replaces those two
+single runs. The trainer's own memorisation guard is
 `tests/test_train/test_sam2/test_the_trainer_memorises_one_batch.py`.
+
+### The 0.1 clip against no clip, paired by seed (D-287)
+
+The clip was measured against `--gradient-clip-norm 0` on 18 seed pairs
+(plan-2026-10-14T062616-81938e81 Step 6, D-287). A seed fixes the initialisation and
+both datasets (validation seed = seed + 10000), so the two arms of a pair share data and
+start, and the per-seed difference `d = clip - off` (positive: the clip is worse)
+removes the seed-to-seed spread. Command, per seed `s` and arm:
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu> MPLBACKEND=Agg PYTHONPATH=src .venv/bin/python -m train.sam2.train_sam2 \
+    --smoke --num-clips-train 32 --num-clips-val 32 --epochs 30 \
+    --early-stopping-patience 100 --seed <s> [--gradient-clip-norm 0]
+```
+
+Score: the restored checkpoint (`final_model.keras`, the lowest-`val_loss` epoch) in
+inference mode, the model's answer on 8 fixed frame-0 clicks per clip over the 32
+held-out clips, as the per-frame mean of `SAM2GatedMaskLoss` with the loss terms of
+D-283 and D-285. It is not comparable with the table above (other loss terms, 4
+held-out clips). The scorer is the plan's scratch script `score_ckpt.py`, not in the
+repository, sha256 `4fba4b06a1abeff63cc3b87098f86996190581f6edd1cfb6bcc5caa32087be33`.
+Seeds 42 to 56 ran on GPU 0 (RTX 4090) and 57 to 59 on GPU 1 (RTX 4070); a pair never
+spans two GPUs.
+
+| Seed | GPU | Clip 0.1 | Off | d = clip - off | Restored epoch (clip / off) | Best constant |
+|---|---|---|---|---|---|---|
+| 42 | 0 (4090) | 0.3131 | 0.3532 | -0.0402 | 14 / 15 | 0.9251 |
+| 43 | 0 (4090) | 0.3951 | 0.3946 | +0.0005 | 26 / 26 | 0.9041 |
+| 44 | 0 (4090) | 0.3333 | 0.4092 | -0.0760 | 18 / 21 | 0.9140 |
+| 45 | 0 (4090) | 0.3280 | 0.2695 | +0.0584 | 17 / 26 | 0.9245 |
+| 46 | 0 (4090) | 0.3757 | 0.3112 | +0.0646 | 26 / 16 | 0.9406 |
+| 47 | 0 (4090) | 0.4230 | 0.3342 | +0.0888 | 23 / 22 | 0.9098 |
+| 48 | 0 (4090) | 0.2825 | 0.4188 | -0.1363 | 24 / 28 | 0.9345 |
+| 49 | 0 (4090) | 0.3655 | 0.3225 | +0.0430 | 22 / 21 | 0.9208 |
+| 50 | 0 (4090) | 0.2623 | 0.3279 | -0.0657 | 13 / 12 | 0.9419 |
+| 51 | 0 (4090) | 0.3980 | 0.3609 | +0.0371 | 26 / 27 | 0.9158 |
+| 52 | 0 (4090) | 0.2439 | 0.4662 | -0.2224 | 18 / 20 | 0.9443 |
+| 53 | 0 (4090) | 0.3323 | 0.3773 | -0.0450 | 5 / 6 | 0.9235 |
+| 54 | 0 (4090) | 0.4040 | 0.4270 | -0.0229 | 21 / 21 | 0.9068 |
+| 55 | 0 (4090) | 0.3400 | 0.3896 | -0.0496 | 17 / 18 | 0.9076 |
+| 56 | 0 (4090) | 0.2542 | 0.2980 | -0.0438 | 27 / 30 | 0.9188 |
+| 57 | 1 (4070) | 0.3202 | 0.3311 | -0.0109 | 30 / 30 | 0.9228 |
+| 58 | 1 (4070) | 0.3780 | 0.3758 | +0.0022 | 18 / 18 | 0.9074 |
+| 59 | 1 (4070) | 0.2339 | 0.2108 | +0.0231 | 24 / 24 | 0.9416 |
+
+N = 18 pairs: mean d -0.0219, sd_d 0.0757, 95% t interval [-0.0596, +0.0157],
+Wilcoxon signed-rank p 0.347 (two-sided, exact). By GPU: the 15 GPU-0 pairs mean d
+-0.0273, the 3 GPU-1 pairs +0.0048. Every run beats the best constant logit on its
+own held-out clips (answer 0.21 to 0.47 against constants 0.90 to 0.94).
+
+**No effect resolved at this scale (unresolved at N = 18); the default stays 0.1,
+upstream's value.** The decision rule was fixed before the first run: flip the default
+to 0 if the interval lies above +0.01 with a mean of at least +0.02; keep it with a
+stated bound if the interval lies inside +/-0.03; keep it as helping if the interval
+lies below 0; otherwise report it unresolved and edit no default. This interval meets
+none of the first three. At this spread about 50 pairs would be needed to bound the
+difference within +/-0.03; the A/B stopped at 18 of its 20-pair cap by the user's
+ruling, and the remaining two pairs could not have resolved it.
 
 ## 8. Serialization and Checkpoints
 
