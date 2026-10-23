@@ -41,7 +41,21 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
 Variants are the presets of `CliffordNet.MODEL_VARIANTS` (table with counts in
 `src/dl_techniques/models/vision/cliffordnet/README.md`): `nano`, `lite`, `lite_g`,
 `nano_g`, `cn_12_3`, `cn_18_5`, `cn_32_3` (the paper's CliffordNet-32), `cn_32_5`
-and `cn_64_5` (the paper's CliffordNet-64), plus `custom`.
+and `cn_64_5` (the paper's CliffordNet-64), plus `custom`. The hierarchical model
+(`HierarchicalCliffordNet`, see the model README) adds `hier_345` (the authors'
+constructor defaults: stages of 3, 4, 5 blocks at widths 32, 64, 128) and
+`custom_hier` (`--stage-depths`, `--stage-dims`, `--shifts`). Its default DropPath is
+0.1, the authors' hierarchical default; no accuracy of it is published.
+
+A flag that does not apply to the chosen architecture is refused by name, never
+ignored: `--channels`, `--depth` and `--use-global-context` with a hierarchical
+variant, and `--stage-depths`/`--stage-dims` with anything but `custom_hier`.
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
+    --dataset cifar100 --variant hier_345 --epoch-analysis-every 10 --output-dir results
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
+    --variant custom_hier --stage-depths 2,3,4 --stage-dims 48,96,192 --shifts 1,2,4
+```
 
 **Paper v2 recipe.** The defaults are the recipe of arXiv:2601.06793v2 and its
 authors' `train.py` (github.com/ParaMind2025/CAN, read through a fetch summary):
@@ -72,7 +86,8 @@ actually uses.
 | `--weight-decay` | `0.1` | AdamW decoupled; no L2 regularizer is added. |
 | `--warmup-epochs` | `0` | Linear warm-up from 1e-8; the paper uses none. |
 | `--patience` | `30` | EarlyStopping on `val_accuracy`. |
-| `--channels` / `--depth` / `--shifts` | `128` / `12` / none | `custom` variant only. `--shifts` is comma-separated. |
+| `--channels` / `--depth` / `--shifts` | `128` / `12` / none | `custom` variant only (`--shifts` also for `custom_hier`). `--shifts` is comma-separated. |
+| `--stage-depths` / `--stage-dims` | model defaults (3,4,5 / 32 doubling) | `custom_hier` only, comma-separated. |
 | `--cli-mode` | preset's (`full`; `inner` for `cn_32_5`, `cn_64_5`) | `inner`, `wedge`, `full`. |
 | `--ctx-mode` | preset's (`diff`) | `diff` (discrete Laplacian) or `abs`. |
 | `--use-global-context` | preset's (on for `lite_g`, `nano_g`) | Adds the gFFN-G branch; pass it to add the branch to another preset. |

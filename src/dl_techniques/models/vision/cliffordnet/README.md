@@ -118,6 +118,38 @@ interaction (full, `diff`, shifts [1, 2]) and is added with weight 1, as here. T
 paper's text writes `C_glo = GlobalAvg(H)` and leaves the `diff` subtraction
 implicit.
 
+### Hierarchical variant (`hierarchical.py`)
+
+`HierarchicalCliffordNet` arranges the same `CliffordNetBlock` in stages instead of
+one isotropic stack: stage `i` runs `stage_depths[i]` blocks at width
+`stage_dims[i]`, and a downsampler between stages halves the resolution and moves
+to the next width (depthwise 3x3 stride 2, batch norm, SiLU, 1x1 convolution). It
+follows `model_hier.py` of the authors' repository (github.com/ParaMind2025/CAN),
+read through a fetch summary and not byte-checked.
+
+| Preset | Stages (blocks) | Widths | Patch | Shifts | cli_mode | Params (100 classes) |
+|:-------|:---------------:|:------:|:-----:|:-------|:--------:|-------:|
+| `hier_345` | 3, 4, 5 | 32, 64, 128 | 1 | [1, 2] | full | 767,476 |
+
+`hier_345` is the authors' constructor default. Stage 1 runs at full input
+resolution (patch size 1), so a 32x32 image goes 32, 16, 8. The drop-path ramp runs
+linearly over all 12 blocks, not per stage; the authors' default rate is 0.1. The
+count is a regression pin (`tests/test_models/test_cliffordnet/test_hierarchical.py`),
+not a paper value: no accuracy and no parameter count of this model is published,
+and the paper v2 text has no hierarchical results.
+
+Ported: the patch-1 and patch-2 stems, the `conv` downsampler, the pooled-LayerNorm
+head, `get_config()`. Left out on purpose: `embed_dim` other than `stage_dims[0]`,
+the `dim_policy` switch, the authors' `patch` and `avgpool` downsample modes, patch
+sizes other than 1 and 2, `enable_cuda`, and a global branch (the authors'
+hierarchical model has none).
+
+```python
+from dl_techniques.models.vision.cliffordnet import HierarchicalCliffordNet
+model = HierarchicalCliffordNet.from_variant("hier_345", num_classes=100)
+features = model.extract_stage_features(images)   # one feature map per stage
+```
+
 The two-hidden-block head this replaced read 1,502,948 / 2,682,596 / 3,470,564,
 which round to 1.5M and 2.7M, not the paper's figures.
 
