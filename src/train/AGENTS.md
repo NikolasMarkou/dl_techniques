@@ -161,6 +161,7 @@ create_callbacks(
     monitor='val_accuracy', monitor_mode=None, patience=15, use_lr_schedule=True,
     analyzer_epoch_frequency=1, include_tensorboard=False, include_terminate_on_nan=False,
     include_analyzer=True, analyzer_config=None, analyzer_start_epoch=1,
+    analyzer_on_train_begin=True, analyzer_first_epoch=True,
 ) -> Tuple[List[Callback], str]      # (callbacks, results_dir)
 ```
 
@@ -180,6 +181,52 @@ and invert the direction — keep both sets unambiguous; and Keras' own `mode='a
 substitute, because it resolves at epoch end by matching a compiled metric object's `.name` and
 **raises `ValueError`** when it finds none, which is exactly the multi-output case. Guarded by
 `tests/test_train/test_common_callbacks.py`.
+
+## Image classification trainers: required analysis and visualizations
+
+Every image classification trainer follows this pattern. Reference implementations:
+`src/train/convnext/common.py` (v1/v2) and `src/train/cliffordnet/train_cliffordnet.py`. Both use
+only shared helpers; do not write per-trainer plotting code.
+
+**1. Model analysis schedule (the standard).** The epoch analyzer (data-free weight and spectral
+analysis, `EpochAnalyzerCallback` through `create_callbacks`) runs
+
+- once before training starts, into `epoch_analysis/epoch_000/` (the untrained model),
+- after epoch 1, into `epoch_analysis/epoch_001/`,
+- then every N epochs from N, into `epoch_analysis/epoch_NNN/`.
+
+`create_callbacks` gives the first two by default (`analyzer_on_train_begin=True`,
+`analyzer_first_epoch=True`); N is `analyzer_epoch_frequency`, and `analyzer_start_epoch=N` puts the
+snapshots on N, 2N, ... (the default start of 1 would give 1, N+1, ...). Expose N as
+`--epoch-analysis-every N` (default 0 = off; AlexNet and CliffordNet are the precedents) and pass
+`include_analyzer=N > 0`. A model that is not built when training starts skips the `epoch_000`
+snapshot with a warning; any analysis failure on a built model raises out of `fit` (D-117), so a
+run never exits 0 with a snapshot missing. Pass `analyzer_on_train_begin=False,
+analyzer_first_epoch=False` only to reproduce an older schedule. The full `ModelAnalyzer` pass
+(`run_model_analysis`) still runs once after `fit`, on the best weights.
+
+**2. Visualizations, into `<run>/visualizations/`.**
+
+| File | Written by |
+|---|---|
+| `training_dashboard.png` | `TrainingDashboardCallback(out_path, baseline_fn=..., title=...)`, appended LAST; redrawn after epoch 1, about 20 times per run, and at the end; includes the epoch-0 baseline and the learning rate |
+| `confusion_matrix.png`, `per_class_metrics.png`, `confidence_calibration.png`, `misclassifications.png`, `classification_report.json` | `run_summary.write_classification_figures(vis_dir, x_test, y_test, probs, class_names, ...)` after the best weights are loaded |
+
+Rules that each cost a run once: insert `LearningRateLogger(at_epoch_start=True)` at the FRONT of
+the callback list so `lr` reaches `training_log.csv` and the dashboard; pass the dashboard a
+`baseline_fn` that measures the untrained model the way the trainer's own loss guard does; give
+`write_classification_figures` PROBABILITIES (softmax of the logits for a logits head) in the
+order of `y_test`, and `mean`/`std` only when `x_test` is standardized; `get_class_names(dataset,
+num_classes)` supplies the labels. A figure that fails logs a warning and does not abort the run;
+read `failed` in the helper's return value.
+
+**Not yet conforming.** From a grep for `write_classification_figures` and
+`TrainingDashboardCallback` (not an audit), these image classification trainers do not follow the
+pattern yet: `alexnet`, `beit/train_classification.py`, `coshnet`,
+`energy_transformer/train_classification.py`, `mobilenet`, `resnet`, `vit`, `head_comparison`,
+`som_nd_soft/train_cifar.py`, `cliffordnet/train_downsampling_techniques.py`. `power_mlp` already writes the
+figures and gets the schedule from the defaults whenever its `epoch_analysis` option is on. Bring a trainer up to the pattern when you touch it, and delete it
+from this list in the same commit. No test enforces this list.
 
 ## What lives in `train.common`
 

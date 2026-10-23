@@ -62,7 +62,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
 | `--stochastic-depth-rate` | `0.3` | |
 | `--dropout-rate` | `0.0` | |
 | `--random-erasing-prob` | `0.25` | |
-| `--epoch-analysis-every` | `0` | Run the data-free weight/spectral analyzer every N epochs (at N, 2N, ...) into `<run>/epoch_analysis/epoch_NNN/`; 0 = off. |
+| `--epoch-analysis-every` | `0` | Standard analysis schedule, 0 = off: the data-free weight/spectral analyzer runs before training (`epoch_000`), after epoch 1, then at N, 2N, ... into `<run>/epoch_analysis/epoch_NNN/`. |
 | `--gpu` | none | |
 
 `--image-size`, `--lr-schedule` and `--show-plots` come from the base parser
@@ -75,7 +75,12 @@ the final and best models, validates the serialization round trip, runs
 
 Output: `results/cliffordnet_<variant>_<dataset>_<timestamp>/` with `best_model.keras`,
 `cliffordnet_<variant>_<dataset>_final.keras`, `training_summary.txt`, the
-config/history JSON, and the CSV log.
+config/history JSON, and the CSV log. Also `visualizations/` (`training_dashboard.png`, redrawn
+during training; `confusion_matrix.png`, `per_class_metrics.png`, `confidence_calibration.png`,
+`misclassifications.png`, `classification_report.json`), `model_analysis/` (once, after training)
+and, with `--epoch-analysis-every`, `epoch_analysis/`. These follow the image classification
+pattern in `src/train/AGENTS.md`. The validation set is the test split, so the best
+checkpoint and the reported accuracy are selected on test data.
 
 ### Downsampling ablation
 
