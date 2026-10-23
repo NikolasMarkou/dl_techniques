@@ -461,6 +461,45 @@ class TestGaussianReadoutBuild:
         assert relative(explicit) == relative(lazy)
 
 
+class TestGridRankRefusal:
+    """``GaussianReadout`` is 2D only (a ``Conv2D`` blur) and must say so loudly.
+
+    It resolves its grid with the DEFAULT rank of ``resolve_grid_shape``. If that
+    function inferred the rank from ``len(grid_shape)`` (decision D-004, anchored
+    at ``resolve_grid_shape``), a 3-tuple would resolve, the layout would be 3D,
+    and the failure would move to a shape error inside ``Conv2D``. These tests
+    pin the early, named refusal.
+    """
+
+    def test_a_three_axis_grid_shape_is_refused_at_build(self):
+        layer = GaussianReadout(grid_shape=(8, 8, 8), seed=0)
+        with pytest.raises(ValueError, match=r"\(height, width\) pair") as raised:
+            layer.build((None, 4, 512))
+        assert "(8, 8, 8)" in str(raised.value)
+
+    def test_the_grid_of_a_3d_layout_is_refused_at_build(self):
+        volume = SpatialLayout(784, seed=0, grid_dim=3)
+        assert volume.grid_shape == (7, 8, 14)
+        layer = GaussianReadout(grid_shape=volume.grid_shape, seed=0)
+        with pytest.raises(ValueError, match=r"\(height, width\) pair"):
+            layer.build((None, 4, 784))
+
+    def test_the_refusal_is_in_the_shared_resolver_not_only_the_layer(self):
+        from dl_techniques.layers.regularization.spatial_smoothness import (
+            resolve_grid_shape,
+        )
+
+        with pytest.raises(ValueError, match=r"\(height, width\) pair"):
+            resolve_grid_shape(512, (8, 8, 8))
+        # The same triple is fine once the rank is STATED, which is the point.
+        assert resolve_grid_shape(512, (8, 8, 8), grid_dim=3) == (8, 8, 8)
+
+    def test_a_two_axis_grid_still_builds(self):
+        layer = GaussianReadout(grid_shape=(16, 32), seed=0)
+        layer.build((None, 4, 512))
+        assert layer.layout.grid_shape == (16, 32)
+
+
 class TestGaussianReadoutPrecision:
     @pytest.mark.parametrize("policy", ("float32", "mixed_float16"))
     def test_the_output_is_finite_under_each_policy(self, policy):

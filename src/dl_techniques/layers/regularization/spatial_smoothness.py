@@ -130,10 +130,43 @@ def _largest_divisor_at_most(num_units: int, bound: float) -> int:
     return 1
 
 
+def _factor_3d_cubic(num_units: int) -> Tuple[int, int, int]:
+    """Factor ``num_units`` into the most cubic ``(h, w, d)`` triple.
+
+    Returns the triple with ``h <= w <= d`` and ``h * w * d == num_units`` that
+    minimises ``d - h``; among equal objectives the one with the larger ``h``
+    wins. Integer arithmetic only: ``h`` ascends while ``h ** 3 <= num_units``
+    (that loop bound IS the integer cube root, so a float ``**`` never decides a
+    grid and no extra helper is needed), and ``w`` runs from ``h`` to
+    ``isqrt(num_units // h)``. The `<=` below is what sends ties to the larger
+    ``h``, because ``h`` ascends. :func:`_largest_divisor_at_most` is
+    deliberately not reused: it ignores its ``bound`` argument.
+
+    :param num_units: A positive integer.
+    :type num_units: int
+    :return: ``(h, w, d)``; ``(1, 1, num_units)`` when ``num_units`` is prime.
+    :rtype: Tuple[int, int, int]
+    """
+    best_gap = None
+    best = (1, 1, num_units)
+    h = 1
+    while h ** 3 <= num_units:
+        if num_units % h == 0:
+            rest = num_units // h
+            for w in range(h, math.isqrt(rest) + 1):
+                if rest % w == 0:
+                    d = rest // w
+                    if best_gap is None or d - h <= best_gap:
+                        best_gap, best = d - h, (h, w, d)
+        h += 1
+    return best
+
+
 def resolve_grid_shape(
     num_units: int,
-    grid_shape: Optional[Tuple[int, int]] = None,
-) -> Tuple[int, int]:
+    grid_shape: Optional[Tuple[int, ...]] = None,
+    grid_dim: int = 2,
+) -> Tuple[int, ...]:
     """Resolve the grid a layout of ``num_units`` units sits on.
 
     This is the ONE place grid arithmetic lives. ``build``, ``call`` and
@@ -142,40 +175,74 @@ def resolve_grid_shape(
 
     :param num_units: Number of units on the last axis of the tapped tensor.
     :type num_units: int
-    :param grid_shape: Explicit ``(height, width)``, or ``None`` to factor
-        ``num_units`` into the most square rectangle available.
-    :type grid_shape: Optional[Tuple[int, int]]
-    :return: The resolved ``(height, width)`` with ``height * width == num_units``.
-    :rtype: Tuple[int, int]
-    :raises ValueError: If ``num_units`` is not positive, if ``grid_shape`` is
-        not a pair of positive integers, or if its product is not ``num_units`` --
-        naming the offending value in each case.
+    :param grid_shape: Explicit ``(height, width)`` for ``grid_dim=2`` or an
+        explicit three-axis shape for ``grid_dim=3``, or ``None`` to factor
+        ``num_units`` into the most square rectangle (2D) or the most cubic box
+        (3D, :func:`_factor_3d_cubic`) available.
+    :type grid_shape: Optional[Tuple[int, ...]]
+    :param grid_dim: Number of grid axes, ``2`` or ``3``. The rank is always this
+        stated value: it is never inferred from ``len(grid_shape)``, so a caller
+        that asks for the default 2D rank and passes a triple is refused.
+    :type grid_dim: int
+    :return: The resolved shape, ``grid_dim`` entries whose product is
+        ``num_units``. For ``grid_dim=3`` the axes are in the order given (or
+        ``h <= w <= d`` when factored) and nothing downstream reorders them.
+    :rtype: Tuple[int, ...]
+    :raises ValueError: If ``num_units`` is not positive, if ``grid_dim`` is not
+        2 or 3, if ``grid_shape`` does not have ``grid_dim`` positive integer
+        entries, or if its product is not ``num_units`` -- naming the offending
+        value in each case.
     """
     if num_units <= 0:
         raise ValueError(
             f"num_units must be positive, got {num_units}"
         )
+    if (
+        isinstance(grid_dim, bool)
+        or not isinstance(grid_dim, (int, np.integer))
+        or grid_dim not in (2, 3)
+    ):
+        raise ValueError(f"grid_dim must be 2 or 3, got {grid_dim!r}")
+    grid_dim = int(grid_dim)
 
     if grid_shape is None:
+        if grid_dim == 3:
+            return _factor_3d_cubic(num_units)
         height = _largest_divisor_at_most(num_units, math.isqrt(num_units))
         return height, num_units // height
 
-    if len(tuple(grid_shape)) != 2:
+    # DECISION plan-2026-10-23T141429-390f3815/D-004
+    # The rank is the stated ``grid_dim`` and is checked against the length of
+    # ``grid_shape``; it is NEVER inferred from that length. Do NOT "simplify"
+    # this to ``grid_dim = len(grid_shape)``: ``GaussianReadout`` calls this with
+    # the default rank and relies on a 3-tuple raising here, because it would
+    # otherwise accept a 3D layout and fail inside its ``Conv2D``. Guarded by
+    # test_gaussian_readout.py::TestGridRankRefusal and
+    # test_spatial_smoothness_3d.py::TestResolveGridShape3D::
+    # test_a_pair_is_refused_when_the_rank_is_three.
+    if len(tuple(grid_shape)) != grid_dim:
+        if grid_dim == 2:
+            raise ValueError(
+                f"grid_shape must be a (height, width) pair, got {tuple(grid_shape)}"
+            )
         raise ValueError(
-            f"grid_shape must be a (height, width) pair, got {tuple(grid_shape)}"
+            f"grid_shape must have grid_dim={grid_dim} entries, got "
+            f"{tuple(grid_shape)}"
         )
-    height, width = int(grid_shape[0]), int(grid_shape[1])
-    if height <= 0 or width <= 0:
+    shape = tuple(int(v) for v in grid_shape)
+    if min(shape) <= 0:
         raise ValueError(
-            f"grid_shape entries must be positive, got ({height}, {width})"
+            f"grid_shape entries must be positive, got "
+            f"({', '.join(str(v) for v in shape)})"
         )
-    if height * width != num_units:
+    cells = math.prod(shape)
+    if cells != num_units:
         raise ValueError(
-            f"grid_shape {height}x{width} has {height * width} cells but the "
-            f"tapped tensor has {num_units} units; the layout must be a "
-            f"bijection. Pass grid_shape=None to factor {num_units}."
+            f"grid_shape {'x'.join(str(v) for v in shape)} has {cells} cells "
+            f"but the tapped tensor has {num_units} units; the layout must be "
+            f"a bijection. Pass grid_shape=None to factor {num_units}."
         )
-    return height, width
+    return shape
 
 
 def permutation_seed(base_seed: Optional[int], tap_index: int) -> int:
@@ -202,11 +269,16 @@ def permutation_seed(base_seed: Optional[int], tap_index: int) -> int:
 
 
 class SpatialLayout:
-    """A bijection between a tensor's last axis and the cells of a 2D grid.
+    """A bijection between a tensor's last axis and the cells of a 2D or 3D grid.
 
-    Unit ``i`` sits at grid cell ``perm[i]``, row-major. ``cell_to_unit`` is the
-    inverse, reshaped to the grid, and is what post-hoc analysis indexes with when
-    it grows clusters or computes a spatial statistic.
+    Unit ``i`` sits at grid cell ``perm[i]``, row-major (the last grid axis
+    varies fastest). ``cell_to_unit`` is the inverse, reshaped to the grid, and is
+    what post-hoc analysis indexes with when it grows clusters or computes a
+    spatial statistic.
+
+    One axis order everywhere: ``grid_shape == cell_to_unit.shape``, and
+    ``positions[:, k]`` is the coordinate along axis ``k`` of that same shape.
+    The axes carry no names (no height/width/depth) and nothing reorders them.
 
     The layout is pure NumPy and holds no tensors: it is a description, and the
     layer that owns it decides whether to keep it as weights.
@@ -218,30 +290,40 @@ class SpatialLayout:
             grid = layout.to_grid(acts)                  # (..., 28, 28)
             back = layout.from_grid(grid)                # (..., 784)
 
+            volume = SpatialLayout(784, seed=0, grid_dim=3)   # 7x8x14
+            vol = volume.to_grid(acts)                   # (..., 7, 8, 14)
+
     :param num_units: Number of units, i.e. the size of the last axis.
     :type num_units: int
-    :param grid_shape: Explicit ``(height, width)``, or ``None`` to factor.
-    :type grid_shape: Optional[Tuple[int, int]]
+    :param grid_shape: Explicit shape with ``grid_dim`` entries, or ``None`` to
+        factor (most square for 2D, most cubic for 3D).
+    :type grid_shape: Optional[Tuple[int, ...]]
     :param permute: Whether to draw a random permutation of the unit order. Set
         ``False`` to place unit ``i`` at cell ``i``; that is the paper's Fig. 12
         ablation, kept because without it the residual stream satisfies the loss
         by propagating one map through every layer.
     :type permute: bool
-    :param seed: Seed for the permutation.
+    :param seed: Seed for the permutation. The permutation is drawn before and
+        independently of the grid rank, so a seed gives the same ``perm`` for
+        ``grid_dim`` 2 and 3.
     :type seed: Optional[int]
-    :raises ValueError: If ``num_units`` is not positive or ``grid_shape`` does
-        not describe ``num_units`` cells. See
-        :func:`resolve_grid_shape`.
+    :param grid_dim: Number of grid axes, ``2`` (default) or ``3``.
+    :type grid_dim: int
+    :raises ValueError: If ``num_units`` is not positive, ``grid_dim`` is not 2
+        or 3, or ``grid_shape`` does not describe ``num_units`` cells on
+        ``grid_dim`` axes. See :func:`resolve_grid_shape`.
     """
 
     def __init__(
         self,
         num_units: int,
-        grid_shape: Optional[Tuple[int, int]] = None,
+        grid_shape: Optional[Tuple[int, ...]] = None,
         permute: bool = True,
         seed: Optional[int] = None,
+        grid_dim: int = 2,
     ) -> None:
-        self.grid_shape = resolve_grid_shape(num_units, grid_shape)
+        self.grid_shape = resolve_grid_shape(num_units, grid_shape, grid_dim)
+        self.grid_dim = len(self.grid_shape)
         self.num_units = int(num_units)
         self.permute = bool(permute)
         self.seed = seed
@@ -253,18 +335,32 @@ class SpatialLayout:
         else:
             self.perm = np.arange(self.num_units, dtype="int32")
 
-        rows, cols = np.divmod(self.perm, self.grid_shape[1])
-        self.positions = np.stack([rows, cols], axis=-1).astype("int32")
+        # DECISION plan-2026-10-23T141429-390f3815/D-003
+        # ONE axis order: ``positions`` columns, ``grid_shape`` and
+        # ``cell_to_unit.shape`` all follow the same row-major axes, last axis
+        # fastest. Do NOT reorder, transpose or rename axes (no "depth, height,
+        # width" translation) here or in any consumer: a centre count or a shape
+        # assert is symmetric under an axis permutation, so a mirrored layout
+        # would pass every structural test and silently score the wrong
+        # neighbourhoods. Guarded by test_spatial_smoothness_3d.py::
+        # TestSpatialLayout3D::test_positions_are_row_major_with_axis_2_fastest
+        # and ::test_positions_index_cell_to_unit_back_to_the_unit (both go RED
+        # when the positions axes are reversed), and by TestPatchTables3D::
+        # test_a_non_cubic_grid_pins_the_axis_order_by_value for the tables.
+        self.positions = np.stack(
+            np.unravel_index(self.perm, self.grid_shape), axis=-1
+        ).astype("int32")
         self.cell_to_unit = np.argsort(self.perm).reshape(
             self.grid_shape
         ).astype("int32")
 
     def to_grid(self, values: np.ndarray) -> np.ndarray:
-        """Scatter a ``(..., num_units)`` array onto the ``(..., h, w)`` grid.
+        """Scatter a ``(..., num_units)`` array onto the ``(..., *grid_shape)`` grid.
 
         :param values: Array whose last axis indexes units.
         :type values: numpy.ndarray
-        :return: The same values with the last two axes replaced by the grid.
+        :return: The same values with the last axis replaced by the
+            ``grid_dim`` grid axes.
         :rtype: numpy.ndarray
         :raises ValueError: If the last axis is not ``num_units``.
         """
@@ -274,29 +370,29 @@ class SpatialLayout:
                 f"to_grid expects a last axis of {self.num_units} units, got "
                 f"{values.shape[-1]} for an array of shape {values.shape}"
             )
-        height, width = self.grid_shape
         return values[..., self.cell_to_unit.reshape(-1)].reshape(
-            *values.shape[:-1], height, width
+            *values.shape[:-1], *self.grid_shape
         )
 
     def from_grid(self, grid: np.ndarray) -> np.ndarray:
-        """Gather a ``(..., h, w)`` grid back onto the ``(..., num_units)`` axis.
+        """Gather a ``(..., *grid_shape)`` grid back onto the ``(..., num_units)`` axis.
 
         Exact inverse of :meth:`to_grid`.
 
-        :param grid: Array whose last two axes are the grid.
+        :param grid: Array whose last ``grid_dim`` axes are the grid.
         :type grid: numpy.ndarray
         :return: The same values with the grid axes replaced by the unit axis.
         :rtype: numpy.ndarray
-        :raises ValueError: If the last two axes are not the grid shape.
+        :raises ValueError: If the last ``grid_dim`` axes are not the grid shape.
         """
         grid = np.asarray(grid)
-        if tuple(grid.shape[-2:]) != tuple(self.grid_shape):
+        rank = len(self.grid_shape)
+        if tuple(grid.shape[-rank:]) != tuple(self.grid_shape):
             raise ValueError(
                 f"from_grid expects trailing axes {self.grid_shape}, got "
-                f"{tuple(grid.shape[-2:])} for an array of shape {grid.shape}"
+                f"{tuple(grid.shape[-rank:])} for an array of shape {grid.shape}"
             )
-        return grid.reshape(*grid.shape[:-2], self.num_units)[..., self.perm]
+        return grid.reshape(*grid.shape[:-rank], self.num_units)[..., self.perm]
 
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor arguments needed to rebuild this layout."""
@@ -305,24 +401,30 @@ class SpatialLayout:
             "grid_shape": tuple(int(v) for v in self.grid_shape),
             "permute": self.permute,
             "seed": self.seed,
+            "grid_dim": self.grid_dim,
         }
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SpatialLayout":
-        """Rebuild a layout from :meth:`get_config` output."""
+        """Rebuild a layout from :meth:`get_config` output.
+
+        A config written before ``grid_dim`` existed has no such key and is a 2D
+        layout, so the key defaults to ``2``.
+        """
         return cls(
             num_units=config["num_units"],
             grid_shape=tuple(config["grid_shape"]),
             permute=config.get("permute", True),
             seed=config.get("seed"),
+            grid_dim=config.get("grid_dim", 2),
         )
 
 
 class NeighborhoodTables(NamedTuple):
     """Precomputed, shareable tables for one neighbourhood geometry.
 
-    One row of ``patch_table`` is the unit ids of one square neighbourhood, in
-    row-major patch order. Because every patch has the same shape and the same
+    One row of ``patch_table`` is the unit ids of one square (2D) or cubic (3D)
+    neighbourhood, in row-major patch order. Because every patch has the same shape and the same
     geometry, ``d_unit`` does not depend on which patch was drawn -- it is
     computed once and shared by every row, which is the entire reason the centre
     restriction in :func:`build_patch_tables` exists.
@@ -330,30 +432,36 @@ class NeighborhoodTables(NamedTuple):
     ``side`` and ``patch_units`` are different numbers and conflating them is the
     easy mistake: a radius-5 patch has side ``11`` and contains ``121`` units,
     and a row of ``patch_table`` is 121 wide while ``triu_flat`` indexes a 121x121
-    matrix. At the paper's settings those are 324x11, 324x121 and 14641.
+    matrix. At the paper's settings those are 324x11, 324x121 and 14641. In 3D
+    the same radius has side ``11`` and ``1331`` units.
 
     :param patch_table: ``(num_centers, patch_units)`` int32 unit ids.
     :param triu_flat: ``(num_pairs,)`` int32 flat indices of the strict upper
         triangle of a ``(patch_units, patch_units)`` matrix.
     :param d_unit: ``(num_pairs,)`` float32, mean-centred and unit-normalised
         inverse distances.
-    :param grid_shape: The ``(height, width)`` grid the patches were cut from.
+    :param grid_shape: The full ``grid_dim``-entry grid the patches were cut from
+        (``(height, width)`` in 2D).
     :param radius: Neighbourhood radius.
     :param side: Patch side length ``2 * radius + 1``.
-    :param patch_units: ``side ** 2``, the width of one ``patch_table`` row.
+    :param patch_units: ``side ** grid_dim``, the width of one ``patch_table``
+        row.
     :param num_pairs: ``patch_units * (patch_units - 1) / 2``.
     :param num_centers: Number of admissible patch centres.
+    :param grid_dim: Number of grid axes, ``2`` or ``3``. Trailing and defaulted
+        so that positional construction of a 2D record is unchanged.
     """
 
     patch_table: np.ndarray
     triu_flat: np.ndarray
     d_unit: np.ndarray
-    grid_shape: Tuple[int, int]
+    grid_shape: Tuple[int, ...]
     radius: int
     side: int
     patch_units: int
     num_pairs: int
     num_centers: int
+    grid_dim: int = 2
 
 
 def build_patch_tables(
@@ -361,28 +469,37 @@ def build_patch_tables(
     radius: int,
     distance: str = "linf",
 ) -> NeighborhoodTables:
-    """Enumerate every full square neighbourhood of a grid and its distance prior.
+    """Enumerate every full square or cubic neighbourhood of a grid and its prior.
 
-    Centres run over ``radius .. height - 1 - radius``, so a patch never hangs off
-    the edge. That keeps ``patch_units`` constant, which keeps ``d_unit``
+    The rank is the array's own: ``grid_dim = cell_to_unit.ndim``, so the tables
+    cannot disagree with the grid they were cut from. Centres run over
+    ``radius .. n - 1 - radius`` on every axis, so a patch never hangs off the
+    edge. That keeps ``patch_units`` constant, which keeps ``d_unit``
     well-defined as a single shared vector rather than a per-centre table.
+    Centres are enumerated lexicographically (first axis slowest), which in 2D is
+    the row-major order of the original nested loop.
 
-    :param cell_to_unit: ``(height, width)`` int array of unit ids.
+    :param cell_to_unit: ``(height, width)`` or three-axis int array of unit ids;
+        its axes are the grid axes in the order of :class:`SpatialLayout`.
     :type cell_to_unit: numpy.ndarray
     :param radius: Neighbourhood radius; the patch side is ``2 * radius + 1``.
     :type radius: int
-    :param distance: One of :data:`DISTANCE_METRICS`.
+    :param distance: One of :data:`DISTANCE_METRICS`. ``'l2'`` is the Euclidean
+        offset in either rank (3D adds the third squared offset).
     :type distance: str
     :return: The tables, with ``d_unit`` already centred and normalised in
         float64 before the float32 cast.
     :rtype: NeighborhoodTables
-    :raises ValueError: If ``radius`` is not positive, if the grid cannot contain
-        one patch of that radius, or if ``distance`` is unknown.
+    :raises ValueError: If ``cell_to_unit`` does not have 2 or 3 axes, if
+        ``radius`` is not positive, if ``distance`` is unknown, or if ANY axis is
+        shorter than the patch side (the message names every short axis; a
+        total-size check would accept ``4 x 9 x 9``, which holds no 5x5x5 cube).
     """
     cell_to_unit = np.asarray(cell_to_unit)
-    if cell_to_unit.ndim != 2:
+    if cell_to_unit.ndim not in (2, 3):
         raise ValueError(
-            f"cell_to_unit must be (height, width), got shape {cell_to_unit.shape}"
+            f"cell_to_unit must have 2 or 3 axes ((height, width) or a "
+            f"3-axis grid), got shape {cell_to_unit.shape}"
         )
     if radius < 1:
         raise ValueError(f"radius must be >= 1, got {radius}")
@@ -391,34 +508,52 @@ def build_patch_tables(
             f"distance must be one of {list(DISTANCE_METRICS)}, got {distance!r}"
         )
 
-    height, width = cell_to_unit.shape
+    grid_dim = cell_to_unit.ndim
+    shape = tuple(int(n) for n in cell_to_unit.shape)
     side = 2 * radius + 1
-    if height < side or width < side:
+    if min(shape) < side:
+        head = (
+            f"a radius-{radius} neighbourhood needs a "
+            f"{'x'.join([str(side)] * grid_dim)} patch, but the grid is "
+            f"{'x'.join(str(n) for n in shape)}"
+        )
+        if grid_dim == 2:
+            raise ValueError(
+                f"{head}. Lower `radius`, or use a wider `grid_shape` (the "
+                f"layout needs at least {side ** 2} units)."
+            )
+        short = "; ".join(
+            f"axis {k} has {n}" for k, n in enumerate(shape) if n < side
+        )
         raise ValueError(
-            f"a radius-{radius} neighbourhood needs a {side}x{side} "
-            f"patch, but the grid is {height}x{width}. Lower `radius`, or use a "
-            f"wider `grid_shape` (the layout needs at least {side ** 2} units)."
+            f"{head}: {short}, and every axis needs at least {side}. Lower "
+            f"`radius`, or use a wider `grid_shape` (the layout needs at least "
+            f"{side ** grid_dim} units, with every axis >= {side})."
         )
 
     rows = [
-        cell_to_unit[
-            cy - radius:cy + radius + 1, cx - radius:cx + radius + 1
-        ].reshape(-1)
-        for cy in range(radius, height - radius)
-        for cx in range(radius, width - radius)
+        cell_to_unit[tuple(slice(o, o + side) for o in offset)].reshape(-1)
+        for offset in np.ndindex(*(n - 2 * radius for n in shape))
     ]
     patch_table = np.stack(rows).astype("int32")
-    patch_units = side * side
+    patch_units = side ** grid_dim
 
-    offsets = np.divmod(np.arange(patch_units), side)
-    dy = np.abs(offsets[0][:, None] - offsets[0][None, :])
-    dx = np.abs(offsets[1][:, None] - offsets[1][None, :])
+    offsets = np.unravel_index(np.arange(patch_units), (side,) * grid_dim)
+    deltas = [np.abs(o[:, None] - o[None, :]) for o in offsets]
+    dy, dx = deltas[0], deltas[1]
     if distance == "linf":
         separation = np.maximum(dy, dx)
+        for extra in deltas[2:]:
+            separation = np.maximum(separation, extra)
     elif distance == "l1":
         separation = dy + dx
+        for extra in deltas[2:]:
+            separation = separation + extra
     else:
-        separation = np.sqrt(dy ** 2 + dx ** 2)
+        squared = dy ** 2 + dx ** 2
+        for extra in deltas[2:]:
+            squared = squared + extra ** 2
+        separation = np.sqrt(squared)
     inverse_distance = 1.0 / (separation.astype("float64") + 1.0)
 
     upper = np.triu_indices(patch_units, k=1)
@@ -442,12 +577,13 @@ def build_patch_tables(
         patch_table=patch_table,
         triu_flat=triu_flat,
         d_unit=d_unit,
-        grid_shape=(int(height), int(width)),
+        grid_shape=shape,
         radius=int(radius),
         side=int(side),
         patch_units=int(patch_units),
         num_pairs=int(triu_flat.shape[0]),
         num_centers=int(patch_table.shape[0]),
+        grid_dim=int(grid_dim),
     )
 
 
