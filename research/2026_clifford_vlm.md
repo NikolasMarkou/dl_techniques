@@ -142,7 +142,7 @@ needs a `C6 = inner + ctx abs` control (§6).
    count + emit pad mask consumed as `ignore_index=0`. `pack_byte_patch_windows`
    has no mask arg today. Specify doc separators + boundary handling for packed
    SFT (Gemma3 mask is keys-only, no boundary mask).
-6. **`context_kernel_size` plumbing in `CliffordNetLM`** — `lm.py`
+6. **`context_kernel_size` plumbing in `CliffordNetLM`** — `cliffordlm/model.py`
    uses one shared `_block_kw` (all K=3); V3 needs a per-block dict. Plus
    `global_context_period` already exists — use it for P1 A3 at zero plumbing.
 7. **`CliffordNetLM` + `Gemma3` embed/decode split** — both `call()`s accept
