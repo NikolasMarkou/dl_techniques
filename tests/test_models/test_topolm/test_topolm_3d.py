@@ -1,26 +1,58 @@
-"""Three-dimensional unit grids for TopoLM: config-level validation.
+"""Three-dimensional unit grids for TopoLM: config validation, block, model.
 
-This file grows across the 3D plan. At this step it covers ``config.py`` only:
-``grid_shape_of`` with a ``grid_dim``, the rank-aware floor, the per-axis check
-that the total unit count cannot replace, and ``validate_all_variants`` judging a
-row by its own ``radius`` and ``grid_dim``.
+This file grows across the 3D plan (plan-2026-10-23T141429-390f3815). Step 4
+covers ``config.py``: ``grid_shape_of`` with a ``grid_dim``, the rank-aware floor,
+the per-axis check that the total unit count cannot replace, and
+``validate_all_variants`` judging a row by its own ``radius`` and ``grid_dim``.
+Step 5 covers ``components.py`` and ``model.py``: ``grid_dim`` on
+:class:`TopoLMBlock` and :class:`TopoLM`, forwarded to every tap, written by
+``get_config``, absent from an old config (which is then 2D), validated, and
+refused by name when a checkpoint of the other rank is loaded into the model.
 
 The numbers pinned here are derived, not measured: 784 factors to (7, 8, 14) in
 3D, so a radius-4 patch (side 9) clears the floor of 9**3 = 729 yet does not fit
 along the first axis; 1000 is a cube (10, 10, 10), 343 is (7, 7, 7), 216 is
-(6, 6, 6).
+(6, 6, 6), 210 is (5, 6, 7), 1344 is (8, 12, 14).
+
+Fast model shapes: embed 216 on a (6, 6, 6) grid at radius 2 (8 centres, 125
+units per patch, 7750 pairs), embed 64 on (4, 4, 4) at radius 1 (8 centres), and
+embed 210 on the non-cubic (5, 6, 7) at radius 2 (6 centres).
 """
 
+import json
+import zipfile
+from typing import Any, Dict
+
+import numpy as np
 import pytest
+import tensorflow as tf
+
+import keras
 
 from dl_techniques.models.language.topolm import (
     MODEL_VARIANTS,
+    TAP_SITES,
+    TopoLM,
+    TopoLMBlock,
+    create_topolm,
     grid_shape_of,
     validate_variant,
 )
 from dl_techniques.models.language.topolm.config import (
     DEFAULT_RADIUS,
     validate_all_variants,
+)
+from tests.index_weights import int32_variables, requires_gpu
+from tests.test_layers.test_regularization.spatial_smoothness_oracle import (
+    reference_patch_units_3d,
+)
+
+from .test_topolm import (
+    VOCAB,
+    _build_head,
+    _dataset,
+    _relative_paths,
+    _tokens,
 )
 
 
@@ -202,3 +234,699 @@ class TestValidationAgreesWithTheTapBuild:
                     if validated != built:
                         disagreements.append((grid_dim, width, radius))
         assert disagreements == []
+
+
+# ---------------------------------------------------------------------
+# step 5: TopoLMBlock and TopoLM carry grid_dim
+# ---------------------------------------------------------------------
+
+#: 216 = 6 x 6 x 6; a radius-2 patch is 5 per side, 8 centres, 125 units.
+_THREE: Dict[str, Any] = {
+    "embed_dim": 216, "depth": 2, "num_heads": 4, "max_seq_len": 64,
+    "radius": 2, "grid_dim": 3,
+}
+
+
+def _build3d(**kwargs) -> TopoLM:
+    """A small 3D model, named like the 2D suite's so weight paths compare."""
+    keras.utils.set_random_seed(0)
+    config = dict(vocab_size=VOCAB, name="topolm", **_THREE)
+    config.update(kwargs)
+    return TopoLM(**config)
+
+
+def _np(value):
+    return keras.ops.convert_to_numpy(value)
+
+
+def _block(**kwargs) -> TopoLMBlock:
+    config = dict(
+        hidden_size=216, num_heads=4, intermediate_size=216, radius=2,
+        name="block",
+    )
+    config.update(kwargs)
+    return TopoLMBlock(**config)
+
+
+class TestBlockGridDim:
+    def test_the_default_is_two_and_the_config_carries_it(self):
+        block = _block()
+        assert block.grid_dim == 2
+        assert block.get_config()["grid_dim"] == 2
+        assert _block(grid_dim=3).get_config()["grid_dim"] == 3
+
+    def test_the_config_round_trips(self):
+        block = _block(grid_dim=3, seed=4)
+        rebuilt = TopoLMBlock.from_config(block.get_config())
+        assert rebuilt.get_config() == block.get_config()
+        assert rebuilt.grid_dim == 3
+
+    def test_a_config_without_the_key_is_a_two_dimensional_block(self):
+        config = _block(grid_dim=3).get_config()
+        config.pop("grid_dim")
+        block = TopoLMBlock.from_config(config)
+        assert block.grid_dim == 2
+        assert all(tap.grid_dim == 2 for tap in block.taps)
+
+    @pytest.mark.parametrize("bad", [1, 4, "3", 3.0, True, None])
+    def test_an_unsupported_rank_is_refused_naming_the_value(self, bad):
+        with pytest.raises(ValueError, match=r"grid_dim must be 2 or 3, got"):
+            _block(grid_dim=bad)
+
+    def test_a_numpy_integer_rank_is_stored_as_a_plain_int(self):
+        """The validator returns ``int(grid_dim)``; the block stores THAT, so a
+        config built from a numpy rank still serializes."""
+        block = _block(grid_dim=np.int64(3))
+        assert type(block.grid_dim) is int
+        json.dumps(block.get_config()["grid_dim"])
+
+    def test_a_bad_rank_is_refused_before_any_sublayer_is_created(self, monkeypatch):
+        """Each tap validates its own ``grid_dim`` too, so the block's check is
+        only distinguishable by WHEN it fires: before the block builds the
+        normalization, attention and feed-forward layers, not at the taps."""
+        from dl_techniques.models.language.topolm import components
+
+        def explode(*args, **kwargs):
+            raise AssertionError("a sublayer was created before grid_dim was checked")
+
+        monkeypatch.setattr(components, "create_normalization_layer", explode)
+        with pytest.raises(ValueError, match=r"grid_dim must be 2 or 3, got 5"):
+            _block(grid_dim=5)
+
+    def test_the_taps_are_built_in_the_blocks_rank(self):
+        """The forwarding site. A dropped ``grid_dim=`` in ``_make_tap`` leaves a
+        block that reports 3 and taps that are silently 2D: they resolve their
+        grid lazily, at their own build, so only the built tables show it."""
+        block = _block(grid_dim=3)
+        block.build((2, 6, 216))
+        for tap in block.taps:
+            assert tap.grid_dim == 3
+            assert tap.layout.grid_shape == (6, 6, 6)
+            assert tuple(tap.patch_table.shape) == (8, 125)
+        flat = _block(grid_dim=2)
+        flat.build((2, 6, 216))
+        # 216 = 12 x 18 in 2D: (12-4)(18-4) = 112 centres of 25 units.
+        assert tuple(flat.taps[0].patch_table.shape) == (112, 25)
+
+
+class TestModelGridDim:
+    def test_the_rank_is_stored_and_the_grid_is_reported_in_it(self):
+        model = _build3d()
+        assert model.grid_dim == 3
+        assert model.grid_shape == (6, 6, 6)
+        assert model.grid_shape is model.grid_shape  # cached after first read
+        assert _build3d(embed_dim=210, num_heads=6, grid_dim=3).grid_shape == (5, 6, 7)
+
+    def test_the_default_is_the_papers_two_dimensional_layout(self):
+        model = TopoLM(vocab_size=VOCAB, name="topolm", embed_dim=256, depth=1,
+                       num_heads=4, max_seq_len=64)
+        assert model.grid_dim == 2
+        assert model.grid_shape == (16, 16)
+        assert model.get_config()["grid_dim"] == 2
+
+    def test_the_config_carries_the_rank_and_round_trips(self):
+        model = _build3d(seed=21, alpha=1.5)
+        config = model.get_config()
+        assert config["grid_dim"] == 3
+        rebuilt = TopoLM.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.grid_dim == 3 and rebuilt.grid_shape == (6, 6, 6)
+
+    def test_the_config_has_every_constructor_argument_and_grid_dim_exactly_once(self):
+        config = _build3d().get_config()
+        assert list(config).count("grid_dim") == 1
+        for key in ("grid_shape", "grid_dim", "radius", "embed_dim"):
+            assert key in config
+
+    def test_a_config_without_the_key_loads_as_two_dimensional(self):
+        """An archive written before ``grid_dim`` existed has no such key. The
+        same widths and radius are legal in both ranks (216 is 12 x 18 in 2D),
+        so a default that were 3 would build a different model and raise nothing."""
+        config = _build3d().get_config()
+        config.pop("grid_dim")
+        model = TopoLM.from_config(config)
+        assert model.grid_dim == 2
+        assert model.grid_shape == (12, 18)
+        model(_tokens(), training=True)
+        assert tuple(model.tap_layers[0].patch_table.shape) == (112, 25)
+
+    def test_every_tap_is_built_in_the_models_rank(self):
+        """The model forwarding site (``_build_architecture``): all 2 * depth taps."""
+        model = _build3d(depth=3)
+        assert all(block.grid_dim == 3 for block in model.blocks)
+        model(_tokens())
+        assert len(model.tap_layers) == 3 * len(TAP_SITES)
+        for tap in model.tap_layers:
+            assert tap.grid_dim == 3
+            assert tap.layout.grid_shape == (6, 6, 6)
+            assert tap.layout.cell_to_unit.shape == (6, 6, 6)
+            assert tuple(tap.patch_table.shape) == (8, 125)
+
+    def test_the_forward_is_finite_and_adds_one_loss_per_tap(self):
+        model = _build3d()
+        outputs = model(_tokens(), training=True)
+        assert outputs["logits"].shape == (2, 12, VOCAB)
+        assert outputs["last_hidden_state"].shape == (2, 12, 216)
+        assert np.all(np.isfinite(_np(outputs["logits"])))
+        assert len(model.losses) == 2 * len(TAP_SITES)
+        assert all(np.isfinite(float(loss)) for loss in model.losses)
+
+    def test_a_small_cube_with_eight_centres_trains(self):
+        """64 = 4 x 4 x 4 at radius 1: a 3 x 3 x 3 patch, (4-2)**3 = 8 centres."""
+        model = _build3d(embed_dim=64, num_heads=4, depth=1, radius=1)
+        model(_tokens(), training=True)
+        assert tuple(model.tap_layers[0].patch_table.shape) == (8, 27)
+        assert len(model.losses) == 2
+
+    def test_one_training_step_moves_every_trainable_variable(self):
+        keras.utils.set_random_seed(0)
+        model = _build3d()
+        head = _build_head(model, aggregate=True)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2))
+        head(np.zeros((1, 12), dtype="int32"), training=False)
+        before = {
+            variable.path: _np(variable).copy()
+            for variable in model.trainable_variables
+        }
+        head.fit(_dataset(), epochs=1, verbose=0)
+        moved = {
+            variable.path for variable in model.trainable_variables
+            if not np.array_equal(before[variable.path], _np(variable))
+        }
+        assert moved == set(before), sorted(set(before) - moved)
+
+
+class TestTheAlphaControlInThreeDimensions:
+    def test_alpha_zero_keeps_every_weight(self):
+        live = _build3d(alpha=2.5)
+        live(_tokens())
+        control = _build3d(alpha=0.0)
+        control(_tokens())
+        assert _relative_paths(live) == _relative_paths(control)
+
+    def test_alpha_zero_keeps_every_permutation_and_table_bit_identical(self):
+        live = _build3d(alpha=2.5, seed=5)
+        live(_tokens())
+        control = _build3d(alpha=0.0, seed=5)
+        control(_tokens())
+        for a, b in zip(live.tap_layers, control.tap_layers):
+            for name in ("perm", "patch_table", "triu_flat", "d_unit"):
+                np.testing.assert_array_equal(
+                    _np(getattr(a, name)), _np(getattr(b, name)), err_msg=name
+                )
+
+    def test_alpha_zero_adds_no_loss(self):
+        live = _build3d(alpha=2.5)
+        live(_tokens(), training=True)
+        control = _build3d(alpha=0.0)
+        control(_tokens(), training=True)
+        assert len(live.losses) == 2 * len(TAP_SITES)
+        assert control.losses == []
+
+    def test_the_reported_training_loss_includes_the_spatial_term(self):
+        """The 3D analogue of the 2D aggregate-loss test, re-measured, not copied.
+
+        216 units on (6, 6, 6), radius 2, depth 2, ``alpha = 2.5``, 4 taps,
+        ``SGD(1e-3)``, one epoch over 2 batches, CPU, float32. Measured:
+
+          * the reported training loss is 10.377 with ``aggregate_backbone_losses``
+            and 5.373 without, a gap of 5.004;
+          * the 4 taps' recorded penalties at initialisation are 1.229 to 1.266
+            each (raw ``0.5 * (1 - corr)`` of about 0.5, times alpha), so the
+            expected gap is 4 * 2.5 * 0.5 = 5.0;
+          * the evaluation loss is 5.323 either way (the taps add nothing when
+            ``training`` is not True).
+
+        The 2D test's ``+ 5.0`` is NOT reused: measured on its own config the 2D
+        gap is 5.008, so that threshold clears by 0.008 and would clear a 3D gap
+        of 5.004 by 0.004. The bounds below are 80 % of the derived gap, and an
+        upper bound of 120 % so a double-counted term also fails.
+        """
+        totals = {}
+        for aggregate in (True, False):
+            keras.utils.set_random_seed(0)
+            backbone = _build3d(alpha=2.5)
+            head = _build_head(backbone, aggregate)
+            head.compile(optimizer=keras.optimizers.SGD(1e-3))
+            head(np.zeros((1, 12), dtype="int32"), training=False)
+            history = head.fit(_dataset(), epochs=1, verbose=0)
+            evaluation = head.evaluate(_dataset(), verbose=0, return_dict=True)
+            totals[aggregate] = (history.history["loss"][0], evaluation["loss"])
+
+        gap = totals[True][0] - totals[False][0]
+        expected = 4 * 2.5 * 0.5
+        assert 0.8 * expected < gap < 1.2 * expected, totals
+        assert totals[True][1] == pytest.approx(totals[False][1], rel=0.05)
+
+
+class TestThreeDimensionalValidationThroughTheModel:
+    def test_784_units_at_radius_4_name_the_short_axis(self):
+        """The floor (729) is cleared and axis 0 of (7, 8, 14) is not."""
+        with pytest.raises(ValueError, match=r"axis 0 has 7") as info:
+            TopoLM(vocab_size=VOCAB, embed_dim=784, depth=1, num_heads=16,
+                   max_seq_len=32, radius=4, grid_dim=3)
+        message = str(info.value)
+        assert "7x8x14" in message
+        assert "every axis >= 9" in message
+        assert "largest radius this grid can use is 3" in message
+
+    def test_1000_units_at_radius_4_construct(self):
+        """The both-ways twin of the 784 case."""
+        model = TopoLM(vocab_size=VOCAB, embed_dim=1000, depth=1, num_heads=8,
+                       max_seq_len=32, radius=4, grid_dim=3)
+        assert model.grid_shape == (10, 10, 10)
+
+    def test_the_default_radius_on_a_narrow_cube_names_the_largest_usable_radius(self):
+        """1000 = 10 x 10 x 10 is below the radius-5 floor 11**3 = 1331."""
+        with pytest.raises(ValueError, match=r"below the 1331 units") as info:
+            TopoLM(vocab_size=VOCAB, embed_dim=1000, depth=1, num_heads=8,
+                   max_seq_len=32, grid_dim=3)
+        message = str(info.value)
+        assert "(11 x 11 x 11)" in message
+        assert "largest radius this grid can use is 4" in message
+
+    def test_the_default_radius_on_a_wide_but_thin_box_names_the_axis(self):
+        """1344 clears the 1331 floor and factors to (8, 12, 14): axis 0 is short."""
+        assert 1344 >= 1331
+        with pytest.raises(ValueError, match=r"axis 0 has 8") as info:
+            TopoLM(vocab_size=VOCAB, embed_dim=1344, depth=1, num_heads=8,
+                   max_seq_len=32, grid_dim=3)
+        assert "largest radius this grid can use is 3" in str(info.value)
+
+    def test_the_two_dimensional_floor_message_is_unchanged(self):
+        with pytest.raises(ValueError) as info:
+            TopoLM(vocab_size=VOCAB, embed_dim=64, depth=1, num_heads=4,
+                   max_seq_len=32, radius=5)
+        assert str(info.value) == (
+            "embed_dim (64) is below the 121 units a radius-5 neighbourhood "
+            "needs (11 x 11). Lower `radius`, or choose a wider variant."
+        )
+
+    def test_the_floor_is_the_cube_not_the_square(self):
+        """100 units clear the 2D floor 5**2 and miss the 3D floor 5**3 = 125."""
+        TopoLM(vocab_size=VOCAB, embed_dim=100, depth=1, num_heads=4,
+               max_seq_len=32, radius=2, grid_dim=2)
+        with pytest.raises(ValueError, match=r"below the 125 units"):
+            TopoLM(vocab_size=VOCAB, embed_dim=100, depth=1, num_heads=4,
+                   max_seq_len=32, radius=2, grid_dim=3)
+
+    def test_a_two_dimensional_model_still_constructs_with_a_short_axis(self):
+        """The per-axis check is 3D-only in the constructor, on purpose.
+
+        An explicit (8, 32) grid at the default radius 5 has always constructed
+        and reported its grid; only the tap's build refuses it, and the 2D suite
+        pins that. The variant table is stricter in both ranks. Tightening this
+        is a 2D behaviour change and belongs to a decision, not to this test.
+        """
+        model = TopoLM(vocab_size=VOCAB, embed_dim=256, depth=1, num_heads=4,
+                       max_seq_len=32, grid_shape=(8, 32))
+        assert model.grid_shape == (8, 32)
+        # The same refusal in 3D, from an explicit grid: 756 = 7 x 9 x 12 clears
+        # the 729 floor and its first axis cannot hold a 9-wide patch.
+        with pytest.raises(ValueError, match=r"axis 0 has 7"):
+            TopoLM(vocab_size=VOCAB, embed_dim=756, depth=1, num_heads=4,
+                   max_seq_len=32, radius=4, grid_dim=3, grid_shape=(7, 9, 12))
+
+    @pytest.mark.parametrize("bad", [1, 4, "3", 3.0, True])
+    def test_an_unsupported_rank_is_refused_naming_the_value(self, bad):
+        with pytest.raises(ValueError, match=r"grid_dim must be 2 or 3, got"):
+            _build3d(grid_dim=bad)
+
+    def test_a_pair_cannot_describe_a_three_dimensional_grid(self):
+        with pytest.raises(ValueError, match=r"grid_shape"):
+            _build3d(grid_shape=(12, 18))
+
+    def test_a_triple_cannot_describe_a_two_dimensional_grid(self):
+        """The rank is the stated ``grid_dim``, never ``len(grid_shape)``."""
+        with pytest.raises(ValueError, match=r"grid_shape"):
+            _build3d(grid_dim=2, grid_shape=(6, 6, 6))
+
+    def test_a_triple_whose_product_is_not_the_width_is_refused(self):
+        with pytest.raises(ValueError, match=r"has 180 cells but the tapped tensor"):
+            _build3d(grid_shape=(6, 6, 5))
+
+    def test_an_explicit_triple_is_reported_in_the_order_given(self):
+        model = _build3d(embed_dim=210, num_heads=6, grid_shape=(7, 6, 5))
+        assert model.grid_shape == (7, 6, 5)
+        assert model.get_config()["grid_shape"] == (7, 6, 5)
+
+    def test_every_shipped_variant_is_still_two_dimensional(self):
+        """The rows were not touched by this step."""
+        assert all(
+            config.get("grid_dim", 2) == 2 for config in MODEL_VARIANTS.values()
+        )
+
+
+# ---------------------------------------------------------------------
+# axis order reaches the taps
+# ---------------------------------------------------------------------
+
+
+def _table(model: TopoLM, index: int = 0) -> np.ndarray:
+    return _np(model.tap_layers[index].patch_table)
+
+
+def _identity_model(grid_shape):
+    """210 units on a non-cubic grid with NO permutation: unit i sits at cell i."""
+    model = _build3d(
+        embed_dim=210, num_heads=6, depth=1, ffn_intermediate_size=210,
+        permute=False, grid_shape=grid_shape,
+    )
+    model.build((None, 12))
+    return model
+
+
+class TestTheAxisOrderReachesTheTaps:
+    """A centre count is symmetric under a permutation of the axes.
+
+    ``(5, 6, 7)`` and ``(7, 6, 5)`` at radius 2 both give 6 centres of 125 units,
+    so a table SHAPE cannot tell a reordered grid from the right one. The pins
+    below are VALUES, derived by hand from the row-major cell numbering
+    ``cell (i0, i1, i2) = i0 * s0 + i1 * s1 + i2`` of an identity layout.
+    """
+
+    def test_a_5_6_7_grid_pins_the_table_values(self):
+        """Strides 42, 7, 1. Centres, lexicographic: (2,2,2) (2,2,3) (2,2,4)
+        (2,3,2) (2,3,3) (2,3,4); a block spans centre -2 .. centre +2, so its
+        first cell is (0,0,0) (0,0,1) (0,0,2) (0,1,0) (0,1,1) (0,1,2) = 0 1 2 7 8
+        9 and its last is (4,4,4) (4,4,5) (4,4,6) (4,5,4) (4,5,5) (4,5,6)."""
+        model = _identity_model((5, 6, 7))
+        table = _table(model)
+        assert table.shape == (6, 125)
+        assert table[:, 0].tolist() == [0, 1, 2, 7, 8, 9]
+        assert table[:, -1].tolist() == [200, 201, 202, 207, 208, 209]
+        assert table[0, 1] == 1      # axis 2 varies fastest
+        assert table[0, 5] == 7      # one step on axis 1
+        assert table[0, 25] == 42    # one step on axis 0
+
+    def test_the_reversed_grid_gives_other_values_of_the_same_shape(self):
+        """Strides 30, 5, 1 on (7, 6, 5); centres (2..4) x (2,3) x (2,)."""
+        model = _identity_model((7, 6, 5))
+        table = _table(model)
+        assert table.shape == (6, 125)
+        assert table[:, 0].tolist() == [0, 5, 30, 35, 60, 65]
+        assert table[0, 25] == 30
+
+    def test_the_implicit_factoring_is_the_ascending_order(self):
+        implicit = _identity_model(None)
+        assert implicit.grid_shape == (5, 6, 7)
+        np.testing.assert_array_equal(_table(implicit), _table(_identity_model((5, 6, 7))))
+
+    def test_the_reported_grid_is_the_taps_cell_array_shape(self):
+        model = _identity_model((5, 6, 7))
+        for tap in model.tap_layers:
+            assert tap.layout.cell_to_unit.shape == model.grid_shape == (5, 6, 7)
+
+    def test_a_permuted_layout_matches_the_independent_oracle_in_the_models_order(self):
+        """With a real permutation the pin is the oracle on the tap's own
+        ``perm`` and the model's reported grid, and the oracle on the REVERSED
+        grid does not agree (anti-vacuity: the pin discriminates)."""
+        keras.utils.set_random_seed(0)
+        model = _build3d(
+            embed_dim=210, num_heads=6, depth=1, ffn_intermediate_size=210,
+            seed=3,
+        )
+        model.build((None, 12))
+        tap = model.tap_layers[0]
+        perm = _np(tap.perm)
+        assert not np.array_equal(perm, np.arange(210))
+
+        def oracle(grid):
+            cell_to_unit = np.argsort(perm).reshape(grid)
+            rows = [
+                reference_patch_units_3d(cell_to_unit, (c0, c1, c2), 2)
+                for c0 in range(2, grid[0] - 2)
+                for c1 in range(2, grid[1] - 2)
+                for c2 in range(2, grid[2] - 2)
+            ]
+            return np.stack(rows)
+
+        np.testing.assert_array_equal(_np(tap.patch_table), oracle(model.grid_shape))
+        assert not np.array_equal(_np(tap.patch_table), oracle((7, 6, 5)))
+
+
+# ---------------------------------------------------------------------
+# serialization, precision, device
+# ---------------------------------------------------------------------
+
+
+class TestThreeDimensionalSerialization:
+    def test_a_keras_round_trip_preserves_values_and_every_layout(self, tmp_path):
+        model = _build3d(depth=2, seed=4)
+        tokens = _tokens(seed=5)
+        original = _np(model(tokens, training=False)["logits"])
+        saved = {w.path: _np(w).copy() for w in model.weights}
+
+        path = str(tmp_path / "topolm3d.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert loaded.grid_dim == 3 and loaded.grid_shape == (6, 6, 6)
+        restored = {w.path: _np(w) for w in loaded.weights}
+        assert sorted(saved) == sorted(restored)
+        for name, values in saved.items():
+            np.testing.assert_array_equal(values, restored[name], err_msg=name)
+        for before, after in zip(model.tap_layers, loaded.tap_layers):
+            assert after.grid_dim == 3
+            np.testing.assert_array_equal(_np(before.perm), _np(after.perm))
+            assert tuple(after.patch_table.shape) == (8, 125)
+        np.testing.assert_allclose(
+            _np(loaded(tokens, training=False)["logits"]), original,
+            atol=1e-6, rtol=0,
+        )
+
+    def test_a_legacy_archive_without_the_key_loads_as_two_dimensional(self, tmp_path):
+        """Strip ``grid_dim`` from the archive's recorded config, as an archive
+        written before the key existed would be, and load it."""
+        model = TopoLM(vocab_size=VOCAB, embed_dim=256, depth=1, num_heads=4,
+                       max_seq_len=64, name="topolm", seed=2)
+        tokens = _tokens()
+        original = _np(model(tokens, training=False)["logits"])
+        path = str(tmp_path / "legacy.keras")
+        model.save(path)
+        stripped = str(tmp_path / "legacy_stripped.keras")
+        removed = _strip_key_from_archive(path, stripped, "grid_dim")
+        # Only the model's own config records it: blocks and taps are rebuilt
+        # from that config on load, so there is exactly one occurrence.
+        assert removed == 1
+
+        loaded = keras.models.load_model(stripped)
+        assert loaded.grid_dim == 2 and loaded.grid_shape == (16, 16)
+        np.testing.assert_allclose(
+            _np(loaded(tokens, training=False)["logits"]), original,
+            atol=1e-6, rtol=0,
+        )
+
+
+def _strip_key_from_archive(source: str, target: str, key: str) -> int:
+    """Copy a ``.keras`` archive with ``key`` removed from every config dict in
+    ``config.json``. Returns how many occurrences were removed."""
+    removed = 0
+
+    def strip(node):
+        nonlocal removed
+        if isinstance(node, dict):
+            if key in node:
+                del node[key]
+                removed += 1
+            for value in node.values():
+                strip(value)
+        elif isinstance(node, list):
+            for value in node:
+                strip(value)
+
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(target, "w") as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "config.json":
+                config = json.loads(data)
+                strip(config)
+                data = json.dumps(config).encode()
+            dst.writestr(item, data)
+    return removed
+
+
+class TestThreeDimensionalPrecisionAndDevice:
+    def test_the_forward_is_finite_under_mixed_float16(self):
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            model = _build3d()
+            outputs = model(_tokens(), training=True)
+            assert np.all(np.isfinite(_np(outputs["logits"])))
+            assert all(np.isfinite(float(value)) for value in model.losses)
+            assert len(model.losses) == 2 * len(TAP_SITES)
+            assert {
+                tap.patch_table.dtype for tap in model.tap_layers
+            } == {"int64"}
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_no_variable_of_the_model_is_int32(self):
+        """Device-independent arm of the XLA-on-GPU placement rule."""
+        model = _build3d()
+        model(_tokens(), training=False)
+        assert int32_variables(model) == []
+        assert {
+            table.dtype
+            for tap in model.tap_layers
+            for table in (tap.perm, tap.patch_table, tap.triu_flat)
+        } == {"int64"}
+
+    def test_a_tf_function_trace_matches_eager(self):
+        model = _build3d()
+        tokens = _tokens()
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None], tf.int32)])
+        def traced(ids):
+            return model(ids, training=False)["logits"]
+
+        np.testing.assert_allclose(
+            _np(traced(tokens)),
+            _np(model(tokens, training=False)["logits"]),
+            atol=1e-5, rtol=0,
+        )
+
+    @requires_gpu
+    def test_a_jit_compiled_fit_runs_on_a_gpu(self):
+        """Written in step 5, run on GPU 0 in step 7. The 3D tables are int64
+        like the 2D ones; the arm exists because the placement rule is a device
+        property that a CPU suite cannot see."""
+        keras.utils.set_random_seed(0)
+        model = _build3d(depth=1)
+        head = _build_head(model, aggregate=True)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2), jit_compile=True)
+
+        history = head.fit(_dataset(), epochs=1, verbose=0)
+
+        assert np.isfinite(history.history["loss"][0])
+        devices = {tap.patch_table.value.device for tap in model.tap_layers}
+        assert all("GPU" in device for device in devices), devices
+
+    def test_a_jit_compiled_step_actually_optimises(self):
+        """The same arm on whatever device is visible (XLA on CPU compiles too)."""
+        keras.utils.set_random_seed(0)
+        model = _build3d(depth=1)
+        head = _build_head(model, aggregate=True)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2), jit_compile=True)
+        head(np.zeros((1, 12), dtype="int32"), training=False)
+        before = {v.path: _np(v).copy() for v in model.trainable_variables}
+        history = head.fit(_dataset(), epochs=2, verbose=0)
+        assert np.isfinite(history.history["loss"][-1])
+        assert history.history["loss"][-1] < history.history["loss"][0]
+        assert any(
+            not np.array_equal(before[v.path], _np(v))
+            for v in model.trainable_variables
+        )
+
+
+# ---------------------------------------------------------------------
+# a checkpoint of the other rank
+# ---------------------------------------------------------------------
+
+#: Small enough to save and load in a test. The feed-forward width is explicit
+#: because ``create_topolm("tiny", ...)`` would otherwise take the row's 1024 and
+#: the two sides would differ in more than the rank.
+_LOAD = {
+    "vocab_size": 64, "depth": 1, "max_seq_len": 16,
+    "ffn_intermediate_size": 128,
+}
+
+
+def _save(model: TopoLM, tmp_path, name: str) -> str:
+    model(_tokens(vocab=64, length=8), training=False)
+    path = str(tmp_path / name)
+    model.save(path)
+    return path
+
+
+class TestACheckpointOfTheOtherRankIsRefused:
+    """Measured before the guard existed (CPU, float32, 2026-10-23):
+
+      * 216 units, radius 2 in both ranks, 2D -> 3D and 3D -> 2D: raised
+        ``Shape mismatch on layer 'block_0'`` (the tables are (112, 25) in 2D and
+        (8, 125) in 3D). It raised, but never said ``grid_dim``.
+      * 729 units, 2D 27 x 27 at radius 13 and 3D 9 x 9 x 9 at radius 4, both
+        directions: LOADED, silently. Each tap holds one 729-unit patch in either
+        rank, so ``perm`` (729,), ``patch_table`` (1, 729) and ``triu_flat``
+        (265356,) have identical shapes, the by-name shape check passes, and a 3D
+        model ends up with a 2D layout (``perm`` and ``patch_table`` copied).
+
+    ``TopoLM.from_variant(pretrained=path)`` now reads the archive's recorded
+    ``grid_dim`` and refuses a mismatch by name before any copy.
+    """
+
+    @pytest.mark.parametrize(
+        "source_dim,target_dim", [(2, 3), (3, 2)], ids=["2D-into-3D", "3D-into-2D"]
+    )
+    def test_equal_width_and_radius_raise_naming_grid_dim(
+        self, tmp_path, source_dim, target_dim
+    ):
+        base = {**_LOAD, "embed_dim": 216, "num_heads": 4, "radius": 2}
+        path = _save(
+            TopoLM(**base, grid_dim=source_dim, name="topolm"), tmp_path, "src.keras"
+        )
+        with pytest.raises(ValueError, match=r"grid_dim") as info:
+            create_topolm("tiny", pretrained=path, **base, grid_dim=target_dim)
+        message = str(info.value)
+        assert f"saved with grid_dim={source_dim}" in message
+        assert f"this model has grid_dim={target_dim}" in message
+
+    @pytest.mark.parametrize(
+        "source,target",
+        [
+            ({"radius": 13, "grid_dim": 2}, {"radius": 4, "grid_dim": 3}),
+            ({"radius": 4, "grid_dim": 3}, {"radius": 13, "grid_dim": 2}),
+        ],
+        ids=["2D-r13-into-3D-r4", "3D-r4-into-2D-r13"],
+    )
+    def test_tables_of_identical_shape_are_still_refused(
+        self, tmp_path, source, target
+    ):
+        """The case a shape check cannot see. Anti-vacuity first: the two models'
+        tables really do have the same shapes, so only the rank differs."""
+        base = {**_LOAD, "embed_dim": 729, "num_heads": 9}
+        left = TopoLM(**base, **source, name="topolm")
+        right = TopoLM(**base, **target, name="topolm")
+        for model in (left, right):
+            model(_tokens(vocab=64, length=8), training=False)
+        assert [tuple(w.shape) for w in left.tap_layers[0].weights] == [
+            tuple(w.shape) for w in right.tap_layers[0].weights
+        ], "fixture invalid: the tables must have identical shapes in both ranks"
+
+        path = _save(left, tmp_path, "same_shapes.keras")
+        with pytest.raises(ValueError, match=r"saved with grid_dim="):
+            create_topolm("tiny", pretrained=path, **base, **target)
+
+    def test_the_same_rank_still_loads_and_restores_every_layout(self, tmp_path):
+        """The guard must not over-refuse: 3D into 3D copies perm and tables."""
+        base = {**_LOAD, "embed_dim": 216, "num_heads": 4, "radius": 2,
+                "grid_dim": 3}
+        source = TopoLM(**base, name="topolm", seed=9)
+        path = _save(source, tmp_path, "three.keras")
+        restored = create_topolm("tiny", pretrained=path, **base, seed=1)
+        restored(_tokens(vocab=64, length=8), training=False)
+        for a, b in zip(source.tap_layers, restored.tap_layers):
+            np.testing.assert_array_equal(_np(a.perm), _np(b.perm))
+            np.testing.assert_array_equal(_np(a.patch_table), _np(b.patch_table))
+
+    def test_a_legacy_checkpoint_without_the_key_loads_into_a_two_dimensional_model(
+        self, tmp_path
+    ):
+        base = {**_LOAD, "embed_dim": 256, "num_heads": 4, "radius": 2}
+        path = _save(TopoLM(**base, name="topolm", seed=9), tmp_path, "two.keras")
+        legacy = str(tmp_path / "two_legacy.keras")
+        assert _strip_key_from_archive(path, legacy, "grid_dim") == 1
+        restored = create_topolm("tiny", pretrained=legacy, **base)
+        assert restored.grid_dim == 2
+
+    def test_a_legacy_checkpoint_is_refused_by_a_three_dimensional_model(
+        self, tmp_path
+    ):
+        """No key means 2D, so a 3D model must not take it."""
+        base = {**_LOAD, "embed_dim": 216, "num_heads": 4, "radius": 2}
+        path = _save(TopoLM(**base, name="topolm"), tmp_path, "two.keras")
+        legacy = str(tmp_path / "two_legacy.keras")
+        _strip_key_from_archive(path, legacy, "grid_dim")
+        with pytest.raises(ValueError, match=r"saved with grid_dim=2"):
+            create_topolm("tiny", pretrained=legacy, **base, grid_dim=3)

@@ -1148,7 +1148,7 @@ class TestSerialization:
         for key in (
             "vocab_size", "embed_dim", "depth", "num_heads",
             "ffn_intermediate_size", "max_seq_len", "alpha", "radius",
-            "num_neighborhoods", "distance", "permute", "grid_shape",
+            "num_neighborhoods", "distance", "permute", "grid_shape", "grid_dim",
             "tap_sites", "dropout_rate", "attention_dropout_rate",
             "initializer_range", "layer_norm_eps", "activation",
             "tie_word_embeddings", "seed",

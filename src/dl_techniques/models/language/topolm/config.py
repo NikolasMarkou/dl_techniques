@@ -18,12 +18,13 @@ References:
       ICLR 2025. (https://arxiv.org/abs/2410.11516)
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 #: Every variant must satisfy ``embed_dim >= (2 * radius + 1) ** grid_dim`` and
 #: have every axis of its resolved grid ``>= 2 * radius + 1``, or the
 #: neighbourhood cannot fit on its grid, and ``embed_dim % num_heads == 0``.
-#: :func:`validate_variant` is the single place that is enforced.
+#: :func:`validate_variant` enforces it for the shipped rows; the model's
+#: constructor enforces the same axis rule (3D) through :func:`axes_fit_problem`.
 
 #: Weight on the added spatial loss, per tap. The paper's value after a
 #: hyperparameter search; lower values under-develop topography and higher values
@@ -94,12 +95,18 @@ def grid_shape_of(embed_dim: int, grid_dim: int = 2) -> Tuple[int, ...]:
     return resolve_grid_shape(embed_dim, grid_dim=grid_dim)
 
 
-def _radius_advice(grid: Tuple[int, ...]) -> str:
+def radius_advice(grid: Tuple[int, ...]) -> str:
     """Name the largest radius a grid can host, or say that none can.
 
     A patch of side ``2 * radius + 1`` has to fit along the shortest axis, so the
     answer is ``(min(grid) - 1) // 2`` and it is at least 1 only when that axis
-    has 3 or more cells.
+    has 3 or more cells. Shared by :func:`validate_variant` and the model's own
+    construction check, so the two cannot word the advice differently.
+
+    :param grid: A resolved unit grid, any number of axes.
+    :type grid: Tuple[int, ...]
+    :return: One sentence, ending in a period.
+    :rtype: str
     """
     min_axis = min(grid)
     if min_axis >= 3:
@@ -107,6 +114,36 @@ def _radius_advice(grid: Tuple[int, ...]) -> str:
     return (
         "No radius can work on this grid (the shortest axis is below 3); "
         "pick a different width."
+    )
+
+
+def axes_fit_problem(grid: Tuple[int, ...], radius: int) -> Optional[str]:
+    """Say why a radius-``radius`` patch does not fit on ``grid``, or ``None``.
+
+    The patch has side ``2 * radius + 1`` and must fit along EVERY axis, which is
+    exactly the condition ``build_patch_tables`` enforces. The sentence names the
+    grid, each short axis with its length, and the largest usable radius
+    (:func:`radius_advice`). It starts with a verb so a caller can put its own
+    subject in front: ``validate_variant`` prefixes the variant and the width,
+    the model's constructor only the width.
+
+    :param grid: A resolved unit grid, any number of axes.
+    :type grid: Tuple[int, ...]
+    :param radius: The neighbourhood radius.
+    :type radius: int
+    :return: The sentence, or ``None`` when every axis is at least the side.
+    :rtype: Optional[str]
+    """
+    side = 2 * int(radius) + 1
+    short = [(k, n) for k, n in enumerate(grid) if n < side]
+    if not short:
+        return None
+    offenders = "; ".join(f"axis {k} has {n}" for k, n in short)
+    return (
+        f"resolves to the {'x'.join(str(n) for n in grid)} grid, but a "
+        f"radius-{radius} neighbourhood needs every axis >= {side}: "
+        f"{offenders}. {radius_advice(grid)} Lower the radius, or pick a wider "
+        f"variant."
     )
 
 
@@ -153,7 +190,7 @@ def validate_variant(
         # radius advice, because a cube below the default radius's floor is the
         # common 3D mistake and the floor is the check that catches it first.
         hint = (
-            f" {_radius_advice(grid_shape_of(embed_dim, grid_dim))}"
+            f" {radius_advice(grid_shape_of(embed_dim, grid_dim))}"
             if grid_dim != 2
             else ""
         )
@@ -172,16 +209,9 @@ def validate_variant(
     # build. The same hole exists in 2D (997 = 1 x 997 clears the floor and dies at
     # tap build); for grid_dim=2 this check only moves WHERE an already
     # unbuildable configuration fails, never what builds.
-    short = [(k, n) for k, n in enumerate(grid) if n < side]
-    if short:
-        advice = _radius_advice(grid)
-        offenders = "; ".join(f"axis {k} has {n}" for k, n in short)
-        raise ValueError(
-            f"variant {name!r}: embed_dim ({embed_dim}) resolves to the "
-            f"{'x'.join(str(n) for n in grid)} grid, but a radius-{radius} "
-            f"neighbourhood needs every axis >= {side}: {offenders}. {advice} "
-            f"Lower the radius, or pick a wider variant."
-        )
+    problem = axes_fit_problem(grid, radius)
+    if problem is not None:
+        raise ValueError(f"variant {name!r}: embed_dim ({embed_dim}) {problem}")
 
 
 def validate_all_variants(radius: int = DEFAULT_RADIUS) -> None:

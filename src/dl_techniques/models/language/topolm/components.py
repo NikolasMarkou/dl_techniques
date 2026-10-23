@@ -106,8 +106,15 @@ class TopoLMBlock(keras.layers.Layer):
     :param permute: Whether each tap draws its own unit permutation. ``False`` is
         the paper's Fig. 12 ablation.
     :type permute: bool
-    :param grid_shape: Explicit ``(height, width)`` for the taps, or ``None``.
-    :type grid_shape: Optional[Tuple[int, int]]
+    :param grid_shape: Explicit grid for the taps, or ``None`` to factor
+        ``hidden_size``: ``(height, width)`` for ``grid_dim=2``, three axes in
+        the order given (never reordered) for ``grid_dim=3``.
+    :type grid_shape: Optional[Tuple[int, ...]]
+    :param grid_dim: Number of grid axes of every tap, 2 (the paper's layout,
+        the default) or 3. Forwarded to each
+        :class:`~dl_techniques.layers.regularization.spatial_smoothness.SpatialSmoothness`
+        and written by :meth:`get_config`; a config without the key is a 2D block.
+    :type grid_dim: int
     :param tap_sites: Which branch outputs to tap, a subset of
         :data:`TAP_SITES`. ``()`` builds the block with no taps at all, which is
         how a plain GPT-2 block is recovered from the same code.
@@ -131,8 +138,8 @@ class TopoLMBlock(keras.layers.Layer):
     :param kwargs: Forwarded to ``keras.layers.Layer``.
     :raises ValueError: If ``hidden_size`` does not divide among ``num_heads``,
         if a name in ``tap_sites`` is not in :data:`TAP_SITES`, or if
-        ``normalization_position`` is not ``'pre'`` or ``'post'`` -- naming the
-        offending value in each case.
+        ``normalization_position`` is not ``'pre'`` or ``'post'``, or if
+        ``grid_dim`` is not 2 or 3 -- naming the offending value in each case.
     """
 
     def __init__(
@@ -145,7 +152,8 @@ class TopoLMBlock(keras.layers.Layer):
         num_neighborhoods: int = 5,
         distance: str = "linf",
         permute: bool = True,
-        grid_shape: Optional[Tuple[int, int]] = None,
+        grid_shape: Optional[Tuple[int, ...]] = None,
+        grid_dim: int = 2,
         tap_sites: Tuple[str, ...] = TAP_SITES,
         normalization_position: str = "pre",
         activation: Union[str, Any] = "gelu",
@@ -168,6 +176,14 @@ class TopoLMBlock(keras.layers.Layer):
                 f"normalization_position must be 'pre' or 'post', got "
                 f"{normalization_position!r}"
             )
+        # The layer's own validator, so the block, the model and the tap accept
+        # the same values. Imported here like the other spatial_smoothness
+        # imports in this file.
+        from dl_techniques.layers.regularization.spatial_smoothness import (
+            validate_grid_dim,
+        )
+
+        grid_dim = validate_grid_dim(grid_dim)
         tap_sites = tuple(tap_sites)
         unknown = sorted(set(tap_sites) - set(TAP_SITES))
         if unknown:
@@ -187,6 +203,7 @@ class TopoLMBlock(keras.layers.Layer):
         self.grid_shape = (
             None if grid_shape is None else tuple(int(v) for v in grid_shape)
         )
+        self.grid_dim = grid_dim
         self.tap_sites = tap_sites
         self.normalization_position = normalization_position
         self.activation = deserialize_activation(activation)
@@ -296,6 +313,10 @@ class TopoLMBlock(keras.layers.Layer):
             distance=self.distance,
             permute=self.permute,
             grid_shape=self.grid_shape,
+            # Forwarded even though 2 is the default: a tap resolves its grid
+            # lazily at its own build, so a dropped argument builds a silently 2D
+            # layer inside a block that reports grid_dim=3.
+            grid_dim=self.grid_dim,
             seed=seed,
             name=name,
         )
@@ -451,6 +472,7 @@ class TopoLMBlock(keras.layers.Layer):
             "distance": self.distance,
             "permute": self.permute,
             "grid_shape": self.grid_shape,
+            "grid_dim": self.grid_dim,
             "tap_sites": tuple(self.tap_sites),
             "normalization_position": self.normalization_position,
             "activation": serialize_activation(self.activation),

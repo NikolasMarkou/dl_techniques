@@ -84,6 +84,7 @@ import keras
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
+    read_checkpoint_config,
 )
 from dl_techniques.utils.sequence_length_guard import (
     RecordedBuildShapeMixin,
@@ -112,6 +113,8 @@ from .config import (
     DEFAULT_NUM_NEIGHBORHOODS,
     DEFAULT_RADIUS,
     MODEL_VARIANTS,
+    axes_fit_problem,
+    radius_advice,
     validate_all_variants,
 )
 
@@ -182,7 +185,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :param vocab_size: Vocabulary size. Default 100277 (cl100k_base).
     :type vocab_size: int
     :param embed_dim: Model width, and the tapped axis' length. Must be a
-        product of two factors at least ``(2 * radius + 1)`` across.
+        product of ``grid_dim`` factors (two or three), each at least
+        ``(2 * radius + 1)`` across.
     :type embed_dim: int
     :param depth: Number of decoder blocks.
     :type depth: int
@@ -204,9 +208,19 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :type distance: str
     :param permute: Whether each tap draws its own unit permutation.
     :type permute: bool
-    :param grid_shape: Explicit ``(height, width)`` for every tap, or ``None`` to
-        factor ``embed_dim``.
-    :type grid_shape: Optional[Tuple[int, int]]
+    :param grid_shape: Explicit grid for every tap, or ``None`` to factor
+        ``embed_dim``: ``(height, width)`` for ``grid_dim=2``, three axes for
+        ``grid_dim=3`` (never reordered). Its length must equal ``grid_dim``.
+    :type grid_shape: Optional[Tuple[int, ...]]
+    :param grid_dim: Number of grid axes, 2 (the paper's layout, the default) or
+        3, where each tapped width is laid out as a box and neighbourhoods are
+        cubes. The rank is this stated value and is never inferred from
+        ``len(grid_shape)``. Forwarded to every block and tap and written by
+        ``get_config``; a config without the key loads as 2D. A 3D width needs
+        every axis of its grid at least ``2 * radius + 1`` across, and the
+        default ``radius=5`` therefore needs a box of at least 11 per axis; the
+        error names the largest radius the grid can use.
+    :type grid_dim: int
     :param tap_sites: Which branch outputs to tap: ``("attention", "mlp")`` for
         the paper, ``("attention",)`` for a single-tap ablation, ``()`` for none.
     :type tap_sites: Tuple[str, ...]
@@ -282,7 +296,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         num_neighborhoods: int = DEFAULT_NUM_NEIGHBORHOODS,
         distance: str = "linf",
         permute: bool = True,
-        grid_shape: Optional[Tuple[int, int]] = None,
+        grid_shape: Optional[Tuple[int, ...]] = None,
+        grid_dim: int = 2,
         tap_sites: Tuple[str, ...] = TAP_SITES,
         normalization_position: str = "pre",
         dropout_rate: float = 0.0,
@@ -303,7 +318,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         self._validate_config(
             vocab_size, embed_dim, depth, num_heads, max_seq_len, dropout_rate,
             attention_dropout_rate, radius, alpha, num_neighborhoods, distance,
-            tap_sites, grid_shape, normalization_position,
+            tap_sites, grid_shape, normalization_position, grid_dim,
         )
         validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
@@ -330,7 +345,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         self._grid_shape_arg = (
             None if grid_shape is None else tuple(int(v) for v in grid_shape)
         )
-        self._resolved_grid_shape: Optional[Tuple[int, int]] = None
+        self.grid_dim = int(grid_dim)
+        self._resolved_grid_shape: Optional[Tuple[int, ...]] = None
         self.tap_sites = tuple(tap_sites)
         self.normalization_position = normalization_position
         self.dropout_rate = float(dropout_rate)
@@ -371,6 +387,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             f"Created TopoLM: depth={self.depth}, embed_dim={self.embed_dim}, "
             f"heads={self.num_heads}, max_seq_len={self.max_seq_len}, "
             f"alpha={self.alpha}, radius={self.radius}, "
+            f"grid_dim={self.grid_dim}, "
             f"taps={len(self.blocks) * len(self.tap_sites)}, "
             f"tie_word_embeddings={self.tie_word_embeddings}"
             + (f", task head '{self.task_config['name']}'" if self.include_top else "")
@@ -390,16 +407,19 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         num_neighborhoods: int,
         distance: str,
         tap_sites: Tuple[str, ...],
-        grid_shape: Optional[Tuple[int, int]],
+        grid_shape: Optional[Tuple[int, ...]],
         normalization_position: str,
+        grid_dim: int,
     ) -> None:
         """Check every argument and every cross-parameter contract at once.
 
-        The grid floor is the one that bites: a width below ``(2r+1)^2`` builds a
-        model that cannot construct a single neighbourhood, and the failure
-        surfaces at the tap's ``build`` -- after embeddings, attention and a whole
-        stack have been created. It is a construction-time error, so it is raised
-        here.
+        The grid floor is the one that bites: a width below ``(2r+1)^grid_dim``
+        builds a model that cannot construct a single neighbourhood, and the
+        failure surfaces at the tap's ``build`` -- after embeddings, attention and
+        a whole stack have been created. It is a construction-time error, so it is
+        raised here. For ``grid_dim=3`` the floor is followed by a per-axis check,
+        because a total that clears the floor can still resolve to a grid one of
+        whose axes is shorter than the patch (784 units: ``(7, 8, 14)``).
         """
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
@@ -449,22 +469,46 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         # message names the grid as well as the width.
         from dl_techniques.layers.regularization.spatial_smoothness import (
             resolve_grid_shape,
+            validate_grid_dim,
         )
+
+        # Before the floor, which raises it to the power grid_dim.
+        grid_dim = validate_grid_dim(grid_dim)
 
         # Floor first, THEN resolve. Resolving first reports "a radius-r
         # neighbourhood needs a (2r+1)x(2r+1) patch" for a width that was simply
         # too narrow -- true, but it names the grid rather than the argument the
         # caller has to change.
-        minimum = (2 * radius + 1) ** 2
+        side = 2 * radius + 1
+        minimum = side ** grid_dim
         if embed_dim < minimum:
+            # Only the 3D message carries the radius advice (the 2D text is
+            # pinned verbatim): a cube below the default radius's floor is the
+            # common 3D mistake, and this is the check that catches it first.
+            hint = (
+                f" {radius_advice(resolve_grid_shape(embed_dim, grid_shape, grid_dim))}"
+                if grid_dim != 2
+                else ""
+            )
             raise ValueError(
                 f"embed_dim ({embed_dim}) is below the {minimum} units a "
                 f"radius-{radius} neighbourhood needs "
-                f"({2 * radius + 1} x {2 * radius + 1}). Lower `radius`, or choose "
-                f"a wider variant."
+                f"({' x '.join([str(side)] * grid_dim)}). Lower `radius`, or "
+                f"choose a wider variant.{hint}"
             )
-        grid = resolve_grid_shape(embed_dim, grid_shape)
-        logger.debug(f"TopoLM unit grid resolved to {grid[0]}x{grid[1]}")
+        grid = resolve_grid_shape(embed_dim, grid_shape, grid_dim)
+        # The per-axis check is 3D only HERE. In 2D this constructor has always
+        # accepted a grid with a short axis (an explicit (8, 32) at the default
+        # radius 5 constructs and reports its grid; only the tap's build refuses
+        # it), and tests/test_models/test_topolm/test_topolm.py pins that, so
+        # tightening it would change 2D behaviour. The variant table is stricter
+        # in both ranks (config.validate_variant).
+        problem = axes_fit_problem(grid, radius) if grid_dim != 2 else None
+        if problem is not None:
+            raise ValueError(f"embed_dim ({embed_dim}) {problem}")
+        logger.debug(
+            f"TopoLM unit grid resolved to {'x'.join(str(n) for n in grid)}"
+        )
 
     def _build_architecture(self) -> None:
         """Create every sub-layer. No weights here, and no shape-dependent work."""
@@ -503,6 +547,10 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 distance=self.distance,
                 permute=self.permute,
                 grid_shape=self._grid_shape_arg,
+                # Forwarded even though 2 is the default: a tap resolves its grid
+                # lazily at its own build, so a dropped argument builds a silently
+                # 2D layer inside a model that reports grid_dim=3.
+                grid_dim=self.grid_dim,
                 tap_sites=self.tap_sites,
                 normalization_position=self.normalization_position,
                 dropout_rate=self.dropout_rate,
@@ -559,12 +607,15 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         return tuple(found)
 
     @property
-    def grid_shape(self) -> Tuple[int, int]:
+    def grid_shape(self) -> Tuple[int, ...]:
         """The unit grid this model's width sits on, resolved from config.
 
         The constructor ARGUMENT is stored privately and this property reports the
         RESOLVED shape, which is the one every analysis function needs -- a caller
-        who left ``grid_shape=None`` still needs to know the grid is 28x28.
+        who left ``grid_shape=None`` still needs to know the grid (28x28 for the
+        paper's 784 units). ``grid_dim`` entries: ``(height, width)`` for 2, three
+        axes for 3, in the order ``cell_to_unit.shape`` has and never reordered.
+        Cached after the first read.
         """
         from dl_techniques.layers.regularization.spatial_smoothness import (
             resolve_grid_shape,
@@ -572,7 +623,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
 
         if self._resolved_grid_shape is None:
             self._resolved_grid_shape = resolve_grid_shape(
-                self.embed_dim, self._grid_shape_arg
+                self.embed_dim, self._grid_shape_arg, self.grid_dim
             )
         return self._resolved_grid_shape
 
@@ -827,6 +878,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             "distance": self.distance,
             "permute": self.permute,
             "grid_shape": self._grid_shape_arg,
+            "grid_dim": self.grid_dim,
             "tap_sites": tuple(self.tap_sites),
             "normalization_position": self.normalization_position,
             "dropout_rate": self.dropout_rate,
@@ -952,6 +1004,27 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             if not os.path.exists(weights_path):
                 raise FileNotFoundError(
                     f"Weights file not found: {weights_path}"
+                )
+            # Refuse a checkpoint of the other grid_dim BY NAME, before any copy.
+            # Do NOT leave this to the shape check in
+            # load_backbone_from_checkpoint: perm, patch_table and
+            # triu_flat have a shape fixed by the width, the radius and the grid
+            # axes, and a 2D and a 3D grid can give them identical shapes (729 units
+            # at radius 13 in 2D and radius 4 in 3D both hold one 729-unit patch),
+            # so such a load succeeds and leaves a 3D model with a 2D layout.
+            recorded = read_checkpoint_config(weights_path).get("config")
+            if isinstance(recorded, dict) and (
+                int(recorded.get("grid_dim", 2)) != model.grid_dim
+            ):
+                raise ValueError(
+                    f"Checkpoint {weights_path!r} was saved with grid_dim="
+                    f"{int(recorded.get('grid_dim', 2))}, but this model has "
+                    f"grid_dim={model.grid_dim}. A tap's layout (perm, "
+                    f"patch_table, triu_flat) belongs to the grid it was built on, "
+                    f"and some widths and radii give those tables the same shape "
+                    f"in both ranks, so the weights cannot be moved across. Build "
+                    f"the model with grid_dim="
+                    f"{int(recorded.get('grid_dim', 2))}."
                 )
             # Built here, so the restore has somewhere to land: a build, not a
             # dummy forward, so no RNG is drawn. Without it every local path

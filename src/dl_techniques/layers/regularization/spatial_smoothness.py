@@ -162,11 +162,12 @@ def _factor_3d_cubic(num_units: int) -> Tuple[int, int, int]:
     return best
 
 
-def _validated_grid_dim(grid_dim: Any) -> int:
+def validate_grid_dim(grid_dim: Any) -> int:
     """Return ``grid_dim`` as an ``int`` if it is 2 or 3, else raise.
 
-    Shared by :func:`resolve_grid_shape` and :class:`SpatialSmoothness`, so the
-    accepted values and the message cannot drift apart. ``bool`` and non-integers
+    Shared by :func:`resolve_grid_shape`, :class:`SpatialSmoothness` and the
+    TopoLM block and model (``models/language/topolm``), so the accepted values
+    and the message cannot drift apart. ``bool`` and non-integers
     (``"3"``, ``3.0``) are refused: a stringly or float rank would otherwise
     compare unequal to 3 further down and fall through as 2D.
 
@@ -220,7 +221,7 @@ def resolve_grid_shape(
         raise ValueError(
             f"num_units must be positive, got {num_units}"
         )
-    grid_dim = _validated_grid_dim(grid_dim)
+    grid_dim = validate_grid_dim(grid_dim)
 
     if grid_shape is None:
         if grid_dim == 3:
@@ -761,7 +762,7 @@ class SpatialSmoothness(keras.layers.Layer):
             )
         if eps <= 0:
             raise ValueError(f"eps must be > 0, got {eps}")
-        grid_dim = _validated_grid_dim(grid_dim)
+        grid_dim = validate_grid_dim(grid_dim)
         if max_samples is not None and max_samples < 2:
             # Fewer than two samples leaves the per-unit standard deviation at
             # zero, so every correlation is 0/0 and the layer reports 0.5 while
