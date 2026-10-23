@@ -38,10 +38,13 @@ from dl_techniques.models.language.topolm import (
     grid_shape_of,
     validate_variant,
 )
+from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+from dl_techniques.layers.heads.nlp import TASK_HEAD_NAME
 from dl_techniques.models.language.topolm.config import (
     DEFAULT_RADIUS,
     validate_all_variants,
 )
+from dl_techniques.utils.weight_transfer import load_backbone_from_checkpoint
 from tests.index_weights import int32_variables, requires_gpu
 from tests.test_layers.test_regularization.spatial_smoothness_oracle import (
     reference_patch_units_3d,
@@ -941,6 +944,205 @@ class TestACheckpointOfTheOtherRankIsRefused:
         with pytest.raises(ValueError, match=r"saved with grid_dim=2"):
             create_topolm("tiny", pretrained=legacy, **base, grid_dim=3)
 
+
+
+def _wrapped_archive(tmp_path, grid_dim: int, name: str) -> str:
+    """A ``CausalLanguageModel`` around a TopoLM, saved whole -- the archive the
+    README's 3D recipe ("build it with the model API and a CausalLanguageModel
+    head") produces. Its top-level config is the wrapper's, with no ``grid_dim``
+    key; the TopoLM config is nested under ``backbone``."""
+    backbone = TopoLM(
+        **_LOAD, embed_dim=216, num_heads=4, radius=2, grid_dim=grid_dim,
+        name="topolm", seed=3,
+    )
+    wrapper = CausalLanguageModel(
+        backbone=backbone, vocab_size=64, skip_head=True, output_key="logits",
+        pre_shifted=True, aggregate_backbone_losses=True, verify_causality=False,
+    )
+    wrapper(_tokens(vocab=64, length=8), training=False)
+    path = str(tmp_path / name)
+    wrapper.save(path)
+    return path
+
+
+class TestTheGuardReadsOnlyATopoLMConfig:
+    """D-017: the rank (and the grid) is read from a recorded TopoLM config and
+    from nothing else.
+
+    Measured before the fix (CPU, 2026-10-23): ``recorded.get("grid_dim", 2)``
+    treated the wrapper's config, which has no such key, as 2D, so a 3D TopoLM
+    wrapped in ``CausalLanguageModel`` loaded into a 3D model raised ``was saved
+    with grid_dim=2`` -- false, and it hid the loader's real error. Measured
+    after: all four wrapper/target combinations raise the loader's own
+    ``ValueError`` ``No overlapping layers between target and source checkpoint``
+    (the wrapper's layers are not a bare TopoLM's, so ``from_variant`` has never
+    been able to warm-start from one, in either rank).
+    """
+
+    @pytest.mark.parametrize(
+        "source_dim,target_dim",
+        [(3, 3), (3, 2), (2, 2), (2, 3)],
+        ids=["3D-into-3D", "3D-into-2D", "2D-into-2D", "2D-into-3D"],
+    )
+    def test_a_wrapped_archive_gets_the_loaders_error_not_a_guessed_rank(
+        self, tmp_path, source_dim, target_dim
+    ):
+        path = _wrapped_archive(tmp_path, source_dim, "wrapped.keras")
+        base = {**_LOAD, "embed_dim": 216, "num_heads": 4, "radius": 2}
+        with pytest.raises(ValueError, match=r"No overlapping layers") as info:
+            create_topolm("tiny", pretrained=path, **base, grid_dim=target_dim)
+        message = str(info.value)
+        assert "saved with grid_dim" not in message
+        assert "Build the model with grid_dim" not in message
+
+    def test_the_wrapper_config_really_has_no_rank_key(self, tmp_path):
+        """Anti-vacuity: the fixture is the case the old default got wrong."""
+        path = _wrapped_archive(tmp_path, 3, "wrapped.keras")
+        with zipfile.ZipFile(path) as archive:
+            top = json.loads(archive.read("config.json"))
+        assert top["class_name"] == "CausalLanguageModel"
+        assert "grid_dim" not in top["config"]
+        assert top["config"]["backbone"]["config"]["grid_dim"] == 3
+
+
+class TestACheckpointOnAnotherGridIsRefused:
+    """D-017: the resolved grid is compared too, not the rank alone.
+
+    Measured before the fix: a 3D checkpoint on ``(10, 5, 20)`` loaded into a
+    model on ``(20, 5, 10)`` returned normally (every table has the same shape,
+    because the centre count ``(a-2r)(b-2r)(c-2r)`` is symmetric in the axes),
+    reporting ``(20, 5, 10)`` while holding the checkpoint's tables. After: the
+    load raises ``ValueError`` naming both grids. The 2D analogue, ``(8, 32)``
+    against ``(32, 8)``, behaved the same and is refused the same way.
+    """
+
+    @staticmethod
+    def _base(rank: int) -> dict:
+        if rank == 3:
+            return {**_LOAD, "embed_dim": 1000, "num_heads": 4, "radius": 2,
+                    "grid_dim": 3}
+        return {**_LOAD, "embed_dim": 256, "num_heads": 4, "radius": 2}
+
+    @pytest.mark.parametrize(
+        "rank,saved,wanted",
+        [
+            (3, (10, 5, 20), (20, 5, 10)),
+            (3, (10, 5, 20), (5, 10, 20)),
+            (2, (8, 32), (32, 8)),
+        ],
+        ids=["3D-permuted", "3D-another-permutation", "2D-transposed"],
+    )
+    def test_a_permuted_grid_is_refused_naming_both(
+        self, tmp_path, rank, saved, wanted
+    ):
+        base = self._base(rank)
+        source = TopoLM(**base, grid_shape=saved, name="topolm", seed=3)
+        path = _save(source, tmp_path, "src.keras")
+        with pytest.raises(ValueError, match=r"unit grid") as info:
+            create_topolm("tiny", pretrained=path, **base, grid_shape=wanted)
+        message = str(info.value)
+        assert f"unit grid {saved}" in message
+        assert f"this model's grid is {wanted}" in message
+        assert f"grid_shape={saved}" in message
+        assert "saved with grid_dim" not in message
+
+    @pytest.mark.parametrize(
+        "rank,saved,default",
+        [(3, (10, 5, 20), (10, 10, 10)), (2, (8, 32), (16, 16))],
+        ids=["3D", "2D"],
+    )
+    def test_an_explicit_grid_is_refused_by_a_model_left_on_the_default(
+        self, tmp_path, rank, saved, default
+    ):
+        """Both sides are RESOLVED, so a ``grid_shape=None`` model is compared by
+        the grid it factors to."""
+        base = self._base(rank)
+        path = _save(
+            TopoLM(**base, grid_shape=saved, name="topolm"), tmp_path, "src.keras"
+        )
+        with pytest.raises(ValueError, match=r"unit grid") as info:
+            create_topolm("tiny", pretrained=path, **base)
+        assert f"this model's grid is {default}" in str(info.value)
+
+    @pytest.mark.parametrize(
+        "rank,saved", [(3, (10, 5, 20)), (2, (8, 32))], ids=["3D", "2D"]
+    )
+    def test_the_same_grid_still_loads_and_restores_every_layout(
+        self, tmp_path, rank, saved
+    ):
+        """Positive control, and a different model seed on the same grid."""
+        base = self._base(rank)
+        source = TopoLM(**base, grid_shape=saved, name="topolm", seed=9)
+        path = _save(source, tmp_path, "src.keras")
+        for seed in (9, 1):
+            restored = create_topolm(
+                "tiny", pretrained=path, **{**base, "seed": seed}, grid_shape=saved
+            )
+            restored(_tokens(vocab=64, length=8), training=False)
+            assert restored.grid_shape == saved
+            for a, b in zip(source.tap_layers, restored.tap_layers):
+                np.testing.assert_array_equal(_np(a.perm), _np(b.perm))
+                np.testing.assert_array_equal(
+                    _np(a.patch_table), _np(b.patch_table)
+                )
+
+    def test_a_default_grid_archive_loads_into_the_same_grid_given_explicitly(
+        self, tmp_path
+    ):
+        """``grid_shape=None`` and the tuple it factors to are the same grid
+        (2D byte-identical behaviour: this load succeeded before the guard)."""
+        base = self._base(2)
+        path = _save(TopoLM(**base, name="topolm"), tmp_path, "src.keras")
+        restored = create_topolm("tiny", pretrained=path, **base, grid_shape=(16, 16))
+        assert restored.grid_shape == (16, 16)
+
+    def test_a_different_width_keeps_the_loaders_shape_error(self, tmp_path):
+        """The grid is compared only at an equal width; a width mismatch is the
+        loader's ``Shape mismatch`` (measured: ``word_embeddings``), which names
+        the real cause."""
+        base = self._base(2)
+        path = _save(TopoLM(**base, name="topolm"), tmp_path, "src.keras")
+        with pytest.raises(ValueError, match=r"Shape mismatch on layer") as info:
+            create_topolm("tiny", pretrained=path, **{**base, "embed_dim": 144})
+        assert "unit grid" not in str(info.value)
+
+
+class TestADocumentedLimitationOfTheGuard:
+    """The guard lives in ``TopoLM.from_variant(pretrained=)``. A DIRECT call to
+    ``load_backbone_from_checkpoint`` is not covered, and the topolm README says so
+    ("a direct call to `load_backbone_from_checkpoint` is not covered by this
+    check, only `from_variant(pretrained=)` is").
+
+    This test pins that truth. Measured (CPU, 2026-10-23): a 3D 9 x 9 x 9 radius-4
+    archive loaded into a 2D 27 x 27 radius-13 model of equal table shapes returns
+    a ``TransferReport`` normally and the model keeps reporting ``(27, 27)``. If a
+    later change guards the loader itself, this assertion has to be updated on
+    purpose, together with that README sentence.
+    """
+
+    def test_a_direct_loader_call_does_not_see_the_rank(self, tmp_path):
+        base = {**_LOAD, "embed_dim": 729, "num_heads": 9}
+        path = _save(
+            TopoLM(**base, radius=4, grid_dim=3, name="topolm", seed=3),
+            tmp_path, "three.keras",
+        )
+        target = TopoLM(**base, radius=13, name="topolm")
+        target.build((1, 8))
+        assert (target.grid_dim, target.grid_shape) == (2, (27, 27))
+
+        report = load_backbone_from_checkpoint(
+            target,
+            path,
+            head_prefixes=(TASK_HEAD_NAME,),
+            vocab_layers=("word_embeddings",),
+            tables=("word_embeddings/embeddings", "lm_head/kernel"),
+            tops=("lm_head",),
+        )
+
+        assert report is not None
+        assert (target.grid_dim, target.grid_shape) == (2, (27, 27))
+        with pytest.raises(ValueError, match=r"saved with grid_dim=3"):
+            create_topolm("tiny", pretrained=path, **base, radius=13)
 
 _ROWS_3D = {
     # name: (embed_dim, depth, heads, ffn, max_seq_len, radius, grid, centres, P)

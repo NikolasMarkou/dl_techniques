@@ -505,6 +505,12 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 f"choose a wider variant.{hint}"
             )
         grid = resolve_grid_shape(embed_dim, grid_shape, grid_dim)
+        # DECISION plan-2026-10-23T141429-390f3815/D-016
+        # Do NOT apply the per-axis check in 2D: an explicit (8, 32) grid at the
+        # default radius 5 must still construct (test_topolm.py::TestConstruction::
+        # test_an_explicit_grid_is_reported_and_used), and the 3D-only branch is
+        # pinned by test_topolm_3d.py::TestThreeDimensionalValidationThroughTheModel.
+        # See decisions.md.
         # The per-axis check is 3D only HERE. In 2D this constructor has always
         # accepted a grid with a short axis (an explicit (8, 32) at the default
         # radius 5 constructs and reports its grid; only the tap's build refuses
@@ -942,6 +948,62 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             f"or pass pretrained=<local_path> to load a local .keras file."
         )
 
+    @staticmethod
+    def _refuse_other_grid(
+        weights_path: str, recorded: Dict[str, Any], model: "TopoLM"
+    ) -> None:
+        """Raise ``ValueError`` when a TopoLM checkpoint sits on another grid.
+
+        Interface contract: ``recorded`` is the ``config`` dict of an archive whose
+        top-level ``class_name`` is ``TopoLM`` (the caller checks that; this
+        function never guesses a rank for any other archive). A missing
+        ``grid_dim`` key means 2D, the layout of every archive saved before the
+        key existed. The rank is compared first, so a rank mismatch keeps its own
+        message; the grid is compared second, resolved from the recorded
+        ``embed_dim``, ``grid_shape`` (``None`` or a JSON list) and ``grid_dim``,
+        and only when the recorded width equals the model's (a different width is
+        the loader's shape mismatch, which names the real cause). Returns ``None``
+        when the layouts agree.
+
+        :param weights_path: The archive path, for the message.
+        :param recorded: The archive's recorded TopoLM constructor config.
+        :param model: The model being warm-started.
+        :raises ValueError: On a different ``grid_dim``, or on a different
+            resolved grid at the same width and rank.
+        """
+        from dl_techniques.layers.regularization.spatial_smoothness import (
+            resolve_grid_shape,
+        )
+
+        rank = int(recorded.get("grid_dim", 2))
+        if rank != model.grid_dim:
+            raise ValueError(
+                f"Checkpoint {weights_path!r} was saved with grid_dim={rank}, "
+                f"but this model has grid_dim={model.grid_dim}. A tap's layout "
+                f"(perm, patch_table, triu_flat) belongs to the grid it was "
+                f"built on, and some widths and radii give those tables the same "
+                f"shape in both ranks, so the weights cannot be moved across. "
+                f"Build the model with grid_dim={rank}."
+            )
+        if recorded.get("embed_dim") != model.embed_dim:
+            return
+        explicit = recorded.get("grid_shape")
+        grid = resolve_grid_shape(
+            model.embed_dim,
+            None if explicit is None else tuple(explicit),
+            rank,
+        )
+        if grid != model.grid_shape:
+            raise ValueError(
+                f"Checkpoint {weights_path!r} was built on the unit grid "
+                f"{grid}, but this model's grid is {model.grid_shape}. A tap's "
+                f"layout (perm, patch_table, triu_flat) belongs to the grid it "
+                f"was built on, and a different grid at the same width can give "
+                f"tables of identical shape (a transposed one always does), so "
+                f"the weights could load and describe the wrong layout. Build "
+                f"the model with grid_shape={grid}."
+            )
+
     @classmethod
     def from_variant(
         cls,
@@ -1013,27 +1075,26 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 raise FileNotFoundError(
                     f"Weights file not found: {weights_path}"
                 )
-            # Refuse a checkpoint of the other grid_dim BY NAME, before any copy.
-            # Do NOT leave this to the shape check in
-            # load_backbone_from_checkpoint: perm, patch_table and
+            # DECISION plan-2026-10-23T141429-390f3815/D-017
+            # Refuse a checkpoint of another grid BY NAME, before any copy, and
+            # only when the archive IS a bare TopoLM. Do NOT default a missing
+            # grid_dim to 2 for any other archive (a CausalLanguageModel around a
+            # 3D TopoLM has no such key and would be reported as "saved with
+            # grid_dim=2", hiding the loader's real error), and do NOT compare
+            # grid_dim alone (a 3D grid (10, 5, 20) loads silently into (20, 5, 10):
+            # every table has the same shape). Do NOT leave the rank to the shape
+            # check in load_backbone_from_checkpoint either: perm, patch_table and
             # triu_flat have a shape fixed by the width, the radius and the grid
-            # axes, and a 2D and a 3D grid can give them identical shapes (729 units
-            # at radius 13 in 2D and radius 4 in 3D both hold one 729-unit patch),
-            # so such a load succeeds and leaves a 3D model with a 2D layout.
-            recorded = read_checkpoint_config(weights_path).get("config")
-            if isinstance(recorded, dict) and (
-                int(recorded.get("grid_dim", 2)) != model.grid_dim
+            # axes, and a 2D and a 3D grid can give them identical shapes (729
+            # units at radius 13 in 2D and radius 4 in 3D both hold one 729-unit
+            # patch). Guarded by test_topolm_3d.py::TestTheGuardReadsOnlyATopoLMConfig,
+            # TestACheckpointOnAnotherGridIsRefused and
+            # TestACheckpointOfTheOtherRankIsRefused. See decisions.md.
+            recorded_archive = read_checkpoint_config(weights_path)
+            if recorded_archive.get("class_name") == "TopoLM" and isinstance(
+                recorded_archive.get("config"), dict
             ):
-                raise ValueError(
-                    f"Checkpoint {weights_path!r} was saved with grid_dim="
-                    f"{int(recorded.get('grid_dim', 2))}, but this model has "
-                    f"grid_dim={model.grid_dim}. A tap's layout (perm, "
-                    f"patch_table, triu_flat) belongs to the grid it was built on, "
-                    f"and some widths and radii give those tables the same shape "
-                    f"in both ranks, so the weights cannot be moved across. Build "
-                    f"the model with grid_dim="
-                    f"{int(recorded.get('grid_dim', 2))}."
-                )
+                cls._refuse_other_grid(weights_path, recorded_archive["config"], model)
             # Built here, so the restore has somewhere to land: a build, not a
             # dummy forward, so no RNG is drawn. Without it every local path
             # raised "model must be built" (measured).
