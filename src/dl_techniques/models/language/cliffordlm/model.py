@@ -53,7 +53,7 @@ from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 _DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 
 
-@register_dl_technique("dl_techniques.models.cliffordnet.lm")
+@register_dl_technique("dl_techniques.models.cliffordlm.model")
 class CliffordNetLM(keras.Model):
     """CliffordNet language model for causal language modeling.
 

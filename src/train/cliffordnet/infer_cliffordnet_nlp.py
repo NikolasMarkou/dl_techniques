@@ -51,7 +51,7 @@ import numpy as np
 import tiktoken
 
 from train.common import setup_gpu
-from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.language.cliffordlm.model import CliffordNetLM
 from dl_techniques.models.common.power_sampling import (
     PowerSampler,
     PowerSamplingConfig,

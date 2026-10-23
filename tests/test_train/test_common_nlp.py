@@ -218,7 +218,7 @@ class TestDictKeyedCompile:
             prepare_dict_keyed_compile,
             build_clm_metrics,
         )
-        from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
+        from dl_techniques.models.language.cliffordlm.model import CliffordNetLM
         from dl_techniques.losses import MaskedCausalLMLoss
 
         vocab_size = 64
