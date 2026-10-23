@@ -1123,3 +1123,28 @@ class TestTapLabelContract:
 
         _, _, fontsize = _panel_tap_labels(["x" * 60])
         assert 3.5 <= fontsize < 5.0
+
+
+class TestTheLiveNoteDoesNotCrowdTheTitle:
+    """Step 6: the live callback passes a ``note`` (step and stimulus set) that is
+    appended to the line under the title. On a one-row 2-D figure the title and
+    that line overlapped, so the figure grows when a note is given (and only then:
+    the no-note path is pixel-pinned)."""
+
+    def _title_and_subtitle_boxes(self, **kwargs):
+        fig, _ = _capture_axes(_t_maps(n_taps=3), arm="raw", _fn="plot_t_maps", **kwargs)
+        renderer = fig.canvas.get_renderer()
+        title = fig._suptitle.get_window_extent(renderer)
+        subtitle = next(t for t in fig.texts if t is not fig._suptitle).get_window_extent(renderer)
+        return fig, title, subtitle
+
+    def test_a_noted_one_row_figure_has_a_title_clear_of_its_subtitle(self):
+        fig, title, subtitle = self._title_and_subtitle_boxes(
+            condition_a="a", condition_b="b", note="step 24 | smoke stimuli, n=5/5 per condition"
+        )
+        assert not title.overlaps(subtitle)
+        assert "step 24" in [t for t in fig.texts if t is not fig._suptitle][0].get_text()
+
+    def test_the_note_is_absent_without_one(self):
+        fig, _, _ = self._title_and_subtitle_boxes(condition_a="a", condition_b="b")
+        assert "step" not in [t for t in fig.texts if t is not fig._suptitle][0].get_text()

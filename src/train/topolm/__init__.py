@@ -38,6 +38,15 @@ one categorical cluster map. They are drawn by :mod:`train.topolm.plotting` from
 the same arrays the report counts, so a cluster in a figure is the cluster in the
 JSON by construction.
 
+Live topography
+---------------
+``--viz-every-steps N`` draws the topography while the model trains, into
+``<run_dir>/topography_live/`` (:class:`~train.topolm.live.TopographyLiveCallback`):
+the untrained map, every ``N`` optimizer steps and the end, as ``step_NNNNNNN/``
+figure sets, ``latest_*.png`` to open, a ``metrics.jsonl`` row per draw and a
+``topography_curve.png``. A draw is an eval-mode pass guarded by a tripwire and
+never changes the run, and a failing draw never stops it.
+
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM.
       ICLR 2025. (https://arxiv.org/abs/2410.11516)
@@ -61,12 +70,14 @@ from .common import (
     train_paired,
     train_topolm,
 )
+from .live import TopographyLiveCallback
 
 __all__ = [
     "PAPER_CONDITIONS",
     "SMOKE_STIMULI",
     "TapCapture",
     "TopoLMTrainingConfig",
+    "TopographyLiveCallback",
     "build_backbone",
     "build_callbacks",
     "compile_model",

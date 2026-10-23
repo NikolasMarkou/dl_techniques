@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -65,11 +65,16 @@ __all__ = [
     "plot_cluster_overlay",
     "plot_cluster_montage_3d",
     "plot_morans_i_profile",
+    "plot_topography_curve",
 ]
 
 
 class PlotScaleWarning(UserWarning):
     """Raised as a warning when a single row cannot share one colour scale."""
+
+
+#: Inches a 2-D t-map figure grows by when it carries a ``note``.
+_NOTE_HEADROOM = 0.4
 
 
 def _panel_shape(t_maps: Dict[str, np.ndarray]) -> Tuple[int, ...]:
@@ -159,12 +164,19 @@ def _t_map_headline(
     condition_a: Optional[str],
     condition_b: Optional[str],
     suptitle: Optional[str],
+    note: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """The figure title and the line under it, for the 2-D and 3-D t-map rows."""
+    """The figure title and the line under it, for the 2-D and 3-D t-map rows.
+
+    ``note`` (the live callback's step and stimulus set) is appended to the line
+    under the title; ``None`` leaves it exactly as it was.
+    """
     if condition_a and condition_b:
         subtitle = f"positive = {condition_a}, negative = {condition_b}"
     else:
         subtitle = "hatched outline = rejected by BH-FDR"
+    if note:
+        subtitle = f"{subtitle} | {note}"
     return suptitle or f"TopoLM t-maps ({arm})", subtitle
 
 
@@ -194,6 +206,7 @@ def plot_t_maps(
     max_panels_per_row: int = 6,
     limit_percentile: float = 99.0,
     suptitle: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> Optional[str]:
     """Render one t-map per tapped layer, with significance and cluster overlays.
 
@@ -222,6 +235,9 @@ def plot_t_maps(
     :type limit_percentile: float
     :param suptitle: Overrides the generated title.
     :type suptitle: Optional[str]
+    :param note: Appended to the line under the title (the live callback's step
+        and stimulus set); ``None`` adds nothing.
+    :type note: Optional[str]
     :return: The written path, or ``None`` if ``output_path`` was ``None``.
     :rtype: Optional[str]
     :raises ValueError: If ``t_maps`` is empty, a map is neither 2-D nor 3-D, or
@@ -240,6 +256,7 @@ def plot_t_maps(
             max_panels_per_row=max_panels_per_row,
             limit_percentile=limit_percentile,
             suptitle=suptitle,
+            note=note,
         )
 
     ordered: List[Tuple[str, np.ndarray]] = [
@@ -252,6 +269,13 @@ def plot_t_maps(
     n_rows = int(math.ceil(n_panels / per_row))
     height = 2.6 * n_rows + 1.1
     width = 2.6 * per_row + 0.8
+    # A note adds text under the title, and a one-row figure has no room for it
+    # (the title and the line under it overlap at this height); the figure
+    # grows by NOTE_HEADROOM and the title block moves into the new space. Without
+    # a note nothing below changes, so the post-hoc figure is the one it was.
+    base_height = height
+    if note:
+        height += _NOTE_HEADROOM
 
     fig, axes = plt.subplots(
         n_rows, per_row, figsize=(width, height), squeeze=False
@@ -285,14 +309,26 @@ def plot_t_maps(
         bar.set_label("t (A - B)", fontsize=8)
         bar.ax.tick_params(labelsize=7)
 
-    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle)
-    fig.suptitle(title, fontsize=10)
-    fig.text(0.5, 0.945, subtitle, ha="center", fontsize=7, alpha=0.75)
+    title, subtitle = _t_map_headline(
+        arm, condition_a, condition_b, suptitle, note
+    )
+    if note:
+        fig.suptitle(title, fontsize=10, y=1.0 - 0.04 / height, va="top")
+        fig.text(
+            0.5, 1.0 - 0.34 / height, subtitle,
+            ha="center", va="top", fontsize=7, alpha=0.75,
+        )
+        top = 1.0 - (0.10 * base_height + _NOTE_HEADROOM) / height
+        bottom = 0.04 * base_height / height
+    else:
+        fig.suptitle(title, fontsize=10)
+        fig.text(0.5, 0.945, subtitle, ha="center", fontsize=7, alpha=0.75)
+        top, bottom = 0.90, 0.04
     # NOT tight_layout: a figure carrying a colorbar has axes that layout cannot
     # reconcile, and matplotlib warns rather than fixing it. savefig's
     # bbox_inches="tight" below does the job without the warning.
     fig.subplots_adjust(
-        left=0.04, right=0.9, top=0.90, bottom=0.04, wspace=0.12, hspace=0.28
+        left=0.04, right=0.9, top=top, bottom=bottom, wspace=0.12, hspace=0.28
     )
 
     return _save_and_close(fig, output_path, "T-maps")
@@ -402,6 +438,7 @@ def plot_t_maps_3d(
     max_panels_per_row: int = 6,
     limit_percentile: float = 99.0,
     suptitle: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> Optional[str]:
     """Render 3-D t-maps as three orthogonal planes per tapped layer.
 
@@ -442,6 +479,9 @@ def plot_t_maps_3d(
     :type limit_percentile: float
     :param suptitle: Overrides the generated title.
     :type suptitle: Optional[str]
+    :param note: Appended to the line under the title (the live callback's step
+        and stimulus set); ``None`` adds nothing.
+    :type note: Optional[str]
     :return: The written path, or ``None`` if ``output_path`` was ``None``.
     :rtype: Optional[str]
     :raises ValueError: If ``t_maps`` is empty, a map is not 3-D, or the maps
@@ -535,14 +575,18 @@ def plot_t_maps_3d(
         bar.set_label("t (A - B)", fontsize=7)
         bar.ax.tick_params(labelsize=6)
 
-    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle)
+    title, subtitle = _t_map_headline(
+        arm, condition_a, condition_b, suptitle, note
+    )
     fig.suptitle(title, fontsize=10, y=1.0 - 0.08 / fig_h, va="top")
-    note = "; dashed green = crosshair at the largest significant |t|"
+    legend_note = "; dashed green = crosshair at the largest significant |t|"
     if shared_prefix:
-        note += f"; tap paths shown without the shared prefix {shared_prefix}"
+        legend_note += (
+            f"; tap paths shown without the shared prefix {shared_prefix}"
+        )
     fig.text(
         0.5, 1.0 - 0.38 / fig_h,
-        subtitle + note,
+        subtitle + legend_note,
         ha="center", va="top", fontsize=7, alpha=0.75,
     )
     # No tight_layout, for the reason given in plot_t_maps.
@@ -764,6 +808,7 @@ def plot_morans_i_profile(
     morans_by_tap: Dict[str, float],
     output_path: Optional[str] = None,
     arm: str = "raw",
+    note: Optional[str] = None,
 ) -> Optional[str]:
     """Plot standard Moran's I against layer depth.
 
@@ -776,6 +821,9 @@ def plot_morans_i_profile(
     :type output_path: Optional[str]
     :param arm: ``"raw"`` or ``"readout"``, for the title.
     :type arm: str
+    :param note: A second title line (the live callback's step and stimulus
+        set); ``None`` leaves the title as it was.
+    :type note: Optional[str]
     :return: The written path, or ``None`` if ``output_path`` was ``None``.
     :rtype: Optional[str]
     """
@@ -789,7 +837,8 @@ def plot_morans_i_profile(
     axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
     axis.set_xlabel("layer (depth order)")
     axis.set_ylabel("Moran's I (standard)")
-    axis.set_title(f"Topographic smoothness across depth ({arm})", fontsize=9)
+    title = f"Topographic smoothness across depth ({arm})"
+    axis.set_title(f"{title}\n{note}" if note else title, fontsize=9)
     step = max(1, len(names) // 12)
     axis.set_xticks(depth[::step])
     axis.set_xticklabels(
@@ -807,3 +856,109 @@ def plot_morans_i_profile(
     plt.close(fig)
     logger.info(f"Moran's I profile written to {output_path}")
     return output_path
+
+
+def _series(rows: Sequence[Mapping[str, Any]], getter) -> np.ndarray:
+    """One value per row, ``nan`` where the row has none (a ``null`` in the JSONL)."""
+    values = []
+    for row in rows:
+        try:
+            value = getter(row)
+        except (KeyError, TypeError):
+            value = None
+        values.append(np.nan if value is None else float(value))
+    return np.asarray(values, dtype="float64")
+
+
+def plot_topography_curve(
+    rows: Sequence[Mapping[str, Any]],
+    output_path: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Optional[str]:
+    """Plot how the topography forms: one point per live draw, against the step.
+
+    The figure the live callback rewrites after every draw, from the rows of its
+    ``metrics.jsonl`` (``null`` for a value that was not finite). Stacked panels
+    share the step axis: Moran's I of every tap (thin, coloured by depth) with the
+    mean over taps in black; the clusters found for each polarity; the mean number
+    of BH-FDR-significant units; and the validation loss when a row carries one.
+    A single row draws as markers, so the first frame is not an empty axis.
+
+    :param rows: Parsed ``metrics.jsonl`` rows, oldest first. Each has ``step``,
+        ``mean_morans_i``, ``total_clusters_a``, ``total_clusters_b``,
+        ``mean_num_significant_units``, ``val_loss`` and ``per_tap``
+        (``{tap_path: {"morans_i": ...}}``); any value may be ``None``.
+    :type rows: Sequence[Mapping[str, Any]]
+    :param output_path: Where to write the PNG, or ``None`` to skip writing.
+    :type output_path: Optional[str]
+    :param note: Appended to the title (the stimulus set).
+    :type note: Optional[str]
+    :return: The written path, or ``None`` if ``output_path`` was ``None``.
+    :rtype: Optional[str]
+    :raises ValueError: If ``rows`` is empty.
+    """
+    if not rows:
+        raise ValueError("cannot draw a topography curve from zero rows")
+
+    steps = _series(rows, lambda row: row["step"])
+    val_loss = _series(rows, lambda row: row["val_loss"])
+    panels = ["moran", "clusters", "units"] + (
+        ["val_loss"] if np.isfinite(val_loss).any() else []
+    )
+    fig, axes = plt.subplots(
+        len(panels), 1, figsize=(6.6, 2.1 * len(panels) + 0.7),
+        sharex=True, squeeze=False,
+    )
+    axes = [row[0] for row in axes]
+
+    moran_axis = axes[0]
+    taps = list(rows[0].get("per_tap", {}))
+    colours = plt.get_cmap("viridis")(np.linspace(0.0, 0.9, max(1, len(taps))))
+    for colour, tap in zip(colours, taps):
+        moran_axis.plot(
+            steps,
+            _series(rows, lambda row, tap=tap: row["per_tap"][tap]["morans_i"]),
+            color=colour, linewidth=0.7, alpha=0.65, marker="o", markersize=2,
+        )
+    moran_axis.plot(
+        steps, _series(rows, lambda row: row["mean_morans_i"]),
+        color="black", linewidth=1.8, marker="o", markersize=3.5,
+        label="mean over taps",
+    )
+    moran_axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
+    moran_axis.set_ylabel("Moran's I")
+    moran_axis.legend(fontsize=7, loc="best")
+
+    cluster_axis = axes[1]
+    cluster_axis.plot(
+        steps, _series(rows, lambda row: row["total_clusters_a"]),
+        marker="o", markersize=3, linewidth=1.2, label="clusters, condition A",
+    )
+    cluster_axis.plot(
+        steps, _series(rows, lambda row: row["total_clusters_b"]),
+        marker="s", markersize=3, linewidth=1.2, linestyle="--",
+        label="clusters, condition B",
+    )
+    cluster_axis.set_ylabel("clusters (all taps)")
+    cluster_axis.legend(fontsize=7, loc="best")
+
+    axes[2].plot(
+        steps, _series(rows, lambda row: row["mean_num_significant_units"]),
+        marker="o", markersize=3, linewidth=1.2, color="tab:red",
+    )
+    axes[2].set_ylabel("significant units\n(mean per tap)")
+
+    if "val_loss" in panels:
+        axes[3].plot(steps, val_loss, marker="o", markersize=3, linewidth=1.2,
+                     color="tab:green")
+        axes[3].set_ylabel("val_loss\n(last validation)")
+
+    for axis in axes:
+        axis.tick_params(labelsize=7)
+        axis.grid(alpha=0.25)
+    axes[-1].set_xlabel("optimizer step")
+    title = "TopoLM topography while training"
+    fig.suptitle(f"{title}\n{note}" if note else title, fontsize=9)
+    fig.tight_layout()
+
+    return _save_and_close(fig, output_path, "Topography curve")

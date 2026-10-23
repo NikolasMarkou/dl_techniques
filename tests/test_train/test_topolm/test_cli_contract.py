@@ -90,6 +90,13 @@ TOPOLM_ROWS: tuple = (
         False,
     ),
     Row(("--tap-sites",), ("--tap-sites", "mlp"), "tap_sites", "mlp"),
+    # Live topography (plan-2026-10-23T190557-972a9ac5, step 6).
+    Row(
+        ("--viz-every-steps",),
+        ("--viz-every-steps", "37"),
+        "viz_every_steps",
+        37,
+    ),
     # Cadence and the paper's stopping rule.
     Row(
         ("--eval-every-steps",),
@@ -457,13 +464,11 @@ class TestRadiusPerVariant:
         assert "3" in message
 
 
-#: The new flag's contract row, kept apart until the flag exists. Step 6 moves it
-#: into ``TOPOLM_ROWS`` (where the completeness test then demands it); until then
-#: adding it to the table would turn two existing tests red for a flag that is
-#: not there yet, which is the one thing a RED test must not do.
-VIZ_ROW = Row(
-    ("--viz-every-steps",), ("--viz-every-steps", "37"), "viz_every_steps", 37
-)
+#: The new flag's contract row. It was held apart until the flag existed (a row
+#: for a missing flag would have turned two existing tests red); step 6 moved it
+#: into ``TOPOLM_ROWS``, where the completeness test demands it, and this name is
+#: now a lookup of that one definition.
+VIZ_ROW = next(row for row in TOPOLM_ROWS if "--viz-every-steps" in row.flags)
 
 
 class TestVizEveryStepsFlag:

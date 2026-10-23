@@ -18,6 +18,10 @@
     # A 3D unit grid (7x7x7, radius 2 from the variant row, raw arm only).
     MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny3d
 
+    # Watch the map form: a frame at step 0, every 200 steps and at the end.
+    MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny3d \\
+        --viz-every-steps 200
+
     # A single-tap ablation, and the paper's stopping rule relaxed.
     MPLBACKEND=Agg python -m train.topolm.pretrain \\
         --tap-sites attention --early-stop-patience 10
@@ -56,6 +60,7 @@ from .common import (
     DEFAULT_READOUT_FWHM,
     TopoLMTrainingConfig,
     _grid_label,
+    check_viz_every_steps,
     resolve_spatial_radius,
     train_paired,
     train_topolm,
@@ -358,7 +363,24 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="run_topography",
         action="store_false",
         default=True,
-        help="Skip the post-hoc topographic evaluation after training",
+        help=(
+            "Skip the post-hoc topographic evaluation after training. It does "
+            "not switch off --viz-every-steps, which is a separate output."
+        ),
+    )
+    parser.add_argument(
+        "--viz-every-steps",
+        type=int,
+        default=0,
+        help=(
+            "Draw the topography WHILE training: at step 0, every N optimizer "
+            "steps and at the end, into <run_dir>/topography_live/ (open "
+            "latest_t_maps_raw.png, tail metrics.jsonl). 0 is off. N counts "
+            "optimizer steps and is independent of --eval-every-steps, the "
+            "virtual epoch length. Each draw scores the built-in smoke "
+            "stimuli on the raw arm in eval mode and does not change the run. "
+            "Works for 2D and 3D variants and for --paired."
+        ),
     )
 
     # Paired control
@@ -420,7 +442,8 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
     returned config, and the ``config.json`` written from it, hold the values the
     run uses.
 
-    :raises ValueError: If a nonzero ``--readout-fwhm`` is typed for a 3D variant.
+    :raises ValueError: If a nonzero ``--readout-fwhm`` is typed for a 3D variant,
+        or ``--viz-every-steps`` is negative.
     """
     config = TopoLMTrainingConfig(
         # Model
@@ -478,6 +501,10 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
         permutation_p_value=args.permutation_p_value,
         num_permutations=args.num_permutations,
         contrast_conditions=(args.contrast[0], args.contrast[1]),
+        # Live topography
+        viz_every_steps=check_viz_every_steps(
+            args.viz_every_steps, "--viz-every-steps"
+        ),
         # Output
         save_dir=args.save_dir,
     )

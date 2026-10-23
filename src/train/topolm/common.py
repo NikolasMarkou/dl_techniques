@@ -219,6 +219,13 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
     :ivar stimuli: Optional ``{condition: [sentence, ...]}``. ``None`` selects
         :data:`SMOKE_STIMULI` and marks every report as such.
     :ivar contrast_conditions: The two conditions the t-map contrasts.
+    :ivar viz_every_steps: Draw the topography WHILE training every this many
+        optimizer steps (and at step 0 and at the end) into
+        ``<run_dir>/topography_live/``; ``0`` is off. The counter counts optimizer
+        steps and is independent of the virtual epoch (``eval_every_steps``): a
+        draw every 500 steps in a run validating every 2000 is four draws per
+        virtual epoch. It does not depend on the post-hoc evaluation either, so
+        ``--no-topography`` leaves it running. See :mod:`train.topolm.live`.
     """
 
     model_variant: str = "small"
@@ -255,6 +262,9 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
     warmup_ratio: float = 0.05
     weight_decay: float = 0.1
     dropout_rate: float = 0.0
+
+    # Live topography (additive; 0 = off, the default run is unchanged)
+    viz_every_steps: int = 0
 
 
 # ---------------------------------------------------------------------
@@ -751,6 +761,7 @@ def evaluate_topography(
     seed: int = 0,
     is_smoke_set: bool = False,
     readout_skipped: Optional[str] = None,
+    batch_size: int = 32,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
     """Score the model's topographic organisation against one contrast.
 
@@ -815,6 +826,10 @@ def evaluate_topography(
         report's top-level ``readout_skipped``; ``None`` adds no key, so a 2D
         report keeps exactly its keys.
     :type readout_skipped: Optional[str]
+    :param batch_size: Prompts per forward pass. Only the memory footprint of the
+        pass; the live callback sets it small (8) so a draw on a shared card
+        stays cheap. It cannot change which prompts are scored.
+    :type batch_size: int
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
         ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
         grids **for that arm specifically**, so :func:`plot_topography` draws
@@ -883,7 +898,7 @@ def evaluate_topography(
         plotted_labels: Dict[str, np.ndarray] = {}
         per_condition = {
             condition: extract_tap_activations(
-                backbone, prompts, preprocessor
+                backbone, prompts, preprocessor, batch_size=batch_size
             )
             for condition, prompts in stimuli.items()
         }
@@ -1027,6 +1042,7 @@ def plot_topography(
     report: Dict[str, Any],
     arrays: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     output_dir: str,
+    note: Optional[str] = None,
 ) -> List[str]:
     """Render the paper's figure set for every arm in ``report``.
 
@@ -1049,6 +1065,11 @@ def plot_topography(
     :type arrays: Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :param output_dir: Directory for the PNGs.
     :type output_dir: str
+    :param note: Optional text appended to the subtitle of the t-map figure and
+        the Moran's I profile (the live callback puts the step and the stimulus
+        set there, so a ``latest_*`` image says which frame it is). ``None``
+        draws exactly the figures a post-hoc run always drew.
+    :type note: Optional[str]
     :return: Paths written.
     :rtype: List[str]
     :raises ValueError: If ``arrays`` carries an arm the report does not, or
@@ -1064,6 +1085,9 @@ def plot_topography(
     condition_a, condition_b = report["contrast"]
     os.makedirs(output_dir, exist_ok=True)
     written: List[str] = []
+    # Passed only when given, so a post-hoc call hands the drawers the arguments
+    # it always did.
+    noted = {} if note is None else {"note": note}
 
     arms = arrays["arms"]
     if set(arms) != set(report["arms"]):
@@ -1084,6 +1108,7 @@ def plot_topography(
                 condition_a=condition_a,
                 condition_b=condition_b,
                 output_path=os.path.join(output_dir, f"t_maps_{arm}.png"),
+                **noted,
             )
         )
         written.append(
@@ -1094,6 +1119,7 @@ def plot_topography(
                 },
                 output_path=os.path.join(output_dir, f"morans_i_{arm}.png"),
                 arm=arm,
+                **noted,
             )
         )
 
@@ -1178,11 +1204,35 @@ def _apply_readout(
 # ---------------------------------------------------------------------
 
 
+def check_viz_every_steps(value: int, name: str) -> int:
+    """Refuse a negative live-visualization cadence, naming the caller's option.
+
+    One definition for the CLI (``name="--viz-every-steps"``) and
+    :func:`build_callbacks` (``name="viz_every_steps"``), so a negative value is
+    refused by the name the caller typed instead of being read as "off".
+
+    :param value: The cadence in optimizer steps; ``0`` is off.
+    :type value: int
+    :param name: The option name the message should carry.
+    :type name: str
+    :return: ``value``, unchanged.
+    :rtype: int
+    :raises ValueError: If ``value`` is negative.
+    """
+    if value < 0:
+        raise ValueError(
+            f"{name} must be >= 0 (0 = no live topography), got {value}"
+        )
+    return value
+
+
 def build_callbacks(
     config: TopoLMTrainingConfig,
     model: CausalLanguageModel,
     results_dir: str,
     initial_step: int,
+    backbone: Optional[TopoLM] = None,
+    preprocessor=None,
 ) -> List[keras.callbacks.Callback]:
     """Assemble the run's callbacks.
 
@@ -1199,9 +1249,22 @@ def build_callbacks(
     :type results_dir: str
     :param initial_step: Resume point, so the step counters start there.
     :type initial_step: int
-    :return: The callback list, in the order they fire.
+    :param backbone: The TopoLM backbone the live callback scores. Required when
+        ``config.viz_every_steps > 0``, ignored otherwise.
+    :type backbone: Optional[TopoLM]
+    :param preprocessor: The tokenizer the live callback encodes its stimuli
+        with. Required when ``config.viz_every_steps > 0``, ignored otherwise.
+    :type preprocessor: Any
+    :return: The callback list, in the order they fire. With
+        ``viz_every_steps > 0`` the live topography callback is appended LAST, so
+        its final frame is drawn after the early stopper has restored the best
+        weights, like the post-hoc figure; with ``0`` the list is exactly the
+        four callbacks a run always had.
     :rtype: List[keras.callbacks.Callback]
+    :raises ValueError: If ``viz_every_steps`` is negative, or positive with no
+        ``backbone`` or ``preprocessor`` to draw from.
     """
+    check_viz_every_steps(config.viz_every_steps, "viz_every_steps")
     probe = GenerationProbeCallback(
         # `CausalLanguageModel` with `output_key="logits"` returns the logits
         # TENSOR directly -- the key is extracted inside `_backbone_forward`, so
@@ -1224,7 +1287,7 @@ def build_callbacks(
     )
     probe._post_generate_hook = augment_probe_results
 
-    return [
+    callbacks: List[keras.callbacks.Callback] = [
         ConsecutiveIncreaseEarlyStopping(
             monitor="val_loss",
             patience=config.early_stop_patience,
@@ -1244,6 +1307,32 @@ def build_callbacks(
         ),
         probe,
     ]
+
+    if config.viz_every_steps > 0:
+        if backbone is None or preprocessor is None:
+            raise ValueError(
+                f"viz_every_steps={config.viz_every_steps} needs the backbone "
+                f"and the preprocessor to draw from; build_callbacks got "
+                f"backbone={backbone is not None}, "
+                f"preprocessor={preprocessor is not None}"
+            )
+        # Local: live.py imports this module.
+        from train.topolm.live import TopographyLiveCallback
+
+        callbacks.append(
+            TopographyLiveCallback(
+                backbone=backbone,
+                preprocessor=preprocessor,
+                output_dir=os.path.join(results_dir, "topography_live"),
+                viz_every_steps=config.viz_every_steps,
+                stimuli=config.stimuli if config.stimuli else SMOKE_STIMULI,
+                contrast_conditions=config.contrast_conditions,
+                min_cluster_size=config.min_cluster_size,
+                is_smoke_set=config.stimuli is None,
+                initial_step=initial_step,
+            )
+        )
+    return callbacks
 
 
 def train_topolm(
@@ -1322,7 +1411,10 @@ def train_topolm(
         required_vocab_size=getattr(preprocessor, "vocab_size", None),
     )
     compile_model(model, config, epochs, steps_per_epoch)
-    callbacks = build_callbacks(config, model, results_dir, initial_step)
+    callbacks = build_callbacks(
+        config, model, results_dir, initial_step,
+        backbone=backbone, preprocessor=preprocessor,
+    )
 
     logger.info(
         f"Starting training: source={config.dataset_source}, "

@@ -540,3 +540,223 @@ class TestTheTripwire:
         _assert_same_snapshot(before, after)
         assert not errors
         assert len(calls) == 3, "draws at steps 0, 2 and 4 were expected"
+
+
+# =====================================================================
+# step 6 additions (plan-2026-10-23T190557-972a9ac5): the guards the step-1
+# file did not cover, each seen RED against a mutation of live.py
+# =====================================================================
+
+
+class TestEvalModeOnly:
+    def test_every_forward_in_a_draw_is_training_false_and_never_the_head(
+        self, monkeypatch, tmp_path
+    ):
+        """The rule D-007 anchors, observed rather than read: record every call
+        of the backbone and of the head during a draw. Each backbone call
+        passes ``training=False`` explicitly; the head (the CLM matmul over the
+        vocabulary, tracker state) is not called at all."""
+        _, head, backbone, callback = _live(tmp_path)
+        calls = []
+        for model, label in ((backbone, "backbone"), (head, "head")):
+            original = type(model).__call__
+
+            def spy(self, *args, _original=original, **kwargs):
+                if self is backbone:
+                    calls.append(("backbone", kwargs.get("training", "unset")))
+                elif self is head:
+                    calls.append(("head", kwargs.get("training", "unset")))
+                return _original(self, *args, **kwargs)
+
+            monkeypatch.setattr(type(model), "__call__", spy)
+
+        callback.on_train_begin()
+
+        assert calls, "the draw did not run a forward pass"
+        assert {kind for kind, _ in calls} == {"backbone"}, calls
+        assert {training for _, training in calls} == {False}, calls
+
+
+class TestLatestFilesAreAtomic:
+    def test_a_latest_file_appears_only_through_os_replace(self, monkeypatch, tmp_path):
+        """With ``os.replace`` turned into a recorder that moves nothing, no
+        ``latest_*`` file and no curve exists under its final name: they can only
+        arrive by the rename. A callback that wrote them in place would show
+        them here."""
+        _, _, _, callback = _live(tmp_path)
+        moves = []
+        monkeypatch.setattr(os, "replace", lambda src, dst: moves.append((src, dst)))
+
+        callback.on_train_begin()
+
+        live = _live_dir(tmp_path)
+        finals = sorted(os.path.basename(dst) for _, dst in moves)
+        assert finals == [
+            "latest_morans_i_raw.png", "latest_t_maps_raw.png", "topography_curve.png",
+        ]
+        for name in finals:
+            assert not (live / name).exists(), f"{name} was written in place"
+        for source, destination in moves:
+            assert os.path.dirname(source) == os.path.dirname(destination), (
+                "the temp file must sit beside its target, or the rename is not atomic"
+            )
+
+    def test_the_final_names_are_complete_png_files(self, tmp_path):
+        _, _, _, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for name in ("latest_t_maps_raw.png", "latest_morans_i_raw.png",
+                     "topography_curve.png"):
+            assert (_live_dir(tmp_path) / name).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        assert not [n for n in os.listdir(_live_dir(tmp_path)) if n.startswith(".")]
+
+
+class TestTheMetricsRows:
+    def test_a_non_finite_statistic_becomes_null_and_the_row_stays_strict_json(
+        self, monkeypatch, tmp_path
+    ):
+        _, _, _, callback = _live(tmp_path)
+
+        def behaviour(n, real, args, kwargs):
+            report, arrays = real(*args, **kwargs)
+            arm = report["arms"]["raw"]
+            arm["mean_morans_i"] = float("nan")
+            first = next(iter(arm["per_tap"].values()))
+            first["morans_i"]["standard"] = float("inf")
+            return report, arrays
+
+        _spy_on_evaluate(monkeypatch, behaviour)
+        callback.on_train_begin()
+
+        text = (_live_dir(tmp_path) / "metrics.jsonl").read_text()
+        row = json.loads(text, parse_constant=lambda c: pytest.fail(f"bare {c}"))
+        assert row["mean_morans_i"] is None
+        assert next(iter(row["per_tap"].values()))["morans_i"] is None
+
+    def test_a_row_carries_the_step_the_validation_loss_was_measured_at(self, tmp_path):
+        _, _, _, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        callback.on_train_batch_end(2, {})
+        callback.on_train_batch_end(3, {})
+
+        rows = [
+            json.loads(line)
+            for line in (_live_dir(tmp_path) / "metrics.jsonl").read_text().splitlines()
+        ]
+        assert [r["step"] for r in rows] == [0, 2, 4]
+        assert [r["val_loss"] for r in rows] == [None, None, 3.25]
+        assert rows[2]["val_loss_step"] == 2
+
+    def test_a_row_holds_one_entry_per_tap_with_the_t_map_summary(self, tmp_path):
+        config, head, backbone, callback = _live(tmp_path)
+        callback.on_train_begin()
+        row = json.loads((_live_dir(tmp_path) / "metrics.jsonl").read_text())
+        assert len(row["per_tap"]) == len(backbone.tap_layers)
+        for entry in row["per_tap"].values():
+            assert set(entry) == {
+                "morans_i", "morans_i_islands", "num_significant_units",
+                "clusters_a", "clusters_b", "t_min", "t_max", "t_abs_mean",
+            }
+            assert entry["t_min"] <= entry["t_abs_mean"] <= max(
+                abs(entry["t_min"]), abs(entry["t_max"])
+            )
+        assert row["grid_shape"] == list(backbone.grid_shape)
+        assert row["stimuli_are_smoke_set"] is True
+
+
+class TestBothRanks:
+    def test_a_3d_backbone_draws_three_plane_figures_and_finite_rows(self, tmp_path):
+        """The callback forwards to the rank-dispatching evaluation and plots, so
+        a ``tiny3d`` draw is the 3D figure and a row whose grid is a 3-list."""
+        config, head, backbone, callback = _live(
+            tmp_path, model_variant="tiny3d", spatial_radius=None
+        )
+        callback.on_train_begin()
+
+        step_dir = _live_dir(tmp_path) / "step_0000000"
+        assert (step_dir / "t_maps_raw.png").stat().st_size > 0
+        assert (_live_dir(tmp_path) / "latest_t_maps_raw.png").stat().st_size > 0
+        row = json.loads((_live_dir(tmp_path) / "metrics.jsonl").read_text())
+        assert row["grid_shape"] == [7, 7, 7]
+        assert all(
+            entry["t_max"] is not None and entry["t_min"] is not None
+            for entry in row["per_tap"].values()
+        )
+
+
+class TestTheFlagIsRefusedNegativeAndNeedsItsInputs:
+    def test_a_negative_cadence_is_refused_by_the_field_name(self, tmp_path):
+        config = _config(viz_every_steps=-1)
+        head, backbone = create_topolm_model(config)
+        with pytest.raises(ValueError, match="viz_every_steps"):
+            build_callbacks(config, head, str(tmp_path), 0, backbone=backbone,
+                            preprocessor=StubTokenizer())
+
+    def test_a_positive_cadence_without_a_backbone_is_refused(self, tmp_path):
+        config = _config(viz_every_steps=2)
+        head, _ = create_topolm_model(config)
+        with pytest.raises(ValueError, match="backbone"):
+            build_callbacks(config, head, str(tmp_path), 0)
+
+    def test_the_value_reaches_the_callbacks_cadence(self, tmp_path):
+        """D-011: the config-live census does not cover this config, so the field
+        is proven live here: it is the callback's cadence, and
+        ``contrast_conditions``/``min_cluster_size`` ride along."""
+        _, _, _, callback = _live(tmp_path)
+        assert callback.viz_every_steps == 2
+        assert callback.min_cluster_size == 2
+        assert callback.contrast_conditions == ("a", "b")
+
+
+class TestTheDrawIsCheapAndTheTripwireIsNotBlind:
+    def test_a_draw_forwards_in_batches_of_eight(self, monkeypatch, tmp_path):
+        """The live pass shares the card with the training step, so it runs at
+        batch 8 (not ``extract_tap_activations``' default 32)."""
+        _, _, _, callback = _live(tmp_path)
+        sizes = []
+        real = C.extract_tap_activations
+
+        def spy(backbone, prompts, preprocessor, batch_size=32):
+            sizes.append(batch_size)
+            return real(backbone, prompts, preprocessor, batch_size=batch_size)
+
+        monkeypatch.setattr(C, "extract_tap_activations", spy)
+        callback.on_train_begin()
+        assert sizes and set(sizes) == {8}
+
+    def test_a_draw_scores_only_the_two_contrast_conditions_on_the_raw_arm(
+        self, monkeypatch, tmp_path
+    ):
+        _, _, _, callback = _live(tmp_path)
+        seen = {}
+
+        def behaviour(n, real, args, kwargs):
+            seen["conditions"] = sorted(args[1])
+            seen["readout_fwhm"] = kwargs.get("readout_fwhm")
+            seen["permutation_p_value"] = kwargs.get("permutation_p_value")
+            return real(*args, **kwargs)
+
+        _spy_on_evaluate(monkeypatch, behaviour)
+        callback.on_train_begin()
+        assert seen == {
+            "conditions": ["a", "b"], "readout_fwhm": None,
+            "permutation_p_value": False,
+        }
+
+    def test_a_blind_snapshot_is_reported_at_the_start_of_training(
+        self, monkeypatch, tmp_path
+    ):
+        """If a Keras release renames ``Layer._seed_generators`` the tripwire finds
+        none and every comparison passes vacuously: say so, once, up front."""
+        import train.topolm.live as live
+
+        _, _, _, callback = _live(tmp_path)
+        warnings = []
+        monkeypatch.setattr(live, "seed_generators", lambda model: [])
+        monkeypatch.setattr(
+            logger, "warning", lambda message, *a, **k: warnings.append(str(message))
+        )
+        callback.on_train_begin()
+        assert any("SeedGenerator" in message for message in warnings)

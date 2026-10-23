@@ -193,6 +193,10 @@ _OPTIONAL_OUTPUT = {
         ('train_superpoint', 'SuperPoint viz batch capture failed (viz', 'from train.common.keypoint_viz import SuperPo',
          'keypoint figures'),
     ],
+    'train/topolm/live.py': [
+        ('_draw', 'Live topography draw at step', 'self._write_frame(step)',
+         'live topography frames, metrics rows and curve; three failures in a row switch it off'),
+    ],
     'train/yolo12/train_coco.py': [
         ('_prepare_visualization_samples', 'Failed to prepare COCO visualization sam', 'sample_batch = next(iter(self.validation_data',
          'detection figures'),
@@ -552,13 +556,17 @@ def test_the_census_counts_are_pinned():
 
     Optional 60 -> 57 at plan-2026-10-14T062616-81938e81 step 11.1: the SAM,
     SAM 2 and SAM 3 trainers' copies of the GPU-peak loop became calls to
-    ``train.common.gpu.log_gpu_peak_memory``, whose handler is listed once."""
+    ``train.common.gpu.log_gpu_peak_memory``, whose handler is listed once.
+
+    Optional 57 -> 58 at plan-2026-10-23T190557-972a9ac5 step 6: the live
+    topography callback's per-draw handler (``train/topolm/live.py``), whose try
+    body is one call that evaluates and plots, never a ``fit``/``evaluate``/save."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 57, "exempt": 60, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 57
+                      "optional": 58, "exempt": 60, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
     assert sum(len(entries) for entries in _EXEMPT.values()) == 60
 
 
