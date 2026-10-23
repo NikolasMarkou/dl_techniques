@@ -9,6 +9,10 @@
 > shipped, and records what the first draft got wrong. Every statement below was
 > checked against the committed code, and every number is either derived by
 > arithmetic (and says so) or a measurement quoted with its configuration.
+> The adversarial review that followed produced three completion fixes (`805be4ba2`,
+> `4a71059a0` and a documents-only one); the checkpoint-guard row of the decisions table,
+> the factoring section and the implementation history below describe the code as those
+> fixes left it.
 
 TopoLM (Rathi et al. 2025, ICLR; arXiv:2410.11516) gives the units of every
 attention and feed-forward branch a distinct cell of an `h x w` grid, with
@@ -31,7 +35,7 @@ auto-factoring rule, with 2D behaviour byte-identical by default.
 | Validation | Every resolved **axis** must be at least `2 * radius + 1`, not only the total unit count. The total floor `(2 * radius + 1) ** grid_dim` is still checked first (it is necessary, not sufficient). The per-axis check runs in `config.validate_variant` for **both** ranks and in the `TopoLM` constructor for **3D only**: a directly constructed 2D model with an explicit short-axis grid (an `(8, 32)` grid at the default radius 5) has always constructed and reported its grid, failing only when a tap builds, and an existing test pins that, so the 2D constructor is unchanged. Shipped variants cannot reach that hole because `validate_variant` is strict in both ranks. Errors name the short axis, its length and the largest usable radius, `(min_axis - 1) // 2`. |
 | Variant home | The 3D variants are rows of `MODEL_VARIANTS` (`paper3d`, `tiny3d`), repo-authored and described as "not in the paper", each carrying its own `"grid_dim": 3` and `"radius"`. No parallel table. The `paper` row is untouched and nothing repo-authored joins it. `validate_all_variants(radius)` takes no `grid_dim`: it judges each row by the row's own `radius` and `grid_dim` and falls back to the argument and to 2. |
 | Trainer | The trainer is 2D-only and **refuses a 3D variant by name before any run work**: `train_topolm` calls `_require_two_dimensional_variant` first, before seeding, `os.makedirs`, the tokenizer, the dataset or `prepare_run_dir`, and `build_backbone` also checks the built backbone's rank. There is **no `--grid-dim` flag**: the 3D rows are valid `--variant` choices because the parser reads the table, and choosing one is refused with a message naming the variant, its width and grid, and the 2D variants that work. |
-| Checkpoints across ranks | `TopoLM.from_variant(..., pretrained=<path>)` refuses a checkpoint whose recorded `grid_dim` differs from the model's, by name, before any weight is copied (a checkpoint without the key counts as 2D). The shape check alone is not enough: 729 units give identically shaped `perm`, `patch_table` and `triu_flat` tables in both ranks (one 729-unit patch at radius 13 in 2D and at radius 4 in 3D), so such a load would otherwise succeed and leave a 3D model with a 2D layout. |
+| Checkpoints across ranks | `TopoLM.from_variant(..., pretrained=<path>)` guards two things before any weight is copied, in `TopoLM._refuse_other_grid` (completion fix `iter-1/step-5.1`, commit `805be4ba2`, decision D-017). (a) A bare TopoLM archive recorded at a different `grid_dim` is refused by name (a missing key in a bare TopoLM config counts as 2D). (b) An archive whose resolved unit grid differs from the model's is refused by name, naming both grids: a 3D `(10, 5, 20)` archive into a model on `(20, 5, 10)`, or a transposed 2D `(8, 32)` into `(32, 8)`; a different seed on the same grid loads. The shape check alone is not enough: 729 units give identically shaped `perm`, `patch_table` and `triu_flat` tables in both ranks (one 729-unit patch at radius 13 in 2D and at radius 4 in 3D), and a permuted grid gives identical shapes because the centre count is symmetric in the axes, so such loads would otherwise succeed and leave the model with a foreign layout. The rank and the grid are read only from an archive whose top-level config is a bare TopoLM: for any other archive the guard does not guess and the loader's own error stands (a `CausalLanguageModel`-wrapped TopoLM, in either rank, gets `No overlapping layers between target and source checkpoint`; the first version of the guard defaulted the missing key to 2 for such an archive and reported a 3D archive as `saved with grid_dim=2`, which was false). A direct `load_backbone_from_checkpoint` call stays uncovered, pinned by `test_a_direct_loader_call_does_not_see_the_rank`. Downgrade: an archive written by this code carries a `grid_dim` key (2 as well as 3), so a checkout from before this change cannot load it (`Unrecognized keyword arguments passed to TopoLM: {'grid_dim': 2}`, measured by the review); a config without the key still loads as 2D here. |
 | Out of scope | `GaussianReadout`, Moran's I (`metrics/spatial_autocorrelation.py`) and the cluster-growth path (`metrics/topographic_selectivity.py`) stay 2D-only. 3D versions are follow-ups, not built. |
 
 ## What the first draft got wrong
@@ -335,6 +339,17 @@ is smaller. For 784 the paper's width does not re-factor to a cube: it resolves 
 the 7-cell axis cannot hold a 9-wide patch) while radius 3 builds. 2D, for reference:
 784 is `(28, 28)`, 512 is `(16, 32)`, 256 is `(16, 16)`.
 
+**The objective is the spread, not the usable radius.** Minimising `d - h` (ties to the
+larger `h`) is not the same as maximising the largest usable radius,
+`(min_axis - 1) // 2`, and the two can disagree. Measured by script against a brute-force
+search for the triple with the longest shortest axis, over every width from 1 to 20000:
+exactly 8 widths get a smaller usable radius from the rule than another triple would host.
+The first is 7425, which the rule factors to `(11, 25, 27)` (usable radius 5) while
+`(15, 15, 33)` hosts radius 7. The other seven are 8775, 12285, 14280, 15120, 17556, 19800
+and 19950. No shipped width is affected, no test pins the disagreement (the brute-force
+oracle in `TestCubicFactoring` is an oracle for the rule's own objective, widths 1 to
+2000), and the rule is left as decided; an explicit `grid_shape` overrides it.
+
 ## Variants
 
 | variant | embed_dim | depth | heads (head dim) | ffn | max_seq_len | grid_dim | grid | radius | centres | provenance |
@@ -466,7 +481,11 @@ were seen failing.
   (including `test_a_two_dimensional_model_still_constructs_with_a_short_axis`),
   `TestTheAxisOrderReachesTheTaps`, `TestThreeDimensionalSerialization`,
   `TestThreeDimensionalPrecisionAndDevice`, `TestACheckpointOfTheOtherRankIsRefused`,
-  `TestThreeDimensionalVariantRows`. The existing 2D guard
+  `TestTheGuardReadsOnlyATopoLMConfig` (a wrapped archive gets the loader's own error in
+  all four rank combinations), `TestACheckpointOnAnotherGridIsRefused` (permuted 3D grids,
+  a transposed 2D grid, a same-grid load with another seed),
+  `TestADocumentedLimitationOfTheGuard` (a direct `load_backbone_from_checkpoint` call does
+  not see the rank), `TestThreeDimensionalVariantRows`. The existing 2D guard
   `test_an_explicit_grid_is_reported_and_used` in `tests/test_models/test_topolm/test_topolm.py`
   is unchanged; that file's only edit adds `grid_dim` to the config-key tuple and makes
   the table loop rank-aware.
@@ -515,6 +534,9 @@ were seen failing.
 | `1e64b58ec` | 5 | `TopoLMBlock` and `TopoLM` `grid_dim`, 3D model tests, cross-rank checkpoint refusal |
 | `85e03cc74` | 6 | `paper3d` and `tiny3d` rows with the trainer refusal and the `grow_clusters` guard |
 | `eea1dbe7f` | 8 | documentation with derived and measured numbers (step 7, the measurement run, produced no commit) |
+| `805be4ba2` | 5.1 | completion fix after the adversarial review: the checkpoint guard reads the rank only from a bare TopoLM config and also compares the resolved grid (D-017) |
+| `4a71059a0` | 6.1 | completion fix: the trainer test's table loop reuses its local `grid_dim` (cosmetic) |
+| step 8.1 | 8.1 | completion fix: documentation of the corrected guard, its uncovered direct-loader route, the downgrade note and the factoring-objective caveat (this commit; documents only) |
 
 The rows landed together with the trainer refusal on purpose: earlier, a selectable
 3D variant would have reached a trainer that could not evaluate it.

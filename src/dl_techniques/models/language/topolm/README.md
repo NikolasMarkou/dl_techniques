@@ -302,6 +302,17 @@ holds; that leaves `(10-8)**3 = 8` centres. `tiny3d` is 343 = 7 x 7 x 7 at radiu
 (27 centres). The grid is `(axis0, axis1, axis2)` and equals the taps'
 `cell_to_unit.shape`, row-major.
 
+The rule's objective is the spread `d - h`, which is **not** the same as the largest
+usable radius, `(min_axis - 1) // 2`. Minimising the spread can pick a triple whose
+shortest axis is shorter than another triple's. Measured against a brute-force search
+for the triple with the longest shortest axis, over every width up to 20000: exactly 8
+widths get a smaller usable radius than another triple would host. The first is 7425,
+which the rule factors to `(11, 25, 27)` (usable radius 5) while `(15, 15, 33)` would
+host radius 7. The others are 8775, 12285, 14280, 15120, 17556, 19800 and 19950. No
+shipped width is affected (784, 343, 1000 and 256 resolve as stated above), and the rule
+is kept as shipped; a model that needs a larger radius at such a width passes an explicit
+`grid_shape`.
+
 Every variant is validated at import (`validate_all_variants`): a width that
 cannot host a radius-`r` patch, or that does not divide among the heads, fails on
 the import that introduced it rather than on whichever run selects that row first.
@@ -408,11 +419,42 @@ unless `alpha=0.0`. The backbone's weight paths are the same with or without a h
 untied `lm_head`) by layer name and never the checkpoint's `task_head`; the model's own head keeps
 its fresh initialization. Every backbone layer loads, and every checkpoint layer finds its place,
 or the call raises `ValueError`, so a checkpoint of another depth (deeper or shallower) or width
-is refused, never half-restored or truncated, and so is a checkpoint saved with the
-other `grid_dim` (refused by name; a 2D and a 3D grid can give the tap tables the
-same shapes, so the shape check alone let such a load through; a direct call to
-`load_backbone_from_checkpoint` is not covered by this check, only
-`from_variant(pretrained=)` is). The vocabulary tables (`word_embeddings` and an untied
+is refused, never half-restored or truncated. Two more refusals come from
+`from_variant(pretrained=)` itself, before any weight is copied, because a 2D and a 3D
+grid (or two grids of the same width) can give the tap tables identical shapes, so the
+loader's shape check alone let such a load through:
+
+- **A bare TopoLM archive saved at the other `grid_dim`** is refused by name. A missing
+  `grid_dim` key in a bare TopoLM config means 2D, the layout of every archive written
+  before the key existed.
+- **An archive whose resolved unit grid differs from the model's** is refused by name,
+  naming both grids and the `grid_shape` to build with: a 3D `(10, 5, 20)` archive into a
+  model on `(20, 5, 10)` (every table has the same shape there, because the centre count is
+  symmetric in the axes), or a transposed 2D grid such as `(8, 32)` into `(32, 8)`. Both
+  sides are resolved, so a model left on `grid_shape=None` is compared by the grid it
+  factors to. A different seed on the same grid still loads. In 2D this tightens one
+  thing: a load across two grids of one width, which used to succeed with an inconsistent
+  layout, is now refused.
+
+The guard does not guess. It reads the rank and the grid only from an archive whose
+top-level config is a bare TopoLM; for any other archive it stays out of the way. A
+`CausalLanguageModel` wrapped around a TopoLM has no `grid_dim` key at its top level, and
+`from_variant` has never been able to warm-start from one, in either rank: the loader's
+own `ValueError` ("No overlapping layers between target and source checkpoint", measured
+for all four rank combinations) stands, and it is not replaced by a made-up rank. A width
+mismatch likewise keeps the loader's `Shape mismatch` error, which names the real cause.
+A direct call to `load_backbone_from_checkpoint` is not covered by the rank or the grid
+guard, only `from_variant(pretrained=)` is: a 3D 9 x 9 x 9 radius-4 archive loaded that
+way into a 2D 27 x 27 radius-13 model of equal table shapes returns a report normally and
+the model keeps reporting `(27, 27)`, pinned by
+`TestADocumentedLimitationOfTheGuard::test_a_direct_loader_call_does_not_see_the_rank`
+(a change that guards the loader has to update that test and this sentence together).
+
+An archive written by this code carries a `grid_dim` key in the model config, 2 as well as
+3. A checkout from before this change cannot load it: it reports
+`Unrecognized keyword arguments passed to TopoLM: {'grid_dim': 2}` (measured by the
+adversarial review on a 2D archive). Loading goes one way only; a config without the key
+still loads as 2D here. The vocabulary tables (`word_embeddings` and an untied
 `lm_head`) stay fresh only when the checkpoint's own `vocab_size` differs from the model's. An
 untied `lm_head` may otherwise be left out only when one side carries a task head: a tied
 headless checkpoint does not fill an untied headless model, and an untied `lm_head` is not
@@ -587,8 +629,9 @@ against a brute-force oracle, the 3D tables, per-axis rejection, the sign probe)
 `tests/test_layers/test_regularization/spatial_smoothness_oracle.py` with
 `test_spatial_smoothness_oracle.py` (an independent nested-loop 3D reference and its
 mutation self-tests), `tests/test_models/test_topolm/test_topolm_3d.py` (config
-validation, block and model `grid_dim`, the alpha control, the other-rank checkpoint
-refusal, the variant rows) and `tests/test_train/test_topolm/test_topolm_trainer.py`
+validation, block and model `grid_dim`, the alpha control, the other-rank and
+other-grid checkpoint refusals, the wrapped-archive and direct-loader cases, the variant
+rows) and `tests/test_train/test_topolm/test_topolm_trainer.py`
 (`TestThreeDimensionalVariantsAreRefused`). The 2D layout is pinned byte for byte by
 `TestTwoDimensionalIsByteIdentical` in `test_spatial_smoothness.py`, and the readout's
 2D-only refusal by `TestGridRankRefusal` in `test_gaussian_readout.py`. The GPU arms use
