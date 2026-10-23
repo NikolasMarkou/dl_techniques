@@ -968,3 +968,158 @@ class TestThreeDimensionalCrosshairAndMontageContent:
             np.zeros((3, 4, 4), dtype=int), output_path=str(tmp_path / "m.png")
         )
         assert path is not None and (tmp_path / "m.png").stat().st_size > 0
+
+
+# ---------------------------------------------------------------------
+# 3-D panel titles with REAL tap paths (completion fix step-4.1)
+# ---------------------------------------------------------------------
+# The step-4 checks used short synthetic tap names, and a real run's paths
+# (``causal_language_model/topolm/block_0/attention_tap``) are wider than the
+# plane they sit over, so neighbouring titles overprinted each other. The oracle
+# is geometric and independent of how the title is built: the rendered extents
+# of the title artists, not a pixel hash and not a character count.
+
+_REAL_PREFIX = "causal_language_model/topolm/"
+
+
+def _real_tap_names(n_blocks):
+    return [
+        f"{_REAL_PREFIX}block_{b}/{tap}"
+        for b in range(n_blocks)
+        for tap in ("attention_tap", "mlp_tap")
+    ]
+
+
+def _title_boxes_and_obstacles(fig):
+    """``(title_boxes, other_boxes)`` in display pixels, one title per image axes.
+
+    ``other_boxes`` are what a title must not overprint: every other axes frame and
+    the figure-level texts (headline and subtitle).
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    image_axes = _image_axes(fig)
+    titles = [(ax, ax.title.get_window_extent(renderer)) for ax in image_axes]
+    texts = [t.get_window_extent(renderer) for t in fig.texts if t.get_text()]
+    return titles, [ax.get_window_extent(renderer) for ax in image_axes], texts
+
+
+def _overlap(a, b, tolerance=0.5):
+    """Whether two display boxes share more than ``tolerance`` pixels in BOTH axes."""
+    return (
+        min(a.x1, b.x1) - max(a.x0, b.x0) > tolerance
+        and min(a.y1, b.y1) - max(a.y0, b.y0) > tolerance
+    )
+
+
+class TestThreeDimensionalTitlesAreReadableForRealTapPaths:
+    @pytest.mark.parametrize("n_blocks", [1, 2, 12], ids=["2taps", "4taps", "24taps"])
+    def test_no_title_overprints_another_title_a_panel_or_the_headline(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        names = _real_tap_names(n_blocks)
+        rng = np.random.default_rng(3)
+        maps = {n: rng.normal(size=(7, 8, 7)) for n in names}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, condition_a="a", condition_b="b",
+                output_path=str(tmp_path / "real.png"),
+            ),
+        )
+        titles, frames, texts = _title_boxes_and_obstacles(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert len(titles) == 3 * len(names)
+        for index, (axis, box) in enumerate(titles):
+            assert box.x0 >= bounds.x0 and box.x1 <= bounds.x1, f"title {index} clipped"
+            assert box.y0 >= bounds.y0 and box.y1 <= bounds.y1, f"title {index} clipped"
+            for other_index, (_, other) in enumerate(titles):
+                if other_index > index:
+                    assert not _overlap(box, other), (
+                        f"titles {index} and {other_index} intersect: {box} {other}"
+                    )
+            for frame_index, frame in enumerate(frames):
+                if frame_index != index:
+                    assert not _overlap(box, frame), (
+                        f"title {index} overprints panel {frame_index}"
+                    )
+            for text in texts:
+                assert not _overlap(box, text), f"title {index} overprints the headline"
+
+    def test_a_single_tap_with_its_full_real_path_is_also_readable(
+        self, monkeypatch, tmp_path
+    ):
+        name = f"{_REAL_PREFIX}block_0/attention_tap"
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {name: np.random.default_rng(0).normal(size=(7, 8, 7))},
+                output_path=str(tmp_path / "one.png"),
+            ),
+        )
+        titles, _, texts = _title_boxes_and_obstacles(fig)
+        plt.close(fig)
+        boxes = [box for _, box in titles]
+        for i, box in enumerate(boxes):
+            assert box.x0 >= fig.bbox.x0 and box.x1 <= fig.bbox.x1
+            assert not any(_overlap(box, t) for t in texts)
+            assert not any(_overlap(box, o) for j, o in enumerate(boxes) if j != i)
+
+    def test_the_full_path_is_recoverable_from_the_figure(self, monkeypatch, tmp_path):
+        """Each title carries the tail that tells the taps apart, and the headline
+        says what was dropped, so prefix + tail is the original path."""
+        names = _real_tap_names(2)
+        maps = {n: np.random.default_rng(i).normal(size=(7, 8, 7)) for i, n in enumerate(names)}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(maps, output_path=str(tmp_path / "rec.png")),
+        )
+        subtitle = " ".join(t.get_text() for t in fig.texts)
+        titles = [ax.get_title() for ax in _image_axes(fig)]
+        plt.close(fig)
+        assert _REAL_PREFIX in subtitle
+        for tap, name in enumerate(names):
+            tail = name[len(_REAL_PREFIX):]
+            for title in titles[3 * tap:3 * tap + 3]:
+                assert "".join(title.split("\n")[:-1]) == tail, title
+
+
+class TestTapLabelContract:
+    def test_a_short_unique_name_is_returned_unchanged(self):
+        from train.topolm.plotting import _panel_tap_labels
+
+        labels, prefix, fontsize = _panel_tap_labels(["blocks.0.ffn/attn_pre"])
+        assert labels == {"blocks.0.ffn/attn_pre": "blocks.0.ffn/attn_pre"}
+        assert prefix == "" and fontsize == 5.0
+
+    def test_shared_leading_components_move_to_the_prefix(self):
+        from train.topolm.plotting import _panel_tap_labels
+
+        names = _real_tap_names(2)
+        labels, prefix, _ = _panel_tap_labels(names)
+        assert prefix == _REAL_PREFIX
+        for name, label in labels.items():
+            assert prefix + label == name
+
+    def test_at_least_the_last_component_survives(self):
+        from train.topolm.plotting import _panel_tap_labels
+
+        labels, prefix, _ = _panel_tap_labels(["a/b/c", "a/b/c"])
+        assert labels["a/b/c"] == "c" and prefix == "a/b/"
+
+    def test_wrapping_loses_nothing_and_keeps_lines_short(self):
+        from train.topolm.plotting import _TITLE_MAX_CHARS, _panel_tap_labels
+
+        name = f"{_REAL_PREFIX}block_0/attention_tap"
+        labels, prefix, fontsize = _panel_tap_labels([name])
+        assert prefix == ""
+        assert "".join(labels[name].split("\n")) == name
+        assert max(len(line) for line in labels[name].split("\n")) <= _TITLE_MAX_CHARS
+        assert fontsize == 5.0
+
+    def test_an_unbreakable_long_component_shrinks_the_font(self):
+        from train.topolm.plotting import _panel_tap_labels
+
+        _, _, fontsize = _panel_tap_labels(["x" * 60])
+        assert 3.5 <= fontsize < 5.0

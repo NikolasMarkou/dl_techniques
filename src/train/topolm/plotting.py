@@ -298,6 +298,73 @@ def plot_t_maps(
     return _save_and_close(fig, output_path, "T-maps")
 
 
+# Widest title line, in characters, that fits above one 3-D plane at the title
+# font size: the planes are 1.3 in wide with 0.16 in between, and the 5 pt title
+# averages about 2.4 pt a character, so 26 characters leave a margin on both sides
+# for the neighbouring title. Measured on the rendered figure, not estimated; the
+# geometric test in test_topolm_plotting.py is what holds it.
+_TITLE_MAX_CHARS = 26
+_TITLE_FONTSIZE = 5.0
+_TITLE_MIN_FONTSIZE = 3.5
+
+
+def _panel_tap_labels(names: List[str]) -> Tuple[Dict[str, str], str, float]:
+    """Shorten and wrap the tap paths used as 3-D panel titles.
+
+    Real tap paths (``causal_language_model/topolm/block_0/attention_tap``) are
+    far wider than a 1.3 in plane, and the three planes of a tap sit side by side,
+    so the unmodified path overprints the neighbouring titles. Two steps, in
+    this order:
+
+    1. With two or more taps, the leading ``/``-separated components that EVERY
+       tap shares are dropped from the title and returned as ``prefix`` so the
+       caller can print them once. At least the last component of each path is
+       always kept, and a single tap keeps its whole path (there is nothing to
+       tell it apart from).
+    2. The remainder is wrapped at ``/`` into lines of at most
+       :data:`_TITLE_MAX_CHARS` characters, the ``/`` staying at the end of the
+       line it closes. A name that fits is returned unchanged, so a short tap name
+       is still one contiguous string in its title. A single component wider than
+       the limit cannot be wrapped; the font is shrunk instead (floor
+       :data:`_TITLE_MIN_FONTSIZE`).
+
+    Joining a tap's lines (``"".join(label.split("\\n"))``) and prepending
+    ``prefix`` gives the original path back, so no information is lost.
+
+    :param names: Tap paths in figure order.
+    :type names: List[str]
+    :return: ``(labels, prefix, fontsize)``: ``labels`` maps each tap path to its
+        possibly multi-line title text, ``prefix`` is the dropped shared leading
+        path including its trailing ``/`` (``""`` if nothing was dropped), and
+        ``fontsize`` is the title font size for every panel.
+    :rtype: Tuple[Dict[str, str], str, float]
+    """
+    split = {name: name.split("/") for name in names}
+    shared = 0
+    if len(names) > 1:
+        shortest = min(len(parts) for parts in split.values())
+        while shared < shortest - 1 and len({p[shared] for p in split.values()}) == 1:
+            shared += 1
+    prefix = "/".join(next(iter(split.values()))[:shared]) + "/" if shared else ""
+
+    labels: Dict[str, str] = {}
+    widest = 0
+    for name, parts in split.items():
+        lines: List[str] = []
+        for index, part in enumerate(parts[shared:]):
+            piece = part + ("/" if index < len(parts[shared:]) - 1 else "")
+            if lines and len(lines[-1]) + len(piece) <= _TITLE_MAX_CHARS:
+                lines[-1] += piece
+            else:
+                lines.append(piece)
+        labels[name] = "\n".join(lines)
+        widest = max(widest, max(len(line) for line in lines))
+    fontsize = _TITLE_FONTSIZE
+    if widest > _TITLE_MAX_CHARS:
+        fontsize = max(_TITLE_MIN_FONTSIZE, _TITLE_FONTSIZE * _TITLE_MAX_CHARS / widest)
+    return labels, prefix, fontsize
+
+
 def _crosshair_voxel(t_map: np.ndarray, significant: Optional[np.ndarray]) -> Tuple[int, ...]:
     """The voxel of a 3-D map the three planes pass through.
 
@@ -398,9 +465,15 @@ def plot_t_maps_3d(
     # The layout is fixed in inches, because the planes are about 10 voxels across
     # and drawn square: a figure sized by a fraction would leave a gap between rows
     # that grows with the number of rows, and put the headline on the title line.
-    cell, gap_x, gap_y = 1.3, 0.16, 0.5
+    tap_labels, shared_prefix, title_fontsize = _panel_tap_labels([n for n, _ in ordered])
+    # A wrapped title is taller than the two lines the gaps were sized for: grow
+    # the gap between rows and the top margin by the extra lines, so a wrapped
+    # title never reaches the row above or the subtitle.
+    extra_lines = max(label.count("\n") for label in tap_labels.values())
+    extra = 0.08 * extra_lines
+    cell, gap_x, gap_y = 1.3, 0.16, 0.5 + extra
     n_cols = 3 * taps_per_row
-    margin_left, margin_right, margin_top, margin_bottom = 0.1, 0.9, 0.85, 0.1
+    margin_left, margin_right, margin_top, margin_bottom = 0.1, 0.9, 0.85 + extra, 0.1
     fig_w = margin_left + n_cols * cell + (n_cols - 1) * gap_x + margin_right
     fig_h = margin_top + n_rows * cell + (n_rows - 1) * gap_y + margin_bottom
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
@@ -445,8 +518,9 @@ def plot_t_maps_3d(
             axis.axvline(crosshair[col_axis], color="limegreen", linewidth=0.5,
                          linestyle="--")
             axis.set_title(
-                f"{name}\naxis {plane_axis} = {crosshair[plane_axis]}  @{crosshair}",
-                fontsize=5,
+                f"{tap_labels[name]}\naxis {plane_axis} = {crosshair[plane_axis]}  "
+                f"@{crosshair}",
+                fontsize=title_fontsize,
                 pad=2,
             )
             axis.set_xticks([])
@@ -463,9 +537,12 @@ def plot_t_maps_3d(
 
     title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle)
     fig.suptitle(title, fontsize=10, y=1.0 - 0.08 / fig_h, va="top")
+    note = "; dashed green = crosshair at the largest significant |t|"
+    if shared_prefix:
+        note += f"; tap paths shown without the shared prefix {shared_prefix}"
     fig.text(
         0.5, 1.0 - 0.38 / fig_h,
-        subtitle + "; dashed green = crosshair at the largest significant |t|",
+        subtitle + note,
         ha="center", va="top", fontsize=7, alpha=0.75,
     )
     # No tight_layout, for the reason given in plot_t_maps.
