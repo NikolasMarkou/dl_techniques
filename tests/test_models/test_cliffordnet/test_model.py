@@ -55,7 +55,12 @@ class TestCliffordNetIter1Refactor:
         #     cliffordnet/clip.py to clip/clifford_clip.py and dropped the
         #     re-export. Import it from dl_techniques.models.vision_language.clifford_clip.model,
         #     not from here.
+        # Widened to 4 names by plan-2026-10-23T132722-77331e7a (D-002): the two
+        # hierarchical names are exported so the pretrained-coverage sweep reaches
+        # their factory. The 2 names above are unchanged.
         assert set(pkg.__all__) == {
             "CliffordNet",
             "create_cliffordnet",
+            "HierarchicalCliffordNet",
+            "create_hierarchical_cliffordnet",
         }
