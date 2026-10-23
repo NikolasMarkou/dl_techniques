@@ -834,3 +834,137 @@ class TestThreeDimensionalFigures:
         texts = [t.get_text() for t in fig.findobj(matplotlib.text.Text)]
         plt.close(fig)
         assert any("+2 not coloured" in text for text in texts), texts
+
+
+# ---------------------------------------------------------------------
+# 3-D figures: what the planes and the montage CONTAIN (added with the drawers)
+# ---------------------------------------------------------------------
+#
+# The step-1 tests above count panels and check one crosshair. These pin the parts
+# a count cannot see: the fallback and the tie rule of the crosshair, where the
+# crosshair is drawn, the titles, and that montage panel k IS slice k of the label
+# grid with one colour per cluster id.
+
+
+def _planes_shown(fig):
+    return [np.asarray(ax.images[0].get_array()) for ax in _image_axes(fig)]
+
+
+def _t_map_figure(monkeypatch, tmp_path, volume, significant, name="blocks.0.ffn/attn_pre"):
+    return _captured_figure(
+        monkeypatch,
+        lambda: plot_t_maps(
+            {name: volume},
+            sig_grids=None if significant is None else {name: significant},
+            output_path=str(tmp_path / "t3d.png"),
+        ),
+    )
+
+
+class TestThreeDimensionalCrosshairAndMontageContent:
+    def test_with_nothing_significant_the_crosshair_is_the_largest_abs_t_overall(
+        self, monkeypatch, tmp_path
+    ):
+        """The fixture's +9 at (0, 7, 13) is the largest |t| and is not significant:
+        it is the fallback answer when nothing is, with or without a mask."""
+        volume, _ = _volume_fixture()
+        for significant in (np.zeros(_VOLUME, dtype=bool), None):
+            fig = _t_map_figure(monkeypatch, tmp_path, volume, significant)
+            shown = _planes_shown(fig)
+            plt.close(fig)
+            expected = [volume[0, :, :], volume[:, 7, :], volume[:, :, 13]]
+            for index, (image, plane) in enumerate(zip(shown, expected)):
+                assert np.array_equal(image, plane), f"panel {index}"
+
+    def test_ties_go_to_the_lowest_flat_index(self, monkeypatch, tmp_path):
+        volume = np.zeros(_VOLUME)
+        significant = np.zeros(_VOLUME, dtype=bool)
+        for voxel in ((6, 0, 0), (3, 5, 2), (3, 2, 9)):      # equal |t|, +/- mixed
+            volume[voxel] = 5.0 if voxel != (3, 5, 2) else -5.0
+            significant[voxel] = True
+        fig = _t_map_figure(monkeypatch, tmp_path, volume, significant)
+        shown = _planes_shown(fig)
+        plt.close(fig)
+        # flat order is C order, so (3, 2, 9) comes before (3, 5, 2) and (6, 0, 0)
+        assert np.array_equal(shown[0], volume[3, :, :])
+        assert np.array_equal(shown[1], volume[:, 2, :])
+        assert np.array_equal(shown[2], volume[:, :, 9])
+
+    def test_the_crosshair_lines_sit_on_the_in_plane_coordinates(
+        self, monkeypatch, tmp_path
+    ):
+        """At (5, 1, 9): plane axis 0 has rows = axis 1 and columns = axis 2, so a
+        horizontal line at y = 1 and a vertical one at x = 9; plane axis 1 has rows
+        = axis 0 (y = 5) and columns = axis 2 (x = 9); plane axis 2 has rows =
+        axis 0 (y = 5) and columns = axis 1 (x = 1)."""
+        volume, significant = _volume_fixture()
+        fig = _t_map_figure(monkeypatch, tmp_path, volume, significant)
+        expected = [(1, 9), (5, 9), (5, 1)]
+        for axis, (row, col) in zip(_image_axes(fig), expected):
+            horizontal = [l for l in axis.lines if len(set(l.get_ydata())) == 1
+                          and len(set(l.get_xdata())) > 1 and float(l.get_ydata()[0]) == row]
+            vertical = [l for l in axis.lines if len(set(l.get_xdata())) == 1
+                        and len(set(l.get_ydata())) > 1 and float(l.get_xdata()[0]) == col]
+            assert horizontal and vertical, (row, col)
+        plt.close(fig)
+
+    def test_every_panel_title_names_the_tap_and_the_crosshair(self, monkeypatch, tmp_path):
+        volume, significant = _volume_fixture()
+        fig = _t_map_figure(monkeypatch, tmp_path, volume, significant)
+        titles = [ax.get_title() for ax in _image_axes(fig)]
+        plt.close(fig)
+        assert len(titles) == 3
+        for plane_axis, title in enumerate(titles):
+            assert "blocks.0.ffn/attn_pre" in title, title
+            assert "(5, 1, 9)" in title, title
+            assert f"axis {plane_axis} = {(5, 1, 9)[plane_axis]}" in title, title
+
+    def test_a_mask_of_the_wrong_shape_is_ignored_not_fatal(self, monkeypatch, tmp_path):
+        volume, _ = _volume_fixture()
+        fig = _t_map_figure(monkeypatch, tmp_path, volume, np.ones((2, 2, 2), dtype=bool))
+        assert len(_image_axes(fig)) == 3
+        assert not any(_hatched(ax) for ax in _image_axes(fig))
+        plt.close(fig)
+
+    def test_the_3d_drawer_refuses_a_2d_map_naming_the_tap(self):
+        from train.topolm.plotting import plot_t_maps_3d
+
+        with pytest.raises(ValueError, match="flat-tap") as caught:
+            plot_t_maps_3d({"flat-tap": np.zeros((4, 4))})
+        assert "3-D" in str(caught.value)
+
+    def test_a_4d_map_is_refused_naming_both_supported_ranks(self):
+        with pytest.raises(ValueError) as caught:
+            plot_t_maps({"tap-4d": np.zeros((2, 2, 2, 2))})
+        assert "2-D" in str(caught.value) and "3-D" in str(caught.value)
+
+    def test_montage_panel_k_is_slice_k_and_an_id_keeps_its_colour(
+        self, monkeypatch, tmp_path
+    ):
+        """Non-contiguous ids (3, 7, 12) over a (4, 5, 6) grid, with id 7 absent from
+        slice 0: each panel must show slice k, coded by the id's RANK among the
+        shown ids (3 -> 1, 7 -> 2, 12 -> 3), so the colour of 7 is the same wherever
+        it appears."""
+        labels = np.zeros((4, 5, 6), dtype=int)
+        labels[0, 0:2, 0:2] = 3
+        labels[1:4, 2:4, 2:4] = 7
+        labels[2:4, 4, 5] = 12
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_cluster_overlay(labels, output_path=str(tmp_path / "m.png")),
+        )
+        shown = _planes_shown(fig)
+        clims = {ax.images[0].get_clim() for ax in _image_axes(fig)}
+        plt.close(fig)
+        rank = {0: 0, 3: 1, 7: 2, 12: 3}
+        expected = np.vectorize(rank.get)(labels)
+        assert len(shown) == 4
+        for k, image in enumerate(shown):
+            assert np.array_equal(image, expected[k]), f"panel {k} is not slice {k}"
+        assert clims == {(0, 3)}, "one colour scale for every panel"
+
+    def test_a_montage_of_an_empty_grid_still_writes(self, tmp_path):
+        path = plot_cluster_overlay(
+            np.zeros((3, 4, 4), dtype=int), output_path=str(tmp_path / "m.png")
+        )
+        assert path is not None and (tmp_path / "m.png").stat().st_size > 0
