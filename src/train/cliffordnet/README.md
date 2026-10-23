@@ -38,28 +38,46 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
     --channels 192 --depth 16 --shifts 1,2,4,8 --cli-mode full --ctx-mode diff
 ```
 
-| Variant | Channels | Depth | Shifts | Global context |
-|---|---|---|---|---|
-| `nano` | 128 | 12 | 1,2 | no |
-| `lite` | 128 | 12 | 1,2,4,8,16 | no |
-| `lite_g` | 128 | 12 | 1,2,4,8,16 | yes |
+Variants are the presets of `CliffordNet.MODEL_VARIANTS` (table with counts in
+`src/dl_techniques/models/vision/cliffordnet/README.md`): `nano`, `lite`, `lite_g`,
+`nano_g`, `cn_12_3`, `cn_18_5`, `cn_32_3` (the paper's CliffordNet-32), `cn_32_5`
+and `cn_64_5` (the paper's CliffordNet-64), plus `custom`.
+
+**Paper v2 recipe.** The defaults are the recipe of arXiv:2601.06793v2 and its
+authors' `train.py` (github.com/ParaMind2025/CAN, read through a fetch summary):
+
+| | Paper v2 / authors | This trainer |
+|---|---|---|
+| epochs / batch | 200 / 128 | 200 / 128 |
+| optimizer | AdamW, lr 1e-3, weight decay 0.1 | same |
+| warm-up | none ("without using warm-up training epochs") | none (`--warmup-epochs 0`) |
+| schedule | cosine annealing to 0, per epoch | cosine to 1e-5 (alpha 0.01), per step |
+| DropPath | 0.3; 0.4 for `cn_64_5` | 0.3; 0.4 for `cn_64_5` (`--stochastic-depth-rate`) |
+| augmentation | AutoAugment CIFAR-10, crop pad 4, flip, random erasing 0.25 | same |
+| loss | cross-entropy, no label smoothing | same |
+
+Earlier runs of this trainer used a 5-epoch warm-up (the old default) and, for
+`--variant lite_g`, trained WITHOUT the global branch: the parser always passed
+`--cli-mode full` and no global context as overrides of the preset. A flag you do
+not pass now takes the preset's value, and `config.json` records what the model
+actually uses.
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--dataset` | `cifar100` | `cifar10` or `cifar100`. |
-| `--variant` | `nano` | `nano`, `lite`, `lite_g`, `custom`. |
+| `--variant` | `nano` | A preset (list above) or `custom`. |
 | `--epochs` | `200` | |
 | `--batch-size` | `128` | |
-| `--learning-rate` | `1e-3` | Peak LR; cosine decay + linear warmup. |
+| `--learning-rate` | `1e-3` | Peak LR; cosine decay, after the optional warm-up. |
 | `--weight-decay` | `0.1` | AdamW decoupled; no L2 regularizer is added. |
-| `--warmup-epochs` | `5` | |
+| `--warmup-epochs` | `0` | Linear warm-up from 1e-8; the paper uses none. |
 | `--patience` | `30` | EarlyStopping on `val_accuracy`. |
 | `--channels` / `--depth` / `--shifts` | `128` / `12` / none | `custom` variant only. `--shifts` is comma-separated. |
-| `--cli-mode` | `full` | `inner`, `wedge`, `full`. |
-| `--ctx-mode` | `diff` | `diff` (discrete Laplacian) or `abs`. |
-| `--use-global-context` | off | |
+| `--cli-mode` | preset's (`full`; `inner` for `cn_32_5`, `cn_64_5`) | `inner`, `wedge`, `full`. |
+| `--ctx-mode` | preset's (`diff`) | `diff` (discrete Laplacian) or `abs`. |
+| `--use-global-context` | preset's (on for `lite_g`, `nano_g`) | Adds the gFFN-G branch; pass it to add the branch to another preset. |
 | `--layer-scale-init` | `1e-5` | |
-| `--stochastic-depth-rate` | `0.3` | |
+| `--stochastic-depth-rate` | `0.3` (`0.4` for `cn_64_5`) | Maximum DropPath, linearly ramped over depth. |
 | `--dropout-rate` | `0.0` | |
 | `--random-erasing-prob` | `0.25` | |
 | `--epoch-analysis-every` | `0` | Standard analysis schedule, 0 = off: the data-free weight/spectral analyzer runs before training (`epoch_000`), after epoch 1, then at N, 2N, ... into `<run>/epoch_analysis/epoch_NNN/`. |

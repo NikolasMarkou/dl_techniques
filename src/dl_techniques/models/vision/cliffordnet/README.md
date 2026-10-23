@@ -83,22 +83,40 @@ raises `ValueError`.
 
 ### Variants
 
-| Variant | Channels | Depth | Shifts | Params (paper) | Params (100 classes) |
-|:--------|:--------:|:-----:|:-------|:------:|-------:|
-| `nano` | 128 | 12 | [1, 2] | 1.4M | 1,436,516 |
-| `lite` | 128 | 12 | [1, 2, 4, 8, 16] | 2.6M | 2,616,164 |
-| `lite_g` | 128 | 12 | [1, 2, 4, 8, 16] + global | not reported | 3,404,132 |
+| Variant | Channels | Depth | Patch | Shifts | cli_mode | Params (paper) | Params (100 classes) |
+|:--------|:--------:|:-----:|:-----:|:-------|:--------:|:------:|-------:|
+| `nano` | 128 | 12 | 2 | [1, 2] | full | 1.43M | 1,436,516 |
+| `lite` | 128 | 12 | 2 | [1, 2, 4, 8, 16] | full | 2.61M | 2,616,164 |
+| `lite_g` | 128 | 12 | 2 | [1, 2, 4, 8, 16] + global | full | 3.40M | 3,404,132 |
+| `nano_g` | 128 | 12 | 2 | [1, 2] + global | full | 2.22M | 2,224,484 |
+| `cn_12_3` | 160 | 12 | 1 | [1, 2, 4] | full | not reported | 2,953,300 |
+| `cn_18_5` | 128 | 18 | 2 | [1, 2, 4, 8, 16] | full | not reported | 3,915,620 |
+| `cn_32_3` | 128 | 32 | 2 | [1, 2, 4] | full | 4.8M (CliffordNet-32) | 4,850,532 |
+| `cn_32_5` | 128 | 32 | 2 | [1, 2, 4, 8, 16] | inner | not reported | 4,326,244 |
+| `cn_64_5` | 128 | 64 | 2 | [1, 2, 4, 8, 16] | inner | 8.6M (CliffordNet-64) | 8,635,236 |
 
-The paper column is Ji 2026, Table 1. The last column is `count_params()`,
-re-derived with:
+The paper column is Ji 2026, arXiv:2601.06793v2, tables 2 and 3; the paper
+truncates its figures (1,436,516 is printed 1.43M). `cn_<depth>_<shifts>` are the
+factories of the authors' `networks.py` (github.com/ParaMind2025/CAN), read
+through a fetch summary, not byte-checked; the authors train `cn_64_5` with drop
+path 0.4 and the others with 0.3. `cn_12_3` has `patch_size=1`, whose stem was
+not compared with the authors'. All counts are pinned by
+`tests/test_models/test_cliffordnet/test_paper_v2_variants.py`. The last column
+is `count_params()`, re-derived with:
 
 ```python
 from dl_techniques.models.vision.cliffordnet import CliffordNet
-for v in ("nano", "lite", "lite_g"):
+for v in CliffordNet.MODEL_VARIANTS:
     m = CliffordNet.from_variant(v, num_classes=100)
     m.build((None, 32, 32, 3))
     print(v, m.count_params())
 ```
+
+The global branch of `lite_g` and `nano_g` was checked against the authors'
+`model.py`: the spatial mean of the normalised input goes through the same
+interaction (full, `diff`, shifts [1, 2]) and is added with weight 1, as here. The
+paper's text writes `C_glo = GlobalAvg(H)` and leaves the `diff` subtraction
+implicit.
 
 The two-hidden-block head this replaced read 1,502,948 / 2,682,596 / 3,470,564,
 which round to 1.5M and 2.7M, not the paper's figures.
