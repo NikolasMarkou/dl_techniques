@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **107 leaf packages** grouped into **13 family directories**.
+Complete model architectures — **110 leaf packages** grouped into **13 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (102 of 102 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (110 of 110 have the file; 107 are non-empty, and `vision/metaformer/`, `vision/video_jepa/` and `vision/vit_siglip/` ship an empty one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -21,11 +21,11 @@ from dl_techniques.models import resnet                               # no - not
 ```
 
 Family-level re-exports were considered and rejected: `import dl_techniques.models.vision`
-would then eagerly construct all 50 vision packages — the whole Keras/TensorFlow import cost
+would then eagerly construct all 51 vision packages — the whole Keras/TensorFlow import cost
 of the family to reach one model — and it opens a circular-import surface between packages
 that share layers. The family `__init__.py` files carry a docstring listing their members and
-nothing else. `time_series/` is the single exception; it predates this layout, has 8 children
-rather than 50, and its consumers rely on the re-exports.
+nothing else. `time_series/` is the single exception; it predates this layout, has 9 children
+rather than 51, and its consumers rely on the re-exports.
 
 ## The 13 families
 
@@ -35,10 +35,10 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **50** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 19 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`vision/`](vision/) | **51** | image backbones, detectors, segmenters, denoisers, generators |
+| [`language/`](language/) | 20 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
-| [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
+| [`time_series/`](time_series/) | 9 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 4 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
@@ -48,9 +48,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`probabilistic/`](probabilistic/) | 1 | latent-variable models with exact, tractable inference |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **107** | |
+| **Sum** | **110** | |
 
-### `vision/` (50)
+### `vision/` (51)
 
 | Package | |
 |---|---|
@@ -60,7 +60,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `bias_free_denoisers/` | bias-free denoiser models |
 | `capsnet/` | Capsule Networks |
 | `cbam/` | CBAM attention model |
-| `cliffordnet/` | Clifford-algebra networks |
+| `cliffordnet/` | CliffordNet, the attention-free Clifford geometric-product image classifier (the language model is `language/cliffordlm/`, the CLIP variant `vision_language/clifford_clip/`) |
 | `convnext/` | ConvNeXt |
 | `convunext/` | ConvUNeXt — U-Net + ConvNeXt |
 | `coshnet/` | CoshNet |
@@ -85,6 +85,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `lewm/` | latent-energy world model |
 | `masked_autoencoder/` | MAE |
 | `mambalct/` | MambaLCT long-term context tracker (hierarchical encoder + SSM temporal scanner, per-frame box/score head) |
+| `metaformer/` | *(a stub: empty `__init__.py` and `README.md`, two architecture PNGs, no model code)* |
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
 | `omnipoint/` | OmniPoint camera-agnostic monocular metric point-cloud model |
 | `rad_convnet/` | RADConvNet — ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware Deformable Convolution, arXiv:2509.15436) |
@@ -105,13 +106,14 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (19)
+### `language/` (20)
 
 | Package | |
 |---|---|
-| `ptrm/` | *(present on disk, absent from this table)* — a token-sequence model, hence the heading count of 19. Add its row when someone next documents it; the count and the table are kept from disagreeing in the meantime. |
+| `ptrm/` | *(present on disk, absent from this table)* — a token-sequence model, hence the heading count of 20. Add its row when someone next documents it; the count and the table are kept from disagreeing in the meantime. |
 | `bert/` | BERT — `bert/model.py` is the normative exemplar for a new model package |
 | `blt/` | Byte Latent Transformer (BLT) |
+| `cliffordlm/` | CliffordNetLM — attention-free causal LM: `CausalCliffordNetBlock` stack with left-only depthwise padding, tied embeddings, five variants (`nano`..`xl`) via `from_variant`. No `include_top`; the output is the dict `{"logits"}`. Trained by `src/train/cliffordnet/`. No pretrained weights |
 | `colbert/` | ColBERT v1/v2, late-interaction retrieval |
 | `distilbert/` | DistilBERT |
 | `fnet/` | FNet, Fourier token mixing |
@@ -150,7 +152,7 @@ image-patch input modality now matches its filing.)
 | `sam/sam3/` | Segment Anything v3, text-promptable |
 | `sd3_mmdit/` | SD3 MMDiT dual-stream text-to-image diffusion transformer |
 
-### `time_series/` (8)
+### `time_series/` (9)
 
 | Package | |
 |---|---|
@@ -160,6 +162,7 @@ image-patch input modality now matches its filing.)
 | `mdn/` | Mixture Density Networks |
 | `nbeats/` | N-BEATS, plus the exogenous `nbeatsx` variant |
 | `prism/` | PRISM forecasting |
+| `timestral/` | Timestral, a patch-based time-series foundation transformer (Decoupled Horizon Forecasting, 21 non-crossing quantiles, past-only and known-future covariates); four released sizes 5M / 28M / 123M / 209M |
 | `tirex/` | TiReX |
 | `xlstm/` | xLSTM |
 

@@ -2,6 +2,7 @@
 
 - `bert/` — BERT
 - `blt/` — Byte Latent Transformer (BLT)
+- `cliffordlm/` — CliffordNetLM (causal language model on Clifford geometric products, attention-free)
 - `colbert/` — ColBERT v1/v2 (late interaction)
 - `distilbert/` — DistilBERT
 - `fnet/` — FNet (Fourier token mixing)
