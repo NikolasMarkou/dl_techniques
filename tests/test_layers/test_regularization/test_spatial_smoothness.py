@@ -18,6 +18,8 @@ The behavioural pins, with the numbers this suite measures (float32, CPU,
                                                           0.0350 at d=1 down to -0.0124 at d=10
 """
 
+import hashlib
+
 import numpy as np
 import pytest
 import tensorflow as tf
@@ -338,6 +340,228 @@ def reference_separations(patch_units):
     )
     upper = np.triu_indices(patch_units, k=1)
     return delta[upper[0], upper[1]]
+
+
+# ---------------------------------------------------------------------
+# 2D byte-identity (golden pins)
+# ---------------------------------------------------------------------
+
+
+def _digest(array):
+    """First 16 hex digits of the sha256 of an array's C-contiguous bytes."""
+    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()[:16]
+
+
+#: Measured on the tree BEFORE the 3D (``grid_dim``) work touched
+#: ``spatial_smoothness.py``, and unchanged since. Keys of each entry: the
+#: layout (``num_units``, ``seed``), the ``radius``, the resolved grid, the
+#: centre and pair counts, and one digest per array. ``d_unit_l1`` and
+#: ``d_unit_l2`` are the other two metrics at the same radius. Hashes of bytes,
+#: not tolerances: a reordered centre, a transposed grid or a reassociated float
+#: sum changes a digest even when every shape and every loss band still passes.
+GOLDEN_2D = {
+    "784_seed0_r5": {
+        "num_units": 784, "seed": 0, "radius": 5, "grid_shape": (28, 28),
+        "num_centers": 324, "num_pairs": 7260,
+        "perm": "a7c8a41d39ef34de",
+        "positions": "7549eb6d9d6b93b2",
+        "cell_to_unit": "b01075a8dc8fdd99",
+        "patch_table": "997639857923f38d",
+        "triu_flat": "6665db8cd4a6c7c0",
+        "d_unit": "52d01038983ae0d8",
+        "d_unit_l1": "0f44492cacce62a5",
+        "d_unit_l2": "8ef2f468f313eef7",
+    },
+    "512_seed3_r4": {
+        "num_units": 512, "seed": 3, "radius": 4, "grid_shape": (16, 32),
+        "num_centers": 192, "num_pairs": 3240,
+        "perm": "547d8a6136a39af9",
+        "positions": "849e7a2ac101fa9e",
+        "cell_to_unit": "dc46a510e40c258e",
+        "patch_table": "551b0aca9c10ea1b",
+        "triu_flat": "5a70c450a4fb4d4f",
+        "d_unit": "9d45f3f70d3b293f",
+        "d_unit_l1": "c2fcf5fda642bcc5",
+        "d_unit_l2": "61f25c4a2d3a9ae5",
+    },
+    "256_seed7_r3": {
+        "num_units": 256, "seed": 7, "radius": 3, "grid_shape": (16, 16),
+        "num_centers": 100, "num_pairs": 1176,
+        "perm": "50ab10642a2763e3",
+        "positions": "0deb542022143328",
+        "cell_to_unit": "1262ef3edd14ec88",
+        "patch_table": "988614547394e84e",
+        "triu_flat": "4f363780f1fdfce7",
+        "d_unit": "e86e50b919f4886b",
+        "d_unit_l1": "9d2c2fc57b9c7da5",
+        "d_unit_l2": "d5c9fc4124230369",
+    },
+}
+
+
+class TestTwoDimensionalIsByteIdentical:
+    """The 2D layer is pinned byte for byte, before and after the 3D work.
+
+    These tests were written GREEN against the unmodified module and must stay
+    green on every later commit. The suite had only self-referential checks (a
+    layout equals a layout built the same way), which a change that alters both
+    sides together cannot fail. A golden digest is the one pin that can.
+    """
+
+    @pytest.mark.parametrize("name", sorted(GOLDEN_2D))
+    def test_layout_and_tables_hash_to_the_golden_digests(self, name):
+        golden = GOLDEN_2D[name]
+        layout = SpatialLayout(golden["num_units"], seed=golden["seed"])
+        tables = build_patch_tables(layout.cell_to_unit, golden["radius"], "linf")
+
+        assert layout.grid_shape == golden["grid_shape"]
+        assert tables.num_centers == golden["num_centers"]
+        assert tables.num_pairs == golden["num_pairs"]
+        measured = {
+            "perm": _digest(layout.perm),
+            "positions": _digest(layout.positions),
+            "cell_to_unit": _digest(layout.cell_to_unit),
+            "patch_table": _digest(tables.patch_table),
+            "triu_flat": _digest(tables.triu_flat),
+            "d_unit": _digest(tables.d_unit),
+        }
+        assert measured == {key: golden[key] for key in measured}
+
+    @pytest.mark.parametrize("name", sorted(GOLDEN_2D))
+    @pytest.mark.parametrize("metric", ["l1", "l2"])
+    def test_the_other_two_metrics_hash_to_the_golden_digests(self, name, metric):
+        golden = GOLDEN_2D[name]
+        layout = SpatialLayout(golden["num_units"], seed=golden["seed"])
+        tables = build_patch_tables(layout.cell_to_unit, golden["radius"], metric)
+        assert _digest(tables.d_unit) == golden[f"d_unit_{metric}"]
+
+    @pytest.mark.parametrize("name", sorted(GOLDEN_2D))
+    def test_array_dtypes_and_shapes_are_pinned(self, name):
+        golden = GOLDEN_2D[name]
+        layout = SpatialLayout(golden["num_units"], seed=golden["seed"])
+        tables = build_patch_tables(layout.cell_to_unit, golden["radius"], "linf")
+        side = 2 * golden["radius"] + 1
+
+        assert layout.perm.dtype == np.int32
+        assert layout.positions.dtype == np.int32
+        assert layout.cell_to_unit.dtype == np.int32
+        assert tables.patch_table.dtype == np.int32
+        assert tables.triu_flat.dtype == np.int32
+        assert tables.d_unit.dtype == np.float32
+        assert layout.positions.shape == (golden["num_units"], 2)
+        assert layout.cell_to_unit.shape == golden["grid_shape"]
+        assert tables.patch_table.shape == (golden["num_centers"], side * side)
+        assert tables.d_unit.shape == (golden["num_pairs"],)
+        assert tables.grid_shape == golden["grid_shape"]
+        assert tables.patch_units == side * side
+
+    def test_positions_are_the_row_and_column_of_each_units_cell(self):
+        """``positions`` against ``cell_to_unit``, by value and by construction.
+
+        Unit ``u`` sits at ``(row, col)`` exactly when ``cell_to_unit[row, col]``
+        is ``u``; a transposed or swapped pair would still be a permutation of
+        the right shape.
+        """
+        layout = SpatialLayout(512, seed=3)
+        rows, cols = layout.positions[:, 0], layout.positions[:, 1]
+        np.testing.assert_array_equal(
+            layout.cell_to_unit[rows, cols], np.arange(512)
+        )
+        assert layout.grid_shape == (16, 32)
+
+    def test_the_pinned_error_substrings_are_unchanged(self):
+        with pytest.raises(ValueError, match="has 12 cells but the tapped tensor"):
+            resolve_grid_shape(10, (3, 4))
+        with pytest.raises(ValueError, match="num_units must be positive"):
+            resolve_grid_shape(0)
+        with pytest.raises(ValueError, match="grid_shape must be a"):
+            resolve_grid_shape(8, (2, 2, 2))
+        with pytest.raises(ValueError, match="needs a 11x11 patch"):
+            build_patch_tables(SpatialLayout(64, seed=0).cell_to_unit, 5)
+        with pytest.raises(ValueError, match="to_grid expects a last axis"):
+            SpatialLayout(784).to_grid(np.zeros((3, 783)))
+        with pytest.raises(ValueError, match="from_grid expects trailing axes"):
+            SpatialLayout(784).from_grid(np.zeros((7, 7)))
+
+    def test_a_three_tuple_is_refused_by_the_default_resolution(self):
+        """``GaussianReadout`` relies on this: the default rank is 2, never inferred."""
+        with pytest.raises(ValueError, match="grid_shape must be a"):
+            resolve_grid_shape(512, (8, 8, 8))
+
+    def test_the_config_keys_of_the_layout_and_the_layer_are_kept(self):
+        layout_keys = {"num_units", "grid_shape", "permute", "seed"}
+        layer_keys = {
+            "alpha", "radius", "num_neighborhoods", "distance", "permute",
+            "grid_shape", "seed", "max_samples", "eps",
+        }
+        assert layout_keys <= set(SpatialLayout(784, seed=0).get_config())
+        assert layer_keys <= set(SpatialSmoothness(alpha=1.0, seed=0).get_config())
+
+    def test_a_layout_config_without_grid_dim_loads_as_the_same_2d_layout(self):
+        """The pre-3D config dict has no ``grid_dim`` key and must keep meaning 2D."""
+        legacy = {
+            "num_units": 512, "grid_shape": (16, 32), "permute": True, "seed": 3,
+        }
+        rebuilt = SpatialLayout.from_config(legacy)
+        direct = SpatialLayout(512, seed=3)
+        assert rebuilt.grid_shape == direct.grid_shape == (16, 32)
+        assert _digest(rebuilt.perm) == _digest(direct.perm)
+        assert _digest(rebuilt.positions) == _digest(direct.positions)
+
+    def test_a_layer_config_without_grid_dim_builds_the_golden_tables(self):
+        legacy = {
+            "alpha": 1.0, "radius": 5, "num_neighborhoods": 5,
+            "distance": "linf", "permute": True, "grid_shape": None, "seed": 0,
+            "max_samples": 256, "eps": 1e-6, "name": "legacy", "trainable": True,
+            "dtype": "float32",
+        }
+        layer = SpatialSmoothness.from_config(legacy)
+        _build_through_parent(layer)
+        golden = GOLDEN_2D["784_seed0_r5"]
+        for key in ("perm", "patch_table", "triu_flat", "d_unit"):
+            assert _digest(
+                keras.ops.convert_to_numpy(getattr(layer, key)).astype(
+                    "float32" if key == "d_unit" else "int32"
+                )
+            ) == golden[key]
+        assert len(layer.weights) == 5
+
+    def test_the_loss_on_a_fixed_field_is_pinned(self):
+        """Value pin of the (untouched) loss on three fixed neighbourhoods.
+
+        784 units, seed 0, radius 5, ``smooth_field_activations(seed=5)`` with 64
+        samples, centres 7, 101, 260: measured 0.149819 (float32, CPU). Band
+        1e-4, an order of magnitude over float32 re-association noise and far
+        below the 0.016 gap to a different centre set.
+        """
+        layout, tables = _tables()
+        activations = smooth_field_activations(layout, num_samples=64, seed=5)
+        value = float(
+            spatial_smoothness_loss(
+                keras.ops.convert_to_tensor(activations.astype("float32")),
+                keras.ops.convert_to_tensor(tables.patch_table[[7, 101, 260]]),
+                keras.ops.convert_to_tensor(tables.triu_flat),
+                keras.ops.convert_to_tensor(tables.d_unit),
+            )
+        )
+        assert value == pytest.approx(0.149819, abs=1e-4)
+
+    def test_the_layers_random_draws_are_pinned_by_a_seeded_penalty(self):
+        """The draw order (rows, then centres) fixes WHICH centres a step scores.
+
+        Layer seed 0 on the layout seed 0 field of the previous test, 5 sampled
+        neighbourhoods, ``max_samples`` at its default: ``last_spatial_loss``
+        measured 0.133828 (CPU). Reordering the draws, or drawing one more
+        number, selects other centres and moves this by about 0.01 or more.
+        """
+        layout = SpatialLayout(NUM_UNITS, seed=0)
+        field = smooth_field_activations(layout, num_samples=64, seed=5)
+        layer = SpatialSmoothness(
+            alpha=1.0, radius=RADIUS, num_neighborhoods=5, seed=0
+        )
+        layer(field.astype("float32").reshape(2, 32, NUM_UNITS), training=True)
+        value = float(keras.ops.convert_to_numpy(layer.last_spatial_loss))
+        assert value == pytest.approx(0.133828, abs=1e-4)
 
 
 # ---------------------------------------------------------------------
