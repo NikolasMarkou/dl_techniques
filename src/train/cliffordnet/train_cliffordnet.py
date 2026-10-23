@@ -9,6 +9,7 @@ and random erasing.
 
 import os
 import math
+from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import keras
@@ -40,6 +41,10 @@ from train.common import (
     CIFAR100_MEAN,
     CIFAR100_STD,
 )
+from train.common import run_summary
+from train.common.callbacks import LearningRateLogger
+from train.common.classification_viz import TrainingDashboardCallback
+from train.common.datasets import get_class_names
 from train.common.run_io import save_training_history_json
 
 
@@ -527,6 +532,22 @@ def train_model(args) -> None:
         analyzer_start_epoch=max(1, args.epoch_analysis_every),
     )
     callbacks.insert(0, keras.callbacks.TerminateOnNaN())
+    # Standard classification visualizations (src/train/AGENTS.md): the learning
+    # rate reaches the CSV and the dashboard, which is drawn last and redrawn on a
+    # cadence into <run>/visualizations/.
+    vis_dir = os.path.join(results_dir, "visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+    callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
+
+    def _baseline(untrained: keras.Model) -> Dict[str, float]:
+        measured = untrained.evaluate(val_ds, verbose=0, return_dict=True)
+        return {"loss": measured["loss"], "accuracy": measured["accuracy"]}
+
+    callbacks.append(TrainingDashboardCallback(
+        out_path=os.path.join(vis_dir, "training_dashboard.png"),
+        baseline_fn=_baseline,
+        title=f"cliffordnet_{args.variant}_{args.dataset} (seed {args.seed})",
+    ))
 
     # DECISION plan-2026-10-14T062616-81938e81/D-177: the config is written here,
     # before training, and NOT wrapped. A failed write raises before any compute
@@ -589,6 +610,17 @@ def train_model(args) -> None:
 
     test_results = best_model.evaluate(val_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")
+
+    # ---- Classification figures --------------------------------------
+    # The model emits logits; every probability consumer gets a softmax. The eval
+    # dataset is ordered, so the predictions line up with y_test. x_test is in
+    # [0, 1] (normalisation happens inside the dataset), so no mean/std is given.
+    logits = best_model.predict(val_ds, verbose=0)
+    probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
+    run_summary.write_classification_figures(
+        Path(vis_dir), x_test, y_test, probs,
+        get_class_names(args.dataset, num_classes),
+    )
 
     # ---- Post-training analysis --------------------------------------
     run_model_analysis(
