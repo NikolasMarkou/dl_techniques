@@ -20,6 +20,14 @@ import numpy as np
 from dl_techniques.utils.logger import logger
 
 
+#: The house ``--seed`` default (D-247 of plan-2026-10-14T062616-81938e81). Every
+#: trainer's ``--seed`` defaults to it: by name where the module already imports
+#: ``train.common``, as a literal of equal value where it does not.
+#: ``tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py`` reads it by
+#: AST and holds every trainer's default equal to it.
+DEFAULT_SEED: int = 42
+
+
 def set_seeds(seed: int) -> None:
     """Seed every RNG source used by training.
 
@@ -41,4 +49,4 @@ def set_seeds(seed: int) -> None:
     logger.info(f"[seed] all RNGs seeded with seed={seed}")
 
 
-__all__ = ["set_seeds"]
+__all__ = ["DEFAULT_SEED", "set_seeds"]

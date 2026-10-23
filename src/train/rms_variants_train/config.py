@@ -159,7 +159,7 @@ class ExperimentConfig:
     # --- Identity ----------------------------------------------------------
     experiment_name: str
     norm_type: str  # one of NORM_VARIANTS (or any factory key for ablations)
-    seed: int = 0
+    seed: int = 42
     # OOB | param_matched. See ``build_norm_kwargs``.
     mode: str = "oob"
 

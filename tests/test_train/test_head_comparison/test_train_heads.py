@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import keras
 
+from train.common.seed import DEFAULT_SEED
 from train.head_comparison.train_heads import (
     HeadComparisonConfig,
     build_callbacks,
@@ -40,7 +41,7 @@ class TestConfig:
 class TestArgv:
     def test_defaults_map(self):
         cfg = config_from_args(parse_arguments([]))
-        assert cfg.head == "softmax" and cfg.seed == 0 and cfg.anneal is True
+        assert cfg.head == "softmax" and cfg.seed == DEFAULT_SEED and cfg.anneal is True
 
     def test_flags_map(self):
         cfg = config_from_args(parse_arguments(

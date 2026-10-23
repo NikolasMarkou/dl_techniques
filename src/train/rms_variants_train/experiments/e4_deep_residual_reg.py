@@ -141,7 +141,7 @@ _REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Opt
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E4 DeepResidual+fp16 regression")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"])
     p.add_argument("--regime", type=str, default="default",
                    choices=list(_REGIME_MAP.keys()),

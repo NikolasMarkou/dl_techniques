@@ -69,7 +69,7 @@ each, with `val_` twins only when validation is on.
 | `--batch-size` | `4` | Must be >= 2: `CliffordNetBlock` uses BatchNormalization in its context stream. |
 | `--learning-rate` | `3e-4` | |
 | `--weight-decay` | `1e-4` | |
-| `--seed` | `0` | |
+| `--seed` | `42` (`DEFAULT_SEED`) | |
 | `--gpu` | none | GPU index; sets `CUDA_VISIBLE_DEVICES`. Nothing stops two concurrent jobs — keep GPU jobs serial yourself. |
 | `--output-dir` | `results/video_jepa_<timestamp>` | |
 | `--smoke` | off | Tiny preset, see above. |

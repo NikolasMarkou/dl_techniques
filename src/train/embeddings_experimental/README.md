@@ -83,7 +83,7 @@ numbers are in `RESULTS.md`.
 | `--model` | `ascii_bert` | Generated from `MODEL_REGISTRY`; baseline is `ascii_bert`. |
 | `--variant` | `tiny` | `tiny`, `small`, `base`. |
 | `--pooling-strategy` | `mean` | `cls`, `mean`, `attention`, `max`. |
-| `--seed` | `0` | |
+| `--seed` | `42` | |
 | `--max-seq-length` | `256` | Stage-1 context. |
 | `--max-train-samples` | `20000` | |
 | `--max-val-samples` | `1000` | |

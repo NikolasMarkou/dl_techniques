@@ -60,7 +60,7 @@ from train.common.megadepth import (
     load_and_process_pair as load_megadepth_pair,
     MegaDepthDataset,
 )
-from train.common.seed import set_seeds
+from train.common.seed import DEFAULT_SEED, set_seeds
 from train.common.config_io import save_config_json, json_numpy_default
 from train.common.run_io import (
     TIMESTAMP_FORMAT,
@@ -185,6 +185,7 @@ __all__ = [
     "decode_text",
     "default_experiment_name",
     "DEFAULT_IMAGE_EXTENSIONS",
+    "DEFAULT_SEED",
     "discover_megadepth_pairs",
     "ElementMapFn",
     "EpochMetricsPlotCallback",

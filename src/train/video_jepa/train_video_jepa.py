@@ -49,7 +49,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, create_base_argument_parser, set_seeds
+from train.common import DEFAULT_SEED, setup_gpu, create_base_argument_parser, set_seeds
 from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
@@ -285,7 +285,7 @@ def parse_args() -> argparse.Namespace:
 
     # --- Training extras not in the base parser ---
     p.add_argument("--steps-per-epoch", type=int, default=1000)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--output-dir", type=str, default=None,
                    help="Results directory. Auto-timestamp if omitted.")
 

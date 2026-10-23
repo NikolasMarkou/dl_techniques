@@ -15,6 +15,7 @@ import keras
 import numpy as np
 import pytest
 
+from train.common.seed import DEFAULT_SEED
 from train.rms_variants_train.config import (
     NORM_VARIANTS,
     ExperimentConfig,
@@ -186,7 +187,7 @@ def test_experiment_config_defaults_roundtrip() -> None:
     cfg = ExperimentConfig(experiment_name="e5", norm_type="rms_norm")
     d = cfg.to_dict()
     assert d["norm_type"] == "rms_norm"
-    assert d["seed"] == 0
+    assert d["seed"] == DEFAULT_SEED
     assert d["mode"] == "oob"
 
 

@@ -37,7 +37,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, set_seeds, save_config_json
+from train.common import DEFAULT_SEED, setup_gpu, set_seeds, save_config_json
 from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.optimization import optimizer_builder, WarmupSchedule
@@ -76,7 +76,7 @@ class TrainingConfig:
     warmup_steps: int = 10
     ema_decay: float = 0.999
     ema_update_every: int = 1
-    seed: int = 0
+    seed: int = DEFAULT_SEED
     gpu: Optional[int] = None
     output_dir: Optional[str] = None
     # DECISION plan-2026-09-03T113223-2a714a91/D-023
@@ -227,7 +227,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--ema-update-every", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--gpu", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None,
                          help="Results directory. Auto-timestamp if omitted.")

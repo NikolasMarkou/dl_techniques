@@ -89,7 +89,7 @@ class ExperimentConfig:
     model: str = BASELINE_MODEL
     variant: str = "tiny"
     pooling_strategy: str = "mean"
-    seed: int = 0
+    seed: int = 42
 
     # -- data ----------------------------------------------------------
     max_seq_length: int = 256

@@ -34,7 +34,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.dasiamrpn.train_dasiamrpn \
 | `--num-synthetic-train` / `--num-synthetic-val` | 2048 / 256 | |
 | `--steps-per-epoch` / `--val-steps` | None | Derived for synthetic; required for COCO |
 | `--no-augment` / `--brightness-delta` | off / 0.125 | Photometric jitter only |
-| `--seed` | 0 | Data, init and shuffle seeding |
+| `--seed` | 42 (`DEFAULT_SEED`) | Data, init and shuffle seeding |
 | `--exemplar-size` / `--search-size` | 127 / 271 | Score grid is 19 |
 | `--no-batch-norm` | off | Removes backbone BatchNorm |
 | `--pos-iou` / `--neg-iou` | 0.6 / 0.3 | Anchor matching thresholds |

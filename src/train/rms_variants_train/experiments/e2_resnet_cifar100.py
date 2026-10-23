@@ -29,7 +29,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import load_dataset
+from train.common import DEFAULT_SEED, load_dataset
 from dl_techniques.models.vision.resnet.model import create_resnet
 from dl_techniques.utils.logger import logger
 
@@ -69,7 +69,7 @@ _REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Opt
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E2 ResNet-18 × CIFAR-100")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"],
                    help="oob: default ResNet. param_matched: thread "
                         "use_scale=False through ResNet into stem + every "

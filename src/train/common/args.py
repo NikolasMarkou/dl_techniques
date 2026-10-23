@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, List, Mapping, Sequence, Set, Tuple
 
 from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig
 
+from train.common.seed import DEFAULT_SEED
+
 __all__ = [
     "build_generator_config",
     "config_values_from_args",
@@ -398,7 +400,7 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
                         help="Experiment name / results-dir prefix")
     parser.add_argument("--result_dir", type=str, default="results",
                         help="Root output directory")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Random seed")
 
     # Synthetic data generation

@@ -66,7 +66,7 @@ from dl_techniques.models.probabilistic.neural_hmm import inference
 from dl_techniques.models.probabilistic.neural_hmm.encoders import ENCODER_TYPES
 from dl_techniques.optimization import optimizer_builder
 from train.common import (
-    default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
+    DEFAULT_SEED, default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
 )
 from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
@@ -142,7 +142,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Global gradient-norm clip of the optimizer.")
     parser.add_argument("--patience", type=int, default=10,
                         help="Epochs without a lower val_loss before training stops.")
-    parser.add_argument("--seed", type=int, default=0,
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Seed of the data splits and of the model initialization.")
 
     parser.add_argument("--gpu", type=int, default=None,

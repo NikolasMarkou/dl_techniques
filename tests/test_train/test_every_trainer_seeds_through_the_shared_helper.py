@@ -18,9 +18,11 @@ The census is an AST call graph, built per entry point:
   ``apply_gradients``, or it is one of ``TRAINS_WITHOUT_A_TRAIN_CALL``.
 - A trainer must reach a call of the shared ``set_seeds`` whose argument is not a
   literal (a literal ignores the flag), and must declare ``--seed`` whose default
-  resolves to 42 (a literal, or a ``seed`` field of the config class the default reads),
-  unless its default predates the rule (``KEPT_DEFAULTS``, reported, not changed) or it
-  runs several seeds (``MULTI_SEED``, ``--seeds``, one ``set_seeds`` per seed).
+  resolves to the shared ``train.common.seed.DEFAULT_SEED`` (a literal of equal value,
+  the constant itself, or a ``seed`` field of the config class the default reads that
+  is either), unless it runs several seeds (``MULTI_SEED``, ``--seeds``, one
+  ``set_seeds`` per seed). The constant is read from ``seed.py`` by AST, so the census
+  holds no second copy of its value.
 - Every entry point that does not train is named in ``NOT_TRAINING`` with its reason,
   and the classification is exact both ways, so a new entry point fails until it is
   classified.
@@ -28,6 +30,8 @@ The census is an AST call graph, built per entry point:
 At 2026-10-21 (ed86f8c05) the census found 173 entry points, 131 of them trainers and 42
 not, and 37 trainers broke the rule: 26 reached no ``set_seeds``, 8 seeded a literal 42
 with no flag, BLT had no flag, and the two YOLOv12 trainers named it ``--random-seed``.
+It then kept 17 older trainers' default 0 in a ``KEPT_DEFAULTS`` list; iteration 3 step 7
+(plan-2026-10-14T062616-81938e81 D-289) moved them to ``DEFAULT_SEED`` and deleted the list.
 """
 
 import ast
@@ -41,7 +45,7 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 TRAIN_CALLS = ("fit", "train_on_batch", "apply_gradients")
 SHARED_HELPER = ("train.common.seed", "set_seeds")
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-SEED_DEFAULT = 42
+SEED_MODULE = ("train.common.seed", "DEFAULT_SEED")
 
 #: Trainers whose update is not a Keras training call inside ``src/train``.
 TRAINS_WITHOUT_A_TRAIN_CALL: Dict[str, str] = {
@@ -112,27 +116,6 @@ MULTI_SEED: Tuple[str, ...] = (
     "train.logic.train_e4_monks",
     "train.sam3.baselines",
 )
-
-#: ``--seed`` defaults that predate step 12.6; kept, not changed (D-247 reports them).
-KEPT_DEFAULTS: Dict[str, int] = {
-    "train.dasiamrpn.train_dasiamrpn": 0,
-    "train.deepsort.train_deepsort": 0,
-    "train.embeddings_experimental.train_embeddings": 0,
-    "train.head_comparison.train_heads": 0,
-    "train.hkan.train_hkan": 0,
-    "train.levjepa.train_levjepa": 0,
-    "train.mambalct.train_mambalct": 0,
-    "train.neural_hmm.train_neural_hmm": 0,
-    "train.rms_variants_train.experiments.e1_vit_cifar10": 0,
-    "train.rms_variants_train.experiments.e2_resnet_cifar100": 0,
-    "train.rms_variants_train.experiments.e3_tinytransformer_imdb": 0,
-    "train.rms_variants_train.experiments.e4_deep_residual_reg": 0,
-    "train.rms_variants_train.experiments.e5_norm_layer_microbench": 0,
-    "train.rms_variants_train.experiments.e6_clm_wiki": 0,
-    "train.siamfc.train_siamfc": 0,
-    "train.topographic_vae.train_topographic_vae": 0,
-    "train.video_jepa.train_video_jepa": 0,
-}
 
 
 class _Module:
@@ -289,6 +272,26 @@ class _Census:
                             and (target[1], func.attr) == SHARED_HELPER)
         return False
 
+    def value_of(self, module_name: str, node: Optional[ast.AST], depth: int = 0):
+        """The constant an expression in ``module_name`` names, or ``None``.
+
+        A literal is its value; a bare name is resolved through ``resolve`` (same-module
+        assignments first, then imports, so ``DEFAULT_SEED`` reached through the
+        ``train.common`` re-export is ``seed.py``'s value and a local ``DEFAULT_SEED = 0``
+        shadows it). Anything else (``DEFAULT_SEED + 1``, a call) is ``None``.
+        """
+        if isinstance(node, ast.Constant):
+            return node.value
+        if not isinstance(node, ast.Name) or depth > 8:
+            return None
+        target = self.resolve(module_name, node.id)
+        if not (target and target[0] == "defs"):
+            return None
+        assigned = target[2][-1]
+        if not isinstance(assigned, (ast.Assign, ast.AnnAssign)):
+            return None
+        return self.value_of(target[1], assigned.value, depth + 1)
+
     def field_default(self, module_name: str, class_name: str, field: str):
         target = self.resolve(module_name, class_name)
         if not (target and target[0] == "defs"):
@@ -298,18 +301,18 @@ class _Census:
                 continue
             for item in node.body:
                 if (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-                        and item.target.id == field and isinstance(item.value, ast.Constant)):
-                    return item.value.value
-                if (isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)
+                        and item.target.id == field):
+                    return self.value_of(target[1], item.value)
+                if (isinstance(item, ast.Assign)
                         and any(isinstance(t, ast.Name) and t.id == field
                                 for t in item.targets)):
-                    return item.value.value
+                    return self.value_of(target[1], item.value)
         return None
 
     def default_value(self, module_name: str, function: ast.AST, default: ast.AST):
         """The value a ``--seed`` default resolves to, or ``None`` if the census cannot."""
-        if isinstance(default, ast.Constant):
-            return default.value
+        if isinstance(default, (ast.Constant, ast.Name)):
+            return self.value_of(module_name, default)
         if isinstance(default, ast.Attribute) and isinstance(default.value, ast.Name):
             owner = default.value.id
             value = self.field_default(module_name, owner, default.attr)
@@ -425,12 +428,17 @@ def _violations(report: _Report) -> List[str]:
     if not declared:
         problems.append("declares no --seed")
         return problems
-    expected = KEPT_DEFAULTS.get(report.entry, SEED_DEFAULT)
+    expected = SEED_DEFAULT
     values = {value for _, value in declared}
     if values != {expected}:
         problems.append(f"--seed default {sorted(map(str, values))} at {declared}, "
                         f"expected {expected}")
     return problems
+
+
+#: The house default, read from ``train.common.seed`` by AST (``None`` if it is missing).
+SEED_DEFAULT = _Census().value_of(
+    SEED_MODULE[0], ast.Name(id=SEED_MODULE[1], ctx=ast.Load()))
 
 
 @pytest.fixture(scope="module")
@@ -454,7 +462,7 @@ def test_every_entry_point_is_classified(reports):
         f"{len(unclassified)} entry points neither call a training step nor are listed: "
         f"{unclassified}. Seed a trainer, or add a non-trainer to NOT_TRAINING with its reason.")
     stale = sorted((set(NOT_TRAINING) | set(TRAINS_WITHOUT_A_TRAIN_CALL)
-                    | set(KEPT_DEFAULTS) | set(MULTI_SEED)) - entries)
+                    | set(MULTI_SEED)) - entries)
     assert not stale, f"listed modules that are no longer entry points: {stale}"
     assert sorted(detected & set(NOT_TRAINING)) == sorted(NOT_TRAINING_DESPITE_A_TRAIN_CALL), (
         "an entry point listed as not training calls a training step: "
@@ -483,8 +491,9 @@ def test_the_census_sees_trainers_seeds_and_defaults(reports):
     convnext = reports["train.convnext.train_convnext_v1"]
     assert any(where.startswith("train.convnext.common:") for where, _ in convnext.seed_calls)
     assert {value for _, value in convnext.options["--seed"]} == {42}
-    # A kept non-42 default is read as such.
-    assert {value for _, value in reports["train.hkan.train_hkan"].options["--seed"]} == {0}
+    # A flag default spelled `DEFAULT_SEED` (hkan's) resolves to the shared constant.
+    assert {value for _, value in reports["train.hkan.train_hkan"].options["--seed"]} == {
+        SEED_DEFAULT}
     # A literal-only seed is caught.
     synthetic = _Census(extra={"train._seed_probe": (
         "from train.common import set_seeds\n"
@@ -520,3 +529,51 @@ def test_a_trainer_without_a_seed_fails_the_rule():
     assert _violations(census.analyse("train._unseeded"))
     assert _violations(census.analyse("train._private"))
     assert _violations(census.analyse("train._compliant")) == []
+
+
+def test_the_shared_default_seed_is_read_from_seed_py():
+    """``SEED_DEFAULT`` is ``train.common.seed.DEFAULT_SEED`` read by AST, the one home of
+    the house value (D-247); a missing constant fails here by name. Its value is not
+    restated: the trainers' literal ``default=42`` sites are held equal to it."""
+    assert isinstance(SEED_DEFAULT, int) and not isinstance(SEED_DEFAULT, bool), (
+        f"train.common.seed.DEFAULT_SEED is missing or not an int literal: {SEED_DEFAULT!r}")
+
+
+def _seed_flag_probe(prelude: str, default: str) -> str:
+    return (f"import argparse\n{prelude}"
+            "def main():\n    p = argparse.ArgumentParser()\n"
+            f"    p.add_argument('--seed', type=int, default={default})\n"
+            "    a = p.parse_args()\n    set_seeds(a.seed)\n    model.fit()\n"
+            "if __name__ == '__main__':\n    main()\n")
+
+
+def test_a_seed_default_named_by_the_constant_resolves_to_it():
+    """Controls for the ``ast.Name`` branch: the constant reached through the
+    ``train.common`` re-export (in a flag and in a config field) passes; a local
+    ``DEFAULT_SEED = 0`` shadow and ``DEFAULT_SEED + 1`` fail."""
+    sources = {
+        "train._reexport": _seed_flag_probe(
+            "from train.common import DEFAULT_SEED, set_seeds\n", "DEFAULT_SEED"),
+        "train._field": (
+            "import argparse\nfrom dataclasses import dataclass\n"
+            "from train.common import DEFAULT_SEED, set_seeds\n"
+            "@dataclass\nclass Config:\n    seed: int = DEFAULT_SEED\n"
+            "def main():\n    defaults = Config()\n    p = argparse.ArgumentParser()\n"
+            "    p.add_argument('--seed', type=int, default=defaults.seed)\n"
+            "    a = p.parse_args()\n    set_seeds(a.seed)\n    model.fit()\n"
+            "if __name__ == '__main__':\n    main()\n"),
+        "train._shadow": _seed_flag_probe(
+            "from train.common import DEFAULT_SEED, set_seeds\nDEFAULT_SEED = 0\n",
+            "DEFAULT_SEED"),
+        "train._offset": _seed_flag_probe(
+            "from train.common import DEFAULT_SEED, set_seeds\n", "DEFAULT_SEED + 1"),
+    }
+    census = _Census(extra=sources)
+    assert _violations(census.analyse("train._reexport")) == []
+    assert _violations(census.analyse("train._field")) == []
+    shadow = census.analyse("train._shadow")
+    assert {value for _, value in shadow.options["--seed"]} == {0}
+    assert _violations(shadow)
+    offset = census.analyse("train._offset")
+    assert {value for _, value in offset.options["--seed"]} == {None}
+    assert _violations(offset)

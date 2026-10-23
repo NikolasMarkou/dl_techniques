@@ -44,7 +44,7 @@ from train.common import (
     load_dataset,
 )
 from train.common.run_io import prepare_run_dir, save_training_history_json
-from train.common.seed import set_seeds
+from train.common.seed import DEFAULT_SEED, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -119,7 +119,7 @@ class HeadComparisonConfig:
     gradient_clipping: float = 1.0
     momentum: float = 0.9
     early_stopping_patience: int = 15
-    seed: int = 0
+    seed: int = DEFAULT_SEED
 
     # Analysis / IO
     analyzer: bool = True
@@ -564,7 +564,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--anneal-schedule", type=str, default="linear",
                         choices=["linear", "cosine", "exp"])
     parser.add_argument("--early-stopping-patience", type=int, default=15)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--analyzer", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)

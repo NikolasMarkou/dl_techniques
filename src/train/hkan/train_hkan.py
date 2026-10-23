@@ -81,7 +81,7 @@ from dl_techniques.models.general_purpose.hkan.hkan_layer import (
 from dl_techniques.models.general_purpose.hkan.model import DEFAULT_L2_BLOCK, DEFAULT_L2_MIX
 from dl_techniques.optimization import optimizer_builder
 from train.common import (
-    default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
+    DEFAULT_SEED, default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
 )
 from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
@@ -152,7 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Test rows of a synthetic target (default: the paper's count).")
     parser.add_argument("--repeats", type=int, default=1,
                         help="Independent fits with derived seeds; the paper uses 50.")
-    parser.add_argument("--seed", type=int, default=0,
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Seed of the data and of the per-repeat derived seeds.")
 
     parser.add_argument("--hidden-units", type=_list_of(int), default=[64],

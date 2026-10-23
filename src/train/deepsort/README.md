@@ -45,7 +45,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.deepsort.train_deepsort \
 | `--p-ids` / `--k-shots` | 8 / 4 | PK batch geometry (batch is always P×K; the reference trains at batch 128 — raise P/K for real runs) |
 | `--validation-id-fraction` | 0.1 | Disjoint-ID holdout (transcribed) |
 | `--no-augment` | off | Disables training left-right flips (the reference's only aug) |
-| `--seed` | 0 | Data, init and shuffle seeding |
+| `--seed` | 42 (`DEFAULT_SEED`) | Data, init and shuffle seeding |
 | `--dropout-rate` | 0.4 | Transcribed keep_prob 0.6 |
 | `--epochs` | 5 | |
 | `--steps-per-epoch` / `--val-steps` | 20 / 5 | |

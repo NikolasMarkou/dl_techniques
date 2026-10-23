@@ -35,7 +35,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.siamfc.train_siamfc \
 | `--steps-per-epoch` / `--val-steps` | None | Derived from synthetic counts; required for COCO |
 | `--no-augment` | off | Disables photometric jitter |
 | `--brightness-delta` | 0.125 | Brightness jitter bound |
-| `--seed` | 0 | Seeds data, init (via `set_seeds`) and shuffle |
+| `--seed` | 42 (`DEFAULT_SEED`) | Seeds data, init (via `set_seeds`) and shuffle |
 | `--exemplar-size` / `--search-size` | 127 / 255 | Paper sizes; score map is 17 |
 | `--no-batch-norm` | off | Removes backbone BatchNorm |
 | `--pos-radius-px` / `--neg-radius-px` | 25.0 / 50.0 | Reference label radii (search pixels) |

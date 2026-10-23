@@ -97,7 +97,7 @@ from train.common import (
 from train.common.run_artifacts import attach_run_log
 from train.common.run_io import default_experiment_name, prepare_run_dir
 from train.common.run_summary import run_data_free_analysis
-from train.common.seed import set_seeds
+from train.common.seed import DEFAULT_SEED, set_seeds
 
 # ---------------------------------------------------------------------
 
@@ -206,7 +206,7 @@ class TopographicVAEConfig:
     num_traversals: int = 12
 
     # --- plumbing ---
-    seed: int = 0
+    seed: int = DEFAULT_SEED
     gpu: Optional[int] = None
     output_dir: str = "results"
     experiment_name: Optional[str] = None
@@ -1301,7 +1301,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--no-model-analysis", action="store_true")
 
     plumbing = parser.add_argument_group("plumbing")
-    plumbing.add_argument("--seed", type=int, default=0)
+    plumbing.add_argument("--seed", type=int, default=DEFAULT_SEED)
     plumbing.add_argument("--gpu", type=int, default=None)
     plumbing.add_argument("--output-dir", default="results")
     plumbing.add_argument("--experiment-name", default=None)

@@ -93,7 +93,7 @@ written.
 | `--scale-csv` | off | min-max scale the CSV data with train statistics |
 | `--num-train-samples`, `--num-test-samples` | paper counts | rows of a synthetic target (at least 2) |
 | `--repeats` | 1 | independent fits with derived seeds (the paper uses 50) |
-| `--seed` | 0 | seed of the data and of the per-repeat seeds |
+| `--seed` | 42 (`DEFAULT_SEED`) | seed of the data and of the per-repeat seeds |
 | `--hidden-units` | `64` | hidden widths; empty string for a one-layer model |
 | `--num-basis` | `10` | basis functions per block, per layer |
 | `--basis` | `sigmoid` | `sigmoid`, `gaussian`, `relu`, `tanh`, `softplus`, `identity`, per layer |

@@ -35,7 +35,7 @@ from train.common.run_io import (
     prepare_run_dir,
     save_training_history_json,
 )
-from train.common import set_seeds
+from train.common import DEFAULT_SEED, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -76,7 +76,7 @@ class MambaLCTTrainingConfig:
     max_shift_ratio: float = 0.1
     augment: bool = True
     brightness_delta: float = 0.125
-    seed: int = 0
+    seed: int = DEFAULT_SEED
     prefetch_buffer: int = tf.data.AUTOTUNE
 
     # Model
@@ -388,7 +388,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-shift-ratio", type=float, default=0.1)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--brightness-delta", type=float, default=0.125)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--variant", type=str, default="mambalct-256",
                         choices=["mambalct-256", "mambalct-384"])
     parser.add_argument("--template-size", type=int, default=128)

@@ -49,7 +49,7 @@ from train.common.run_io import (
     prepare_run_dir,
     save_training_history_json,
 )
-from train.common import set_seeds
+from train.common import DEFAULT_SEED, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -86,7 +86,7 @@ class DeepSortTrainingConfig:
     k_shots: int = 4
     validation_id_fraction: float = 0.1
     augment: bool = True
-    seed: int = 0
+    seed: int = DEFAULT_SEED
     prefetch_buffer: int = tf.data.AUTOTUNE
 
     # Model / objective
@@ -426,7 +426,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--k-shots", type=int, default=4)
     parser.add_argument("--validation-id-fraction", type=float, default=0.1)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--loss-mode", type=str, default="cosine-softmax",
                         choices=["cosine-softmax", "triplet"])
     parser.add_argument("--dropout-rate", type=float, default=0.4)

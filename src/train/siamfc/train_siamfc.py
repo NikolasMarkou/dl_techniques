@@ -35,7 +35,7 @@ from train.common.run_io import (
     prepare_run_dir,
     save_training_history_json,
 )
-from train.common import set_seeds
+from train.common import DEFAULT_SEED, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -72,7 +72,7 @@ class SiamFCTrainingConfig:
     val_steps: Optional[int] = None
     augment: bool = True
     brightness_delta: float = 0.125
-    seed: int = 0
+    seed: int = DEFAULT_SEED
     prefetch_buffer: int = tf.data.AUTOTUNE
 
     # Model / labels
@@ -330,7 +330,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-steps", type=int, default=None)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--brightness-delta", type=float, default=0.125)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--exemplar-size", type=int, default=127)
     parser.add_argument("--search-size", type=int, default=255)
     parser.add_argument("--no-batch-norm", dest="use_batch_norm", action="store_false")

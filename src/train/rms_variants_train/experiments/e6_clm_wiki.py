@@ -64,6 +64,7 @@ from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.losses import MaskedCausalLMLoss
 from dl_techniques.utils.logger import logger
 
+from train.common.seed import DEFAULT_SEED
 from train.common.nlp import (
     DEFAULT_SEP_TOKEN_ID,
     build_clm_metrics,
@@ -286,7 +287,7 @@ _REGIME_MAP: Dict[str, Tuple[
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E6 4L causal-LM × Wikipedia 10k")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"])
     p.add_argument("--regime", type=str, default="default",
                    choices=list(_REGIME_MAP.keys()),
