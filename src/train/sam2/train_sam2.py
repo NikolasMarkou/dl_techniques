@@ -25,6 +25,10 @@ memorises the batch (its restored checkpoint scores a mask loss of 0.165 on 8 fi
 clicks in inference mode against a best constant of 0.959) and a 32-clip run beats a
 constant on 4 held-out clips (0.375 against 0.921); plan-2026-10-14T062616-81938e81
 D-261 and D-264, the SAM 2 README section 7.
+Those numbers were measured before plan-2026-10-14T062616-81938e81 D-285: since then
+every SAM 2 loss term and the total are summed over the clip's frames and averaged over
+the clips, as upstream does, ``num_frames`` times the earlier mean, so no SAM 2 loss
+value before D-285 compares with one after.
 **That is the whole claim.** No official Meta SAM 2 checkpoint has ever been
 loaded in this repository, no annotated video-object-segmentation dataset exists
 on this machine, and this trainer makes no accuracy claim on real video.

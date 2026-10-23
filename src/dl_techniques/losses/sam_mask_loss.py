@@ -370,6 +370,35 @@ class SAMIoULoss(keras.losses.Loss):
 
         ``error`` is the square, or the absolute value under ``use_l1_loss``.
         """
+        # Mean over the mask axis ONLY, keeping the batch axis. A scalar here
+        # would be multiplied by `sample_weight` before Keras reduces, charging
+        # every row the batch aggregate. Every row holds the same M mask slots, so
+        # the mean of this vector equals the old all-axes mean exactly -- including
+        # over the GT-absent rows SAM 2's training model zeroes in BOTH channels,
+        # which contribute an exact 0 either way.
+        return ops.mean(self.per_slot(y_true, y_pred), axis=-1)
+
+    def per_slot(self, y_true: Any, y_pred: Any) -> Any:
+        """The error of every ``(batch, mask)`` slot, unreduced.
+
+        Interface contract (callers: :meth:`call`, which takes its mean over
+        the slots, and ``SAM2IoULoss.call`` in ``sam2_video_loss.py``, which
+        groups the slots by frame): the arguments are those of :meth:`call`;
+        the return is ``(B, M)``, the squared (or, under ``use_l1_loss``,
+        absolute) difference between the predicted and the achieved IoU, the
+        achieved channel ``stop_gradient``-ed. It raises what :meth:`call`
+        raises.
+
+        Args:
+            y_true: Structurally unused, as in :meth:`call`.
+            y_pred: ``(B, M, 2)`` predicted and achieved IoU.
+
+        Returns:
+            ``(B, M)`` per-slot error.
+
+        Raises:
+            ValueError: if ``y_pred``'s shape is not ``(batch, num_masks, 2)``.
+        """
         shape = tuple(y_pred.shape)
         if len(shape) != 3 or shape[-1] != 2:
             raise ValueError(
@@ -381,15 +410,8 @@ class SAMIoULoss(keras.losses.Loss):
             )
         predicted = y_pred[..., 0]
         achieved = ops.stop_gradient(y_pred[..., 1])
-        # Mean over the mask axis ONLY, keeping the batch axis. A scalar here
-        # would be multiplied by `sample_weight` before Keras reduces, charging
-        # every row the batch aggregate. Every row holds the same M mask slots, so
-        # the mean of this vector equals the old all-axes mean exactly -- including
-        # over the GT-absent rows SAM 2's training model zeroes in BOTH channels,
-        # which contribute an exact 0 either way.
         difference = predicted - achieved
-        error = ops.abs(difference) if self.use_l1_loss else ops.square(difference)
-        return ops.mean(error, axis=-1)
+        return ops.abs(difference) if self.use_l1_loss else ops.square(difference)
 
     def get_config(self) -> Dict[str, Any]:
         """Full serialization config."""

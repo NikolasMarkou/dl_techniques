@@ -312,7 +312,12 @@ and the IoU loss (L1) are upstream's (`training/loss_fns.py` and the `sam2.1` tr
 config), pinned by `tests/test_models/test_sam2/test_the_loss_terms_match_upstream_loss_fns.py`;
 the focal `alpha` stays a scalar (D-073 of plan 2026-08-04T044628-4c240b4c), and the
 numbers in this section were measured with the earlier terms (dice smoothing `1e-6`, a
-smoothed IoU target, MSE). The clip does not remove those
+smoothed IoU target, MSE). Since D-285 every SAM 2 training loss term, and the total,
+is summed over the `T` frames and averaged over the clips, as upstream's
+`MultiStepMultiMasksAndIous.forward` adds its frames (`training/loss_fns.py` l.167-182;
+pinned by `tests/test_models/test_sam2/test_the_loss_sums_over_frames_as_upstream.py`):
+`T` times the earlier mean over `(B, T)`, so no SAM 2 loss value logged or quoted before
+D-285, this section's included, compares with one after. The clip does not remove those
 spikes: without it the same command jumps to 22 at epoch 16 and is still at 3.9 at
 epoch 30. Held out, the clip moves the answer by less than the seed does (32-clip
 command, clip on against off: seed 42 0.375 against 0.353, seed 43 0.225 against

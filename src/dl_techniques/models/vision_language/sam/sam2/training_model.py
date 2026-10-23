@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 
 from dl_techniques.losses.sam2_video_loss import (
-    SAM2GatedMaskLoss, mask_presence_gate, select_lowest_loss_mask)
-from dl_techniques.losses.sam_mask_loss import SAMIoULoss
+    SAM2GatedMaskLoss, SAM2IoULoss, SAM2ObjectScoreLoss, mask_presence_gate,
+    select_lowest_loss_mask)
 from dl_techniques.models.vision_language.sam.sam1.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
 from .model import SAM2, _num_prompt_points, _select_best_by_iou
@@ -54,9 +54,9 @@ SAM2_OBJECT_SCORE_LOGITS = "object_score_logits"
 #: frame, see the class docstring): ``[..., 0]`` is the
 #: model's predicted IoU and ``[..., 1]`` the IoU it actually achieved against
 #: the ground truth, already ``stop_gradient``-ed. Both channels are ZEROED on
-#: rows the ground truth calls absent, which is what makes ``SAMIoULoss``
-#: reusable unchanged (D-052): ``zero - zero`` contributes exactly ``0`` to the
-#: mean and exactly ``0`` to the gradient, reproducing upstream's
+#: rows the ground truth calls absent, which is what makes ``SAMIoULoss``'s
+#: error reusable unchanged (D-052): ``zero - zero`` contributes exactly ``0``
+#: to the loss and exactly ``0`` to the gradient, reproducing upstream's
 #: ``loss_iou * target_obj``.
 SAM2_IOU_SUPERVISION = "iou_supervision"
 #: Upstream SAM 2's achieved-IoU target, ``area_i / clamp(area_u, min=1)``
@@ -135,9 +135,10 @@ class SAM2TrainingModel(keras.Model):
     * ``iou_supervision``: ``(B, T * K, 2)`` -- see :data:`SAM2_IOU_SUPERVISION`.
       ``K`` slots per frame: on a multimask frame 0 its ``K = 3`` candidates'
       pairs, on every other frame its one pair repeated ``K`` times, so the
-      loss's mean over slots weighs each frame alike and averages frame 0
-      over its candidates (upstream's ``supervise_all_iou``). ``K == 1``
-      when frame 0 is not multimask.
+      loss averages each frame's ``K`` slots (frame 0 over its candidates,
+      upstream's ``supervise_all_iou``) and sums the frames
+      (:class:`SAM2IoULoss`, D-285). ``K == 1`` when frame 0 is not
+      multimask.
 
     Example:
 
@@ -185,7 +186,9 @@ class SAM2TrainingModel(keras.Model):
         # The ONE mask loss: it ranks a multimask frame's candidates
         # (select_lowest_loss_mask) and `compile_sam2_video_trainer` compiles it
         # on `low_res_logits`, so the selection and the loss share their weights.
-        self.mask_loss = SAM2GatedMaskLoss()
+        # Summed over the frames, as upstream (D-285); the ranking reads
+        # `per_mask`, which no reduction touches.
+        self.mask_loss = SAM2GatedMaskLoss(sum_over_frames=True)
 
     def build(self, input_shape: Optional[Any] = None) -> None:
         """Build the wrapped SAM 2 eagerly, then this model.
@@ -613,6 +616,11 @@ def compile_sam2_video_trainer(
 ) -> None:
     """Compile ``model`` with the three losses SAM 2 is trained with.
 
+    Every term is upstream's frame sum (``training/loss_fns.py`` l.167-182,
+    D-285): per clip the sum over the ``T`` frames, then the mean over the
+    ``B`` clips (one object per clip). The values are ``T`` times the
+    pre-D-285 mean over ``(B, T)``.
+
     This function exists so that the ``loss=`` dict has exactly ONE home. H-5:
     a dict ``y_pred`` requires ``loss=`` keyed to the output NAMES, and nothing
     in Keras checks the two sets against each other -- a key spelled in the
@@ -626,8 +634,8 @@ def compile_sam2_video_trainer(
     :param mask_weight: Weight of the gated focal+dice term. The focal:dice
         ratio itself lives inside :class:`SAM2GatedMaskLoss`.
     :type mask_weight: float
-    :param object_score_weight: Weight of the object-score BCE. Upstream's
-        ``loss_class: 1``.
+    :param object_score_weight: Weight of the object-score BCE
+        (:class:`SAM2ObjectScoreLoss`). Upstream's ``loss_class: 1``.
     :type object_score_weight: float
     :param iou_weight: Weight of the IoU regression term, an L1 loss
         (upstream's ``iou_use_l1_loss: true``, ``loss_iou: 1``).
@@ -640,18 +648,25 @@ def compile_sam2_video_trainer(
     # DECISION plan-2026-08-04T044628-4c240b4c/D-052: the object-score BCE term
     # is mandatory, since every consumer thresholds object_score_logits hard at >0 -- a mask-only loss can't train or reopen that head. D-055: jit_compile=False is mandatory too (Hiera's bicubic resize has no XLA GPU kernel). See decisions.md.
     compile_kwargs.setdefault("jit_compile", False)
+    # DECISION plan-2026-10-14T062616-81938e81/D-285
+    # All three terms SUM over the frames (upstream's `forward`, loss_fns.py
+    # l.167-182): the mask loss built with `sum_over_frames=True`, the
+    # frame-summing BCE and IoU classes. Do NOT compile stock
+    # `BinaryCrossentropy` or `SAMIoULoss` here (a mean over (B, T): 1/T of
+    # upstream's, and the 0.1 clip binds at a T times smaller gradient), and
+    # do NOT restore the mean by `loss_weights` times T (D-284).
     model.compile(
         optimizer=optimizer,
         loss={
             SAM2_LOW_RES_LOGITS: model.mask_loss,
-            SAM2_OBJECT_SCORE_LOGITS: keras.losses.BinaryCrossentropy(
-                from_logits=True),
+            SAM2_OBJECT_SCORE_LOGITS: SAM2ObjectScoreLoss(),
             # DECISION plan-2026-10-14T062616-81938e81/D-283
             # L1, upstream SAM 2's `iou_use_l1_loss: true` (sam2.1 training
             # config; `loss_fns.py:117-118`). Do NOT drop the flag back to
             # SAMIoULoss's MSE default: that is SAM 1's loss, and it gives an
             # IoU error of e a gradient 2e instead of sign(e).
-            SAM2_IOU_SUPERVISION: SAMIoULoss(use_l1_loss=True),
+            SAM2_IOU_SUPERVISION: SAM2IoULoss(
+                num_frames=model.num_frames, use_l1_loss=True),
         },
         loss_weights={
             SAM2_LOW_RES_LOGITS: float(mask_weight),

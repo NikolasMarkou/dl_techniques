@@ -248,13 +248,18 @@ class TestThroughTheTrainer:
         return model, clip_inputs(model, absent_frames=(2,))
 
     def test_b_the_mask_loss_equals_the_oracle(self) -> None:
-        """Every frame is the sentinel; the loss is the oracle's row mean."""
+        """Every frame is the sentinel; the loss is the oracle's rows summed over frames.
+
+        The wrapper's mask loss sums each clip's frames and averages the clips
+        (upstream's ``forward``, D-285); the per-row values are unchanged.
+        """
         model, inputs = self._called(CALLED_ABSENT)
         outputs, loss, _ = every_gradient(model, inputs)
         logits = np.asarray(outputs[SAM2_LOW_RES_LOGITS])
         np.testing.assert_array_equal(logits, NO_OBJ_SCORE)
 
-        expected = float(upstream_rows_oracle(inputs["gt_masks"], logits).mean())
+        expected = float(upstream_rows_oracle(
+            inputs["gt_masks"], logits).sum(axis=1).mean())
         assert float(loss) == pytest.approx(expected, rel=VALUE_RTOL), (
             f"mask loss {float(loss)!r}, oracle {expected!r}")
         assert expected > 100.0, "the fixture no longer gives a large value"
@@ -347,10 +352,10 @@ class TestTheIoUHead:
         np.testing.assert_array_equal(packed[..., 1], achieved)
 
         absolute = np.abs(predicted - achieved)
+        # The compiled IoU loss sums the frames and averages the clips (D-285).
         assert float(value) == pytest.approx(
-            float(absolute.mean()), rel=VALUE_RTOL)
-        expected_gradient = float(np.sign(predicted - achieved).sum()
-                                  / (BATCH * FRAMES))
+            float(absolute.sum(axis=1).mean()), rel=VALUE_RTOL)
+        expected_gradient = float(np.sign(predicted - achieved).sum() / BATCH)
         # One bias entry per mask token; a single-mask frame reads token 0 only.
         expected_bias = np.zeros(gradient.shape)
         expected_bias[0] = expected_gradient

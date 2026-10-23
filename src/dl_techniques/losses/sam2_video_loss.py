@@ -100,17 +100,30 @@ bounds from it) and is now **0.0**; the ``4.235165241142481e-22`` it used to
 carry was the clip's own per-pixel floor, and its disappearance is one of the
 RED proofs that the formulation actually changed.
 
-What is deliberately NOT here
------------------------------
-* **No object-score loss class.** Upstream's ``loss_class`` is
+The frame sum
+-------------
+Upstream's ``MultiStepMultiMasksAndIous.forward`` (``training/loss_fns.py``
+l.167-182) ADDS the losses of the clip's frames; each frame's terms are already
+a mean over its objects (divided by ``num_objects``, the objects of one frame).
+This port has one object per clip, so every term the video trainer compiles is
+a sum over the ``T`` frames of a mean over the ``B`` clips: :func:`frame_sum`
+per clip, then Keras' ``sum_over_batch_size``. Before plan-2026-10-14T062616-81938e81
+D-285 each term was a mean over ``(B, T)``, ``1 / T`` of upstream's.
+
+* :class:`SAM2GatedMaskLoss` takes ``sum_over_frames``; the training model
+  builds it with ``True``. The default stays the mean over every row, the
+  reduction of its parent :class:`SAMMaskLoss`, against which it is compared
+  by value.
+* :class:`SAM2ObjectScoreLoss` is upstream's ``loss_class``:
   ``sigmoid_focal_loss(..., focal_gamma_obj_score=0.0,
-  focal_alpha_obj_score=-1.0)`` at weight 1 -- i.e. a plain BCE. It is stock
-  ``keras.losses.BinaryCrossentropy(from_logits=True)``; a bespoke class with
-  one call site and no behaviour of its own would be an unearned abstraction.
-* **No IoU loss class.** ``SAMIoULoss`` is reused with ``use_l1_loss=True``,
-  upstream's ``iou_use_l1_loss: true``; the MODEL zeroes both channels of its
+  focal_alpha_obj_score=-1.0)`` at weight 1, i.e. a plain BCE from logits,
+  summed over frames. Stock ``BinaryCrossentropy`` averages them.
+* :class:`SAM2IoULoss` is ``SAMIoULoss`` (``use_l1_loss=True`` in the trainer,
+  upstream's ``iou_use_l1_loss: true``) with each frame's ``K`` slots averaged
+  (``supervise_all_iou``) and the frames summed; the slots are frame-major, so
+  it carries ``num_frames``. The MODEL zeroes both channels of its
   ``iou_supervision`` output on absent rows, which makes both the absolute
-  error and its gradient exactly 0 under a mean reduction.
+  error and its gradient exactly 0.
 
 Dice smoothing
 --------------
@@ -133,6 +146,7 @@ from .segmentation_loss import LossConfig
 from .segmentation_metrics import dice_per_sample
 from .sam_mask_loss import (
     DICE_CHANNELS,
+    SAMIoULoss,
     SAMMaskLoss,
     _require_channels_last,
     _static_mask_stack_shape,
@@ -186,6 +200,49 @@ def mask_presence_gate(masks: Any) -> Any:
     :rtype: Any
     """
     return keras.ops.max(masks, axis=(-2, -1), keepdims=True) > 0.0
+
+
+def frame_sum(values: Any, num_frames: int) -> Any:
+    """Each clip's per-slot values, averaged within a frame and SUMMED over frames.
+
+    Upstream's ``MultiStepMultiMasksAndIous.forward`` (``training/loss_fns.py``
+    l.167-182) adds the losses of the clip's frames; within a frame the IoU
+    term averages the candidates (``supervise_all_iou``, l.280). This is that
+    reduction over the axes the port has.
+
+    Interface contract (callers: :meth:`SAM2GatedMaskLoss.call`,
+    :meth:`SAM2ObjectScoreLoss.call`, :meth:`SAM2IoULoss.call`): ``values`` is
+    ``(B, T * k)``, frame-major (the ``k`` slots of frame 0 first), with a
+    static last axis; the return is ``(B,)``, ``sum_t mean_k values[:, t, k]``.
+    Keras' ``sum_over_batch_size`` then takes the mean over ``B``, upstream's
+    ``/ num_objects`` with one object per clip.
+
+    # DECISION plan-2026-10-14T062616-81938e81/D-285
+    # A SUM over frames, as upstream adds `losses[k] += v` per frame. Do NOT
+    # go back to the mean over (B, T): every term was then 1/T of upstream's,
+    # and the 0.1 global-norm clip (D-264) bound at a gradient T times smaller
+    # than upstream's. Do NOT replace the sum with the mean times a constant T
+    # either (D-284): the reference's operation is the sum.
+
+    :param values: ``(B, T * k)`` per-slot values.
+    :type values: Any
+    :param num_frames: ``T``.
+    :type num_frames: int
+    :return: ``(B,)`` per-clip frame sum.
+    :rtype: Any
+    :raises ValueError: if ``values`` is not rank 2, its last axis is not
+        static, or it is not a positive multiple of ``num_frames``.
+    """
+    slots = values.shape[-1] if len(values.shape) == 2 else None
+    frames = int(num_frames)
+    if slots is None or frames < 1 or int(slots) % frames or int(slots) == 0:
+        raise ValueError(
+            f"frame_sum expects (batch, num_frames * slots) values with a "
+            f"static last axis that num_frames={num_frames} divides; got "
+            f"shape {tuple(values.shape)}.")
+    per_frame = keras.ops.mean(
+        keras.ops.reshape(values, (-1, frames, int(slots) // frames)), axis=-1)
+    return keras.ops.sum(per_frame, axis=-1)
 
 
 def _focal_from_logits(truth: Any, logits: Any, gamma: float, alpha: float) -> Any:
@@ -272,6 +329,11 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
     :param config: ``LossConfig`` of the focal and dice terms. Defaults to
         ``LossConfig(num_classes=2, smooth_factor=SAM2_DICE_SMOOTH)``, upstream
         SAM 2's dice smoothing; a given config is used as given.
+    :param sum_over_frames: ``True``: :meth:`call` returns each clip's rows
+        SUMMED over the mask axis (the frame axis of the video trainer),
+        ``(B,)``, upstream's frame sum (:func:`frame_sum`, D-285); the
+        training model builds the loss so. ``False`` (default): the mean over
+        every row, the reduction of :class:`SAMMaskLoss`.
     :param kwargs: Everything else :class:`SAMMaskLoss` accepts
         (``focal_weight``, ``dice_weight``, ``from_logits``, ``name``,
         ``reduction``).
@@ -302,7 +364,8 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
     """
 
     def __init__(self, name: str = "sam2_gated_mask_loss",
-                 config: Optional[LossConfig] = None, **kwargs: Any) -> None:
+                 config: Optional[LossConfig] = None,
+                 sum_over_frames: bool = False, **kwargs: Any) -> None:
         # DECISION plan-2026-10-14T062616-81938e81/D-283
         # The SAM 2 default carries upstream's dice smoothing 1
         # (`training/loss_fns.py:46`). Do NOT move `LossConfig.smooth_factor`
@@ -312,23 +375,30 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         if config is None:
             config = LossConfig(num_classes=2, smooth_factor=SAM2_DICE_SMOOTH)
         super().__init__(name=name, config=config, **kwargs)
+        self.sum_over_frames = bool(sum_over_frames)
 
     def call(self, y_true: Any, y_pred: Any) -> Any:
         """Compute the gated ``focal_weight * focal + dice_weight * dice``.
 
-        The mean of :meth:`per_mask` over every ``(batch, mask)`` row: the focal
-        term is a per-row pixel mean and the dice term a per-row value, and
-        every row has the same ``h * w`` pixels, so this equals the focal mean
-        over all pixels plus the dice mean over all rows.
+        Under ``sum_over_frames``: each clip's :meth:`per_mask` rows summed over
+        the mask (frame) axis, ``(B,)``, which Keras then averages over ``B``
+        (:func:`frame_sum`). Otherwise the mean of :meth:`per_mask` over every
+        ``(batch, mask)`` row: the focal term is a per-row pixel mean and the
+        dice term a per-row value, and every row has the same ``h * w`` pixels,
+        so this equals the focal mean over all pixels plus the dice mean over
+        all rows.
 
         :param y_true: ``(B, M, h, w)`` binary ground truth.
         :type y_true: Any
         :param y_pred: ``(B, M, h, w)`` mask logits or probabilities.
         :type y_pred: Any
-        :return: Scalar loss.
+        :return: ``(B,)`` under ``sum_over_frames``, else a scalar.
         :rtype: Any
         """
-        return keras.ops.mean(self.per_mask(y_true, y_pred))
+        rows = self.per_mask(y_true, y_pred)
+        if self.sum_over_frames:
+            return frame_sum(rows, int(rows.shape[-1]))
+        return keras.ops.mean(rows)
 
     def per_mask(self, y_true: Any, y_pred: Any) -> Any:
         """The gated loss of every ``(batch, mask)`` row, unreduced.
@@ -440,13 +510,113 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
             smooth=self.config.smooth_factor)
 
     def get_config(self) -> Dict[str, Any]:
-        """Full serialization config, identical in shape to the parent's.
+        """Full serialization config: the parent's plus ``sum_over_frames``.
 
         :return: Configuration dict consumable by
             :meth:`SAMMaskLoss.from_config`.
         :rtype: Dict[str, Any]
         """
-        return super().get_config()
+        config = super().get_config()
+        config["sum_over_frames"] = self.sum_over_frames
+        return config
+
+
+@register_dl_technique("dl_techniques.losses.sam2_video_loss")
+class SAM2ObjectScoreLoss(keras.losses.Loss):
+    """Upstream SAM 2's ``loss_class``: BCE from logits, summed over frames.
+
+    ``sigmoid_focal_loss`` at ``focal_alpha_obj_score = -1`` and
+    ``focal_gamma_obj_score = 0`` (``training/loss_fns.py`` l.248-254, the
+    ``sam2.1`` training config) is a plain BCE with logits, a mean over the
+    frame's objects (l.90); ``forward`` adds the frames (l.177-180). Ungated:
+    the target is the ground-truth presence, and an absent frame is trained
+    towards a negative score.
+
+    :param name: Keras loss name.
+    :param kwargs: Forwarded to ``keras.losses.Loss`` (``reduction``,
+        ``dtype``).
+
+    Call args:
+
+    * ``y_true``: ``(B, T, 1)`` presence, ``1`` where the frame's ground truth
+      has foreground.
+    * ``y_pred``: ``(B, T, 1)`` object-score logits.
+
+    :raises ValueError: if ``y_pred`` is not ``(B, T, 1)``.
+    """
+
+    def __init__(self, name: str = "sam2_object_score_loss",
+                 **kwargs: Any) -> None:
+        super().__init__(name=name, **kwargs)
+
+    def call(self, y_true: Any, y_pred: Any) -> Any:
+        """Per clip: the BCE of every frame, summed over the frames.
+
+        :param y_true: ``(B, T, 1)`` presence.
+        :type y_true: Any
+        :param y_pred: ``(B, T, 1)`` object-score logits.
+        :type y_pred: Any
+        :return: ``(B,)``.
+        :rtype: Any
+        """
+        shape = tuple(y_pred.shape)
+        if len(shape) != 3 or shape[-1] != 1:
+            raise ValueError(
+                "SAM2ObjectScoreLoss expects y_pred of shape (batch, "
+                f"num_frames, 1), the 'object_score_logits' output; got {shape}.")
+        per_frame = keras.losses.binary_crossentropy(
+            keras.ops.cast(y_true, y_pred.dtype), y_pred, from_logits=True)
+        return frame_sum(per_frame, int(shape[1]))
+
+
+@register_dl_technique("dl_techniques.losses.sam2_video_loss")
+class SAM2IoULoss(SAMIoULoss):
+    """:class:`SAMIoULoss` averaged over each frame's slots and summed over frames.
+
+    ``iou_supervision`` is ``(B, T * K, 2)``, frame-major, ``K`` slots per
+    frame (``SAM2TrainingModel``); upstream's ``iou_loss`` with
+    ``supervise_all_iou`` averages a frame's candidates (l.280) and ``forward``
+    adds the frames (l.177-180). The slot axis alone does not say where a
+    frame ends, hence ``num_frames``.
+
+    :param num_frames: ``T``, the training model's ``num_frames``.
+    :param use_l1_loss: As :class:`SAMIoULoss`; the trainer passes ``True``
+        (upstream's ``iou_use_l1_loss: true``, D-283).
+    :param name: Keras loss name.
+    :param kwargs: Forwarded to :class:`SAMIoULoss`.
+
+    :raises ValueError: if ``num_frames`` is below 1, or (at call time) the
+        slot axis is not a multiple of it.
+    """
+
+    def __init__(self, num_frames: int, use_l1_loss: bool = False,
+                 name: str = "sam2_iou_loss", **kwargs: Any) -> None:
+        super().__init__(use_l1_loss=use_l1_loss, name=name, **kwargs)
+        if int(num_frames) < 1:
+            raise ValueError(f"num_frames must be >= 1; got {num_frames}.")
+        self.num_frames = int(num_frames)
+
+    def call(self, y_true: Any, y_pred: Any) -> Any:
+        """Per clip: each frame's mean slot error, summed over the frames.
+
+        :param y_true: Structurally unused, as in :class:`SAMIoULoss`.
+        :type y_true: Any
+        :param y_pred: ``(B, T * K, 2)`` predicted and achieved IoU.
+        :type y_pred: Any
+        :return: ``(B,)``.
+        :rtype: Any
+        """
+        return frame_sum(self.per_slot(y_true, y_pred), self.num_frames)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Full serialization config: the parent's plus ``num_frames``.
+
+        :return: Configuration dict.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config["num_frames"] = self.num_frames
+        return config
 
 
 def select_lowest_loss_mask(loss: SAM2GatedMaskLoss, truth: Any, candidates: Any) -> Any:

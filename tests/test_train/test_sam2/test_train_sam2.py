@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 import train.sam2.train_sam2 as train_sam2_module
+from dl_techniques.losses.sam2_video_loss import SAM2ObjectScoreLoss
 from dl_techniques.models.vision_language.sam.sam2.model import create_sam2
 from dl_techniques.models.vision_language.sam.sam2.training_model import (
     OUTPUT_KEYS,
@@ -588,11 +589,21 @@ class TestCompilation:
             self) -> None:
         """Upstream's ``loss_class`` at ``focal_gamma_obj_score = 0.0`` and
         ``focal_alpha_obj_score = -1.0`` IS a plain BCE, and the head emits
-        LOGITS -- ``from_logits=False`` would silently score sigmoids twice."""
+        LOGITS -- ``from_logits=False`` would silently score sigmoids twice.
+
+        Since D-285 the term is :class:`SAM2ObjectScoreLoss`, the BCE summed
+        over frames, so the claim is asserted by value: one clip, logits
+        ``+2`` (present) and ``-1`` (absent) give ``softplus(-2) +
+        softplus(-1)``; a probability-space BCE would read those logits as
+        clipped probabilities and give a different number.
+        """
         model = create_sam2_training_model(_probe_config())
         bce = model.loss[SAM2_OBJECT_SCORE_LOGITS]
-        assert isinstance(bce, keras.losses.BinaryCrossentropy)
-        assert bce.from_logits is True
+        assert isinstance(bce, SAM2ObjectScoreLoss)
+        value = float(bce(np.array([[[1.0], [0.0]]], dtype="float32"),
+                          np.array([[[2.0], [-1.0]]], dtype="float32")))
+        expected = float(np.logaddexp(0.0, -2.0) + np.logaddexp(0.0, -1.0))
+        assert value == pytest.approx(expected, rel=1e-6)
 
     def test_jit_compile_is_false_on_the_compiled_model(self) -> None:
         """MANDATORY on the gate device (D-055), and asserted, not assumed.

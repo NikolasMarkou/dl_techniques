@@ -314,14 +314,23 @@ class TestTheIoULoss:
 
     def test_the_compiled_iou_loss_is_upstreams_l1(
             self, built_trainer: SAM2TrainingModel) -> None:
-        """Value and gradient of ``compile_sam2_video_trainer``'s IoU loss."""
+        """Value and gradient of ``compile_sam2_video_trainer``'s IoU loss.
+
+        The compiled loss sums a clip's frames (D-285), so the one-frame
+        fixture is frame 0 of a ``T``-frame pack whose other frames are zero
+        (gated-absent pairs, which contribute exactly 0): the value is the
+        frame's own.
+        """
         compile_sam2_video_trainer(built_trainer)
         loss = built_trainer.loss[SAM2_IOU_SUPERVISION]
+        later_frames = np.zeros(
+            (3, 3 * (built_trainer.num_frames - 1), 2), dtype="float32")
 
         predicted = tf.Variable(PREDICTED_IOU)
         with tf.GradientTape() as tape:
             packed = keras.ops.stack(
                 [predicted, keras.ops.convert_to_tensor(ACHIEVED_IOU)], axis=-1)
+            packed = keras.ops.concatenate([packed, later_frames], axis=1)
             value = loss(np.zeros((3, 2), dtype="float32"), packed)
         gradient = np.asarray(tape.gradient(value, predicted))
 
