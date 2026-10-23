@@ -20,7 +20,8 @@ References:
 
 from typing import Any, Dict, Tuple
 
-#: Every variant must satisfy ``embed_dim >= (2 * radius + 1) ** 2`` or the
+#: Every variant must satisfy ``embed_dim >= (2 * radius + 1) ** grid_dim`` and
+#: have every axis of its resolved grid ``>= 2 * radius + 1``, or the
 #: neighbourhood cannot fit on its grid, and ``embed_dim % num_heads == 0``.
 #: :func:`validate_variant` is the single place that is enforced.
 
@@ -71,27 +72,59 @@ MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def grid_shape_of(embed_dim: int) -> Tuple[int, int]:
+def grid_shape_of(embed_dim: int, grid_dim: int = 2) -> Tuple[int, ...]:
     """The unit grid a given width sits on.
 
     Delegates to the layer's own resolver so there is exactly one factoring rule
     in the tree: a model variant and the tap it builds cannot disagree about what
     grid a width implies, and a disagreement here would surface as a tap that
     raises at build time deep inside the model.
+
+    :param embed_dim: Model width, i.e. the number of units on the grid.
+    :type embed_dim: int
+    :param grid_dim: Number of grid axes, 2 (the default, the paper's layout) or 3.
+    :type grid_dim: int
+    :return: The grid, ``(height, width)`` for 2 and a three-axis tuple for 3.
+    :rtype: Tuple[int, ...]
     """
     from dl_techniques.layers.regularization.spatial_smoothness import (
         resolve_grid_shape,
     )
 
-    return resolve_grid_shape(embed_dim)
+    return resolve_grid_shape(embed_dim, grid_dim=grid_dim)
 
 
-def validate_variant(name: str, config: Dict[str, Any], radius: int) -> None:
+def _radius_advice(grid: Tuple[int, ...]) -> str:
+    """Name the largest radius a grid can host, or say that none can.
+
+    A patch of side ``2 * radius + 1`` has to fit along the shortest axis, so the
+    answer is ``(min(grid) - 1) // 2`` and it is at least 1 only when that axis
+    has 3 or more cells.
+    """
+    min_axis = min(grid)
+    if min_axis >= 3:
+        return f"The largest radius this grid can use is {(min_axis - 1) // 2}."
+    return (
+        "No radius can work on this grid (the shortest axis is below 3); "
+        "pick a different width."
+    )
+
+
+def validate_variant(
+    name: str, config: Dict[str, Any], radius: int, grid_dim: int = 2
+) -> None:
     """Check one variant against the constraints a tap imposes.
 
     Called for every shipped preset at class construction, not just the one a
     caller happens to ask for: a variant table with one entry sitting on a
     degenerate boundary is the shape of defect that ships and is never exercised.
+
+    Two checks bound the neighbourhood. The floor ``(2 * radius + 1) ** grid_dim``
+    on the total unit count is necessary but not sufficient: a patch has to fit
+    along EVERY axis of the resolved grid, so the grid is resolved and each axis
+    is compared against ``2 * radius + 1``. That axis test is exactly the
+    condition :func:`~dl_techniques.layers.regularization.spatial_smoothness.build_patch_tables`
+    enforces, so a configuration that builds is never rejected here.
 
     :param name: Variant name, for the error message.
     :type name: str
@@ -99,13 +132,16 @@ def validate_variant(name: str, config: Dict[str, Any], radius: int) -> None:
     :type config: Dict[str, Any]
     :param radius: The neighbourhood radius the model will build taps with.
     :type radius: int
-    :raises ValueError: If the width cannot host the grid, cannot fill a
-        neighbourhood, or does not divide among the heads -- naming the variant
-        and the offending value in each case.
+    :param grid_dim: Number of grid axes, 2 or 3.
+    :type grid_dim: int
+    :raises ValueError: If the width does not divide among the heads, cannot fill
+        a neighbourhood, or resolves to a grid with an axis shorter than the
+        patch side -- naming the variant and the offending value in each case.
     """
     embed_dim = int(config["embed_dim"])
     num_heads = int(config["num_heads"])
-    min_units = (2 * int(radius) + 1) ** 2
+    side = 2 * int(radius) + 1
+    min_units = side ** grid_dim
 
     if embed_dim % num_heads != 0:
         raise ValueError(
@@ -113,11 +149,38 @@ def validate_variant(name: str, config: Dict[str, Any], radius: int) -> None:
             f"num_heads ({num_heads})"
         )
     if embed_dim < min_units:
+        # The 2D wording is pinned verbatim; only the 3D message carries the
+        # radius advice, because a cube below the default radius's floor is the
+        # common 3D mistake and the floor is the check that catches it first.
+        hint = (
+            f" {_radius_advice(grid_shape_of(embed_dim, grid_dim))}"
+            if grid_dim != 2
+            else ""
+        )
         raise ValueError(
             f"variant {name!r}: embed_dim ({embed_dim}) is below the "
-            f"{(2 * radius + 1)}x{(2 * radius + 1)} = {min_units} units a "
+            f"{'x'.join([str(side)] * grid_dim)} = {min_units} units a "
             f"radius-{radius} neighbourhood needs. Lower the radius, or pick a "
-            f"wider variant."
+            f"wider variant.{hint}"
+        )
+
+    grid = grid_shape_of(embed_dim, grid_dim)
+    # DECISION plan-2026-10-23T141429-390f3815/D-007: the unit count alone is not
+    # enough. Do NOT validate only the total (the floor above): 784 units at
+    # radius 4 clear the 3D floor of 729 yet resolve to (7, 8, 14), whose first
+    # axis cannot hold a 9-wide patch, so the error would fire deep inside the tap
+    # build. The same hole exists in 2D (997 = 1 x 997 clears the floor and dies at
+    # tap build); for grid_dim=2 this check only moves WHERE an already
+    # unbuildable configuration fails, never what builds.
+    short = [(k, n) for k, n in enumerate(grid) if n < side]
+    if short:
+        advice = _radius_advice(grid)
+        offenders = "; ".join(f"axis {k} has {n}" for k, n in short)
+        raise ValueError(
+            f"variant {name!r}: embed_dim ({embed_dim}) resolves to the "
+            f"{'x'.join(str(n) for n in grid)} grid, but a radius-{radius} "
+            f"neighbourhood needs every axis >= {side}: {offenders}. {advice} "
+            f"Lower the radius, or pick a wider variant."
         )
 
 
@@ -127,6 +190,19 @@ def validate_all_variants(radius: int = DEFAULT_RADIUS) -> None:
     Run at import of the model module so a table edit that breaks a variant fails
     on the import that introduced it, not on whichever training run happens to
     select that row first.
+
+    A row may carry its own ``"radius"`` and ``"grid_dim"``; each is judged by its
+    own values and falls back to ``radius`` and 2 when absent, so the rows that
+    predate the keys behave exactly as before.
+
+    :param radius: Radius used for every row that does not carry its own.
+    :type radius: int
+    :raises ValueError: From :func:`validate_variant`, for the first bad row.
     """
     for name, config in MODEL_VARIANTS.items():
-        validate_variant(name, config, radius)
+        validate_variant(
+            name,
+            config,
+            int(config.get("radius", radius)),
+            int(config.get("grid_dim", 2)),
+        )
