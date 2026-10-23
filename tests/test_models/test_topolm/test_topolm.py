@@ -169,8 +169,8 @@ class TestVariantRegistry:
             grid_dim = config.get("grid_dim", 2)
             radius = config.get("radius", DEFAULT_RADIUS)
             side = 2 * radius + 1
-            grid = grid_shape_of(config["embed_dim"], config.get("grid_dim", 2))
-            assert len(grid) == config.get("grid_dim", 2), name
+            grid = grid_shape_of(config["embed_dim"], grid_dim)
+            assert len(grid) == grid_dim, name
             assert int(np.prod(grid)) == config["embed_dim"], name
             assert config["embed_dim"] % config["num_heads"] == 0, name
             assert config["embed_dim"] >= side ** grid_dim, name
