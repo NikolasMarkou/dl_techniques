@@ -508,4 +508,7 @@ replaces. Pinned by `tests/test_analyzer/test_spectral_truncation_policy.py`.
 
 - `AGENTS.md` — module map and authoring rules.
 - `SETOL.md`, `CORRELATION_TRAPS.md` — the theory behind the spectral metrics.
+- `SPECTRAL_CHEATSHEET.md` — text-only theory companion: why the metrics are what they
+  are, universality classes, the R-transform origins of α/α̂, the ERG condition, the
+  funnel, traps, and one-paragraph verbal explanations of each headline metric.
 - Tests: `tests/test_analyzer/`.
