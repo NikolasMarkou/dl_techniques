@@ -11,8 +11,10 @@ live and pushes the score negative.
 
 :class:`SAM2GatedMaskLoss` is that gate, and it lives in a NEW module rather
 than as an option on :class:`~dl_techniques.losses.sam_mask_loss.SAMMaskLoss`
-because ``sam_mask_loss.py`` is protected by SAM 1's 357-test gate and must
-stay byte-unchanged. Everything that module owns -- ``match_mask_axis``,
+because SAM 1's mask loss in ``sam_mask_loss.py`` is protected by SAM 1's
+357-test gate and its values must not move (the one later change there,
+``SAMIoULoss``'s opt-in ``use_l1_loss``, defaults to SAM 1's MSE; D-283).
+Everything that module owns -- ``match_mask_axis``,
 ``to_dice_layout``, ``to_focal_layout``, the two ``SegmentationWrapperLoss``
 instances and their layout refusals -- is INHERITED or imported here, never
 re-derived: H-17 records that a 1-channel focal is bit-identically blind to
@@ -75,8 +77,8 @@ by ``test_a_clip_with_no_absent_row_matches_the_ungated_loss``, which still
 compares this class against plain :class:`SAMMaskLoss` by value. The clip is
 the only thing that was removed.
 
-``losses/segmentation_loss.py`` and ``losses/sam_mask_loss.py`` are NOT touched:
-both are inside SAM 1's 357-test gate. SAM 1's own mask supervision therefore
+``losses/segmentation_loss.py`` and ``SAMMaskLoss`` are NOT touched: both are
+inside SAM 1's 357-test gate. SAM 1's own mask supervision therefore
 still carries this clip; see ``decisions.md`` D-072 for why that is recorded and
 not fixed here.
 
@@ -105,19 +107,29 @@ What is deliberately NOT here
   focal_alpha_obj_score=-1.0)`` at weight 1 -- i.e. a plain BCE. It is stock
   ``keras.losses.BinaryCrossentropy(from_logits=True)``; a bespoke class with
   one call site and no behaviour of its own would be an unearned abstraction.
-* **No IoU loss class.** ``SAMIoULoss`` is reused unchanged; the MODEL zeroes
-  both channels of its ``iou_supervision`` output on absent rows, which makes
-  both the squared error and its gradient exactly 0 under a mean reduction.
+* **No IoU loss class.** ``SAMIoULoss`` is reused with ``use_l1_loss=True``,
+  upstream's ``iou_use_l1_loss: true``; the MODEL zeroes both channels of its
+  ``iou_supervision`` output on absent rows, which makes both the absolute
+  error and its gradient exactly 0 under a mean reduction.
+
+Dice smoothing
+--------------
+Upstream's ``dice_loss`` is ``1 - (2 * inter + 1) / (sum_p + sum_t + 1)``
+(``training/loss_fns.py:46``, facebookresearch/sam2 main, sha256
+``457d7bd5...``). :class:`SAM2GatedMaskLoss` therefore defaults its config to
+:data:`SAM2_DICE_SMOOTH` ``= 1``, where the shared ``LossConfig`` default, and
+with it SAM 1's :class:`SAMMaskLoss`, keeps ``1e-6`` (decisions.md D-283).
 
 Both of those choices, and the ``compile()`` dict that assembles all three, live
 in ``models/vision_language/sam/sam2/training_model.py::compile_sam2_video_trainer`` -- the site a
 reader assembling a training run actually reaches. See ``decisions.md`` D-052.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import keras
 
+from .segmentation_loss import LossConfig
 from .segmentation_metrics import dice_per_sample
 from .sam_mask_loss import (
     DICE_CHANNELS,
@@ -141,6 +153,12 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 #: reintroduced a clipped probability-space focal would push it off zero and be
 #: caught by name instead of silently.
 ABSENT_ROW_FOCAL_RESIDUAL = 0.0
+
+#: Dice smoothing of upstream SAM 2's ``dice_loss``, ``1 - (2 * inter + 1) /
+#: (sum_p + sum_t + 1)`` (``training/loss_fns.py:46``). The default of
+#: :class:`SAM2GatedMaskLoss`'s config only; ``LossConfig.smooth_factor`` stays
+#: ``1e-6`` for SAM 1 and every other segmentation loss.
+SAM2_DICE_SMOOTH = 1.0
 
 
 def mask_presence_gate(masks: Any) -> Any:
@@ -237,20 +255,26 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
     Rows whose ground truth is entirely empty contribute exactly zero gradient
     and exactly zero loss (:data:`ABSENT_ROW_FOCAL_RESIDUAL` is ``0.0``). Every
     other row is scored as :class:`SAMMaskLoss` scores it **up to float error,
-    on unsaturated logits** -- the dice term is identical, and the focal term is
-    the same expression evaluated in LOGIT space rather than through
-    ``SegmentationLosses.focal_loss``'s ``1e-7`` probability clip. That clip is
-    what made the shipped mask head untrainable (module docstring, D-072), so
-    the two formulations DIVERGE by design once ``|logit|`` passes ~16: there
-    the parent's gradient is exactly ``0`` and this class's is not.
+    on unsaturated logits and at the same dice smoothing** -- the dice term is
+    the same function, and the focal term is the same expression evaluated in
+    LOGIT space rather than through ``SegmentationLosses.focal_loss``'s
+    ``1e-7`` probability clip. That clip is what made the shipped mask head
+    untrainable (module docstring, D-072), so the two formulations DIVERGE by
+    design once ``|logit|`` passes ~16: there the parent's gradient is exactly
+    ``0`` and this class's is not. The dice smoothing differs by default: this
+    class uses upstream's ``1`` (:data:`SAM2_DICE_SMOOTH`), the parent the
+    shared ``1e-6``.
 
     The gate is applied to the probabilities on the dice path and to the
     per-pixel loss on the focal path; both are exactly upstream's
     ``loss_* * target_obj``.
 
-    :param kwargs: Everything :class:`SAMMaskLoss` accepts
-        (``focal_weight``, ``dice_weight``, ``from_logits``, ``config``,
-        ``name``, ``reduction``).
+    :param config: ``LossConfig`` of the focal and dice terms. Defaults to
+        ``LossConfig(num_classes=2, smooth_factor=SAM2_DICE_SMOOTH)``, upstream
+        SAM 2's dice smoothing; a given config is used as given.
+    :param kwargs: Everything else :class:`SAMMaskLoss` accepts
+        (``focal_weight``, ``dice_weight``, ``from_logits``, ``name``,
+        ``reduction``).
 
     Call args:
 
@@ -277,8 +301,17 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         model.compile(loss={"low_res_logits": loss, ...}, jit_compile=False)
     """
 
-    def __init__(self, name: str = "sam2_gated_mask_loss", **kwargs: Any) -> None:
-        super().__init__(name=name, **kwargs)
+    def __init__(self, name: str = "sam2_gated_mask_loss",
+                 config: Optional[LossConfig] = None, **kwargs: Any) -> None:
+        # DECISION plan-2026-10-14T062616-81938e81/D-283
+        # The SAM 2 default carries upstream's dice smoothing 1
+        # (`training/loss_fns.py:46`). Do NOT move `LossConfig.smooth_factor`
+        # (1e-6) instead: SAM 1's `SAMMaskLoss` and every segmentation user
+        # read it (D-082, D-282). Do NOT hard-code the 1 in `_dice_rows`
+        # either: a caller's config would then be stored and ignored.
+        if config is None:
+            config = LossConfig(num_classes=2, smooth_factor=SAM2_DICE_SMOOTH)
+        super().__init__(name=name, config=config, **kwargs)
 
     def call(self, y_true: Any, y_pred: Any) -> Any:
         """Compute the gated ``focal_weight * focal + dice_weight * dice``.
@@ -355,13 +388,15 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         present = mask_presence_gate(truth)
         gated = keras.ops.where(present, probabilities, keras.ops.zeros_like(probabilities))
 
-        # DICE: unchanged. `sam_mask_loss`'s adapter and its refusal are reused,
-        # not re-derived -- raw-layout dice reduces (num_masks, height) instead
-        # of (height, width) and returns a plausible number without raising
+        # DICE: `sam_mask_loss`'s adapter and its refusal are reused, not
+        # re-derived -- raw-layout dice reduces (num_masks, height) instead of
+        # (height, width) and returns a plausible number without raising
         # (H-17). Dice IS still saturation-limited through its own
-        # `d(sigmoid)/dx = p(1-p)` chain factor, but so is upstream's
-        # (`loss_fns.py:53` sigmoids first too), so that is faithfulness, not a
-        # divergence. Only the focal clip was a divergence.
+        # `d(sigmoid)/dx = p(1-p)` chain factor, and so is upstream's
+        # (`loss_fns.py:34` sigmoids first too). Its smoothing was a divergence
+        # until D-283: upstream adds 1 (`loss_fns.py:46`), this loss added the
+        # shared 1e-6, off by up to 0.5 per row; the default config now
+        # carries 1.
         dice_pred = to_dice_layout(gated)
         dice_true = to_dice_layout(truth)
         _require_channels_last(dice_pred, DICE_CHANNELS, "SAM2GatedMaskLoss dice path")
@@ -390,7 +425,8 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
 
         The parent's dice is ``dice_scalar``, the mean of ``dice_per_sample``
         over these rows; the rows are kept so a caller can rank masks by them.
-        Same function, same ``from_logits`` and ``smooth``.
+        Same function and ``from_logits``; ``smooth`` is this loss's own
+        ``config.smooth_factor`` (:data:`SAM2_DICE_SMOOTH` by default).
 
         :param dice_true: ``(B * M, h, w, 1)`` ground truth.
         :type dice_true: Any

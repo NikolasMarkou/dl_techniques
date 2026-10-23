@@ -20,12 +20,18 @@ plan-2026-10-14T062616-81938e81 D-281):
 
 The upstream lines are the transcription F-12 records (fetched 2026-10-22 from
 facebookresearch/sam2 main; ``findings/iter3-sam2-omnipoint-cliffordclip.md``
-"Item 9") and the ``sigmoid_focal_loss`` transcription in
-``losses/sam2_video_loss.py``'s module docstring. Neither carries upstream's
-``dice_loss`` body, its loss weights or its IoU loss; those three pieces of the
-oracle below come from what this repository documents (``SAMMaskLoss``'s
-"Reference SAM reports a focal:dice ratio of 20:1", ``LossConfig``'s
-``focal_alpha = 0.25``, ``smooth_factor = 1e-6``), and D-281 names that limit.
+"Item 9"), and, since D-283, upstream's ``training/loss_fns.py`` (retrieved
+2026-10-22T23:16:15Z, sha256
+``457d7bd5c90fbab7c1a9012abc01e7f5c6583289bf51e366dea0a22f04e6ef38``) and the
+``sam2.1_hiera_b+_MOSE_finetune.yaml`` training config (retrieved
+2026-10-22T23:19:11Z, sha256
+``d96919e157527116c3a80c6ec961151bda98e5eb988ae4dd85be6e7efbd2b51f``): the
+dice smoothing 1 (``loss_fns.py:46``), the focal default ``alpha = 0.25``,
+``gamma = 2`` (lines 56-57), the IoU target ``area_i / clamp(area_u, min=1)``
+(line 115), the L1 IoU loss (line 118, yaml ``iou_use_l1_loss: true``) and the
+weights 20, 1, 1, 1 (yaml lines 285-288). D-281's oracle took the dice
+smoothing (``1e-6``) and the IoU target from this repository's documentation;
+D-283 found both, and the MSE IoU loss, to differ from upstream and fixed them.
 
 The oracle is a float64 numpy transcription of the FORMULAE, written in the
 textbook forms rather than the forms the loss uses, so it does not assert that
@@ -37,7 +43,8 @@ alpha forms agree: a background pixel's cross entropy is
 ``softplus(-1024) = 0`` exactly, so only foreground pixels, where
 ``alpha_t = alpha``, contribute. Hence the per-row value
 ``20 * 0.25 * 1024 * f + dice``, with ``f`` the foreground fraction and the
-dice term ``1 - smooth / (N_fg + smooth)``, within ``1e-6 / N_fg`` of 1.
+dice term ``1 - smooth / (N_fg + smooth) = 1 - 1 / (N_fg + 1)``: 1280.9846 at
+f = 1/4 (1281.0 before D-283) and 160.8889 at f = 1/32.
 
 RED proofs (in place, sha256 restored, D-281): gating ``per_mask`` by the
 prediction instead of the ground truth fails the value arms; replacing
@@ -52,14 +59,13 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.losses.sam2_video_loss import SAM2GatedMaskLoss
-from dl_techniques.losses.sam_mask_loss import SAMIoULoss
-from dl_techniques.models.vision_language.sam.sam1.training_model import IOU_SMOOTH
 from dl_techniques.models.vision_language.sam.sam2.model import NO_OBJ_SCORE
 from dl_techniques.models.vision_language.sam.sam2.training_model import (
     SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
     SAM2_OBJECT_SCORE_LOGITS,
     SAM2TrainingModel,
+    compile_sam2_video_trainer,
 )
 
 from .test_training_model import (
@@ -71,17 +77,17 @@ from .test_training_model import (
     trainer,
 )
 
-#: Upstream's mask-loss weights as this repository documents them
-#: (``SAMMaskLoss``: "Reference SAM reports a focal:dice ratio of 20:1").
-#: Written here as numbers, not read from the loss, so a changed default fails.
+#: Upstream's mask-loss weights, ``weight_dict`` ``loss_mask: 20`` and
+#: ``loss_dice: 1`` (training yaml lines 285-286). Written here as numbers, not
+#: read from the loss, so a changed default fails.
 UPSTREAM_FOCAL_WEIGHT = 20.0
 UPSTREAM_DICE_WEIGHT = 1.0
 #: ``sigmoid_focal_loss``'s balancing factor and focusing exponent.
 UPSTREAM_ALPHA = 0.25
 UPSTREAM_GAMMA = 2.0
-#: The dice smoothing this repository documents (``LossConfig.smooth_factor``).
-#: Upstream's own ``dice_loss`` body is not in F-12; see the module docstring.
-DICE_SMOOTH = 1e-6
+#: Upstream's ``dice_loss`` smoothing, ``loss_fns.py:46`` (D-283; D-281 used
+#: the repository's ``1e-6``).
+DICE_SMOOTH = 1.0
 
 #: The object-score logit that calls every frame absent, and its opposite.
 CALLED_ABSENT = -5.0
@@ -189,7 +195,7 @@ class TestThePerRowValue:
     """(a) ``SAM2GatedMaskLoss.per_mask`` against the float64 oracle."""
 
     def test_a_sentinel_row_scores_upstreams_focal_and_dice(self) -> None:
-        """Present and called absent: ``20 * 0.25 * 1024 * f`` plus about 1.
+        """Present and called absent: ``20 * 0.25 * 1024 * f + 1 - 1 / (N_fg + 1)``.
 
         Rows: f = 1/4 and f = 1/32 at the sentinel, then two ground-truth
         absent rows, one called present (logit +5) and one at the sentinel.
@@ -309,43 +315,41 @@ class TestTheIoUHead:
 
     def test_d_the_achieved_iou_is_the_empty_mask_and_the_head_is_pushed_down(
             self) -> None:
-        """Target ``IOU_SMOOTH / (N_fg + IOU_SMOOTH)``, under ``1e-7``: about 0.
+        """Target exactly ``0``, upstream's ``area_i / clamp(area_u, min=1)``.
 
-        The sentinel mask thresholds to empty, so the achieved IoU is the
-        smoothing term over the union, the foreground count; upstream's
-        ``area_i / clamp(area_u, 1)`` gives exactly 0 (F-12 states upstream
-        gates ``loss_iou`` by ``target_obj``; the IoU loss body is not in F-12).
-        The frame is ground-truth present, so the pair is NOT zeroed and the
-        IoU head's predicted value (pinned 0.9) is regressed towards it.
+        The sentinel mask thresholds to empty, so ``area_i = 0`` and the
+        achieved IoU is exactly 0 (``loss_fns.py:115``; before D-283 the target
+        was SAM 1's ``1e-6 / (N_fg + 1e-6)``). The frame is ground-truth
+        present, so the pair is NOT zeroed, and the trainer's L1 IoU loss
+        (``iou_use_l1_loss: true``, ``loss_fns.py:118``) regresses the IoU
+        head's predicted value (pinned 0.9) towards it.
         """
         keras.utils.set_random_seed(0)
         model = trainer(object_score=CALLED_ABSENT, multimask_output_in_sam=False)
         pin_predicted_iou(model, 0.9)
+        compile_sam2_video_trainer(model)
+        iou_loss = model.loss[SAM2_IOU_SUPERVISION]
         inputs = clip_inputs(model, absent_frames=(2,))
         bias = model.sam2.mask_decoder.iou_prediction_head.layers[-1].bias
         with tf.GradientTape() as tape:
             packed = model(inputs, training=True)[SAM2_IOU_SUPERVISION]
-            value = SAMIoULoss()(
+            value = iou_loss(
                 np.zeros((BATCH, FRAMES, 2), dtype="float32"), packed)
         gradient = np.asarray(tape.gradient(value, bias))
         packed = np.asarray(packed)
 
-        foreground = (inputs["gt_masks"] > 0.5).sum(axis=(-2, -1)).astype(
-            np.float64)
         present = np.max(inputs["gt_masks"], axis=(-2, -1)) > 0.0
-        achieved = np.where(
-            present, IOU_SMOOTH / (foreground + IOU_SMOOTH), 0.0)
+        achieved = np.zeros(present.shape)
         predicted = np.where(present, np.float64(np.float32(0.9)), 0.0)
 
         np.testing.assert_array_equal(packed[:, 2], 0.0)
         np.testing.assert_array_equal(packed[:, :2, 0], np.float32(0.9))
-        np.testing.assert_allclose(packed[..., 1], achieved, rtol=VALUE_RTOL)
-        assert packed[:, :2, 1].max() < 1e-7
+        np.testing.assert_array_equal(packed[..., 1], achieved)
 
-        squared = (predicted - achieved) ** 2
+        absolute = np.abs(predicted - achieved)
         assert float(value) == pytest.approx(
-            float(squared.mean()), rel=VALUE_RTOL)
-        expected_gradient = float((2.0 * (predicted - achieved)).sum()
+            float(absolute.mean()), rel=VALUE_RTOL)
+        expected_gradient = float(np.sign(predicted - achieved).sum()
                                   / (BATCH * FRAMES))
         # One bias entry per mask token; a single-mask frame reads token 0 only.
         expected_bias = np.zeros(gradient.shape)

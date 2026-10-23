@@ -59,6 +59,12 @@ SAM2_OBJECT_SCORE_LOGITS = "object_score_logits"
 #: mean and exactly ``0`` to the gradient, reproducing upstream's
 #: ``loss_iou * target_obj``.
 SAM2_IOU_SUPERVISION = "iou_supervision"
+#: Upstream SAM 2's achieved-IoU target, ``area_i / clamp(area_u, min=1)``
+#: (``training/loss_fns.py:115``): no smoothing, the union clamped at 1. Passed
+#: to SAM 1's :func:`achieved_mask_iou`, whose own defaults (smoothing ``1e-6``)
+#: stay SAM 1's (decisions.md D-283).
+SAM2_IOU_SMOOTH = 0.0
+SAM2_IOU_MIN_UNION = 1.0
 #: Keys :meth:`SAM2TrainingModel.call` always returns, in a stable order.
 OUTPUT_KEYS: Tuple[str, ...] = (
     SAM2_LOW_RES_LOGITS, SAM2_OBJECT_SCORE_LOGITS, SAM2_IOU_SUPERVISION)
@@ -361,7 +367,15 @@ class SAM2TrainingModel(keras.Model):
         # truth for "the IoU this thresholded prediction actually got". It
         # thresholds, so it is already gradient-free; the explicit
         # `stop_gradient` states the intent rather than relying on that.
-        achieved = keras.ops.stop_gradient(achieved_mask_iou(logits, truth))
+        # DECISION plan-2026-10-14T062616-81938e81/D-283
+        # SAM 2's target is upstream's `area_i / clamp(area_u, min=1)`
+        # (`loss_fns.py:115`), not SAM 1's `(I + 1e-6) / (U + 1e-6)`: that
+        # trains an empty mask's IoU towards 1e-6 / U instead of 0. Do NOT
+        # change `achieved_mask_iou`'s defaults (SAM 1 reads them) and do NOT
+        # pass `smooth=0.0` alone (an empty union divides 0 by 0).
+        achieved = keras.ops.stop_gradient(achieved_mask_iou(
+            logits, truth, smooth=SAM2_IOU_SMOOTH,
+            min_union=SAM2_IOU_MIN_UNION))
         packed = keras.ops.stack([predicted, achieved], axis=-1)
         present = keras.ops.reshape(mask_presence_gate(truth), (-1, 1, 1))
         packed = keras.ops.where(present, packed, keras.ops.zeros_like(packed))
@@ -615,7 +629,8 @@ def compile_sam2_video_trainer(
     :param object_score_weight: Weight of the object-score BCE. Upstream's
         ``loss_class: 1``.
     :type object_score_weight: float
-    :param iou_weight: Weight of the IoU regression term.
+    :param iou_weight: Weight of the IoU regression term, an L1 loss
+        (upstream's ``iou_use_l1_loss: true``, ``loss_iou: 1``).
     :type iou_weight: float
     :param compile_kwargs: Forwarded to ``keras.Model.compile``. Passing
         ``jit_compile`` here overrides the mandatory ``False`` and will make the
@@ -631,7 +646,12 @@ def compile_sam2_video_trainer(
             SAM2_LOW_RES_LOGITS: model.mask_loss,
             SAM2_OBJECT_SCORE_LOGITS: keras.losses.BinaryCrossentropy(
                 from_logits=True),
-            SAM2_IOU_SUPERVISION: SAMIoULoss(),
+            # DECISION plan-2026-10-14T062616-81938e81/D-283
+            # L1, upstream SAM 2's `iou_use_l1_loss: true` (sam2.1 training
+            # config; `loss_fns.py:117-118`). Do NOT drop the flag back to
+            # SAMIoULoss's MSE default: that is SAM 1's loss, and it gives an
+            # IoU error of e a gradient 2e instead of sign(e).
+            SAM2_IOU_SUPERVISION: SAMIoULoss(use_l1_loss=True),
         },
         loss_weights={
             SAM2_LOW_RES_LOGITS: float(mask_weight),

@@ -92,6 +92,7 @@ def achieved_mask_iou(
     gt_masks: Any,
     threshold: float = IOU_MASK_THRESHOLD,
     smooth: float = IOU_SMOOTH,
+    min_union: float = 0.0,
 ) -> Any:
     """
     Compute the IoU a thresholded mask prediction actually achieves against
@@ -106,6 +107,11 @@ def achieved_mask_iou(
     :param smooth: Added to numerator and denominator so an empty union
         gives ``1.0`` rather than ``nan``.
     :type smooth: float
+    :param min_union: Lower bound of the smoothed denominator. The default
+        ``0.0`` is inert (``union + smooth`` is positive), so SAM 1's target is
+        unchanged; SAM 2 passes ``smooth=0.0, min_union=1.0``, upstream SAM 2's
+        ``area_i / clamp(area_u, min=1)`` (decisions.md D-283).
+    :type min_union: float
     :return: IoU in ``[0, 1]``, shape ``(B, M)``.
     """
     predicted = ops.cast(mask_logits > threshold, "float32")
@@ -116,7 +122,7 @@ def achieved_mask_iou(
         + ops.sum(truth, axis=[-2, -1])
         - intersection
     )
-    return (intersection + smooth) / (union + smooth)
+    return (intersection + smooth) / ops.maximum(union + smooth, min_union)
 
 
 @register_dl_technique("dl_techniques.models.sam1.training_model")

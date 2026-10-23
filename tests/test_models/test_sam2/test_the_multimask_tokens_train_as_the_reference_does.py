@@ -27,7 +27,6 @@ from dl_techniques.losses.sam2_video_loss import (
     SAM2GatedMaskLoss,
     select_lowest_loss_mask,
 )
-from dl_techniques.models.vision_language.sam.sam1.training_model import achieved_mask_iou
 from dl_techniques.models.vision_language.sam.sam2.training_model import (
     SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
@@ -101,6 +100,28 @@ def test_the_loss_mean_of_per_mask_is_the_scalar_loss():
                 rtol=1e-6, atol=0)
 
 
+def upstream_achieved_iou(logits: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """Upstream's ``area_i / clamp(area_u, min=1)`` on hard masks, in float32.
+
+    facebookresearch/sam2 main ``training/loss_fns.py:111-115`` (sha256
+    ``457d7bd5c90fbab7c1a9012abc01e7f5c6583289bf51e366dea0a22f04e6ef38``;
+    D-283). The counts are exact float32 integers and one float32 division is
+    correctly rounded, as the backend's is, so the result is bit-comparable.
+
+    :param logits: ``(B, K, h, w)`` candidate mask logits.
+    :type logits: numpy.ndarray
+    :param truth: ``(B, 1, h, w)`` binary ground truth.
+    :type truth: numpy.ndarray
+    :return: ``(B, K)`` achieved IoU, float32.
+    :rtype: numpy.ndarray
+    """
+    predicted = logits > 0.0
+    target = np.broadcast_to(truth > 0.0, predicted.shape)
+    area_i = (predicted & target).sum(axis=(-2, -1)).astype(np.float32)
+    area_u = (predicted | target).sum(axis=(-2, -1)).astype(np.float32)
+    return area_i / np.maximum(area_u, np.float32(1.0))
+
+
 def test_frame_zero_supervises_its_lowest_loss_candidate_and_every_iou():
     model = trainer(num_frames=2, object_score=8.0)
     seen = _recording_decode(model)
@@ -122,8 +143,7 @@ def test_frame_zero_supervises_its_lowest_loss_candidate_and_every_iou():
         iou[:, :CANDIDATES, 0], keras.ops.convert_to_numpy(frame0["iou_predictions"]))
     np.testing.assert_array_equal(
         iou[:, :CANDIDATES, 1],
-        keras.ops.convert_to_numpy(
-            achieved_mask_iou(candidates, inputs["gt_masks"][:, 0:1])))
+        upstream_achieved_iou(candidates, inputs["gt_masks"][:, 0:1]))
     # Frame 1 decoded one mask; its pair fills its slots.
     frame1 = keras.ops.convert_to_numpy(seen[1]["iou_predictions"])
     for slot in range(CANDIDATES, 2 * CANDIDATES):

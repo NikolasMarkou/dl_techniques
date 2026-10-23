@@ -34,27 +34,54 @@ from dl_techniques.losses.sam2_video_loss import (
     mask_presence_gate,
 )
 from dl_techniques.losses.sam_mask_loss import SAMMaskLoss
+from dl_techniques.losses.segmentation_loss import LossConfig
 
 #: Tolerance for every value assertion in this file, DERIVED not guessed.
 #: MEASURED |repo float32 - float64 oracle| over the two fixtures below:
-#: ``7.91e-07`` and ``3.17e-06``. That is float32 reduction error over a
-#: ``2 x 4 x 16 x 16`` stack, and it is the BINDING term -- the absent-row focal
-#: residual it is often assumed to bound is fourteen orders of magnitude
-#: smaller (see :data:`ABSENT_ROW_FOCAL_RESIDUAL`). ``1e-5`` is ~3x the measured
-#: error and ~4e5 times smaller than the smallest candidate separation
-#: (``4.118``); :meth:`TestGateIsValueExact.test_the_tolerance_cannot_admit_a_wrong_candidate`
+#: ``7.91e-07`` and ``3.17e-06`` at dice smoothing ``1e-6``; ``1.53e-07`` and
+#: ``2.09e-07`` at upstream's ``1`` (re-measured at D-283). That is float32
+#: reduction error over a ``2 x 4 x 16 x 16`` stack, and it is the BINDING term
+#: -- the absent-row focal residual it is often assumed to bound is fourteen
+#: orders of magnitude smaller (see :data:`ABSENT_ROW_FOCAL_RESIDUAL`).
+#: ``1e-5`` is ~3x the largest measured error and ~2.2e5 times smaller than
+#: the smallest candidate separation (``2.224``, gated against self-gated, at
+#: smoothing ``1``); :meth:`TestGateIsValueExact.test_the_tolerance_cannot_admit_a_wrong_candidate`
 #: asserts that margin rather than leaving it to prose.
 VALUE_TOLERANCE = 1e-5
 
 #: The same measurement for the UNGATED loss, which needs its OWN number and
 #: does not get to borrow the gated one. MEASURED |SAMMaskLoss float32 -
-#: float64 oracle| at :func:`discriminating_fixture`: ``1.729e-05``, i.e. 5.5x
-#: the gated figure -- the ungated total is 1.7x larger and keeps two more rows
-#: in the focal reduction, so it accumulates more float32 error. ``5e-5`` is
-#: ~2.9x the measured value and still 8e4 times inside the nearest candidate
-#: separation. Writing one tolerance for both would have meant either a false
+#: float64 oracle| at :func:`discriminating_fixture`: ``1.729e-05`` at
+#: smoothing ``1e-6`` (5.5x the gated figure), ``5.26e-06`` at ``1``
+#: (:func:`ungated_parent`, D-283) -- the ungated total is larger and keeps two
+#: more rows in the focal reduction, so it accumulates more float32 error.
+#: ``5e-5`` is ~2.9x the larger measured value and still 4e4 times inside the
+#: nearest candidate separation. Writing one tolerance for both would have meant either a false
 #: failure here or a loosened bound on the arm that actually matters.
 UNGATED_VALUE_TOLERANCE = 5e-5
+
+#: Upstream SAM 2's dice smoothing, ``dice_loss``'s
+#: ``1 - (numerator + 1) / (denominator + 1)`` (facebookresearch/sam2 main,
+#: ``training/loss_fns.py:46``, sha256
+#: ``457d7bd5c90fbab7c1a9012abc01e7f5c6583289bf51e366dea0a22f04e6ef38``).
+#: :class:`SAM2GatedMaskLoss` defaults to it since D-283 of plan
+#: 2026-10-14T062616-81938e81; SAM 1's :class:`SAMMaskLoss` keeps the shared
+#: ``LossConfig`` default ``1e-6``.
+UPSTREAM_DICE_SMOOTH = 1.0
+
+
+def ungated_parent() -> SAMMaskLoss:
+    """Plain :class:`SAMMaskLoss` (no gate, clipped focal) at SAM 2's dice smoothing.
+
+    "Delete the gate" from :class:`SAM2GatedMaskLoss` leaves the parent with the
+    SAM 2 config, so every by-value comparison against the parent gives it
+    the same smoothing; the parent's own default (``1e-6``) is SAM 1's.
+
+    :return: The ungated loss.
+    :rtype: SAMMaskLoss
+    """
+    return SAMMaskLoss(config=LossConfig(
+        num_classes=2, smooth_factor=UPSTREAM_DICE_SMOOTH))
 
 
 def gated_mask_loss_oracle(
@@ -65,7 +92,7 @@ def gated_mask_loss_oracle(
         dice_weight: float = 1.0,
         gamma: float = 2.0,
         alpha: float = 0.25,
-        smooth: float = 1e-6,
+        smooth: float = UPSTREAM_DICE_SMOOTH,
 ) -> float:
     """Hand-compute ``focal_weight * focal + dice_weight * dice`` in float64.
 
@@ -99,7 +126,7 @@ def gated_mask_loss_oracle(
     :type gamma: float
     :param alpha: ``LossConfig.focal_alpha``.
     :type alpha: float
-    :param smooth: ``LossConfig.smooth_factor``.
+    :param smooth: Dice smoothing, upstream's ``1`` (``loss_fns.py:46``).
     :type smooth: float
     :return: The scalar loss.
     :rtype: float
@@ -281,7 +308,7 @@ class TestGateIsValueExact:
                 f"fixture; a guard sited here cannot discriminate them")
 
     def test_the_tolerance_cannot_admit_a_wrong_candidate(self) -> None:
-        """:data:`VALUE_TOLERANCE` is 4e5 times inside the nearest wrong one."""
+        """:data:`VALUE_TOLERANCE` is 2.2e5 times inside the nearest wrong one."""
         truth, logits = discriminating_fixture()
         values = candidate_values(truth, logits)
         nearest = min(
@@ -295,7 +322,8 @@ class TestGateIsValueExact:
     def test_the_loss_equals_the_hand_computed_gated_value(self) -> None:
         """G3.1: value exactness against the float64 oracle.
 
-        MEASURED |float32 - float64| at this fixture: ``3.17e-06``.
+        MEASURED |float32 - float64| at this fixture: ``3.17e-06`` at dice
+        smoothing ``1e-6``, ``2.09e-07`` at upstream's ``1`` (D-283).
         """
         truth, logits = discriminating_fixture()
         measured = float(SAM2GatedMaskLoss()(truth, logits))
@@ -305,7 +333,7 @@ class TestGateIsValueExact:
             f"value is {expected!r}")
 
     def test_it_is_not_the_ungated_value(self) -> None:
-        """G3.1's RED arm, permanent: deleting the gate moves it by 4.118."""
+        """G3.1's RED arm, permanent: deleting the gate moves it by 4.117."""
         truth, logits = discriminating_fixture()
         measured = float(SAM2GatedMaskLoss()(truth, logits))
         values = candidate_values(truth, logits)
@@ -313,11 +341,13 @@ class TestGateIsValueExact:
         # ... and the ungated candidate really is what plain SAMMaskLoss gives,
         # so "delete the gate" is the mutation this arm rejects, not a
         # hypothetical.
-        assert float(SAMMaskLoss()(truth, logits)) == pytest.approx(
+        assert float(ungated_parent()(truth, logits)) == pytest.approx(
             values["ungated"], abs=UNGATED_VALUE_TOLERANCE)
 
     def test_it_is_not_the_self_gated_value(self) -> None:
-        """G3.3's RED arm, permanent: gating on the PREDICTION moves it by 6.042.
+        """G3.3's RED arm, permanent: gating on the PREDICTION moves it by 2.224.
+
+        (6.042 at the dice smoothing ``1e-6`` this loss used before D-283.)
 
         The row that separates them is ``(0, 1)``: present in the ground truth,
         empty in the prediction. A self-gated loss scores it zero -- it has
@@ -346,7 +376,7 @@ class TestGateIsValueExact:
         logits = rng.normal(0.0, 2.0, (2, 3, 16, 16)).astype("float32")
         assert ground_truth_gate(truth).all()
         assert float(SAM2GatedMaskLoss()(truth, logits)) == pytest.approx(
-            float(SAMMaskLoss()(truth, logits)), abs=VALUE_TOLERANCE)
+            float(ungated_parent()(truth, logits)), abs=VALUE_TOLERANCE)
 
 
 # ---------------------------------------------------------------------
@@ -529,7 +559,8 @@ class TestSaturatedLogits:
 
         Below saturation the logit-space focal and the clipped
         probability-space focal are the same function, and were MEASURED
-        bit-identical (``diff = 0.0``) on this fixture. Without this arm, the
+        bit-identical (``diff = 0.0``; re-measured with the parent at the same
+        dice smoothing ``1``, D-283) on this fixture. Without this arm, the
         divergence arm above would be satisfied by any loss that merely differs
         from the parent everywhere.
         """
@@ -539,10 +570,10 @@ class TestSaturatedLogits:
         logits = rng.normal(0.0, 2.0, (2, 3, 16, 16)).astype("float32")
         assert ground_truth_gate(truth).all()
         assert float(SAM2GatedMaskLoss()(truth, logits)) == pytest.approx(
-            float(SAMMaskLoss()(truth, logits)), abs=VALUE_TOLERANCE)
+            float(ungated_parent()(truth, logits)), abs=VALUE_TOLERANCE)
         np.testing.assert_allclose(
             logit_gradient(SAM2GatedMaskLoss(), truth, logits),
-            logit_gradient(SAMMaskLoss(), truth, logits),
+            logit_gradient(ungated_parent(), truth, logits),
             atol=1e-7)
 
     def test_the_bce_term_autodiffs_exactly_at_a_zero_logit(self) -> None:

@@ -303,10 +303,16 @@ restored epoch, not the last one, is the result. It matches the reference on all
 points (the sentinel and where it is applied, focal and dice gated by ground-truth
 presence, an ungated object-score BCE, no mask-path gradient through the sentinel), and
 `tests/test_models/test_sam2/test_a_present_frame_called_absent_is_scored_against_the_sentinel.py`
-pins it by value: such a frame scores `20 * 0.25 * 1024 * f` plus a dice term within
-`1e-6` of 1 (`f` its foreground fraction), its mask term gives every variable exactly zero
-gradient, and only the object-score BCE and the IoU head (regressed towards an empty-mask IoU
-below `1e-7`) learn from it (D-281). The clip does not remove those
+pins it by value: such a frame scores `20 * 0.25 * 1024 * f` plus a dice term
+`1 - 1 / (N_fg + 1)` (`f` its foreground fraction, `N_fg` its foreground pixel count), its
+mask term gives every variable exactly zero gradient, and only the object-score BCE and the
+IoU head (regressed towards an empty-mask IoU of exactly 0) learn from it (D-281, D-283).
+Since D-283 the dice smoothing (1), the achieved-IoU target (`area_i / clamp(area_u, min=1)`)
+and the IoU loss (L1) are upstream's (`training/loss_fns.py` and the `sam2.1` training
+config), pinned by `tests/test_models/test_sam2/test_the_loss_terms_match_upstream_loss_fns.py`;
+the focal `alpha` stays a scalar (D-073 of plan 2026-08-04T044628-4c240b4c), and the
+numbers in this section were measured with the earlier terms (dice smoothing `1e-6`, a
+smoothed IoU target, MSE). The clip does not remove those
 spikes: without it the same command jumps to 22 at epoch 16 and is still at 3.9 at
 epoch 30. Held out, the clip moves the answer by less than the seed does (32-clip
 command, clip on against off: seed 42 0.375 against 0.353, seed 43 0.225 against

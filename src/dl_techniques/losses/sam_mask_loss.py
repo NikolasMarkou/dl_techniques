@@ -1,5 +1,5 @@
 """
-SAM training losses: `SAMMaskLoss` (focal + dice) and `SAMIoULoss` (MSE).
+SAM training losses: `SAMMaskLoss` (focal + dice) and `SAMIoULoss` (MSE, or L1).
 
 The reuse path is MEASURED BROKEN, and this module is the containment
 ---------------------------------------------------------------------
@@ -316,7 +316,16 @@ class SAMMaskLoss(keras.losses.Loss):
 @register_dl_technique("dl_techniques.losses.sam_mask_loss")
 class SAMIoULoss(keras.losses.Loss):
     """
-    MSE between the predicted IoU and the IoU the prediction actually achieved.
+    MSE (or L1) between the predicted IoU and the IoU the prediction achieved.
+
+    Args:
+        use_l1_loss: Absolute instead of squared error. ``False`` (MSE) is SAM
+            1's loss; SAM 2's trainer passes ``True``, upstream SAM 2's
+            ``iou_use_l1_loss: true`` (``training/loss_fns.py:117-118`` and the
+            ``sam2.1`` training config; decisions.md D-283).
+        name: Keras loss name.
+        reduction: Keras reduction.
+        **kwargs: Forwarded to ``keras.losses.Loss``.
 
     Call args:
         y_true: Structurally unused -- see the note below. Any tensor Keras
@@ -326,7 +335,8 @@ class SAMIoULoss(keras.losses.Loss):
             by the model.
 
     Returns:
-        Per-sample MSE of shape ``(B,)``, averaged over the ``M`` mask slots.
+        Per-sample MSE (or L1) of shape ``(B,)``, averaged over the ``M`` mask
+        slots.
         Keras' reduction recovers the scalar this used to return; keeping the
         batch axis is what lets ``sample_weight`` and ``reduction`` select rows.
 
@@ -347,14 +357,19 @@ class SAMIoULoss(keras.losses.Loss):
 
     def __init__(
         self,
+        use_l1_loss: bool = False,
         name: str = "sam_iou_loss",
         reduction: str = "sum_over_batch_size",
         **kwargs: Any,
     ) -> None:
         super().__init__(name=name, reduction=reduction, **kwargs)
+        self.use_l1_loss = bool(use_l1_loss)
 
     def call(self, y_true: Any, y_pred: Any) -> Any:
-        """Per sample: ``mean_over_masks((predicted_iou - achieved_iou) ** 2)``."""
+        """Per sample: ``mean_over_masks(error(predicted_iou - achieved_iou))``.
+
+        ``error`` is the square, or the absolute value under ``use_l1_loss``.
+        """
         shape = tuple(y_pred.shape)
         if len(shape) != 3 or shape[-1] != 2:
             raise ValueError(
@@ -372,8 +387,12 @@ class SAMIoULoss(keras.losses.Loss):
         # the mean of this vector equals the old all-axes mean exactly -- including
         # over the GT-absent rows SAM 2's training model zeroes in BOTH channels,
         # which contribute an exact 0 either way.
-        return ops.mean(ops.square(predicted - achieved), axis=-1)
+        difference = predicted - achieved
+        error = ops.abs(difference) if self.use_l1_loss else ops.square(difference)
+        return ops.mean(error, axis=-1)
 
     def get_config(self) -> Dict[str, Any]:
         """Full serialization config."""
-        return super().get_config()
+        config = super().get_config()
+        config["use_l1_loss"] = self.use_l1_loss
+        return config
