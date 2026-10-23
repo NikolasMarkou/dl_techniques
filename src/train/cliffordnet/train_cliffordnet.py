@@ -739,7 +739,7 @@ def main() -> None:
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
-    # DECISION plan-2026-10-23T100412-e7eaaa02/D-008
+    # DECISION plan-2026-10-23T100412-e7eaaa02/D-009
     # Flags the user did not pass take the PRESET's value. Do NOT give these
     # three flags their own defaults again: always passing cli_mode='full' and
     # use_global_context=False as overrides made `--variant lite_g` train without
