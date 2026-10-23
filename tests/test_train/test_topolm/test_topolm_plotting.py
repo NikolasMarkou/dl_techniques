@@ -29,6 +29,7 @@ from train.topolm.plotting import (
     plot_cluster_overlay,
     plot_morans_i_profile,
     plot_t_maps,
+    plot_topography_curve,
 )
 
 GRID = 8
@@ -1448,3 +1449,186 @@ class TestThreeDimensionalHeadlineFitsWithANote:
         assert not _overlap(texts[0], texts[1])
         for _, box in titles:
             assert not any(_overlap(box, t) for t in texts)
+
+
+# ---------------------------------------------------------------------
+# Completion fix step 4.3: what a person watching a real run saw
+# ---------------------------------------------------------------------
+#
+# Three defects read off the real-run figures: the curve's val_loss panel was
+# drawn at the draw step (one cadence late, a false plateau), the 2-D cluster title
+# read "mlp_tap (raw): 1 clusters" (block dropped, wrong plural), and the 3-D
+# crosshair was a thin green dash that vanished on saturated cells.
+
+
+def _curve_rows(draw_steps, val_losses, val_steps):
+    """Live rows as the callback writes them: a ``val_loss`` that repeats between
+    epochs, with ``val_loss_step`` naming where it was measured."""
+    return [
+        {
+            "step": step, "val_loss": loss, "val_loss_step": measured,
+            "mean_morans_i": 0.1 * index, "total_clusters_a": index,
+            "total_clusters_b": index, "mean_num_significant_units": 3.0,
+            "per_tap": {"t": {"morans_i": 0.1 * index}},
+        }
+        for index, (step, loss, measured) in enumerate(
+            zip(draw_steps, val_losses, val_steps)
+        )
+    ]
+
+
+def _val_loss_line(fig):
+    axis = next(ax for ax in fig.axes if ax.get_ylabel().startswith("val_loss"))
+    line = axis.lines[0]
+    return list(map(float, line.get_xdata())), list(map(float, line.get_ydata()))
+
+
+class TestTheCurveDrawsValidationAtItsOwnStep:
+    """RED on the previous drawer: it plotted ``val_loss`` against ``step``."""
+
+    def test_each_validation_is_drawn_once_at_the_step_it_was_measured(
+        self, monkeypatch, tmp_path
+    ):
+        rows = _curve_rows(
+            draw_steps=[0, 50, 100, 150, 200, 250, 300],
+            val_losses=[None, None, None, 7.9, 7.9, 7.7, 7.7],
+            val_steps=[None, None, None, 100, 100, 200, 200],
+        )
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(rows, output_path=str(tmp_path / "c.png")),
+        )
+        steps, values = _val_loss_line(fig)
+        plt.close(fig)
+        assert steps == [100.0, 200.0], "drawn at the draw step, or a repeat kept"
+        assert values == [7.9, 7.7]
+
+    def test_a_row_without_a_measured_step_falls_back_to_its_draw_step(
+        self, monkeypatch, tmp_path
+    ):
+        """An older ``metrics.jsonl`` has no ``val_loss_step``."""
+        rows = _curve_rows([0, 10, 20], [1.0, 0.5, 0.25], [None, None, None])
+        for row in rows:
+            del row["val_loss_step"]
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(rows, output_path=str(tmp_path / "c.png")),
+        )
+        steps, values = _val_loss_line(fig)
+        plt.close(fig)
+        assert (steps, values) == ([0.0, 10.0, 20.0], [1.0, 0.5, 0.25])
+
+    def test_a_curve_with_no_validation_has_no_val_loss_panel(self, monkeypatch, tmp_path):
+        rows = _curve_rows([0, 50], [None, None], [None, None])
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(rows, output_path=str(tmp_path / "c.png")),
+        )
+        labels = [ax.get_ylabel() for ax in fig.axes]
+        plt.close(fig)
+        assert not any(label.startswith("val_loss") for label in labels), labels
+
+
+def _cluster_report_and_arrays(names, populated, size=8):
+    """The smallest ``(report, arrays)`` pair ``plot_topography`` accepts, with one
+    cluster in the tap ``populated``."""
+    rng = np.random.default_rng(1)
+    labels = {n: np.zeros((size, size), dtype=int) for n in names}
+    labels[populated][1:5, 1:4] = 1
+    report = {
+        "contrast": ["a", "b"],
+        "arms": {"raw": {"per_tap": {
+            n: {"morans_i": {"standard": 0.3}} for n in names}}},
+    }
+    arrays = {"arms": {"raw": {
+        "t_maps": {n: rng.normal(size=(size, size)) * 2 for n in names},
+        "sig_grids": {n: np.zeros((size, size), dtype=bool) for n in names},
+        "label_grids": labels,
+    }}}
+    return report, arrays
+
+
+def _cluster_figure_title(monkeypatch, tmp_path, names, populated):
+    from train.topolm import common
+
+    report, arrays = _cluster_report_and_arrays(names, populated)
+    holder = {}
+    original = Figure.savefig
+
+    def recording(self, path, *args, **kwargs):
+        if "clusters_" in str(path):
+            holder["fig"] = self
+        return original(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", recording)
+    common.plot_topography(report, arrays, str(tmp_path))
+    return holder["fig"]
+
+
+class TestTheClusterFigureNamesItsTapAndCountsCorrectly:
+    def test_the_title_keeps_the_block_and_drops_only_the_shared_prefix(
+        self, monkeypatch, tmp_path
+    ):
+        names = _real_tap_names(4)
+        fig = _cluster_figure_title(monkeypatch, tmp_path, names, names[-1])
+        title = fig.axes[0].get_title()
+        plt.close(fig)
+        assert title == "block_3/mlp_tap (raw): 1 cluster", title
+
+    def test_a_single_tap_keeps_its_whole_path_and_stays_inside_the_figure(
+        self, monkeypatch, tmp_path
+    ):
+        names = _real_tap_names(4)[-1:]
+        fig = _cluster_figure_title(monkeypatch, tmp_path, names, names[0])
+        title = fig.axes[0].title
+        text = title.get_text()
+        fig.canvas.draw()
+        box = title.get_window_extent(fig.canvas.get_renderer())
+        bounds = fig.bbox
+        plt.close(fig)
+        assert "".join(text.split("\n")).startswith(names[0]), text
+        assert _inside(box, bounds), "the wrapped title leaves the figure"
+
+    @pytest.mark.parametrize("count,expected", [(1, "1 cluster"), (2, "2 clusters")])
+    def test_the_plural_follows_the_count_in_2d_and_3d(
+        self, monkeypatch, tmp_path, count, expected
+    ):
+        flat = np.zeros((6, 6), dtype=int)
+        for index in range(count):
+            flat[index * 3, 0:2] = index + 1
+        solid = np.stack([flat, flat])
+        for grid in (flat, solid):
+            fig = _captured_figure(
+                monkeypatch,
+                lambda: plot_cluster_overlay(grid, output_path=str(tmp_path / "x.png")),
+            )
+            texts = [t.get_text() for t in fig.findobj(matplotlib.text.Text)]
+            plt.close(fig)
+            assert any(t == f"clusters: {expected}" for t in texts), (grid.ndim, texts)
+
+
+class TestTheCrosshairIsVisibleOnSaturatedCells:
+    """RED on the previous drawer: a bare 0.5 pt green dash, no outline."""
+
+    def test_every_crosshair_line_has_a_wider_white_stroke_under_it(
+        self, monkeypatch, tmp_path
+    ):
+        import matplotlib.patheffects as path_effects
+
+        volume, significant = _volume_fixture()
+        fig = _t_map_figure(monkeypatch, tmp_path, volume, significant)
+        checked = 0
+        for axis in _image_axes(fig):
+            for line in axis.lines:
+                effects = line.get_path_effects()
+                strokes = [e for e in effects if isinstance(e, path_effects.Stroke)]
+                assert strokes, "a crosshair line has no outline"
+                halo = strokes[0]
+                assert halo._gc["foreground"] == "white"
+                assert halo._gc["linewidth"] > line.get_linewidth()
+                assert any(isinstance(e, path_effects.Normal) for e in effects), (
+                    "the green line itself is no longer drawn"
+                )
+                checked += 1
+        plt.close(fig)
+        assert checked == 6, "three planes with two lines each"

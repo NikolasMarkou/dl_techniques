@@ -1077,7 +1077,8 @@ def plot_topography(
         a figure disagree with the report it sits beside.
     """
     from train.topolm.plotting import (  # local: keeps matplotlib off the
-        plot_cluster_overlay,  # analysis import path
+        _panel_tap_labels,  # analysis import path
+        plot_cluster_overlay,
         plot_morans_i_profile,
         plot_t_maps,
     )
@@ -1134,11 +1135,14 @@ def plot_topography(
         populated = [name for name, grid in labels.items() if np.any(grid > 0)]
         if populated:
             deepest = populated[-1]
+            # The tap WITH its block (``block_3/mlp_tap``), not its last path
+            # component: ``mlp_tap`` alone is the same name in every block.
+            tap_labels, _, _ = _panel_tap_labels(list(labels))
             written.append(
                 plot_cluster_overlay(
                     labels[deepest],
                     output_path=os.path.join(output_dir, f"clusters_{arm}.png"),
-                    title=f"{deepest.split('/')[-1]} ({arm})",
+                    title=f"{tap_labels[deepest]} ({arm})",
                 )
             )
 

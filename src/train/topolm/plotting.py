@@ -466,6 +466,23 @@ def _panel_tap_labels(
     return labels, prefix, fontsize
 
 
+# A thin green dashed line vanishes on a saturated cell of either sign, so each
+# crosshair line is drawn over a wider white stroke (a halo): the green keeps its
+# colour on pale cells and the halo separates it from dark red and dark blue ones.
+_CROSSHAIR_STYLE = dict(color="limegreen", linewidth=0.8, linestyle="--")
+_CROSSHAIR_HALO_WIDTH = 2.2
+
+
+def _crosshair_outline() -> list:
+    """The path effects of one crosshair line: a white halo, then the line itself."""
+    import matplotlib.patheffects as path_effects
+
+    return [
+        path_effects.Stroke(linewidth=_CROSSHAIR_HALO_WIDTH, foreground="white"),
+        path_effects.Normal(),
+    ]
+
+
 def _crosshair_voxel(t_map: np.ndarray, significant: Optional[np.ndarray]) -> Tuple[int, ...]:
     """The voxel of a 3-D map the three planes pass through.
 
@@ -625,10 +642,11 @@ def plot_t_maps_3d(
             # The in-plane coordinates of the crosshair: the two axes that are
             # NOT the plane axis, in order (rows, then columns).
             row_axis, col_axis = [a for a in range(3) if a != plane_axis]
-            axis.axhline(crosshair[row_axis], color="limegreen", linewidth=0.5,
-                         linestyle="--")
-            axis.axvline(crosshair[col_axis], color="limegreen", linewidth=0.5,
-                         linestyle="--")
+            for line in (
+                axis.axhline(crosshair[row_axis], **_CROSSHAIR_STYLE),
+                axis.axvline(crosshair[col_axis], **_CROSSHAIR_STYLE),
+            ):
+                line.set_path_effects(_crosshair_outline())
             axis.set_title(
                 f"{tap_labels[name]}\naxis {plane_axis} = {crosshair[plane_axis]}  "
                 f"@{crosshair}",
@@ -730,6 +748,26 @@ def _cluster_palette(
     return shown, hidden, colours
 
 
+def _cluster_title(title: str, n_shown: int, hidden: int) -> str:
+    """``"<title>: 1 cluster"`` / ``"<title>: 3 clusters (+2 not coloured)"``.
+
+    Shared by the 2-D overlay and the 3-D montage so the two read alike.
+
+    :param title: The caller's title (the tap and the arm).
+    :type title: str
+    :param n_shown: Cluster ids coloured in the figure.
+    :type n_shown: int
+    :param hidden: Cluster ids beyond ``max_clusters_shown`` that are not coloured.
+    :type hidden: int
+    :return: The figure title.
+    :rtype: str
+    """
+    label = f"{title}: {n_shown} cluster{'' if n_shown == 1 else 's'}"
+    if hidden:
+        label += f" (+{hidden} not coloured)"
+    return label
+
+
 def plot_cluster_overlay(
     label_grid: np.ndarray,
     output_path: Optional[str] = None,
@@ -783,9 +821,7 @@ def plot_cluster_overlay(
         origin="upper",
     )
     _draw_boundaries(axis, values)
-    label = f"{title}: {shown.size} clusters"
-    if hidden:
-        label += f" (+{hidden} not coloured)"
+    label = _cluster_title(title, shown.size, hidden)
     axis.set_title(label, fontsize=8)
     axis.set_xticks([])
     axis.set_yticks([])
@@ -857,9 +893,7 @@ def plot_cluster_montage_3d(
         axis.set_xticks([])
         axis.set_yticks([])
 
-    label = f"{title}: {shown.size} clusters"
-    if hidden:
-        label += f" (+{hidden} not coloured)"
+    label = _cluster_title(title, shown.size, hidden)
     fig.suptitle(label, fontsize=8)
     fig.subplots_adjust(
         left=0.02, right=0.98, top=0.86 if n_rows > 1 else 0.78, bottom=0.02,
@@ -948,6 +982,37 @@ def _series(rows: Sequence[Mapping[str, Any]], getter) -> np.ndarray:
     return np.asarray(values, dtype="float64")
 
 
+def _validation_points(rows: Sequence[Mapping[str, Any]]) -> Tuple[np.ndarray, np.ndarray]:
+    """``(steps, values)`` of the validations in ``rows``, each drawn once at its OWN step.
+
+    A row's ``val_loss`` is the last one Keras reported, so consecutive rows
+    (drawn every N steps while validation happens once per epoch) repeat the same
+    value, and its ``val_loss_step`` is where that value was measured. Drawing it
+    at the row's ``step`` instead shifts every point right by up to one cadence
+    and shows a plateau that is not there. A row without ``val_loss_step`` (an
+    older ``metrics.jsonl``) falls back to its ``step``. Rows without a finite
+    ``val_loss`` contribute nothing; a repeated ``(step, value)`` pair is kept
+    once, in order.
+
+    :param rows: Parsed ``metrics.jsonl`` rows, oldest first.
+    :type rows: Sequence[Mapping[str, Any]]
+    :return: Two equal-length arrays, empty when no row carries a validation.
+    :rtype: Tuple[numpy.ndarray, numpy.ndarray]
+    """
+    values = _series(rows, lambda row: row["val_loss"])
+    own = _series(rows, lambda row: row["val_loss_step"])
+    draw = _series(rows, lambda row: row["step"])
+    where = np.where(np.isfinite(own), own, draw)
+    seen = set()
+    kept = []
+    for index in np.flatnonzero(np.isfinite(values)):
+        key = (float(where[index]), float(values[index]))
+        if key not in seen:
+            seen.add(key)
+            kept.append(index)
+    return where[kept], values[kept]
+
+
 def plot_topography_curve(
     rows: Sequence[Mapping[str, Any]],
     output_path: Optional[str] = None,
@@ -959,12 +1024,15 @@ def plot_topography_curve(
     ``metrics.jsonl`` (``null`` for a value that was not finite). Stacked panels
     share the step axis: Moran's I of every tap (thin, coloured by depth) with the
     mean over taps in black; the clusters found for each polarity; the mean number
-    of BH-FDR-significant units; and the validation loss when a row carries one.
-    A single row draws as markers, so the first frame is not an empty axis.
+    of BH-FDR-significant units; and the validation loss when a row carries one,
+    each validation once at the step it was measured (``val_loss_step``, see
+    :func:`_validation_points`). A single row draws as markers, so the first
+    frame is not an empty axis.
 
     :param rows: Parsed ``metrics.jsonl`` rows, oldest first. Each has ``step``,
         ``mean_morans_i``, ``total_clusters_a``, ``total_clusters_b``,
-        ``mean_num_significant_units``, ``val_loss`` and ``per_tap``
+        ``mean_num_significant_units``, ``val_loss`` (with ``val_loss_step``)
+        and ``per_tap``
         (``{tap_path: {"morans_i": ...}}``); any value may be ``None``.
     :type rows: Sequence[Mapping[str, Any]]
     :param output_path: Where to write the PNG, or ``None`` to skip writing.
@@ -979,10 +1047,8 @@ def plot_topography_curve(
         raise ValueError("cannot draw a topography curve from zero rows")
 
     steps = _series(rows, lambda row: row["step"])
-    val_loss = _series(rows, lambda row: row["val_loss"])
-    panels = ["moran", "clusters", "units"] + (
-        ["val_loss"] if np.isfinite(val_loss).any() else []
-    )
+    val_steps, val_loss = _validation_points(rows)
+    panels = ["moran", "clusters", "units"] + (["val_loss"] if val_loss.size else [])
     fig, axes = plt.subplots(
         len(panels), 1, figsize=(6.6, 2.1 * len(panels) + 0.7),
         sharex=True, squeeze=False,
@@ -1027,9 +1093,9 @@ def plot_topography_curve(
     axes[2].set_ylabel("significant units\n(mean per tap)")
 
     if "val_loss" in panels:
-        axes[3].plot(steps, val_loss, marker="o", markersize=3, linewidth=1.2,
+        axes[3].plot(val_steps, val_loss, marker="o", markersize=3, linewidth=1.2,
                      color="tab:green")
-        axes[3].set_ylabel("val_loss\n(last validation)")
+        axes[3].set_ylabel("val_loss\n(each validation)")
 
     for axis in axes:
         axis.tick_params(labelsize=7)
