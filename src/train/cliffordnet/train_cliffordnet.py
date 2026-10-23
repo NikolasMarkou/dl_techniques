@@ -517,7 +517,14 @@ def train_model(args) -> None:
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
-        include_analyzer=False,
+        # DECISION plan-2026-10-23T100412-e7eaaa02/D-002
+        # Per-epoch analysis stays opt-in: do NOT make it the default again.
+        # The shared default (every epoch) was removed in b6903e109 for cost.
+        include_analyzer=args.epoch_analysis_every > 0,
+        analyzer_epoch_frequency=max(1, args.epoch_analysis_every),
+        # start at N so the snapshots land on epochs N, 2N, ... (default start 1
+        # would give 1, N+1, ...).
+        analyzer_start_epoch=max(1, args.epoch_analysis_every),
     )
     callbacks.insert(0, keras.callbacks.TerminateOnNaN())
 
@@ -536,6 +543,7 @@ def train_model(args) -> None:
         "use_global_context": args.use_global_context,
         "warmup_epochs": args.warmup_epochs,
         "random_erasing_prob": args.random_erasing_prob,
+        "epoch_analysis_every": args.epoch_analysis_every,
         "input_shape": list(input_shape),
         "num_classes": num_classes,
     }, results_dir)
@@ -662,6 +670,13 @@ def main() -> None:
     # Augmentation
     parser.add_argument('--random-erasing-prob', type=float, default=0.25,
                         dest='random_erasing_prob')
+
+    # Analysis
+    parser.add_argument('--epoch-analysis-every', type=int, default=0,
+                        dest='epoch_analysis_every',
+                        help='Run the data-free weight/spectral model analyzer '
+                             'every N epochs into <run>/epoch_analysis/ '
+                             '(0 = off).')
 
     # Warmup
     parser.add_argument('--warmup-epochs', type=int, default=5, dest='warmup_epochs')

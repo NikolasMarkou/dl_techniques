@@ -62,6 +62,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
 | `--stochastic-depth-rate` | `0.3` | |
 | `--dropout-rate` | `0.0` | |
 | `--random-erasing-prob` | `0.25` | |
+| `--epoch-analysis-every` | `0` | Run the data-free weight/spectral analyzer every N epochs (at N, 2N, ...) into `<run>/epoch_analysis/epoch_NNN/`; 0 = off. |
 | `--gpu` | none | |
 
 `--image-size`, `--lr-schedule` and `--show-plots` come from the base parser
