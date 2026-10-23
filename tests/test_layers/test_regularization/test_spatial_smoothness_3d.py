@@ -720,3 +720,87 @@ class TestSpatialSmoothness3DBuild:
         history = model.fit(inputs, targets, batch_size=8, epochs=2, verbose=0)
         assert np.isfinite(history.history["loss"][-1])
         assert history.history["loss"][-1] < history.history["loss"][0]
+
+
+class TestSpatialSmoothness3DConfigAndSign:
+    """Config key set, legacy loading and the 3D sign probe (plan step 3)."""
+
+    def test_the_config_key_set_is_exactly_the_old_keys_plus_grid_dim(self):
+        keys = set(SpatialSmoothness(alpha=1.0, seed=0, grid_dim=3).get_config())
+        assert keys == {
+            "name", "trainable", "dtype",
+            "alpha", "radius", "num_neighborhoods", "distance", "permute",
+            "grid_shape", "seed", "max_samples", "eps", "grid_dim",
+        }
+
+    def test_a_config_without_grid_dim_builds_as_2d_even_with_a_3d_sibling(self):
+        """The pre-3D config has no key; the default must be 2, not the last seen."""
+        three = SpatialSmoothness(alpha=1.0, radius=2, seed=0, grid_dim=3)
+        legacy = dict(three.get_config())
+        del legacy["grid_dim"]
+        legacy["grid_shape"] = None
+        layer = SpatialSmoothness.from_config(legacy)
+        assert layer.grid_dim == 2
+        _build_through_parent(layer, 512)
+        # 512 factors to (16, 32) in 2D: (16-4)*(32-4) = 336 centres of 25 units.
+        assert tuple(layer.patch_table.shape) == (336, 25)
+        assert layer.layout.grid_shape == (16, 32)
+        assert layer.get_config()["grid_dim"] == 2
+
+    def test_the_negated_prior_scores_far_above_one_half(self):
+        """Sign-discriminating: distance-to-+d against distance-to--d, in 3D.
+
+        512 units on (8, 8, 8), radius 2 (64 centres), the smooth 3D field of
+        ``smooth_field_activations_3d`` (256 samples, seed 0), five fixed centres
+        drawn with ``default_rng(1)``. MEASURED on the real implementation before
+        any bound was written:
+
+            forward (+d_unit)  0.2002      backward (-d_unit)  0.7998
+
+        and over centre draws seeds 1, 2, 3: forward 0.2002 / 0.2066 / 0.1701,
+        backward 0.7998 / 0.7934 / 0.8299 (the layout seed does not move them:
+        the field is generated in the layout's own unit order). The pair is run
+        twice, once on the tables ``build_patch_tables`` returns and once on the
+        weights a built ``SpatialSmoothness(grid_dim=3)`` holds, so a flipped sign
+        in either place turns it red.
+
+        On a larger grid, 1000 units on (10, 10, 10) with radius 4 (only 8
+        centres), the same pair reads 0.3311 / 0.6689 (and 0.3255 / 0.6745,
+        0.3256 / 0.6744 for two more centre draws): still on the right sides of
+        one half but too close to the 0.30 / 0.70 bands to assert, so it is
+        recorded here only.
+        """
+        layout = _layout_3d(512, seed=0)
+        tables = build_patch_tables(layout.cell_to_unit, 2, "linf")
+        layer = _build_through_parent(
+            SpatialSmoothness(alpha=1.0, radius=2, seed=0, grid_dim=3), 512
+        )
+        activations = smooth_field_activations_3d(
+            layout, num_samples=256, seed=0
+        ).astype("float32")
+        rows = np.random.default_rng(1).integers(0, tables.num_centers, size=5)
+
+        def pair(patch_table, triu_flat, d_unit):
+            def loss(sign):
+                return float(
+                    spatial_smoothness_loss(
+                        keras.ops.convert_to_tensor(activations),
+                        keras.ops.convert_to_tensor(patch_table[rows]),
+                        keras.ops.convert_to_tensor(triu_flat),
+                        keras.ops.convert_to_tensor(sign * d_unit),
+                    )
+                )
+            return loss(1.0), loss(-1.0)
+
+        sources = {
+            "tables": (tables.patch_table, tables.triu_flat, tables.d_unit),
+            "layer": tuple(
+                keras.ops.convert_to_numpy(w)
+                for w in (layer.patch_table, layer.triu_flat, layer.d_unit)
+            ),
+        }
+        for name, (patch_table, triu_flat, d_unit) in sources.items():
+            forward, backward = pair(patch_table, triu_flat, d_unit)
+            assert forward < 0.30, (name, forward)
+            assert backward > 0.70, (name, backward)
+            assert forward + backward == pytest.approx(1.0, abs=1e-5), name

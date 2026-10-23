@@ -162,6 +162,29 @@ def _factor_3d_cubic(num_units: int) -> Tuple[int, int, int]:
     return best
 
 
+def _validated_grid_dim(grid_dim: Any) -> int:
+    """Return ``grid_dim`` as an ``int`` if it is 2 or 3, else raise.
+
+    Shared by :func:`resolve_grid_shape` and :class:`SpatialSmoothness`, so the
+    accepted values and the message cannot drift apart. ``bool`` and non-integers
+    (``"3"``, ``3.0``) are refused: a stringly or float rank would otherwise
+    compare unequal to 3 further down and fall through as 2D.
+
+    :param grid_dim: Candidate number of grid axes.
+    :type grid_dim: Any
+    :return: ``int(grid_dim)``, 2 or 3.
+    :rtype: int
+    :raises ValueError: ``grid_dim must be 2 or 3, got <repr>``.
+    """
+    if (
+        isinstance(grid_dim, bool)
+        or not isinstance(grid_dim, (int, np.integer))
+        or grid_dim not in (2, 3)
+    ):
+        raise ValueError(f"grid_dim must be 2 or 3, got {grid_dim!r}")
+    return int(grid_dim)
+
+
 def resolve_grid_shape(
     num_units: int,
     grid_shape: Optional[Tuple[int, ...]] = None,
@@ -197,13 +220,7 @@ def resolve_grid_shape(
         raise ValueError(
             f"num_units must be positive, got {num_units}"
         )
-    if (
-        isinstance(grid_dim, bool)
-        or not isinstance(grid_dim, (int, np.integer))
-        or grid_dim not in (2, 3)
-    ):
-        raise ValueError(f"grid_dim must be 2 or 3, got {grid_dim!r}")
-    grid_dim = int(grid_dim)
+    grid_dim = _validated_grid_dim(grid_dim)
 
     if grid_shape is None:
         if grid_dim == 3:
@@ -685,9 +702,11 @@ class SpatialSmoothness(keras.layers.Layer):
     :param permute: Whether to draw a random unit permutation. ``False`` is the
         paper's Fig. 12 ablation; see :class:`SpatialLayout`.
     :type permute: bool
-    :param grid_shape: Explicit ``(height, width)``, or ``None`` to factor the
-        unit count into the most square rectangle available.
-    :type grid_shape: Optional[Tuple[int, int]]
+    :param grid_shape: Explicit shape with ``grid_dim`` entries (``(height,
+        width)`` for ``grid_dim=2``), or ``None`` to factor the unit count into
+        the most square rectangle (``grid_dim=2``) or the most cubic box
+        (``grid_dim=3``) available.
+    :type grid_shape: Optional[Tuple[int, ...]]
     :param seed: Seed for the layout permutation and the neighbourhood sampling.
     :type seed: Optional[int]
     :param max_samples: Cap on the ``M`` sample rows used for the correlation, or
@@ -697,11 +716,18 @@ class SpatialSmoothness(keras.layers.Layer):
     :param eps: Floor under the per-unit standard deviation. Must exceed ``0``;
         it is the only thing standing between a constant unit and a NaN.
     :type eps: float
+    :param grid_dim: Number of grid axes, ``2`` (default, the paper's layout) or
+        ``3``. With ``3`` the units are laid out as a volume and a neighbourhood
+        is a cube of ``(2 * radius + 1) ** 3`` units. Stated, never inferred from
+        ``grid_shape``; a config written before this keyword existed has no such
+        key and builds as 2D.
+    :type grid_dim: int
     :param kwargs: Forwarded to ``keras.layers.Layer``.
     :raises ValueError: If ``alpha`` is negative, ``radius`` or
         ``num_neighborhoods`` is below ``1``, ``distance`` is unknown, ``eps`` is
-        not positive, ``max_samples`` is below ``2``, or ``grid_shape`` is
-        malformed -- naming the offending value in each case.
+        not positive, ``max_samples`` is below ``2``, ``grid_dim`` is not 2 or 3,
+        or ``grid_shape`` is malformed -- naming the offending value in each
+        case.
     """
 
     def __init__(
@@ -711,10 +737,11 @@ class SpatialSmoothness(keras.layers.Layer):
         num_neighborhoods: int = 5,
         distance: str = "linf",
         permute: bool = True,
-        grid_shape: Optional[Tuple[int, int]] = None,
+        grid_shape: Optional[Tuple[int, ...]] = None,
         seed: Optional[int] = None,
         max_samples: Optional[int] = None,
         eps: float = 1e-6,
+        grid_dim: int = 2,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -734,6 +761,7 @@ class SpatialSmoothness(keras.layers.Layer):
             )
         if eps <= 0:
             raise ValueError(f"eps must be > 0, got {eps}")
+        grid_dim = _validated_grid_dim(grid_dim)
         if max_samples is not None and max_samples < 2:
             # Fewer than two samples leaves the per-unit standard deviation at
             # zero, so every correlation is 0/0 and the layer reports 0.5 while
@@ -754,6 +782,7 @@ class SpatialSmoothness(keras.layers.Layer):
         self.seed = seed
         self.max_samples = max_samples
         self.eps = float(eps)
+        self.grid_dim = grid_dim
 
         self.seed_generator = keras.random.SeedGenerator(seed)
 
@@ -803,13 +832,16 @@ class SpatialSmoothness(keras.layers.Layer):
                 f"unit count."
             )
 
-        grid_shape = resolve_grid_shape(num_units, self.grid_shape)
+        grid_shape = resolve_grid_shape(num_units, self.grid_shape, self.grid_dim)
         layout = SpatialLayout(
             num_units=num_units,
             grid_shape=grid_shape,
             permute=self.permute,
             seed=self.seed,
+            grid_dim=self.grid_dim,
         )
+        # ``build_patch_tables`` reads the rank from ``layout.cell_to_unit.ndim``,
+        # so the tables cannot disagree with the layout they were cut from.
         tables = build_patch_tables(
             layout.cell_to_unit, self.radius, self.distance
         )
@@ -858,9 +890,11 @@ class SpatialSmoothness(keras.layers.Layer):
         )
 
         logger.info(
-            f"SpatialSmoothness: {num_units} units on a {grid_shape[0]}x"
-            f"{grid_shape[1]} grid, {tables.num_centers} admissible radius-"
-            f"{self.radius} neighbourhoods of {tables.side}x{tables.side} = "
+            f"SpatialSmoothness: {num_units} units on a "
+            f"{'x'.join(str(axis) for axis in grid_shape)} grid, "
+            f"{tables.num_centers} admissible radius-"
+            f"{self.radius} neighbourhoods of "
+            f"{'x'.join([str(tables.side)] * len(grid_shape))} = "
             f"{tables.patch_units} units ({tables.num_pairs} pairs each), "
             f"alpha={self.alpha}, distance={self.distance!r}, "
             f"permute={self.permute}"
@@ -978,6 +1012,7 @@ class SpatialSmoothness(keras.layers.Layer):
             "seed": self.seed,
             "max_samples": self.max_samples,
             "eps": self.eps,
+            "grid_dim": self.grid_dim,
         })
         return config
 
