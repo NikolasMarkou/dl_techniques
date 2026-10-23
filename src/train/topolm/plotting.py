@@ -39,13 +39,23 @@ crosshair voxel, drawn with the same colour scale, hatch and outlines as the 2-D
 panel. A 3-D label grid goes to :func:`plot_cluster_montage_3d`, which shows every
 slice of it. The crosshair is a PROPOSAL for where to look (the largest
 significant ``|t|``), not a result: a cluster away from it is in the montage.
-The 2-D path is untouched; ranks other than 2 and 3 are refused by name.
+Ranks other than 2 and 3 are refused by name.
+
+Layout
+------
+Both t-map figures are laid out in inches rather than fractions, so a real tap
+path (``causal_language_model/topolm/block_0/attention_tap``) never overprints a
+neighbour, the colour bar has an axes of its own clear of the panels, and the
+headline and the line under it never collide. Panel titles drop the leading path
+components every tap shares (:func:`_panel_tap_labels`) and the subtitle names
+them once. The geometric tests in ``test_topolm_plotting.py`` hold all of this.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import textwrap
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -71,10 +81,6 @@ __all__ = [
 
 class PlotScaleWarning(UserWarning):
     """Raised as a warning when a single row cannot share one colour scale."""
-
-
-#: Inches a 2-D t-map figure grows by when it carries a ``note``.
-_NOTE_HEADROOM = 0.4
 
 
 def _panel_shape(t_maps: Dict[str, np.ndarray]) -> Tuple[int, ...]:
@@ -180,6 +186,30 @@ def _t_map_headline(
     return suptitle or f"TopoLM t-maps ({arm})", subtitle
 
 
+def _prefix_note(shared_prefix: str) -> str:
+    """The sentence naming the tap-path prefix the panel titles leave out (or ``""``)."""
+    if not shared_prefix:
+        return ""
+    return f"; tap paths shown without the shared prefix {shared_prefix}"
+
+
+#: Characters of 7 pt subtitle text per inch of figure width, deliberately a little
+#: pessimistic (the measured average is about 17), so a wrapped line stays inside the
+#: figure. The geometric tests in test_topolm_plotting.py are what hold it.
+_SUBTITLE_CHARS_PER_INCH = 15.0
+
+
+def _wrap_subtitle(text: str, width_in: float) -> str:
+    """Break the line under the headline at spaces so it fits a figure ``width_in`` wide.
+
+    A one-row figure of two taps is about 5.6 in wide, and the subtitle (the
+    conditions, the live callback's note, the dropped tap prefix) is wider than
+    that. Lines are joined with ``"\n"``; text that already fits is unchanged.
+    """
+    columns = max(20, int((width_in - 0.4) * _SUBTITLE_CHARS_PER_INCH))
+    return "\n".join(textwrap.wrap(text, width=columns, break_long_words=False)) or text
+
+
 def _save_and_close(fig: plt.Figure, output_path: Optional[str], what: str) -> Optional[str]:
     """Write ``fig`` to ``output_path`` (creating its directory) and close it.
 
@@ -211,7 +241,7 @@ def plot_t_maps(
     """Render one t-map per tapped layer, with significance and cluster overlays.
 
     A rank-3 input is drawn by :func:`plot_t_maps_3d` instead (three planes per
-    tap); the arguments mean the same thing and the 2-D path is unchanged.
+    tap); the arguments mean the same thing.
 
     :param t_maps: ``{tap_path: (height, width) t-values}`` (or 3-D, see above).
     :type t_maps: Mapping[str, numpy.ndarray]
@@ -267,18 +297,37 @@ def plot_t_maps(
     n_panels = len(ordered)
     per_row = max(1, min(int(max_panels_per_row), n_panels))
     n_rows = int(math.ceil(n_panels / per_row))
-    height = 2.6 * n_rows + 1.1
-    width = 2.6 * per_row + 0.8
-    # A note adds text under the title, and a one-row figure has no room for it
-    # (the title and the line under it overlap at this height); the figure
-    # grows by NOTE_HEADROOM and the title block moves into the new space. Without
-    # a note nothing below changes, so the post-hoc figure is the one it was.
-    base_height = height
-    if note:
-        height += _NOTE_HEADROOM
+
+    # The layout is fixed in inches, like the 3-D one, and for the same reasons: a
+    # figure sized by fractions put the colour bar on top of the last panel (and over
+    # its title), let the headline and the line under it collide, and left no room
+    # for a real tap path (``causal_language_model/topolm/block_0/attention_tap``) as
+    # a title. Titles are the shared-prefix-free, wrapped labels the 3-D figure uses,
+    # the dropped prefix is named once under the headline, and the colour bar has an
+    # axes of its own to the right of the panels, a gap clear of them.
+    tap_labels, shared_prefix, title_fontsize = _panel_tap_labels(
+        [name for name, _ in ordered],
+        max_chars=_T_MAP_TITLE_MAX_CHARS,
+        fontsize=_T_MAP_TITLE_FONTSIZE,
+    )
+    title_lines = max(label.count("\n") + 1 for label in tap_labels.values())
+    title_block = 0.12 * title_lines + 0.08
+    cell, gap_x, gap_y = 2.1, 0.25, title_block + 0.12
+    margin_left, margin_right, margin_bottom = 0.15, 1.05, 0.1
+    grid_w = per_row * cell + (per_row - 1) * gap_x
+    grid_h = n_rows * cell + (n_rows - 1) * gap_y
+    fig_w = margin_left + grid_w + margin_right
+
+    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle, note)
+    subtitle = _wrap_subtitle(subtitle + _prefix_note(shared_prefix), fig_w)
+    subtitle_lines = subtitle.count("\n") + 1
+    # From the top: a margin, the headline (10 pt), the subtitle (7 pt, any number of
+    # lines), a gap, then the first row's titles above its panels.
+    margin_top = 0.06 + 0.17 + 0.06 + 0.12 * subtitle_lines + 0.08 + title_block
+    fig_h = margin_top + grid_h + margin_bottom
 
     fig, axes = plt.subplots(
-        n_rows, per_row, figsize=(width, height), squeeze=False
+        n_rows, per_row, figsize=(fig_w, fig_h), squeeze=False
     )
     flat_axes = [ax for row in axes for ax in row]
     for unused in flat_axes[n_panels:]:
@@ -300,35 +349,37 @@ def plot_t_maps(
                 _hatch_rejected(axis, mask)
         if label_grids is not None and name in label_grids:
             _draw_boundaries(axis, np.asarray(label_grids[name]))
-        axis.set_title(name, fontsize=7)
+        axis.set_title(tap_labels[name], fontsize=title_fontsize, pad=3)
         axis.set_xticks([])
         axis.set_yticks([])
 
     if image is not None:
-        bar = fig.colorbar(image, ax=flat_axes[:n_panels], fraction=0.02, pad=0.02)
+        bar_h = min(2.4, grid_h)
+        bar_axis = fig.add_axes([
+            (margin_left + grid_w + 0.22) / fig_w,
+            (margin_bottom + (grid_h - bar_h) / 2) / fig_h,
+            0.14 / fig_w,
+            bar_h / fig_h,
+        ])
+        bar = fig.colorbar(image, cax=bar_axis)
         bar.set_label("t (A - B)", fontsize=8)
         bar.ax.tick_params(labelsize=7)
 
-    title, subtitle = _t_map_headline(
-        arm, condition_a, condition_b, suptitle, note
+    fig.suptitle(title, fontsize=10, y=1.0 - 0.06 / fig_h, va="top")
+    fig.text(
+        0.5, 1.0 - 0.29 / fig_h, subtitle,
+        ha="center", va="top", fontsize=7, alpha=0.75,
     )
-    if note:
-        fig.suptitle(title, fontsize=10, y=1.0 - 0.04 / height, va="top")
-        fig.text(
-            0.5, 1.0 - 0.34 / height, subtitle,
-            ha="center", va="top", fontsize=7, alpha=0.75,
-        )
-        top = 1.0 - (0.10 * base_height + _NOTE_HEADROOM) / height
-        bottom = 0.04 * base_height / height
-    else:
-        fig.suptitle(title, fontsize=10)
-        fig.text(0.5, 0.945, subtitle, ha="center", fontsize=7, alpha=0.75)
-        top, bottom = 0.90, 0.04
     # NOT tight_layout: a figure carrying a colorbar has axes that layout cannot
-    # reconcile, and matplotlib warns rather than fixing it. savefig's
-    # bbox_inches="tight" below does the job without the warning.
+    # reconcile, and matplotlib warns rather than fixing it. The margins are in
+    # inches above, so nothing here needs it.
     fig.subplots_adjust(
-        left=0.04, right=0.9, top=top, bottom=bottom, wspace=0.12, hspace=0.28
+        left=margin_left / fig_w,
+        right=1.0 - margin_right / fig_w,
+        top=1.0 - margin_top / fig_h,
+        bottom=margin_bottom / fig_h,
+        wspace=gap_x / cell,
+        hspace=gap_y / cell,
     )
 
     return _save_and_close(fig, output_path, "T-maps")
@@ -342,10 +393,19 @@ def plot_t_maps(
 _TITLE_MAX_CHARS = 26
 _TITLE_FONTSIZE = 5.0
 _TITLE_MIN_FONTSIZE = 3.5
+# The 2-D map is 2.1 in wide and its title is 7 pt, about 3.9 pt a character, so 30
+# characters (1.6 in) leave a margin for the neighbouring title; measured by the
+# geometric test, like the 3-D constants above.
+_T_MAP_TITLE_MAX_CHARS = 30
+_T_MAP_TITLE_FONTSIZE = 7.0
 
 
-def _panel_tap_labels(names: List[str]) -> Tuple[Dict[str, str], str, float]:
-    """Shorten and wrap the tap paths used as 3-D panel titles.
+def _panel_tap_labels(
+    names: List[str],
+    max_chars: int = _TITLE_MAX_CHARS,
+    fontsize: float = _TITLE_FONTSIZE,
+) -> Tuple[Dict[str, str], str, float]:
+    """Shorten and wrap the tap paths used as panel titles (3-D planes and 2-D maps).
 
     Real tap paths (``causal_language_model/topolm/block_0/attention_tap``) are
     far wider than a 1.3 in plane, and the three planes of a tap sit side by side,
@@ -358,7 +418,7 @@ def _panel_tap_labels(names: List[str]) -> Tuple[Dict[str, str], str, float]:
        always kept, and a single tap keeps its whole path (there is nothing to
        tell it apart from).
     2. The remainder is wrapped at ``/`` into lines of at most
-       :data:`_TITLE_MAX_CHARS` characters, the ``/`` staying at the end of the
+       ``max_chars`` characters, the ``/`` staying at the end of the
        line it closes. A name that fits is returned unchanged, so a short tap name
        is still one contiguous string in its title. A single component wider than
        the limit cannot be wrapped; the font is shrunk instead (floor
@@ -369,6 +429,12 @@ def _panel_tap_labels(names: List[str]) -> Tuple[Dict[str, str], str, float]:
 
     :param names: Tap paths in figure order.
     :type names: List[str]
+    :param max_chars: Widest title line in characters; the default is the 3-D
+        plane's, the 2-D map passes its own (:data:`_T_MAP_TITLE_MAX_CHARS`).
+    :type max_chars: int
+    :param fontsize: The title font size, shrunk only for an unbreakable
+        component wider than ``max_chars``.
+    :type fontsize: float
     :return: ``(labels, prefix, fontsize)``: ``labels`` maps each tap path to its
         possibly multi-line title text, ``prefix`` is the dropped shared leading
         path including its trailing ``/`` (``""`` if nothing was dropped), and
@@ -389,15 +455,14 @@ def _panel_tap_labels(names: List[str]) -> Tuple[Dict[str, str], str, float]:
         lines: List[str] = []
         for index, part in enumerate(parts[shared:]):
             piece = part + ("/" if index < len(parts[shared:]) - 1 else "")
-            if lines and len(lines[-1]) + len(piece) <= _TITLE_MAX_CHARS:
+            if lines and len(lines[-1]) + len(piece) <= max_chars:
                 lines[-1] += piece
             else:
                 lines.append(piece)
         labels[name] = "\n".join(lines)
         widest = max(widest, max(len(line) for line in lines))
-    fontsize = _TITLE_FONTSIZE
-    if widest > _TITLE_MAX_CHARS:
-        fontsize = max(_TITLE_MIN_FONTSIZE, _TITLE_FONTSIZE * _TITLE_MAX_CHARS / widest)
+    if widest > max_chars:
+        fontsize = max(_TITLE_MIN_FONTSIZE, fontsize * max_chars / widest)
     return labels, prefix, fontsize
 
 
@@ -515,6 +580,13 @@ def plot_t_maps_3d(
     n_cols = 3 * taps_per_row
     margin_left, margin_right, margin_top, margin_bottom = 0.1, 0.9, 0.85 + extra, 0.1
     fig_w = margin_left + n_cols * cell + (n_cols - 1) * gap_x + margin_right
+    # The line under the headline can be wider than a one-tap figure (5.2 in): wrap
+    # it, and grow the top margin by the extra lines. One line changes nothing.
+    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle, note)
+    legend_note = "; dashed green = crosshair at the largest significant |t|"
+    legend_note += _prefix_note(shared_prefix)
+    subtitle = _wrap_subtitle(subtitle + legend_note, fig_w)
+    margin_top += 0.12 * subtitle.count("\n")
     fig_h = margin_top + n_rows * cell + (n_rows - 1) * gap_y + margin_bottom
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     flat_axes = [ax for row in axes for ax in row]
@@ -575,18 +647,10 @@ def plot_t_maps_3d(
         bar.set_label("t (A - B)", fontsize=7)
         bar.ax.tick_params(labelsize=6)
 
-    title, subtitle = _t_map_headline(
-        arm, condition_a, condition_b, suptitle, note
-    )
     fig.suptitle(title, fontsize=10, y=1.0 - 0.08 / fig_h, va="top")
-    legend_note = "; dashed green = crosshair at the largest significant |t|"
-    if shared_prefix:
-        legend_note += (
-            f"; tap paths shown without the shared prefix {shared_prefix}"
-        )
     fig.text(
         0.5, 1.0 - 0.38 / fig_h,
-        subtitle + legend_note,
+        subtitle,
         ha="center", va="top", fontsize=7, alpha=0.75,
     )
     # No tight_layout, for the reason given in plot_t_maps.
@@ -835,14 +899,28 @@ def plot_morans_i_profile(
     depth = np.arange(len(values))
     axis.plot(depth, values, marker="o", linewidth=1.2, markersize=3)
     axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
-    axis.set_xlabel("layer (depth order)")
+    # Real tap paths end in the same two names in every block, so the last component
+    # alone (the old tick label) read ``attention_tap`` at every other tick. The
+    # tick is the path without the prefix every tap shares, which is named once
+    # under the axis; the wrapped title labels are joined back into one line.
+    labels, prefix, _ = _panel_tap_labels(
+        names, max_chars=_T_MAP_TITLE_MAX_CHARS, fontsize=_T_MAP_TITLE_FONTSIZE
+    )
+    xlabel = "layer (depth order)"
+    if prefix:
+        # Wrapped to the 5 in figure: the longest prefix (a one-block run drops the
+        # block too) is wider than the figure at 9 pt on one line.
+        xlabel += "\n" + _wrap_subtitle(
+            f"tap paths shown without the shared prefix {prefix}", 5.0
+        )
+    axis.set_xlabel(xlabel, fontsize=8 if prefix else None)
     axis.set_ylabel("Moran's I (standard)")
     title = f"Topographic smoothness across depth ({arm})"
     axis.set_title(f"{title}\n{note}" if note else title, fontsize=9)
     step = max(1, len(names) // 12)
     axis.set_xticks(depth[::step])
     axis.set_xticklabels(
-        [names[i].split("/")[-1] for i in range(0, len(names), step)],
+        ["".join(labels[names[i]].split("\n")) for i in range(0, len(names), step)],
         rotation=90,
         fontsize=6,
     )

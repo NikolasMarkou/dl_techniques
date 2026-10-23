@@ -611,9 +611,20 @@ def _pixel_digest(path):
 
 
 class TestTwoDimensionalUnchangedPixels:
-    """The fix for D-002 and the rank dispatch for 3-D may change a figure with
-    cluster outlines; they may not change a pixel of one without. Measured on
-    the unmodified code (matplotlib 3.10.0, Agg), identical across processes."""
+    """The 2-D figures' pixel pins, RE-PINNED ON PURPOSE in step 4.2.
+
+    Until step 4.2 these hashes pinned the old 2-D layout, and the old layout was
+    the defect: the colour bar sat on top of the last panel and its title, the
+    headline and the line under it collided, and a real tap path overflowed its
+    panel. The pixels changed deliberately, for LAYOUT, not for content: the new
+    figure is laid out in inches, has the colour bar in its own axes, and titles
+    its panels with the shared-prefix-free labels. What the figure shows is pinned
+    separately and independently of layout in
+    :class:`TestTwoDimensionalContentDoesNotDependOnLayout`; these hashes pin the
+    new layout so it cannot drift unnoticed, and the geometric tests in
+    :class:`TestTwoDimensionalTitlesAreReadableForRealTapPaths` say what the layout
+    must satisfy. Measured on the step-4.2 code (matplotlib 3.10.0, Agg),
+    identical across processes."""
 
     @staticmethod
     def _maps():
@@ -623,35 +634,41 @@ class TestTwoDimensionalUnchangedPixels:
         return maps, {k: np.abs(v) > 1.5 for k, v in maps.items()}
 
     def test_a_t_map_row_without_overlays(self, tmp_path):
+        """Re-pinned (layout): was ((547, 1983, 4), "351efc58717dda02")."""
         maps, _ = self._maps()
         path = plot_t_maps(maps, output_path=str(tmp_path / "a.png"))
-        assert _pixel_digest(path) == ((547, 1983, 4), "351efc58717dda02")
+        assert _pixel_digest(path) == ((468, 1993, 4), "445e18d5a116726c")
 
     def test_a_t_map_row_with_the_hatch_and_the_legend_but_no_clusters(self, tmp_path):
+        """Re-pinned (layout): was ((547, 1983, 4), "eab7091b764aa543")."""
         maps, sig = self._maps()
         path = plot_t_maps(
             maps, sig_grids=sig, arm="raw", condition_a="a", condition_b="b",
             output_path=str(tmp_path / "b.png"),
         )
-        assert _pixel_digest(path) == ((547, 1983, 4), "eab7091b764aa543")
+        assert _pixel_digest(path) == ((468, 1993, 4), "25ac5e61b97c81a8")
 
     def test_an_all_zero_label_grid_changes_nothing(self, tmp_path):
-        """No cluster, no outline: the same pixels as passing no label grids."""
+        """No cluster, no outline: the same pixels as passing no label grids
+        (re-pinned with the figure above, same new layout)."""
         maps, sig = self._maps()
         empty = {k: np.zeros((8, 8), dtype=int) for k in maps}
         path = plot_t_maps(
             maps, sig_grids=sig, label_grids=empty, arm="raw",
             condition_a="a", condition_b="b", output_path=str(tmp_path / "c.png"),
         )
-        assert _pixel_digest(path) == ((547, 1983, 4), "eab7091b764aa543")
+        assert _pixel_digest(path) == ((468, 1993, 4), "25ac5e61b97c81a8")
 
     def test_the_moran_profile(self, tmp_path):
+        """Re-pinned (labels): the ticks are now the tap path without the shared
+        prefix instead of its last component alone, which read ``attention_tap`` at
+        every other tick for real paths. Was ((463, 783, 4), "2bf6cdf35fed80ed")."""
         maps, _ = self._maps()
         path = plot_morans_i_profile(
             {k: i / 10 - 0.1 for i, k in enumerate(maps)},
             output_path=str(tmp_path / "d.png"), arm="raw",
         )
-        assert _pixel_digest(path) == ((463, 783, 4), "2bf6cdf35fed80ed")
+        assert _pixel_digest(path) == ((462, 783, 4), "2a787e0115cb9d6c")
 
 
 class TestTwoDimensionalUnchangedInputValidation:
@@ -1148,3 +1165,286 @@ class TestTheLiveNoteDoesNotCrowdTheTitle:
     def test_the_note_is_absent_without_one(self):
         fig, _, _ = self._title_and_subtitle_boxes(condition_a="a", condition_b="b")
         assert "step" not in [t for t in fig.texts if t is not fig._suptitle][0].get_text()
+
+
+# ---------------------------------------------------------------------
+# Step 4.2: the 2-D figures with the names and the note a real run gives them
+# ---------------------------------------------------------------------
+# The live figure of a real tiny run (6 taps, ``causal_language_model/topolm/...``
+# paths, a step-and-stimulus note) had the headline on top of the line under it,
+# the colour bar over the last panel and its title, and tap titles touching their
+# neighbours. Like the 3-D checks above, the oracle is geometric: the rendered
+# extents of the artists, never a pixel hash.
+
+_LIVE_NOTE = "step 24 | smoke stimuli, n=5/5 per condition"
+_REAL_NAME_CASES = [
+    pytest.param(1, id="2taps"),
+    pytest.param(3, id="6taps"),
+    pytest.param(12, id="24taps"),
+]
+
+
+def _real_maps(n_blocks, size=8, seed=5):
+    rng = np.random.default_rng(seed)
+    return {name: rng.normal(size=(size, size)) * 2 for name in _real_tap_names(n_blocks)}
+
+
+def _t_map_geometry(fig):
+    """The rendered extents of a 2-D t-map figure, in display pixels.
+
+    Returns ``(titles, frames, bar, texts)``: the title of each image axes, each
+    image axes' frame, the colour bar's axes INCLUDING its tick labels and label
+    (``get_tightbbox``), and the figure-level texts (the headline and the line
+    under it).
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    panels = _image_axes(fig)
+    bars = [ax for ax in fig.axes if not ax.images and ax.get_visible()]
+    assert len(bars) == 1, f"expected exactly one colour bar axes, found {len(bars)}"
+    return (
+        [ax.title.get_window_extent(renderer) for ax in panels],
+        [ax.get_window_extent(renderer) for ax in panels],
+        bars[0].get_tightbbox(renderer),
+        [t.get_window_extent(renderer) for t in fig.texts if t.get_text()],
+    )
+
+
+def _inside(box, bounds):
+    return (box.x0 >= bounds.x0 - 0.5 and box.x1 <= bounds.x1 + 0.5
+            and box.y0 >= bounds.y0 - 0.5 and box.y1 <= bounds.y1 + 0.5)
+
+
+class TestTwoDimensionalTitlesAreReadableForRealTapPaths:
+    @pytest.mark.parametrize("note", [None, _LIVE_NOTE], ids=["no_note", "live_note"])
+    @pytest.mark.parametrize("n_blocks", _REAL_NAME_CASES)
+    def test_nothing_overprints_anything_and_nothing_leaves_the_figure(
+        self, monkeypatch, tmp_path, n_blocks, note
+    ):
+        maps = _real_maps(n_blocks)
+        sig = {k: np.abs(v) > 3 for k, v in maps.items()}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids=sig, condition_a="a", condition_b="b", note=note,
+                output_path=str(tmp_path / "real.png"),
+            ),
+        )
+        titles, frames, bar, texts = _t_map_geometry(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert len(titles) == len(maps) and len(frames) == len(maps)
+        assert len(texts) == 2, "expected the headline and the line under it"
+
+        # Nothing leaves the figure.
+        for name, box in [(f"title {i}", b) for i, b in enumerate(titles)] + [
+            (f"panel {i}", b) for i, b in enumerate(frames)
+        ] + [("colour bar", bar)] + [(f"text {i}", b) for i, b in enumerate(texts)]:
+            assert _inside(box, bounds), f"{name} leaves the figure: {box} in {bounds}"
+
+        # No title overprints another title, any panel, the colour bar or a headline.
+        for i, box in enumerate(titles):
+            for j in range(i + 1, len(titles)):
+                assert not _overlap(box, titles[j]), f"titles {i} and {j} intersect"
+            for j, frame in enumerate(frames):
+                if j != i:
+                    assert not _overlap(box, frame), f"title {i} overprints panel {j}"
+            assert not _overlap(box, bar), f"title {i} overprints the colour bar"
+            for k, text in enumerate(texts):
+                assert not _overlap(box, text), f"title {i} overprints text {k}"
+
+        # The headline and the line under it are apart, and clear of every panel
+        # and the colour bar.
+        assert not _overlap(texts[0], texts[1]), "the headline overprints its subtitle"
+        for k, text in enumerate(texts):
+            assert not _overlap(text, bar), f"text {k} overprints the colour bar"
+            for j, frame in enumerate(frames):
+                assert not _overlap(text, frame), f"text {k} overprints panel {j}"
+
+        # The colour bar does not touch any panel (not even its frame).
+        for j, frame in enumerate(frames):
+            assert not _overlap(bar, frame, tolerance=-0.5), (
+                f"the colour bar touches panel {j}: {bar} {frame}"
+            )
+
+    def test_a_single_tap_with_its_full_real_path_is_also_readable(
+        self, monkeypatch, tmp_path
+    ):
+        name = f"{_REAL_PREFIX}block_0/attention_tap"
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {name: np.random.default_rng(0).normal(size=(8, 8))}, note=_LIVE_NOTE,
+                output_path=str(tmp_path / "one.png"),
+            ),
+        )
+        titles, frames, bar, texts = _t_map_geometry(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert all(_inside(b, bounds) for b in titles + frames + texts + [bar])
+        assert not any(_overlap(titles[0], t) for t in texts + [bar])
+        assert not _overlap(texts[0], texts[1])
+        assert not _overlap(bar, frames[0], tolerance=-0.5)
+
+    def test_the_short_name_case_is_clean_too(self, monkeypatch, tmp_path):
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(_t_maps(n_taps=4), condition_a="a", condition_b="b",
+                                output_path=str(tmp_path / "short.png")),
+        )
+        titles, frames, bar, texts = _t_map_geometry(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert all(_inside(b, bounds) for b in titles + frames + texts + [bar])
+        assert not any(_overlap(titles[i], titles[i + 1]) for i in range(3))
+        assert not any(_overlap(t, bar) for t in titles + texts)
+        assert not _overlap(texts[0], texts[1])
+        assert not any(_overlap(bar, f, tolerance=-0.5) for f in frames)
+
+    def test_the_titles_drop_the_shared_prefix_and_the_subtitle_names_it(
+        self, monkeypatch, tmp_path
+    ):
+        names = _real_tap_names(3)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(_real_maps(3), output_path=str(tmp_path / "p.png")),
+        )
+        subtitle = " ".join(t.get_text() for t in fig.texts)
+        titles = [ax.get_title() for ax in _image_axes(fig)]
+        plt.close(fig)
+        assert _REAL_PREFIX in " ".join(subtitle.split("\n"))
+        for name, title in zip(names, titles):
+            assert "".join(title.split("\n")) == name[len(_REAL_PREFIX):]
+
+
+class TestTwoDimensionalContentDoesNotDependOnLayout:
+    """What the 2-D figure SHOWS, asserted on the artists and the inputs, so the
+    layout re-pin in step 4.2 cannot hide a change of content: the image data, the
+    colour limits, the hatch geometry and the cluster outlines are all in data
+    coordinates and independent of where the figure puts its axes."""
+
+    # SHA-256 (first 16 hex digits) of the hatch paths' vertices and codes for the
+    # five fixture panels, taken on the code BEFORE step 4.2 and again after it: the
+    # hatch geometry did not change. Same environment pin as the pixel digests.
+    HATCH_GEOMETRY = "08d1c8a366184f84"
+
+    @staticmethod
+    def _panels(fig):
+        return [ax for ax in fig.axes if ax.images]
+
+    def _check_content(self, fig, maps, labels=None):
+        limit = _shared_limit(maps, 99.0)
+        panels = self._panels(fig)
+        assert len(panels) == len(maps)
+        for axis, values in zip(panels, maps.values()):
+            image = axis.images[0]
+            np.testing.assert_array_equal(np.asarray(image.get_array()), values)
+            assert image.get_clim() == (-limit, limit)
+        bar = next(ax for ax in fig.axes if not ax.images and ax.get_visible())
+        assert tuple(bar.get_ylim()) == (-limit, limit), "the colour bar has another scale"
+        if labels is not None:
+            for axis, grid in zip(panels, labels.values()):
+                assert _drawn_pieces(axis) == _expected_pieces(grid)
+
+    @pytest.mark.parametrize("note", [None, _LIVE_NOTE], ids=["no_note", "note"])
+    def test_short_names_the_pinned_fixture(self, monkeypatch, tmp_path, note):
+        maps, sig = TestTwoDimensionalUnchangedPixels._maps()
+        labels = {k: _boundary_fixtures()["touching"] for k in maps}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(maps, sig_grids=sig, label_grids=labels, note=note,
+                                output_path=str(tmp_path / "c.png")),
+        )
+        self._check_content(fig, maps, labels)
+        plt.close(fig)
+
+    @pytest.mark.parametrize("n_blocks", _REAL_NAME_CASES)
+    def test_real_names_with_a_note(self, monkeypatch, tmp_path, n_blocks):
+        maps = _real_maps(n_blocks)
+        labels = {k: _boundary_fixtures()["ring"] for k in maps}
+        sig = {k: np.abs(v) > 3 for k, v in maps.items()}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(maps, sig_grids=sig, label_grids=labels,
+                                note=_LIVE_NOTE, output_path=str(tmp_path / "r.png")),
+        )
+        self._check_content(fig, maps, labels)
+        plt.close(fig)
+
+    def test_the_hatch_geometry_is_the_one_before_the_layout_change(self):
+        import hashlib
+
+        maps, sig = TestTwoDimensionalUnchangedPixels._maps()
+        fig, axes = _capture_axes(maps, sig_grids=sig, _fn="plot_t_maps")
+        digest = hashlib.sha256()
+        for axis in [a for row in np.atleast_2d(axes) for a in row]:
+            for collection in axis.collections:
+                for path in collection.get_paths():
+                    digest.update(np.round(path.vertices, 6).tobytes())
+                    if path.codes is not None:
+                        digest.update(path.codes.tobytes())
+        plt.close(fig)
+        assert digest.hexdigest()[:16] == self.HATCH_GEOMETRY
+
+
+class TestTheMoransProfileIsReadableForRealTapPaths:
+    @pytest.mark.parametrize("n_blocks", _REAL_NAME_CASES)
+    def test_every_tick_names_its_tap_and_nothing_overprints(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        from train.topolm.plotting import plot_morans_i_profile as draw
+
+        names = _real_tap_names(n_blocks)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: draw({n: 0.05 * i for i, n in enumerate(names)}, arm="raw",
+                         note=_LIVE_NOTE, output_path=str(tmp_path / "m.png")),
+        )
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axis = fig.axes[0]
+        ticks = [t for t in axis.get_xticklabels() if t.get_text()]
+        boxes = [t.get_window_extent(renderer) for t in ticks]
+        other = [axis.title.get_window_extent(renderer),
+                 axis.xaxis.label.get_window_extent(renderer)]
+        bounds = fig.bbox
+        shown = [t.get_text() for t in ticks]
+        subtitle = " ".join(axis.xaxis.label.get_text().split("\n"))
+        plt.close(fig)
+
+        assert len(set(shown)) == len(shown), f"two ticks read the same: {shown}"
+        assert _REAL_PREFIX in subtitle
+        # The label names the prefix that was dropped (a one-block figure drops the
+        # block as well), so prefix + tick is the tap's full path.
+        prefix = subtitle.split("shared prefix ")[1]
+        for text in shown:
+            assert f"{prefix}{text}" in names
+        for i, box in enumerate(boxes + other):
+            assert _inside(box, bounds), f"element {i} leaves the figure"
+        for i, box in enumerate(boxes):
+            assert not any(_overlap(box, o) for o in other), f"tick {i} overprints a label"
+            assert not any(_overlap(box, boxes[j]) for j in range(i + 1, len(boxes)))
+
+
+class TestThreeDimensionalHeadlineFitsWithANote:
+    """Step 4.2 found the 3-D line under the headline 12 px wider than a one-tap
+    figure once it carried the live note; it is wrapped to the figure now."""
+
+    @pytest.mark.parametrize("n_taps", [1, 2, 6, 24], ids=lambda n: f"{n}taps")
+    def test_the_headline_texts_stay_inside_and_clear_of_the_titles(
+        self, monkeypatch, tmp_path, n_taps
+    ):
+        names = _real_tap_names(12)[:n_taps]
+        maps = {n: np.random.default_rng(3).normal(size=(7, 8, 7)) for n in names}
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(maps, condition_a="a", condition_b="b",
+                                note=_LIVE_NOTE, output_path=str(tmp_path / "n.png")),
+        )
+        titles, _, texts = _title_boxes_and_obstacles(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert all(_inside(t, bounds) for t in texts)
+        assert not _overlap(texts[0], texts[1])
+        for _, box in titles:
+            assert not any(_overlap(box, t) for t in texts)
