@@ -162,16 +162,17 @@ pre-norm path the branch tensor is a local that stochastic depth and layer scale
 add — it is gone by the time `call` returns. A regularizer that must be computed on that tensor,
 before normalization and before the add, cannot reach it: there is no flag, no hook, and no
 `activity_regularizer` that does. `models/language/topolm/` is the worked example; `TopoLMBlock`
-there composes `create_attention_layer` / `create_ffn_layer` / `create_normalization_layer` rather
-than reimplementing any of them, which keeps the reuse order unchanged (factories first, a bespoke
-layer last). Precedents for the same shape: `hnet`, `wave_field`, `tree_transformer`, `qwen3_next`.
+there composes `create_attention_layer`, `create_normalization_layer` and the feed-forward path
+`TransformerLayer` uses (`build_transformer_ffn_config` into `create_ffn_from_config`) rather than
+reimplementing any of them, which keeps the reuse order unchanged (factories first, a bespoke layer
+last). Precedents for the same shape: `hnet`, `wave_field`, `tree_transformer`, `qwen3_next`.
 
 **`models/language/topolm/` is also the reference for a model with its own trainer conventions.** It
 is Pattern 8 in `src/train/AGENTS.md`, and the three deviations from an ordinary NLP pretrain each
 have a measured consequence worth knowing before reading either tree. The auxiliary term rides
 `add_loss`, so the head must be built with `aggregate_backbone_losses=True` — a reported training
-loss of 15.31 aggregated against 5.36 not, on identical weights, and the evaluation loss is the
-pure task loss either way. The validation cadence IS the virtual epoch length. And the reported
+loss of 17.67 aggregated against 7.68 not (same seed and same two batches, the corrected `tiny`
+variant), and the evaluation loss is the pure task loss either way. The validation cadence IS the virtual epoch length. And the reported
 loss must be SPLIT, because a rising curve can be a rising task loss with a falling penalty or the
 reverse, and the two look identical in one number. Its `paper` variant is the one row of its table
 that is quoted data and pinned against upstream; `small` and `tiny` are repo-authored scales and are
