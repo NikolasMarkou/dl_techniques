@@ -2212,3 +2212,120 @@ class TestTheVocabularyMessageNamesOnlyRealFlags:
         with pytest.raises(ValueError) as caught:
             build_backbone(_config(vocab_size=50257), required_vocab_size=100277)
         assert self._flags_in(str(caught.value)) <= self._real_flags()
+
+
+# =====================================================================
+# Step 5.4 (plan-2026-10-23T190557-972a9ac5, decision D-019, defect D7): the
+# early radius refusal reaches the user as a parser error (one message on
+# stderr, exit code 2), not as a traceback. Written RED-first against 2650cb6f9.
+# =====================================================================
+
+
+class _CliSpies(_NoRunWork):
+    """:class:`_NoRunWork` plus the two trainer entry points and the GPU set-up,
+    which a refused command line must not reach either."""
+
+    def __init__(self, monkeypatch, tmp_path):
+        super().__init__(monkeypatch, tmp_path)
+        for owner, name in ((pretrain_cli, "train_topolm"), (pretrain_cli, "train_paired"),
+                            (pretrain_cli, "setup_gpu")):
+            def spy(*args, _name=name, **kwargs):
+                self.calls.append(_name)
+                raise AssertionError(f"{_name} was reached by a refused command line")
+            monkeypatch.setattr(owner, name, spy)
+
+
+def _refused_message(argv_tail):
+    """The exact text ``check_variant_fits_radius`` raises for ``argv_tail``."""
+    args = pretrain_cli._build_parser().parse_args(argv_tail)
+    config = pretrain_cli._config_from_args(args)
+    with pytest.raises(ValueError) as caught:
+        C.check_variant_fits_radius(config)
+    return str(caught.value)
+
+
+class TestTheRadiusRefusalIsAParserError:
+    @pytest.mark.parametrize("extra", [[], ["--paired"]], ids=["plain", "paired"])
+    def test_tiny3d_with_radius_5_exits_2_with_the_message_and_no_run_work(
+        self, monkeypatch, tmp_path, capsys, extra
+    ):
+        guard = _CliSpies(monkeypatch, tmp_path)
+        argv = ["--variant", "tiny3d", "--radius", "5", "--save-dir",
+                str(guard.save_dir), *extra]
+        expected = _refused_message(argv)
+        with pytest.raises(SystemExit) as caught:
+            pretrain_cli.main(argv)
+        error = capsys.readouterr().err
+        assert caught.value.code == 2
+        assert "usage:" in error and "error:" in error
+        assert expected in error, "the parser error must carry the refusal's own text"
+        assert "largest radius this grid can use is 3" in error
+        assert "--radius 5" in error and "tiny3d" in error and "7x7x7" in error
+        assert "Traceback" not in error
+        guard.assert_nothing_happened()       # no seeds, tokenizer, dataset, save dir
+
+    def test_a_head_count_that_does_not_divide_the_width_is_refused_the_same_way(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        guard = _CliSpies(monkeypatch, tmp_path)
+        argv = ["--variant", "tiny", "--num-heads", "5", "--save-dir", str(guard.save_dir)]
+        expected = _refused_message(argv)
+        with pytest.raises(SystemExit) as caught:
+            pretrain_cli.main(argv)
+        error = capsys.readouterr().err
+        assert caught.value.code == 2 and expected in error and "divisible" in error
+        guard.assert_nothing_happened()
+
+    def test_other_refusals_are_unchanged(self, monkeypatch, tmp_path):
+        """A 3-D variant with a typed readout is refused by ``_config_from_args``
+        with a ``ValueError``, before the radius check, as before."""
+        guard = _CliSpies(monkeypatch, tmp_path)
+        with pytest.raises(ValueError, match="--readout-fwhm"):
+            pretrain_cli.main(["--variant", "tiny3d", "--readout-fwhm", "2.0",
+                               "--save-dir", str(guard.save_dir)])
+        guard.assert_nothing_happened()
+
+    def test_a_radius_the_grid_holds_still_reaches_the_trainer(
+        self, monkeypatch, tmp_path
+    ):
+        captured = {}
+
+        def _record(config, run_topography=True):
+            captured["config"] = config
+            return {"results_dir": str(tmp_path)}
+
+        monkeypatch.setattr(pretrain_cli, "setup_gpu", lambda gpu_id=None: None)
+        monkeypatch.setattr(pretrain_cli, "train_topolm", _record)
+        pretrain_cli.main(["--variant", "tiny3d", "--radius", "3",
+                           "--save-dir", str(tmp_path / "out")])
+        assert captured["config"].spatial_radius == 3
+
+    def test_main_still_reads_sys_argv_without_an_argument(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def _record(config, run_topography=True):
+            captured["config"] = config
+            return {"results_dir": str(tmp_path)}
+
+        monkeypatch.setattr(pretrain_cli, "setup_gpu", lambda gpu_id=None: None)
+        monkeypatch.setattr(pretrain_cli, "train_topolm", _record)
+        monkeypatch.setattr(
+            "sys.argv", ["pretrain", "--variant", "tiny3d", "--save-dir", str(tmp_path / "o")]
+        )
+        pretrain_cli.main()
+        assert captured["config"].model_variant == "tiny3d"
+
+    def test_the_refusal_happens_before_the_gpu_is_touched(self, monkeypatch, tmp_path):
+        """A command that cannot run should not allocate a GPU context first."""
+        order = []
+        monkeypatch.setattr(pretrain_cli, "setup_gpu", lambda gpu_id=None: order.append("gpu"))
+        monkeypatch.setattr(
+            pretrain_cli, "train_topolm",
+            lambda config, run_topography=True: order.append("train") or {"results_dir": ""},
+        )
+        with pytest.raises(SystemExit):
+            pretrain_cli.main(["--variant", "tiny3d", "--radius", "5",
+                               "--save-dir", str(tmp_path / "o")])
+        assert order == []
+        pretrain_cli.main(["--variant", "tiny3d", "--save-dir", str(tmp_path / "o")])
+        assert order == ["gpu", "train"]

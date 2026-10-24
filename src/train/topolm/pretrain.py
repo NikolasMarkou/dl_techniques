@@ -46,7 +46,7 @@ References:
 """
 
 import argparse
-from typing import Optional
+from typing import Optional, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -60,6 +60,7 @@ from .common import (
     DEFAULT_READOUT_FWHM,
     TopoLMTrainingConfig,
     _grid_label,
+    check_variant_fits_radius,
     check_viz_every_steps,
     resolve_spatial_radius,
     train_paired,
@@ -513,17 +514,34 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
     return config
 
 
-def main() -> None:
-    """Parse arguments, configure the GPU, and train.
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Parse arguments, refuse a variant that cannot host the radius, configure the GPU, and train.
 
-    :raises SystemExit: If ``--paired`` is combined with ``--alpha 0``, which has
-        no topographic arm to pair against. Raised through the trainer's own
-        check rather than duplicated here.
+    A variant row that cannot hold the resolved radius (``--variant tiny3d
+    --radius 5``) or whose head count does not divide its width is refused HERE,
+    before the GPU is touched and before any run work, as a parser error: the
+    message of :func:`~train.topolm.common.check_variant_fits_radius` on stderr
+    under the usage line, exit code 2, no traceback. The trainers repeat the same
+    check for a programmatic caller, where it stays a ``ValueError``.
+
+    :param argv: The command line without the program name; ``None`` reads
+        ``sys.argv``.
+    :type argv: Optional[Sequence[str]]
+    :raises SystemExit: With code 2 for the refusal above; and if ``--paired`` is
+        combined with ``--alpha 0``, which has no topographic arm to pair against
+        (raised through the trainer's own check rather than duplicated here).
+    :raises ValueError: For any other refused combination of flags, as before
+        (for example a typed ``--readout-fwhm`` on a 3-D variant).
     """
-    args = _build_parser().parse_args()
-    setup_gpu(gpu_id=args.gpu)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
     config = _config_from_args(args)
+    try:
+        check_variant_fits_radius(config)
+    except ValueError as error:
+        parser.error(str(error))
+    setup_gpu(gpu_id=args.gpu)
     logger.info(
         f"Config: variant={config.model_variant}, "
         f"alpha={config.spatial_alpha}, radius={config.spatial_radius}, "
