@@ -236,7 +236,7 @@ positive.
 | `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, both conditions' clusters outlined (solid black for A, dashed magenta for B); on a 3D grid, three orthogonal planes per tap |
 | `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout (2D variants only) |
 | `morans_i_raw.png`, `morans_i_readout.png` | standard Moran's I against depth |
-| `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster; on a 3D grid, every slice along axis 0 |
+| `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster, drawn from condition A's clusters only and titled with the tap, the arm and the condition (`block_3/mlp_tap (raw), condition a: 1 cluster`; the t-map of the same tap outlines both conditions); on a 3D grid, every slice along axis 0 |
 
 Three rules the figures follow, each of which exists because the obvious
 alternative misleads:
@@ -297,10 +297,12 @@ arm draws into its own run directory.
     step_0000050/ ...           morans_i_raw.png, clusters_raw.png once a cluster exists)
     latest_t_maps_raw.png       the newest t-maps
     latest_morans_i_raw.png     the newest Moran's I profile
-    metrics.jsonl               one JSON row per draw
-    topography_curve.png        Moran's I per tap (named in a legend right of the
-                                axes), clusters, significant units and validation
-                                loss against step
+    metrics.jsonl               one JSON row per draw, and a closing metrics-only row
+                                when a validation ran after the last draw
+    topography_curve.png        Moran's I per tap (one colour, marker and dash
+                                pattern each, named in a legend right of the axes),
+                                clusters, significant units and validation loss
+                                against step
 ```
 
 **How to watch it live.** Open `latest_t_maps_raw.png` in an image viewer that
@@ -318,12 +320,24 @@ the draw), `val_loss`, `val_loss_step`, `grid_shape`, `contrast`,
 `morans_i_islands`, `num_significant_units`, `clusters_a`, `clusters_b`, `t_min`,
 `t_max` and `t_abs_mean`. `val_loss` is the last validation completed when the row
 was written and `val_loss_step` is the step it was measured at. A draw at a step
-where a validation is also due is taken at the end of that batch, before the
-validation, so **the last row can lag the final value in `training_history.json`**:
-in a 400-step `tiny3d` run (validation every 100 steps, a draw every 50) the last
-row holds 7.5333 and the final history value is 7.4917; in the matching `tiny` run
-7.8182 and 7.8185. The
-curve plots each validation once, at its own `val_loss_step`.
+where a validation is also due is taken at the end of that batch, before Keras
+validates, so **the last full row lags the final value in `training_history.json`**:
+in a 400-step `tiny3d` run (validation every 100 steps, a draw every 50) the step-400
+row held 7.5333 and the final history value was 7.4917; in the matching `tiny` run
+7.8182 and 7.8185. The curve plots each validation once, at its own `val_loss_step`.
+
+**The closing validation row.** So that the curve ends on the run's last validation,
+`on_train_end` appends one metrics-only row when a validation newer than the one the
+last row carries ran after it: `{"step": 400, "val_only": true, "val_loss": ...,
+"val_loss_step": 400}`, with the `step` of the last row, the newer value and nothing
+else (no `per_tap`, no map statistics). It redraws the curve only: no evaluation,
+no second set of map figures, the `latest_*` t-maps untouched. A run whose last
+validation is already in the last row (a draw made after it, an off-grid final step,
+a restore redraw) gets no such row, and a switched-off callback writes none. A
+reader merges a repeated step with `last_row_per_step`: a row with map statistics
+replaces the row before it, a metrics-only row is merged onto it (its non-null fields
+override, a null or a missing field leaves the earlier value alone), and the curve
+reads every validation from every row, so a merge never drops an older one.
 
 **The last frame is the model the run ends with.** `fit` draws the last step at
 the end of its final batch; `ConsecutiveIncreaseEarlyStopping` restores its
@@ -332,10 +346,10 @@ snapshot only afterwards. When the weights differ from the ones the last draw sa
 step again: the step directory and the `latest_*` files are replaced and
 `metrics.jsonl` gets a second row with the same `step` and
 `"restored_weights": true`. A run without a restore has strictly increasing steps
-and no such field. A reader takes the last row of a repeated step (the curve does,
-through `last_row_per_step`). A stop that falls between two draws gets one final
-frame labelled with the step it stopped at, already showing the restored weights.
-A `metrics.jsonl` with a damaged line (a crash mid-write) does not stop the view:
+and no such field (apart from the closing row above, which repeats the last step). A
+reader takes one entry per step with `last_row_per_step`, as the curve does. A stop
+that falls between two draws gets one final frame labelled with the step it stopped
+at, already showing the restored weights. A `metrics.jsonl` with a damaged line (a crash mid-write) does not stop the view:
 the line is skipped with one warning and the next row starts on a line of its own.
 
 **What a draw scores.** The two contrast conditions of the built-in smoke stimuli
@@ -349,6 +363,17 @@ percentile of its own t-values (see the rules above), and the colour bar states
 that scale. A 2D `tiny` run was on +/-4 at step 0 and +/-14 at step 400. Two
 frames are therefore not comparable by colour across steps; a fixed scale would
 either clip the trained map or hide the early structure.
+
+**The frame size is not constant.** The figure is laid out in inches and the line
+under the headline wraps at clause boundaries (after a `;` or a `|`), so its height,
+and with it the PNG's pixel size, changes by a few pixels between draws when the
+subtitle gains or loses a wrapped line (a real 3D run went from 1522x1246 at step 0 to
+1522x1265 and 1540x1265 later). A viewer that reloads the file may resize its window
+or rescale the picture; padding every frame to one size was not done, because it
+would change every figure. The 3D subtitle also says where the crosshair is and is
+true at every step: `crosshair at the largest significant |t|`, with `(the largest
+|t| where none is significant)` added when only some taps have a significant cell,
+and `at the largest |t| (nothing is significant)` at step 0.
 
 **What the periodic pass guarantees.**
 
@@ -365,6 +390,17 @@ either clip the trained map or hide the early structure.
   good draw resets the count. `KeyboardInterrupt` and `SystemExit` are not
   caught. The post-hoc evaluation still raises on a real failure, so a run cannot
   exit 0 without its topography report.
+
+**Warnings after the last line.** A long run with the live view can print five TensorFlow
+warnings, `Error occurred when finalizing GeneratorDataset iterator: FAILED_PRECONDITION:
+Python interpreter state is not initialized`, after the final `Wrote ...` line. The exit code
+is 0 and every output is written: the data generator's iterators are finalized after the
+interpreter has begun to shut down. It is intermittent: on `tiny3d` runs of 400 steps with
+`--viz-every-steps 50` it appeared in 9 of 11 runs of the current code and 1 of 3 runs of
+an earlier callback, and in none of 6 runs without the live view (nor in 60-step runs with
+it). It was traced as far as exceptions retained inside `pyparsing` (matplotlib's math-text
+parser) keeping the `fit` frame, and with it the data iterators, alive to the end of the
+process; it was not traced to the callback's own code, and nothing was changed for it.
 
 **Does it change the run?** On CPU, no: a same-seed training with the callback
 gives bit-equal trainable and non-trainable weights, `SeedGenerator` states and
@@ -421,11 +457,14 @@ them like a 2D variant, with these differences.
 - *Radius.* `--radius` unset resolves to the variant's own radius, so
   `--variant tiny3d` needs no radius flag. An explicit radius the grid cannot hold
   is refused before the run starts: no run directory, tokenizer or dataset is
-  touched. The error names the radius, the variant and its unit grid, the unit
-  count a radius-r neighbourhood needs, and the largest radius the grid can use;
-  `--variant tiny3d --radius 5` reports the 7x7x7 grid, the 1331 units needed
-  against 343, and a largest usable radius of 3. When the unit count suffices but
-  an axis is short, it names that axis and its length.
+  touched, and on the command line the GPU is not configured either. It is a parser
+  error (the message on stderr under the usage line, exit code 2, no traceback; a head
+  count that does not divide the width is refused the same way), and a programmatic
+  call of `train_topolm` raises the same text as a `ValueError`. The message names the
+  radius, the variant and its unit grid, the unit count a radius-r neighbourhood needs,
+  and the largest radius the grid can use; `--variant tiny3d --radius 5` reports the
+  7x7x7 grid, the 1331 units needed against 343, and a largest usable radius of 3.
+  When the unit count suffices but an axis is short, it names that axis and its length.
 - *Readout.* The Gaussian readout is a `Conv2D`, so the readout arm is 2D only.
   `--readout-fwhm` unset means 2.0 on a 2D variant and no readout on a 3D one, `0`
   means no readout on either, and a positive value typed for a 3D variant is
@@ -440,8 +479,9 @@ them like a 2D variant, with these differences.
 - *Figures.* `t_maps_raw.png` draws three orthogonal planes per tap, two taps per
   row, through a crosshair at the cell of the largest `|t|` among the significant
   cells (the largest `|t|` overall if none is significant, ties to the lowest flat
-  index). The crosshair is a proposal for where to look, not a result: a cluster
-  away from it is not in the planes. `clusters_raw.png` is a montage of every slice
+  index). The subtitle states which of the two applies. The crosshair is a proposal
+  for where to look, not a result: a cluster away from it is not in the planes.
+  `clusters_raw.png` is a montage of every slice
   along axis 0 of the clusters of the deepest tap that found one, one colour per
   cluster. There are no `*_readout.png` files. The colour scale, hatch and outlines
   are the 2D ones, applied to each plane.
@@ -615,10 +655,12 @@ The 3D work and the live view live in these files (all under
 - `test_topolm_live.py` (new): `TestTheABInstrument` (the same-seed CPU A/B, with a
   control that must reproduce itself and a `training=True` negative control),
   `TestTheTripwire`, `TestEvalModeOnly`, `TestFailureIsolation`, `TestOutputs`,
-  `TestLatestFilesAreAtomic`, `TestTheMetricsRows`, `TestBothRanks` and
-  `TestTheFlagIsRefusedNegativeAndNeedsItsInputs`.
+  `TestLatestFilesAreAtomic`, `TestTheMetricsRows`, `TestBothRanks`,
+  `TestTheFlagIsRefusedNegativeAndNeedsItsInputs`, `TestTheFinalFrameShowsTheEndingWeights`,
+  `TestADamagedMetricsFileDoesNotKillTheView`, `TestTheLastValidationIsDrawn` (the closing
+  metrics-only row) and `TestARepeatedStepIsMerged` (`last_row_per_step`).
 - `test_topolm_trainer.py`: `TestThreeDimensionalVariantsTrain` (it replaces
-  `TestThreeDimensionalVariantsAreRefused`, which pinned the refusal this trainer no
+  the class that pinned an earlier refusal of 3D variants, which this trainer no
   longer makes), `TestRadiusResolution`, `TestVizEveryStepsField`,
   `TestTheMapPlacementFollowsTheLayout` (the placement correction above, against an
   oracle that does not use `to_grid`), the golden pins that hold the 2D report, config
@@ -627,11 +669,16 @@ The 3D work and the live view live in these files (all under
   `TestTwoDimensionalUnchangedPlacementWithoutPermutation`), and
   `TestTheGridIsReportedAtItsOwnRank`.
 - `test_cli_contract.py`: `TestRadiusPerVariant` and `TestVizEveryStepsFlag`.
+- `test_topolm_trainer.py` also holds `TestTheVariantIsCheckedAgainstTheRadiusFirst` and
+  `TestTheRadiusRefusalIsAParserError` (`main([...])` exits 2 with the refusal's text,
+  before any run work).
 - `test_topolm_plotting.py`: `TestClusterBoundariesSitOnTheirCells`,
   `TestThreeDimensionalFigures`, `TestThreeDimensionalCrosshairAndMontageContent`,
   `TestTheCurveDrawsValidationAtItsOwnStep`,
   `TestTheClusterFigureNamesItsTapAndCountsCorrectly`,
-  `TestTheCrosshairIsVisibleOnSaturatedCells`, and the layout classes
+  `TestTheCrosshairIsVisibleOnSaturatedCells`, `TestTheClusterFigureNamesTheConditionItShows`,
+  `TestTheTapLinesCanBeToldApart`, `TestTheCrosshairSentenceIsTrueAtEveryStep`,
+  `TestTheSubtitleBreaksAtClauses`, and the layout classes
   `TestThreeDimensionalTitlesAreReadableForRealTapPaths`,
   `TestTwoDimensionalTitlesAreReadableForRealTapPaths` and
   `TestTheMoransProfileIsReadableForRealTapPaths`, which render real-length tap paths
