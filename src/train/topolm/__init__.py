@@ -4,7 +4,7 @@ The package holds the pipeline in :mod:`~train.topolm.common` and the CLI in
 :mod:`~train.topolm.pretrain`::
 
     MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny \\
-        --vocab-size 50257 --epochs 2 --eval-every-steps 50
+        --vocab-size 100277 --epochs 2 --eval-every-steps 50
 
 Two things about this trainer are worth knowing before reading its code, because
 both would otherwise look like mistakes:

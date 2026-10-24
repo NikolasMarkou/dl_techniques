@@ -107,12 +107,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100277,
         help=(
-            "Vocabulary size. MUST exceed the tokenizer's, which is 100277 for "
-            "the default cl100k_base encoding used by create_tokenizer -- its "
-            "special ids reach 100267. The previous default of 50257 is "
-            "GPT-2's base vocabulary and is wrong for this tokenizer: it dies "
-            "in word_embeddings on the first batch with an out-of-range Gather "
-            "(`indices[..] = 50259 is not in [0, 50257)`). Measured."
+            "Embedding table rows. Must hold every id the tokenizer emits, "
+            "special ids included. The trainer's tokenizer is Tiktoken 'gpt2' "
+            "(50257 base ids plus special ids 50257..50260), so at least 50261 "
+            "rows; the default 100277 satisfies that. 50257 rows fail on the "
+            "first batch with an out-of-range Gather in word_embeddings "
+            "(measured on the earlier pipeline, not re-run on the packed path)."
         ),
     )
     parser.add_argument(

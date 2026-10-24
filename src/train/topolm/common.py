@@ -304,8 +304,11 @@ def _require_vocab_covers_tokenizer(
 
     The bound is the tokenizer's OWN ``vocab_size``, not a constant, so changing
     ``encoding_name`` moves the requirement with it. That matters because the
-    natural wrong value is GPT-2's 50257, which is what this CLI used to default
-    to against a ``cl100k_base`` tokenizer whose ids reach 100267.
+    natural wrong value is GPT-2's base size 50257, which is what this CLI used
+    to default to although the trainer's ``gpt2`` tokenizer also emits special
+    ids 50257..50260. NOTE: the bound compared is the tokenizer's base
+    ``vocab_size`` (50257), not the largest special id plus one (50261), so a
+    50257-row table passes this check.
 
     :param config: The run's configuration.
     :type config: TopoLMTrainingConfig
