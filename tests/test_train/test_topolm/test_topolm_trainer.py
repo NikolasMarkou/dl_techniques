@@ -1847,14 +1847,18 @@ class TestTheSmokeStimuliAreLengthMatched:
 
     A t-map between two conditions of different length measures the length. The
     built-in smoke set used to differ by 8.0 against 5.8 text tokens (a against
-    b) and 10.2 against 11.6 (c against d); length-only differences
-    produced a large contrast on the trained 3D example (word lists from one
-    vocabulary, 3 against 7 words: median 225 significant units per tap, against
-    89 for the shipped a-versus-b), while equal lengths gave 0 in 12 draws.
+    b) and 10.2 against 11.6 (c against d). Length-only contrasts (word lists
+    from one vocabulary, 3 against 7 words) give a large count where the real
+    contrast is matched: under the shipped context a median 87.5 and 92.3
+    significant units per tap on the trained 2D example (the matched a-versus-b
+    gives 24.9) and 12.5 and 14.5 on the trained 3D one (matched: 135.75); equal
+    lengths (5 against 5) give 0.0 (``train.topolm.controls.length_control``, 12
+    draws, seed 0; the numbers move with the draws and with the framing).
 
-    The counts are those of the trainer's own tokenizer after D-024's framing:
-    the text ids are the plain ``encode`` of the sentence, so the count is
-    ``len(encoder.encode(sentence))`` with no CLS and no SEP in it.
+    The counts are those of the trainer's own tokenizer: the text ids are the
+    plain ``encode`` of the sentence, so the count is
+    ``len(encoder.encode(sentence))`` with no CLS, no SEP, no context and no
+    end-of-text id in it.
     """
 
     #: Text tokens of sentence i, the same in a, b, c and d.

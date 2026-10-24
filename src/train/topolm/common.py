@@ -385,6 +385,14 @@ def _resolve_framing(
 
 def _warn_legacy_framing(preprocessor: Any, context: Optional[str]) -> None:
     """Say, once per preprocessor class per process, that the legacy framing runs."""
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-028: the call-only framing is a
+    # production route (any preprocessor without a raw encoder) and it is the
+    # framing that was found to manufacture significant units, so it must never
+    # be silent. Do NOT remove or demote this warning, do NOT make the legacy
+    # framing the quiet default for an unknown preprocessor, and do NOT log it
+    # once per call (a test double is used thousands of times: once per class).
+    # The report says the same in stimuli.framing. See decisions.md D-028;
+    # guarded by TestTheLegacyFramingIsLoud and TestTheReportStatesHowTheStimuliWereFramed.
     name = type(preprocessor).__name__
     if name in _LEGACY_FRAMING_WARNED:
         return

@@ -25,9 +25,11 @@ shapes, the determinism and the agreement with ``evaluate_topography``.
 """
 
 import ast
+import glob
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import zlib
@@ -450,7 +452,9 @@ class TestTheLabelShuffleNull:
         first = self._null(monkeypatch, set(A_SENTENCES), max_splits=20, seed=1)
         again = self._null(monkeypatch, set(A_SENTENCES), max_splits=20, seed=1)
         other = self._null(monkeypatch, set(A_SENTENCES), max_splits=20, seed=2)
-        indices = lambda r: [tuple(e["a_index"]) for e in r["per_split"]]  # noqa: E731
+        def indices(result):
+            return [tuple(e["a_index"]) for e in result["per_split"]]
+
         assert first["n_splits"] == 20 and len(indices(first)) == 20
         assert (0, 1, 2, 3, 4) in indices(first)
         assert indices(first) == indices(again)
@@ -875,3 +879,84 @@ class TestTheModuleStandsOnTheRepoAlone:
         source = open(path).read()
         assert "sys.path" not in source, "a path hack could reach plans/"
         assert "plans/" not in source.replace("``plans/``", "")
+
+
+# ---------------------------------------------------------------------
+# the decision anchors of src/train/topolm
+# ---------------------------------------------------------------------
+
+THIS_PLAN = "plan-2026-10-23T190557-972a9ac5"
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+ANCHOR_PATTERN = re.compile(r"# DECISION (plan-\d{4}-\d\d-\d\dT\d{6}-[0-9a-f]{8})/(D-\d{3})")
+
+#: Every decision of this plan that has an anchor in ``src/train/topolm`` (D-003's
+#: lives in ``src/dl_techniques/metrics``, outside this census).
+ANCHORED_DECISIONS = {
+    "D-001", "D-002", "D-006", "D-007", "D-019", "D-020", "D-021", "D-022",
+    "D-024", "D-025", "D-026", "D-027", "D-028", "D-029",
+}
+
+
+def _anchor_blocks():
+    """``(path, line, text)`` of each anchor: the comment block that follows it."""
+    found = []
+    for path in sorted(glob.glob(os.path.join(REPO, "src", "train", "topolm", "*.py"))):
+        lines = open(path, encoding="utf-8").read().splitlines()
+        for index, line in enumerate(lines):
+            if "# DECISION" not in line:
+                continue
+            block, cursor = [line], index
+            while (
+                cursor + 1 < len(lines)
+                and lines[cursor + 1].lstrip().startswith("#")
+                and "# DECISION" not in lines[cursor + 1]
+            ):
+                cursor += 1
+                block.append(lines[cursor])
+            # a test name wrapped after an underscore is one name
+            text = re.sub(r"_\s*\n\s*#\s*", "_", "\n".join(block))
+            found.append((path, index + 1, text))
+    return found
+
+
+def _test_sources():
+    return {
+        os.path.basename(p): open(p, encoding="utf-8").read()
+        for p in glob.glob(os.path.join(TEST_DIR, "*.py"))
+    }
+
+
+class TestTheAnchorsNameRealGuards:
+    """An anchor is a comment; a test is the guard. Each anchor of this plan in
+    ``src/train/topolm`` names the guard (a test class, a test function or a test
+    file) and the name must exist, so a renamed or deleted guard fails here
+    instead of leaving the anchor pointing at nothing (pass-4 note 11)."""
+
+    def test_the_census_sees_every_anchored_decision(self):
+        found = {
+            ANCHOR_PATTERN.search(text).group(2)
+            for _, _, text in _anchor_blocks()
+            if ANCHOR_PATTERN.search(text)
+        }
+        assert found == ANCHORED_DECISIONS, (found ^ ANCHORED_DECISIONS)
+
+    def test_every_anchor_carries_this_plans_id(self):
+        for path, line, text in _anchor_blocks():
+            match = ANCHOR_PATTERN.search(text)
+            assert match, (path, line, "an anchor without a qualified plan id")
+            assert match.group(1) == THIS_PLAN, (path, line, match.group(1))
+
+    def test_every_anchor_names_a_guard_that_exists(self):
+        sources = _test_sources()
+        everything = "\n".join(sources.values())
+        for path, line, text in _anchor_blocks():
+            names = set(re.findall(r"\bTest[A-Za-z0-9_]+", text))
+            names |= set(re.findall(r"\btest_[A-Za-z0-9_]+(?:\.py)?", text))
+            assert names, (path, line, "an anchor that names no guard")
+            for name in names:
+                if name.endswith(".py"):
+                    assert name in sources, (path, line, name)
+                elif name.startswith("Test"):
+                    assert re.search(rf"^class {name}\b", everything, re.M), (path, line, name)
+                else:
+                    assert re.search(rf"def {name}\b", everything), (path, line, name)

@@ -128,6 +128,15 @@ def _score(
     t-map (queen weights), over the taps where it is defined, exactly as
     ``evaluate_topography`` averages it.
     """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-029: a control scores a contrast
+    # with the SAME chain the report uses. Do NOT copy the t-map, BH-FDR and
+    # cluster steps into this module (a second hand-kept copy drifts, and a
+    # control that scores something else than the report is not a control): call
+    # common.score_contrast. The controls are tracked code so the README numbers
+    # can be regenerated from a run; do NOT read a script or file from a plan
+    # directory here. See decisions.md D-029; guarded by TestTheSharedScorer,
+    # TestTheFramingTable (each row equals evaluate_topography) and
+    # TestTheModuleStandsOnTheRepoAlone.
     scored = C.score_contrast(
         backbone, values_a, values_b, condition_a, condition_b,
         min_cluster_size=min_cluster_size, fdr_alpha=fdr_alpha,
