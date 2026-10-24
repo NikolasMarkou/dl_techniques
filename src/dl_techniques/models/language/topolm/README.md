@@ -481,7 +481,9 @@ The trainer scores a trained backbone through four steps, and each has a way to
 go quietly wrong:
 
 1. a two-sample t-map between two stimulus conditions, on activations
-   **mean-pooled** over the text tokens (CLS, SEP and pad positions excluded by id);
+   **mean-pooled** over the text tokens of each sentence, which the trainer frames as
+   the training stream presents text (end-of-text id first, no CLS or SEP, padding
+   after; the prefix and the padding are excluded by id);
 2. BH-FDR corrected **across all taps**, then split back;
 3. clusters grown from the surviving cells, both polarities;
 4. Moran's I on the **unthresholded** map, plus the islands variant.
@@ -508,8 +510,8 @@ Two rules in that list are load-bearing and not interchangeable:
 
 A run also **draws** the result: one t-map per tapped layer on a shared diverging
 scale with rejected cells hatched and clusters outlined (three orthogonal planes per
-tap on a 3D grid), Moran's I against depth, and one categorical cluster map (a slice
-montage on a 3D grid). That is `train.topolm.plotting`, called from
+tap on a 3D grid), Moran's I against depth, and, when a condition-A cluster is found,
+one categorical cluster map (a slice montage on a 3D grid). That is `train.topolm.plotting`, called from
 `run_topographic_evaluation` on the same arrays the report counts. Its rules are
 in the trainer's README (`src/train/topolm/README.md` § *Figures*); the short
 version is that a topographic figure has exactly two ways of lying by

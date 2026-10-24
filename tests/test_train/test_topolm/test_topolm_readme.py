@@ -1,14 +1,15 @@
 """The TopoLM READMEs may cite only test classes that exist, and none of the figures
 that were retracted (plan-2026-10-23T190557-972a9ac5, step 8.2); and the guide to
-the figures is held to the DATA of the figures, not only to its own form (step 8.4,
-decision D-022).
+the figures is held to the DATA of the figures, not only to its own form (steps 8.4
+and 8.5, decision D-022).
 
 A README names the test classes that guard a claim; a class that was renamed or
 deleted leaves a sentence pointing at nothing. This reads the two READMEs and
 greps the test tree for each cited ``Test...`` name.
 
 ``src/train/topolm/figures/figure_facts.json`` is written, by a script, from the
-real runs the seven example images came from (``metrics.jsonl``,
+real runs the example images came from (and, for the one synthetic image, from the
+script that made it) (``metrics.jsonl``,
 ``topography_report.json``, the PNG files). The tests below pin every image to the
 SHA-256, byte size and pixel size recorded there (a swapped figure fails) and require
 each caption to print the exact string the facts hold for each number it quotes (a
@@ -23,6 +24,7 @@ import struct
 from pathlib import Path
 
 import pytest
+import scipy.stats
 
 _ROOT = Path(__file__).resolve().parents[3]
 _READMES = (
@@ -120,7 +122,7 @@ def test_every_relative_link_and_image_the_readme_uses_exists():
 def test_every_image_the_guide_shows_is_a_real_png():
     guide = _guide_text()
     images = sorted({t for t in _relative_targets(guide) if t.endswith(".png")})
-    assert len(images) >= 7, f"the guide references only {images}"
+    assert len(images) >= 6, f"the guide references only {images}"
     for image in images:
         path = _TRAINER_README.parent / image
         assert path.is_file(), f"{image} is referenced but does not exist"
@@ -182,7 +184,7 @@ def test_the_guide_has_no_em_dash_and_no_retracted_figure():
 
 
 # ---------------------------------------------------------------------------
-# Truth, not form (step 8.4, D-022): the guide against the figures' data.
+# Truth, not form (steps 8.4 and 8.5, D-022): the guide against the figures' data.
 # ---------------------------------------------------------------------------
 
 
@@ -190,9 +192,23 @@ def _facts() -> dict:
     return json.loads(_FACTS_PATH.read_text(encoding="utf-8"))
 
 
+def _shipped(facts: dict = None) -> dict:
+    """The facts entries of the images that are shipped (an omitted figure, one no
+    run wrote, has an entry with ``omitted`` and no file)."""
+    facts = facts or _facts()
+    return {name: entry for name, entry in facts["files"].items() if not entry.get("omitted")}
+
+
 def _squash(text: str) -> str:
     """Whitespace collapsed to single spaces, so a phrase may wrap across lines."""
     return " ".join(text.split())
+
+
+def _g(value: float) -> str:
+    """``0.0`` -> ``0.0``, ``4.25`` -> ``4.25``, ``5.5`` -> ``5.5``: at most three
+    decimals, at least one."""
+    text = f"{value:.3f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
 
 
 def _png_size(data: bytes):
@@ -216,25 +232,50 @@ def _figure_context(name: str) -> dict:
     return context
 
 
-def _caption(name: str) -> str:
+def _caption(name: str, guide: str = None) -> str:
     """The italic paragraph that follows the image tag of ``name`` in the guide,
     whitespace collapsed."""
-    guide = _guide_text()
+    guide = _guide_text() if guide is None else guide
     start = guide.index(f"figures/{name}")
     match = re.search(r"\n\n(\*.*?)\n\n", guide[start:], re.S)
     assert match, f"no caption paragraph follows {name}"
     return _squash(match.group(1))
 
 
-def test_the_facts_file_pins_every_image_by_hash_size_and_pixels():
-    entries = _facts()["files"]
-    figures = _TRAINER_README.parent / "figures"
-    assert sorted(entries) == sorted(p.name for p in figures.glob("*.png"))
+def _pin_failures(directory: Path, entries: dict):
+    """Images of ``entries`` whose file in ``directory`` is not the one the facts
+    describe (hash, bytes or pixel size), and PNGs there that no entry describes."""
+    failures = []
     for name, entry in entries.items():
-        data = (figures / name).read_bytes()
-        assert hashlib.sha256(data).hexdigest() == entry["sha256"], f"{name} is not the figure the facts describe"
-        assert len(data) == entry["bytes"], name
-        assert _png_size(data) == (entry["width"], entry["height"]), name
+        path = directory / name
+        if not path.is_file():
+            failures.append(name)
+            continue
+        data = path.read_bytes()
+        if (
+            hashlib.sha256(data).hexdigest() != entry["sha256"]
+            or len(data) != entry["bytes"]
+            or _png_size(data) != (entry["width"], entry["height"])
+        ):
+            failures.append(name)
+    failures += sorted(p.name for p in directory.glob("*.png") if p.name not in entries)
+    return failures
+
+
+def test_the_facts_file_pins_every_image_by_hash_size_and_pixels():
+    assert _pin_failures(_TRAINER_README.parent / "figures", _shipped()) == []
+
+
+def test_a_figure_no_run_wrote_is_omitted_in_the_facts_and_absent_in_the_guide():
+    """No cluster figure was written by either example run: the facts say so, no
+    file is shipped and the guide shows none."""
+    files = _facts()["files"]
+    omitted = sorted(name for name, entry in files.items() if entry.get("omitted"))
+    assert omitted == ["clusters_2d.png", "clusters_3d.png"]
+    for name in omitted:
+        assert files[name]["reason"]
+        assert not (_TRAINER_README.parent / "figures" / name).exists()
+        assert name not in _readme_text()
 
 
 #: What each caption must print, as ``str.format`` templates over the ``fmt``
@@ -253,11 +294,11 @@ _CAPTION_QUOTES = {
     ),
     "t_maps_2d_trained.png": (
         "Mean Moran's I {mean_morans_i} (per tap {morans_i_min_over_taps} to {morans_i_max_over_taps})",
-        "{significant_units_min_over_taps} to {significant_units_max_over_taps} significant units per tap"
-        " (mean {mean_significant_units_per_tap} of {units_per_tap})",
+        "{mean_significant_units_per_tap} significant units per tap ({significant_units_max_over_taps} of {units_per_tap} in every tap)",
         "{total_clusters_a} clusters for `a` and {total_clusters_b} for `b` over the {num_taps} taps",
         "t values run from {t_min_over_taps} to {t_max_over_taps}",
         "+/-{colour_limit}",
+        "none is significant",
         "({width} x {height})",
     ),
     "t_maps_3d_trained.png": (
@@ -270,12 +311,10 @@ _CAPTION_QUOTES = {
         "colour scale +/-{colour_limit}",
         "({width} x {height})",
     ),
-    "clusters_2d.png": (
-        "tap `{cluster_figure_tap_name}`, condition `a`, one cluster of {cluster_figure_tap_sizes_a} units",
-        "{width} x {height}",
-    ),
-    "clusters_3d.png": (
-        "tap `{cluster_figure_tap_name}`, condition `a` only, one cluster of {cluster_figure_tap_sizes_a} units",
+    "t_maps_2d_illustration.png": (
+        "SYNTHETIC illustration, made-up numbers, not a run",
+        "{grid_shape} maps",
+        "|t| is above {threshold_abs_t}",
         "{width} x {height}",
     ),
     "morans_i_by_depth_2d.png": (
@@ -288,107 +327,278 @@ _CAPTION_QUOTES = {
 }
 
 
-def _quote_context(name: str) -> dict:
-    context = _figure_context(name)
-    facts = _facts()["files"][name]["facts"]
-    if "cluster_figure_tap" in facts:
-        tap = facts["cluster_figure_tap"]
-        context["cluster_figure_tap_name"] = tap["name"]["fmt"]
-        context["cluster_figure_tap_sizes_a"] = tap["cluster_sizes_a"]["fmt"]
-        context["cluster_figure_tap_sizes_b"] = tap["cluster_sizes_b"]["fmt"]
+def _quote_context(name: str, facts_all: dict = None) -> dict:
+    facts_all = facts_all or _facts()
+    entry = facts_all["files"][name]
+    facts = entry["facts"]
+    context = {
+        key: value["fmt"]
+        for key, value in facts.items()
+        if isinstance(value, dict) and "fmt" in value
+    }
+    context["width"], context["height"] = entry["width"], entry["height"]
     context["colour_limit"] = facts["colour_limit"]["fmt"] if "colour_limit" in facts else ""
-    context["per_tap_morans_i"] = ", ".join(v["morans_i"]["fmt"] for v in facts["per_tap"].values())
+    if "per_tap" in facts:
+        context["per_tap_morans_i"] = ", ".join(v["morans_i"]["fmt"] for v in facts["per_tap"].values())
     return context
+
+
+def _caption_failures(name: str, guide: str, facts_all: dict = None):
+    """The phrases the caption of ``name`` in ``guide`` should print and does not."""
+    caption = _caption(name, guide)
+    context = _quote_context(name, facts_all)
+    return [
+        _squash(template.format(**context))
+        for template in _CAPTION_QUOTES[name]
+        if _squash(template.format(**context)) not in caption
+    ]
 
 
 @pytest.mark.parametrize("name", sorted(_CAPTION_QUOTES))
 def test_each_caption_prints_the_numbers_the_facts_hold(name):
-    caption = _caption(name)
-    context = _quote_context(name)
-    missing = []
-    for template in _CAPTION_QUOTES[name]:
-        phrase = _squash(template.format(**context))
-        if phrase not in caption:
-            missing.append(phrase)
-    assert missing == [], f"{name}: the caption does not say {missing}; it says {caption!r}"
+    missing = _caption_failures(name, _guide_text())
+    assert missing == [], f"{name}: the caption does not say {missing}; it says {_caption(name)!r}"
 
 
-def test_every_figure_has_a_caption_row_in_the_quote_table():
-    assert sorted(_CAPTION_QUOTES) == sorted(_facts()["files"])
+def test_every_shipped_figure_has_a_caption_row_in_the_quote_table():
+    assert sorted(_CAPTION_QUOTES) == sorted(_shipped())
 
 
-def test_the_prose_beside_the_figures_quotes_the_facts_too():
-    """Numbers that sit in the guide's prose rather than in a caption: the live curve
-    bullets, the per-tap sentences, the cluster sizes, the colour limits and the frame
-    sizes. Every phrase is built from the facts file."""
-    guide = _squash(_guide_text())
-    facts = _facts()
+def test_the_trained_2d_example_has_no_significant_unit_and_the_guide_says_so():
+    """The central fact of the 2D example: smooth and not significant."""
+    facts = _facts()["files"]["t_maps_2d_trained.png"]["facts"]
+    assert facts["significant_units_min_over_taps"]["value"] == 0
+    assert facts["significant_units_max_over_taps"]["value"] == 0
+    assert facts["total_clusters_a"]["value"] == 0 and facts["total_clusters_b"]["value"] == 0
+    assert facts["mean_morans_i"]["value"] > 0.7
+    section = _squash(_guide_text()).split("#### Reading a t-map")[1].split("#### Hatching and outlines")[0]
+    assert "The map is smooth, and it is not significant" in section
+    assert "it covers every cell, so nothing in this 2D example is significant" in section
+    assert "smooth" in section and "not significant" in section
+
+
+def test_the_synthetic_illustration_is_synthetic_in_the_facts_and_the_guide():
+    entry = _facts()["files"]["t_maps_2d_illustration.png"]
+    assert entry["kind"] == "synthetic"
+    assert entry["run"] is None and entry["step"] is None
+    assert _illustration_failures(_guide_text(), _facts()) == []
+    # No run image of the guide is of the synthetic kind, and every other one has a run.
+    for name, other in _shipped().items():
+        if name != "t_maps_2d_illustration.png":
+            assert other.get("kind") != "synthetic" and other["run"] in ("2d", "3d"), name
+
+
+def _illustration_failures(guide: str, facts_all: dict):
+    """What the synthetic illustration must carry: the word in the caption (as the
+    sentence ``SYNTHETIC illustration, made-up numbers, not a run``), in the alt text,
+    and ``kind: synthetic`` in the facts."""
+    problems = []
+    if facts_all["files"]["t_maps_2d_illustration.png"].get("kind") != "synthetic":
+        problems.append("facts kind")
+    caption = _caption("t_maps_2d_illustration.png", guide)
+    if "synthetic" not in caption.lower() or "made-up numbers, not a run" not in caption:
+        problems.append("caption")
+    tag = guide[guide.index("figures/t_maps_2d_illustration.png") - 20:]
+    alt = re.search(r'alt="([^"]*)"', tag).group(1)
+    if "SYNTHETIC" not in alt:
+        problems.append("alt text")
+    # The sentence that introduces the image says it too.
+    before = guide[: guide.index("figures/t_maps_2d_illustration.png")]
+    if "synthetic" not in before[-700:].lower():
+        problems.append("no word before the image")
+    return problems
+
+
+def test_the_illustration_panels_are_what_the_caption_says():
+    per_panel = _facts()["files"]["t_maps_2d_illustration.png"]["facts"]["per_panel"]
+    assert len(per_panel) == 4
+    for stats in per_panel.values():
+        assert stats["clusters_a"] == 2 and stats["clusters_b"] == 1
+    first = per_panel["synthetic/tap_1"]["significant_units"]
+    assert f"the first has {first} significant units" in _caption("t_maps_2d_illustration.png")
+
+
+# --- the prose beside the figures --------------------------------------------
+
+
+def _run_series(run: dict, key: str) -> dict:
+    return {int(k): v for k, v in run[key].items()}
+
+
+def _prose_phrases(facts: dict):
+    """Every phrase the guide's prose must print, built from the facts: ``(in_guide,
+    in_readme)``."""
     curve = facts["files"]["live_curve_2d.png"]["facts"]
     run2d, run3d = facts["runs"]["2d"], facts["runs"]["3d"]
     trained = facts["files"]["t_maps_2d_trained.png"]["facts"]
     untrained = facts["files"]["t_maps_2d_untrained.png"]["facts"]
-    cluster2d = facts["files"]["clusters_2d.png"]["facts"]["cluster_figure_tap"]
-    cluster3d = facts["files"]["clusters_3d.png"]["facts"]["cluster_figure_tap"]
-    moran = {int(k): v for k, v in run2d["mean_morans_i_series"].items()}
+    three = facts["files"]["t_maps_3d_trained.png"]["facts"]
+    moran = _run_series(run2d, "mean_morans_i_series")
     sig = {int(k): v for k, v in curve["significant_units_mean_series"].items()}
     ca = {int(k): v for k, v in curve["clusters_a_series"].items()}
     cb = {int(k): v for k, v in curve["clusters_b_series"].items()}
+    assert set(ca.values()) == {0} and set(cb.values()) == {0}, "the curve text says 0 and 0 at every step"
+    assert [s for s, v in sig.items() if v] == [200], "the curve text says 0.25 at step 200 only"
     later = [moran[s] for s in moran if s >= 100]
+    last = [moran[s] for s in moran if s >= 250]
     points = list(curve["validation_loss_points_drawn"]["value"].values())
-    per_tap = trained["per_tap"]
-    phrases = [
+    units = trained["units_per_tap"]["value"]
+    comparisons = units * trained["num_taps"]["value"]
+    need = scipy.stats.t.isf(0.05 / comparisons / 2, 8)
+    counts = run2d["stimuli_framing"]["a"]["text_token_counts"]
+    for condition in "abcd":
+        assert run2d["stimuli_framing"][condition]["text_token_counts"] == counts
+        assert run3d["stimuli_framing"][condition]["text_token_counts"] == counts
+    mean_tokens = sum(counts) / len(counts)
+    framing2, framing3 = run2d["controls"]["framings"], run3d["controls"]["framings"]
+
+    def prefix_row(label, key):
+        def cell(framing):
+            row = framing[key]
+            return f"{row['mean_significant_units_per_tap']:.1f} ({row['clusters_a']} / {row['clusters_b']})"
+        return f"| {label} | {cell(framing2)} | {cell(framing3)} |"
+
+    moran_by_prefix = {
+        "2D": [row["mean_morans_i"] for row in framing2.values()],
+        "3D": [row["mean_morans_i"] for row in framing3.values()],
+    }
+    sig3 = [row["mean_significant_units_per_tap"] for row in framing3.values()]
+    shuffle2, shuffle3 = (run["controls"]["label_shuffle_null"] for run in (run2d, run3d))
+    length2, length3 = (run["controls"]["length_control_all"] for run in (run2d, run3d))
+    five = [
+        length[key]["sig_max"]
+        for length in (length2, length3)
+        for key in ("b_vocab_5v5", "a_vocab_5v5")
+    ]
+    per_tap3 = three["per_tap"]
+    in_guide = [
+        # the framing and the matching
+        f"{', '.join(str(c) for c in counts[:-1])} and {counts[-1]} for i = 0 to 4 (mean {mean_tokens:.1f} in every condition)",
+        prefix_row("CLS marker", "cls_prefix"),
+        prefix_row("end-of-text id (the one used here)", "eot_prefix_shipped"),
+        prefix_row("none", "no_prefix"),
+        f"at most 0.03 across the three prefixes (2D {min(moran_by_prefix['2D']):.3f} to {max(moran_by_prefix['2D']):.3f}, "
+        f"3D {min(moran_by_prefix['3D']):.3f} to {max(moran_by_prefix['3D']):.3f})",
+        f"factor of about {max(sig3) / min(sig3):.1f} with the framing ({min(sig3):.1f} to {max(sig3):.1f})",
+        # reading the 2D map
+        f"the largest t of the run, {trained['t_max_over_taps']['fmt']}",
+        f"over {comparisons} comparisons",
+        f"need a |t| of about {need:.1f} to pass",
+        f"Step 0 is drawn on +/-{untrained['colour_limit']['fmt']} and step 400 on +/-{trained['colour_limit']['fmt']}",
+        f"(at step 400 the largest |t| is {trained['t_max_over_taps']['fmt']} on a scale of +/-{trained['colour_limit']['fmt']})",
+        f"(the mean Moran's I went from {untrained['mean_morans_i']['fmt']} to {trained['mean_morans_i']['fmt']})",
+        # the 3D map
+        f"{three['mean_significant_units_per_tap']['fmt']} of {three['units_per_tap']['fmt']} units per tap are significant on average",
+        f"{three['significant_units_min_over_taps']['fmt']} to {three['significant_units_max_over_taps']['fmt']} depending on the tap",
+        f"{per_tap3['block_2/mlp_tap']['significant_units']['fmt']} of them are in `block_2/mlp_tap`",
+        "one cluster of `b` of 12 units",
+        # Moran's I
+        f"the lowest tap is `block_0/mlp_tap` ({trained['per_tap']['block_0/mlp_tap']['morans_i']['fmt']}) and the highest "
+        f"`block_3/mlp_tap` ({trained['per_tap']['block_3/mlp_tap']['morans_i']['fmt']})",
+        f"(2D median {shuffle2['moran_mean']['median']:.3f}, the real labelling {trained['mean_morans_i']['fmt']}; "
+        f"3D median {shuffle3['moran_mean']['median']:.3f}, the real labelling {three['mean_morans_i']['fmt']})",
+        f"defined in {three['taps_with_islands_morans_i_defined']['fmt']} of the {three['num_taps']['fmt']} 3D taps, between "
+        f"{three['morans_i_islands_min_over_taps']['fmt']} and {three['morans_i_islands_max_over_taps']['fmt']}",
+        # the label-shuffle table
+        f"| significant units per tap, real labelling | {_g(shuffle2['observed_sig'])} | {three['mean_significant_units_per_tap']['fmt']} |",
+        f"| shuffled: median, 95th percentile, maximum | {_g(shuffle2['sig_per_tap']['median'])}, {_g(shuffle2['sig_per_tap']['p95'])}, "
+        f"{_g(shuffle2['sig_per_tap']['max'])} | {_g(shuffle3['sig_per_tap']['median'])}, {_g(shuffle3['sig_per_tap']['p95'])}, "
+        f"{_g(shuffle3['sig_per_tap']['max'])} |",
+        f"| labellings with at least as many as the real one (itself included) | {shuffle2['n_splits_sig_ge_observed']} | "
+        f"{shuffle3['n_splits_sig_ge_observed']} |",
+        f"| clusters, real labelling | {shuffle2['observed_clusters']} | {shuffle3['observed_clusters']} |",
+        f"| labellings with at least one cluster (the real one and its mirror included) | "
+        f"{round(shuffle2['n_splits'] * (1 - shuffle2['clusters_total']['fraction_zero']))} | "
+        f"{round(shuffle3['n_splits'] * (1 - shuffle3['clusters_total']['fraction_zero']))} |",
+        f"| Moran's I, real labelling | {trained['mean_morans_i']['fmt']} | {three['mean_morans_i']['fmt']} |",
+        f"| shuffled: median (5th to 95th percentile) | {shuffle2['moran_mean']['median']:.3f} ({shuffle2['moran_mean']['p5']:.3f} to "
+        f"{shuffle2['moran_mean']['p95']:.3f}) | {shuffle3['moran_mean']['median']:.3f} ({shuffle3['moran_mean']['p5']:.3f} to "
+        f"{shuffle3['moran_mean']['p95']:.3f}) |",
+        f"{shuffle3['n_splits_sig_ge_observed']} of {shuffle3['n_splits']} is about {shuffle3['n_splits_sig_ge_observed'] / shuffle3['n_splits']:.3f}",
+        f"a strictly larger count ({_g(shuffle3['sig_per_tap']['max'])})",
+        f"all {shuffle2['n_splits']} ways to choose 5 of 10",
+        # the length-control table
+        f"| 3 words against 7 words, `b` vocabulary | {length2['b_vocab_3v7']['sig_median']:.1f} | {length3['b_vocab_3v7']['sig_median']:.1f} |",
+        f"| 3 words against 7 words, `a` vocabulary | {length2['a_vocab_3v7']['sig_median']:.1f} | {length3['a_vocab_3v7']['sig_median']:.1f} |",
+        f"| 5 words against 5 words, either vocabulary | {max(length2['b_vocab_5v5']['sig_median'], length2['a_vocab_5v5']['sig_median']):.1f} | "
+        f"{max(length3['b_vocab_5v5']['sig_median'], length3['a_vocab_5v5']['sig_median']):.1f} |",
+        f"(at most {max(five):.1f} in any of the {run2d['controls']['length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap']['draws']} draws)",
+        f"{three['mean_significant_units_per_tap']['fmt']} significant units per tap, against {length3['b_vocab_3v7']['sig_median']:.1f} for lists four words apart",
         # the live curve, panel by panel
         f"from {curve['mean_morans_i_first_step']['fmt']} at step 0 to {moran[50]:.3f} at step 50",
         f"peaks at {curve['mean_morans_i_peak']['fmt']} at step {curve['mean_morans_i_peak_step']['fmt']}",
         f"between {min(later):.3f} and {max(later):.3f} from step 100 on",
-        f"between {trained['morans_i_min_over_taps']['fmt']} and {trained['morans_i_max_over_taps']['fmt']}",
-        f"{ca[200]} and {cb[200]} at step 200",
-        f"{ca[250]} and {cb[250]} again at step 250",
-        f"{ca[300]} and {cb[300]} at step 300",
-        f"{ca[350]} and {cb[350]} at steps 350 and 400",
-        f"{sig[200]:.1f} at step 200",
-        f"{sig[250]:.1f} at step 250",
-        f"{sig[300]:.1f}, {sig[350]:.1f} and {sig[400]:.1f} at steps 300, 350 and 400",
+        f"({min(last):.3f} to {max(last):.3f} from step 250 on)",
+        f"the taps end between {trained['morans_i_min_over_taps']['fmt']} and {trained['morans_i_max_over_taps']['fmt']}",
+        "0 and 0 at every step",
+        f"0.0 at every step except {sig[200]:.2f} at step 200",
         ", ".join(f"{v:.3f}" for v in points),
-        # the colour scale of the two 2D frames
-        f"Step 0 is drawn on +/-{untrained['colour_limit']['fmt']} and step 400 on +/-{trained['colour_limit']['fmt']}",
-        # the two taps that show almost no island
-        f"`block_1/mlp_tap` has {per_tap['block_1/mlp_tap']['significant_units']['fmt']} significant units",
-        f"`block_3/mlp_tap` has {per_tap['block_3/mlp_tap']['significant_units']['fmt']},",
-        # the 15 per cent: the mean over the units per tap, rounded
-        f"{round(100 * trained['mean_significant_units_per_tap']['value'] / trained['units_per_tap']['value'])} per cent of the cells on average",
-        # the largest islands value over the taps
-        f"{trained['morans_i_islands_max_over_taps']['fmt']} in 2D and "
-        f"{facts['files']['t_maps_3d_trained.png']['facts']['morans_i_islands_max_over_taps']['fmt']} in 3D",
-        # the cluster that the t-map outlines in magenta beside the one the cluster figure draws
-        f"dashed magenta cluster of {cluster2d['cluster_sizes_b']['fmt']} units",
-        f"dashed magenta cluster of {cluster3d['cluster_sizes_b']['fmt']} units",
-        f"`{cluster2d['title_as_drawn']}`",
+        # the scale of the 3D run's claim in the summary
+        f"Moran's I rises from about 0 to {trained['mean_morans_i']['fmt']} (2D) and {three['mean_morans_i']['fmt']} (3D)",
     ]
     # Outside the guide: the sections on watching a run and on training a 3D variant.
-    elsewhere = [
+    s3 = _run_series(run3d, "mean_morans_i_series")
+    s3sig = _run_series(run3d, "mean_significant_units_series")
+    w0, h0 = (facts["files"]["t_maps_2d_untrained.png"][k] for k in ("width", "height"))
+    w4, h4 = (facts["files"]["t_maps_2d_trained.png"][k] for k in ("width", "height"))
+    assert (w0, h0) == (w4, h4), "the frame-size sentence says the two 2D frames have one size"
+    in_readme = [
         f"on +/-{untrained['colour_limit']['fmt']} at step 0 and +/-{trained['colour_limit']['fmt']} at step 400",
-        # frame sizes of the 2D example run, quoted as a figure that changes size
-        f"{facts['files']['t_maps_2d_untrained.png']['width']}x{facts['files']['t_maps_2d_untrained.png']['height']} at step 0 "
-        f"to {facts['files']['t_maps_2d_trained.png']['width']}x{facts['files']['t_maps_2d_trained.png']['height']} at step 400",
+        f"stayed at {w0}x{h0} at step 0 and at step 400",
         # the 3D training bullet
-        f"from {run3d['mean_morans_i_series']['0']:.4f} at step 0 to {run3d['mean_morans_i_series']['50']:.3f} at step 50 "
-        f"and {run3d['mean_morans_i_series']['400']:.3f} at step 400",
-        f"{run3d['mean_significant_units_series']['250']:.1f}, {run3d['mean_significant_units_series']['300']:.1f}, "
-        f"{run3d['mean_significant_units_series']['350']:.1f} and {run3d['mean_significant_units_series']['400']:.1f} at steps 250, 300, 350 and 400",
-        f"{facts['files']['t_maps_3d_trained.png']['facts']['total_clusters_a']['fmt']} clusters for `a` and "
-        f"{facts['files']['t_maps_3d_trained.png']['facts']['total_clusters_b']['fmt']} for `b` at step 400",
-    ]
-    readme = _squash(_readme_text())
-    cost = [
+        f"from {s3[0]:.4f} at step 0 to {s3[50]:.3f} at step 50 and {s3[400]:.3f} at step 400",
+        f"{s3sig[250]:.1f} up to step 250, then {s3sig[300]:.3f} at steps 300 and 350 and {s3sig[400]:.1f} at step 400",
+        f"{three['total_clusters_a']['fmt']} clusters for `a` and {three['total_clusters_b']['fmt']} for `b` at step 400",
+        f"{length3['b_vocab_3v7']['sig_median']:.1f} significant units per tap on this checkpoint",
+        # the lag of the last full row behind the final history value (tiny: from the facts)
+        f"in the matching `tiny` run {points_raw(curve, 300):.4f} and {points_raw(curve, 400):.4f}",
+        # the cost of a draw
         f"median {run2d['seconds_per_draw_median']['fmt']} s ({run2d['seconds_per_draw_min']['fmt']} to {run2d['seconds_per_draw_max']['fmt']}; "
         f"{run2d['seconds_per_draw_sum']['fmt']} s in all, in a run of {run2d['total_wall_s']['fmt']} s)",
         f"median {run3d['seconds_per_draw_median']['fmt']} s ({run3d['seconds_per_draw_min']['fmt']} to {run3d['seconds_per_draw_max']['fmt']}; "
         f"{run3d['seconds_per_draw_sum']['fmt']} s in all, in a run of {run3d['total_wall_s']['fmt']} s)",
         f"{run2d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny`) and {run3d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny3d`)",
     ]
-    absent = [p for p in phrases if p not in guide] + [p for p in elsewhere + cost if p not in readme]
+    return in_guide, in_readme
+
+
+def points_raw(curve: dict, step: int) -> float:
+    """The validation loss the live curve drew at ``step`` (full precision)."""
+    return curve["validation_loss_points_drawn"]["value"][str(step)]
+
+
+def _prose_failures(guide: str, readme: str, facts: dict):
+    in_guide, in_readme = _prose_phrases(facts)
+    return [p for p in in_guide if _squash(p) not in guide] + [p for p in in_readme if _squash(p) not in readme]
+
+
+def test_the_prose_beside_the_figures_quotes_the_facts_too():
+    """Numbers that sit in the guide's prose rather than in a caption: the controls'
+    tables, the framing table, the live curve bullets, the colour limits, the frame
+    sizes, the cost of a draw. Every phrase is built from the facts file."""
+    absent = _prose_failures(_squash(_guide_text()), _squash(_readme_text()), _facts())
     assert absent == [], f"the prose does not say {absent}"
+
+
+def test_the_controls_say_what_the_numbers_mean():
+    """The words of the two controls hold in the data: the real 2D value is the null's
+    median, the real 3D value is in the top 4 of 252 and two splits beat it that are
+    not the real labelling, and Moran's I of the real labelling lies inside the
+    shuffled range in both dimensions."""
+    runs = _facts()["runs"]
+    shuffle2 = runs["2d"]["controls"]["label_shuffle_null"]
+    shuffle3 = runs["3d"]["controls"]["label_shuffle_null"]
+    assert shuffle2["observed_sig"] == shuffle2["sig_per_tap"]["median"] == 0.0
+    assert shuffle2["n_splits_sig_ge_observed"] == shuffle2["n_splits"] == 252
+    assert shuffle3["n_splits_sig_ge_observed"] == 4 and shuffle3["n_splits_sig_gt_observed"] == 2
+    assert shuffle3["sig_per_tap"]["max"] > shuffle3["observed_sig"]
+    for run, shuffle in (("2d", shuffle2), ("3d", shuffle3)):
+        observed = runs[run]["last_live_row_mean_morans_i"]
+        assert shuffle["moran_mean"]["p5"] <= observed <= shuffle["moran_mean"]["p95"], run
+    assert runs["3d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"] > (
+        4 * runs["2d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"]
+    )
+    assert runs["2d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"] > 0
 
 
 def test_a_crosshair_index_the_guide_prints_exists_on_the_grid_it_describes():
@@ -416,7 +626,7 @@ _RETRACTED_SENTENCES = (
     "averaged over the positions of the input window",
     "mean-pooled over token positions",
     "Pooling is a **mean** over token positions",
-    "most cells passed",                       # the trained 2D map is mostly hatched
+    "most cells passed",                       # the trained 2D map is hatched everywhere
     "large patches of one\ncolour",            # (the earlier caption of the trained map)
     "187.9 of 256",                            # old-run caption numbers, see _OLDER_RUN_NUMBERS
     "142 to 206",
@@ -424,6 +634,17 @@ _RETRACTED_SENTENCES = (
     "fell from 191 at step 50",
     "0.555 at step 50",
     "7.5333",
+    "10.0 text tokens on average against 7.8",  # CLS and SEP counted as text (step 8.5)
+    "10.0 text tokens on average, `b` 7.8",
+    "In 2D the artefact is nearly gone",       # the length control says otherwise
+    "the map to trust least on length",        # one ranking of 3D against 2D; none is made
+    "a 3D map is the less trustworthy of the two on length",
+    "read the plateau at the end",
+    "Two taps barely show any island",
+    "largest value over the 8 taps is 0.172",
+    "figures/clusters_2d.png",                 # no run wrote a cluster figure
+    "figures/clusters_3d.png",
+    "ticks stop at 6",                         # the colour bar of the earlier trained map
 )
 
 
@@ -437,25 +658,41 @@ def test_no_retracted_sentence_is_back(readme):
 #: What the guide must now say, each a sentence the review asked for.
 _REQUIRED_SENTENCES = (
     "averaged over the text tokens of the sentence",                 # the pooling (D-020)
-    "excluded by id",
-    "not free of length effects",
-    "islands of significance in a mostly non-significant field",
-    "a hatched cell did not pass",                                  # literally true since D-021
-    "only tell clusters apart",                                     # the cluster colours
+    "The prefix is a choice",                                        # the framing (D-024)
+    "matched in length, in tokens",                                  # the stimuli (D-025)
+    "learned **absolute** position embeddings",
+    "not free of length and position effects",
+    "The map is smooth, and it is not significant",                  # the 2D example
+    "a hatched cell did not pass",                                   # literally true since D-021
+    "only tell clusters apart",                                      # the cluster colours
     "do not encode the condition",
-    "not a growth curve",                                           # the significant-units line
+    "Neither example run wrote one",                                 # the cluster figure
+    "not a growth curve",                                            # the significant-units line
+    "never as \"the map separates a from b\"",                       # what Moran's I is
+    "label-shuffle null",
+    "length control",
+    "No claim is made that 3D is better or worse than 2D",
+    "A real selectivity claim needs a larger stimulus set",
     "A second correction: earlier t-maps were averaged over the padding",
+    "A third correction: the stimuli framing and their lengths changed what the t-maps show",
 )
 
 
 def test_the_guide_says_what_the_review_asked_it_to_say():
     guide = _squash(_readme_text())
-    assert [s for s in _REQUIRED_SENTENCES if s not in guide] == []
+    assert [s for s in _REQUIRED_SENTENCES if _squash(s) not in guide] == []
 
 
-#: Numbers of the EARLIER example runs (the padded average) or of controls measured
-#: on them. They stay in the README only labelled as such, and each is listed here
-#: with where it was measured, so none is mistaken for a number of the figures shown.
+#: Phrases that are false for the 2D example but true of an EARLIER run, so they may
+#: stand only inside a unit (bullet, table, paragraph) that carries an older-run label.
+_ONLY_WITH_A_LABEL = (
+    "islands of significance",
+)
+
+#: Numbers of the EARLIER example runs (the padded average, the CLS framing, the
+#: unmatched lengths) or of controls measured on them. They stay in the README only
+#: labelled as such, and each is listed here with where it was measured, so none is
+#: mistaken for a number of the figures shown.
 _OLDER_RUN_NUMBERS = {
     "187.9": "pooling-fix measurements, mean over 8 taps, 2D old (padded average)",
     "36.5": "same table, 2D new (text tokens), on the earlier checkpoint",
@@ -463,9 +700,15 @@ _OLDER_RUN_NUMBERS = {
     "92.8": "same table, 3D new, on the earlier checkpoint",
     "202.9": "dotted control, 2D, old pooling",
     "10.9": "dotted control, 2D, new pooling",
-    "111.0": "dotted control, 3D, old pooling",
-    "35.9": "dotted control, 3D, new pooling",
     "1.034": "islands Moran's I of the earlier 2D example, block_0/attention_tap",
+    "38.9": "the previous 2D example (CLS framing, unmatched lengths), significant units per tap",
+    "89.2": "the previous 3D example, same",
+    "38.88": "framing measurement, earlier 2D checkpoint, CLS framing",
+    "89.0": "framing measurement, earlier 3D checkpoint, CLS framing",
+    "51.12": "framing measurement, earlier 3D checkpoint, end-of-text framing, unmatched",
+    "5.25": "length-matched smoke set on the earlier 3D checkpoint",
+    "0.786": "Moran's I of the previous 2D example",
+    "0.711": "Moran's I of the previous 3D example",
 }
 #: Whole words only (step 9.1): ``old`` used to match inside ``hold``, ``holds`` and
 #: ``threshold`` and let an unlabelled number through.
@@ -511,18 +754,22 @@ def _unlabelled_older_numbers(text: str, numbers=_OLDER_RUN_NUMBERS):
     return unlabelled
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the README bullet that starts 'Cutting every `a` sentence to the exact token "
-        "lengths' (about line 372) quotes 36.5 and 92.8, numbers of the EARLIER "
-        "checkpoints, with no label of its own: the finding of this stricter guard "
-        "(step 9.1). Step 8.5 rewrites that bullet; when it does, this test XPASSes "
-        "and strict=True fails it, which is the cue to delete this mark."
-    ),
-)
+def _unlabelled_mentions(text: str, phrases=_ONLY_WITH_A_LABEL):
+    """Phrases of ``phrases`` that some unit of ``text`` says without an older-run label."""
+    return [
+        phrase
+        for unit in _label_units(text)
+        for phrase in phrases
+        if phrase.lower() in unit.lower() and not _LABELS.search(unit)
+    ]
+
+
 def test_numbers_of_the_earlier_runs_are_kept_only_with_their_label():
     assert _unlabelled_older_numbers(_readme_text()) == []
+
+
+def test_islands_of_significance_is_not_said_of_the_current_example():
+    assert _unlabelled_mentions(_readme_text()) == []
 
 
 _TWO = {"36.5": "t", "92.8": "t"}
@@ -561,24 +808,100 @@ class TestTheLabelGuardCanFail:
         with pytest.raises(AssertionError, match="no longer quoted"):
             _unlabelled_older_numbers("- the earlier run had 36.5\n", _TWO)
 
-    def test_the_real_guide_with_an_unlabelled_bullet_slipped_in_is_flagged(self):
-        """The README itself, mutated: a bullet quoting an older-run number with no
-        label is inserted right BEFORE a labelled bullet, in the same list. The old
-        paragraph-level check read the neighbour's label as its own."""
-        lines = _readme_text().splitlines()
-        number = re.compile(r"(?<![\d.])(?:%s)(?!\d)" % "|".join(map(re.escape, _OLDER_RUN_NUMBERS)))
-
-        def labelled_bullet_at(start):
-            end = start + 1
-            while end < len(lines) and lines[end].strip() and not _BULLET_START.match(lines[end]):
-                end += 1
-            unit = " ".join(lines[start:end])
-            return bool(number.search(unit) and _LABELS.search(unit))
-
-        target = next(
-            i for i, line in enumerate(lines)
-            if _BULLET_START.match(line) and labelled_bullet_at(i)
+    def test_the_real_readme_with_an_unlabelled_bullet_slipped_in_is_flagged(self):
+        """The README itself, mutated: a two-bullet list is appended whose first
+        bullet is labelled and whose second quotes an older-run number bare. The old
+        paragraph-level check read the neighbour's label as its own. (The README has
+        no such list now, so the list is added to it; a guard that passes the real
+        text but misses this one would be blind to a bullet someone adds later.)"""
+        text = _readme_text() + (
+            "\n\n- the earlier run had 187.9 significant units\n"
+            "- the guide reports 72.9 significant units\n"
         )
-        lines.insert(target, "- the guide reports 72.9 significant units")
-        flagged = _unlabelled_older_numbers("\n".join(lines))
-        assert "72.9" in flagged, flagged
+        flagged = _unlabelled_older_numbers(text)
+        assert flagged == ["72.9"], flagged
+
+    def test_an_unlabelled_older_number_on_a_plain_line_of_the_real_readme_is_flagged(self):
+        """Step 8.5: the new older-run numbers (38.9, 89.2 ...) are guarded too: one
+        of them quoted bare, in a paragraph of its own, is flagged."""
+        text = _readme_text() + "\n\nThe 2D map has 38.9 significant units per tap.\n"
+        assert "38.9" in _unlabelled_older_numbers(text)
+
+
+class TestTheReadmeGuardsCanFail:
+    """Step 8.5: each guard of the README tests, seen RED on a mutated copy."""
+
+    def test_two_swapped_images_are_named(self, tmp_path):
+        figures = _TRAINER_README.parent / "figures"
+        for path in figures.glob("*.png"):
+            (tmp_path / path.name).write_bytes(path.read_bytes())
+        first, second = "t_maps_2d_untrained.png", "t_maps_2d_trained.png"
+        (tmp_path / first).write_bytes((figures / second).read_bytes())
+        (tmp_path / second).write_bytes((figures / first).read_bytes())
+        assert _pin_failures(tmp_path, _shipped()) == [first, second]
+        # ... and the unmodified copy is clean, so the failure above is the swap.
+        (tmp_path / first).write_bytes((figures / first).read_bytes())
+        (tmp_path / second).write_bytes((figures / second).read_bytes())
+        assert _pin_failures(tmp_path, _shipped()) == []
+
+    def test_an_extra_png_nobody_describes_is_named(self, tmp_path):
+        figures = _TRAINER_README.parent / "figures"
+        for path in figures.glob("*.png"):
+            (tmp_path / path.name).write_bytes(path.read_bytes())
+        (tmp_path / "clusters_2d.png").write_bytes(_PNG_SIGNATURE)
+        assert _pin_failures(tmp_path, _shipped()) == ["clusters_2d.png"]
+
+    def test_a_changed_caption_number_is_named(self):
+        guide = _guide_text()
+        assert _caption_failures("t_maps_2d_trained.png", guide) == []
+        trained = _caption("t_maps_2d_trained.png", guide)
+        assert "Mean Moran's I 0.785" in trained
+        mutated = guide.replace("Mean Moran's I 0.785", "Mean Moran's I 0.795", 1)
+        failures = _caption_failures("t_maps_2d_trained.png", mutated)
+        assert any("0.785" in failure for failure in failures), failures
+
+    def test_a_changed_prose_number_is_named(self):
+        guide, readme = _squash(_guide_text()), _squash(_readme_text())
+        assert _prose_failures(guide, readme, _facts()) == []
+        mutated = guide.replace("| 3 words against 7 words, `b` vocabulary | 42.4 |", "| 3 words against 7 words, `b` vocabulary | 4.2 |")
+        assert mutated != guide
+        failures = _prose_failures(mutated, readme, _facts())
+        assert any("42.4" in failure for failure in failures), failures
+
+    def test_a_reinserted_retracted_claim_about_the_2d_example_is_flagged(self):
+        text = _readme_text()
+        assert _unlabelled_mentions(text) == []
+        anchor = "**Look at the hatching of the trained map"
+        assert anchor in text
+        mutated = text.replace(
+            anchor,
+            "The trained 2D map is islands of significance in a mostly hatched field.\n\n" + anchor,
+            1,
+        )
+        assert _unlabelled_mentions(mutated) == ["islands of significance"]
+        # ... and the same words inside an earlier-run sentence are allowed.
+        labelled = text.replace(
+            anchor,
+            "The earlier example read the 2D map as islands of significance.\n\n" + anchor,
+            1,
+        )
+        assert _unlabelled_mentions(labelled) == []
+
+    def test_a_reinserted_retracted_sentence_is_flagged(self):
+        squashed = _squash(_readme_text() + "\nIn 2D the artefact is nearly gone.\n")
+        assert [s for s in _RETRACTED_SENTENCES if _squash(s) in squashed] == ["In 2D the artefact is nearly gone"]
+
+    def test_an_illustration_caption_without_the_word_synthetic_is_flagged(self):
+        guide, facts = _guide_text(), _facts()
+        assert _illustration_failures(guide, facts) == []
+        caption = _caption("t_maps_2d_illustration.png", guide)
+        assert caption.startswith("*SYNTHETIC illustration, made-up numbers, not a run.")
+        mutated = guide.replace("*SYNTHETIC illustration, made-up numbers, not a run.", "*Illustration.", 1)
+        assert "caption" in _illustration_failures(mutated, facts)
+        # The word must also be in the facts: a figure that is not marked there fails.
+        unmarked = json.loads(json.dumps(facts))
+        unmarked["files"]["t_maps_2d_illustration.png"]["kind"] = "run"
+        assert "facts kind" in _illustration_failures(guide, unmarked)
+        # ... and in the alt text.
+        no_alt = guide.replace("the title says SYNTHETIC", "the title says so", 1)
+        assert "alt text" in _illustration_failures(no_alt, facts)

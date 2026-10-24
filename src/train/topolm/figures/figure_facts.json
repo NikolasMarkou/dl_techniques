@@ -1,19 +1,19 @@
 {
  "generated_from": {
-  "head_sha": "2720677b8b0695405b75b7fda706325c8b423f43",
-  "last_commit_touching_topolm_trainer_or_metrics": "12a946e11c98872dfdf4567c43a887469423e8eb",
+  "head_sha": "b56aa634164dacadea31dc8e0c370043f8874bdf",
+  "last_commit_touching_topolm_trainer_or_metrics": "b56aa634164dacadea31dc8e0c370043f8874bdf",
   "topolm_and_metrics_tracked_files_clean": true,
   "seed": 42,
-  "run_dir_2d": "results/topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034",
-  "run_dir_3d": "results/topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400"
+  "run_dir_2d": "results/topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632",
+  "run_dir_3d": "results/topolm_viz_final3_3d_20261024_142432/topolm_tiny3d_topo_alpha2.5_20261024_142925"
  },
  "files": {
   "t_maps_2d_untrained.png": {
-   "sha256": "6d1bd8208bded197c5cdbffe9564af6224f799a1958b8c0a219bb0c47a9dc020",
-   "bytes": 186301,
+   "sha256": "91deb473069bdef0375cfa3010459050b3d1336d88f1a30f460a357170fab01a",
+   "bytes": 231360,
    "width": 2356,
    "height": 856,
-   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000000/t_maps_raw.png",
+   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000000/t_maps_raw.png",
    "step": 0,
    "run": "2d",
    "facts": {
@@ -37,20 +37,28 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": -0.013179545613537094,
-     "fmt": "-0.013"
+     "value": -0.007519833553020923,
+     "fmt": "-0.008"
     },
     "morans_i_min_over_taps": {
-     "value": -0.06037008738401731,
-     "fmt": "-0.060"
+     "value": -0.05890014713060055,
+     "fmt": "-0.059"
     },
     "morans_i_max_over_taps": {
-     "value": 0.05617682604568976,
-     "fmt": "0.056"
+     "value": 0.051017335587902966,
+     "fmt": "0.051"
     },
     "morans_i_islands_max_over_taps": {
      "value": null,
      "fmt": "n/a"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": null,
+     "fmt": "n/a"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 0,
+     "fmt": "0"
     },
     "mean_significant_units_per_tap": {
      "value": 0.0,
@@ -73,18 +81,18 @@
      "fmt": "0"
     },
     "t_min_over_taps": {
-     "value": -6.03070236915491,
-     "fmt": "-6.03"
+     "value": -5.853750655631269,
+     "fmt": "-5.85"
     },
     "t_max_over_taps": {
-     "value": 5.204057445711545,
-     "fmt": "5.20"
+     "value": 5.009737390802144,
+     "fmt": "5.01"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": -0.05856840979744698,
-       "fmt": "-0.059"
+       "value": -0.05317598713532186,
+       "fmt": "-0.053"
       },
       "significant_units": {
        "value": 0,
@@ -101,8 +109,8 @@
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.012203542826611164,
-       "fmt": "0.012"
+       "value": 0.04400411335462033,
+       "fmt": "0.044"
       },
       "significant_units": {
        "value": 0,
@@ -119,7 +127,7 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.032533760786361006,
+       "value": 0.032666928189960254,
        "fmt": "0.033"
       },
       "significant_units": {
@@ -137,8 +145,8 @@
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": -0.06037008738401731,
-       "fmt": "-0.060"
+       "value": -0.043891539951957055,
+       "fmt": "-0.044"
       },
       "significant_units": {
        "value": 0,
@@ -155,8 +163,8 @@
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": -0.05731351117913601,
-       "fmt": "-0.057"
+       "value": -0.05890014713060055,
+       "fmt": "-0.059"
       },
       "significant_units": {
        "value": 0,
@@ -173,8 +181,8 @@
      },
      "block_2/mlp_tap": {
       "morans_i": {
-       "value": -0.035027518816835,
-       "fmt": "-0.035"
+       "value": -0.04854368570694132,
+       "fmt": "-0.049"
       },
       "significant_units": {
        "value": 0,
@@ -191,8 +199,8 @@
      },
      "block_3/attention_tap": {
       "morans_i": {
-       "value": 0.05617682604568976,
-       "fmt": "0.056"
+       "value": 0.051017335587902966,
+       "fmt": "0.051"
       },
       "significant_units": {
        "value": 0,
@@ -209,8 +217,8 @@
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.004929032610476637,
-       "fmt": "0.005"
+       "value": 0.016664314368169852,
+       "fmt": "0.017"
       },
       "significant_units": {
        "value": 0,
@@ -227,16 +235,16 @@
      }
     },
     "colour_limit": {
-     "value": 3.4649676203044235,
-     "fmt": "3.5",
+     "value": 3.2901975875710137,
+     "fmt": "3.3",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 3.4649676203044235,
-      "max_abs_t": 6.029013504051529,
-      "recomputed_mean_morans_i": -0.013167944400523516,
-      "run_step0_mean_morans_i": -0.013179545613537094,
-      "max_abs_diff_t_min": 0.008316769668666346,
-      "max_abs_diff_t_max": 0.008453949217142487,
+      "limit_pooled_p99_abs_t": 3.2901975875710137,
+      "max_abs_t": 5.853754695768778,
+      "recomputed_mean_morans_i": -0.00751981495828935,
+      "run_step0_mean_morans_i": -0.007519833553020923,
+      "max_abs_diff_t_min": 5.790252816773034e-06,
+      "max_abs_diff_t_max": 1.9029270266202047e-06,
       "significant_units_all_zero": true
      },
      "printed_tick_range": {
@@ -253,13 +261,13 @@
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 3.4800000000000026,
-      "relative_difference": 0.004338389659831346,
-      "mismatch_px": 0.23727422003288115,
+      "nearest_candidate_limit": 3.3100000000000023,
+      "relative_difference": 0.006018608883488889,
+      "mismatch_px": 0.30233059991366773,
       "all_candidates": [
        {
-        "limit": 3.4800000000000026,
-        "mismatch_px": 0.23727422003288115,
+        "limit": 3.3100000000000023,
+        "mismatch_px": 0.30233059991366773,
         "ticks": [
          -3.0,
          -2.0,
@@ -271,8 +279,8 @@
         ]
        },
        {
-        "limit": 1.740000000000001,
-        "mismatch_px": 0.23727422003286489,
+        "limit": 1.650000000000001,
+        "mismatch_px": 0.35281385281382427,
         "ticks": [
          -1.5,
          -1.0,
@@ -284,8 +292,8 @@
         ]
        },
        {
-        "limit": 0.7000000000000002,
-        "mismatch_px": 0.5408163265306355,
+        "limit": 0.6600000000000001,
+        "mismatch_px": 0.35281385281386485,
         "ticks": [
          -0.6000000000000001,
          -0.4,
@@ -302,11 +310,11 @@
    }
   },
   "t_maps_2d_trained.png": {
-   "sha256": "bf83f9a4dec834db3c75ae541a67c262a28896e8b31f1ffc4b4576b10606c5fa",
-   "bytes": 205438,
+   "sha256": "c87d309de781dc6f710f013a22e671c33b427c36840c1f8659b4ad3fe0e00d39",
+   "bytes": 247209,
    "width": 2356,
-   "height": 875,
-   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/t_maps_raw.png",
+   "height": 856,
+   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000400/t_maps_raw.png",
    "step": 400,
    "run": "2d",
    "facts": {
@@ -330,80 +338,88 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.7858730760123217,
-     "fmt": "0.786"
+     "value": 0.7852937160723079,
+     "fmt": "0.785"
     },
     "morans_i_min_over_taps": {
-     "value": 0.596735420598046,
-     "fmt": "0.597"
+     "value": 0.6124232803362263,
+     "fmt": "0.612"
     },
     "morans_i_max_over_taps": {
-     "value": 0.9378441544782128,
-     "fmt": "0.938"
+     "value": 0.877373685236679,
+     "fmt": "0.877"
     },
     "morans_i_islands_max_over_taps": {
-     "value": 0.17184774303047012,
-     "fmt": "0.172"
+     "value": null,
+     "fmt": "n/a"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": null,
+     "fmt": "n/a"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 0,
+     "fmt": "0"
     },
     "mean_significant_units_per_tap": {
-     "value": 38.875,
-     "fmt": "38.9"
+     "value": 0.0,
+     "fmt": "0.0"
     },
     "significant_units_min_over_taps": {
-     "value": 1,
-     "fmt": "1"
+     "value": 0,
+     "fmt": "0"
     },
     "significant_units_max_over_taps": {
-     "value": 63,
-     "fmt": "63"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_a": {
-     "value": 5,
-     "fmt": "5"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_b": {
-     "value": 7,
-     "fmt": "7"
+     "value": 0,
+     "fmt": "0"
     },
     "t_min_over_taps": {
-     "value": -8.564705202388957,
-     "fmt": "-8.56"
+     "value": -5.030361648278311,
+     "fmt": "-5.03"
     },
     "t_max_over_taps": {
-     "value": 14.192000948163841,
-     "fmt": "14.19"
+     "value": 6.828551590644003,
+     "fmt": "6.83"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.7109943431759382,
-       "fmt": "0.711"
+       "value": 0.629897202064481,
+       "fmt": "0.630"
       },
       "significant_units": {
-       "value": 33,
-       "fmt": "33"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.596735420598046,
-       "fmt": "0.597"
+       "value": 0.6124232803362263,
+       "fmt": "0.612"
       },
       "significant_units": {
-       "value": 63,
-       "fmt": "63"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
        "value": 0,
@@ -412,30 +428,30 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.7896917732507592,
-       "fmt": "0.790"
+       "value": 0.8084755000044597,
+       "fmt": "0.808"
       },
       "significant_units": {
-       "value": 57,
-       "fmt": "57"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.732025547920894,
-       "fmt": "0.732"
+       "value": 0.8133122187102703,
+       "fmt": "0.813"
       },
       "significant_units": {
-       "value": 11,
-       "fmt": "11"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -448,66 +464,66 @@
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.8449454980629185,
-       "fmt": "0.845"
+       "value": 0.8478975095430508,
+       "fmt": "0.848"
       },
       "significant_units": {
-       "value": 51,
-       "fmt": "51"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8198092434527591,
-       "fmt": "0.820"
-      },
-      "significant_units": {
-       "value": 57,
-       "fmt": "57"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8549386271590461,
-       "fmt": "0.855"
-      },
-      "significant_units": {
-       "value": 38,
-       "fmt": "38"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8350191785848942,
+       "fmt": "0.835"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8579511540984018,
+       "fmt": "0.858"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.9378441544782128,
-       "fmt": "0.938"
+       "value": 0.877373685236679,
+       "fmt": "0.877"
       },
       "significant_units": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -520,52 +536,39 @@
      }
     },
     "colour_limit": {
-     "value": 7.036065279789275,
-     "fmt": "7.0",
+     "value": 3.6645873212720663,
+     "fmt": "3.7",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 7.036065279789275,
-      "max_abs_t": 14.202902813081021,
-      "recomputed_mean_morans_i": 0.7858559982173503,
-      "run_mean_morans_i": 0.7858730760123217,
-      "mean_morans_abs_diff": 1.7077794971398497e-05,
+      "limit_pooled_p99_abs_t": 3.6645873212720663,
+      "max_abs_t": 6.828560764345906,
+      "recomputed_mean_morans_i": 0.7852936860335448,
+      "run_mean_morans_i": 0.7852937160723079,
+      "mean_morans_abs_diff": 3.0038763143558356e-08,
       "significant_units_equal": true,
       "clusters_equal": true
      },
      "printed_tick_range": {
-      "value": 6.0,
-      "fmt": "6",
+      "value": 3.0,
+      "fmt": "3",
       "ticks": [
-       -6.0,
-       -4.0,
+       -3.0,
        -2.0,
+       -1.0,
        0.0,
+       1.0,
        2.0,
-       4.0,
-       6.0
+       3.0
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 7.080000000000005,
-      "relative_difference": 0.006244217252635569,
-      "mismatch_px": 0.2255851493139533,
+      "nearest_candidate_limit": 3.680000000000003,
+      "relative_difference": 0.004205842944025247,
+      "mismatch_px": 0.24534161490686301,
       "all_candidates": [
        {
-        "limit": 7.080000000000005,
-        "mismatch_px": 0.2255851493139533,
-        "ticks": [
-         -6.0,
-         -4.0,
-         -2.0,
-         0.0,
-         2.0,
-         4.0,
-         6.0
-        ]
-       },
-       {
-        "limit": 3.5400000000000027,
-        "mismatch_px": 0.2255851493139533,
+        "limit": 3.680000000000003,
+        "mismatch_px": 0.24534161490686301,
         "ticks": [
          -3.0,
          -2.0,
@@ -577,8 +580,8 @@
         ]
        },
        {
-        "limit": 1.7700000000000011,
-        "mismatch_px": 0.2255851493139533,
+        "limit": 1.8400000000000012,
+        "mismatch_px": 0.24534161490686301,
         "ticks": [
          -1.5,
          -1.0,
@@ -590,8 +593,8 @@
         ]
        },
        {
-        "limit": 0.7100000000000002,
-        "mismatch_px": 0.4436619718310015,
+        "limit": 0.7400000000000002,
+        "mismatch_px": 0.5077220077220416,
         "ticks": [
          -0.6000000000000001,
          -0.4,
@@ -601,6 +604,19 @@
          0.40000000000000013,
          0.6000000000000001
         ]
+       },
+       {
+        "limit": 0.9200000000000004,
+        "mismatch_px": 0.24534161490685488,
+        "ticks": [
+         -0.75,
+         -0.5,
+         -0.25,
+         0.0,
+         0.25,
+         0.5,
+         0.75
+        ]
        }
       ]
      }
@@ -608,11 +624,11 @@
    }
   },
   "t_maps_3d_trained.png": {
-   "sha256": "e9d56411efeb153f460fd0a1facdd97be4116ffeacf8478acb921a30d3e72e66",
-   "bytes": 299548,
-   "width": 1522,
-   "height": 1265,
-   "source": "topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400/topography_live/step_0000400/t_maps_raw.png",
+   "sha256": "986e0b0eafc6db9531ad59d117d2286c3824533ddd3a43039813b18b09375cdc",
+   "bytes": 370281,
+   "width": 1521,
+   "height": 1284,
+   "source": "topolm_viz_final3_3d_20261024_142432/topolm_tiny3d_topo_alpha2.5_20261024_142925/topography_live/step_0000400/t_maps_raw.png",
    "step": 400,
    "run": "3d",
    "facts": {
@@ -637,152 +653,160 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.7109463363165125,
-     "fmt": "0.711"
+     "value": 0.6700588995755474,
+     "fmt": "0.670"
     },
     "morans_i_min_over_taps": {
-     "value": 0.5328885420997992,
-     "fmt": "0.533"
+     "value": 0.4897352661687348,
+     "fmt": "0.490"
     },
     "morans_i_max_over_taps": {
-     "value": 0.8017428633430992,
-     "fmt": "0.802"
+     "value": 0.7594377244644531,
+     "fmt": "0.759"
     },
     "morans_i_islands_max_over_taps": {
-     "value": 0.9723838198484271,
-     "fmt": "0.972"
+     "value": -0.09354109785489333,
+     "fmt": "-0.094"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.5,
+     "fmt": "-0.500"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 4,
+     "fmt": "4"
     },
     "mean_significant_units_per_tap": {
-     "value": 89.25,
-     "fmt": "89.2"
+     "value": 5.375,
+     "fmt": "5.4"
     },
     "significant_units_min_over_taps": {
-     "value": 67,
-     "fmt": "67"
+     "value": 0,
+     "fmt": "0"
     },
     "significant_units_max_over_taps": {
-     "value": 115,
-     "fmt": "115"
+     "value": 21,
+     "fmt": "21"
     },
     "total_clusters_a": {
-     "value": 10,
-     "fmt": "10"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_b": {
-     "value": 8,
-     "fmt": "8"
+     "value": 1,
+     "fmt": "1"
     },
     "t_min_over_taps": {
-     "value": -11.231236551248296,
-     "fmt": "-11.23"
+     "value": -9.966205121932981,
+     "fmt": "-9.97"
     },
     "t_max_over_taps": {
-     "value": 8.738154414436256,
-     "fmt": "8.74"
+     "value": 8.775841185281449,
+     "fmt": "8.78"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.6054713890134106,
-       "fmt": "0.605"
+       "value": 0.4897352661687348,
+       "fmt": "0.490"
       },
       "significant_units": {
-       "value": 67,
-       "fmt": "67"
-      },
-      "clusters_a": {
-       "value": 2,
-       "fmt": "2"
-      },
-      "clusters_b": {
        "value": 1,
        "fmt": "1"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.7743436124638997,
-       "fmt": "0.774"
+       "value": 0.7580294793643653,
+       "fmt": "0.758"
       },
       "significant_units": {
-       "value": 100,
-       "fmt": "100"
+       "value": 5,
+       "fmt": "5"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.7108857575583479,
-       "fmt": "0.711"
+       "value": 0.6831484969627599,
+       "fmt": "0.683"
       },
       "significant_units": {
-       "value": 95,
-       "fmt": "95"
+       "value": 4,
+       "fmt": "4"
       },
       "clusters_a": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.5328885420997992,
-       "fmt": "0.533"
+       "value": 0.6795858111431399,
+       "fmt": "0.680"
       },
       "significant_units": {
-       "value": 91,
-       "fmt": "91"
-      },
-      "clusters_a": {
        "value": 1,
        "fmt": "1"
       },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.7886711059422261,
-       "fmt": "0.789"
+       "value": 0.6473948134752309,
+       "fmt": "0.647"
       },
       "significant_units": {
-       "value": 79,
-       "fmt": "79"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_2/mlp_tap": {
       "morans_i": {
-       "value": 0.7650391099142382,
-       "fmt": "0.765"
+       "value": 0.7147438648265183,
+       "fmt": "0.715"
       },
       "significant_units": {
-       "value": 115,
-       "fmt": "115"
+       "value": 21,
+       "fmt": "21"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
        "value": 1,
@@ -791,16 +815,16 @@
      },
      "block_3/attention_tap": {
       "morans_i": {
-       "value": 0.7085283101970785,
-       "fmt": "0.709"
+       "value": 0.6283957401991775,
+       "fmt": "0.628"
       },
       "significant_units": {
-       "value": 92,
-       "fmt": "92"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
        "value": 0,
@@ -809,104 +833,94 @@
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.8017428633430992,
-       "fmt": "0.802"
+       "value": 0.7594377244644531,
+       "fmt": "0.759"
       },
       "significant_units": {
-       "value": 75,
-       "fmt": "75"
+       "value": 10,
+       "fmt": "10"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       }
      }
     },
     "colour_limit": {
-     "value": 7.054252479472767,
-     "fmt": "7.1",
+     "value": 5.719035625083526,
+     "fmt": "5.7",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 7.054252479472767,
-      "max_abs_t": 11.229288159131391,
-      "recomputed_mean_morans_i": 0.7109501798362061,
-      "run_mean_morans_i": 0.7109463363165125,
-      "mean_morans_abs_diff": 3.843519693624842e-06,
-      "significant_units_equal": false,
+      "limit_pooled_p99_abs_t": 5.719035625083526,
+      "max_abs_t": 9.966206328839377,
+      "recomputed_mean_morans_i": 0.6700589261663419,
+      "run_mean_morans_i": 0.6700588995755474,
+      "mean_morans_abs_diff": 2.6590794455216837e-08,
+      "significant_units_equal": true,
       "clusters_equal": true
      },
      "printed_tick_range": {
-      "value": 6.0,
-      "fmt": "6",
+      "value": 4.0,
+      "fmt": "4",
       "ticks": [
-       -6.0,
        -4.0,
        -2.0,
        0.0,
        2.0,
-       4.0,
-       6.0
+       4.0
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 7.100000000000006,
-      "relative_difference": 0.006485098266663937,
-      "mismatch_px": 0.20120724346072297,
+      "nearest_candidate_limit": 5.780000000000005,
+      "relative_difference": 0.010659904730981313,
+      "mismatch_px": 0.39999999999997726,
       "all_candidates": [
        {
-        "limit": 7.100000000000006,
-        "mismatch_px": 0.20120724346072297,
+        "limit": 5.780000000000005,
+        "mismatch_px": 0.39999999999997726,
         "ticks": [
-         -6.0,
          -4.0,
          -2.0,
          0.0,
          2.0,
-         4.0,
-         6.0
+         4.0
         ]
        },
        {
-        "limit": 3.5500000000000025,
-        "mismatch_px": 0.2012072434607473,
+        "limit": 2.8900000000000023,
+        "mismatch_px": 0.39999999999997726,
         "ticks": [
-         -3.0,
          -2.0,
          -1.0,
          0.0,
          1.0,
-         2.0,
-         3.0
+         2.0
         ]
        },
        {
-        "limit": 1.7700000000000011,
-        "mismatch_px": 0.27441485068602234,
+        "limit": 1.4400000000000008,
+        "mismatch_px": 0.4000000000000227,
         "ticks": [
-         -1.5,
          -1.0,
          -0.5,
          0.0,
          0.5,
-         1.0,
-         1.5
+         1.0
         ]
        },
        {
-        "limit": 0.7100000000000002,
-        "mismatch_px": 0.20120724346076355,
+        "limit": 0.5800000000000001,
+        "mismatch_px": 0.4,
         "ticks": [
-         -0.6000000000000001,
-         -0.4,
-         -0.19999999999999996,
+         -0.4000000000000001,
+         -0.20000000000000007,
          0.0,
          0.19999999999999996,
-         0.40000000000000013,
-         0.6000000000000001
+         0.3999999999999999
         ]
        }
       ]
@@ -915,11 +929,11 @@
    }
   },
   "live_curve_2d.png": {
-   "sha256": "c8006606f4d091c62ad88eb29e52a7cee051fb73849873d5936be2dd3b5a39fd",
-   "bytes": 214948,
+   "sha256": "139007b622cf86a4fe8233bd19f80b154f0ca971cd13b35d8a49221f09043b68",
+   "bytes": 181214,
    "width": 1360,
    "height": 1432,
-   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/topography_curve.png",
+   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/topography_curve.png",
    "step": 400,
    "run": "2d",
    "facts": {
@@ -943,80 +957,88 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.7858730760123217,
-     "fmt": "0.786"
+     "value": 0.7852937160723079,
+     "fmt": "0.785"
     },
     "morans_i_min_over_taps": {
-     "value": 0.596735420598046,
-     "fmt": "0.597"
+     "value": 0.6124232803362263,
+     "fmt": "0.612"
     },
     "morans_i_max_over_taps": {
-     "value": 0.9378441544782128,
-     "fmt": "0.938"
+     "value": 0.877373685236679,
+     "fmt": "0.877"
     },
     "morans_i_islands_max_over_taps": {
-     "value": 0.17184774303047012,
-     "fmt": "0.172"
+     "value": null,
+     "fmt": "n/a"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": null,
+     "fmt": "n/a"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 0,
+     "fmt": "0"
     },
     "mean_significant_units_per_tap": {
-     "value": 38.875,
-     "fmt": "38.9"
+     "value": 0.0,
+     "fmt": "0.0"
     },
     "significant_units_min_over_taps": {
-     "value": 1,
-     "fmt": "1"
+     "value": 0,
+     "fmt": "0"
     },
     "significant_units_max_over_taps": {
-     "value": 63,
-     "fmt": "63"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_a": {
-     "value": 5,
-     "fmt": "5"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_b": {
-     "value": 7,
-     "fmt": "7"
+     "value": 0,
+     "fmt": "0"
     },
     "t_min_over_taps": {
-     "value": -8.564705202388957,
-     "fmt": "-8.56"
+     "value": -5.030361648278311,
+     "fmt": "-5.03"
     },
     "t_max_over_taps": {
-     "value": 14.192000948163841,
-     "fmt": "14.19"
+     "value": 6.828551590644003,
+     "fmt": "6.83"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.7109943431759382,
-       "fmt": "0.711"
+       "value": 0.629897202064481,
+       "fmt": "0.630"
       },
       "significant_units": {
-       "value": 33,
-       "fmt": "33"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.596735420598046,
-       "fmt": "0.597"
+       "value": 0.6124232803362263,
+       "fmt": "0.612"
       },
       "significant_units": {
-       "value": 63,
-       "fmt": "63"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
        "value": 0,
@@ -1025,30 +1047,30 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.7896917732507592,
-       "fmt": "0.790"
+       "value": 0.8084755000044597,
+       "fmt": "0.808"
       },
       "significant_units": {
-       "value": 57,
-       "fmt": "57"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.732025547920894,
-       "fmt": "0.732"
+       "value": 0.8133122187102703,
+       "fmt": "0.813"
       },
       "significant_units": {
-       "value": 11,
-       "fmt": "11"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -1061,66 +1083,66 @@
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.8449454980629185,
-       "fmt": "0.845"
+       "value": 0.8478975095430508,
+       "fmt": "0.848"
       },
       "significant_units": {
-       "value": 51,
-       "fmt": "51"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8198092434527591,
-       "fmt": "0.820"
-      },
-      "significant_units": {
-       "value": 57,
-       "fmt": "57"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8549386271590461,
-       "fmt": "0.855"
-      },
-      "significant_units": {
-       "value": 38,
-       "fmt": "38"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8350191785848942,
+       "fmt": "0.835"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8579511540984018,
+       "fmt": "0.858"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.9378441544782128,
-       "fmt": "0.938"
+       "value": 0.877373685236679,
+       "fmt": "0.877"
       },
       "significant_units": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -1134,20 +1156,20 @@
     },
     "validation_loss_points_drawn": {
      "value": {
-      "100": 7.914386749267578,
-      "200": 7.812617301940918,
-      "300": 7.818270206451416,
-      "400": 7.81881856918335
+      "100": 7.914369106292725,
+      "200": 7.81265115737915,
+      "300": 7.818082332611084,
+      "400": 7.818432807922363
      },
-     "fmt": "100: 7.914, 200: 7.813, 300: 7.818, 400: 7.819"
+     "fmt": "100: 7.914, 200: 7.813, 300: 7.818, 400: 7.818"
     },
     "mean_morans_i_first_step": {
-     "value": -0.013179545613537094,
-     "fmt": "-0.013"
+     "value": -0.007519833553020923,
+     "fmt": "-0.008"
     },
     "mean_morans_i_last_step": {
-     "value": 0.7858730760123217,
-     "fmt": "0.786"
+     "value": 0.7852937160723079,
+     "fmt": "0.785"
     },
     "first_step": {
      "value": 0,
@@ -1158,8 +1180,8 @@
      "fmt": "400"
     },
     "mean_morans_i_peak": {
-     "value": 0.792790991029724,
-     "fmt": "0.793"
+     "value": 0.8086429766088608,
+     "fmt": "0.809"
     },
     "mean_morans_i_peak_step": {
      "value": 100,
@@ -1170,42 +1192,50 @@
      "50": 0.0,
      "100": 0.0,
      "150": 0.0,
-     "200": 19.875,
-     "250": 1.125,
-     "300": 39.5,
-     "350": 40.75,
-     "400": 38.875
+     "200": 0.25,
+     "250": 0.0,
+     "300": 0.0,
+     "350": 0.0,
+     "400": 0.0
     },
     "clusters_a_series": {
      "0": 0,
      "50": 0,
      "100": 0,
      "150": 0,
-     "200": 1,
+     "200": 0,
      "250": 0,
-     "300": 7,
-     "350": 5,
-     "400": 5
+     "300": 0,
+     "350": 0,
+     "400": 0
     },
     "clusters_b_series": {
      "0": 0,
      "50": 0,
      "100": 0,
      "150": 0,
-     "200": 2,
+     "200": 0,
      "250": 0,
-     "300": 6,
-     "350": 7,
-     "400": 7
+     "300": 0,
+     "350": 0,
+     "400": 0
     }
    }
   },
   "clusters_2d.png": {
-   "sha256": "c97393044e069707651a29099fbc83ebc13e7930d4fd8467cb5c0ee382dd8852",
-   "bytes": 9527,
-   "width": 469,
-   "height": 496,
-   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/clusters_raw.png",
+   "omitted": true,
+   "reason": "no cluster figure was written by the run: the figure draws condition A clusters only and this run found none of condition A (clusters a = 0, b = 0 at step 400)"
+  },
+  "clusters_3d.png": {
+   "omitted": true,
+   "reason": "no cluster figure was written by the run: the figure draws condition A clusters only and this run found none of condition A (clusters a = 0, b = 1 at step 400)"
+  },
+  "morans_i_by_depth_2d.png": {
+   "sha256": "eab83305d540041319381bc8c83fa68e6c88150500dadd3102976309fe9945e5",
+   "bytes": 53020,
+   "width": 794,
+   "height": 467,
+   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000400/morans_i_raw.png",
    "step": 400,
    "run": "2d",
    "facts": {
@@ -1229,80 +1259,88 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.7858730760123217,
-     "fmt": "0.786"
+     "value": 0.7852937160723079,
+     "fmt": "0.785"
     },
     "morans_i_min_over_taps": {
-     "value": 0.596735420598046,
-     "fmt": "0.597"
+     "value": 0.6124232803362263,
+     "fmt": "0.612"
     },
     "morans_i_max_over_taps": {
-     "value": 0.9378441544782128,
-     "fmt": "0.938"
+     "value": 0.877373685236679,
+     "fmt": "0.877"
     },
     "morans_i_islands_max_over_taps": {
-     "value": 0.17184774303047012,
-     "fmt": "0.172"
+     "value": null,
+     "fmt": "n/a"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": null,
+     "fmt": "n/a"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 0,
+     "fmt": "0"
     },
     "mean_significant_units_per_tap": {
-     "value": 38.875,
-     "fmt": "38.9"
+     "value": 0.0,
+     "fmt": "0.0"
     },
     "significant_units_min_over_taps": {
-     "value": 1,
-     "fmt": "1"
+     "value": 0,
+     "fmt": "0"
     },
     "significant_units_max_over_taps": {
-     "value": 63,
-     "fmt": "63"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_a": {
-     "value": 5,
-     "fmt": "5"
+     "value": 0,
+     "fmt": "0"
     },
     "total_clusters_b": {
-     "value": 7,
-     "fmt": "7"
+     "value": 0,
+     "fmt": "0"
     },
     "t_min_over_taps": {
-     "value": -8.564705202388957,
-     "fmt": "-8.56"
+     "value": -5.030361648278311,
+     "fmt": "-5.03"
     },
     "t_max_over_taps": {
-     "value": 14.192000948163841,
-     "fmt": "14.19"
+     "value": 6.828551590644003,
+     "fmt": "6.83"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.7109943431759382,
-       "fmt": "0.711"
+       "value": 0.629897202064481,
+       "fmt": "0.630"
       },
       "significant_units": {
-       "value": 33,
-       "fmt": "33"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.596735420598046,
-       "fmt": "0.597"
+       "value": 0.6124232803362263,
+       "fmt": "0.612"
       },
       "significant_units": {
-       "value": 63,
-       "fmt": "63"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
        "value": 0,
@@ -1311,30 +1349,30 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.7896917732507592,
-       "fmt": "0.790"
+       "value": 0.8084755000044597,
+       "fmt": "0.808"
       },
       "significant_units": {
-       "value": 57,
-       "fmt": "57"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_b": {
-       "value": 2,
-       "fmt": "2"
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.732025547920894,
-       "fmt": "0.732"
+       "value": 0.8133122187102703,
+       "fmt": "0.813"
       },
       "significant_units": {
-       "value": 11,
-       "fmt": "11"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -1347,66 +1385,66 @@
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.8449454980629185,
-       "fmt": "0.845"
+       "value": 0.8478975095430508,
+       "fmt": "0.848"
       },
       "significant_units": {
-       "value": 51,
-       "fmt": "51"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8198092434527591,
-       "fmt": "0.820"
-      },
-      "significant_units": {
-       "value": 57,
-       "fmt": "57"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8549386271590461,
-       "fmt": "0.855"
-      },
-      "significant_units": {
-       "value": 38,
-       "fmt": "38"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8350191785848942,
+       "fmt": "0.835"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8579511540984018,
+       "fmt": "0.858"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.9378441544782128,
-       "fmt": "0.938"
+       "value": 0.877373685236679,
+       "fmt": "0.877"
       },
       "significant_units": {
-       "value": 1,
-       "fmt": "1"
+       "value": 0,
+       "fmt": "0"
       },
       "clusters_a": {
        "value": 0,
@@ -1417,516 +1455,269 @@
        "fmt": "0"
       }
      }
-    },
-    "cluster_figure_tap": {
-     "name": {
-      "value": "causal_language_model/topolm/block_2/mlp_tap",
-      "fmt": "block_2/mlp_tap"
-     },
-     "clusters_a": {
-      "value": 1,
-      "fmt": "1"
-     },
-     "clusters_b": {
-      "value": 1,
-      "fmt": "1"
-     },
-     "cluster_sizes_a": {
-      "value": [
-       19
-      ],
-      "fmt": "19"
-     },
-     "cluster_sizes_b": {
-      "value": [
-       19
-      ],
-      "fmt": "19"
-     },
-     "morans_i": {
-      "value": 0.8198092434527591,
-      "fmt": "0.820"
-     },
-     "significant_units": {
-      "value": 57,
-      "fmt": "57"
-     },
-     "title_as_drawn": "block_2/mlp_tap (raw), condition a: 1 cluster"
     }
    }
   },
-  "clusters_3d.png": {
-   "sha256": "c4504c499dc1d1a2e2db4b4d6740b0a28e2937ae229e24436e815b2f025e1a61",
-   "bytes": 17835,
-   "width": 1475,
-   "height": 628,
-   "source": "topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400/topography_live/step_0000400/clusters_raw.png",
-   "step": 400,
-   "run": "3d",
+  "t_maps_2d_illustration.png": {
+   "kind": "synthetic",
+   "sha256": "31ec07a0f32094cf9173e8a807872013f8117595cfbe7db4dc712230b862c23b",
+   "bytes": 147424,
+   "width": 1604,
+   "height": 488,
+   "source": "scratch_step7_5/make_illustration.py (no model, no run)",
+   "step": null,
+   "run": null,
+   "how_made": "four 16x16 maps built from analytic gaussian blobs (two positive, one negative) plus smoothed noise; significant = |t| > 3.5; label grids from dl_techniques.metrics.topographic_selectivity.grow_clusters (queen connectivity, min size 10, both signs); drawn by train.topolm.plotting.plot_t_maps with the figure's own note parameter and a SYNTHETIC suptitle",
+   "caption_must_say": "synthetic illustration, made-up numbers, not a run",
    "facts": {
-    "step": {
-     "value": 400,
-     "fmt": "400"
-    },
     "grid_shape": {
      "value": [
-      7,
-      7,
-      7
+      16,
+      16
      ],
-     "fmt": "7x7x7"
+     "fmt": "16x16"
     },
-    "units_per_tap": {
-     "value": 343,
-     "fmt": "343"
+    "panels": {
+     "value": 4,
+     "fmt": "4"
     },
-    "num_taps": {
-     "value": 8,
-     "fmt": "8"
+    "threshold_abs_t": {
+     "value": 3.5,
+     "fmt": "3.5"
     },
-    "mean_morans_i": {
-     "value": 0.7109463363165125,
-     "fmt": "0.711"
-    },
-    "morans_i_min_over_taps": {
-     "value": 0.5328885420997992,
-     "fmt": "0.533"
-    },
-    "morans_i_max_over_taps": {
-     "value": 0.8017428633430992,
-     "fmt": "0.802"
-    },
-    "morans_i_islands_max_over_taps": {
-     "value": 0.9723838198484271,
-     "fmt": "0.972"
-    },
-    "mean_significant_units_per_tap": {
-     "value": 89.25,
-     "fmt": "89.2"
-    },
-    "significant_units_min_over_taps": {
-     "value": 67,
-     "fmt": "67"
-    },
-    "significant_units_max_over_taps": {
-     "value": 115,
-     "fmt": "115"
-    },
-    "total_clusters_a": {
+    "min_cluster_size": {
      "value": 10,
      "fmt": "10"
     },
-    "total_clusters_b": {
-     "value": 8,
-     "fmt": "8"
-    },
-    "t_min_over_taps": {
-     "value": -11.231236551248296,
-     "fmt": "-11.23"
-    },
-    "t_max_over_taps": {
-     "value": 8.738154414436256,
-     "fmt": "8.74"
-    },
-    "per_tap": {
-     "block_0/attention_tap": {
-      "morans_i": {
-       "value": 0.6054713890134106,
-       "fmt": "0.605"
+    "per_panel": {
+     "synthetic/tap_1": {
+      "significant_units": 57,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       19,
+       24
+      ],
+      "cluster_sizes_b": [
+       14
+      ],
+      "t_min": {
+       "value": -6.53566141198439,
+       "fmt": "-6.54"
       },
-      "significant_units": {
-       "value": 67,
-       "fmt": "67"
-      },
-      "clusters_a": {
-       "value": 2,
-       "fmt": "2"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+      "t_max": {
+       "value": 7.432767319483581,
+       "fmt": "7.43"
       }
      },
-     "block_0/mlp_tap": {
-      "morans_i": {
-       "value": 0.7743436124638997,
-       "fmt": "0.774"
+     "synthetic/tap_2": {
+      "significant_units": 55,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       25,
+       12
+      ],
+      "cluster_sizes_b": [
+       18
+      ],
+      "t_min": {
+       "value": -6.372440174990377,
+       "fmt": "-6.37"
       },
-      "significant_units": {
-       "value": 100,
-       "fmt": "100"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+      "t_max": {
+       "value": 7.837839641855993,
+       "fmt": "7.84"
       }
      },
-     "block_1/attention_tap": {
-      "morans_i": {
-       "value": 0.7108857575583479,
-       "fmt": "0.711"
+     "synthetic/tap_3": {
+      "significant_units": 53,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       20,
+       15
+      ],
+      "cluster_sizes_b": [
+       18
+      ],
+      "t_min": {
+       "value": -5.223077985905286,
+       "fmt": "-5.22"
       },
-      "significant_units": {
-       "value": 95,
-       "fmt": "95"
-      },
-      "clusters_a": {
-       "value": 2,
-       "fmt": "2"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+      "t_max": {
+       "value": 7.611024791974114,
+       "fmt": "7.61"
       }
      },
-     "block_1/mlp_tap": {
-      "morans_i": {
-       "value": 0.5328885420997992,
-       "fmt": "0.533"
+     "synthetic/tap_4": {
+      "significant_units": 48,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       27,
+       10
+      ],
+      "cluster_sizes_b": [
+       11
+      ],
+      "t_min": {
+       "value": -5.478231442628694,
+       "fmt": "-5.48"
       },
-      "significant_units": {
-       "value": 91,
-       "fmt": "91"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 2,
-       "fmt": "2"
-      }
-     },
-     "block_2/attention_tap": {
-      "morans_i": {
-       "value": 0.7886711059422261,
-       "fmt": "0.789"
-      },
-      "significant_units": {
-       "value": 79,
-       "fmt": "79"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.7650391099142382,
-       "fmt": "0.765"
-      },
-      "significant_units": {
-       "value": 115,
-       "fmt": "115"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.7085283101970785,
-       "fmt": "0.709"
-      },
-      "significant_units": {
-       "value": 92,
-       "fmt": "92"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_3/mlp_tap": {
-      "morans_i": {
-       "value": 0.8017428633430992,
-       "fmt": "0.802"
-      },
-      "significant_units": {
-       "value": 75,
-       "fmt": "75"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
+      "t_max": {
+       "value": 6.657768320412431,
+       "fmt": "6.66"
       }
      }
-    },
-    "cluster_figure_tap": {
-     "name": {
-      "value": "causal_language_model/topolm/block_3/mlp_tap",
-      "fmt": "block_3/mlp_tap"
-     },
-     "clusters_a": {
-      "value": 1,
-      "fmt": "1"
-     },
-     "clusters_b": {
-      "value": 1,
-      "fmt": "1"
-     },
-     "cluster_sizes_a": {
-      "value": [
-       30
-      ],
-      "fmt": "30"
-     },
-     "cluster_sizes_b": {
-      "value": [
-       45
-      ],
-      "fmt": "45"
-     },
-     "morans_i": {
-      "value": 0.8017428633430992,
-      "fmt": "0.802"
-     },
-     "significant_units": {
-      "value": 75,
-      "fmt": "75"
-     },
-     "title_as_drawn": "block_3/mlp_tap (raw), condition a: 1 cluster"
     }
-   }
-  },
-  "morans_i_by_depth_2d.png": {
-   "sha256": "35d0612360c913305c020743dc109f254bac65e9a991a513059d3ad91d5072fa",
-   "bytes": 51310,
-   "width": 782,
-   "height": 467,
-   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/morans_i_raw.png",
-   "step": 400,
-   "run": "2d",
-   "facts": {
-    "step": {
-     "value": 400,
-     "fmt": "400"
-    },
-    "grid_shape": {
-     "value": [
-      16,
-      16
+   },
+   "params": {
+    "threshold_abs_t": 3.5,
+    "grid": [
+     16,
+     16
+    ],
+    "blobs_per_panel": {
+     "synthetic/tap_1": [
+      [
+       4.0,
+       4.5,
+       2.2,
+       7.0
+      ],
+      [
+       11.5,
+       11.0,
+       2.0,
+       6.0
+      ],
+      [
+       4.5,
+       12.0,
+       2.0,
+       -6.0
+      ]
      ],
-     "fmt": "16x16"
+     "synthetic/tap_2": [
+      [
+       3.5,
+       10.0,
+       2.4,
+       7.2
+      ],
+      [
+       12.0,
+       4.0,
+       2.1,
+       6.4
+      ],
+      [
+       10.5,
+       12.0,
+       2.2,
+       -6.5
+      ]
+     ],
+     "synthetic/tap_3": [
+      [
+       7.0,
+       3.5,
+       2.0,
+       6.5
+      ],
+      [
+       11.0,
+       10.5,
+       2.3,
+       7.0
+      ],
+      [
+       3.5,
+       11.5,
+       2.1,
+       -5.8
+      ]
+     ],
+     "synthetic/tap_4": [
+      [
+       5.0,
+       6.0,
+       2.5,
+       7.0
+      ],
+      [
+       12.5,
+       12.0,
+       1.9,
+       5.8
+      ],
+      [
+       11.5,
+       3.0,
+       2.0,
+       -6.2
+      ]
+     ]
     },
-    "units_per_tap": {
-     "value": 256,
-     "fmt": "256"
-    },
-    "num_taps": {
-     "value": 8,
-     "fmt": "8"
-    },
-    "mean_morans_i": {
-     "value": 0.7858730760123217,
-     "fmt": "0.786"
-    },
-    "morans_i_min_over_taps": {
-     "value": 0.596735420598046,
-     "fmt": "0.597"
-    },
-    "morans_i_max_over_taps": {
-     "value": 0.9378441544782128,
-     "fmt": "0.938"
-    },
-    "morans_i_islands_max_over_taps": {
-     "value": 0.17184774303047012,
-     "fmt": "0.172"
-    },
-    "mean_significant_units_per_tap": {
-     "value": 38.875,
-     "fmt": "38.9"
-    },
-    "significant_units_min_over_taps": {
-     "value": 1,
-     "fmt": "1"
-    },
-    "significant_units_max_over_taps": {
-     "value": 63,
-     "fmt": "63"
-    },
-    "total_clusters_a": {
-     "value": 5,
-     "fmt": "5"
-    },
-    "total_clusters_b": {
-     "value": 7,
-     "fmt": "7"
-    },
-    "t_min_over_taps": {
-     "value": -8.564705202388957,
-     "fmt": "-8.56"
-    },
-    "t_max_over_taps": {
-     "value": 14.192000948163841,
-     "fmt": "14.19"
-    },
-    "per_tap": {
-     "block_0/attention_tap": {
-      "morans_i": {
-       "value": 0.7109943431759382,
-       "fmt": "0.711"
-      },
-      "significant_units": {
-       "value": 33,
-       "fmt": "33"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 2,
-       "fmt": "2"
-      }
+    "min_cluster_size": 10,
+    "noise": "gaussian_filter(standard_normal, sigma 1.2) scaled to std 0.9, seed 100+panel",
+    "stats": {
+     "synthetic/tap_1": {
+      "significant_units": 57,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       19,
+       24
+      ],
+      "cluster_sizes_b": [
+       14
+      ],
+      "t_min": -6.53566141198439,
+      "t_max": 7.432767319483581
      },
-     "block_0/mlp_tap": {
-      "morans_i": {
-       "value": 0.596735420598046,
-       "fmt": "0.597"
-      },
-      "significant_units": {
-       "value": 63,
-       "fmt": "63"
-      },
-      "clusters_a": {
-       "value": 2,
-       "fmt": "2"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
+     "synthetic/tap_2": {
+      "significant_units": 55,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       25,
+       12
+      ],
+      "cluster_sizes_b": [
+       18
+      ],
+      "t_min": -6.372440174990377,
+      "t_max": 7.837839641855993
      },
-     "block_1/attention_tap": {
-      "morans_i": {
-       "value": 0.7896917732507592,
-       "fmt": "0.790"
-      },
-      "significant_units": {
-       "value": 57,
-       "fmt": "57"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 2,
-       "fmt": "2"
-      }
+     "synthetic/tap_3": {
+      "significant_units": 53,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       20,
+       15
+      ],
+      "cluster_sizes_b": [
+       18
+      ],
+      "t_min": -5.223077985905286,
+      "t_max": 7.611024791974114
      },
-     "block_1/mlp_tap": {
-      "morans_i": {
-       "value": 0.732025547920894,
-       "fmt": "0.732"
-      },
-      "significant_units": {
-       "value": 11,
-       "fmt": "11"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_2/attention_tap": {
-      "morans_i": {
-       "value": 0.8449454980629185,
-       "fmt": "0.845"
-      },
-      "significant_units": {
-       "value": 51,
-       "fmt": "51"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8198092434527591,
-       "fmt": "0.820"
-      },
-      "significant_units": {
-       "value": 57,
-       "fmt": "57"
-      },
-      "clusters_a": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8549386271590461,
-       "fmt": "0.855"
-      },
-      "significant_units": {
-       "value": 38,
-       "fmt": "38"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 1,
-       "fmt": "1"
-      }
-     },
-     "block_3/mlp_tap": {
-      "morans_i": {
-       "value": 0.9378441544782128,
-       "fmt": "0.938"
-      },
-      "significant_units": {
-       "value": 1,
-       "fmt": "1"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
+     "synthetic/tap_4": {
+      "significant_units": 48,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       27,
+       10
+      ],
+      "cluster_sizes_b": [
+       11
+      ],
+      "t_min": -5.478231442628694,
+      "t_max": 6.657768320412431
      }
     }
    }
@@ -1936,37 +1727,37 @@
   "2d": {
    "exit_code": 0,
    "total_wall_s": {
-    "value": 256.168636649,
-    "fmt": "256.2"
+    "value": 259.050965942,
+    "fmt": "259.1"
    },
    "number_of_draws": {
     "value": 9,
     "fmt": "9"
    },
    "seconds_per_draw_min": {
-    "value": 1.896140333992662,
-    "fmt": "1.90"
+    "value": 2.165947569999844,
+    "fmt": "2.17"
    },
    "seconds_per_draw_median": {
-    "value": 1.959816923015751,
-    "fmt": "1.96"
+    "value": 2.2112552619946655,
+    "fmt": "2.21"
    },
    "seconds_per_draw_max": {
-    "value": 2.3266370439960156,
-    "fmt": "2.33"
+    "value": 2.65237739199074,
+    "fmt": "2.65"
    },
    "seconds_per_draw_sum": {
-    "value": 17.90642690495588,
-    "fmt": "17.9"
+    "value": 20.3405613360228,
+    "fmt": "20.3"
    },
    "peak_own_gpu_mib_nvidia_smi_1s_samples": {
-    "value": 6052,
-    "fmt": "6052"
+    "value": 5028,
+    "fmt": "5028"
    },
-   "gpu_samples": 130,
+   "gpu_samples": 145,
    "last_live_row_equals_report": true,
-   "last_live_row_mean_morans_i": 0.7858730760123217,
-   "report_mean_morans_i": 0.7858730760123217,
+   "last_live_row_mean_morans_i": 0.7852937160723079,
+   "report_mean_morans_i": 0.7852937160723079,
    "rows_in_metrics_jsonl": 10,
    "rows_after_merge_per_step": 9,
    "steps_drawn": [
@@ -1989,26 +1780,26 @@
     "readout"
    ],
    "mean_morans_i_series": {
-    "0": -0.013179545613537094,
-    "50": 0.6853011077383909,
-    "100": 0.792790991029724,
-    "150": 0.7798465026897164,
-    "200": 0.7484478461845341,
-    "250": 0.7629885098826796,
-    "300": 0.7764090084921983,
-    "350": 0.7844725969959302,
-    "400": 0.7858730760123217
+    "0": -0.007519833553020923,
+    "50": 0.6791107296051838,
+    "100": 0.8086429766088608,
+    "150": 0.7919873886672588,
+    "200": 0.7413015376245601,
+    "250": 0.7800083666562339,
+    "300": 0.7815316183165304,
+    "350": 0.7842214873236495,
+    "400": 0.7852937160723079
    },
    "mean_significant_units_series": {
     "0": 0.0,
     "50": 0.0,
     "100": 0.0,
     "150": 0.0,
-    "200": 19.875,
-    "250": 1.125,
-    "300": 39.5,
-    "350": 40.75,
-    "400": 38.875
+    "200": 0.25,
+    "250": 0.0,
+    "300": 0.0,
+    "350": 0.0,
+    "400": 0.0
    },
    "clusters_ab_series": {
     "0": [
@@ -2028,30 +1819,30 @@
      0
     ],
     "200": [
-     1,
-     2
+     0,
+     0
     ],
     "250": [
      0,
      0
     ],
     "300": [
-     7,
-     6
+     0,
+     0
     ],
     "350": [
-     5,
-     7
+     0,
+     0
     ],
     "400": [
-     5,
-     7
+     0,
+     0
     ]
    },
    "device": "NVIDIA GeForce RTX 4090",
-   "first_stamped_line_to_cadence_s": 119.267,
-   "fit_phase_s_cadence_to_best_evaluation": 125.345,
-   "cadence_to_wrote_s": 130.258,
+   "first_stamped_line_to_cadence_s": 112.482,
+   "fit_phase_s_cadence_to_best_evaluation": 134.889,
+   "cadence_to_wrote_s": 140.125,
    "tf_shutdown_warnings_python_interpreter_state": 0,
    "traceback_lines": 0,
    "config": {
@@ -2068,42 +1859,241 @@
     "min_cluster_size": 10,
     "num_permutations": 9999,
     "permutation_p_value": false
+   },
+   "stimuli_framing": {
+    "a": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "b": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "c": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "d": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "eot_token_of_encoder": 50256,
+    "text_token_counts_equal_across_conditions": true,
+    "mean_text_tokens_per_condition": {
+     "a": 8.0,
+     "b": 8.0,
+     "c": 8.0,
+     "d": 8.0
+    }
+   },
+   "controls": {
+    "observed_a_vs_b": {
+     "mean_significant_units_per_tap": {
+      "value": 0.0,
+      "fmt": "0.00"
+     },
+     "clusters_a": 0,
+     "clusters_b": 0
+    },
+    "length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap": {
+     "b_vocab": {
+      "value": 42.4375,
+      "fmt": "42.4"
+     },
+     "a_vocab": {
+      "value": 55.625,
+      "fmt": "55.6"
+     },
+     "draws": 12
+    },
+    "length_control_same_vocabulary_5_vs_5_words_median_significant_units_per_tap": {
+     "b_vocab": {
+      "value": 0.0,
+      "fmt": "0.0"
+     },
+     "a_vocab": {
+      "value": 0.0,
+      "fmt": "0.0"
+     },
+     "draws": 12
+    },
+    "length_control_all": {
+     "b_vocab_3v7": {
+      "sig_median": 42.4375,
+      "sig_min": 0.0,
+      "sig_max": 118.75,
+      "clusters_median": 12.0,
+      "clusters_max": 24
+     },
+     "b_vocab_5v5": {
+      "sig_median": 0.0,
+      "sig_min": 0.0,
+      "sig_max": 0.5,
+      "clusters_median": 0.0,
+      "clusters_max": 0
+     },
+     "b_vocab_4v8": {
+      "sig_median": 22.0625,
+      "sig_min": 0.0,
+      "sig_max": 61.625,
+      "clusters_median": 6.0,
+      "clusters_max": 18
+     },
+     "a_vocab_3v7": {
+      "sig_median": 55.625,
+      "sig_min": 7.25,
+      "sig_max": 91.75,
+      "clusters_median": 15.5,
+      "clusters_max": 22
+     },
+     "a_vocab_5v5": {
+      "sig_median": 0.0,
+      "sig_min": 0.0,
+      "sig_max": 0.0,
+      "clusters_median": 0.0,
+      "clusters_max": 0
+     },
+     "a_vocab_4v8": {
+      "sig_median": 33.25,
+      "sig_min": 0.0,
+      "sig_max": 68.5,
+      "clusters_median": 9.5,
+      "clusters_max": 19
+     }
+    },
+    "label_shuffle_null": {
+     "n_splits": 252,
+     "design": "all C(10,5)=252 ways to call 5 of the 10 matched sentences condition a (the observed split and its mirror included)",
+     "sig_per_tap": {
+      "median": 0.0,
+      "mean": 0.04563492063492063,
+      "p5": 0.0,
+      "p95": 0.0,
+      "p99": 1.5,
+      "max": 4.25,
+      "min": 0.0
+     },
+     "clusters_total": {
+      "median": 0.0,
+      "mean": 0.0,
+      "p95": 0.0,
+      "max": 0,
+      "fraction_zero": 1.0
+     },
+     "moran_mean": {
+      "median": 0.8096355694798831,
+      "p5": 0.720734760455059,
+      "p95": 0.8443228080160368
+     },
+     "observed_sig": 0.0,
+     "observed_clusters": 0,
+     "n_splits_sig_ge_observed": 252,
+     "n_splits_sig_gt_observed": 4,
+     "n_splits_clusters_ge_observed": 252,
+     "percentile_of_observed_sig_strict_below": 0.0,
+     "percentile_of_observed_sig_at_or_below": 98.4126984126984
+    },
+    "framings": {
+     "eot_prefix_shipped": {
+      "mean_significant_units_per_tap": 0.0,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.7852936583441122
+     },
+     "cls_prefix": {
+      "mean_significant_units_per_tap": 0.0,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.7709754622660561
+     },
+     "no_prefix": {
+      "mean_significant_units_per_tap": 0.0,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.7901326789792971
+     }
+    },
+    "own_eot_response_vs_trainer_max_abs_diff": 7.947285984855057e-08
    }
   },
   "3d": {
    "exit_code": 0,
    "total_wall_s": {
-    "value": 198.004301653,
-    "fmt": "198.0"
+    "value": 170.930350512,
+    "fmt": "170.9"
    },
    "number_of_draws": {
     "value": 9,
     "fmt": "9"
    },
    "seconds_per_draw_min": {
-    "value": 1.803595839010086,
-    "fmt": "1.80"
+    "value": 1.9327884380181786,
+    "fmt": "1.93"
    },
    "seconds_per_draw_median": {
-    "value": 1.8897589139814954,
-    "fmt": "1.89"
+    "value": 1.970914025005186,
+    "fmt": "1.97"
    },
    "seconds_per_draw_max": {
-    "value": 2.895108954020543,
-    "fmt": "2.90"
+    "value": 2.496935853996547,
+    "fmt": "2.50"
    },
    "seconds_per_draw_sum": {
-    "value": 19.63251970699639,
-    "fmt": "19.6"
+    "value": 18.234814647992607,
+    "fmt": "18.2"
    },
    "peak_own_gpu_mib_nvidia_smi_1s_samples": {
-    "value": 6564,
-    "fmt": "6564"
+    "value": 5540,
+    "fmt": "5540"
    },
-   "gpu_samples": 142,
+   "gpu_samples": 151,
    "last_live_row_equals_report": true,
-   "last_live_row_mean_morans_i": 0.7109463363165125,
-   "report_mean_morans_i": 0.7109463363165125,
+   "last_live_row_mean_morans_i": 0.6700588995755474,
+   "report_mean_morans_i": 0.6700588995755474,
    "rows_in_metrics_jsonl": 10,
    "rows_after_merge_per_step": 9,
    "steps_drawn": [
@@ -2125,15 +2115,15 @@
     "raw"
    ],
    "mean_morans_i_series": {
-    "0": -0.0014802153701720976,
-    "50": 0.6131023566327037,
-    "100": 0.7161993910559263,
-    "150": 0.7368083872101472,
-    "200": 0.7214907619333653,
-    "250": 0.7166376484447826,
-    "300": 0.7128635824504153,
-    "350": 0.7108535181230935,
-    "400": 0.7109463363165125
+    "0": -0.00437925032087917,
+    "50": 0.5842250747900529,
+    "100": 0.717014758599636,
+    "150": 0.7093034229129009,
+    "200": 0.6729093780700028,
+    "250": 0.6503042716366644,
+    "300": 0.6663381493147618,
+    "350": 0.6670410458690899,
+    "400": 0.6700588995755474
    },
    "mean_significant_units_series": {
     "0": 0.0,
@@ -2141,10 +2131,10 @@
     "100": 0.0,
     "150": 0.0,
     "200": 0.0,
-    "250": 58.75,
-    "300": 87.0,
-    "350": 91.375,
-    "400": 89.25
+    "250": 0.0,
+    "300": 0.125,
+    "350": 0.125,
+    "400": 5.375
    },
    "clusters_ab_series": {
     "0": [
@@ -2168,26 +2158,26 @@
      0
     ],
     "250": [
-     9,
-     7
+     0,
+     0
     ],
     "300": [
-     10,
-     8
+     0,
+     0
     ],
     "350": [
-     10,
-     8
+     0,
+     0
     ],
     "400": [
-     10,
-     8
+     0,
+     1
     ]
    },
    "device": "NVIDIA GeForce RTX 4090",
-   "first_stamped_line_to_cadence_s": 48.923,
-   "fit_phase_s_cadence_to_best_evaluation": 140.198,
-   "cadence_to_wrote_s": 142.685,
+   "first_stamped_line_to_cadence_s": 16.616,
+   "fit_phase_s_cadence_to_best_evaluation": 145.481,
+   "cadence_to_wrote_s": 147.585,
    "tf_shutdown_warnings_python_interpreter_state": 5,
    "traceback_lines": 0,
    "config": {
@@ -2204,6 +2194,205 @@
     "min_cluster_size": 10,
     "num_permutations": 9999,
     "permutation_p_value": false
+   },
+   "stimuli_framing": {
+    "a": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "b": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "c": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "d": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "first_id": 50256,
+     "first_id_is_eot_for_every_sentence": true,
+     "window_length": 10,
+     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "eot_token_of_encoder": 50256,
+    "text_token_counts_equal_across_conditions": true,
+    "mean_text_tokens_per_condition": {
+     "a": 8.0,
+     "b": 8.0,
+     "c": 8.0,
+     "d": 8.0
+    }
+   },
+   "controls": {
+    "observed_a_vs_b": {
+     "mean_significant_units_per_tap": {
+      "value": 5.375,
+      "fmt": "5.38"
+     },
+     "clusters_a": 0,
+     "clusters_b": 1
+    },
+    "length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap": {
+     "b_vocab": {
+      "value": 214.4375,
+      "fmt": "214.4"
+     },
+     "a_vocab": {
+      "value": 213.625,
+      "fmt": "213.6"
+     },
+     "draws": 12
+    },
+    "length_control_same_vocabulary_5_vs_5_words_median_significant_units_per_tap": {
+     "b_vocab": {
+      "value": 0.0,
+      "fmt": "0.0"
+     },
+     "a_vocab": {
+      "value": 0.0,
+      "fmt": "0.0"
+     },
+     "draws": 12
+    },
+    "length_control_all": {
+     "b_vocab_3v7": {
+      "sig_median": 214.4375,
+      "sig_min": 180.875,
+      "sig_max": 260.875,
+      "clusters_median": 17.5,
+      "clusters_max": 20
+     },
+     "b_vocab_5v5": {
+      "sig_median": 0.0,
+      "sig_min": 0.0,
+      "sig_max": 0.0,
+      "clusters_median": 0.0,
+      "clusters_max": 0
+     },
+     "b_vocab_4v8": {
+      "sig_median": 185.875,
+      "sig_min": 62.5,
+      "sig_max": 255.5,
+      "clusters_median": 18.5,
+      "clusters_max": 21
+     },
+     "a_vocab_3v7": {
+      "sig_median": 213.625,
+      "sig_min": 116.125,
+      "sig_max": 248.5,
+      "clusters_median": 17.5,
+      "clusters_max": 21
+     },
+     "a_vocab_5v5": {
+      "sig_median": 0.0,
+      "sig_min": 0.0,
+      "sig_max": 0.125,
+      "clusters_median": 0.0,
+      "clusters_max": 0
+     },
+     "a_vocab_4v8": {
+      "sig_median": 150.1875,
+      "sig_min": 0.0,
+      "sig_max": 229.625,
+      "clusters_median": 19.0,
+      "clusters_max": 21
+     }
+    },
+    "label_shuffle_null": {
+     "n_splits": 252,
+     "design": "all C(10,5)=252 ways to call 5 of the 10 matched sentences condition a (the observed split and its mirror included)",
+     "sig_per_tap": {
+      "median": 0.0,
+      "mean": 0.0882936507936508,
+      "p5": 0.0,
+      "p95": 0.0,
+      "p99": 5.375,
+      "max": 5.5,
+      "min": 0.0
+     },
+     "clusters_total": {
+      "median": 0.0,
+      "mean": 0.007936507936507936,
+      "p95": 0.0,
+      "max": 1,
+      "fraction_zero": 0.9920634920634921
+     },
+     "moran_mean": {
+      "median": 0.6800814961578725,
+      "p5": 0.6190641257618859,
+      "p95": 0.7208086044617568
+     },
+     "observed_sig": 5.375,
+     "observed_clusters": 1,
+     "n_splits_sig_ge_observed": 4,
+     "n_splits_sig_gt_observed": 2,
+     "n_splits_clusters_ge_observed": 2,
+     "percentile_of_observed_sig_strict_below": 98.4126984126984,
+     "percentile_of_observed_sig_at_or_below": 99.20634920634922
+    },
+    "framings": {
+     "eot_prefix_shipped": {
+      "mean_significant_units_per_tap": 5.375,
+      "clusters_a": 0,
+      "clusters_b": 1,
+      "mean_morans_i": 0.6700589097212695
+     },
+     "cls_prefix": {
+      "mean_significant_units_per_tap": 19.125,
+      "clusters_a": 4,
+      "clusters_b": 3,
+      "mean_morans_i": 0.6982193651201155
+     },
+     "no_prefix": {
+      "mean_significant_units_per_tap": 40.5,
+      "clusters_a": 5,
+      "clusters_b": 5,
+      "mean_morans_i": 0.6868559826479623
+     }
+    },
+    "own_eot_response_vs_trainer_max_abs_diff": 2.384185791015625e-07
    }
   }
  }
