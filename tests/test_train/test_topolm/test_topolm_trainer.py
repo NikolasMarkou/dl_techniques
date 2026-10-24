@@ -725,11 +725,16 @@ def _text_only_loop(raw, ids, special):
     return pooled
 
 
-def _all_position_pooling(backbone, prompts, preprocessor, batch_size=32):
+def _all_position_pooling(
+    backbone, prompts, preprocessor, batch_size=32, context=None
+):
     """The pre-D-020 behaviour, kept as a reference: a mean over EVERY position.
 
     Used as the measuring instrument for the length controls ("what would the
     old code have reported on this model"), never as the code under test.
+    ``context`` is accepted and ignored: this reference stands in for
+    ``extract_tap_activations``, which the evaluation now calls with a ``context``
+    keyword (D-027), and it frames by calling the preprocessor.
     """
     ids = np.asarray(preprocessor(list(prompts))["input_ids"], dtype="int32")
     pooled = {tap.path: [] for tap in backbone.tap_layers}
@@ -980,6 +985,18 @@ class TestPoolingIsOverTextTokensOnly:
         part of the units significant; over text tokens it does not. Both numbers
         are measured on the same model in the same test, so the control cannot
         pass because the model happens to be quiet.
+
+        Scored in the eot-only framing (``stimulus_context=""``): the claim is
+        about the POOLING, and the thresholds were calibrated there (0 to 3 of
+        1024 over seeds 0 to 5). Under the default context framing (D-027) the
+        same control gives 29, 29, 112, 38, 37, 32 of 1024 (seeds 0 to 5,
+        ``scratch_step5_9/dotted_seeds.log``): the context is shared by every
+        sentence, so the within-condition spread of the pooled response falls
+        about 12-fold in the attention taps while the shift the four extra tokens
+        cause stays the same size (``dotted_why.log``: shift over spread 0.24 to
+        0.49 eot-only, 0.50 to 0.98 with the context). The framing therefore
+        makes the contrast MORE length-sensitive on random weights; the controls
+        module measures the same on a trained model.
         """
         keras.utils.set_random_seed(0)
         backbone, preprocessor = _model("gpt2", 512), _tokenizer("gpt2", 512)
@@ -991,7 +1008,7 @@ class TestPoolingIsOverTextTokensOnly:
         def significant():
             report, _ = evaluate_topography(
                 backbone, stimuli, ("dotted", "plain"), preprocessor,
-                min_cluster_size=2, batch_size=8,
+                min_cluster_size=2, batch_size=8, stimulus_context="",
             )
             return sum(
                 entry["num_significant_units"]
@@ -1064,34 +1081,44 @@ def _ids_the_model_sees(backbone, prompts, preprocessor, **kwargs):
     return np.concatenate(spy.calls) if spy.calls else None, pooled
 
 
-def _framed_oracle(backbone, encoding, prompts, keep=None, pad_to=None):
-    """Independent oracle: each sentence ALONE, ``[eot] + text`` (+ optional pads).
+def _framed_oracle(
+    backbone, encoding, prompts, keep=None, pad_to=None, context_ids=()
+):
+    """Independent oracle: each sentence ALONE, ``context + [eot] + text`` (+ pads).
 
-    The mean over the text positions (1 .. n) of one forward pass of one sentence.
-    No batching and, by default, no padding, so neither can be what the function
-    under test is compared against.
+    The mean over the sentence positions (``len(context) + 1`` onward) of one
+    forward pass of one sentence. No batching and, by default, no padding, so
+    neither can be what the function under test is compared against. With the
+    default empty ``context_ids`` it is the eot-only framing of D-024.
     """
     pooled = {tap.path: [] for tap in backbone.tap_layers}
+    start = len(context_ids) + 1
     for prompt in prompts:
         text = encoding.encode(prompt)[:keep]
-        ids = [int(encoding.eot_token)] + text
+        ids = list(context_ids) + [int(encoding.eot_token)] + text
         if pad_to is not None:
             ids = ids + [50259] * (pad_to - len(ids))
         raw = _raw_taps(backbone, np.asarray([ids], dtype="int32"))
         for path, values in raw.items():
-            pooled[path].append(values[0, 1:1 + len(text)].mean(axis=0))
+            pooled[path].append(values[0, start:start + len(text)].mean(axis=0))
     return {path: np.stack(rows) for path, rows in pooled.items()}
 
 
 class TestStimuliAreFramedLikeTheTrainingStream:
-    """D-024: a stimulus is ``<eot> text pad...``, not ``[CLS] text [SEP] pad...``.
+    """D-024, the eot-only framing (``context=''``): ``<eot> text pad...``, no CLS.
 
-    The model is causal: a text token's activation depends on everything before
-    it. The packed training stream never contains CLS; a document there starts
-    after ``<|endoftext|>``. Framing the stimuli with CLS fed every text token a
-    context the model never trained on, and the trained 2D example's selective
-    "islands" (38.9 significant units per tap, 5/7 clusters) were largely a
-    product of it: with ``<eot>`` instead, 0.0 and 0/0 (review pass 3, concern 1).
+    The class name is kept for stable test ids. Its title claim, that this is
+    "the way the training stream presents text", is RETRACTED (D-027): the packed
+    stream joins documents with ``<eot>`` and cuts windows at arbitrary offsets,
+    so a document starts at an arbitrary position after the previous document's
+    text, and ``<eot>`` at position 0 is rare. What survives: the model is causal,
+    a text token's activation depends on everything before it, the training
+    stream never contains CLS, and framing the stimuli with CLS fed every text
+    token a context the model never trained on (on the trained 2D example 38.9
+    significant units per tap and 5/7 clusters with CLS, 0.0 and 0/0 with
+    ``<eot>``; review pass 3, concern 1). The default framing is now
+    ``TestStimuliAreFramedWithAFixedContext``'s; this class pins the
+    ``context=''`` path.
 
     Pooling is over the text tokens, so the prefix position is excluded exactly as
     CLS was (a constant position weighted 1/n would re-introduce a length
@@ -1103,7 +1130,7 @@ class TestStimuliAreFramedLikeTheTrainingStream:
     def _ids(self, window=512):
         backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", window)
         return backbone, preprocessor, _ids_the_model_sees(
-            backbone, self.PROMPTS, preprocessor
+            backbone, self.PROMPTS, preprocessor, context=""
         )
 
     def test_every_stimulus_starts_with_the_end_of_text_id_and_carries_no_cls_or_sep(
@@ -1131,7 +1158,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
     def test_the_end_of_text_id_is_read_from_the_encoder_not_typed_in(self):
         backbone = build_backbone(_config())
         preprocessor = _RawEncoderPreprocessor(max_length=LENGTH)
-        ids, _ = _ids_the_model_sees(backbone, ["ab", "abcd"], preprocessor)
+        ids, _ = _ids_the_model_sees(
+            backbone, ["ab", "abcd"], preprocessor, context=""
+        )
         assert np.all(ids[:, 0] == _RawEncoder.eot_token), ids[:, 0]
         assert not np.isin(ids, [CLS_ID, SEP_ID]).any()
 
@@ -1143,7 +1172,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
 
     def test_it_equals_an_independent_loop_one_sentence_at_a_time(self):
         backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
-        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        pooled = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
         expected = _framed_oracle(backbone, _gpt2_encoding(), self.PROMPTS)
         for path, values in pooled.items():
             _forward_close(values, expected[path])
@@ -1155,7 +1186,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
         so the batch padded to the longest stimulus and a window of 70 agree.
         """
         backbone, preprocessor = _model("gpt2", 80), _tokenizer("gpt2", 512)
-        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        pooled = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
         padded = _framed_oracle(
             backbone, _gpt2_encoding(), self.PROMPTS, pad_to=70
         )
@@ -1165,7 +1198,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
     def test_a_stimulus_longer_than_the_position_table_is_cut_not_refused(self):
         """Window = min(preprocessor window, model ``max_seq_len``); prefix included."""
         backbone, preprocessor = _model("gpt2", 8), _tokenizer("gpt2", 512)
-        ids, pooled = _ids_the_model_sees(backbone, self.PROMPTS, preprocessor)
+        ids, pooled = _ids_the_model_sees(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
         assert ids.shape[1] == 8, ids.shape
         expected = _framed_oracle(
             backbone, _gpt2_encoding(), self.PROMPTS, keep=7
@@ -1182,7 +1217,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
         proves it landed on positions at all.
         """
         backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
-        clean = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        clean = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
         hits = []
 
         def select(ids):
@@ -1195,7 +1232,8 @@ class TestStimuliAreFramedLikeTheTrainingStream:
             return marked
 
         poisoned_result = extract_tap_activations(
-            _PoisonedBackbone(backbone, select), self.PROMPTS, preprocessor
+            _PoisonedBackbone(backbone, select), self.PROMPTS, preprocessor,
+            context="",
         )
         assert hits and hits[0] > 0, "the poison marked no position"
         for path in clean:
@@ -1208,7 +1246,7 @@ class TestStimuliAreFramedLikeTheTrainingStream:
 
         moved = extract_tap_activations(
             _PoisonedBackbone(backbone, first_text_position),
-            self.PROMPTS, preprocessor,
+            self.PROMPTS, preprocessor, context="",
         )
         for path in clean:
             assert np.max(np.abs(moved[path] - clean[path])) > 1.0, path
@@ -1217,7 +1255,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
         backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
         spy = _SpyBackbone(backbone)
         with pytest.raises(ValueError) as excinfo:
-            extract_tap_activations(spy, ["alpha beta", "", "gamma"], preprocessor)
+            extract_tap_activations(
+                spy, ["alpha beta", "", "gamma"], preprocessor, context=""
+            )
         message = str(excinfo.value)
         assert "index 1" in message and "''" in message, message
         assert "no text token" in message, message
@@ -1231,7 +1271,9 @@ class TestStimuliAreFramedLikeTheTrainingStream:
         same backbone.
         """
         backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
-        framed = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        framed = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
         encoding = _gpt2_encoding()
         with_cls = []
         for prompt in self.PROMPTS:
@@ -1256,6 +1298,303 @@ class TestStimuliAreFramedLikeTheTrainingStream:
         assert np.all(tokens[:, 0] == CLS_ID)
         assert text.sum(axis=1).tolist() == [2, 4]
         assert not text[:, 0].any()
+
+
+#: Words the stimulus context may share with the smoke sentences: function words
+#: and pronouns, no content word (D-027).
+_FUNCTION_WORDS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "is", "it", "its",
+    "of", "on", "or", "that", "the", "to", "was", "which", "who", "with",
+})
+
+#: The eot-only pooled responses of commit 855af2cd7 (the previous commit), on
+#: ``keras.utils.set_random_seed(0)``; ``_model("gpt2", 64)``; the real gpt2
+#: preprocessor; the ten a and b smoke sentences. Per tap: the sum, the sum of
+#: absolute values, row 0's first four values and row 9's last four.
+_EOT_ONLY_RECORD = {
+    "topolm/block_0/attention_tap": (
+        1.2257726090055425, 46.9393310783243,
+        [0.013301650686318882, 0.020122189100624785, 0.030433871162434418,
+         0.0011712760897353292],
+        [0.029749557026661932, -0.020677630891441368, 0.012047200536471792,
+         0.04864271660335362],
+    ),
+    "topolm/block_0/mlp_tap": (
+        0.03052063577016515, 6.099825679961532,
+        [0.002595587633550167, -0.0021060948881010213, -0.0015844462905079126,
+         0.0012046263275098884],
+        [0.0017867240239866078, 0.0013677233655471355, -0.0027109537113574333,
+         -0.001965763818589039],
+    ),
+}
+
+
+def _words(texts):
+    import re
+
+    return {w for t in texts for w in re.findall(r"[a-z]+", t.lower())}
+
+
+def _content_words_shared_with_the_smoke_set(context):
+    smoke = _words(s for v in SMOKE_STIMULI.values() for s in v)
+    return (_words([context]) & smoke) - _FUNCTION_WORDS
+
+
+class TestStimuliAreFramedWithAFixedContext:
+    """D-027: a stimulus is ``<context> <eot> <sentence> pad...``.
+
+    D-024's claim that ``<eot> text`` at position 0 is "the way the training
+    stream presents text" is retracted: the packed stream joins documents with
+    ``<eot>`` and cuts windows at arbitrary offsets, so a document starts at an
+    arbitrary position after the previous document's text. A fixed neutral
+    context puts every sentence at the same absolute position after the same
+    preceding text, which is what that framing can offer. Pooling is over the
+    sentence positions only (the context and the ``<eot>`` are left out). The
+    framing remains a choice; the controls module measures how much it matters.
+    """
+
+    PROMPTS = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
+
+    def _context_ids(self):
+        return _gpt2_encoding().encode(C.STIMULUS_CONTEXT)
+
+    def _setup(self, window=128):
+        return _model("gpt2", window), _tokenizer("gpt2", 512)
+
+    # -- the constant ------------------------------------------------------
+
+    def test_the_context_is_about_sixty_gpt2_tokens_of_plain_text(self):
+        ids = self._context_ids()
+        assert len(ids) == 60, len(ids)
+        preprocessor = _tokenizer("gpt2", 512)
+        specials = {
+            int(preprocessor.tokenizer.eot_token), int(preprocessor.cls_token_id),
+            int(preprocessor.sep_token_id), int(preprocessor.pad_token_id),
+            int(preprocessor.mask_token_id),
+        }
+        assert not specials & set(ids), specials & set(ids)
+        assert max(ids) < 50256
+
+    def test_the_context_shares_no_content_word_with_any_smoke_sentence(self):
+        assert _content_words_shared_with_the_smoke_set(C.STIMULUS_CONTEXT) == set()
+
+    def test_the_overlap_check_can_fail(self):
+        """The check is not vacuous: a context that mentions 'river' and
+        'harbor' (words of condition b) is caught."""
+        shared = _content_words_shared_with_the_smoke_set(
+            "The river ran beside the harbor and the town."
+        )
+        assert shared == {"river", "harbor"}, shared
+
+    # -- the encoding ------------------------------------------------------
+
+    def test_each_stimulus_is_context_then_eot_then_sentence_then_pads(self):
+        backbone, preprocessor = self._setup()
+        ids, _ = _ids_the_model_sees(backbone, self.PROMPTS, preprocessor)
+        encoding, context = _gpt2_encoding(), self._context_ids()
+        eot = int(encoding.eot_token)
+        start = len(context) + 1
+        for row, prompt in enumerate(self.PROMPTS):
+            sentence = encoding.encode(prompt)
+            assert list(ids[row, :len(context)]) == context
+            assert ids[row, len(context)] == eot
+            assert list(ids[row, start:start + len(sentence)]) == sentence
+            assert np.all(ids[row, start + len(sentence):] == preprocessor.pad_token_id)
+        assert np.count_nonzero(ids == eot) == len(self.PROMPTS), (
+            "an end-of-text id outside the one separator"
+        )
+        assert not np.isin(
+            ids, [preprocessor.cls_token_id, preprocessor.sep_token_id]
+        ).any()
+
+    def test_the_window_is_the_context_plus_the_eot_plus_the_longest_sentence(self):
+        backbone, preprocessor = self._setup()
+        ids, _ = _ids_the_model_sees(backbone, self.PROMPTS, preprocessor)
+        encoding = _gpt2_encoding()
+        longest = max(len(encoding.encode(p)) for p in self.PROMPTS)
+        assert ids.shape == (len(self.PROMPTS), 60 + 1 + longest), ids.shape
+
+    def test_every_sentence_starts_at_the_same_absolute_position(self):
+        """Whatever its length, sentence ``i`` begins at position 61."""
+        _, preprocessor = self._setup()
+        tokens, text, _ = C._encode_stimuli(preprocessor, self.PROMPTS, 128)
+        first = [int(np.flatnonzero(row)[0]) for row in text]
+        assert set(first) == {61}, first
+        assert not text[:, :61].any(), "a context or eot position is pooled"
+        encoding = _gpt2_encoding()
+        for row, prompt in enumerate(self.PROMPTS):
+            assert tokens[row, 61] == encoding.encode(prompt)[0]
+
+    # -- the response ------------------------------------------------------
+
+    def test_it_equals_an_independent_loop_one_sentence_at_a_time(self):
+        backbone, preprocessor = self._setup()
+        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        expected = _framed_oracle(
+            backbone, _gpt2_encoding(), self.PROMPTS,
+            context_ids=self._context_ids(),
+        )
+        for path, values in pooled.items():
+            _forward_close(values, expected[path])
+
+    def test_more_padding_after_the_sentence_does_not_change_the_response(self):
+        backbone, preprocessor = self._setup(window=160)
+        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        padded = _framed_oracle(
+            backbone, _gpt2_encoding(), self.PROMPTS, pad_to=140,
+            context_ids=self._context_ids(),
+        )
+        for path, values in pooled.items():
+            _forward_close(values, padded[path])
+
+    def test_the_default_context_is_the_module_constant(self):
+        backbone, preprocessor = self._setup()
+        default = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        named = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=C.STIMULUS_CONTEXT
+        )
+        for path in default:
+            np.testing.assert_array_equal(default[path], named[path])
+
+    @pytest.mark.parametrize("poisoned", ["context", "prefix", "pad"])
+    def test_a_context_eot_or_pad_position_does_not_enter_the_pooled_values(
+        self, poisoned
+    ):
+        """1e6 at every context position (or the eot, or every pad): the pooled
+        values do not move; at the first sentence position they do (control)."""
+        backbone, preprocessor = self._setup()
+        clean = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        hits = []
+
+        def select(ids):
+            marked = np.zeros(ids.shape, dtype=bool)
+            if poisoned == "context":
+                marked[:, :60] = True
+            elif poisoned == "prefix":
+                marked[:, 60] = True
+            else:
+                marked |= ids == int(preprocessor.pad_token_id)
+            hits.append(int(marked.sum()))
+            return marked
+
+        result = extract_tap_activations(
+            _PoisonedBackbone(backbone, select), self.PROMPTS, preprocessor
+        )
+        assert hits and hits[0] > 0, "the poison marked no position"
+        for path in clean:
+            _forward_close(result[path], clean[path])
+
+        def first_sentence_position(ids):
+            marked = np.zeros(ids.shape, dtype=bool)
+            marked[:, 61] = True
+            return marked
+
+        moved = extract_tap_activations(
+            _PoisonedBackbone(backbone, first_sentence_position),
+            self.PROMPTS, preprocessor,
+        )
+        for path in clean:
+            assert np.max(np.abs(moved[path] - clean[path])) > 1.0, path
+
+    def test_the_context_is_a_real_input_so_a_different_one_moves_the_response(self):
+        """The pooling ignores the context positions, the model does not: the
+        sentence tokens attend to the context. Without this the poison test could
+        pass for a framing that dropped the context altogether."""
+        backbone, preprocessor = self._setup()
+        shipped = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        other = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor,
+            context="Cats sleep most of the day and hunt at night.",
+        )
+        eot_only = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
+        for path in shipped:
+            assert np.max(np.abs(shipped[path] - other[path])) > 1e-3, path
+            assert np.max(np.abs(shipped[path] - eot_only[path])) > 1e-3, path
+
+    def test_an_empty_context_is_the_eot_only_framing_of_the_previous_commit(self):
+        """Pinned against numbers recorded at commit 855af2cd7, not against the
+        new code's own output."""
+        keras.utils.set_random_seed(0)
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        pooled = extract_tap_activations(
+            backbone, self.PROMPTS, preprocessor, context=""
+        )
+        for path, (total, absolute, first, last) in _EOT_ONLY_RECORD.items():
+            values = pooled[path]
+            _forward_close(np.asarray(values[0, :4]), np.asarray(first))
+            _forward_close(np.asarray(values[9, -4:]), np.asarray(last))
+            np.testing.assert_allclose(values.sum(), total, rtol=1e-4, atol=1e-5)
+            np.testing.assert_allclose(np.abs(values).sum(), absolute, rtol=1e-4)
+
+    # -- refusals ----------------------------------------------------------
+
+    def test_a_sentence_with_no_token_is_refused_by_name_before_any_pass(self):
+        backbone, preprocessor = self._setup()
+        spy = _SpyBackbone(backbone)
+        with pytest.raises(ValueError) as excinfo:
+            extract_tap_activations(spy, ["alpha beta", "", "gamma"], preprocessor)
+        message = str(excinfo.value)
+        assert "index 1" in message and "''" in message, message
+        assert "no text token" in message, message
+        assert spy.calls == []
+
+    def test_a_context_and_sentence_that_do_not_fit_are_refused_with_the_numbers(self):
+        """60 context tokens + 1 + the longest sentence (9) = 70 positions, in a
+        64-position table: refused before any pass, naming the numbers."""
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        spy = _SpyBackbone(backbone)
+        with pytest.raises(ValueError) as excinfo:
+            extract_tap_activations(spy, SMOKE_STIMULI["a"], preprocessor)
+        message = str(excinfo.value)
+        for number in ("60", "9", "70", "64"):
+            assert number in message, (number, message)
+        assert spy.calls == []
+
+    def test_the_preprocessor_window_is_a_limit_too(self):
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 66)
+        with pytest.raises(ValueError, match="66"):
+            extract_tap_activations(backbone, SMOKE_STIMULI["a"], preprocessor)
+
+    # -- the legacy path ---------------------------------------------------
+
+    def test_none_is_the_legacy_call_only_path_with_cls_and_sep(self):
+        preprocessor = _tokenizer("gpt2", 40)
+        tokens, text, _ = C._encode_stimuli(
+            preprocessor, ["ab cd", "ab"], None, context=None
+        )
+        assert tokens.shape == (2, 40)
+        assert np.all(tokens[:, 0] == preprocessor.cls_token_id)
+        assert not text[:, 0].any()
+        assert (tokens == preprocessor.sep_token_id).any()
+
+    # -- through the evaluation --------------------------------------------
+
+    def test_the_evaluation_passes_its_context_to_the_extraction(self, monkeypatch):
+        backbone, preprocessor = self._setup()
+        seen = []
+        real = C.extract_tap_activations
+
+        def spy(backbone, prompts, preprocessor, batch_size=32, context=None):
+            seen.append(context)
+            return real(
+                backbone, prompts, preprocessor, batch_size=batch_size,
+                context=context,
+            )
+
+        monkeypatch.setattr(C, "extract_tap_activations", spy)
+        stimuli = {"a": SMOKE_STIMULI["a"], "b": SMOKE_STIMULI["b"]}
+        evaluate_topography(
+            backbone, stimuli, ("a", "b"), preprocessor, min_cluster_size=2
+        )
+        assert seen == [C.STIMULUS_CONTEXT] * 2, seen
+        seen.clear()
+        evaluate_topography(
+            backbone, stimuli, ("a", "b"), preprocessor, min_cluster_size=2,
+            stimulus_context="",
+        )
+        assert seen == ["", ""], seen
 
 
 def _trainer_tokenizer():
@@ -2328,12 +2667,12 @@ def _plant(monkeypatch, backbone, effects):
             activations[tap.path] = rows
         return activations
 
-    monkeypatch.setattr(
-        C, "extract_tap_activations",
-        lambda backbone_, prompts, preprocessor, batch_size=32: activations_for(
-            list(prompts)
-        ),
-    )
+    def planted(backbone_, prompts, preprocessor, batch_size=32, **_kwargs):
+        # ``context`` and any later keyword of the real extraction are ignored:
+        # the activations are planted, not computed.
+        return activations_for(list(prompts))
+
+    monkeypatch.setattr(C, "extract_tap_activations", planted)
     return {
         condition: activations_for(prompts)
         for condition, prompts in _PLANT_STIMULI.items()

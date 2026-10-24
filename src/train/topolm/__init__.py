@@ -55,6 +55,7 @@ References:
 from .common import (
     PAPER_CONDITIONS,
     SMOKE_STIMULI,
+    STIMULUS_CONTEXT,
     TapCapture,
     TopoLMTrainingConfig,
     build_backbone,
@@ -75,6 +76,7 @@ from .live import TopographyLiveCallback
 __all__ = [
     "PAPER_CONDITIONS",
     "SMOKE_STIMULI",
+    "STIMULUS_CONTEXT",
     "TapCapture",
     "TopoLMTrainingConfig",
     "TopographyLiveCallback",

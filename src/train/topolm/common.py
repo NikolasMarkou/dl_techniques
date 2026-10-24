@@ -306,8 +306,9 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
 
 #: The ids a call-only preprocessor wraps (CLS, SEP) and pads (PAD) every stimulus
 #: with: the tokens that are not text. :func:`_encode_stimuli` marks them as such
-#: on the fallback path (a preprocessor with a raw encoder is framed ``<eot> text
-#: pad...`` and needs no id list); the attribute names are the preprocessor's own.
+#: on the fallback path (a preprocessor with a raw encoder is framed ``context
+#: <eot> sentence pad...`` and needs no id list); the attribute names are the
+#: preprocessor's own.
 _NON_TEXT_ID_ATTRIBUTES = (
     "cls_token_id",
     "sep_token_id",
@@ -316,54 +317,102 @@ _NON_TEXT_ID_ATTRIBUTES = (
 
 _SPECIAL_ID_ATTRIBUTES = _NON_TEXT_ID_ATTRIBUTES + ("mask_token_id",)
 
+#: The text every stimulus is placed after (D-027): a fixed, neutral, encyclopedic
+#: passage of 60 gpt2 tokens about an invented town. It shares no content word
+#: with any smoke sentence (``TestStimuliAreFramedWithAFixedContext`` checks the
+#: word forms, and that the check can fail) and holds no CLS, SEP or other special
+#: id. It was written once and was NOT chosen by looking at a contrast: three
+#: other contexts (30, 60 and 120 tokens, different topics) are measured beside it
+#: in the README. Changing it changes every number the evaluation reports.
+STIMULUS_CONTEXT = (
+    "Ashbury is a market town in the north of the county. It lies on a low "
+    "plateau, about twelve miles from the coast, and its population was "
+    "recorded as nine thousand at the last census. The town grew in the "
+    "thirteenth century as a centre for the trade in wool and grain."
+)
+
+#: The three framings a report can name (``stimuli.framing``).
+FRAMING_CONTEXT = "context+eot"
+FRAMING_EOT = "eot"
+FRAMING_LEGACY = "legacy-call-only"
+
+def _resolve_framing(
+    preprocessor: Any, context: Optional[str]
+) -> Tuple[str, Optional[int], List[int]]:
+    """Which framing ``preprocessor`` and ``context`` select.
+
+    Contract. Returns ``(framing, eot, context_ids)``. ``framing`` is
+    ``'context+eot'`` (a non-empty ``context`` that encodes to at least one
+    token), ``'eot'`` (``context == ''``) or ``'legacy-call-only'`` (``context is
+    None``, or the preprocessor has no raw encoder with an ``eot_token``, so the
+    context cannot be encoded). ``eot`` and ``context_ids`` are ``None`` and ``[]``
+    for the legacy framing. Never raises.
+    """
+    encoder = getattr(preprocessor, "tokenizer", None)
+    eot = getattr(encoder, "eot_token", None)
+    if (
+        context is None
+        or not callable(getattr(encoder, "encode", None))
+        or eot is None
+    ):
+        return FRAMING_LEGACY, None, []
+    ids = [int(i) for i in encoder.encode(context)] if context else []
+    return (FRAMING_CONTEXT if ids else FRAMING_EOT), int(eot), ids
+
 
 def _encode_stimuli(
     preprocessor: Any,
     prompts: Sequence[str],
     max_positions: Optional[int],
+    context: Optional[str] = STIMULUS_CONTEXT,
 ) -> Tuple[np.ndarray, np.ndarray, str]:
-    """Encode ``prompts`` the way the packed training stream presents text.
+    """Encode ``prompts`` as ``context <eot> sentence pad...`` and mark the sentence.
 
     Contract. ``preprocessor`` is the tokenizer the trainer built. ``prompts`` is
     a non-empty list of strings. ``max_positions`` is the model's position-table
-    length, or ``None`` when unknown. Returns ``(tokens, text, non_text)``:
-    ``tokens`` is ``(num_prompts, window)`` int32, ``text`` the same shape bool
-    (True where the id is a text token, the only positions a response is pooled
-    over) and ``non_text`` a phrase naming what the other positions hold, for an
-    error message. Never raises on an empty prompt: ``text`` simply has no True in
-    that row, and the caller refuses it by name.
+    length, or ``None`` when unknown. ``context`` is the text placed before every
+    sentence (``''`` for none, ``None`` for the legacy framing). Returns
+    ``(tokens, text, non_text)``: ``tokens`` is ``(num_prompts, window)`` int32,
+    ``text`` the same shape bool (True where the id is a SENTENCE token, the only
+    positions a response is pooled over) and ``non_text`` a phrase naming what the
+    other positions hold, for an error message. Never raises on an empty prompt:
+    ``text`` simply has no True in that row, and the caller refuses it by name.
+    Raises ``ValueError`` (naming the numbers) when a non-empty context plus the
+    end-of-text id plus the longest sentence does not fit the window.
 
-    Two framings.
+    Three framings (:func:`_resolve_framing`).
 
-    * The preprocessor owns a raw encoder (``.tokenizer.encode`` and
-      ``.tokenizer.eot_token``, as :class:`~dl_techniques.utils.tokenizer.
-      TiktokenPreprocessor` does): ``<eot> text pad...``. The end-of-text id is
-      the encoder's own ``eot_token``, read from the object
-      ``preprocess_clm_dataset`` takes it from; the text ids are the plain
-      ``encode`` of the prompt; the pad id is the preprocessor's
-      ``pad_token_id`` (the encoder's ``eot_token`` when it has none). The window
-      is the longest encoded prompt plus the prefix, never the trainer's 512, cut
-      to ``min(preprocessor.max_length, max_positions)`` where those are known:
-      a causal model's text positions do not depend on the pads behind them, so
+    * ``'context+eot'``: the preprocessor owns a raw encoder (``.tokenizer.encode``
+      and ``.tokenizer.eot_token``, as :class:`~dl_techniques.utils.tokenizer.
+      TiktokenPreprocessor` does): the encoded ``context``, the encoder's own
+      ``eot_token`` (the object ``preprocess_clm_dataset`` takes it from, never
+      typed), the plain ``encode`` of the prompt, then the preprocessor's
+      ``pad_token_id`` (the ``eot_token`` when it has none). Every sentence
+      therefore starts at position ``len(context ids) + 1``. The window is that
+      prefix plus the longest encoded prompt, never the trainer's 512, and it must
+      fit ``min(preprocessor.max_length, max_positions)`` where those are known: a
+      causal model's sentence positions do not depend on the pads behind them, so
       the shorter window gives identical responses for less compute.
-    * Otherwise (a test double that can only be called): the previous framing,
-      whatever ``preprocessor(prompts)`` returns, with the CLS, SEP and PAD ids
-      its attributes name marked as not text.
+    * ``'eot'`` (``context == ''``): the framing of D-024, ``<eot> sentence pad...``.
+      A sentence longer than the window is cut, as before.
+    * ``'legacy-call-only'``: whatever ``preprocessor(prompts)`` returns, with the
+      CLS, SEP and PAD ids its attributes name marked as not text.
     """
-    # DECISION plan-2026-10-23T190557-972a9ac5/D-024: frame the stimuli as the
-    # training stream presents text. Do NOT frame them ``[CLS] text [SEP]``: the
-    # model never sees CLS in training and, being causal, every text token attends
-    # to it (on the trained 2D example the selective "islands" of 38.9
-    # significant units per tap and 5/7 clusters were largely that prefix: with
-    # ``<eot>`` 0.0 and 0/0). Do NOT pool the prefix position: a constant
-    # position weighted 1/n re-introduces a length dependence (it is not in
-    # ``text``). Do NOT type the end-of-text id (50256 is gpt2's; another
-    # encoding has another): read it from the encoder, where
-    # ``preprocess_clm_dataset`` reads it. See decisions.md D-024; guarded by
-    # ``TestStimuliAreFramedLikeTheTrainingStream``.
-    encoder = getattr(preprocessor, "tokenizer", None)
-    eot = getattr(encoder, "eot_token", None)
-    if not callable(getattr(encoder, "encode", None)) or eot is None:
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-027: frame each stimulus as
+    # ``<context> <eot> <sentence>`` and pool the sentence only. Do NOT frame
+    # with CLS and SEP: the model never sees them in training and every later
+    # token attends to them. Do NOT put the sentence at position 1 (``<eot>
+    # sentence`` alone): the packed stream cuts windows at arbitrary offsets, so
+    # a document starts after the previous document's text (about 1 window in
+    # 441 starts at an ``<eot>``); on the trained examples that framing gave 0.0
+    # significant units per tap in 2D where three contexts gave 22 to 34, and 5.4
+    # in 3D where they gave 127 to 163. Do NOT pool the context or the ``<eot>``:
+    # a constant block weighted 1/n re-introduces a length dependence. Do NOT
+    # choose the context to change the result: it is fixed text that shares no
+    # content word with the stimuli, and the README reports alternatives. See
+    # decisions.md D-027; guarded by TestStimuliAreFramedWithAFixedContext.
+    framing, eot, context_ids = _resolve_framing(preprocessor, context)
+    if framing == FRAMING_LEGACY:
         # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
         # or a LIST of strings and raises TypeError on anything but those -- the
         # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline
@@ -380,30 +429,55 @@ def _encode_stimuli(
             f"the CLS, SEP and PAD ids {non_text_ids}",
         )
 
-    eot = int(eot)
+    encoder = preprocessor.tokenizer
     pad = getattr(preprocessor, "pad_token_id", None)
     pad = eot if pad is None else int(pad)
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-024: the separator is the
+    # encoder's own end-of-text id. Do NOT type it (50256 is gpt2's; another
+    # encoding has another): read it from the encoder, where
+    # ``preprocess_clm_dataset`` reads it. Do NOT pool the separator position.
+    # D-024's wording "the way the training stream presents text" is RETRACTED
+    # (D-027): no framing reproduces the stream, which has no fixed position for
+    # a document start. See decisions.md D-024; guarded by
+    # TestStimuliAreFramedLikeTheTrainingStream (the eot-only framing, context='').
+    prefix = context_ids + [eot]
+    start = len(prefix)
+    preprocessor_window = getattr(preprocessor, "max_length", None)
     limits = [
         int(value)
-        for value in (getattr(preprocessor, "max_length", None), max_positions)
+        for value in (preprocessor_window, max_positions)
         if value is not None
     ]
     encoded = [list(encoder.encode(prompt)) for prompt in prompts]
     if limits:
-        if min(limits) < 2:
-            raise ValueError(
-                f"a stimulus needs room for the end-of-text prefix and one text "
-                f"token, but the window is {min(limits)} positions"
-            )
-        encoded = [ids[:min(limits) - 1] for ids in encoded]
-    window = 1 + max(len(ids) for ids in encoded)
+        limit = min(limits)
+        if context_ids:
+            longest = max(len(ids) for ids in encoded)
+            if start + longest > limit:
+                raise ValueError(
+                    f"the stimulus context ({len(context_ids)} tokens) + the "
+                    f"end-of-text id (1) + the longest stimulus ({longest} "
+                    f"tokens) = {start + longest} positions do not fit the "
+                    f"window of {limit} (preprocessor max_length "
+                    f"{preprocessor_window}, model max_seq_len "
+                    f"{max_positions}): use a longer window, a shorter context "
+                    f"or shorter stimuli"
+                )
+        else:
+            if limit < 2:
+                raise ValueError(
+                    f"a stimulus needs room for the end-of-text prefix and one "
+                    f"text token, but the window is {limit} positions"
+                )
+            encoded = [ids[:limit - 1] for ids in encoded]
+    window = start + max(len(ids) for ids in encoded)
     tokens = np.full((len(encoded), window), pad, dtype="int32")
     text = np.zeros((len(encoded), window), dtype=bool)
-    tokens[:, 0] = eot
+    tokens[:, :start] = prefix
     for row, ids in enumerate(encoded):
-        tokens[row, 1:1 + len(ids)] = ids
-        text[row, 1:1 + len(ids)] = True
-    return tokens, text, f"the end-of-text id {eot} and padding"
+        tokens[row, start:start + len(ids)] = ids
+        text[row, start:start + len(ids)] = True
+    return tokens, text, f"the stimulus context, the end-of-text id {eot} and padding"
 
 
 def _required_vocab_size(preprocessor: Any) -> Optional[int]:
@@ -906,25 +980,32 @@ def extract_tap_activations(
     prompts: Sequence[str],
     preprocessor,
     batch_size: int = 32,
+    context: Optional[str] = STIMULUS_CONTEXT,
 ) -> Dict[str, np.ndarray]:
-    """Each unit's response to each prompt, pooled over the TEXT tokens, per tap.
+    """Each unit's response to each prompt, pooled over the SENTENCE tokens, per tap.
 
     A unit's response to a sentence is its tap activation averaged over the
-    sentence's text tokens. Each text token has the same weight
+    sentence's tokens. Each sentence token has the same weight
     (``sum(activation * text) / sum(text)`` in float64, per sentence), so a
     sentence of 20 tokens and one of 8 each give one number per unit and neither
     reads as a stronger response because it is longer.
 
-    The stimuli are encoded the way the packed training stream presents text
-    (D-024): ``<eot> text pad...``, the end-of-text id first (read from the
-    preprocessor's raw encoder, never typed), then the plain ``encode`` of the
-    prompt, then pads to the longest stimulus. There is no CLS and no SEP: the
-    model never sees them in training and, being causal, every text token attends
-    to the prefix, so a CLS prefix shaped the response of every token after it.
-    The prefix and the pads are not text and are not pooled (a constant prefix
-    position weighted ``1 / n`` would make a shorter sentence read differently).
-    The framing is still a choice: a causal model's text activations depend on
-    what precedes them, and the README states the measured size of that.
+    The stimuli are framed ``context <eot> sentence pad...`` (D-027): the encoded
+    ``context`` (default :data:`STIMULUS_CONTEXT`, a fixed neutral passage), the
+    end-of-text id (read from the preprocessor's raw encoder, never typed), the
+    plain ``encode`` of the prompt, then pads to the longest stimulus. Every
+    sentence starts at the same absolute position (``len(context ids) + 1``)
+    after the same preceding text. There is no CLS and no SEP: the model never
+    sees them in training and, being causal, every later token attends to them.
+    The context, the ``<eot>`` and the pads are not pooled (a constant block
+    weighted ``1 / n`` would make a shorter sentence read differently). The
+    framing is a choice and the response depends on it: a causal model's
+    activations depend on what precedes them, and the README states the measured
+    size of that. ``context=''`` is the eot-only framing of D-024 (``<eot>
+    sentence``; D-024's claim that it is "the way the training stream presents
+    text" is retracted, D-027); ``context=None`` is the LEGACY call-only framing
+    (CLS and SEP from calling the preprocessor), kept for test doubles and for
+    reproducing earlier numbers.
 
     Why text only (D-020). Averaged over a 512-position window, ~98% of a smoke
     sentence's positions were padding, so the t-map measured padding and sentence
@@ -946,12 +1027,16 @@ def extract_tap_activations(
     window where it is known). ``preprocessor`` is either a tokenizer that owns a
     raw encoder (``preprocessor.tokenizer.encode`` and ``.eot_token``, the
     ``TiktokenPreprocessor`` shape): the framing above, the pad id from
-    ``pad_token_id``, text cut to ``min(preprocessor.max_length, max_seq_len) - 1``
-    tokens. Or a callable only (a test double): the FALLBACK, in which
+    ``pad_token_id``; with a non-empty ``context`` the context, the ``<eot>`` and
+    the longest sentence must fit ``min(preprocessor.max_length, max_seq_len)``
+    (``ValueError`` naming the numbers otherwise); with ``context=''`` a longer
+    sentence is cut to that window minus one. Or a callable only (a test
+    double), or ``context=None``: the LEGACY framing, in which
     ``preprocessor(prompts)["input_ids"]`` is ``(num_prompts, window)`` and the
     positions whose id is the preprocessor's ``cls_token_id``, ``sep_token_id`` or
     ``pad_token_id`` are left out; a missing or ``None`` attribute excludes
-    nothing. The preprocessor's ``attention_mask`` is not used in either path.
+    nothing, and a context that cannot be encoded is not applied. The
+    preprocessor's ``attention_mask`` is not used in either path.
 
     :param backbone: The trained model.
     :type backbone: TopoLM
@@ -961,13 +1046,17 @@ def extract_tap_activations(
     :type preprocessor: Any
     :param batch_size: Forward-pass batch size.
     :type batch_size: int
+    :param context: Text placed before every sentence (D-027); ``''`` for the
+        eot-only framing, ``None`` for the legacy call-only framing.
+    :type context: Optional[str]
     :return: ``{tap_path: (num_prompts, num_units)}`` in original unit order, NOT
         grid order -- every consumer maps through the tap's own
         ``layout.cell_to_unit``.
     :rtype: Dict[str, numpy.ndarray]
-    :raises ValueError: If ``prompts`` is empty, or if a prompt has no text token
-        (it encodes to nothing); the message names the prompt's index and text.
-        Raised before any forward pass.
+    :raises ValueError: If ``prompts`` is empty, if a prompt has no text token
+        (it encodes to nothing; the message names the prompt's index and text), or
+        if the context and the longest sentence do not fit the window (the
+        message names the numbers). Raised before any forward pass.
     """
     # DECISION plan-2026-10-23T190557-972a9ac5/D-020: pool over the TEXT tokens
     # only. Do NOT average over every position: stimuli padded to the window were
@@ -978,7 +1067,7 @@ def extract_tap_activations(
     # NOT weight the non-text positions: the prefix (CLS, before D-024) weighs
     # 1/n of a sentence of n text tokens, which keeps a length dependence. Do NOT
     # return NaN for a sentence with no text token: it is refused by name. The
-    # framing of the text (D-024) is _encode_stimuli's. See decisions.md D-020;
+    # framing of the text (D-027) is _encode_stimuli's. See decisions.md D-020;
     # guarded by TestPoolingIsOverTextTokensOnly (loop oracle, window-length
     # invariance, a huge constant at each non-text position, the dotted length
     # control).
@@ -987,7 +1076,8 @@ def extract_tap_activations(
         raise ValueError("prompts must not be empty")
 
     tokens, text, non_text = _encode_stimuli(
-        preprocessor, prompts, getattr(backbone, "max_seq_len", None)
+        preprocessor, prompts, getattr(backbone, "max_seq_len", None),
+        context=context,
     )
     counts = text.sum(axis=1)
     empty = np.flatnonzero(counts == 0)
@@ -1054,6 +1144,7 @@ def evaluate_topography(
     is_smoke_set: bool = False,
     readout_skipped: Optional[str] = None,
     batch_size: int = 32,
+    stimulus_context: Optional[str] = STIMULUS_CONTEXT,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
     """Score the model's topographic organisation against one contrast.
 
@@ -1064,8 +1155,8 @@ def evaluate_topography(
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
 
     1. a two-sample t-map between the two conditions, on activations that are
-       MEAN-POOLED over each sentence's TEXT tokens (the ``<eot>`` prefix and the
-       pads left out, :func:`extract_tap_activations`);
+       MEAN-POOLED over each sentence's tokens (the stimulus context, the
+       ``<eot>`` and the pads left out, :func:`extract_tap_activations`);
     2. BH-FDR corrected ACROSS ALL TAPS, then split back;
     3. clusters grown from the surviving cells, both polarities;
     4. Moran's I on the UNTHRESHOLDED map, plus the islands variant.
@@ -1124,6 +1215,10 @@ def evaluate_topography(
         pass; the live callback sets it small (8) so a draw on a shared card
         stays cheap. It cannot change which prompts are scored.
     :type batch_size: int
+    :param stimulus_context: The text every stimulus is placed after (D-027):
+        :data:`STIMULUS_CONTEXT` by default, ``''`` for the eot-only framing,
+        ``None`` for the legacy call-only framing.
+    :type stimulus_context: Optional[str]
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
         ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
         grids **for that arm specifically**, so :func:`plot_topography` draws
@@ -1132,8 +1227,10 @@ def evaluate_topography(
         these are not.
     :rtype: Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :raises ValueError: If the two contrast conditions are absent from
-        ``stimuli`` -- naming them --, ``num_permutations`` is not positive, or a
-        readout is requested on a backbone whose grid is not 2-D.
+        ``stimuli`` -- naming them --, ``num_permutations`` is not positive, a
+        readout is requested on a backbone whose grid is not 2-D, or the context
+        and the longest stimulus do not fit the window (raised by the first
+        condition's extraction, before its forward pass).
     """
     condition_a, condition_b = contrast_conditions
     missing = [
@@ -1201,7 +1298,8 @@ def evaluate_topography(
         plotted_labels_b: Dict[str, np.ndarray] = {}
         per_condition = {
             condition: extract_tap_activations(
-                backbone, prompts, preprocessor, batch_size=batch_size
+                backbone, prompts, preprocessor, batch_size=batch_size,
+                context=stimulus_context,
             )
             for condition, prompts in stimuli.items()
         }

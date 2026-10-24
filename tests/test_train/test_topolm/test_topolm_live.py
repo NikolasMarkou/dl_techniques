@@ -729,9 +729,11 @@ class TestTheDrawIsCheapAndTheTripwireIsNotBlind:
         sizes = []
         real = C.extract_tap_activations
 
-        def spy(backbone, prompts, preprocessor, batch_size=32):
+        def spy(backbone, prompts, preprocessor, batch_size=32, **kwargs):
             sizes.append(batch_size)
-            return real(backbone, prompts, preprocessor, batch_size=batch_size)
+            return real(
+                backbone, prompts, preprocessor, batch_size=batch_size, **kwargs
+            )
 
         monkeypatch.setattr(C, "extract_tap_activations", spy)
         callback.on_train_begin()
