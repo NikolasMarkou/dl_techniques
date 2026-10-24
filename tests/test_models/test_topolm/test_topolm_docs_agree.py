@@ -103,7 +103,7 @@ class TestTheReadingOfTheMeasurement:
             if line.startswith("| `aggregate_backbone_losses=True`"))
         assert "aggregated against 7.68 not aggregated" in row
         assert "same seed" in row
-        assert "—" not in row and "–" not in row
+        assert chr(0x2014) not in row and chr(0x2013) not in row  # no em dash, no en dash
 
     def test_the_agents_row_is_a_three_cell_table_row(self):
         row = next(line for line in _read(

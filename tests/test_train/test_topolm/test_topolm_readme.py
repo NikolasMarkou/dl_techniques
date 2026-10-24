@@ -822,7 +822,7 @@ def _second_seed_phrases(facts, run2d, run3d, run2c, run3c, percent):
         f"Moran's I is {morans(seed43['2d']):.3f} and {morans(seed43['3d']):.3f}\n  with the penalty at seed 43 "
         f"({morans(seed42['2d']):.3f} and {morans(seed42['3d']):.3f} at seed 42) and within 0.02 of zero\n  without it "
         f"({morans(seed43['2d_alpha0']):.3f} and {morans(seed43['3d_alpha0']):.3f}; {morans(seed42['2d_alpha0']):.3f} and {morans(seed42['3d_alpha0']):.3f})",
-        f"0.323 and\n  0.370 nats at seed 43" if False else f"{val(seed43['2d']) - val(seed43['2d_alpha0']):.3f} and "
+        f"{val(seed43['2d']) - val(seed43['2d_alpha0']):.3f} and "
         f"{val(seed43['3d']) - val(seed43['3d_alpha0']):.3f} nats lower at seed 43 "
         f"({val(seed42['2d']) - val(seed42['2d_alpha0']):.3f} and {val(seed42['3d']) - val(seed42['3d_alpha0']):.3f} at seed 42)",
         f"{_g(sig_mean(seed43['2d_alpha0']))} and {_g(sig_mean(seed43['3d_alpha0']))} significant units per tap at seed 43",
