@@ -2691,3 +2691,89 @@ class TestTheRadiusRefusalIsAParserError:
         assert order == []
         pretrain_cli.main(["--variant", "tiny3d", "--save-dir", str(tmp_path / "o")])
         assert order == ["gpu", "train"]
+
+
+# =====================================================================
+# Step 5.6 (plan-2026-10-23T190557-972a9ac5, decision D-022, review pass 2
+# concern 5): `--radius 0` and `--radius -2` passed the early refusal and the
+# command line, and the model then refused them ("radius must be >= 1") only
+# after the GPU set-up, the seeds, the save directory, the tokenizer and the
+# dataset load. Written RED-first against ca08dedd0.
+# =====================================================================
+
+
+class TestARadiusBelowOneIsRefusedUpFront:
+    @pytest.mark.parametrize("radius", [0, -2], ids=["zero", "negative"])
+    @pytest.mark.parametrize("extra", [[], ["--paired"]], ids=["plain", "paired"])
+    def test_the_command_line_exits_2_naming_the_radius_and_does_no_work(
+        self, monkeypatch, tmp_path, capsys, radius, extra
+    ):
+        guard = _CliSpies(monkeypatch, tmp_path)
+        argv = ["--variant", "tiny", "--radius", str(radius),
+                "--save-dir", str(guard.save_dir), *extra]
+        with pytest.raises(SystemExit) as caught:
+            pretrain_cli.main(argv)
+        error = capsys.readouterr().err
+        assert caught.value.code == 2
+        assert "usage:" in error and "error:" in error
+        assert f"--radius {radius}" in error and "at least 1" in error
+        assert "Traceback" not in error
+        guard.assert_nothing_happened()       # no GPU, seeds, tokenizer, dataset, save dir
+
+    @pytest.mark.parametrize("radius", [0, -2], ids=["zero", "negative"])
+    @pytest.mark.parametrize("variant", ["tiny", "tiny3d", "no_such_variant"])
+    def test_the_check_refuses_it_for_every_variant(self, variant, radius):
+        """A radius below 1 is wrong whatever the grid is, so the variant does not
+        matter (an unknown variant is still named by the model otherwise)."""
+        with pytest.raises(ValueError) as caught:
+            C.check_variant_fits_radius(
+                _config(model_variant=variant, spatial_radius=radius)
+            )
+        message = str(caught.value)
+        assert f"--radius {radius}" in message and "at least 1" in message
+        assert "Nothing was started" in message
+
+    @pytest.mark.parametrize("radius", [0, -2], ids=["zero", "negative"])
+    def test_a_programmatic_run_is_refused_before_any_run_work(
+        self, monkeypatch, tmp_path, radius
+    ):
+        guard = _NoRunWork(monkeypatch, tmp_path)
+        config = _config(spatial_radius=radius, save_dir=str(guard.save_dir))
+        with pytest.raises(ValueError, match=f"--radius {radius}"):
+            C.train_topolm(config, preprocessor=StubTokenizer(), run_topography=False)
+        with pytest.raises(ValueError, match=f"--radius {radius}"):
+            C.train_paired(config, preprocessor=StubTokenizer(), run_topography=False)
+        guard.assert_nothing_happened()
+
+    @pytest.mark.parametrize("variant", ["tiny", "tiny3d"])
+    @pytest.mark.parametrize("radius", [0, -1, -2])
+    def test_the_verdict_still_equals_whether_the_model_builds(self, variant, radius):
+        """Extends the 1..8 sweep below the floor: the check is exactly as strict
+        as the model, which refuses these in its constructor."""
+        config = _config(model_variant=variant, spatial_radius=radius, num_layers=1)
+        with pytest.raises(ValueError):
+            build_backbone(config)
+        with pytest.raises(ValueError):
+            C.check_variant_fits_radius(config)
+
+    @pytest.mark.parametrize("variant", sorted(MODEL_VARIANTS))
+    def test_a_radius_of_one_is_accepted_by_every_variant(self, variant):
+        C.check_variant_fits_radius(
+            _config(model_variant=variant, spatial_radius=1)
+        )
+
+    def test_a_radius_of_one_reaches_the_trainer_on_the_command_line(
+        self, monkeypatch, tmp_path
+    ):
+        seen = {}
+
+        def _record(config, run_topography=True):
+            seen["radius"] = config.spatial_radius
+            return {"results_dir": str(tmp_path)}
+
+        monkeypatch.setattr(pretrain_cli, "setup_gpu", lambda gpu_id=None: None)
+        monkeypatch.setattr(pretrain_cli, "train_topolm", _record)
+        for variant in sorted(MODEL_VARIANTS):
+            pretrain_cli.main(["--variant", variant, "--radius", "1",
+                               "--save-dir", str(tmp_path / variant)])
+            assert seen["radius"] == 1, variant

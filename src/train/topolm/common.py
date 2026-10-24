@@ -453,16 +453,34 @@ def check_variant_fits_radius(config: TopoLMTrainingConfig) -> None:
     ``TestTheVariantIsCheckedAgainstTheRadiusFirst`` compares this check with
     ``build_backbone`` for ``tiny`` and ``tiny3d``.
 
+    An explicit ``spatial_radius`` below 1 (``--radius 0``, ``--radius -2``) is
+    refused first, by name, for every variant: the grid check cannot see it, and
+    the model refuses it only after the dataset load.
+
     Contract: reads ``model_variant``, ``spatial_radius`` (``None`` resolves to the
     row's own) and ``num_heads``; returns ``None``; an unknown variant name passes
-    (``TopoLM.from_variant`` lists the valid names); raises ``ValueError`` and
-    nothing else.
+    (``TopoLM.from_variant`` lists the valid names) unless the radius is below 1;
+    raises ``ValueError`` and nothing else.
 
     :param config: The run's configuration.
     :type config: TopoLMTrainingConfig
-    :raises ValueError: Naming the variant, the radius and where it came from,
-        the unit grid, the shortage and the largest usable radius.
+    :raises ValueError: For a radius below 1, naming it and the floor; otherwise
+        naming the variant, the radius and where it came from, the unit grid, the
+        shortage and the largest usable radius.
     """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-022: a radius below 1 is refused
+    # HERE, by name, whatever the variant. Do NOT leave it to the model: the
+    # tap build refuses "radius must be >= 1" only after the GPU set-up, the
+    # seeds, the save directory, the tokenizer and the dataset load, and
+    # validate_variant (the grid check below) accepts 0 and negatives because a
+    # grid holds them trivially. Guarded by TestARadiusBelowOneIsRefusedUpFront.
+    if config.spatial_radius is not None and int(config.spatial_radius) < 1:
+        raise ValueError(
+            f"--radius {int(config.spatial_radius)} is not a neighbourhood "
+            f"radius: it must be at least 1 (a radius-r patch is 2r+1 units "
+            f"across; below 1 it holds no pair of units to smooth). Nothing "
+            f"was started."
+        )
     row = TopoLM.MODEL_VARIANTS.get(config.model_variant)
     if row is None:
         return

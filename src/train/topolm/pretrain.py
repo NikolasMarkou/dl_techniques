@@ -154,8 +154,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Neighbourhood radius; a radius-r patch needs (2r+1)**grid_dim "
-            "units, so every axis of the grid must be at least 2r+1 across. "
+            "Neighbourhood radius, at least 1; a radius-r patch needs "
+            "(2r+1)**grid_dim units, so every axis of the grid must be at "
+            "least 2r+1 across. "
             "Unset takes the variant's own radius (tiny3d 2, paper3d 4) and "
             "5 for the 2D variants, the paper's."
         ),
@@ -517,8 +518,9 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """Parse arguments, refuse a variant that cannot host the radius, configure the GPU, and train.
 
-    A variant row that cannot hold the resolved radius (``--variant tiny3d
-    --radius 5``) or whose head count does not divide its width is refused HERE,
+    A radius below 1 (``--radius 0``, ``--radius -2``), a variant row that cannot
+    hold the resolved radius (``--variant tiny3d --radius 5``) or whose head
+    count does not divide its width is refused HERE,
     before the GPU is touched and before any run work, as a parser error: the
     message of :func:`~train.topolm.common.check_variant_fits_radius` on stderr
     under the usage line, exit code 2, no traceback. The trainers repeat the same
