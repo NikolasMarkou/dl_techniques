@@ -37,8 +37,8 @@ is a repo-authored extension: the units sit in an `h x w x d` box with
 `h <= w <= d` and `h * w * d == embed_dim`, and a neighbourhood is a cube of
 `(2*rho + 1)**3` units. The paper is 2D throughout, so nothing here about 3D
 reproduces a published number. A config saved before the key existed loads as 2D.
-The trainer, the post-hoc analysis and the Gaussian readout stay 2D-only
-(sections 6, 7 and 8).
+The Gaussian readout stays 2D-only; the trainer, the post-hoc analysis and the plots
+take both ranks (sections 6, 7 and 8).
 
 ```python
 volume = create_topolm("tiny3d")   # 343 units on a 7 x 7 x 7 box, radius 2
@@ -365,16 +365,18 @@ are worth knowing before reading its code, both of which would otherwise look li
 mistakes: the validation cadence *is* the virtual epoch length, and the head must
 be told to aggregate the backbone's losses.
 
-**The trainer is 2D-only and refuses a 3D variant by name.** `--variant paper3d`
-and `--variant tiny3d` are valid choices (the parser reads the table), but both
-`build_backbone` and `train_topolm` raise a `ValueError` naming the variant, its
-grid and "2D-only" before the output directory, the tokenizer or the dataset is
-touched; there is no `--grid-dim` flag. The reason is the evaluation, which runs
-only after the whole training run: a 3D model would train to the end and then fail
-in the cluster growth. To train a 3D model, build it with the model API and a
-`CausalLanguageModel` head as above. The refusal is pinned by
-`TestThreeDimensionalVariantsAreRefused` in
-`tests/test_train/test_topolm/test_topolm_trainer.py`.
+**The trainer trains both ranks.** `--variant paper3d` and `--variant tiny3d` train at
+the variant row's own radius (`--radius` unset resolves per variant: 4 and 2; the 2D
+variants keep the paper's 5), and the post-hoc evaluation, the figures and the live view
+(`--viz-every-steps`) follow the grid's rank. The Gaussian readout is 2D, so a 3D run
+scores its raw arm only: the default `--readout-fwhm` resolves to no readout on a 3D
+variant, a positive value typed for one is refused by flag and variant, and the report
+says `readout_skipped`. There is still no `--grid-dim` flag; the rank comes from the
+variant. See `src/train/topolm/README.md` (*Training a 3D variant*). Until the
+placement correction recorded there, the trainer put each tap's t-map on the grid with a
+plain `reshape`, so 2D Moran's I and cluster numbers produced under `permute=True` should
+be recomputed. The 3D path is pinned by `TestThreeDimensionalVariantsTrain` and
+`TestTheTrainerTrainsA3DVariant` in `tests/test_train/test_topolm/`.
 
 ### A task head in the model (`include_top`)
 
@@ -466,13 +468,14 @@ dropped into a tied one. The model is built first: before that, every
 
 ## 7. Post-hoc analysis
 
-**This chain is 2D-only.** The grid-based steps take a `(height, width)` map:
-`morans_i_grid`, `label_islands` (in both metric modules), `islands_morans_i` and
-`grow_clusters` raise a `ValueError` for any other rank, naming the shape, and the
-trainer's plots and the Gaussian readout are 2D as well. 3D Moran's I, 3D cluster
-growth and a 3D readout are not built; they are recorded follow-ups. The per-unit
-steps (`contrast_tmap`, `fdr_across_layers`) act on `(stimuli, units)` arrays and do
-not depend on the grid rank, but nothing in this repository joins them to a 3D map.
+**The chain takes a 2D or a 3D map.** The grid-based steps take a `(height, width)` or a
+`(depth, height, width)` map: `morans_i_grid`, `label_islands` (in both metric modules),
+`islands_morans_i`, `morans_i_summary` and `grow_clusters` read the rank from the array
+(`grid_weights_nd` builds the weights; queen is 26 neighbours in 3D and rook is 6), and
+raise a `ValueError` naming the shape for any other rank. The 2D results are bit-identical
+to what the code returned before 3D support. The per-unit steps (`contrast_tmap`,
+`fdr_across_layers`) act on `(stimuli, units)` arrays and do not depend on the grid rank.
+The Gaussian readout is the part that stays 2D (a `Conv2D`), and a 3D readout is not built.
 
 The trainer scores a trained backbone through four steps, and each has a way to
 go quietly wrong:
@@ -504,8 +507,9 @@ Two rules in that list are load-bearing and not interchangeable:
   jumps without any change in the underlying organisation.
 
 A run also **draws** the result: one t-map per tapped layer on a shared diverging
-scale with rejected cells hatched and clusters outlined, Moran's I against depth,
-and one categorical cluster map. That is `train.topolm.plotting`, called from
+scale with rejected cells hatched and clusters outlined (three orthogonal planes per
+tap on a 3D grid), Moran's I against depth, and one categorical cluster map (a slice
+montage on a 3D grid). That is `train.topolm.plotting`, called from
 `run_topographic_evaluation` on the same arrays the report counts. Its rules are
 in the trainer's README (`src/train/topolm/README.md` § *Figures*); the short
 version is that a topographic figure has exactly two ways of lying by
@@ -610,8 +614,8 @@ built-in smoke stimulus set, with every report stamped
 your own `stimuli=` config for a real analysis.
 
 The paper is 2D, so there is nothing to reproduce in 3D: `paper3d` and `tiny3d` are
-repo-authored layouts, the trainer refuses them, and no number in the paper applies
-to them.
+repo-authored layouts, the trainer trains them (raw arm only), and no number in the
+paper applies to them.
 
 ---
 
@@ -632,7 +636,7 @@ mutation self-tests), `tests/test_models/test_topolm/test_topolm_3d.py` (config
 validation, block and model `grid_dim`, the alpha control, the other-rank and
 other-grid checkpoint refusals, the wrapped-archive and direct-loader cases, the variant
 rows) and `tests/test_train/test_topolm/test_topolm_trainer.py`
-(`TestThreeDimensionalVariantsAreRefused`). The 2D layout is pinned byte for byte by
+(`TestThreeDimensionalVariantsTrain`). The 2D layout is pinned byte for byte by
 `TestTwoDimensionalIsByteIdentical` in `test_spatial_smoothness.py`, and the readout's
 2D-only refusal by `TestGridRankRefusal` in `test_gaussian_readout.py`. The GPU arms use
 the `requires_gpu` marker from `tests/index_weights.py`; one of them runs a 3D model

@@ -273,7 +273,7 @@ add cannot reach it: no flag, no hook, no `activity_regularizer`.
 
 - `topolm/` — `TopoLMBlock`, whose two taps carry `SpatialSmoothness` (`grid_dim` 2, the paper's
   layout and the default, or 3, repo-authored: `paper3d` and `tiny3d` rows with their own radius,
-  refused by name by the 2D-only trainer; the model constructor's per-axis check is 3D-only while
+  trained by `train/topolm/` on the raw arm only, since the Gaussian readout is 2D; the model constructor's per-axis check is 3D-only while
   `validate_variant` is strict in both ranks). It composes
   `create_attention_layer` / `create_ffn_layer` / `create_normalization_layer`
   rather than reimplementing them, so the reuse order (factories first, a bespoke

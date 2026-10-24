@@ -103,6 +103,11 @@ callbacks = build_callbacks(config, head, results_dir, initial_step=0)
 #  StepCheckpointCallback, GenerationProbeCallback]
 ```
 
+With `viz_every_steps > 0` the call also takes `backbone=` and `preprocessor=` and a
+fifth callback, `TopographyLiveCallback`, is appended last (see *Watching a run*
+in section 5). With the default `0` the list is the four above and nothing else
+is added.
+
 `ConsecutiveIncreaseEarlyStopping` restores the snapshot taken immediately before
 the final streak — the last *good* evaluation, not the best one seen — which is
 deliberately different from `EarlyStopping(restore_best_weights=True)`.
@@ -136,9 +141,12 @@ Two details that are not interchangeable:
 
 No `loss=` or `metrics=` are passed to `compile`. `CausalLanguageModel` owns its
 loss and its `loss` / `accuracy` / `perplexity` trackers through a hand-rolled
-`train_step`, so a compiled loss here would be inert config. `jit_compile` stays
-off: the tap is graph-safe, but the fused whole-step trace is not measured, and a
-run that silently declines to compile is worse than one that runs eagerly.
+`train_step`, so a compiled loss here would be inert config. `jit_compile` is not
+passed either, so it stays at Keras's `"auto"`: XLA whenever a GPU is visible,
+eager on a CPU-only host (`compile_model`'s docstring records the measurement:
+`model.jit_compile` is `True` after the call on a GPU). That is why the taps'
+index tables are int64 weights: an int32 weight is kept in host memory, where an
+XLA step on a GPU cannot read it.
 
 ---
 
@@ -160,12 +168,23 @@ MPLBACKEND=Agg python -m train.topolm.pretrain --no-permute
 # A single-tap ablation, and the stopping rule relaxed.
 MPLBACKEND=Agg python -m train.topolm.pretrain \
     --tap-sites attention --early-stop-patience 10
+
+# Watch the topography form: a draw at step 0, every 50 optimizer steps and at the end.
+MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny --train-steps 400 \
+    --eval-every-steps 100 --viz-every-steps 50 --batch-size 8
+
+# A 3D layout (343 units on a 7 x 7 x 7 box, radius 2), raw arm only.
+MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny3d --train-steps 400 \
+    --eval-every-steps 100 --viz-every-steps 50 --batch-size 8
 ```
 
-There is **no 3D flag**. `--variant` offers every row of `MODEL_VARIANTS`, so
-`paper3d` and `tiny3d` are accepted by the parser, but the trainer is 2D-only and
-refuses them by name (see section 8). `--radius` means a radius-`r` patch of
-`(2r+1)**2` units in this trainer.
+`--variant` offers every row of `MODEL_VARIANTS`. The grid's rank comes from the
+variant, so there is no grid flag: `paper3d` (1000 units on a 10 x 10 x 10 box,
+radius 4) and `tiny3d` (343 units on 7 x 7 x 7, radius 2) train a 3D layout (see
+*Training a 3D variant* below). `--radius` means a radius-`r` patch of
+`(2r+1)**grid_dim` units. Left unset it resolves per variant: the row's own radius
+for `tiny3d` (2) and `paper3d` (4), 5 (the paper's) for the 2D variants, and an
+explicit value wins. `config.json` records the integer that was used.
 
 Every flag maps onto exactly one field of `TopoLMTrainingConfig`, so `--help` and
 `config.json` describe the same run — and
@@ -180,8 +199,16 @@ worth stating rather than leaving to `--help`:
 
 | Flag | Value that works | Why the other value fails |
 |---|---|---|
-| `--vocab-size` | `100277` (default) | `50257` is GPT-2's base vocabulary; `create_tokenizer` uses `cl100k_base`, whose special ids reach `100267`. Dies in `word_embeddings` with `indices[..] = 50259 is not in [0, 50257)`. |
+| `--vocab-size` | `100277` (default) | The trainer's tokenizer is Tiktoken `gpt2`: `encoding_name` is a field of `ClmPretrainConfig` (default `"gpt2"`) with no flag, and the run log says `encoding 'gpt2'`, `vocab_size=50257`. Its 50,257 base ids are followed by the four special ids the config assigns, 50257 to 50260 (`cls_token_id`, `sep_token_id`, `pad_token_id`, `mask_token_id`), so a table that holds all of them has at least 50,261 rows (derived: 50260 + 1). A 50,257-row table failed with `indices[..] = 50259 is not in [0, 50257)`, which is the pad id of that list. `100277` is larger than that and is the flag's default. |
 | `--max-seq-length` | `512` (default) | The data pipeline chunks to this, so the position table must match. `build_backbone` forwards it to `max_seq_len`; before it did, a `tiny` run kept the variant's 256-entry table against 512-token windows and died with `indices[256] = 256 is not in [0, 256)`. |
+
+An earlier version of this table said `create_tokenizer` uses `cl100k_base`, whose
+special ids reach `100267`. That does not describe this trainer: `create_tokenizer`'s
+own default is `cl100k_base`, but the trainer passes `config.encoding_name`. The
+guard `_require_vocab_covers_tokenizer` compares `--vocab-size` with the base
+`vocab_size` the log prints (50257), not with the special ids. Both failures above
+were measured on the pre-audit pipeline; the `--vocab-size 50257` case was not
+re-run on the packed dataset path the trainer uses now.
 
 Both are measured, not inferred: each was reproduced on a clean worktree at the
 pre-audit commit before being fixed here. `build_backbone` now also raises, rather
@@ -197,16 +224,17 @@ than deferring the mismatch to the first forward.
 two must not be confusable when they are read back months apart. Contents:
 `config.json`, `training_history.json`, `training_curves.png`,
 `topography_report.json`, `checkpoints/`, `generation_probes/`, plus the figures
-below when topography ran.
+below when topography ran, and `topography_live/` when `--viz-every-steps` is
+positive.
 
 ### Figures
 
 | File | Contents |
 |---|---|
-| `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, clusters outlined |
-| `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout |
+| `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, clusters outlined; on a 3D grid, three orthogonal planes per tap |
+| `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout (2D variants only) |
 | `morans_i_raw.png`, `morans_i_readout.png` | standard Moran's I against depth |
-| `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster |
+| `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster; on a 3D grid, every slice along axis 0 |
 
 Three rules the figures follow, each of which exists because the obvious
 alternative misleads:
@@ -234,6 +262,198 @@ its analysis does not pull in a plotting stack.
 > `results/` at the repo root is **gitignored and untracked**. There is no history
 > and no backup. Do not clean it up by name; route a test's config through
 > `tmp_path`.
+
+### Watching a run: `--viz-every-steps`
+
+```bash
+MPLBACKEND=Agg python -m train.topolm.pretrain --variant tiny --train-steps 400 \
+    --eval-every-steps 100 --viz-every-steps 50 --batch-size 8
+```
+
+`--viz-every-steps N` (default `0`, off) makes the run score its own topography
+while it trains. A draw is taken at step 0 (the untrained map), at every optimizer
+step that is a multiple of `N`, and at the end of the run. **`N` counts optimizer
+steps and is independent of the virtual epoch**: `--eval-every-steps` sets the
+length of the epoch Keras validates at, `N` is a count of steps inside the run
+(a resumed run continues from its checkpoint's step), so `--viz-every-steps 500`
+in a run that validates every 2000 steps draws four times per virtual epoch.
+`0` adds no callback and no directory. A negative value is refused by name.
+`--no-topography` does not switch it off: that flag skips the post-hoc report
+only, so passing both gives live figures and no final report. With `--paired` each
+arm draws into its own run directory.
+
+```text
+<run_dir>/topography_live/
+    step_0000000/               one figure set per draw (t_maps_raw.png,
+    step_0000050/ ...           morans_i_raw.png, clusters_raw.png once a cluster exists)
+    latest_t_maps_raw.png       the newest t-maps
+    latest_morans_i_raw.png     the newest Moran's I profile
+    metrics.jsonl               one JSON row per draw
+    topography_curve.png        Moran's I per tap, clusters, significant units and
+                                validation loss against step
+```
+
+**How to watch it live.** Open `latest_t_maps_raw.png` in an image viewer that
+reloads a file when it changes; its subtitle names the step and the stimulus set.
+Follow the numbers with `tail -f <run_dir>/topography_live/metrics.jsonl`, and open
+`topography_curve.png` for the trend. The `latest_*` files and the curve are
+written to a temporary name and moved into place, so a viewer that reloads in the
+middle of a draw never reads a half-written PNG.
+
+**`metrics.jsonl`.** One strict-JSON row per draw (a value that is not finite is
+`null`), flushed to disk after each row. Fields: `step`, `seconds` (wall time of
+the draw), `val_loss`, `val_loss_step`, `grid_shape`, `contrast`,
+`stimuli_are_smoke_set`, `mean_morans_i`, `mean_num_significant_units`,
+`total_clusters_a`, `total_clusters_b`, and `per_tap`: for each tap `morans_i`,
+`morans_i_islands`, `num_significant_units`, `clusters_a`, `clusters_b`, `t_min`,
+`t_max` and `t_abs_mean`. `val_loss` is the last validation completed when the row
+was written and `val_loss_step` is the step it was measured at. A draw at a step
+where a validation is also due is taken at the end of that batch, before the
+validation, so **the last row can lag the final value in `training_history.json`**:
+in a 400-step `tiny3d` run (validation every 100 steps, a draw every 50) the last
+row holds 7.5333 and the final history value is 7.4917; in the matching `tiny` run
+7.8182 and 7.8185. The
+curve plots each validation once, at its own `val_loss_step`.
+
+**What a draw scores.** The two contrast conditions of the built-in smoke stimuli
+(five sentences per condition; the command line has no flag for other stimuli),
+the raw arm only, no permutation test, in batches of 8 prompts. A live map is
+noisy, and the subtitle says so (`smoke stimuli, n=5/5 per condition`): it shows
+that a structure is forming, not a result.
+
+**The colour scale is per frame, on purpose.** Each figure uses the pooled 99th
+percentile of its own t-values (see the rules above), and the colour bar states
+that scale. A 2D `tiny` run was on +/-4 at step 0 and +/-14 at step 400. Two
+frames are therefore not comparable by colour across steps; a fixed scale would
+either clip the trained map or hide the early structure.
+
+**What the periodic pass guarantees.**
+
+- *Eval mode only.* A draw never calls the model with `training=True`. A
+  training-mode forward overwrites each tap's non-trainable `last_spatial_loss`
+  and advances every `SeedGenerator` (measured on CPU).
+- *A tripwire.* Around each draw the callback compares every `SeedGenerator`
+  state and the Python and NumPy random states. On any difference it restores
+  them, logs an ERROR and switches the live view off; the run continues. At the
+  start it warns if it finds fewer generators than taps, because the tripwire
+  would then be blind.
+- *Failure isolation.* An exception in a draw is logged with its location and
+  training goes on. Three consecutive failed draws switch the live view off; a
+  good draw resets the count. `KeyboardInterrupt` and `SystemExit` are not
+  caught. The post-hoc evaluation still raises on a real failure, so a run cannot
+  exit 0 without its topography report.
+
+**Does it change the run?** On CPU, no: a same-seed training with the callback
+gives bit-equal trainable and non-trainable weights, `SeedGenerator` states and
+per-epoch losses (`TestTheABInstrument`; its control run reproduces itself, and a
+callback doing a `training=True` forward is seen to fail it). On GPU the
+comparison cannot be bit-exact, because two identical runs without the callback
+differ from each other. Measured on GPU 0 (`tiny`, seed 42, 200 steps,
+`--eval-every-steps 50 --batch-size 8`, four runs without and two with
+`--viz-every-steps 25`), the largest absolute difference over the trainable weights
+of the final checkpoints, as min / median / max:
+
+| Pairs | n | max abs difference |
+|---|---|---|
+| without vs without | 6 | 1.145e-2 / 1.331e-2 / 1.466e-2 |
+| with vs without | 8 | 1.071e-2 / 1.304e-2 / 1.581e-2 |
+
+The ranges overlap and most of the difference sits in the embedding table in both
+rows. The honest statement is: **bit-exact on CPU; on GPU no effect detectable
+above the device's own run-to-run noise (n=6 pairs without, n=8 with); the GPU is
+not deterministic.** A single-pair criterion set before the runs (with-callback
+difference no larger than the self-difference) was not met: 1.549e-2 against
+1.291e-2, which one pair cannot resolve at this noise level. Every
+`SeedGenerator` state and every non-trainable variable other than
+`last_spatial_loss` was bit-identical in all 15 pairs, and the tripwire never
+fired. One observation is unexplained: the epoch-3 training loss of both runs with
+the callback (8.93612 and 8.93605) is below all four runs without it (8.93624 to
+8.93645), by 1.2e-4 to 1.9e-4; no mechanism was found.
+
+**What it costs** (measured 2026-10-24 on an RTX 4090 that another process was
+sharing; about 11,065 MiB of the 24,564 MiB were already in use before each job,
+and the timings are indicative, although the four runs without the callback agree
+in wall time within 2.5%):
+
+- *Per draw*, the `seconds` field over 9 draws each: `tiny` median 1.46 s (0.87 to
+  1.97), `tiny3d` median 1.93 s (1.28 to 2.37), and a `paper3d`-width run
+  (`--num-layers 2 --max-seq-length 128 --batch-size 4`) median 1.75 s (0.76 to
+  2.16). The step-0 draw is the cheapest: nothing is learned yet and no cluster
+  outlines are drawn.
+- *Against a run without it*: `tiny`, 200 steps, a draw every 25 steps (9 draws).
+  The fit phase took a median of 100.15 s over four runs without the callback and
+  116.27 s and 117.07 s with it, i.e. 16.1 s and 16.9 s more (+16.1% and +16.9%).
+  A draw every 25 steps is much denser than a real run needs; the overhead at a
+  sparser cadence was not measured. Peak memory held by the process rose from
+  5,028 to 6,052 MiB (the allocator's reserved memory under
+  `TF_FORCE_GPU_ALLOW_GROWTH`, an upper bound on use).
+
+### Training a 3D variant
+
+`--variant tiny3d` (343 units, 7 x 7 x 7, radius 2) and `--variant paper3d` (1000
+units, 10 x 10 x 10, 8 heads, radius 4) are repo-authored layouts, not the paper's,
+and no number in the paper applies to them. The trainer trains, scores and draws
+them like a 2D variant, with these differences.
+
+- *Radius.* `--radius` unset resolves to the variant's own radius, so
+  `--variant tiny3d` needs no radius flag. An explicit radius the grid cannot hold
+  is still an error from the model, naming the short axis.
+- *Readout.* The Gaussian readout is a `Conv2D`, so the readout arm is 2D only.
+  `--readout-fwhm` unset means 2.0 on a 2D variant and no readout on a 3D one, `0`
+  means no readout on either, and a positive value typed for a 3D variant is
+  refused by flag and variant before any work is done. A 3D run therefore scores
+  the raw arm only. Its `topography_report.json` has a three-entry `grid_shape`,
+  the single arm `raw`, and a top-level `readout_skipped` string giving the reason;
+  a 2D report has no such key. (A programmatic config left at the dataclass default
+  `readout_fwhm=2.0` on a 3D backbone also runs: the arm is skipped with one INFO
+  line.)
+- *Analysis.* The t-map, BH-FDR, cluster growth and both Moran statistics follow
+  the grid's rank: queen contiguity is 26 neighbours in 3D and rook is 6.
+- *Figures.* `t_maps_raw.png` draws three orthogonal planes per tap, two taps per
+  row, through a crosshair at the cell of the largest `|t|` among the significant
+  cells (the largest `|t|` overall if none is significant, ties to the lowest flat
+  index). The crosshair is a proposal for where to look, not a result: a cluster
+  away from it is not in the planes. `clusters_raw.png` is a montage of every slice
+  along axis 0 of the clusters of the deepest tap that found one, one colour per
+  cluster. There are no `*_readout.png` files. The colour scale, hatch and outlines
+  are the 2D ones, applied to each plane.
+- *Measured, `tiny3d`* (`--train-steps 400 --eval-every-steps 100
+  --viz-every-steps 50 --batch-size 8`, smoke stimuli): the t-maps are finite and
+  not all zero, and the mean Moran's I over the 8 taps went from -0.0014 at step 0
+  to 0.555 at step 50 and 0.625 at step 400, while the significant units per tap
+  fell from 191 at step 50 to 70 at step 400.
+- *Memory at paper width.* `--variant paper3d --num-layers 2 --train-steps 200
+  --eval-every-steps 50 --viz-every-steps 25 --batch-size 4`: the first attempt, at
+  the default `--max-seq-length 512`, held 8,608 MiB in its own process when it was
+  stopped by an 8,000 MiB cap set for that measurement on a shared card, so its
+  peak is not known. With `--max-seq-length 128` it finished, peaking at 6,558 MiB.
+  That run shows the pipeline and the figures work at the paper's width; it is not
+  what a real `paper3d` run looks like (2 layers, 200 steps).
+
+### A correction to earlier 2D numbers
+
+Before this change `evaluate_topography` put each tap's per-unit t and
+significance vectors on the grid with a plain `reshape`. Under the default
+`permute=True` unit `i` does not sit at cell `i`: the tap's layout places it at
+`layout.positions`. **Earlier 2D Moran's I and cluster numbers produced under the
+default `permute=True` were computed on a map whose cells were not at their layout
+positions; they should be recomputed.** Runs with `permute=False`
+(`--no-permute`) were unaffected, because the two placements agree there. The
+t-map and cluster figures from `permute=True` runs were drawn from the same
+scrambled map. Per-unit quantities, such as the t value of a unit and the number
+of significant units, do not depend on where a unit is placed.
+
+Both arms and the 3D path now place the vectors through the tap's
+`layout.to_grid` (the readout also returns unit order). On a field that is smooth
+on a 28 x 28 layout, Moran's I came out at 0.7927 through `layout.to_grid` and
+0.0005 through `reshape`, with 5 clusters against 0 (measured before the fix, on
+synthetic data). Pinned by `TestTheMapPlacementFollowsTheLayout`.
+
+A second, separate figure defect: the cluster outline was drawn displaced from the
+cells it enclosed (for the cell at row 3, column 4, the segments sat at x 5 to 6
+and 4 to 5, while the cell spans x 3.5 to 4.5). It is drawn on the cell edges now,
+for 2D and 3D; the cluster counts in the JSON never depended on it. Pinned by
+`TestClusterBoundariesSitOnTheirCells`.
 
 ---
 
@@ -309,18 +529,13 @@ set**. Neither is in this repository.
 
 The encoding probe, RSA and bootstrap CIs are deferred to a later pass.
 
-**The trainer's evaluation and plots are 2D-only, and a 3D variant is refused by
-name.** The t-map panels, cluster growth, Moran's I and the Gaussian readout all take
-a `(height, width)` map. The `paper3d` and `tiny3d` variants of the model package lay
-their units out on a 3D box, and the evaluation runs only after the whole training
-run, so a 3D model would train to the end and then fail in `grow_clusters`.
-`build_backbone` and `train_topolm` therefore raise a `ValueError` that names the
-variant, its width and grid, and says the evaluation is 2D-only, before the output
-directory, the tokenizer or the dataset is touched (the check reads the variant's
-row first, because the trainer's own `--radius` default of 5 would otherwise raise a
-less helpful axis error). The built backbone's rank is checked too. There is no
-`--grid-dim` flag. Deferred, not built: 3D Moran's I, 3D cluster growth and a 3D
-readout. `grow_clusters` itself also refuses a map that is not 2-D, by name.
+**Dimension.** The trainer evaluates, plots and live-draws a 2D or a 3D grid; the
+rank comes from the variant's row (`grid_dim`), and there is no grid flag. The grid
+metrics (`morans_i_grid`, `label_islands`, `islands_morans_i`, `morans_i_summary`
+and `grow_clusters`) take a `(height, width)` or a `(depth, height, width)` map and
+refuse any other rank by name. Deferred, not built: a 3D Gaussian readout.
+`GaussianReadout` is a `Conv2D` and refuses a three-entry grid at build, so a 3D
+run scores its raw arm only (see *Training a 3D variant* in section 5).
 
 Moran's I **permutation test** is now implemented and reaches the report via
 `--permutation-p-value` (off by default). It is the paper's third Moran
@@ -362,15 +577,46 @@ matched neither the real preprocessor nor anything else — and that agreement
 between two unlike stubs is what hid the live `TypeError` in
 `extract_tap_activations` for the whole first pass of this code.
 
-The 3D refusal is pinned by `TestThreeDimensionalVariantsAreRefused` in
-`test_topolm_trainer.py` (`test_build_backbone_refuses_by_name_at_any_radius`,
-`test_train_topolm_refuses_before_any_directory_or_data_work`,
-`test_train_paired_refuses_before_its_first_arm_makes_anything`,
-`test_the_cli_entry_refuses_with_an_absolute_scratch_output_path`,
-`test_the_cli_adds_no_grid_flag_and_still_offers_every_variant`), and the grid
-label and report shape at their own rank by `TestTheGridIsReportedAtItsOwnRank`.
-The `grow_clusters` guard is `test_a_map_that_is_not_two_dimensional_is_named_not_unpacked`
-in `tests/test_metrics/test_topographic_selectivity.py`.
+The 3D work and the live view live in these files (all under
+`tests/test_train/test_topolm/` unless a path is given):
+
+- `test_topolm_3d_evaluation.py` (new): `TestThreeDimensionalPlacement`,
+  `TestThreeDimensionalReadout`, `TestAThreeDimensionalReportAlwaysSaysItsReadoutIsAbsent`,
+  `TestThreeDimensionalFigures` and `TestTheTrainerTrainsA3DVariant`, a short CPU
+  `tiny3d` run through `train_topolm`.
+- `test_topolm_live.py` (new): `TestTheABInstrument` (the same-seed CPU A/B, with a
+  control that must reproduce itself and a `training=True` negative control),
+  `TestTheTripwire`, `TestEvalModeOnly`, `TestFailureIsolation`, `TestOutputs`,
+  `TestLatestFilesAreAtomic`, `TestTheMetricsRows`, `TestBothRanks` and
+  `TestTheFlagIsRefusedNegativeAndNeedsItsInputs`.
+- `test_topolm_trainer.py`: `TestThreeDimensionalVariantsTrain` (it replaces
+  `TestThreeDimensionalVariantsAreRefused`, which pinned the refusal this trainer no
+  longer makes), `TestRadiusResolution`, `TestVizEveryStepsField`,
+  `TestTheMapPlacementFollowsTheLayout` (the placement correction above, against an
+  oracle that does not use `to_grid`), the golden pins that hold the 2D report, config
+  and `permute=False` placement as they were
+  (`TestTwoDimensionalUnchangedReport`, `TestTwoDimensionalUnchangedConfig`,
+  `TestTwoDimensionalUnchangedPlacementWithoutPermutation`), and
+  `TestTheGridIsReportedAtItsOwnRank`.
+- `test_cli_contract.py`: `TestRadiusPerVariant` and `TestVizEveryStepsFlag`.
+- `test_topolm_plotting.py`: `TestClusterBoundariesSitOnTheirCells`,
+  `TestThreeDimensionalFigures`, `TestThreeDimensionalCrosshairAndMontageContent`,
+  `TestTheCurveDrawsValidationAtItsOwnStep`,
+  `TestTheClusterFigureNamesItsTapAndCountsCorrectly`,
+  `TestTheCrosshairIsVisibleOnSaturatedCells`, and the layout classes
+  `TestThreeDimensionalTitlesAreReadableForRealTapPaths`,
+  `TestTwoDimensionalTitlesAreReadableForRealTapPaths` and
+  `TestTheMoransProfileIsReadableForRealTapPaths`, which render real-length tap paths
+  and assert that no title box overlaps another or leaves the figure. The four 2D
+  pixel pins in `TestTwoDimensionalUnchangedPixels` were re-pinned once on purpose,
+  for layout and not for content, when the 2D figure was laid out in inches.
+- `tests/test_metrics/test_spatial_autocorrelation.py` and
+  `tests/test_metrics/test_topographic_selectivity.py`: golden pins of the 2D results
+  (`TestMoransIGoldenPins`, `TestLabelIslandsGoldenPins`,
+  `TestGrowClustersGoldenPins`) and the 3D oracles (`TestMoransIGrid3D`,
+  `TestGridWeightsNd`, `TestGrowClusters3D`). The rank guard is
+  `test_a_map_that_is_not_two_dimensional_is_named_not_unpacked`, now parametrized
+  over ranks 1, 4 and 5.
 
 **Do not run the full suite as a routine check.** It takes about 1.5 hours and is
 also the pre-push hook; scope pytest to the modules you touched.

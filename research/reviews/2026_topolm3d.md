@@ -13,6 +13,14 @@
 > `4a71059a0` and a documents-only one); the checkpoint-guard row of the decisions table,
 > the factoring section and the implementation history below describe the code as those
 > fixes left it.
+>
+> A later plan (`plan-2026-10-23T190557-972a9ac5`, commits `65b85e96a..7e9f6f89c`)
+> implemented the follow-ups this document left open: the trainer no longer refuses a
+> 3D variant, Moran's I, cluster growth, the t-map and cluster figures take a 3D map, and
+> a live view draws them during training. Statements below that describe the trainer as
+> limited to 2D grids or refusing are marked as the state at `85e03cc74`; the section "Follow-up: 3D
+> evaluation, plots and a live view" records what replaced them. The 3D Gaussian readout
+> is still not built.
 
 TopoLM (Rathi et al. 2025, ICLR; arXiv:2410.11516) gives the units of every
 attention and feed-forward branch a distinct cell of an `h x w` grid, with
@@ -34,9 +42,9 @@ auto-factoring rule, with 2D behaviour byte-identical by default.
 | Axis order | One order everywhere: **`grid_shape == cell_to_unit.shape == (axis0, axis1, axis2)`, row-major, last axis fastest**, and `positions[:, k]` is the coordinate along axis `k` of that same shape. No axis has a name (no depth, height, width, no `(z, y, x)`), and nothing reorders or transposes anywhere. The first draft used three different orderings; see the section on what it got wrong. |
 | Validation | Every resolved **axis** must be at least `2 * radius + 1`, not only the total unit count. The total floor `(2 * radius + 1) ** grid_dim` is still checked first (it is necessary, not sufficient). The per-axis check runs in `config.validate_variant` for **both** ranks and in the `TopoLM` constructor for **3D only**: a directly constructed 2D model with an explicit short-axis grid (an `(8, 32)` grid at the default radius 5) has always constructed and reported its grid, failing only when a tap builds, and an existing test pins that, so the 2D constructor is unchanged. Shipped variants cannot reach that hole because `validate_variant` is strict in both ranks. Errors name the short axis, its length and the largest usable radius, `(min_axis - 1) // 2`. |
 | Variant home | The 3D variants are rows of `MODEL_VARIANTS` (`paper3d`, `tiny3d`), repo-authored and described as "not in the paper", each carrying its own `"grid_dim": 3` and `"radius"`. No parallel table. The `paper` row is untouched and nothing repo-authored joins it. `validate_all_variants(radius)` takes no `grid_dim`: it judges each row by the row's own `radius` and `grid_dim` and falls back to the argument and to 2. |
-| Trainer | The trainer is 2D-only and **refuses a 3D variant by name before any run work**: `train_topolm` calls `_require_two_dimensional_variant` first, before seeding, `os.makedirs`, the tokenizer, the dataset or `prepare_run_dir`, and `build_backbone` also checks the built backbone's rank. There is **no `--grid-dim` flag**: the 3D rows are valid `--variant` choices because the parser reads the table, and choosing one is refused with a message naming the variant, its width and grid, and the 2D variants that work. |
+| Trainer | As shipped at `85e03cc74` the trainer handled 2D grids only and raised a `ValueError` naming the variant for a 3D one, before any run work (`_require_two_dimensional_variant`, plus a rank check on the built backbone). **Superseded** by the follow-up plan: both are deleted, `--radius` and `--readout-fwhm` default to unset and resolve per variant, and `paper3d` and `tiny3d` train (see "Follow-up: 3D evaluation, plots and a live view"). There is still **no `--grid-dim` flag**: the 3D rows are `--variant` choices because the parser reads the table, and the rank comes from the row. |
 | Checkpoints across ranks | `TopoLM.from_variant(..., pretrained=<path>)` guards two things before any weight is copied, in `TopoLM._refuse_other_grid` (completion fix `iter-1/step-5.1`, commit `805be4ba2`, decision D-017). (a) A bare TopoLM archive recorded at a different `grid_dim` is refused by name (a missing key in a bare TopoLM config counts as 2D). (b) An archive whose resolved unit grid differs from the model's is refused by name, naming both grids: a 3D `(10, 5, 20)` archive into a model on `(20, 5, 10)`, or a transposed 2D `(8, 32)` into `(32, 8)`; a different seed on the same grid loads. The shape check alone is not enough: 729 units give identically shaped `perm`, `patch_table` and `triu_flat` tables in both ranks (one 729-unit patch at radius 13 in 2D and at radius 4 in 3D), and a permuted grid gives identical shapes because the centre count is symmetric in the axes, so such loads would otherwise succeed and leave the model with a foreign layout. The rank and the grid are read only from an archive whose top-level config is a bare TopoLM: for any other archive the guard does not guess and the loader's own error stands (a `CausalLanguageModel`-wrapped TopoLM, in either rank, gets `No overlapping layers between target and source checkpoint`; the first version of the guard defaulted the missing key to 2 for such an archive and reported a 3D archive as `saved with grid_dim=2`, which was false). A direct `load_backbone_from_checkpoint` call stays uncovered, pinned by `test_a_direct_loader_call_does_not_see_the_rank`. Downgrade: an archive written by this code carries a `grid_dim` key (2 as well as 3), so a checkout from before this change cannot load it (`Unrecognized keyword arguments passed to TopoLM: {'grid_dim': 2}`, measured by the review); a config without the key still loads as 2D here. |
-| Out of scope | `GaussianReadout`, Moran's I (`metrics/spatial_autocorrelation.py`) and the cluster-growth path (`metrics/topographic_selectivity.py`) stay 2D-only. 3D versions are follow-ups, not built. |
+| Out of scope | `GaussianReadout` stays 2D-only (it is a `Conv2D`) and a 3D version is not built. At `85e03cc74` Moran's I (`metrics/spatial_autocorrelation.py`) and the cluster-growth path (`metrics/topographic_selectivity.py`) also took a `(height, width)` map only, recorded as follow-ups; both take a 2-D or 3-D map now (see the follow-up section). |
 
 ## What the first draft got wrong
 
@@ -302,6 +310,10 @@ unaffected by the rank.
 
 ### 5. Trainer and metrics (`src/train/topolm/`, `metrics/`)
 
+*This section describes commit `85e03cc74`. The refusal, the rank check and the 2-D-only
+`grow_clusters` guard it records were replaced by the follow-up plan; see "Follow-up: 3D
+evaluation, plots and a live view".*
+
 * `common.py`: `_require_two_dimensional_variant` (the by-name refusal, checked on the
   variant's ROW before anything is built, because the trainer overrides a row's own
   radius with `spatial_radius`, default 5, which a 3D width cannot hold, so building
@@ -491,11 +503,12 @@ were seen failing.
   the table loop rank-aware.
 * `tests/test_train/test_topolm/test_topolm_trainer.py`:
   `TestThreeDimensionalVariantsAreRefused` (by name, before any directory or data work:
-  `test_train_topolm_refuses_before_any_directory_or_data_work`) and
+  `test_train_topolm_refuses_before_any_directory_or_data_work`; both exist only at
+  `85e03cc74` and were replaced by `TestThreeDimensionalVariantsTrain` in the follow-up) and
   `TestTheGridIsReportedAtItsOwnRank`.
 * `tests/test_metrics/test_topographic_selectivity.py`:
-  `test_a_map_that_is_not_two_dimensional_is_named_not_unpacked` pins the `grow_clusters`
-  guard.
+  `test_a_map_that_is_not_two_dimensional_is_named_not_unpacked` pinned the `grow_clusters`
+  guard; it is now parametrized over ranks 1, 4 and 5, because a 3-D map is grown.
 * GPU coverage: one 3D model arm, `test_a_jit_compiled_fit_runs_on_a_gpu` in
   `TestThreeDimensionalPrecisionAndDevice` (depth 1); the layer-level 3D file has no GPU
   arm. The measured jitted steps above also ran 3D models under XLA on the same card.
@@ -506,10 +519,11 @@ were seen failing.
   `GaussianReadout` (stays 2D, refusal pinned) and the topolm config and model (which
   state the rank explicitly).
 * The trainer's four places that unpacked the grid as `(height, width)` are
-  rank-agnostic, with 2D output identical, and a 3D variant never reaches them.
-* Follow-ups, deliberately not built: a 3D `GaussianReadout`, 3D Moran's I
-  (`metrics/spatial_autocorrelation.py`), 3D cluster growth, and 3D t-map plots. They
-  are recorded in the trainer README.
+  rank-agnostic, with 2D output identical (at `85e03cc74` a 3D variant never reached
+  them; the follow-up plan made the evaluation and plots rank-aware).
+* Follow-ups at `85e03cc74`: a 3D `GaussianReadout`, Moran's I on a 3D map
+  (`metrics/spatial_autocorrelation.py`), cluster growth on a 3D map, and 3D t-map plots. All but
+  the readout are implemented now; the readout is the one still not built.
 
 ## Numerical notes (carried over, unchanged in 3D)
 
@@ -539,17 +553,55 @@ were seen failing.
 | step 8.1 | 8.1 | completion fix: documentation of the corrected guard, its uncovered direct-loader route, the downgrade note and the factoring-objective caveat (this commit; documents only) |
 
 The rows landed together with the trainer refusal on purpose: earlier, a selectable
-3D variant would have reached a trainer that could not evaluate it.
+3D variant would have reached a trainer that could not evaluate it. The follow-up plan
+removed the refusal by making the evaluation rank-aware, not by dropping the check.
 
 ## Open questions, answered
 
 * **Exact home of the 3D variant rows**: rows in `MODEL_VARIANTS`, each carrying its own
   `grid_dim` and `radius`; no second table.
-* **Whether the trainer's plotting wants a 3D view**: no. The trainer is 2D-only and
-  refuses a 3D variant by name; 3D plots are a recorded follow-up.
+* **Whether the trainer's plotting wants a 3D view**: not in the first plan (the trainer
+  handled 2D grids only and raised for a 3D variant; 3D plots were a recorded follow-up). The
+  follow-up plan built it: three orthogonal planes per tap and a slice montage of the
+  clusters.
 * **Whether `SpatialLayout.get_config` carries `grid_dim` explicitly**: yes, explicitly,
   and `from_config` defaults a missing key to 2. A value that reads back as something
   derivable is how the `alpha = 0` lesson happened.
+
+## Follow-up: 3D evaluation, plots and a live view
+
+Plan `plan-2026-10-23T190557-972a9ac5`, ten commits `65b85e96a..7e9f6f89c` (steps 1 to 6
+and completion steps 4.1, 4.2, 4.3 and 5.1). Every statement was checked against the
+committed code; numbers are quoted with their configuration in `src/train/topolm/README.md`.
+
+* **The refusal is removed.** `spatial_radius` is optional and `resolve_spatial_radius`
+  takes an unset value from the variant row (`tiny3d` 2, `paper3d` 4, the 2D rows 5).
+  `--radius` and `--readout-fwhm` resolve per variant. A positive `--readout-fwhm` typed
+  for a 3D variant is refused by flag and variant, and a 3D report carries
+  `readout_skipped` with the reason and only the `raw` arm. `TestThreeDimensionalVariantsAreRefused`
+  became `TestThreeDimensionalVariantsTrain`.
+* **3D evaluation.** `grid_weights_nd` and rank-agnostic `morans_i_grid`, `label_islands`,
+  `islands_morans_i`, `morans_i_summary` and `grow_clusters` take a 2-D or 3-D map (queen is
+  26 neighbours in 3D, rook 6; other ranks are refused by name). The 2-D results are
+  bit-identical, held by golden `float.hex` pins recorded before the change.
+* **3D plots.** `plot_t_maps_3d` draws three orthogonal planes per tap through a crosshair
+  at the largest significant `|t|`; `plot_cluster_montage_3d` shows every slice of one
+  tap's clusters. `plot_t_maps` and `plot_cluster_overlay` dispatch on rank.
+* **A live view.** `--viz-every-steps N` (default 0) adds `TopographyLiveCallback`: a draw
+  at step 0, every `N` optimizer steps and at the end into `<run_dir>/topography_live/`
+  (figure sets, atomic `latest_*` files, a strict-JSON `metrics.jsonl`, a curve). A draw is
+  an eval-mode pass guarded by a tripwire and per-draw failure isolation. Non-perturbation
+  is bit-exact on CPU; on GPU it is bounded by the device's own run-to-run noise, not
+  proven bit-identical.
+* **Two 2D defects found on the way and fixed.** (1) `evaluate_topography` placed the
+  per-unit t and significance vectors on the grid with a `reshape`; under the default
+  `permute=True` unit `i` is not at cell `i`, so 2D Moran's I, cluster numbers and the
+  t-map figures produced under `permute=True` before this change were computed on a map
+  whose cells were not at their layout positions and should be recomputed. Runs with
+  `permute=False` were unaffected. The 2D layout and the model are byte-identical as
+  stated above; the trainer's 2D evaluation is not, by exactly this fix. (2) The cluster
+  outline was drawn displaced from the cells it enclosed.
+* **Still not built:** a 3D `GaussianReadout`. The trainer's 3D runs score the raw arm.
 
 ## References
 

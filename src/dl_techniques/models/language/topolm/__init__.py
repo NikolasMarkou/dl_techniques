@@ -8,8 +8,8 @@ tapped tensor is assigned a distinct cell of an ``h x w`` grid with ``h * w ==
 embed_dim``, and the penalty makes nearby units co-activate across the batch.
 With ``grid_dim=3`` the grid is an ``h x w x d`` box (``h <= w <= d``, ``h * w *
 d == embed_dim``) and a neighbourhood is a cube. The paper is 2D; the 3D layout is
-repo-authored, and the trainer, the post-hoc analysis and the Gaussian readout stay
-2D-only.
+repo-authored. The trainer and the post-hoc analysis take both ranks; the Gaussian
+readout stays 2D-only.
 
 .. code-block:: python
 
