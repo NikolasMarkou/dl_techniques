@@ -23,6 +23,13 @@ The ``alpha = 0`` arm is a genuine control, not the absence of one: its taps are
 still created, still built, and still derive their layouts from the same seeds,
 so it differs from the trained model in its objective alone.
 
+The block's defaults follow the authors' released code: one feed-forward MLP with
+no bias, LayerNorm without a beta, the exact GELU, residual projections scaled by
+``1 / sqrt(2 * depth)``, and the taps on the branch outputs (``tap_placement=
+'branch'``; ``'residual'`` taps the post-add tensor). ``use_bias``, ``norm_center``,
+``activation``, ``tap_placement``, ``ffn_type`` and ``normalization_type`` are
+serialized constructor options of ``TopoLM`` and ``from_variant``.
+
 Training goes through the shared CLM head, which must be told to fold the
 backbone's own ``add_loss`` contribution into the scalar it backpropagates:
 

@@ -21,9 +21,11 @@ blocks, and the reuse order is unchanged: the factories first, a bespoke layer
 last.
 
 The feed-forward is ONE layer, ``ffn``: for the default ``ffn_type='mlp'`` it is
-``Linear(H -> I)``, the activation, ``Linear(I -> H)``, exactly GPT-2's MLP. Its
-type, its arguments, its bias, the normalization type of both norms and their
-arguments are constructor options, serialized by :meth:`TopoLMBlock.get_config`.
+``Linear(H -> I)``, the activation, ``Linear(I -> H)``, the released TopoLM's MLP
+(GPT-2's, without the biases unless ``use_bias=True``). Its type, its arguments,
+its bias, the activation, the normalization type of both norms, their centre flag
+(LayerNorm ``beta``) and arguments, and where the taps sit (``tap_placement``) are
+constructor options, serialized by :meth:`TopoLMBlock.get_config`.
 
 .. code-block:: text
 

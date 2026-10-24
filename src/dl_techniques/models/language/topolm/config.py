@@ -38,7 +38,17 @@ DEFAULT_ALPHA = 2.5
 #: Neighbourhoods sampled per step. The paper averages over five.
 DEFAULT_NUM_NEIGHBORHOODS = 5
 
-#: Radius the paper trains with: an 11x11 patch of 121 units.
+#: Neighbourhood radius, and which source it follows. The paper TEXT describes an
+#: L-inf radius of 5: an 11 x 11 patch of 121 units, which is this repository's
+#: default (``radius=5``, ``distance='linf'``). The authors' RELEASED code differs
+#: in two ways: it selects neighbours with a strict ``distance < 5`` on the
+#: integer grid, a 9 x 9 patch of 81 units (``positions.py``: ``distances[center] <
+#: radius``, centres from ``init_pos.py``), which is ``radius=4`` here (inclusive);
+#: and it weights the prior with an L2 distance (``positions.py``), where the paper
+#: says L-inf (``distance='l2'`` here; on 9 x 9 and 11 x 11 patches the two priors
+#: correlate 0.98). ``radius=4, distance='l2'`` reproduces the released code's
+#: geometry; the default keeps the paper's literal text. Neither is fitted to a
+#: result.
 DEFAULT_RADIUS = 5
 
 

@@ -279,10 +279,15 @@ add cannot reach it: no flag, no hook, no `activity_regularizer`.
   `TransformerLayer` uses (`build_transformer_ffn_config` into
   `create_ffn_from_config`) rather than reimplementing them, so the reuse order
   (factories first, a bespoke layer last) is unchanged. The feed-forward is ONE
-  layer, `ffn` (for `ffn_type='mlp'`, GPT-2's `Linear`, activation, `Linear`);
-  `ffn_type`, `ffn_args`, `use_bias`, `normalization_type` and the two norm-args
-  dicts are serialized constructor knobs, also on `TopoLM` and `from_variant`. The
-  attention call still passes a **positional string literal** for its type on
+  layer, `ffn` (for `ffn_type='mlp'`, `Linear`, activation, `Linear`);
+  `ffn_type`, `ffn_args`, `use_bias`, `normalization_type`, `norm_center`,
+  `tap_placement` and the two norm-args dicts are serialized constructor knobs, also
+  on `TopoLM` and `from_variant`. The defaults are the released code's: no
+  feed-forward bias (`use_bias=False`), LayerNorm without a beta
+  (`norm_center=False`), the exact GELU, residual projections at
+  `initializer_range / sqrt(2 * depth)` (`num_layers`, set by the model), taps on
+  the branch outputs (`tap_placement='branch'`; `'residual'` taps the post-add
+  tensor). The attention call still passes a **positional string literal** for its type on
   purpose: the repo's dropped-param sweep resolves a literal type statically and
   cannot resolve a variable one, and its ceiling is explicitly not to be raised to
   absorb a new site. The feed-forward goes through `create_ffn_from_config`, which

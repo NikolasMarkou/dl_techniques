@@ -29,7 +29,22 @@ computes the loss "prior to normalization and addition into the residual stream"
 and :class:`~dl_techniques.models.topolm.components.TopoLMBlock` holds those
 tensors as named locals for exactly that reason. A tap's forward pass is the
 identity, so the residual arithmetic is unchanged and any difference in the loss
-curve is attributable to the added term alone.
+curve is attributable to the added term alone. ``tap_placement='residual'`` taps
+the post-add tensor instead, which is what the authors' released training config
+does (``with_resid: True``) while their evaluation scripts and the paper text tap
+the branch; the default is the paper's.
+
+Defaults that follow the released code
+--------------------------------------
+No feed-forward bias and no LayerNorm beta (``use_bias=False``,
+``norm_center=False``; the attention never has a bias), the exact (erf) GELU
+(``activation='gelu'``; ``'gelu_tanh'`` is one argument away), and the two
+residual-path output projections initialised at ``initializer_range / sqrt(2 *
+depth)`` (the model hands its depth to every block). The geometry of the
+neighbourhood is the one place the paper text and the released code differ; see
+:mod:`~dl_techniques.models.topolm.config` for both readings and which this
+repository defaults to. A GPT-2-with-biases model is ``use_bias=True,
+norm_center=True`` away.
 
 What is and is not here
 -----------------------
