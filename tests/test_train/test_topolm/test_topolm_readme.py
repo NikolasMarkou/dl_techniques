@@ -266,16 +266,18 @@ def test_the_facts_file_pins_every_image_by_hash_size_and_pixels():
     assert _pin_failures(_TRAINER_README.parent / "figures", _shipped()) == []
 
 
-def test_a_figure_no_run_wrote_is_omitted_in_the_facts_and_absent_in_the_guide():
-    """No cluster figure was written by either example run: the facts say so, no
-    file is shipped and the guide shows none."""
+def test_every_cluster_figure_a_run_wrote_is_shipped_and_shown():
+    """Both example runs found a condition-A cluster and so wrote ``clusters_raw.png``:
+    the facts list both, the files are shipped and the guide shows them. (A run that
+    finds none writes no such figure; the facts would then carry an ``omitted`` entry
+    with a reason and no file, and this test would say so.)"""
     files = _facts()["files"]
-    omitted = sorted(name for name, entry in files.items() if entry.get("omitted"))
-    assert omitted == ["clusters_2d.png", "clusters_3d.png"]
-    for name in omitted:
-        assert files[name]["reason"]
-        assert not (_TRAINER_README.parent / "figures" / name).exists()
-        assert name not in _readme_text()
+    assert [name for name, entry in files.items() if entry.get("omitted")] == []
+    for name, run in (("clusters_2d.png", "2d"), ("clusters_3d.png", "3d")):
+        assert files[name]["run"] == run
+        assert (_TRAINER_README.parent / "figures" / name).is_file()
+        assert f"figures/{name}" in _guide_text()
+        assert files[name]["facts"]["total_clusters_a"]["value"] > 0, "a cluster figure needs a cluster of a"
 
 
 #: What each caption must print, as ``str.format`` templates over the ``fmt``
@@ -294,11 +296,12 @@ _CAPTION_QUOTES = {
     ),
     "t_maps_2d_trained.png": (
         "Mean Moran's I {mean_morans_i} (per tap {morans_i_min_over_taps} to {morans_i_max_over_taps})",
-        "{mean_significant_units_per_tap} significant units per tap ({significant_units_max_over_taps} of {units_per_tap} in every tap)",
+        "{mean_significant_units_per_tap} significant units per tap ({significant_units_min_over_taps} to "
+        "{significant_units_max_over_taps} of {units_per_tap}, depending on the tap)",
         "{total_clusters_a} clusters for `a` and {total_clusters_b} for `b` over the {num_taps} taps",
         "t values run from {t_min_over_taps} to {t_max_over_taps}",
         "+/-{colour_limit}",
-        "none is significant",
+        "The unhatched cells inside the outlines are the significant ones",
         "({width} x {height})",
     ),
     "t_maps_3d_trained.png": (
@@ -311,10 +314,26 @@ _CAPTION_QUOTES = {
         "colour scale +/-{colour_limit}",
         "({width} x {height})",
     ),
+    "clusters_2d.png": (
+        "Left, the 2D run: `{cluster_title}`, of {cluster_sizes} units ({width} x {height})",
+    ),
+    "clusters_3d.png": (
+        "Right, the 3D run: `{cluster_title}`, of {cluster_sizes} unit",
+        "({width} x {height})",
+    ),
+    "t_maps_2d_alpha0_control.png": (
+        "Mean Moran's I {mean_morans_i} (per tap {morans_i_min_over_taps} to {morans_i_max_over_taps})",
+        "{mean_significant_units_per_tap} significant units per tap ({significant_units_min_over_taps} to "
+        "{significant_units_max_over_taps} of {units_per_tap}, depending on the tap)",
+        "{total_clusters_a} clusters for `a` and {total_clusters_b} for `b` over the {num_taps} taps",
+        "t values run from {t_min_over_taps} to {t_max_over_taps}",
+        "+/-{colour_limit}",
+        "({width} x {height})",
+    ),
     "t_maps_2d_illustration.png": (
         "SYNTHETIC illustration, made-up numbers, not a run",
         "{grid_shape} maps",
-        "|t| is above {threshold_abs_t}",
+        "one BH-FDR correction across the {panels_word} panels",
         "{width} x {height}",
     ),
     "morans_i_by_depth_2d.png": (
@@ -338,8 +357,14 @@ def _quote_context(name: str, facts_all: dict = None) -> dict:
     }
     context["width"], context["height"] = entry["width"], entry["height"]
     context["colour_limit"] = facts["colour_limit"]["fmt"] if "colour_limit" in facts else ""
-    if "per_tap" in facts:
+    if "per_tap" in facts and name != "t_maps_2d_illustration.png":
         context["per_tap_morans_i"] = ", ".join(v["morans_i"]["fmt"] for v in facts["per_tap"].values())
+    if "cluster_figure_tap" in facts:
+        tap = facts["cluster_figure_tap"]
+        context["cluster_title"] = tap["title_as_drawn"]
+        context["cluster_sizes"] = " and ".join(str(n) for n in tap["cluster_sizes_a"]["value"])
+    if name == "t_maps_2d_illustration.png":
+        context["panels_word"] = {4: "four"}[facts["panels"]["value"]]
     return context
 
 
@@ -364,17 +389,29 @@ def test_every_shipped_figure_has_a_caption_row_in_the_quote_table():
     assert sorted(_CAPTION_QUOTES) == sorted(_shipped())
 
 
-def test_the_trained_2d_example_has_no_significant_unit_and_the_guide_says_so():
-    """The central fact of the 2D example: smooth and not significant."""
-    facts = _facts()["files"]["t_maps_2d_trained.png"]["facts"]
-    assert facts["significant_units_min_over_taps"]["value"] == 0
-    assert facts["significant_units_max_over_taps"]["value"] == 0
-    assert facts["total_clusters_a"]["value"] == 0 and facts["total_clusters_b"]["value"] == 0
-    assert facts["mean_morans_i"]["value"] > 0.7
+def test_the_trained_examples_have_islands_and_the_guide_says_so():
+    """The central fact of both examples: a smooth map in which part is significant,
+    in outlined islands, and part is not."""
+    facts_all = _facts()["files"]
+    for name, units in (("t_maps_2d_trained.png", 256), ("t_maps_3d_trained.png", 343)):
+        facts = facts_all[name]["facts"]
+        assert facts["units_per_tap"]["value"] == units
+        mean = facts["mean_significant_units_per_tap"]["value"]
+        assert 0 < mean < units / 2, "part of the map is significant and part is not"
+        assert facts["total_clusters_a"]["value"] > 0 and facts["total_clusters_b"]["value"] > 0
+        assert facts["mean_morans_i"]["value"] > 0.5
+    untrained = facts_all["t_maps_2d_untrained.png"]["facts"]
+    assert untrained["significant_units_max_over_taps"]["value"] == 0
     section = _squash(_guide_text()).split("#### Reading a t-map")[1].split("#### Hatching and outlines")[0]
-    assert "The map is smooth, and it is not significant" in section
-    assert "it covers every cell, so nothing in this 2D example is significant" in section
-    assert "smooth" in section and "not significant" in section
+    assert "The map is smooth, and part of it is significant" in section
+    assert "Look at the unhatched islands of the trained map" in section
+    # The 2D hatch pixel check recorded with the facts: as many cells with a stroke as rejected cells.
+    trained = facts_all["t_maps_2d_trained.png"]["facts"]
+    rejected = sum(
+        trained["units_per_tap"]["value"] - v["significant_units"]["value"] for v in trained["per_tap"].values()
+    )
+    total = trained["units_per_tap"]["value"] * trained["num_taps"]["value"]
+    assert f"{rejected} of {total} cells with a stroke in the trained figure" in _squash(_guide_text())
 
 
 def test_the_synthetic_illustration_is_synthetic_in_the_facts_and_the_guide():
@@ -385,7 +422,7 @@ def test_the_synthetic_illustration_is_synthetic_in_the_facts_and_the_guide():
     # No run image of the guide is of the synthetic kind, and every other one has a run.
     for name, other in _shipped().items():
         if name != "t_maps_2d_illustration.png":
-            assert other.get("kind") != "synthetic" and other["run"] in ("2d", "3d"), name
+            assert other.get("kind") != "synthetic" and other["run"] in ("2d", "3d", "2d_alpha0"), name
 
 
 def _illustration_failures(guide: str, facts_all: dict):
@@ -410,12 +447,15 @@ def _illustration_failures(guide: str, facts_all: dict):
 
 
 def test_the_illustration_panels_are_what_the_caption_says():
-    per_panel = _facts()["files"]["t_maps_2d_illustration.png"]["facts"]["per_panel"]
+    entry = _facts()["files"]["t_maps_2d_illustration.png"]
+    per_panel = entry["facts"]["per_panel"]
     assert len(per_panel) == 4
     for stats in per_panel.values():
-        assert stats["clusters_a"] == 2 and stats["clusters_b"] == 1
+        assert stats["clusters_a"] >= 1 and stats["clusters_b"] >= 1
+        assert all(size >= entry["facts"]["min_cluster_size"]["value"] for size in stats["cluster_sizes_a"] + stats["cluster_sizes_b"])
     first = per_panel["synthetic/tap_1"]["significant_units"]
     assert f"the first has {first} significant units" in _caption("t_maps_2d_illustration.png")
+    assert "scored by the same chain as a real run" in _caption("t_maps_2d_illustration.png")
 
 
 # --- the prose beside the figures --------------------------------------------
@@ -425,9 +465,23 @@ def _run_series(run: dict, key: str) -> dict:
     return {int(k): v for k, v in run[key].items()}
 
 
+#: The framings of the controls' table, in the order the guide prints them, with the
+#: wording of their row.
+_FRAMING_ROWS = (
+    ("context", "the shipped context (60 tokens), then the end-of-text id (the one used here)"),
+    ("context:physics_31", "another context of 31 tokens (physics)"),
+    ("context:sport_59", "another context of 59 tokens (sport)"),
+    ("context:history_123", "another context of 123 tokens (history)"),
+    ("eot", "the end-of-text id only"),
+    ("none", "nothing before the sentence"),
+)
+
+
 def _prose_phrases(facts: dict):
     """Every phrase the guide's prose must print, built from the facts: ``(in_guide,
-    in_readme)``."""
+    in_readme)``. The assertions inside are the claims the sentences make about the
+    data (an ordering, a maximum, an equality), so a sentence cannot outlive the
+    numbers that made it true."""
     curve = facts["files"]["live_curve_2d.png"]["facts"]
     run2d, run3d = facts["runs"]["2d"], facts["runs"]["3d"]
     trained = facts["files"]["t_maps_2d_trained.png"]["facts"]
@@ -437,14 +491,16 @@ def _prose_phrases(facts: dict):
     sig = {int(k): v for k, v in curve["significant_units_mean_series"].items()}
     ca = {int(k): v for k, v in curve["clusters_a_series"].items()}
     cb = {int(k): v for k, v in curve["clusters_b_series"].items()}
-    assert set(ca.values()) == {0} and set(cb.values()) == {0}, "the curve text says 0 and 0 at every step"
-    assert [s for s, v in sig.items() if v] == [200], "the curve text says 0.25 at step 200 only"
     later = [moran[s] for s in moran if s >= 100]
     last = [moran[s] for s in moran if s >= 250]
     points = list(curve["validation_loss_points_drawn"]["value"].values())
     units = trained["units_per_tap"]["value"]
-    comparisons = units * trained["num_taps"]["value"]
+    taps = trained["num_taps"]["value"]
+    comparisons = units * taps
+    sig_total = round(trained["mean_significant_units_per_tap"]["value"] * taps)
+    rejected = comparisons - sig_total
     need = scipy.stats.t.isf(0.05 / comparisons / 2, 8)
+    relaxed = scipy.stats.t.isf(0.05 * sig_total / comparisons / 2, 8)
     counts = run2d["stimuli_framing"]["a"]["text_token_counts"]
     for condition in "abcd":
         assert run2d["stimuli_framing"][condition]["text_token_counts"] == counts
@@ -452,105 +508,224 @@ def _prose_phrases(facts: dict):
     mean_tokens = sum(counts) / len(counts)
     framing2, framing3 = run2d["controls"]["framings"], run3d["controls"]["framings"]
 
-    def prefix_row(label, key):
-        def cell(framing):
-            row = framing[key]
-            return f"{row['mean_significant_units_per_tap']:.1f} ({row['clusters_a']} / {row['clusters_b']})"
-        return f"| {label} | {cell(framing2)} | {cell(framing3)} |"
+    def cell(framing, key):
+        row = framing[key]
+        return f"{_g(row['mean_significant_units_per_tap'])} ({row['clusters_a']} / {row['clusters_b']})"
 
-    moran_by_prefix = {
+    framing_rows = [
+        f"| {label} | {cell(framing2, key)} | {cell(framing3, key)} |" for key, label in _FRAMING_ROWS
+    ]
+    contexts = [key for key, _ in _FRAMING_ROWS if key.startswith("context")]
+    span = lambda framing: [framing[key]["mean_significant_units_per_tap"] for key in contexts]
+    moran_framings = {
         "2D": [row["mean_morans_i"] for row in framing2.values()],
         "3D": [row["mean_morans_i"] for row in framing3.values()],
     }
-    sig3 = [row["mean_significant_units_per_tap"] for row in framing3.values()]
+    sig_framings = {
+        "2D": [row["mean_significant_units_per_tap"] for row in framing2.values()],
+        "3D": [row["mean_significant_units_per_tap"] for row in framing3.values()],
+    }
     shuffle2, shuffle3 = (run["controls"]["label_shuffle_null"] for run in (run2d, run3d))
-    length2, length3 = (run["controls"]["length_control_all"] for run in (run2d, run3d))
+    length2, length3 = (run["controls"]["length_control"] for run in (run2d, run3d))
+    for shuffle in (shuffle2, shuffle3):
+        top = shuffle["top"]
+        assert top[0]["mean_significant_units_per_tap"] == top[1]["mean_significant_units_per_tap"] == shuffle["real"]["mean_significant_units_per_tap"]
+        assert top[2]["mean_significant_units_per_tap"] < top[1]["mean_significant_units_per_tap"]
+        assert shuffle["n_strictly_above"] == 0 and shuffle["n_at_or_above"] == 2
+    best2, best3 = (shuffle["top"][2]["mean_significant_units_per_tap"] for shuffle in (shuffle2, shuffle3))
+    real2, real3 = (shuffle["real"]["mean_significant_units_per_tap"] for shuffle in (shuffle2, shuffle3))
     five = [
-        length[key]["sig_max"]
-        for length in (length2, length3)
-        for key in ("b_vocab_5v5", "a_vocab_5v5")
+        length[key]["max"] for length in (length2, length3) for key in ("b_vocab_5v5", "a_vocab_5v5")
+    ]
+    three_v_seven = [
+        length[key] for length in (length2, length3) for key in ("b_vocab_3v7", "a_vocab_3v7")
     ]
     per_tap3 = three["per_tap"]
+    sig3 = {name: v["significant_units"]["value"] for name, v in per_tap3.items()}
+    most3, fewest3 = max(sig3, key=sig3.get), min(sig3, key=sig3.get)
+    moran3 = {name: v["morans_i"]["value"] for name, v in per_tap3.items()}
+    assert min(moran3, key=moran3.get) == fewest3
+    assert per_tap3[fewest3]["clusters_a"]["value"] == per_tap3[fewest3]["clusters_b"]["value"] == 0
+    per_tap2 = trained["per_tap"]
+    moran2 = {name: v["morans_i"]["value"] for name, v in per_tap2.items()}
+    low2, high2 = min(moran2, key=moran2.get), max(moran2, key=moran2.get)
+
+    def attention_against_feed_forward(per_tap):
+        pairs = []
+        for block in range(4):
+            attention = per_tap[f"block_{block}/attention_tap"]["morans_i"]
+            feed_forward = per_tap[f"block_{block}/mlp_tap"]["morans_i"]
+            assert attention["value"] > feed_forward["value"], "the sentence says attention is smoother in every block"
+            pairs.append(f"{attention['fmt']} against {feed_forward['fmt']}")
+        return ", ".join(pairs)
+
+    def percent(count, whole):
+        return round(100 * count / whole)
+
+    islands = {}
+    for label, facts_of in (("2D", trained), ("3D", three)):
+        assert facts_of["taps_with_islands_morans_i_defined"]["value"] == facts_of["num_taps"]["value"]
+        islands[label] = (
+            f"{facts_of['taps_with_islands_morans_i_defined']['fmt']} of the {facts_of['num_taps']['fmt']} {label} taps, between "
+            f"{facts_of['morans_i_islands_min_over_taps']['fmt']} and {facts_of['morans_i_islands_max_over_taps']['fmt']}"
+        )
+    contexts2, contexts3 = span(framing2), span(framing3)
     in_guide = [
+        # the short version
+        f"{trained['mean_significant_units_per_tap']['fmt']} of the {units} units per tap pass the significance test "
+        f"({trained['significant_units_min_over_taps']['fmt']} to {trained['significant_units_max_over_taps']['fmt']} depending on the tap)",
+        f"{trained['total_clusters_a']['fmt']} clusters that prefer the sentences and {trained['total_clusters_b']['fmt']} that prefer the word lists",
+        f"in the 3D run {three['mean_significant_units_per_tap']['fmt']} of {three['units_per_tap']['fmt']} units per tap pass, in "
+        f"{three['total_clusters_a']['fmt']} and {three['total_clusters_b']['fmt']} clusters",
+        f"every one except the real one and its mirror gives at most {_g(best2)} significant units per tap in 2D and {_g(best3)} in 3D",
+        f"3D drops to {_g(framing3['eot']['mean_significant_units_per_tap'])} or {_g(framing3['none']['mean_significant_units_per_tap'])} significant units per tap",
+        f"(validation loss {points[-1]:.2f} after 400 steps against about 7.8 before)",
         # the framing and the matching
         f"{', '.join(str(c) for c in counts[:-1])} and {counts[-1]} for i = 0 to 4 (mean {mean_tokens:.1f} in every condition)",
-        prefix_row("CLS marker", "cls_prefix"),
-        prefix_row("end-of-text id (the one used here)", "eot_prefix_shipped"),
-        prefix_row("none", "no_prefix"),
-        f"at most 0.03 across the three prefixes (2D {min(moran_by_prefix['2D']):.3f} to {max(moran_by_prefix['2D']):.3f}, "
-        f"3D {min(moran_by_prefix['3D']):.3f} to {max(moran_by_prefix['3D']):.3f})",
-        f"factor of about {max(sig3) / min(sig3):.1f} with the framing ({min(sig3):.1f} to {max(sig3):.1f})",
+        *framing_rows,
+        f"between {min(contexts2):.0f} and {max(contexts2):.0f} significant units per tap in 2D and between "
+        f"{min(contexts3):.0f} and {max(contexts3):.0f} in 3D",
+        f"the end-of-text id alone ({_g(framing2['eot']['mean_significant_units_per_tap'])}) is close to the lowest passage "
+        f"({_g(min(contexts2))}) and only the bare sentence at the start of the window loses nearly everything "
+        f"({_g(framing2['none']['mean_significant_units_per_tap'])})",
+        f"2D {min(moran_framings['2D']):.3f} to {max(moran_framings['2D']):.3f}, 3D {min(moran_framings['3D']):.3f} to {max(moran_framings['3D']):.3f}",
+        f"{_g(real3)} here and {three['mean_significant_units_per_tap']['fmt']} in the figure caption",
         # reading the 2D map
-        f"the largest t of the run, {trained['t_max_over_taps']['fmt']}",
+        f"of the {comparisons} units ({taps} taps of {units}), {sig_total} are significant "
+        f"({trained['mean_significant_units_per_tap']['fmt']} per tap) and {rejected} are not",
+        f"{rejected} of {comparisons} cells with a stroke in the trained figure",
         f"over {comparisons} comparisons",
         f"need a |t| of about {need:.1f} to pass",
+        f"(about {relaxed:.1f} when {sig_total} of the {comparisons} pass)",
         f"Step 0 is drawn on +/-{untrained['colour_limit']['fmt']} and step 400 on +/-{trained['colour_limit']['fmt']}",
-        f"(at step 400 the largest |t| is {trained['t_max_over_taps']['fmt']} on a scale of +/-{trained['colour_limit']['fmt']})",
+        f"(at step 400 the largest |t| is "
+        f"{max(abs(trained['t_min_over_taps']['value']), abs(trained['t_max_over_taps']['value'])):.2f} "
+        f"on a scale of +/-{trained['colour_limit']['fmt']})",
         f"(the mean Moran's I went from {untrained['mean_morans_i']['fmt']} to {trained['mean_morans_i']['fmt']})",
         # the 3D map
         f"{three['mean_significant_units_per_tap']['fmt']} of {three['units_per_tap']['fmt']} units per tap are significant on average",
+        f"(about {percent(three['mean_significant_units_per_tap']['value'], three['units_per_tap']['value'])} per cent)",
         f"{three['significant_units_min_over_taps']['fmt']} to {three['significant_units_max_over_taps']['fmt']} depending on the tap",
-        f"{per_tap3['block_2/mlp_tap']['significant_units']['fmt']} of them are in `block_2/mlp_tap`",
-        "one cluster of `b` of 12 units",
+        f"the most are in `{most3}` ({sig3[most3]}), the fewest in `{fewest3}` ({sig3[fewest3]}, which also has the "
+        f"lowest Moran's I, {per_tap3[fewest3]['morans_i']['fmt']}, and no cluster at all)",
         # Moran's I
-        f"the lowest tap is `block_0/mlp_tap` ({trained['per_tap']['block_0/mlp_tap']['morans_i']['fmt']}) and the highest "
-        f"`block_3/mlp_tap` ({trained['per_tap']['block_3/mlp_tap']['morans_i']['fmt']})",
-        f"(2D median {shuffle2['moran_mean']['median']:.3f}, the real labelling {trained['mean_morans_i']['fmt']}; "
-        f"3D median {shuffle3['moran_mean']['median']:.3f}, the real labelling {three['mean_morans_i']['fmt']})",
-        f"defined in {three['taps_with_islands_morans_i_defined']['fmt']} of the {three['num_taps']['fmt']} 3D taps, between "
-        f"{three['morans_i_islands_min_over_taps']['fmt']} and {three['morans_i_islands_max_over_taps']['fmt']}",
+        f"the lowest tap is `{low2}` ({per_tap2[low2]['morans_i']['fmt']}) and the highest `{high2}` ({per_tap2[high2]['morans_i']['fmt']})",
+        f"in every one of the four blocks the attention tap is smoother than the feed-forward tap of the same block "
+        f"({attention_against_feed_forward(per_tap2)})",
+        f"and in the 3D run too ({attention_against_feed_forward(per_tap3)})",
+        f"(2D median {shuffle2['morans_i']['median']:.3f}, the real labelling {trained['mean_morans_i']['fmt']}; "
+        f"3D median {shuffle3['morans_i']['median']:.3f}, the real labelling {three['mean_morans_i']['fmt']})",
+        f"defined in all {islands['2D']}, and in all {islands['3D']}",
         # the label-shuffle table
-        f"| significant units per tap, real labelling | {_g(shuffle2['observed_sig'])} | {three['mean_significant_units_per_tap']['fmt']} |",
-        f"| shuffled: median, 95th percentile, maximum | {_g(shuffle2['sig_per_tap']['median'])}, {_g(shuffle2['sig_per_tap']['p95'])}, "
-        f"{_g(shuffle2['sig_per_tap']['max'])} | {_g(shuffle3['sig_per_tap']['median'])}, {_g(shuffle3['sig_per_tap']['p95'])}, "
-        f"{_g(shuffle3['sig_per_tap']['max'])} |",
-        f"| labellings with at least as many as the real one (itself included) | {shuffle2['n_splits_sig_ge_observed']} | "
-        f"{shuffle3['n_splits_sig_ge_observed']} |",
-        f"| clusters, real labelling | {shuffle2['observed_clusters']} | {shuffle3['observed_clusters']} |",
-        f"| labellings with at least one cluster (the real one and its mirror included) | "
-        f"{round(shuffle2['n_splits'] * (1 - shuffle2['clusters_total']['fraction_zero']))} | "
-        f"{round(shuffle3['n_splits'] * (1 - shuffle3['clusters_total']['fraction_zero']))} |",
+        f"| significant units per tap, real labelling | {_g(real2)} | {_g(real3)} |",
+        f"| shuffled: median, 95th percentile | {_g(shuffle2['sig']['median'])}, {_g(shuffle2['sig']['p95'])} | "
+        f"{_g(shuffle3['sig']['median'])}, {_g(shuffle3['sig']['p95'])} |",
+        f"| the best other labelling (not the real one or its mirror) | {_g(best2)} | {_g(best3)} |",
+        f"| labellings with at least as many as the real one (itself and its mirror included) | {shuffle2['n_at_or_above']} | "
+        f"{shuffle3['n_at_or_above']} |",
+        f"| labellings with at least one cluster (the real one and its mirror included) | {shuffle2['n_splits_with_a_cluster']} | "
+        f"{shuffle3['n_splits_with_a_cluster']} |",
         f"| Moran's I, real labelling | {trained['mean_morans_i']['fmt']} | {three['mean_morans_i']['fmt']} |",
-        f"| shuffled: median (5th to 95th percentile) | {shuffle2['moran_mean']['median']:.3f} ({shuffle2['moran_mean']['p5']:.3f} to "
-        f"{shuffle2['moran_mean']['p95']:.3f}) | {shuffle3['moran_mean']['median']:.3f} ({shuffle3['moran_mean']['p5']:.3f} to "
-        f"{shuffle3['moran_mean']['p95']:.3f}) |",
-        f"{shuffle3['n_splits_sig_ge_observed']} of {shuffle3['n_splits']} is about {shuffle3['n_splits_sig_ge_observed'] / shuffle3['n_splits']:.3f}",
-        f"a strictly larger count ({_g(shuffle3['sig_per_tap']['max'])})",
+        f"| shuffled: median (minimum to maximum) | {shuffle2['morans_i']['median']:.3f} ({shuffle2['morans_i']['min']:.3f} to "
+        f"{shuffle2['morans_i']['max']:.3f}) | {shuffle3['morans_i']['median']:.3f} ({shuffle3['morans_i']['min']:.3f} to "
+        f"{shuffle3['morans_i']['max']:.3f}) |",
+        f"is {shuffle2['n_at_or_above']} of {shuffle2['n_splits']}, about {shuffle2['n_at_or_above'] / shuffle2['n_splits']:.3f}",
+        f"(rank {shuffle2['morans_i']['real_rank_from_top']} and {shuffle3['morans_i']['real_rank_from_top']} from the top out of {shuffle2['n_splits']})",
         f"all {shuffle2['n_splits']} ways to choose 5 of 10",
         # the length-control table
-        f"| 3 words against 7 words, `b` vocabulary | {length2['b_vocab_3v7']['sig_median']:.1f} | {length3['b_vocab_3v7']['sig_median']:.1f} |",
-        f"| 3 words against 7 words, `a` vocabulary | {length2['a_vocab_3v7']['sig_median']:.1f} | {length3['a_vocab_3v7']['sig_median']:.1f} |",
-        f"| 5 words against 5 words, either vocabulary | {max(length2['b_vocab_5v5']['sig_median'], length2['a_vocab_5v5']['sig_median']):.1f} | "
-        f"{max(length3['b_vocab_5v5']['sig_median'], length3['a_vocab_5v5']['sig_median']):.1f} |",
-        f"(at most {max(five):.1f} in any of the {run2d['controls']['length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap']['draws']} draws)",
-        f"{three['mean_significant_units_per_tap']['fmt']} significant units per tap, against {length3['b_vocab_3v7']['sig_median']:.1f} for lists four words apart",
+        f"| 3 words against 7 words, `b` vocabulary | {length2['b_vocab_3v7']['median']:.1f} ({length2['b_vocab_3v7']['max']:.1f}) | "
+        f"{length3['b_vocab_3v7']['median']:.1f} ({length3['b_vocab_3v7']['max']:.1f}) |",
+        f"| 3 words against 7 words, `a` vocabulary | {length2['a_vocab_3v7']['median']:.1f} ({length2['a_vocab_3v7']['max']:.1f}) | "
+        f"{length3['a_vocab_3v7']['median']:.1f} ({length3['a_vocab_3v7']['max']:.1f}) |",
+        f"| 5 words against 5 words, either vocabulary | {max(length2['b_vocab_5v5']['median'], length2['a_vocab_5v5']['median']):.1f} "
+        f"({max(length2['b_vocab_5v5']['max'], length2['a_vocab_5v5']['max']):.1f}) | "
+        f"{max(length3['b_vocab_5v5']['median'], length3['a_vocab_5v5']['median']):.1f} "
+        f"({max(length3['b_vocab_5v5']['max'], length3['a_vocab_5v5']['max']):.1f}) |",
+        f"(at most {max(five):.1f} in any of the {length2['b_vocab_3v7']['draws']} draws)",
+        f"a median of at most {max(row['median'] for row in three_v_seven):.1f} and a single draw as large as "
+        f"{max(row['max'] for row in three_v_seven):.1f}",
+        f"{percent(length2['a_vocab_3v7']['max'], real2)} to {percent(length2['b_vocab_3v7']['max'], real2)} per cent of the real count in 2D "
+        f"({length2['a_vocab_3v7']['max']:.1f} and {length2['b_vocab_3v7']['max']:.1f} of {_g(real2)}) and "
+        f"{percent(length3['b_vocab_3v7']['max'], real3)} to {percent(length3['a_vocab_3v7']['max'], real3)} per cent in 3D "
+        f"({length3['b_vocab_3v7']['max']:.1f} and {length3['a_vocab_3v7']['max']:.1f} of {_g(real3)})",
         # the live curve, panel by panel
         f"from {curve['mean_morans_i_first_step']['fmt']} at step 0 to {moran[50]:.3f} at step 50",
         f"peaks at {curve['mean_morans_i_peak']['fmt']} at step {curve['mean_morans_i_peak_step']['fmt']}",
         f"between {min(later):.3f} and {max(later):.3f} from step 100 on",
         f"({min(last):.3f} to {max(last):.3f} from step 250 on)",
         f"the taps end between {trained['morans_i_min_over_taps']['fmt']} and {trained['morans_i_max_over_taps']['fmt']}",
-        "0 and 0 at every step",
-        f"0.0 at every step except {sig[200]:.2f} at step 200",
+        f"none at steps 0 and 50, then {ca[100]} and {cb[100]} at step 100, and {ca[400]} and {cb[400]} at step 400",
+        f"{sig[0]} at steps 0 and 50, {sig[100]} at step 100, {sig[150]} at step 150, then {sig[200]}, {sig[250]}, {sig[300]}, "
+        f"{sig[350]} and {sig[400]} at step 400",
+        f"it was flat from step 200 to 250 ({sig[200]} and {sig[250]})",
         ", ".join(f"{v:.3f}" for v in points),
-        # the scale of the 3D run's claim in the summary
+        # the conclusions' scale
         f"Moran's I rises from about 0 to {trained['mean_morans_i']['fmt']} (2D) and {three['mean_morans_i']['fmt']} (3D)",
+        f"{trained['mean_significant_units_per_tap']['fmt']} of 256 units per tap in 2D and {three['mean_significant_units_per_tap']['fmt']} of 343 in 3D",
+        f"from {min(sig_framings['3D']):.1f} to {max(sig_framings['3D']):.1f} with the framing; in 2D from "
+        f"{min(sig_framings['2D']):.1f} to {max(sig_framings['2D']):.1f}",
     ]
+    # The run without the penalty (alpha = 0), the fourth control.
+    run2c, run3c = facts["runs"]["2d_alpha0"], facts["runs"]["3d_alpha0"]
+    assert run2c["config"]["spatial_alpha"] == run3c["config"]["spatial_alpha"] == 0.0
+    assert run2d["config"]["spatial_alpha"] == run3d["config"]["spatial_alpha"] == 2.5
+    for with_penalty, without in ((run2d, run2c), (run3d, run3c)):
+        assert without["config"]["seed"] == with_penalty["config"]["seed"]
+        assert without["last_live_row_mean_morans_i"] < 0.1 < 0.5 < with_penalty["last_live_row_mean_morans_i"], "smoothness is the penalty's"
+    sig_mean = lambda run: run["significant_units_total"] / 8
+    assert sig_mean(run2c) > sig_mean(run2d) and sig_mean(run3c) > 0.9 * sig_mean(run3d), "the count is not the penalty's"
+    morans_end = lambda run: run["last_live_row_mean_morans_i"]
+    clusters_end = lambda run: run["clusters_ab_series"]["400"]
+    val_end = lambda run: run["training"]["final_val_loss"]
+    share = lambda run: run["share_of_significant_units_in_clusters"]
+    cells2, cells3 = trained["units_per_tap"]["value"], three["units_per_tap"]["value"]
+    columns = (run2d, run2c, run3d, run3c)
+    assert share(run2d) > share(run2c) and share(run3d) > share(run3c)
+    assert val_end(run2c) < val_end(run2d) and val_end(run3c) < val_end(run3d)
+    in_guide += [
+        f"significant units, {_g(sig_mean(run2c))} per tap in 2D and {_g(sig_mean(run3c))} in 3D",
+        f"(Moran's I {morans_end(run2c):.3f} and {morans_end(run3c):.3f} against {morans_end(run2d):.3f} and {morans_end(run3d):.3f})",
+        "| mean Moran's I | " + " | ".join(f"{morans_end(run):.3f}" for run in columns) + " |",
+        "| significant units per tap | " + " | ".join(_g(sig_mean(run)) for run in columns) + " |",
+        "| clusters of `a` / `b` | " + " | ".join(f"{clusters_end(run)[0]} / {clusters_end(run)[1]}" for run in columns) + " |",
+        "| share of the significant units that sit in a cluster | " + " | ".join(f"{share(run):.3f}" for run in columns) + " |",
+        "| validation loss | " + " | ".join(f"{val_end(run):.3f}" for run in columns) + " |",
+        f"({_g(sig_mean(run2c))} against {_g(sig_mean(run2d))}, {percent(sig_mean(run2c), cells2)} per cent of the cells)",
+        f"({_g(sig_mean(run3c))} against {_g(sig_mean(run3d))})",
+        f"when {percent(sig_mean(run2c), cells2)} per cent (2D) or {percent(sig_mean(run3c), cells3)} per cent (3D) of the cells are significant",
+        f"({clusters_end(run3d)[0]} and {clusters_end(run3d)[1]} against {clusters_end(run3c)[0]} and {clusters_end(run3c)[1]})",
+        f"({share(run2d) * 100:.1f} per cent of the significant units in the 2D map with the penalty, {share(run2c) * 100:.1f} per cent without; "
+        f"{share(run3d) * 100:.1f} and {share(run3c) * 100:.1f} per cent in 3D)",
+        f"the validation loss after 400 steps is {val_end(run2d):.3f} with it and {val_end(run2c):.3f} without in 2D, "
+        f"{val_end(run3d):.3f} and {val_end(run3c):.3f} in 3D "
+        f"({val_end(run2d) - val_end(run2c):.3f} and {val_end(run3d) - val_end(run3c):.3f} nats",
+        f"the run without it has {run2c['mean_significant_units_series']['50']} significant units per tap and "
+        f"{run2c['clusters_ab_series']['50'][0]} and {run2c['clusters_ab_series']['50'][1]} clusters at step 50",
+        f"has as many significant units ({_g(sig_mean(run2c))} per tap in 2D, {_g(sig_mean(run3c))} in 3D)",
+        f"(Moran's I {morans_end(run2d):.3f} against {morans_end(run2c):.3f}, {morans_end(run3d):.3f} against {morans_end(run3c):.3f})",
+    ]
+    assert sig[0] == sig[50] == 0 and sig[100] > 0 and sig[200] > sig[250], "the curve text describes this shape"
+    assert ca[0] == ca[50] == cb[0] == cb[50] == 0 and ca[100] > 0 and cb[100] > 0
     # Outside the guide: the sections on watching a run and on training a 3D variant.
     s3 = _run_series(run3d, "mean_morans_i_series")
     s3sig = _run_series(run3d, "mean_significant_units_series")
     w0, h0 = (facts["files"]["t_maps_2d_untrained.png"][k] for k in ("width", "height"))
     w4, h4 = (facts["files"]["t_maps_2d_trained.png"][k] for k in ("width", "height"))
-    assert (w0, h0) == (w4, h4), "the frame-size sentence says the two 2D frames have one size"
+    from_200 = [v for step, v in s3sig.items() if step >= 200]
+    val3 = run3d["val_loss_points_in_metrics_jsonl"]
     in_readme = [
         f"on +/-{untrained['colour_limit']['fmt']} at step 0 and +/-{trained['colour_limit']['fmt']} at step 400",
-        f"stayed at {w0}x{h0} at step 0 and at step 400",
+        f"went from {w0}x{h0} at step 0 to {w4}x{h4} at step 400",
         # the 3D training bullet
         f"from {s3[0]:.4f} at step 0 to {s3[50]:.3f} at step 50 and {s3[400]:.3f} at step 400",
-        f"{s3sig[250]:.1f} up to step 250, then {s3sig[300]:.3f} at steps 300 and 350 and {s3sig[400]:.1f} at step 400",
-        f"{three['total_clusters_a']['fmt']} clusters for `a` and {three['total_clusters_b']['fmt']} for `b` at step 400",
-        f"{length3['b_vocab_3v7']['sig_median']:.1f} significant units per tap on this checkpoint",
-        # the lag of the last full row behind the final history value (tiny: from the facts)
+        f"{s3sig[50]:.1f} at step 50 and {s3sig[100]:.3f} at step 100, then {s3sig[150]:.1f} at step 150 and between "
+        f"{min(from_200):.1f} and {max(from_200):.1f} from step 200 on",
+        f"({three['total_clusters_a']['fmt']} clusters for `a` and {three['total_clusters_b']['fmt']} for `b` at step 400)",
+        f"words give a median of {length3['b_vocab_3v7']['median']:.1f} significant units per tap on this checkpoint",
+        f"are the only two of {shuffle3['n_splits']} that give more than {_g(best3)} significant units per tap",
+        # the lag of the last full row behind the final history value
+        f"in the 400-step `tiny3d` example run (validation every 100 steps, a draw every 50) the step-400 row held "
+        f"{val3['300']:.4f} (the validation of step 300) and the final history value was {run3d['training']['final_val_loss']:.4f}",
         f"in the matching `tiny` run {points_raw(curve, 300):.4f} and {points_raw(curve, 400):.4f}",
         # the cost of a draw
         f"median {run2d['seconds_per_draw_median']['fmt']} s ({run2d['seconds_per_draw_min']['fmt']} to {run2d['seconds_per_draw_max']['fmt']}; "
@@ -581,24 +756,34 @@ def test_the_prose_beside_the_figures_quotes_the_facts_too():
 
 
 def test_the_controls_say_what_the_numbers_mean():
-    """The words of the two controls hold in the data: the real 2D value is the null's
-    median, the real 3D value is in the top 4 of 252 and two splits beat it that are
-    not the real labelling, and Moran's I of the real labelling lies inside the
-    shuffled range in both dimensions."""
+    """The words of the controls hold in the data: the real labelling and its mirror
+    are the top two of the 252 and every other labelling gives far less, Moran's I of
+    the real labelling lies inside the shuffled range in both dimensions, a pure length
+    difference gives a median far below the real count in both, the equal-length
+    calibration gives nothing, and the framing table shows the dependence on the passage
+    in 3D."""
     runs = _facts()["runs"]
-    shuffle2 = runs["2d"]["controls"]["label_shuffle_null"]
-    shuffle3 = runs["3d"]["controls"]["label_shuffle_null"]
-    assert shuffle2["observed_sig"] == shuffle2["sig_per_tap"]["median"] == 0.0
-    assert shuffle2["n_splits_sig_ge_observed"] == shuffle2["n_splits"] == 252
-    assert shuffle3["n_splits_sig_ge_observed"] == 4 and shuffle3["n_splits_sig_gt_observed"] == 2
-    assert shuffle3["sig_per_tap"]["max"] > shuffle3["observed_sig"]
-    for run, shuffle in (("2d", shuffle2), ("3d", shuffle3)):
+    for run in ("2d", "3d"):
+        controls = runs[run]["controls"]
+        shuffle = controls["label_shuffle_null"]
+        real = shuffle["real"]["mean_significant_units_per_tap"]
+        assert shuffle["n_splits"] == 252 and shuffle["n_at_or_above"] == 2 and shuffle["n_strictly_above"] == 0
+        assert shuffle["sig"]["median"] == 0.0 and shuffle["sig"]["p95"] == 0.0
+        others = [entry["mean_significant_units_per_tap"] for entry in shuffle["top"][2:]]
+        assert max(others) < real / 4, run
+        moran = shuffle["morans_i"]
+        assert moran["min"] <= moran["real"] <= moran["max"], run
         observed = runs[run]["last_live_row_mean_morans_i"]
-        assert shuffle["moran_mean"]["p5"] <= observed <= shuffle["moran_mean"]["p95"], run
-    assert runs["3d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"] > (
-        4 * runs["2d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"]
-    )
-    assert runs["2d"]["controls"]["length_control_all"]["b_vocab_3v7"]["sig_median"] > 0
+        assert abs(observed - moran["real"]) < 1e-4, "the live run and the CPU rescoring agree on Moran's I"
+        length = controls["length_control"]
+        for key in ("b_vocab_3v7", "a_vocab_3v7"):
+            assert length[key]["median"] < real / 10, (run, key)
+            assert length[key]["max"] < real / 2, (run, key)
+        for key in ("b_vocab_5v5", "a_vocab_5v5"):
+            assert length[key]["median"] == 0.0 and length[key]["max"] < 3, (run, key)
+    framing3 = runs["3d"]["controls"]["framings"]
+    contexts = [row["mean_significant_units_per_tap"] for key, row in framing3.items() if key.startswith("context")]
+    assert min(contexts) > 10 * max(framing3["eot"]["mean_significant_units_per_tap"], framing3["none"]["mean_significant_units_per_tap"])
 
 
 def test_a_crosshair_index_the_guide_prints_exists_on_the_grid_it_describes():
@@ -642,9 +827,15 @@ _RETRACTED_SENTENCES = (
     "read the plateau at the end",
     "Two taps barely show any island",
     "largest value over the 8 taps is 0.172",
-    "figures/clusters_2d.png",                 # no run wrote a cluster figure
-    "figures/clusters_3d.png",
     "ticks stop at 6",                         # the colour bar of the earlier trained map
+    # True of the example runs on the previous model, false of the corrected one's:
+    "it covers every cell, so nothing in this 2D example is significant",
+    "The map is smooth, and it is not significant",
+    "Every cell is hatched: none is significant",
+    "Neither example run wrote one",
+    "no unit passes the\nsignificance test",
+    "a smooth map whose units show no detected difference between these\n  stimuli. The curve cannot",
+    "the prefix is a choice",                  # the framing is a passage now, not a prefix
 )
 
 
@@ -658,16 +849,17 @@ def test_no_retracted_sentence_is_back(readme):
 #: What the guide must now say, each a sentence the review asked for.
 _REQUIRED_SENTENCES = (
     "averaged over the text tokens of the sentence",                 # the pooling (D-020)
-    "The prefix is a choice",                                        # the framing (D-024)
+    "The framing is a choice, and it moves the result",              # the framing (D-027)
     "matched in length, in tokens",                                  # the stimuli (D-025)
     "learned **absolute** position embeddings",
     "not free of length and position effects",
-    "The map is smooth, and it is not significant",                  # the 2D example
+    "The map is smooth, and part of it is significant",              # the 2D example
+    "Look at the unhatched islands of the trained map",
     "a hatched cell did not pass",                                   # literally true since D-021
     "only tell clusters apart",                                      # the cluster colours
     "do not encode the condition",
-    "Neither example run wrote one",                                 # the cluster figure
-    "not a growth curve",                                            # the significant-units line
+    "Both example runs wrote one this time",                         # the cluster figure
+    "can fall as well as rise",                                      # the significant-units line
     "never as \"the map separates a from b\"",                       # what Moran's I is
     "label-shuffle null",
     "length control",
@@ -675,6 +867,13 @@ _REQUIRED_SENTENCES = (
     "A real selectivity claim needs a larger stimulus set",
     "A second correction: earlier t-maps were averaged over the padding",
     "A third correction: the stimuli framing and their lengths changed what the t-maps show",
+    "But it is not made by the topographic penalty",                # the alpha = 0 control
+    "The penalty is **not** what makes units respond differently to sentences and to word lists",
+    "They do not show that the topographic penalty made that selectivity",
+    "A cluster count is therefore a weak diagnostic here",
+    "A fourth correction: the sentence is placed after a fixed passage",
+    "A fifth correction: the model was not the model the paper describes",
+    "No ablation separates the five differences, so which one mattered is not known",
 )
 
 
@@ -683,10 +882,12 @@ def test_the_guide_says_what_the_review_asked_it_to_say():
     assert [s for s in _REQUIRED_SENTENCES if _squash(s) not in guide] == []
 
 
-#: Phrases that are false for the 2D example but true of an EARLIER run, so they may
-#: stand only inside a unit (bullet, table, paragraph) that carries an older-run label.
+#: Phrases that are false for the examples shown but true of an EARLIER run (the
+#: previous model), so they may stand only inside a unit (bullet, table, paragraph)
+#: that carries an older-run label.
 _ONLY_WITH_A_LABEL = (
-    "islands of significance",
+    "almost no selectivity",
+    "no selectivity at this scale",
 )
 
 #: Numbers of the EARLIER example runs (the padded average, the CLS framing, the
@@ -709,6 +910,11 @@ _OLDER_RUN_NUMBERS = {
     "5.25": "length-matched smoke set on the earlier 3D checkpoint",
     "0.786": "Moran's I of the previous 2D example",
     "0.711": "Moran's I of the previous 3D example",
+    "0.785": "Moran's I of the example run on the previous model, 2D (fifth correction)",
+    "0.670": "the same, 3D",
+    "42.4": "length-control median, 3 against 7 words, `b` vocabulary, previous model, 2D",
+    "55.6": "the same, `a` vocabulary, 2D",
+    "214.4": "the same, `b` vocabulary, previous model, 3D",
 }
 #: Whole words only (step 9.1): ``old`` used to match inside ``hold``, ``holds`` and
 #: ``threshold`` and let an unlabelled number through.
@@ -768,7 +974,7 @@ def test_numbers_of_the_earlier_runs_are_kept_only_with_their_label():
     assert _unlabelled_older_numbers(_readme_text()) == []
 
 
-def test_islands_of_significance_is_not_said_of_the_current_example():
+def test_no_selectivity_is_not_said_of_the_current_examples():
     assert _unlabelled_mentions(_readme_text()) == []
 
 
@@ -855,37 +1061,44 @@ class TestTheReadmeGuardsCanFail:
         guide = _guide_text()
         assert _caption_failures("t_maps_2d_trained.png", guide) == []
         trained = _caption("t_maps_2d_trained.png", guide)
-        assert "Mean Moran's I 0.785" in trained
-        mutated = guide.replace("Mean Moran's I 0.785", "Mean Moran's I 0.795", 1)
+        assert "Mean Moran's I 0.771" in trained
+        mutated = guide.replace("Mean Moran's I 0.771", "Mean Moran's I 0.781", 1)
         failures = _caption_failures("t_maps_2d_trained.png", mutated)
-        assert any("0.785" in failure for failure in failures), failures
+        assert any("0.771" in failure for failure in failures), failures
 
     def test_a_changed_prose_number_is_named(self):
         guide, readme = _squash(_guide_text()), _squash(_readme_text())
         assert _prose_failures(guide, readme, _facts()) == []
-        mutated = guide.replace("| 3 words against 7 words, `b` vocabulary | 42.4 |", "| 3 words against 7 words, `b` vocabulary | 4.2 |")
+        mutated = guide.replace("| 3 words against 7 words, `b` vocabulary | 2.5 (28.9) |", "| 3 words against 7 words, `b` vocabulary | 0.5 (28.9) |")
         assert mutated != guide
         failures = _prose_failures(mutated, readme, _facts())
-        assert any("42.4" in failure for failure in failures), failures
+        assert any("2.5 (28.9)" in failure for failure in failures), failures
+        # and a changed number in the control table of the run without the penalty
+        mutated = guide.replace("| mean Moran's I | 0.771 | -0.019 |", "| mean Moran's I | 0.771 | 0.019 |")
+        assert mutated != guide
+        assert any("-0.019" in failure for failure in _prose_failures(mutated, readme, _facts()))
 
-    def test_a_reinserted_retracted_claim_about_the_2d_example_is_flagged(self):
+    def test_a_reinserted_retracted_claim_about_the_examples_is_flagged(self):
         text = _readme_text()
         assert _unlabelled_mentions(text) == []
-        anchor = "**Look at the hatching of the trained map"
+        anchor = "**Look at the unhatched islands of the trained map"
         assert anchor in text
         mutated = text.replace(
             anchor,
-            "The trained 2D map is islands of significance in a mostly hatched field.\n\n" + anchor,
+            "The trained 2D map shows no selectivity at this scale.\n\n" + anchor,
             1,
         )
-        assert _unlabelled_mentions(mutated) == ["islands of significance"]
+        assert _unlabelled_mentions(mutated) == ["no selectivity at this scale"]
         # ... and the same words inside an earlier-run sentence are allowed.
         labelled = text.replace(
             anchor,
-            "The earlier example read the 2D map as islands of significance.\n\n" + anchor,
+            "The earlier example read the 2D map as showing no selectivity at this scale.\n\n" + anchor,
             1,
         )
         assert _unlabelled_mentions(labelled) == []
+        # ... and a retracted sentence about the examples is caught as a whole.
+        squashed = _squash(text + "\nEvery cell is hatched: none is significant.\n")
+        assert [r for r in _RETRACTED_SENTENCES if _squash(r) in squashed] == ["Every cell is hatched: none is significant"]
 
     def test_a_reinserted_retracted_sentence_is_flagged(self):
         squashed = _squash(_readme_text() + "\nIn 2D the artefact is nearly gone.\n")

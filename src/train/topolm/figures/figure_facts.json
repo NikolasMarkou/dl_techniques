@@ -1,19 +1,30 @@
 {
  "generated_from": {
-  "head_sha": "b56aa634164dacadea31dc8e0c370043f8874bdf",
-  "last_commit_touching_topolm_trainer_or_metrics": "b56aa634164dacadea31dc8e0c370043f8874bdf",
+  "head_sha": "20325a0e4665d08d71d649c9830af3d9d4b73890",
+  "last_commit_touching_topolm_trainer_or_metrics": "f31a535890c626e356e0b985cdc0aa21160b2175",
   "topolm_and_metrics_tracked_files_clean": true,
   "seed": 42,
-  "run_dir_2d": "results/topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632",
-  "run_dir_3d": "results/topolm_viz_final3_3d_20261024_142432/topolm_tiny3d_topo_alpha2.5_20261024_142925"
+  "run_dir_2d": "results/topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324",
+  "run_dir_3d": "results/topolm_step12_3d_20261024_170258/topolm_tiny3d_topo_alpha2.5_20261024_200546",
+  "run_dir_2d_alpha0": "results/topolm_step12_2d_alpha0_20261024_170258/topolm_tiny_control_alpha0_20261024_203910",
+  "run_dir_3d_alpha0": "results/topolm_step12_3d_alpha0_20261024_170258/topolm_tiny3d_control_alpha0_20261024_204112",
+  "run_dirs": {
+   "2d": "/media/arxwn/data_fast/repositories/dl_techniques/results/topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324",
+   "3d": "/media/arxwn/data_fast/repositories/dl_techniques/results/topolm_step12_3d_20261024_170258/topolm_tiny3d_topo_alpha2.5_20261024_200546"
+  },
+  "n_draws": 12,
+  "controls_seed": 0,
+  "controls_module": "train.topolm.controls",
+  "note_tracked_clean": "recorded when the runs were made, from git status of src/train/topolm and src/dl_techniques/metrics; afterwards only comments, docstrings, the README and the figures of src/train/topolm were edited",
+  "runs": "2d and 3d: the penalty on (alpha 2.5); 2d_alpha0 and 3d_alpha0: the same command with --alpha 0"
  },
  "files": {
   "t_maps_2d_untrained.png": {
-   "sha256": "91deb473069bdef0375cfa3010459050b3d1336d88f1a30f460a357170fab01a",
-   "bytes": 231360,
+   "sha256": "80e8f3ff2784d76e8702c354e5beab087df5c366c40558851593bc9911db37bc",
+   "bytes": 231231,
    "width": 2356,
    "height": 856,
-   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000000/t_maps_raw.png",
+   "source": "topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324/topography_live/step_0000000/t_maps_raw.png",
    "step": 0,
    "run": "2d",
    "facts": {
@@ -37,16 +48,16 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": -0.007519833553020923,
-     "fmt": "-0.008"
+     "value": -0.011047995174024468,
+     "fmt": "-0.011"
     },
     "morans_i_min_over_taps": {
-     "value": -0.05890014713060055,
-     "fmt": "-0.059"
+     "value": -0.04465325388474677,
+     "fmt": "-0.045"
     },
     "morans_i_max_over_taps": {
-     "value": 0.051017335587902966,
-     "fmt": "0.051"
+     "value": 0.028774999017985196,
+     "fmt": "0.029"
     },
     "morans_i_islands_max_over_taps": {
      "value": null,
@@ -81,18 +92,18 @@
      "fmt": "0"
     },
     "t_min_over_taps": {
-     "value": -5.853750655631269,
-     "fmt": "-5.85"
+     "value": -5.166245707632049,
+     "fmt": "-5.17"
     },
     "t_max_over_taps": {
-     "value": 5.009737390802144,
-     "fmt": "5.01"
+     "value": 5.914980996186142,
+     "fmt": "5.91"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": -0.05317598713532186,
-       "fmt": "-0.053"
+       "value": -0.0361630716133373,
+       "fmt": "-0.036"
       },
       "significant_units": {
        "value": 0,
@@ -109,8 +120,8 @@
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.04400411335462033,
-       "fmt": "0.044"
+       "value": -0.011935607370191474,
+       "fmt": "-0.012"
       },
       "significant_units": {
        "value": 0,
@@ -127,8 +138,8 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.032666928189960254,
-       "fmt": "0.033"
+       "value": 0.028774999017985196,
+       "fmt": "0.029"
       },
       "significant_units": {
        "value": 0,
@@ -145,8 +156,8 @@
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": -0.043891539951957055,
-       "fmt": "-0.044"
+       "value": -0.025197786824045554,
+       "fmt": "-0.025"
       },
       "significant_units": {
        "value": 0,
@@ -163,8 +174,8 @@
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": -0.05890014713060055,
-       "fmt": "-0.059"
+       "value": -0.04465325388474677,
+       "fmt": "-0.045"
       },
       "significant_units": {
        "value": 0,
@@ -181,8 +192,8 @@
      },
      "block_2/mlp_tap": {
       "morans_i": {
-       "value": -0.04854368570694132,
-       "fmt": "-0.049"
+       "value": 0.018127404381739844,
+       "fmt": "0.018"
       },
       "significant_units": {
        "value": 0,
@@ -199,8 +210,8 @@
      },
      "block_3/attention_tap": {
       "morans_i": {
-       "value": 0.051017335587902966,
-       "fmt": "0.051"
+       "value": -0.025001284140428747,
+       "fmt": "-0.025"
       },
       "significant_units": {
        "value": 0,
@@ -217,8 +228,8 @@
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.016664314368169852,
-       "fmt": "0.017"
+       "value": 0.007664639040829075,
+       "fmt": "0.008"
       },
       "significant_units": {
        "value": 0,
@@ -235,16 +246,16 @@
      }
     },
     "colour_limit": {
-     "value": 3.2901975875710137,
-     "fmt": "3.3",
+     "value": 3.6802103624171063,
+     "fmt": "3.7",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 3.2901975875710137,
-      "max_abs_t": 5.853754695768778,
-      "recomputed_mean_morans_i": -0.00751981495828935,
-      "run_step0_mean_morans_i": -0.007519833553020923,
-      "max_abs_diff_t_min": 5.790252816773034e-06,
-      "max_abs_diff_t_max": 1.9029270266202047e-06,
+      "limit_pooled_p99_abs_t": 3.6802103624171063,
+      "max_abs_t": 5.925381388310697,
+      "recomputed_mean_morans_i": -0.011051976288612392,
+      "run_step0_mean_morans_i": -0.011047995174024468,
+      "max_abs_diff_t_min": 0.005674211901383064,
+      "max_abs_diff_t_max": 0.010400392124554791,
       "significant_units_all_zero": true
      },
      "printed_tick_range": {
@@ -261,13 +272,13 @@
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 3.3100000000000023,
-      "relative_difference": 0.006018608883488889,
-      "mismatch_px": 0.30233059991366773,
+      "nearest_candidate_limit": 3.700000000000003,
+      "relative_difference": 0.005377311521371567,
+      "mismatch_px": 0.22200772200780453,
       "all_candidates": [
        {
-        "limit": 3.3100000000000023,
-        "mismatch_px": 0.30233059991366773,
+        "limit": 3.700000000000003,
+        "mismatch_px": 0.22200772200780453,
         "ticks": [
          -3.0,
          -2.0,
@@ -279,8 +290,8 @@
         ]
        },
        {
-        "limit": 1.650000000000001,
-        "mismatch_px": 0.35281385281382427,
+        "limit": 1.8500000000000012,
+        "mismatch_px": 0.2220077220077883,
         "ticks": [
          -1.5,
          -1.0,
@@ -292,8 +303,8 @@
         ]
        },
        {
-        "limit": 0.6600000000000001,
-        "mismatch_px": 0.35281385281386485,
+        "limit": 0.7400000000000002,
+        "mismatch_px": 0.22200772200775581,
         "ticks": [
          -0.6000000000000001,
          -0.4,
@@ -303,6 +314,19 @@
          0.40000000000000013,
          0.6000000000000001
         ]
+       },
+       {
+        "limit": 0.9200000000000004,
+        "mismatch_px": 0.43788819875773505,
+        "ticks": [
+         -0.75,
+         -0.5,
+         -0.25,
+         0.0,
+         0.25,
+         0.5,
+         0.75
+        ]
        }
       ]
      }
@@ -310,11 +334,11 @@
    }
   },
   "t_maps_2d_trained.png": {
-   "sha256": "c87d309de781dc6f710f013a22e671c33b427c36840c1f8659b4ad3fe0e00d39",
-   "bytes": 247209,
+   "sha256": "1aaf1c9a02ee9a6273c1f3d5681a9a0e20260f482f613522fd8fdf90e06e218e",
+   "bytes": 243662,
    "width": 2356,
-   "height": 856,
-   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000400/t_maps_raw.png",
+   "height": 875,
+   "source": "topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324/topography_live/step_0000400/t_maps_raw.png",
    "step": 400,
    "run": "2d",
    "facts": {
@@ -338,196 +362,196 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.7852937160723079,
-     "fmt": "0.785"
+     "value": 0.7709789341025671,
+     "fmt": "0.771"
     },
     "morans_i_min_over_taps": {
-     "value": 0.6124232803362263,
-     "fmt": "0.612"
+     "value": 0.7002741109593743,
+     "fmt": "0.700"
     },
     "morans_i_max_over_taps": {
-     "value": 0.877373685236679,
-     "fmt": "0.877"
+     "value": 0.8563622196837564,
+     "fmt": "0.856"
     },
     "morans_i_islands_max_over_taps": {
-     "value": null,
-     "fmt": "n/a"
+     "value": 0.23934163543050602,
+     "fmt": "0.239"
     },
     "morans_i_islands_min_over_taps": {
-     "value": null,
-     "fmt": "n/a"
+     "value": -0.06647284335517874,
+     "fmt": "-0.066"
     },
     "taps_with_islands_morans_i_defined": {
-     "value": 0,
-     "fmt": "0"
+     "value": 8,
+     "fmt": "8"
     },
     "mean_significant_units_per_tap": {
-     "value": 0.0,
-     "fmt": "0.0"
+     "value": 65.0,
+     "fmt": "65.0"
     },
     "significant_units_min_over_taps": {
-     "value": 0,
-     "fmt": "0"
+     "value": 34,
+     "fmt": "34"
     },
     "significant_units_max_over_taps": {
-     "value": 0,
-     "fmt": "0"
+     "value": 119,
+     "fmt": "119"
     },
     "total_clusters_a": {
-     "value": 0,
-     "fmt": "0"
+     "value": 9,
+     "fmt": "9"
     },
     "total_clusters_b": {
-     "value": 0,
-     "fmt": "0"
+     "value": 9,
+     "fmt": "9"
     },
     "t_min_over_taps": {
-     "value": -5.030361648278311,
-     "fmt": "-5.03"
+     "value": -11.642366370982641,
+     "fmt": "-11.64"
     },
     "t_max_over_taps": {
-     "value": 6.828551590644003,
-     "fmt": "6.83"
+     "value": 11.264342025090892,
+     "fmt": "11.26"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.629897202064481,
-       "fmt": "0.630"
+       "value": 0.8325905687436305,
+       "fmt": "0.833"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 117,
+       "fmt": "117"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.6124232803362263,
-       "fmt": "0.612"
+       "value": 0.7424140924871674,
+       "fmt": "0.742"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 63,
+       "fmt": "63"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       }
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.8084755000044597,
-       "fmt": "0.808"
+       "value": 0.7781498913784751,
+       "fmt": "0.778"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 46,
+       "fmt": "46"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.8133122187102703,
-       "fmt": "0.813"
+       "value": 0.7473860203653687,
+       "fmt": "0.747"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 38,
+       "fmt": "38"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.8478975095430508,
-       "fmt": "0.848"
+       "value": 0.8563622196837564,
+       "fmt": "0.856"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 119,
+       "fmt": "119"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       }
      },
      "block_2/mlp_tap": {
       "morans_i": {
-       "value": 0.8350191785848942,
-       "fmt": "0.835"
+       "value": 0.7527602119437242,
+       "fmt": "0.753"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 53,
+       "fmt": "53"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_3/attention_tap": {
       "morans_i": {
-       "value": 0.8579511540984018,
-       "fmt": "0.858"
+       "value": 0.7578943572590408,
+       "fmt": "0.758"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 34,
+       "fmt": "34"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.877373685236679,
-       "fmt": "0.877"
+       "value": 0.7002741109593743,
+       "fmt": "0.700"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 50,
+       "fmt": "50"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       },
       "clusters_b": {
        "value": 0,
@@ -536,86 +560,96 @@
      }
     },
     "colour_limit": {
-     "value": 3.6645873212720663,
-     "fmt": "3.7",
+     "value": 8.048741530990041,
+     "fmt": "8.0",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 3.6645873212720663,
-      "max_abs_t": 6.828560764345906,
-      "recomputed_mean_morans_i": 0.7852936860335448,
-      "run_mean_morans_i": 0.7852937160723079,
-      "mean_morans_abs_diff": 3.0038763143558356e-08,
+      "limit_pooled_p99_abs_t": 8.048741530990041,
+      "max_abs_t": 11.6387389048404,
+      "recomputed_mean_morans_i": 0.7709645590969874,
+      "run_mean_morans_i": 0.7709789341025671,
+      "mean_morans_abs_diff": 1.4375005579769784e-05,
       "significant_units_equal": true,
       "clusters_equal": true
      },
      "printed_tick_range": {
-      "value": 3.0,
-      "fmt": "3",
+      "value": 8.0,
+      "fmt": "8",
       "ticks": [
-       -3.0,
+       -8.0,
+       -6.0,
+       -4.0,
        -2.0,
-       -1.0,
        0.0,
-       1.0,
        2.0,
-       3.0
+       4.0,
+       6.0,
+       8.0
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 3.680000000000003,
-      "relative_difference": 0.004205842944025247,
-      "mismatch_px": 0.24534161490686301,
+      "nearest_candidate_limit": 8.090000000000007,
+      "relative_difference": 0.005126077020998706,
+      "mismatch_px": 0.27777777777777146,
       "all_candidates": [
        {
-        "limit": 3.680000000000003,
-        "mismatch_px": 0.24534161490686301,
+        "limit": 8.090000000000007,
+        "mismatch_px": 0.27777777777777146,
         "ticks": [
+         -8.0,
+         -6.0,
+         -4.0,
+         -2.0,
+         0.0,
+         2.0,
+         4.0,
+         6.0,
+         8.0
+        ]
+       },
+       {
+        "limit": 4.050000000000003,
+        "mismatch_px": 0.2777777777777904,
+        "ticks": [
+         -4.0,
          -3.0,
          -2.0,
          -1.0,
          0.0,
          1.0,
          2.0,
-         3.0
+         3.0,
+         4.0
         ]
        },
        {
-        "limit": 1.8400000000000012,
-        "mismatch_px": 0.24534161490686301,
+        "limit": 10.110000000000008,
+        "mismatch_px": 0.27777777777777146,
         "ticks": [
+         -10.0,
+         -7.5,
+         -5.0,
+         -2.5,
+         0.0,
+         2.5,
+         5.0,
+         7.5,
+         10.0
+        ]
+       },
+       {
+        "limit": 2.0200000000000014,
+        "mismatch_px": 0.2975797579757745,
+        "ticks": [
+         -2.0,
          -1.5,
          -1.0,
          -0.5,
          0.0,
          0.5,
          1.0,
-         1.5
-        ]
-       },
-       {
-        "limit": 0.7400000000000002,
-        "mismatch_px": 0.5077220077220416,
-        "ticks": [
-         -0.6000000000000001,
-         -0.4,
-         -0.19999999999999996,
-         0.0,
-         0.19999999999999996,
-         0.40000000000000013,
-         0.6000000000000001
-        ]
-       },
-       {
-        "limit": 0.9200000000000004,
-        "mismatch_px": 0.24534161490685488,
-        "ticks": [
-         -0.75,
-         -0.5,
-         -0.25,
-         0.0,
-         0.25,
-         0.5,
-         0.75
+         1.5,
+         2.0
         ]
        }
       ]
@@ -624,11 +658,11 @@
    }
   },
   "t_maps_3d_trained.png": {
-   "sha256": "986e0b0eafc6db9531ad59d117d2286c3824533ddd3a43039813b18b09375cdc",
-   "bytes": 370281,
-   "width": 1521,
-   "height": 1284,
-   "source": "topolm_viz_final3_3d_20261024_142432/topolm_tiny3d_topo_alpha2.5_20261024_142925/topography_live/step_0000400/t_maps_raw.png",
+   "sha256": "cff553d0f2cb97a238de4539f99c9b26145da222f4a8e949731c02d31845d211",
+   "bytes": 332334,
+   "width": 1522,
+   "height": 1265,
+   "source": "topolm_step12_3d_20261024_170258/topolm_tiny3d_topo_alpha2.5_20261024_200546/topography_live/step_0000400/t_maps_raw.png",
    "step": 400,
    "run": "3d",
    "facts": {
@@ -653,66 +687,1438 @@
      "fmt": "8"
     },
     "mean_morans_i": {
-     "value": 0.6700588995755474,
-     "fmt": "0.670"
+     "value": 0.5934942438805451,
+     "fmt": "0.593"
     },
     "morans_i_min_over_taps": {
-     "value": 0.4897352661687348,
-     "fmt": "0.490"
+     "value": 0.40410567063225833,
+     "fmt": "0.404"
     },
     "morans_i_max_over_taps": {
-     "value": 0.7594377244644531,
-     "fmt": "0.759"
+     "value": 0.6774494283208156,
+     "fmt": "0.677"
     },
     "morans_i_islands_max_over_taps": {
-     "value": -0.09354109785489333,
-     "fmt": "-0.094"
+     "value": 0.9310898181482984,
+     "fmt": "0.931"
     },
     "morans_i_islands_min_over_taps": {
-     "value": -0.5,
-     "fmt": "-0.500"
+     "value": -0.3292422656467743,
+     "fmt": "-0.329"
     },
     "taps_with_islands_morans_i_defined": {
-     "value": 4,
-     "fmt": "4"
+     "value": 8,
+     "fmt": "8"
     },
     "mean_significant_units_per_tap": {
-     "value": 5.375,
-     "fmt": "5.4"
+     "value": 111.5,
+     "fmt": "111.5"
     },
     "significant_units_min_over_taps": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "significant_units_max_over_taps": {
      "value": 21,
      "fmt": "21"
     },
+    "significant_units_max_over_taps": {
+     "value": 231,
+     "fmt": "231"
+    },
     "total_clusters_a": {
-     "value": 0,
-     "fmt": "0"
+     "value": 7,
+     "fmt": "7"
     },
     "total_clusters_b": {
-     "value": 1,
-     "fmt": "1"
+     "value": 11,
+     "fmt": "11"
     },
     "t_min_over_taps": {
-     "value": -9.966205121932981,
-     "fmt": "-9.97"
+     "value": -10.7649475103779,
+     "fmt": "-10.76"
     },
     "t_max_over_taps": {
-     "value": 8.775841185281449,
-     "fmt": "8.78"
+     "value": 10.71967637963714,
+     "fmt": "10.72"
     },
     "per_tap": {
      "block_0/attention_tap": {
       "morans_i": {
-       "value": 0.4897352661687348,
-       "fmt": "0.490"
+       "value": 0.6600257236593543,
+       "fmt": "0.660"
       },
       "significant_units": {
+       "value": 120,
+       "fmt": "120"
+      },
+      "clusters_a": {
        "value": 1,
        "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.5830549892582096,
+       "fmt": "0.583"
+      },
+      "significant_units": {
+       "value": 110,
+       "fmt": "110"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.6774494283208156,
+       "fmt": "0.677"
+      },
+      "significant_units": {
+       "value": 71,
+       "fmt": "71"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.6061599633517178,
+       "fmt": "0.606"
+      },
+      "significant_units": {
+       "value": 55,
+       "fmt": "55"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.6582820202317831,
+       "fmt": "0.658"
+      },
+      "significant_units": {
+       "value": 203,
+       "fmt": "203"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.40410567063225833,
+       "fmt": "0.404"
+      },
+      "significant_units": {
+       "value": 21,
+       "fmt": "21"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.6044083428918691,
+       "fmt": "0.604"
+      },
+      "significant_units": {
+       "value": 231,
+       "fmt": "231"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.5544678126983521,
+       "fmt": "0.554"
+      },
+      "significant_units": {
+       "value": 81,
+       "fmt": "81"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     }
+    },
+    "colour_limit": {
+     "value": 8.658498270780866,
+     "fmt": "8.7",
+     "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
+     "recomputation_check": {
+      "limit_pooled_p99_abs_t": 8.658498270780866,
+      "max_abs_t": 10.75860481731386,
+      "recomputed_mean_morans_i": 0.5934881863369313,
+      "run_mean_morans_i": 0.5934942438805451,
+      "mean_morans_abs_diff": 6.0575436137133565e-06,
+      "significant_units_equal": false,
+      "clusters_equal": true
+     },
+     "printed_tick_range": {
+      "value": 8.0,
+      "fmt": "8",
+      "ticks": [
+       -8.0,
+       -6.0,
+       -4.0,
+       -2.0,
+       0.0,
+       2.0,
+       4.0,
+       6.0,
+       8.0
+      ]
+     },
+     "pixel_cross_check": {
+      "nearest_candidate_limit": 8.700000000000006,
+      "relative_difference": 0.004793178669237938,
+      "mismatch_px": 0.025542784163418573,
+      "all_candidates": [
+       {
+        "limit": 4.350000000000003,
+        "mismatch_px": 0.025542784163418573,
+        "ticks": [
+         -4.0,
+         -3.0,
+         -2.0,
+         -1.0,
+         0.0,
+         1.0,
+         2.0,
+         3.0,
+         4.0
+        ]
+       },
+       {
+        "limit": 8.700000000000006,
+        "mismatch_px": 0.025542784163418573,
+        "ticks": [
+         -8.0,
+         -6.0,
+         -4.0,
+         -2.0,
+         0.0,
+         2.0,
+         4.0,
+         6.0,
+         8.0
+        ]
+       },
+       {
+        "limit": 0.8700000000000003,
+        "mismatch_px": 0.02554278416345015,
+        "ticks": [
+         -0.8,
+         -0.6,
+         -0.3999999999999999,
+         -0.19999999999999996,
+         0.0,
+         0.20000000000000018,
+         0.40000000000000013,
+         0.6000000000000001,
+         0.8
+        ]
+       },
+       {
+        "limit": 2.1800000000000015,
+        "mismatch_px": 0.1630988786952672,
+        "ticks": [
+         -2.0,
+         -1.5,
+         -1.0,
+         -0.5,
+         0.0,
+         0.5,
+         1.0,
+         1.5,
+         2.0
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "live_curve_2d.png": {
+   "sha256": "d4f6e348fac0924df21f1c1fb44086dfe08ce13e966ab0e815952205abf6b892",
+   "bytes": 202755,
+   "width": 1361,
+   "height": 1432,
+   "source": "topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324/topography_live/topography_curve.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7709789341025671,
+     "fmt": "0.771"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.7002741109593743,
+     "fmt": "0.700"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.8563622196837564,
+     "fmt": "0.856"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.23934163543050602,
+     "fmt": "0.239"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.06647284335517874,
+     "fmt": "-0.066"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 65.0,
+     "fmt": "65.0"
+    },
+    "significant_units_min_over_taps": {
+     "value": 34,
+     "fmt": "34"
+    },
+    "significant_units_max_over_taps": {
+     "value": 119,
+     "fmt": "119"
+    },
+    "total_clusters_a": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "total_clusters_b": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "t_min_over_taps": {
+     "value": -11.642366370982641,
+     "fmt": "-11.64"
+    },
+    "t_max_over_taps": {
+     "value": 11.264342025090892,
+     "fmt": "11.26"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.8325905687436305,
+       "fmt": "0.833"
+      },
+      "significant_units": {
+       "value": 117,
+       "fmt": "117"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.7424140924871674,
+       "fmt": "0.742"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7781498913784751,
+       "fmt": "0.778"
+      },
+      "significant_units": {
+       "value": 46,
+       "fmt": "46"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.7473860203653687,
+       "fmt": "0.747"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8563622196837564,
+       "fmt": "0.856"
+      },
+      "significant_units": {
+       "value": 119,
+       "fmt": "119"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.7527602119437242,
+       "fmt": "0.753"
+      },
+      "significant_units": {
+       "value": 53,
+       "fmt": "53"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.7578943572590408,
+       "fmt": "0.758"
+      },
+      "significant_units": {
+       "value": 34,
+       "fmt": "34"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.7002741109593743,
+       "fmt": "0.700"
+      },
+      "significant_units": {
+       "value": 50,
+       "fmt": "50"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "validation_loss_points_drawn": {
+     "value": {
+      "100": 7.856712818145752,
+      "200": 7.3857879638671875,
+      "300": 7.212465286254883,
+      "400": 7.162363052368164
+     },
+     "fmt": "100: 7.857, 200: 7.386, 300: 7.212, 400: 7.162"
+    },
+    "mean_morans_i_first_step": {
+     "value": -0.011047995174024468,
+     "fmt": "-0.011"
+    },
+    "mean_morans_i_last_step": {
+     "value": 0.7709789341025671,
+     "fmt": "0.771"
+    },
+    "first_step": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "last_step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "mean_morans_i_peak": {
+     "value": 0.8050706367331559,
+     "fmt": "0.805"
+    },
+    "mean_morans_i_peak_step": {
+     "value": 150,
+     "fmt": "150"
+    },
+    "significant_units_mean_series": {
+     "0": 0.0,
+     "50": 0.0,
+     "100": 14.5,
+     "150": 40.75,
+     "200": 46.375,
+     "250": 45.875,
+     "300": 59.0,
+     "350": 61.875,
+     "400": 65.0
+    },
+    "clusters_a_series": {
+     "0": 0,
+     "50": 0,
+     "100": 3,
+     "150": 5,
+     "200": 6,
+     "250": 7,
+     "300": 7,
+     "350": 7,
+     "400": 9
+    },
+    "clusters_b_series": {
+     "0": 0,
+     "50": 0,
+     "100": 2,
+     "150": 6,
+     "200": 5,
+     "250": 6,
+     "300": 8,
+     "350": 9,
+     "400": 9
+    }
+   }
+  },
+  "clusters_2d.png": {
+   "sha256": "6521299b1cf009270a6b78b8fa72b141e922a0eba54c71b0bde9d70f65b5dc5f",
+   "bytes": 10626,
+   "width": 469,
+   "height": 496,
+   "source": "topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324/topography_live/step_0000400/clusters_raw.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7709789341025671,
+     "fmt": "0.771"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.7002741109593743,
+     "fmt": "0.700"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.8563622196837564,
+     "fmt": "0.856"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.23934163543050602,
+     "fmt": "0.239"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.06647284335517874,
+     "fmt": "-0.066"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 65.0,
+     "fmt": "65.0"
+    },
+    "significant_units_min_over_taps": {
+     "value": 34,
+     "fmt": "34"
+    },
+    "significant_units_max_over_taps": {
+     "value": 119,
+     "fmt": "119"
+    },
+    "total_clusters_a": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "total_clusters_b": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "t_min_over_taps": {
+     "value": -11.642366370982641,
+     "fmt": "-11.64"
+    },
+    "t_max_over_taps": {
+     "value": 11.264342025090892,
+     "fmt": "11.26"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.8325905687436305,
+       "fmt": "0.833"
+      },
+      "significant_units": {
+       "value": 117,
+       "fmt": "117"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.7424140924871674,
+       "fmt": "0.742"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7781498913784751,
+       "fmt": "0.778"
+      },
+      "significant_units": {
+       "value": 46,
+       "fmt": "46"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.7473860203653687,
+       "fmt": "0.747"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8563622196837564,
+       "fmt": "0.856"
+      },
+      "significant_units": {
+       "value": 119,
+       "fmt": "119"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.7527602119437242,
+       "fmt": "0.753"
+      },
+      "significant_units": {
+       "value": 53,
+       "fmt": "53"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.7578943572590408,
+       "fmt": "0.758"
+      },
+      "significant_units": {
+       "value": 34,
+       "fmt": "34"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.7002741109593743,
+       "fmt": "0.700"
+      },
+      "significant_units": {
+       "value": 50,
+       "fmt": "50"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "cluster_figure_tap": {
+     "name": {
+      "value": "causal_language_model/topolm/block_3/mlp_tap",
+      "fmt": "block_3/mlp_tap"
+     },
+     "clusters_a": {
+      "value": 2,
+      "fmt": "2"
+     },
+     "clusters_b": {
+      "value": 0,
+      "fmt": "0"
+     },
+     "cluster_sizes_a": {
+      "value": [
+       10,
+       16
+      ],
+      "fmt": "10, 16"
+     },
+     "cluster_sizes_b": {
+      "value": [],
+      "fmt": ""
+     },
+     "morans_i": {
+      "value": 0.7002741109593743,
+      "fmt": "0.700"
+     },
+     "significant_units": {
+      "value": 50,
+      "fmt": "50"
+     },
+     "title_as_drawn": "block_3/mlp_tap (raw), condition a: 2 clusters"
+    }
+   }
+  },
+  "clusters_3d.png": {
+   "sha256": "49e263ecb73b89b7897130b0bc9a5fc9f2152ee13567f648475037d76f7815ce",
+   "bytes": 17334,
+   "width": 1475,
+   "height": 628,
+   "source": "topolm_step12_3d_20261024_170258/topolm_tiny3d_topo_alpha2.5_20261024_200546/topography_live/step_0000400/clusters_raw.png",
+   "step": 400,
+   "run": "3d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      7,
+      7,
+      7
+     ],
+     "fmt": "7x7x7"
+    },
+    "units_per_tap": {
+     "value": 343,
+     "fmt": "343"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.5934942438805451,
+     "fmt": "0.593"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.40410567063225833,
+     "fmt": "0.404"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.6774494283208156,
+     "fmt": "0.677"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.9310898181482984,
+     "fmt": "0.931"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.3292422656467743,
+     "fmt": "-0.329"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 111.5,
+     "fmt": "111.5"
+    },
+    "significant_units_min_over_taps": {
+     "value": 21,
+     "fmt": "21"
+    },
+    "significant_units_max_over_taps": {
+     "value": 231,
+     "fmt": "231"
+    },
+    "total_clusters_a": {
+     "value": 7,
+     "fmt": "7"
+    },
+    "total_clusters_b": {
+     "value": 11,
+     "fmt": "11"
+    },
+    "t_min_over_taps": {
+     "value": -10.7649475103779,
+     "fmt": "-10.76"
+    },
+    "t_max_over_taps": {
+     "value": 10.71967637963714,
+     "fmt": "10.72"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.6600257236593543,
+       "fmt": "0.660"
+      },
+      "significant_units": {
+       "value": 120,
+       "fmt": "120"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.5830549892582096,
+       "fmt": "0.583"
+      },
+      "significant_units": {
+       "value": 110,
+       "fmt": "110"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.6774494283208156,
+       "fmt": "0.677"
+      },
+      "significant_units": {
+       "value": 71,
+       "fmt": "71"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.6061599633517178,
+       "fmt": "0.606"
+      },
+      "significant_units": {
+       "value": 55,
+       "fmt": "55"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.6582820202317831,
+       "fmt": "0.658"
+      },
+      "significant_units": {
+       "value": 203,
+       "fmt": "203"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.40410567063225833,
+       "fmt": "0.404"
+      },
+      "significant_units": {
+       "value": 21,
+       "fmt": "21"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.6044083428918691,
+       "fmt": "0.604"
+      },
+      "significant_units": {
+       "value": 231,
+       "fmt": "231"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.5544678126983521,
+       "fmt": "0.554"
+      },
+      "significant_units": {
+       "value": 81,
+       "fmt": "81"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     }
+    },
+    "cluster_figure_tap": {
+     "name": {
+      "value": "causal_language_model/topolm/block_3/mlp_tap",
+      "fmt": "block_3/mlp_tap"
+     },
+     "clusters_a": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "clusters_b": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "cluster_sizes_a": {
+      "value": [
+       34
+      ],
+      "fmt": "34"
+     },
+     "cluster_sizes_b": {
+      "value": [
+       21
+      ],
+      "fmt": "21"
+     },
+     "morans_i": {
+      "value": 0.5544678126983521,
+      "fmt": "0.554"
+     },
+     "significant_units": {
+      "value": 81,
+      "fmt": "81"
+     },
+     "title_as_drawn": "block_3/mlp_tap (raw), condition a: 1 cluster"
+    }
+   }
+  },
+  "morans_i_by_depth_2d.png": {
+   "sha256": "6f707140772175a402a13a40fa436c117f089cfa145aee4e346af157bb5168b5",
+   "bytes": 54451,
+   "width": 794,
+   "height": 467,
+   "source": "topolm_step12_2d_20261024_170258/topolm_tiny_topo_alpha2.5_20261024_200324/topography_live/step_0000400/morans_i_raw.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7709789341025671,
+     "fmt": "0.771"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.7002741109593743,
+     "fmt": "0.700"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.8563622196837564,
+     "fmt": "0.856"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.23934163543050602,
+     "fmt": "0.239"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.06647284335517874,
+     "fmt": "-0.066"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 65.0,
+     "fmt": "65.0"
+    },
+    "significant_units_min_over_taps": {
+     "value": 34,
+     "fmt": "34"
+    },
+    "significant_units_max_over_taps": {
+     "value": 119,
+     "fmt": "119"
+    },
+    "total_clusters_a": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "total_clusters_b": {
+     "value": 9,
+     "fmt": "9"
+    },
+    "t_min_over_taps": {
+     "value": -11.642366370982641,
+     "fmt": "-11.64"
+    },
+    "t_max_over_taps": {
+     "value": 11.264342025090892,
+     "fmt": "11.26"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.8325905687436305,
+       "fmt": "0.833"
+      },
+      "significant_units": {
+       "value": 117,
+       "fmt": "117"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.7424140924871674,
+       "fmt": "0.742"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7781498913784751,
+       "fmt": "0.778"
+      },
+      "significant_units": {
+       "value": 46,
+       "fmt": "46"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.7473860203653687,
+       "fmt": "0.747"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8563622196837564,
+       "fmt": "0.856"
+      },
+      "significant_units": {
+       "value": 119,
+       "fmt": "119"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.7527602119437242,
+       "fmt": "0.753"
+      },
+      "significant_units": {
+       "value": 53,
+       "fmt": "53"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.7578943572590408,
+       "fmt": "0.758"
+      },
+      "significant_units": {
+       "value": 34,
+       "fmt": "34"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.7002741109593743,
+       "fmt": "0.700"
+      },
+      "significant_units": {
+       "value": 50,
+       "fmt": "50"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    }
+   }
+  },
+  "t_maps_2d_alpha0_control.png": {
+   "sha256": "aeace79f9304536af7a5fc19966bf44008294ddbcae73dfaaf6a762e99ec083f",
+   "bytes": 224941,
+   "width": 2365,
+   "height": 875,
+   "source": "topolm_step12_2d_alpha0_20261024_170258/topolm_tiny_control_alpha0_20261024_203910/topography_live/step_0000400/t_maps_raw.png",
+   "step": 400,
+   "run": "2d_alpha0",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": -0.018811480606054455,
+     "fmt": "-0.019"
+    },
+    "morans_i_min_over_taps": {
+     "value": -0.04604005051381347,
+     "fmt": "-0.046"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.018989320607175845,
+     "fmt": "0.019"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.014966479287060389,
+     "fmt": "0.015"
+    },
+    "morans_i_islands_min_over_taps": {
+     "value": -0.4020323029994052,
+     "fmt": "-0.402"
+    },
+    "taps_with_islands_morans_i_defined": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 120.25,
+     "fmt": "120.2"
+    },
+    "significant_units_min_over_taps": {
+     "value": 52,
+     "fmt": "52"
+    },
+    "significant_units_max_over_taps": {
+     "value": 219,
+     "fmt": "219"
+    },
+    "total_clusters_a": {
+     "value": 6,
+     "fmt": "6"
+    },
+    "total_clusters_b": {
+     "value": 6,
+     "fmt": "6"
+    },
+    "t_min_over_taps": {
+     "value": -18.238748223376987,
+     "fmt": "-18.24"
+    },
+    "t_max_over_taps": {
+     "value": 15.266511251800406,
+     "fmt": "15.27"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.018989320607175845,
+       "fmt": "0.019"
+      },
+      "significant_units": {
+       "value": 52,
+       "fmt": "52"
       },
       "clusters_a": {
        "value": 0,
@@ -725,12 +2131,12 @@
      },
      "block_0/mlp_tap": {
       "morans_i": {
-       "value": 0.7580294793643653,
-       "fmt": "0.758"
+       "value": -0.025429925317298603,
+       "fmt": "-0.025"
       },
       "significant_units": {
-       "value": 5,
-       "fmt": "5"
+       "value": 80,
+       "fmt": "80"
       },
       "clusters_a": {
        "value": 0,
@@ -743,84 +2149,84 @@
      },
      "block_1/attention_tap": {
       "morans_i": {
-       "value": 0.6831484969627599,
-       "fmt": "0.683"
+       "value": -0.04604005051381347,
+       "fmt": "-0.046"
       },
       "significant_units": {
-       "value": 4,
-       "fmt": "4"
+       "value": 197,
+       "fmt": "197"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 3,
+       "fmt": "3"
       }
      },
      "block_1/mlp_tap": {
       "morans_i": {
-       "value": 0.6795858111431399,
-       "fmt": "0.680"
+       "value": -0.031310599803545704,
+       "fmt": "-0.031"
       },
       "significant_units": {
-       "value": 1,
-       "fmt": "1"
+       "value": 119,
+       "fmt": "119"
       },
       "clusters_a": {
        "value": 0,
        "fmt": "0"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 2,
+       "fmt": "2"
       }
      },
      "block_2/attention_tap": {
       "morans_i": {
-       "value": 0.6473948134752309,
-       "fmt": "0.647"
+       "value": 0.008810966967221473,
+       "fmt": "0.009"
       },
       "significant_units": {
-       "value": 1,
-       "fmt": "1"
+       "value": 219,
+       "fmt": "219"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
+       "value": 3,
+       "fmt": "3"
       },
       "clusters_b": {
-       "value": 0,
-       "fmt": "0"
+       "value": 1,
+       "fmt": "1"
       }
      },
      "block_2/mlp_tap": {
       "morans_i": {
-       "value": 0.7147438648265183,
-       "fmt": "0.715"
+       "value": -0.02424783602591788,
+       "fmt": "-0.024"
       },
       "significant_units": {
-       "value": 21,
-       "fmt": "21"
+       "value": 105,
+       "fmt": "105"
       },
       "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
        "value": 1,
        "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
       }
      },
      "block_3/attention_tap": {
       "morans_i": {
-       "value": 0.6283957401991775,
-       "fmt": "0.628"
+       "value": -0.02595464851157256,
+       "fmt": "-0.026"
       },
       "significant_units": {
-       "value": 0,
-       "fmt": "0"
+       "value": 103,
+       "fmt": "103"
       },
       "clusters_a": {
        "value": 0,
@@ -833,12 +2239,12 @@
      },
      "block_3/mlp_tap": {
       "morans_i": {
-       "value": 0.7594377244644531,
-       "fmt": "0.759"
+       "value": -0.025309072250684753,
+       "fmt": "-0.025"
       },
       "significant_units": {
-       "value": 10,
-       "fmt": "10"
+       "value": 87,
+       "fmt": "87"
       },
       "clusters_a": {
        "value": 0,
@@ -851,59 +2257,37 @@
      }
     },
     "colour_limit": {
-     "value": 5.719035625083526,
-     "fmt": "5.7",
+     "value": 11.85497282099214,
+     "fmt": "11.9",
      "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
      "recomputation_check": {
-      "limit_pooled_p99_abs_t": 5.719035625083526,
-      "max_abs_t": 9.966206328839377,
-      "recomputed_mean_morans_i": 0.6700589261663419,
-      "run_mean_morans_i": 0.6700588995755474,
-      "mean_morans_abs_diff": 2.6590794455216837e-08,
+      "limit_pooled_p99_abs_t": 11.85497282099214,
+      "max_abs_t": 18.231567223080404,
+      "recomputed_mean_morans_i": -0.01881080009840573,
+      "run_mean_morans_i": -0.018811480606054455,
+      "mean_morans_abs_diff": 6.805076487245709e-07,
       "significant_units_equal": true,
       "clusters_equal": true
      },
      "printed_tick_range": {
-      "value": 4.0,
-      "fmt": "4",
+      "value": 10.0,
+      "fmt": "10",
       "ticks": [
-       -4.0,
-       -2.0,
+       -10.0,
+       -5.0,
        0.0,
-       2.0,
-       4.0
+       5.0,
+       10.0
       ]
      },
      "pixel_cross_check": {
-      "nearest_candidate_limit": 5.780000000000005,
-      "relative_difference": 0.010659904730981313,
-      "mismatch_px": 0.39999999999997726,
+      "nearest_candidate_limit": 11.93000000000001,
+      "relative_difference": 0.0063287516674029164,
+      "mismatch_px": 0.4999999999999886,
       "all_candidates": [
        {
-        "limit": 5.780000000000005,
-        "mismatch_px": 0.39999999999997726,
-        "ticks": [
-         -4.0,
-         -2.0,
-         0.0,
-         2.0,
-         4.0
-        ]
-       },
-       {
-        "limit": 2.8900000000000023,
-        "mismatch_px": 0.39999999999997726,
-        "ticks": [
-         -2.0,
-         -1.0,
-         0.0,
-         1.0,
-         2.0
-        ]
-       },
-       {
-        "limit": 1.4400000000000008,
-        "mismatch_px": 0.4000000000000227,
+        "limit": 1.1900000000000006,
+        "mismatch_px": 0.5000000000000228,
         "ticks": [
          -1.0,
          -0.5,
@@ -913,14 +2297,36 @@
         ]
        },
        {
-        "limit": 0.5800000000000001,
-        "mismatch_px": 0.4,
+        "limit": 11.93000000000001,
+        "mismatch_px": 0.4999999999999886,
         "ticks": [
-         -0.4000000000000001,
-         -0.20000000000000007,
+         -10.0,
+         -5.0,
          0.0,
-         0.19999999999999996,
-         0.3999999999999999
+         5.0,
+         10.0
+        ]
+       },
+       {
+        "limit": 4.770000000000004,
+        "mismatch_px": 0.5,
+        "ticks": [
+         -4.0,
+         -2.0,
+         0.0,
+         2.0,
+         4.0
+        ]
+       },
+       {
+        "limit": 2.3800000000000017,
+        "mismatch_px": 0.5000000000000113,
+        "ticks": [
+         -2.0,
+         -1.0,
+         0.0,
+         1.0,
+         2.0
         ]
        }
       ]
@@ -928,546 +2334,16 @@
     }
    }
   },
-  "live_curve_2d.png": {
-   "sha256": "139007b622cf86a4fe8233bd19f80b154f0ca971cd13b35d8a49221f09043b68",
-   "bytes": 181214,
-   "width": 1360,
-   "height": 1432,
-   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/topography_curve.png",
-   "step": 400,
-   "run": "2d",
-   "facts": {
-    "step": {
-     "value": 400,
-     "fmt": "400"
-    },
-    "grid_shape": {
-     "value": [
-      16,
-      16
-     ],
-     "fmt": "16x16"
-    },
-    "units_per_tap": {
-     "value": 256,
-     "fmt": "256"
-    },
-    "num_taps": {
-     "value": 8,
-     "fmt": "8"
-    },
-    "mean_morans_i": {
-     "value": 0.7852937160723079,
-     "fmt": "0.785"
-    },
-    "morans_i_min_over_taps": {
-     "value": 0.6124232803362263,
-     "fmt": "0.612"
-    },
-    "morans_i_max_over_taps": {
-     "value": 0.877373685236679,
-     "fmt": "0.877"
-    },
-    "morans_i_islands_max_over_taps": {
-     "value": null,
-     "fmt": "n/a"
-    },
-    "morans_i_islands_min_over_taps": {
-     "value": null,
-     "fmt": "n/a"
-    },
-    "taps_with_islands_morans_i_defined": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "mean_significant_units_per_tap": {
-     "value": 0.0,
-     "fmt": "0.0"
-    },
-    "significant_units_min_over_taps": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "significant_units_max_over_taps": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "total_clusters_a": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "total_clusters_b": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "t_min_over_taps": {
-     "value": -5.030361648278311,
-     "fmt": "-5.03"
-    },
-    "t_max_over_taps": {
-     "value": 6.828551590644003,
-     "fmt": "6.83"
-    },
-    "per_tap": {
-     "block_0/attention_tap": {
-      "morans_i": {
-       "value": 0.629897202064481,
-       "fmt": "0.630"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_0/mlp_tap": {
-      "morans_i": {
-       "value": 0.6124232803362263,
-       "fmt": "0.612"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_1/attention_tap": {
-      "morans_i": {
-       "value": 0.8084755000044597,
-       "fmt": "0.808"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_1/mlp_tap": {
-      "morans_i": {
-       "value": 0.8133122187102703,
-       "fmt": "0.813"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_2/attention_tap": {
-      "morans_i": {
-       "value": 0.8478975095430508,
-       "fmt": "0.848"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8350191785848942,
-       "fmt": "0.835"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8579511540984018,
-       "fmt": "0.858"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_3/mlp_tap": {
-      "morans_i": {
-       "value": 0.877373685236679,
-       "fmt": "0.877"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     }
-    },
-    "validation_loss_points_drawn": {
-     "value": {
-      "100": 7.914369106292725,
-      "200": 7.81265115737915,
-      "300": 7.818082332611084,
-      "400": 7.818432807922363
-     },
-     "fmt": "100: 7.914, 200: 7.813, 300: 7.818, 400: 7.818"
-    },
-    "mean_morans_i_first_step": {
-     "value": -0.007519833553020923,
-     "fmt": "-0.008"
-    },
-    "mean_morans_i_last_step": {
-     "value": 0.7852937160723079,
-     "fmt": "0.785"
-    },
-    "first_step": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "last_step": {
-     "value": 400,
-     "fmt": "400"
-    },
-    "mean_morans_i_peak": {
-     "value": 0.8086429766088608,
-     "fmt": "0.809"
-    },
-    "mean_morans_i_peak_step": {
-     "value": 100,
-     "fmt": "100"
-    },
-    "significant_units_mean_series": {
-     "0": 0.0,
-     "50": 0.0,
-     "100": 0.0,
-     "150": 0.0,
-     "200": 0.25,
-     "250": 0.0,
-     "300": 0.0,
-     "350": 0.0,
-     "400": 0.0
-    },
-    "clusters_a_series": {
-     "0": 0,
-     "50": 0,
-     "100": 0,
-     "150": 0,
-     "200": 0,
-     "250": 0,
-     "300": 0,
-     "350": 0,
-     "400": 0
-    },
-    "clusters_b_series": {
-     "0": 0,
-     "50": 0,
-     "100": 0,
-     "150": 0,
-     "200": 0,
-     "250": 0,
-     "300": 0,
-     "350": 0,
-     "400": 0
-    }
-   }
-  },
-  "clusters_2d.png": {
-   "omitted": true,
-   "reason": "no cluster figure was written by the run: the figure draws condition A clusters only and this run found none of condition A (clusters a = 0, b = 0 at step 400)"
-  },
-  "clusters_3d.png": {
-   "omitted": true,
-   "reason": "no cluster figure was written by the run: the figure draws condition A clusters only and this run found none of condition A (clusters a = 0, b = 1 at step 400)"
-  },
-  "morans_i_by_depth_2d.png": {
-   "sha256": "eab83305d540041319381bc8c83fa68e6c88150500dadd3102976309fe9945e5",
-   "bytes": 53020,
-   "width": 794,
-   "height": 467,
-   "source": "topolm_viz_final3_2d_20261024_142432/topolm_tiny_topo_alpha2.5_20261024_142632/topography_live/step_0000400/morans_i_raw.png",
-   "step": 400,
-   "run": "2d",
-   "facts": {
-    "step": {
-     "value": 400,
-     "fmt": "400"
-    },
-    "grid_shape": {
-     "value": [
-      16,
-      16
-     ],
-     "fmt": "16x16"
-    },
-    "units_per_tap": {
-     "value": 256,
-     "fmt": "256"
-    },
-    "num_taps": {
-     "value": 8,
-     "fmt": "8"
-    },
-    "mean_morans_i": {
-     "value": 0.7852937160723079,
-     "fmt": "0.785"
-    },
-    "morans_i_min_over_taps": {
-     "value": 0.6124232803362263,
-     "fmt": "0.612"
-    },
-    "morans_i_max_over_taps": {
-     "value": 0.877373685236679,
-     "fmt": "0.877"
-    },
-    "morans_i_islands_max_over_taps": {
-     "value": null,
-     "fmt": "n/a"
-    },
-    "morans_i_islands_min_over_taps": {
-     "value": null,
-     "fmt": "n/a"
-    },
-    "taps_with_islands_morans_i_defined": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "mean_significant_units_per_tap": {
-     "value": 0.0,
-     "fmt": "0.0"
-    },
-    "significant_units_min_over_taps": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "significant_units_max_over_taps": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "total_clusters_a": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "total_clusters_b": {
-     "value": 0,
-     "fmt": "0"
-    },
-    "t_min_over_taps": {
-     "value": -5.030361648278311,
-     "fmt": "-5.03"
-    },
-    "t_max_over_taps": {
-     "value": 6.828551590644003,
-     "fmt": "6.83"
-    },
-    "per_tap": {
-     "block_0/attention_tap": {
-      "morans_i": {
-       "value": 0.629897202064481,
-       "fmt": "0.630"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_0/mlp_tap": {
-      "morans_i": {
-       "value": 0.6124232803362263,
-       "fmt": "0.612"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_1/attention_tap": {
-      "morans_i": {
-       "value": 0.8084755000044597,
-       "fmt": "0.808"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_1/mlp_tap": {
-      "morans_i": {
-       "value": 0.8133122187102703,
-       "fmt": "0.813"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_2/attention_tap": {
-      "morans_i": {
-       "value": 0.8478975095430508,
-       "fmt": "0.848"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_2/mlp_tap": {
-      "morans_i": {
-       "value": 0.8350191785848942,
-       "fmt": "0.835"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_3/attention_tap": {
-      "morans_i": {
-       "value": 0.8579511540984018,
-       "fmt": "0.858"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     },
-     "block_3/mlp_tap": {
-      "morans_i": {
-       "value": 0.877373685236679,
-       "fmt": "0.877"
-      },
-      "significant_units": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_a": {
-       "value": 0,
-       "fmt": "0"
-      },
-      "clusters_b": {
-       "value": 0,
-       "fmt": "0"
-      }
-     }
-    }
-   }
-  },
   "t_maps_2d_illustration.png": {
    "kind": "synthetic",
-   "sha256": "31ec07a0f32094cf9173e8a807872013f8117595cfbe7db4dc712230b862c23b",
-   "bytes": 147424,
-   "width": 1604,
+   "sha256": "3cce25d186b140c4577dd22801c7c0c6ca91457ca950810a78a579217c319283",
+   "bytes": 145082,
+   "width": 1617,
    "height": 488,
-   "source": "scratch_step7_5/make_illustration.py (no model, no run)",
+   "source": "python -m train.topolm.controls --illustration (no model, no run)",
    "step": null,
    "run": null,
-   "how_made": "four 16x16 maps built from analytic gaussian blobs (two positive, one negative) plus smoothed noise; significant = |t| > 3.5; label grids from dl_techniques.metrics.topographic_selectivity.grow_clusters (queen connectivity, min size 10, both signs); drawn by train.topolm.plotting.plot_t_maps with the figure's own note parameter and a SYNTHETIC suptitle",
+   "how_made": "four 16x16 made-up response matrices (10 stimuli by 256 units: smooth unit-variance noise plus a planted effect of two positive blobs and one negative blob, added to the 5 a stimuli and subtracted from the 5 b stimuli) go through the real chain train.topolm.common.score_contrast (Student t-test, ONE BH-FDR 0.05 across the four panels, queen cluster growth, clusters of at least 10 cells) and are drawn by train.topolm.plotting.plot_t_maps with a SYNTHETIC title and the figure's own note parameter",
    "caption_must_say": "synthetic illustration, made-up numbers, not a run",
    "facts": {
     "grid_shape": {
@@ -1481,103 +2357,111 @@
      "value": 4,
      "fmt": "4"
     },
-    "threshold_abs_t": {
-     "value": 3.5,
-     "fmt": "3.5"
+    "fdr_alpha": {
+     "value": 0.05,
+     "fmt": "0.05"
     },
     "min_cluster_size": {
      "value": 10,
      "fmt": "10"
     },
+    "n_per_condition": {
+     "value": 5,
+     "fmt": "5"
+    },
     "per_panel": {
      "synthetic/tap_1": {
-      "significant_units": 57,
+      "significant_units": 63,
       "clusters_a": 2,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       19,
-       24
+       29,
+       13
+      ],
+      "cluster_sizes_b": [
+       21
+      ],
+      "t_min": {
+       "value": -8.470210847244205,
+       "fmt": "-8.47"
+      },
+      "t_max": {
+       "value": 8.962350550212573,
+       "fmt": "8.96"
+      }
+     },
+     "synthetic/tap_2": {
+      "significant_units": 69,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       23,
+       28
       ],
       "cluster_sizes_b": [
        14
       ],
       "t_min": {
-       "value": -6.53566141198439,
-       "fmt": "-6.54"
+       "value": -6.687861450548402,
+       "fmt": "-6.69"
       },
       "t_max": {
-       "value": 7.432767319483581,
-       "fmt": "7.43"
-      }
-     },
-     "synthetic/tap_2": {
-      "significant_units": 55,
-      "clusters_a": 2,
-      "clusters_b": 1,
-      "cluster_sizes_a": [
-       25,
-       12
-      ],
-      "cluster_sizes_b": [
-       18
-      ],
-      "t_min": {
-       "value": -6.372440174990377,
-       "fmt": "-6.37"
-      },
-      "t_max": {
-       "value": 7.837839641855993,
-       "fmt": "7.84"
+       "value": 9.421797366618165,
+       "fmt": "9.42"
       }
      },
      "synthetic/tap_3": {
-      "significant_units": 53,
-      "clusters_a": 2,
+      "significant_units": 79,
+      "clusters_a": 1,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       20,
-       15
+       52
       ],
       "cluster_sizes_b": [
-       18
+       26
       ],
       "t_min": {
-       "value": -5.223077985905286,
-       "fmt": "-5.22"
+       "value": -9.365972407748899,
+       "fmt": "-9.37"
       },
       "t_max": {
-       "value": 7.611024791974114,
-       "fmt": "7.61"
+       "value": 11.726776017566378,
+       "fmt": "11.73"
       }
      },
      "synthetic/tap_4": {
-      "significant_units": 48,
-      "clusters_a": 2,
+      "significant_units": 85,
+      "clusters_a": 1,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       27,
-       10
+       74
       ],
       "cluster_sizes_b": [
-       11
+       10
       ],
       "t_min": {
-       "value": -5.478231442628694,
-       "fmt": "-5.48"
+       "value": -6.255280123638589,
+       "fmt": "-6.26"
       },
       "t_max": {
-       "value": 6.657768320412431,
-       "fmt": "6.66"
+       "value": 15.53296229846025,
+       "fmt": "15.53"
       }
      }
     }
    },
    "params": {
-    "threshold_abs_t": 3.5,
-    "grid": [
+    "kind": "synthetic",
+    "significance": "Student t-test, BH-FDR 0.05 jointly across the 4 panels, clusters of at least 10 cells (queen connectivity)",
+    "grid_shape": [
      16,
      16
     ],
+    "panels": 4,
+    "n_per_condition": 5,
+    "seed": 100,
+    "fdr_alpha": 0.05,
+    "min_cluster_size": 10,
     "blobs_per_panel": {
      "synthetic/tap_1": [
       [
@@ -1660,66 +2544,63 @@
       ]
      ]
     },
-    "min_cluster_size": 10,
-    "noise": "gaussian_filter(standard_normal, sigma 1.2) scaled to std 0.9, seed 100+panel",
-    "stats": {
+    "per_panel": {
      "synthetic/tap_1": {
-      "significant_units": 57,
+      "significant_units": 63,
       "clusters_a": 2,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       19,
-       24
+       29,
+       13
+      ],
+      "cluster_sizes_b": [
+       21
+      ],
+      "t_min": -8.470210847244205,
+      "t_max": 8.962350550212573
+     },
+     "synthetic/tap_2": {
+      "significant_units": 69,
+      "clusters_a": 2,
+      "clusters_b": 1,
+      "cluster_sizes_a": [
+       23,
+       28
       ],
       "cluster_sizes_b": [
        14
       ],
-      "t_min": -6.53566141198439,
-      "t_max": 7.432767319483581
-     },
-     "synthetic/tap_2": {
-      "significant_units": 55,
-      "clusters_a": 2,
-      "clusters_b": 1,
-      "cluster_sizes_a": [
-       25,
-       12
-      ],
-      "cluster_sizes_b": [
-       18
-      ],
-      "t_min": -6.372440174990377,
-      "t_max": 7.837839641855993
+      "t_min": -6.687861450548402,
+      "t_max": 9.421797366618165
      },
      "synthetic/tap_3": {
-      "significant_units": 53,
-      "clusters_a": 2,
+      "significant_units": 79,
+      "clusters_a": 1,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       20,
-       15
+       52
       ],
       "cluster_sizes_b": [
-       18
+       26
       ],
-      "t_min": -5.223077985905286,
-      "t_max": 7.611024791974114
+      "t_min": -9.365972407748899,
+      "t_max": 11.726776017566378
      },
      "synthetic/tap_4": {
-      "significant_units": 48,
-      "clusters_a": 2,
+      "significant_units": 85,
+      "clusters_a": 1,
       "clusters_b": 1,
       "cluster_sizes_a": [
-       27,
-       10
+       74
       ],
       "cluster_sizes_b": [
-       11
+       10
       ],
-      "t_min": -5.478231442628694,
-      "t_max": 6.657768320412431
+      "t_min": -6.255280123638589,
+      "t_max": 15.53296229846025
      }
-    }
+    },
+    "written": null
    }
   }
  },
@@ -1727,37 +2608,37 @@
   "2d": {
    "exit_code": 0,
    "total_wall_s": {
-    "value": 259.050965942,
-    "fmt": "259.1"
+    "value": 142.845647461,
+    "fmt": "142.8"
    },
    "number_of_draws": {
     "value": 9,
     "fmt": "9"
    },
    "seconds_per_draw_min": {
-    "value": 2.165947569999844,
-    "fmt": "2.17"
+    "value": 2.1393095169914886,
+    "fmt": "2.14"
    },
    "seconds_per_draw_median": {
-    "value": 2.2112552619946655,
-    "fmt": "2.21"
+    "value": 2.19142080200254,
+    "fmt": "2.19"
    },
    "seconds_per_draw_max": {
-    "value": 2.65237739199074,
-    "fmt": "2.65"
+    "value": 2.642515672981972,
+    "fmt": "2.64"
    },
    "seconds_per_draw_sum": {
-    "value": 20.3405613360228,
+    "value": 20.319281742995372,
     "fmt": "20.3"
    },
    "peak_own_gpu_mib_nvidia_smi_1s_samples": {
-    "value": 5028,
-    "fmt": "5028"
+    "value": 4770,
+    "fmt": "4770"
    },
-   "gpu_samples": 145,
+   "gpu_samples": 124,
    "last_live_row_equals_report": true,
-   "last_live_row_mean_morans_i": 0.7852937160723079,
-   "report_mean_morans_i": 0.7852937160723079,
+   "last_live_row_mean_morans_i": 0.7709789341025671,
+   "report_mean_morans_i": 0.7709789341025671,
    "rows_in_metrics_jsonl": 10,
    "rows_after_merge_per_step": 9,
    "steps_drawn": [
@@ -1780,26 +2661,26 @@
     "readout"
    ],
    "mean_morans_i_series": {
-    "0": -0.007519833553020923,
-    "50": 0.6791107296051838,
-    "100": 0.8086429766088608,
-    "150": 0.7919873886672588,
-    "200": 0.7413015376245601,
-    "250": 0.7800083666562339,
-    "300": 0.7815316183165304,
-    "350": 0.7842214873236495,
-    "400": 0.7852937160723079
+    "0": -0.011047995174024468,
+    "50": 0.7481746770591714,
+    "100": 0.78225886399303,
+    "150": 0.8050706367331559,
+    "200": 0.7787667487533948,
+    "250": 0.7666085836911913,
+    "300": 0.7679809091138698,
+    "350": 0.7693376874147506,
+    "400": 0.7709789341025671
    },
    "mean_significant_units_series": {
     "0": 0.0,
     "50": 0.0,
-    "100": 0.0,
-    "150": 0.0,
-    "200": 0.25,
-    "250": 0.0,
-    "300": 0.0,
-    "350": 0.0,
-    "400": 0.0
+    "100": 14.5,
+    "150": 40.75,
+    "200": 46.375,
+    "250": 45.875,
+    "300": 59.0,
+    "350": 61.875,
+    "400": 65.0
    },
    "clusters_ab_series": {
     "0": [
@@ -1811,39 +2692,63 @@
      0
     ],
     "100": [
-     0,
-     0
+     3,
+     2
     ],
     "150": [
-     0,
-     0
+     5,
+     6
     ],
     "200": [
-     0,
-     0
+     6,
+     5
     ],
     "250": [
-     0,
-     0
+     7,
+     6
     ],
     "300": [
-     0,
-     0
+     7,
+     8
     ],
     "350": [
-     0,
-     0
+     7,
+     9
     ],
     "400": [
-     0,
-     0
+     9,
+     9
     ]
    },
+   "significant_units_total": 520,
+   "significant_units_in_clusters": 393,
+   "share_of_significant_units_in_clusters": 0.7557692307692307,
+   "training": {
+    "final_val_loss": 7.162363052368164,
+    "final_val_perplexity": 1307.0166015625,
+    "final_val_accuracy": 0.11591855436563492,
+    "val_loss_per_virtual_epoch": [
+     7.856712818145752,
+     7.3857879638671875,
+     7.212465286254883,
+     7.162363052368164
+    ],
+    "final_train_loss": 7.673315048217773,
+    "epochs_run": 4,
+    "vocab_size": 50304,
+    "model_variant": "tiny"
+   },
+   "val_loss_points_in_metrics_jsonl": {
+    "100": 7.856712818145752,
+    "200": 7.3857879638671875,
+    "300": 7.212465286254883,
+    "400": 7.162363052368164
+   },
    "device": "NVIDIA GeForce RTX 4090",
-   "first_stamped_line_to_cadence_s": 112.482,
-   "fit_phase_s_cadence_to_best_evaluation": 134.889,
-   "cadence_to_wrote_s": 140.125,
-   "tf_shutdown_warnings_python_interpreter_state": 0,
+   "first_stamped_line_to_cadence_s": 17.843,
+   "fit_phase_s_cadence_to_best_evaluation": 114.175,
+   "cadence_to_wrote_s": 119.2,
+   "tf_shutdown_warnings_python_interpreter_state": 5,
    "traceback_lines": 0,
    "config": {
     "model_variant": "tiny",
@@ -1869,10 +2774,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -1884,10 +2796,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -1899,10 +2818,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -1914,10 +2840,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -1932,168 +2865,503 @@
    },
    "controls": {
     "observed_a_vs_b": {
-     "mean_significant_units_per_tap": {
-      "value": 0.0,
-      "fmt": "0.00"
-     },
-     "clusters_a": 0,
-     "clusters_b": 0
+     "mean_significant_units_per_tap": 65.0,
+     "clusters_a": 9,
+     "clusters_b": 9,
+     "mean_morans_i": 0.7709645590969874
     },
-    "length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap": {
-     "b_vocab": {
-      "value": 42.4375,
-      "fmt": "42.4"
+    "framings": {
+     "context": {
+      "framing": "context+eot",
+      "context_tokens": 60,
+      "significant_units_per_tap": [
+       117,
+       63,
+       46,
+       38,
+       119,
+       53,
+       34,
+       50
+      ],
+      "mean_significant_units_per_tap": 65.0,
+      "clusters_a": 9,
+      "clusters_b": 9,
+      "mean_morans_i": 0.7709645590969874
      },
-     "a_vocab": {
-      "value": 55.625,
-      "fmt": "55.6"
+     "eot": {
+      "framing": "eot",
+      "context_tokens": 0,
+      "significant_units_per_tap": [
+       25,
+       31,
+       28,
+       16,
+       44,
+       24,
+       65,
+       41
+      ],
+      "mean_significant_units_per_tap": 34.25,
+      "clusters_a": 4,
+      "clusters_b": 2,
+      "mean_morans_i": 0.7504578554550546
      },
-     "draws": 12
+     "none": {
+      "framing": "none",
+      "context_tokens": 0,
+      "significant_units_per_tap": [
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "mean_significant_units_per_tap": 0.125,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.7410365474130374
+     },
+     "context:physics_31": {
+      "framing": "context+eot",
+      "context_tokens": 31,
+      "significant_units_per_tap": [
+       71,
+       51,
+       23,
+       31,
+       38,
+       42,
+       9,
+       39
+      ],
+      "mean_significant_units_per_tap": 38.0,
+      "clusters_a": 6,
+      "clusters_b": 5,
+      "mean_morans_i": 0.7688462936880621
+     },
+     "context:sport_59": {
+      "framing": "context+eot",
+      "context_tokens": 59,
+      "significant_units_per_tap": [
+       80,
+       50,
+       44,
+       21,
+       93,
+       46,
+       32,
+       34
+      ],
+      "mean_significant_units_per_tap": 50.0,
+      "clusters_a": 6,
+      "clusters_b": 8,
+      "mean_morans_i": 0.769546631687539
+     },
+     "context:history_123": {
+      "framing": "context+eot",
+      "context_tokens": 123,
+      "significant_units_per_tap": [
+       116,
+       53,
+       62,
+       21,
+       110,
+       37,
+       15,
+       39
+      ],
+      "mean_significant_units_per_tap": 56.625,
+      "clusters_a": 7,
+      "clusters_b": 9,
+      "mean_morans_i": 0.7444359006623086
+     }
     },
-    "length_control_same_vocabulary_5_vs_5_words_median_significant_units_per_tap": {
-     "b_vocab": {
-      "value": 0.0,
-      "fmt": "0.0"
-     },
-     "a_vocab": {
-      "value": 0.0,
-      "fmt": "0.0"
-     },
-     "draws": 12
-    },
-    "length_control_all": {
-     "b_vocab_3v7": {
-      "sig_median": 42.4375,
-      "sig_min": 0.0,
-      "sig_max": 118.75,
-      "clusters_median": 12.0,
-      "clusters_max": 24
-     },
-     "b_vocab_5v5": {
-      "sig_median": 0.0,
-      "sig_min": 0.0,
-      "sig_max": 0.5,
-      "clusters_median": 0.0,
-      "clusters_max": 0
-     },
-     "b_vocab_4v8": {
-      "sig_median": 22.0625,
-      "sig_min": 0.0,
-      "sig_max": 61.625,
-      "clusters_median": 6.0,
-      "clusters_max": 18
-     },
+    "length_control": {
      "a_vocab_3v7": {
-      "sig_median": 55.625,
-      "sig_min": 7.25,
-      "sig_max": 91.75,
-      "clusters_median": 15.5,
-      "clusters_max": 22
+      "vocabulary": "a",
+      "short_words": 3,
+      "long_words": 7,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.125,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       17.75,
+       8.375,
+       25.0,
+       3.25,
+       1.875
+      ],
+      "median": 0.0625,
+      "min": 0.0,
+      "max": 25.0,
+      "clusters_median": 0.0,
+      "clusters_max": 6,
+      "mean_tokens": [
+       3.6333333333333333,
+       7.933333333333334
+      ]
      },
      "a_vocab_5v5": {
-      "sig_median": 0.0,
-      "sig_min": 0.0,
-      "sig_max": 0.0,
+      "vocabulary": "a",
+      "short_words": 5,
+      "long_words": 5,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.125,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.125,
       "clusters_median": 0.0,
-      "clusters_max": 0
+      "clusters_max": 0,
+      "mean_tokens": [
+       5.766666666666667,
+       5.5
+      ]
      },
-     "a_vocab_4v8": {
-      "sig_median": 33.25,
-      "sig_min": 0.0,
-      "sig_max": 68.5,
-      "clusters_median": 9.5,
-      "clusters_max": 19
+     "b_vocab_3v7": {
+      "vocabulary": "b",
+      "short_words": 3,
+      "long_words": 7,
+      "draws": 12,
+      "values": [
+       16.5,
+       1.5,
+       0.125,
+       1.875,
+       0.0,
+       5.125,
+       3.125,
+       0.875,
+       28.875,
+       1.625,
+       17.125,
+       12.25
+      ],
+      "median": 2.5,
+      "min": 0.0,
+      "max": 28.875,
+      "clusters_median": 0.0,
+      "clusters_max": 7,
+      "mean_tokens": [
+       3.5166666666666666,
+       7.583333333333333
+      ]
+     },
+     "b_vocab_5v5": {
+      "vocabulary": "b",
+      "short_words": 5,
+      "long_words": 5,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "clusters_median": 0.0,
+      "clusters_max": 0,
+      "mean_tokens": [
+       5.666666666666667,
+       5.783333333333333
+      ]
      }
     },
     "label_shuffle_null": {
      "n_splits": 252,
-     "design": "all C(10,5)=252 ways to call 5 of the 10 matched sentences condition a (the observed split and its mirror included)",
-     "sig_per_tap": {
+     "real": {
+      "a_index": [
+       0,
+       1,
+       2,
+       3,
+       4
+      ],
+      "significant_units_per_tap": [
+       117,
+       63,
+       46,
+       38,
+       119,
+       53,
+       34,
+       50
+      ],
+      "mean_significant_units_per_tap": 65.0,
+      "clusters_a": 9,
+      "clusters_b": 9,
+      "mean_morans_i": 0.7709645535057637
+     },
+     "n_at_or_above": 2,
+     "n_strictly_above": 0,
+     "p": 0.007936507936507936,
+     "rank_from_top": 1,
+     "competitors": [],
+     "top": [
+      {
+       "a_index": [
+        0,
+        1,
+        2,
+        3,
+        4
+       ],
+       "significant_units_per_tap": [
+        117,
+        63,
+        46,
+        38,
+        119,
+        53,
+        34,
+        50
+       ],
+       "mean_significant_units_per_tap": 65.0,
+       "clusters_a": 9,
+       "clusters_b": 9,
+       "mean_morans_i": 0.7709645535057637
+      },
+      {
+       "a_index": [
+        5,
+        6,
+        7,
+        8,
+        9
+       ],
+       "significant_units_per_tap": [
+        117,
+        63,
+        46,
+        38,
+        119,
+        53,
+        34,
+        50
+       ],
+       "mean_significant_units_per_tap": 65.0,
+       "clusters_a": 9,
+       "clusters_b": 9,
+       "mean_morans_i": 0.7709645535057637
+      },
+      {
+       "a_index": [
+        0,
+        1,
+        3,
+        4,
+        7
+       ],
+       "significant_units_per_tap": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+       ],
+       "mean_significant_units_per_tap": 0.25,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.7507900479662157
+      },
+      {
+       "a_index": [
+        2,
+        5,
+        6,
+        8,
+        9
+       ],
+       "significant_units_per_tap": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+       ],
+       "mean_significant_units_per_tap": 0.25,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.7507900479662157
+      },
+      {
+       "a_index": [
+        0,
+        1,
+        2,
+        4,
+        6
+       ],
+       "significant_units_per_tap": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "mean_significant_units_per_tap": 0.125,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.7720169378650021
+      },
+      {
+       "a_index": [
+        0,
+        5,
+        6,
+        7,
+        9
+       ],
+       "significant_units_per_tap": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "mean_significant_units_per_tap": 0.125,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.7707462936671016
+      }
+     ],
+     "sig": {
       "median": 0.0,
-      "mean": 0.04563492063492063,
-      "p5": 0.0,
+      "mean": 0.5198412698412699,
       "p95": 0.0,
-      "p99": 1.5,
-      "max": 4.25,
-      "min": 0.0
+      "min": 0.0,
+      "max": 65.0
      },
-     "clusters_total": {
-      "median": 0.0,
-      "mean": 0.0,
-      "p95": 0.0,
-      "max": 0,
-      "fraction_zero": 1.0
-     },
-     "moran_mean": {
-      "median": 0.8096355694798831,
-      "p5": 0.720734760455059,
-      "p95": 0.8443228080160368
-     },
-     "observed_sig": 0.0,
-     "observed_clusters": 0,
-     "n_splits_sig_ge_observed": 252,
-     "n_splits_sig_gt_observed": 4,
-     "n_splits_clusters_ge_observed": 252,
-     "percentile_of_observed_sig_strict_below": 0.0,
-     "percentile_of_observed_sig_at_or_below": 98.4126984126984
-    },
-    "framings": {
-     "eot_prefix_shipped": {
-      "mean_significant_units_per_tap": 0.0,
-      "clusters_a": 0,
-      "clusters_b": 0,
-      "mean_morans_i": 0.7852936583441122
-     },
-     "cls_prefix": {
-      "mean_significant_units_per_tap": 0.0,
-      "clusters_a": 0,
-      "clusters_b": 0,
-      "mean_morans_i": 0.7709754622660561
-     },
-     "no_prefix": {
-      "mean_significant_units_per_tap": 0.0,
-      "clusters_a": 0,
-      "clusters_b": 0,
-      "mean_morans_i": 0.7901326789792971
+     "n_splits_with_a_cluster": 2,
+     "morans_i": {
+      "min": 0.6887397720043225,
+      "median": 0.7562295328375016,
+      "max": 0.7987495451740371,
+      "real": 0.7709645535057637,
+      "real_rank_from_top": 60
      }
     },
-    "own_eot_response_vs_trainer_max_abs_diff": 7.947285984855057e-08
+    "n_draws": 12,
+    "seed": 0
+   },
+   "stimuli": {
+    "context_tokens": 60,
+    "contrast": [
+     "a",
+     "b"
+    ],
+    "framing": "context+eot",
+    "pooling": "sentence tokens",
+    "sentences_per_condition": 5,
+    "token_counts": {
+     "a": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "b": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "c": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "d": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ]
+    }
    }
   },
   "3d": {
    "exit_code": 0,
    "total_wall_s": {
-    "value": 170.930350512,
-    "fmt": "170.9"
+    "value": 146.226712675,
+    "fmt": "146.2"
    },
    "number_of_draws": {
     "value": 9,
     "fmt": "9"
    },
    "seconds_per_draw_min": {
-    "value": 1.9327884380181786,
-    "fmt": "1.93"
+    "value": 1.8996545010013506,
+    "fmt": "1.90"
    },
    "seconds_per_draw_median": {
-    "value": 1.970914025005186,
-    "fmt": "1.97"
+    "value": 2.300691922981059,
+    "fmt": "2.30"
    },
    "seconds_per_draw_max": {
-    "value": 2.496935853996547,
-    "fmt": "2.50"
+    "value": 2.8248731560015585,
+    "fmt": "2.82"
    },
    "seconds_per_draw_sum": {
-    "value": 18.234814647992607,
-    "fmt": "18.2"
+    "value": 20.85113898094278,
+    "fmt": "20.9"
    },
    "peak_own_gpu_mib_nvidia_smi_1s_samples": {
-    "value": 5540,
-    "fmt": "5540"
+    "value": 5026,
+    "fmt": "5026"
    },
-   "gpu_samples": 151,
+   "gpu_samples": 128,
    "last_live_row_equals_report": true,
-   "last_live_row_mean_morans_i": 0.6700588995755474,
-   "report_mean_morans_i": 0.6700588995755474,
+   "last_live_row_mean_morans_i": 0.5934942438805451,
+   "report_mean_morans_i": 0.5934942438805451,
    "rows_in_metrics_jsonl": 10,
    "rows_after_merge_per_step": 9,
    "steps_drawn": [
@@ -2115,26 +3383,26 @@
     "raw"
    ],
    "mean_morans_i_series": {
-    "0": -0.00437925032087917,
-    "50": 0.5842250747900529,
-    "100": 0.717014758599636,
-    "150": 0.7093034229129009,
-    "200": 0.6729093780700028,
-    "250": 0.6503042716366644,
-    "300": 0.6663381493147618,
-    "350": 0.6670410458690899,
-    "400": 0.6700588995755474
+    "0": -0.009135548788464898,
+    "50": 0.5280561874355194,
+    "100": 0.5656391671735572,
+    "150": 0.5849380083092851,
+    "200": 0.5833202472927645,
+    "250": 0.5855336887620721,
+    "300": 0.5844162986768318,
+    "350": 0.5867823937346321,
+    "400": 0.5934942438805451
    },
    "mean_significant_units_series": {
     "0": 0.0,
-    "50": 0.0,
-    "100": 0.0,
-    "150": 0.0,
-    "200": 0.0,
-    "250": 0.0,
-    "300": 0.125,
-    "350": 0.125,
-    "400": 5.375
+    "50": 0.5,
+    "100": 0.125,
+    "150": 88.125,
+    "200": 110.875,
+    "250": 109.5,
+    "300": 111.875,
+    "350": 107.5,
+    "400": 111.5
    },
    "clusters_ab_series": {
     "0": [
@@ -2150,35 +3418,59 @@
      0
     ],
     "150": [
-     0,
-     0
+     6,
+     10
     ],
     "200": [
-     0,
-     0
+     7,
+     11
     ],
     "250": [
-     0,
-     0
+     7,
+     12
     ],
     "300": [
-     0,
-     0
+     8,
+     11
     ],
     "350": [
-     0,
-     0
+     7,
+     10
     ],
     "400": [
-     0,
-     1
+     7,
+     11
     ]
    },
+   "significant_units_total": 892,
+   "significant_units_in_clusters": 823,
+   "share_of_significant_units_in_clusters": 0.922645739910314,
+   "training": {
+    "final_val_loss": 7.105467796325684,
+    "final_val_perplexity": 1236.0343017578125,
+    "final_val_accuracy": 0.11828829348087311,
+    "val_loss_per_virtual_epoch": [
+     7.847262859344482,
+     7.341992378234863,
+     7.159599781036377,
+     7.105467796325684
+    ],
+    "final_train_loss": 7.6902995109558105,
+    "epochs_run": 4,
+    "vocab_size": 50304,
+    "model_variant": "tiny3d"
+   },
+   "val_loss_points_in_metrics_jsonl": {
+    "100": 7.847262859344482,
+    "200": 7.341992378234863,
+    "300": 7.159599781036377,
+    "400": 7.105467796325684
+   },
    "device": "NVIDIA GeForce RTX 4090",
-   "first_stamped_line_to_cadence_s": 16.616,
-   "fit_phase_s_cadence_to_best_evaluation": 145.481,
-   "cadence_to_wrote_s": 147.585,
-   "tf_shutdown_warnings_python_interpreter_state": 5,
+   "first_stamped_line_to_cadence_s": 17.119,
+   "fit_phase_s_cadence_to_best_evaluation": 120.627,
+   "cadence_to_wrote_s": 123.003,
+   "tf_shutdown_warnings_python_interpreter_state": 0,
    "traceback_lines": 0,
    "config": {
     "model_variant": "tiny3d",
@@ -2204,10 +3496,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -2219,10 +3518,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -2234,10 +3540,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -2249,10 +3562,17 @@
       7,
       8
      ],
-     "first_id": 50256,
-     "first_id_is_eot_for_every_sentence": true,
-     "window_length": 10,
-     "non_text_phrase": "the end-of-text id 50256 and padding",
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
      "cls_id_present": false,
      "sep_id_present": false
     },
@@ -2267,132 +3587,984 @@
    },
    "controls": {
     "observed_a_vs_b": {
-     "mean_significant_units_per_tap": {
-      "value": 5.375,
-      "fmt": "5.38"
-     },
-     "clusters_a": 0,
-     "clusters_b": 1
+     "mean_significant_units_per_tap": 111.25,
+     "clusters_a": 7,
+     "clusters_b": 11,
+     "mean_morans_i": 0.5934881863369313
     },
-    "length_control_same_vocabulary_3_vs_7_words_median_significant_units_per_tap": {
-     "b_vocab": {
-      "value": 214.4375,
-      "fmt": "214.4"
+    "framings": {
+     "context": {
+      "framing": "context+eot",
+      "context_tokens": 60,
+      "significant_units_per_tap": [
+       120,
+       110,
+       71,
+       55,
+       202,
+       20,
+       231,
+       81
+      ],
+      "mean_significant_units_per_tap": 111.25,
+      "clusters_a": 7,
+      "clusters_b": 11,
+      "mean_morans_i": 0.5934881863369313
      },
-     "a_vocab": {
-      "value": 213.625,
-      "fmt": "213.6"
+     "eot": {
+      "framing": "eot",
+      "context_tokens": 0,
+      "significant_units_per_tap": [
+       1,
+       3,
+       0,
+       3,
+       0,
+       3,
+       0,
+       6
+      ],
+      "mean_significant_units_per_tap": 2.0,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.5206554451139348
      },
-     "draws": 12
+     "none": {
+      "framing": "none",
+      "context_tokens": 0,
+      "significant_units_per_tap": [
+       0,
+       2,
+       0,
+       2,
+       0,
+       2,
+       0,
+       7
+      ],
+      "mean_significant_units_per_tap": 1.625,
+      "clusters_a": 0,
+      "clusters_b": 0,
+      "mean_morans_i": 0.5159155804923811
+     },
+     "context:physics_31": {
+      "framing": "context+eot",
+      "context_tokens": 31,
+      "significant_units_per_tap": [
+       65,
+       82,
+       76,
+       51,
+       205,
+       31,
+       135,
+       83
+      ],
+      "mean_significant_units_per_tap": 91.0,
+      "clusters_a": 11,
+      "clusters_b": 10,
+      "mean_morans_i": 0.60904921489286
+     },
+     "context:sport_59": {
+      "framing": "context+eot",
+      "context_tokens": 59,
+      "significant_units_per_tap": [
+       106,
+       104,
+       62,
+       50,
+       226,
+       27,
+       245,
+       87
+      ],
+      "mean_significant_units_per_tap": 113.375,
+      "clusters_a": 8,
+      "clusters_b": 10,
+      "mean_morans_i": 0.5947894388136543
+     },
+     "context:history_123": {
+      "framing": "context+eot",
+      "context_tokens": 123,
+      "significant_units_per_tap": [
+       134,
+       72,
+       39,
+       35,
+       186,
+       8,
+       267,
+       52
+      ],
+      "mean_significant_units_per_tap": 99.125,
+      "clusters_a": 8,
+      "clusters_b": 8,
+      "mean_morans_i": 0.5846713924102208
+     }
     },
-    "length_control_same_vocabulary_5_vs_5_words_median_significant_units_per_tap": {
-     "b_vocab": {
-      "value": 0.0,
-      "fmt": "0.0"
-     },
-     "a_vocab": {
-      "value": 0.0,
-      "fmt": "0.0"
-     },
-     "draws": 12
-    },
-    "length_control_all": {
-     "b_vocab_3v7": {
-      "sig_median": 214.4375,
-      "sig_min": 180.875,
-      "sig_max": 260.875,
-      "clusters_median": 17.5,
-      "clusters_max": 20
-     },
-     "b_vocab_5v5": {
-      "sig_median": 0.0,
-      "sig_min": 0.0,
-      "sig_max": 0.0,
-      "clusters_median": 0.0,
-      "clusters_max": 0
-     },
-     "b_vocab_4v8": {
-      "sig_median": 185.875,
-      "sig_min": 62.5,
-      "sig_max": 255.5,
-      "clusters_median": 18.5,
-      "clusters_max": 21
-     },
+    "length_control": {
      "a_vocab_3v7": {
-      "sig_median": 213.625,
-      "sig_min": 116.125,
-      "sig_max": 248.5,
-      "clusters_median": 17.5,
-      "clusters_max": 21
+      "vocabulary": "a",
+      "short_words": 3,
+      "long_words": 7,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.25,
+       1.875,
+       0.25,
+       0.0,
+       0.0,
+       0.0,
+       31.75,
+       0.0,
+       0.0
+      ],
+      "median": 0.0,
+      "min": 0.0,
+      "max": 31.75,
+      "clusters_median": 0.0,
+      "clusters_max": 6,
+      "mean_tokens": [
+       3.6333333333333333,
+       7.933333333333334
+      ]
      },
      "a_vocab_5v5": {
-      "sig_median": 0.0,
-      "sig_min": 0.0,
-      "sig_max": 0.125,
+      "vocabulary": "a",
+      "short_words": 5,
+      "long_words": 5,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0,
       "clusters_median": 0.0,
-      "clusters_max": 0
+      "clusters_max": 0,
+      "mean_tokens": [
+       5.766666666666667,
+       5.5
+      ]
      },
-     "a_vocab_4v8": {
-      "sig_median": 150.1875,
-      "sig_min": 0.0,
-      "sig_max": 229.625,
-      "clusters_median": 19.0,
-      "clusters_max": 21
+     "b_vocab_3v7": {
+      "vocabulary": "b",
+      "short_words": 3,
+      "long_words": 7,
+      "draws": 12,
+      "values": [
+       0.75,
+       0.25,
+       21.875,
+       6.0,
+       2.375,
+       2.375,
+       21.125,
+       18.25,
+       26.0,
+       0.0,
+       8.625,
+       4.875
+      ],
+      "median": 5.4375,
+      "min": 0.0,
+      "max": 26.0,
+      "clusters_median": 0.5,
+      "clusters_max": 7,
+      "mean_tokens": [
+       3.5166666666666666,
+       7.583333333333333
+      ]
+     },
+     "b_vocab_5v5": {
+      "vocabulary": "b",
+      "short_words": 5,
+      "long_words": 5,
+      "draws": 12,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       2.125
+      ],
+      "median": 0.0,
+      "min": 0.0,
+      "max": 2.125,
+      "clusters_median": 0.0,
+      "clusters_max": 0,
+      "mean_tokens": [
+       5.666666666666667,
+       5.783333333333333
+      ]
      }
     },
     "label_shuffle_null": {
      "n_splits": 252,
-     "design": "all C(10,5)=252 ways to call 5 of the 10 matched sentences condition a (the observed split and its mirror included)",
-     "sig_per_tap": {
+     "real": {
+      "a_index": [
+       0,
+       1,
+       2,
+       3,
+       4
+      ],
+      "significant_units_per_tap": [
+       120,
+       110,
+       71,
+       55,
+       202,
+       20,
+       231,
+       81
+      ],
+      "mean_significant_units_per_tap": 111.25,
+      "clusters_a": 7,
+      "clusters_b": 11,
+      "mean_morans_i": 0.5934881888651732
+     },
+     "n_at_or_above": 2,
+     "n_strictly_above": 0,
+     "p": 0.007936507936507936,
+     "rank_from_top": 1,
+     "competitors": [],
+     "top": [
+      {
+       "a_index": [
+        0,
+        1,
+        2,
+        3,
+        4
+       ],
+       "significant_units_per_tap": [
+        120,
+        110,
+        71,
+        55,
+        202,
+        20,
+        231,
+        81
+       ],
+       "mean_significant_units_per_tap": 111.25,
+       "clusters_a": 7,
+       "clusters_b": 11,
+       "mean_morans_i": 0.5934881888651732
+      },
+      {
+       "a_index": [
+        5,
+        6,
+        7,
+        8,
+        9
+       ],
+       "significant_units_per_tap": [
+        120,
+        110,
+        71,
+        55,
+        202,
+        20,
+        231,
+        81
+       ],
+       "mean_significant_units_per_tap": 111.25,
+       "clusters_a": 11,
+       "clusters_b": 7,
+       "mean_morans_i": 0.5934881888651732
+      },
+      {
+       "a_index": [
+        0,
+        1,
+        3,
+        4,
+        8
+       ],
+       "significant_units_per_tap": [
+        62,
+        9,
+        23,
+        3,
+        3,
+        10,
+        85,
+        3
+       ],
+       "mean_significant_units_per_tap": 24.75,
+       "clusters_a": 3,
+       "clusters_b": 1,
+       "mean_morans_i": 0.6300440509864617
+      },
+      {
+       "a_index": [
+        2,
+        5,
+        6,
+        7,
+        9
+       ],
+       "significant_units_per_tap": [
+        62,
+        9,
+        23,
+        3,
+        3,
+        10,
+        85,
+        3
+       ],
+       "mean_significant_units_per_tap": 24.75,
+       "clusters_a": 1,
+       "clusters_b": 3,
+       "mean_morans_i": 0.6300440509864617
+      },
+      {
+       "a_index": [
+        0,
+        1,
+        3,
+        4,
+        9
+       ],
+       "significant_units_per_tap": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "mean_significant_units_per_tap": 0.125,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.6420340666070328
+      },
+      {
+       "a_index": [
+        0,
+        1,
+        5,
+        6,
+        8
+       ],
+       "significant_units_per_tap": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "mean_significant_units_per_tap": 0.125,
+       "clusters_a": 0,
+       "clusters_b": 0,
+       "mean_morans_i": 0.5238968580677206
+      }
+     ],
+     "sig": {
       "median": 0.0,
-      "mean": 0.0882936507936508,
-      "p5": 0.0,
+      "mean": 1.0823412698412698,
       "p95": 0.0,
-      "p99": 5.375,
-      "max": 5.5,
-      "min": 0.0
+      "min": 0.0,
+      "max": 111.25
      },
-     "clusters_total": {
-      "median": 0.0,
-      "mean": 0.007936507936507936,
-      "p95": 0.0,
-      "max": 1,
-      "fraction_zero": 0.9920634920634921
-     },
-     "moran_mean": {
-      "median": 0.6800814961578725,
-      "p5": 0.6190641257618859,
-      "p95": 0.7208086044617568
-     },
-     "observed_sig": 5.375,
-     "observed_clusters": 1,
-     "n_splits_sig_ge_observed": 4,
-     "n_splits_sig_gt_observed": 2,
-     "n_splits_clusters_ge_observed": 2,
-     "percentile_of_observed_sig_strict_below": 98.4126984126984,
-     "percentile_of_observed_sig_at_or_below": 99.20634920634922
-    },
-    "framings": {
-     "eot_prefix_shipped": {
-      "mean_significant_units_per_tap": 5.375,
-      "clusters_a": 0,
-      "clusters_b": 1,
-      "mean_morans_i": 0.6700589097212695
-     },
-     "cls_prefix": {
-      "mean_significant_units_per_tap": 19.125,
-      "clusters_a": 4,
-      "clusters_b": 3,
-      "mean_morans_i": 0.6982193651201155
-     },
-     "no_prefix": {
-      "mean_significant_units_per_tap": 40.5,
-      "clusters_a": 5,
-      "clusters_b": 5,
-      "mean_morans_i": 0.6868559826479623
+     "n_splits_with_a_cluster": 4,
+     "morans_i": {
+      "min": 0.5238968580677206,
+      "median": 0.602368040974795,
+      "max": 0.6585050541885721,
+      "real": 0.5934881888651732,
+      "real_rank_from_top": 152
      }
     },
-    "own_eot_response_vs_trainer_max_abs_diff": 2.384185791015625e-07
+    "n_draws": 12,
+    "seed": 0
+   },
+   "stimuli": {
+    "context_tokens": 60,
+    "contrast": [
+     "a",
+     "b"
+    ],
+    "framing": "context+eot",
+    "pooling": "sentence tokens",
+    "sentences_per_condition": 5,
+    "token_counts": {
+     "a": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "b": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "c": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "d": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ]
+    }
+   }
+  },
+  "2d_alpha0": {
+   "exit_code": 0,
+   "total_wall_s": {
+    "value": 122.162069047,
+    "fmt": "122.2"
+   },
+   "number_of_draws": {
+    "value": 9,
+    "fmt": "9"
+   },
+   "seconds_per_draw_min": {
+    "value": 2.1854457650042605,
+    "fmt": "2.19"
+   },
+   "seconds_per_draw_median": {
+    "value": 2.350905633997172,
+    "fmt": "2.35"
+   },
+   "seconds_per_draw_max": {
+    "value": 3.444120505009778,
+    "fmt": "3.44"
+   },
+   "seconds_per_draw_sum": {
+    "value": 24.020882983022602,
+    "fmt": "24.0"
+   },
+   "peak_own_gpu_mib_nvidia_smi_1s_samples": {
+    "value": 4768,
+    "fmt": "4768"
+   },
+   "gpu_samples": 106,
+   "last_live_row_equals_report": true,
+   "last_live_row_mean_morans_i": -0.018811480606054455,
+   "report_mean_morans_i": -0.018811480606054455,
+   "rows_in_metrics_jsonl": 10,
+   "rows_after_merge_per_step": 9,
+   "steps_drawn": [
+    0,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400
+   ],
+   "restored_weights_rows": 0,
+   "val_only_rows": 1,
+   "stimuli_are_smoke_set": true,
+   "readout_skipped": null,
+   "arms": [
+    "raw",
+    "readout"
+   ],
+   "mean_morans_i_series": {
+    "0": -0.011047995174024468,
+    "50": -0.01688836741145954,
+    "100": -0.0037882788460639394,
+    "150": -0.0005676156943482408,
+    "200": 0.004537218346717288,
+    "250": -0.024246705468356368,
+    "300": -0.02136979240877473,
+    "350": -0.019751011730068525,
+    "400": -0.018811480606054455
+   },
+   "mean_significant_units_series": {
+    "0": 0.0,
+    "50": 219.75,
+    "100": 215.75,
+    "150": 169.375,
+    "200": 111.5,
+    "250": 128.625,
+    "300": 122.5,
+    "350": 119.375,
+    "400": 120.25
+   },
+   "clusters_ab_series": {
+    "0": [
+     0,
+     0
+    ],
+    "50": [
+     15,
+     15
+    ],
+    "100": [
+     10,
+     12
+    ],
+    "150": [
+     18,
+     15
+    ],
+    "200": [
+     8,
+     10
+    ],
+    "250": [
+     7,
+     13
+    ],
+    "300": [
+     6,
+     6
+    ],
+    "350": [
+     6,
+     6
+    ],
+    "400": [
+     6,
+     6
+    ]
+   },
+   "significant_units_total": 962,
+   "significant_units_in_clusters": 383,
+   "share_of_significant_units_in_clusters": 0.3981288981288981,
+   "training": {
+    "final_val_loss": 6.807596206665039,
+    "final_val_perplexity": 924.9485473632812,
+    "final_val_accuracy": 0.13539625704288483,
+    "val_loss_per_virtual_epoch": [
+     7.389256954193115,
+     6.961867809295654,
+     6.873337268829346,
+     6.807596206665039
+    ],
+    "final_train_loss": 6.79325008392334,
+    "epochs_run": 4,
+    "vocab_size": 50304,
+    "model_variant": "tiny"
+   },
+   "val_loss_points_in_metrics_jsonl": {
+    "100": 7.389256954193115,
+    "200": 6.961867809295654,
+    "300": 6.873337268829346,
+    "400": 6.807596206665039
+   },
+   "device": "NVIDIA GeForce RTX 4090",
+   "first_stamped_line_to_cadence_s": 17.545,
+   "fit_phase_s_cadence_to_best_evaluation": 93.559,
+   "cadence_to_wrote_s": 98.933,
+   "tf_shutdown_warnings_python_interpreter_state": 0,
+   "traceback_lines": 0,
+   "config": {
+    "model_variant": "tiny",
+    "seed": 42,
+    "batch_size": 8,
+    "train_steps": 400,
+    "eval_every_steps": 100,
+    "viz_every_steps": 50,
+    "spatial_radius": 5,
+    "spatial_alpha": 0.0,
+    "max_seq_length": 512,
+    "tap_sites": "both",
+    "min_cluster_size": 10,
+    "num_permutations": 9999,
+    "permutation_p_value": false
+   },
+   "stimuli_framing": {
+    "a": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "b": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "c": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "d": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "eot_token_of_encoder": 50256,
+    "text_token_counts_equal_across_conditions": true,
+    "mean_text_tokens_per_condition": {
+     "a": 8.0,
+     "b": 8.0,
+     "c": 8.0,
+     "d": 8.0
+    }
+   }
+  },
+  "3d_alpha0": {
+   "exit_code": 0,
+   "total_wall_s": {
+    "value": 132.092186686,
+    "fmt": "132.1"
+   },
+   "number_of_draws": {
+    "value": 9,
+    "fmt": "9"
+   },
+   "seconds_per_draw_min": {
+    "value": 1.9134450340061449,
+    "fmt": "1.91"
+   },
+   "seconds_per_draw_median": {
+    "value": 3.1734130699769594,
+    "fmt": "3.17"
+   },
+   "seconds_per_draw_max": {
+    "value": 3.560637382994173,
+    "fmt": "3.56"
+   },
+   "seconds_per_draw_sum": {
+    "value": 27.598242406966165,
+    "fmt": "27.6"
+   },
+   "peak_own_gpu_mib_nvidia_smi_1s_samples": {
+    "value": 5022,
+    "fmt": "5022"
+   },
+   "gpu_samples": 115,
+   "last_live_row_equals_report": true,
+   "last_live_row_mean_morans_i": -0.0014050949485700879,
+   "report_mean_morans_i": -0.0014050949485700879,
+   "rows_in_metrics_jsonl": 10,
+   "rows_after_merge_per_step": 9,
+   "steps_drawn": [
+    0,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400
+   ],
+   "restored_weights_rows": 0,
+   "val_only_rows": 1,
+   "stimuli_are_smoke_set": true,
+   "readout_skipped": "3D: the Gaussian readout is 2-D only; the grid is 7x7x7 and only the raw arm is computed",
+   "arms": [
+    "raw"
+   ],
+   "mean_morans_i_series": {
+    "0": -0.009135548788464898,
+    "50": -0.005818419930409438,
+    "100": 0.0022304269502829576,
+    "150": -0.009077859777848083,
+    "200": -0.0013563530583415133,
+    "250": -0.0026325927809652755,
+    "300": 0.0005503988669311064,
+    "350": -0.002014716881828839,
+    "400": -0.0014050949485700879
+   },
+   "mean_significant_units_series": {
+    "0": 0.0,
+    "50": 305.875,
+    "100": 237.25,
+    "150": 206.5,
+    "200": 163.875,
+    "250": 139.0,
+    "300": 113.0,
+    "350": 94.5,
+    "400": 108.125
+   },
+   "clusters_ab_series": {
+    "0": [
+     0,
+     0
+    ],
+    "50": [
+     8,
+     8
+    ],
+    "100": [
+     8,
+     8
+    ],
+    "150": [
+     8,
+     8
+    ],
+    "200": [
+     7,
+     9
+    ],
+    "250": [
+     7,
+     9
+    ],
+    "300": [
+     8,
+     7
+    ],
+    "350": [
+     8,
+     9
+    ],
+    "400": [
+     8,
+     8
+    ]
+   },
+   "significant_units_total": 865,
+   "significant_units_in_clusters": 665,
+   "share_of_significant_units_in_clusters": 0.7687861271676301,
+   "training": {
+    "final_val_loss": 6.7067155838012695,
+    "final_val_perplexity": 840.2490234375,
+    "final_val_accuracy": 0.1509448140859604,
+    "val_loss_per_virtual_epoch": [
+     7.322576522827148,
+     6.898065090179443,
+     6.784788608551025,
+     6.7067155838012695
+    ],
+    "final_train_loss": 6.701409816741943,
+    "epochs_run": 4,
+    "vocab_size": 50304,
+    "model_variant": "tiny3d"
+   },
+   "val_loss_points_in_metrics_jsonl": {
+    "100": 7.322576522827148,
+    "200": 6.898065090179443,
+    "300": 6.784788608551025,
+    "400": 6.7067155838012695
+   },
+   "device": "NVIDIA GeForce RTX 4090",
+   "first_stamped_line_to_cadence_s": 16.873,
+   "fit_phase_s_cadence_to_best_evaluation": 106.483,
+   "cadence_to_wrote_s": 109.627,
+   "tf_shutdown_warnings_python_interpreter_state": 0,
+   "traceback_lines": 0,
+   "config": {
+    "model_variant": "tiny3d",
+    "seed": 42,
+    "batch_size": 8,
+    "train_steps": 400,
+    "eval_every_steps": 100,
+    "viz_every_steps": 50,
+    "spatial_radius": 2,
+    "spatial_alpha": 0.0,
+    "max_seq_length": 512,
+    "tap_sites": "both",
+    "min_cluster_size": 10,
+    "num_permutations": 9999,
+    "permutation_p_value": false
+   },
+   "stimuli_framing": {
+    "a": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "b": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "c": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "d": {
+     "text_token_counts": [
+      9,
+      9,
+      7,
+      7,
+      8
+     ],
+     "context_tokens_before_eot": 60,
+     "id_before_the_sentence_is_eot": true,
+     "sentence_starts_at_position": [
+      61,
+      61,
+      61,
+      61,
+      61
+     ],
+     "window_length": 70,
+     "non_text_phrase": "the stimulus context, the end-of-text id 50256 and padding",
+     "cls_id_present": false,
+     "sep_id_present": false
+    },
+    "eot_token_of_encoder": 50256,
+    "text_token_counts_equal_across_conditions": true,
+    "mean_text_tokens_per_condition": {
+     "a": 8.0,
+     "b": 8.0,
+     "c": 8.0,
+     "d": 8.0
+    }
    }
   }
  }

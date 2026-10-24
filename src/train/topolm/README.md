@@ -46,14 +46,17 @@ load-bearing. The taps reach the objective only through `backbone.losses`; witho
 the flag the head computes every penalty, discards it, and the run produces a
 non-topographic model with a healthy curve.
 
-Measured on identical weights at `alpha = 2.5`, same data, same seed, same taps:
+Measured on the corrected `tiny` variant (8 taps) at `alpha = 2.5`, the same seed and
+the same two batches of random tokens (vocabulary 2048, SGD, one epoch, on the CPU):
 
 | `aggregate_backbone_losses` | reported train loss | eval loss |
 |---|---|---|
-| `True` | **15.31** | 5.31 |
-| `False` | **5.36** | 5.31 |
+| `True` | **17.67** | 7.49 |
+| `False` | **7.68** | 7.49 |
 
-The evaluation loss is 5.31 either way, because the taps add nothing when
+The gap is 9.99, against the derived 8 taps * 2.5 * 0.5 = 10.0 (a tap's penalty is
+about one half for activations unrelated to the distance prior). The evaluation loss is
+7.49 either way, because the taps add nothing when
 `training` is not `True`. That is the intended behaviour and it is what makes the
 paper's reported 3.075 / 2.966 pair comparable.
 
@@ -69,11 +72,11 @@ identical in one number. Every run therefore also records, through
 | key | meaning |
 |---|---|
 | `spatial/<tap_name>` | that tap's penalty for the last batch |
-| `spatial/total` | `sum(alpha_k * SL_k)` — the weighted total |
-| `spatial/unweighted` | `sum(SL_k)` — with no `alpha` |
+| `spatial/total` | `sum(alpha_k * SL_k)`: the weighted total |
+| `spatial/unweighted` | `sum(SL_k)`: with no `alpha` |
 | `task_loss` | `loss - spatial/total` |
 | `spatial/share` | `spatial/total / loss`, the fraction topography currently owns |
-| `spatial/accounted` | `loss - compile_loss` — what the loop actually folded in |
+| `spatial/accounted` | `loss - compile_loss`: what the loop actually folded in |
 | `spatial/unaccounted` | `spatial/total - accounted` |
 
 **`spatial/unaccounted` is the one to watch.** It is non-zero exactly when the
@@ -109,7 +112,7 @@ in section 5). With the default `0` the list is the four above and nothing else
 is added.
 
 `ConsecutiveIncreaseEarlyStopping` restores the snapshot taken immediately before
-the final streak — the last *good* evaluation, not the best one seen — which is
+the final streak, the last *good* evaluation, not the best one seen, which is
 deliberately different from `EarlyStopping(restore_best_weights=True)`.
 
 ---
@@ -187,34 +190,40 @@ for `tiny3d` (2) and `paper3d` (4), 5 (the paper's) for the 2D variants, and an
 explicit value wins. `config.json` records the integer that was used.
 
 Every flag maps onto exactly one field of `TopoLMTrainingConfig`, so `--help` and
-`config.json` describe the same run — and
+`config.json` describe the same run, and
 `tests/test_train/test_topolm/test_cli_contract.py` drives the real parser and the
 real config builder to assert that every declared flag arrives, with set-equality
 against the parser so a newly added flag fails until it is given a row.
 
 ### Two defaults that must match the tokenizer, not the paper
 
-Both of these were wrong and both killed the run on its first batch, so they are
-worth stating rather than leaving to `--help`:
+Both of these were wrong once and both killed the run on its first batch, so they
+are worth stating rather than leaving to `--help`:
 
-| Flag | Value that works | Why the other value fails |
+| Flag | Default | Why |
 |---|---|---|
-| `--vocab-size` | `100277` (default) | The trainer's tokenizer is Tiktoken `gpt2`: `encoding_name` is a field of `ClmPretrainConfig` (default `"gpt2"`) with no flag, and the run log says `encoding 'gpt2'`, `vocab_size=50257`. Its 50,257 base ids are followed by the four special ids the config assigns, 50257 to 50260 (`cls_token_id`, `sep_token_id`, `pad_token_id`, `mask_token_id`), so a table that holds all of them has at least 50,261 rows (derived: 50260 + 1). A 50,257-row table failed with `indices[..] = 50259 is not in [0, 50257)`, which is the pad id of that list. `100277` is larger than that and is the flag's default. |
-| `--max-seq-length` | `512` (default) | The data pipeline chunks to this, so the position table must match. `build_backbone` forwards it to `max_seq_len`; before it did, a `tiny` run kept the variant's 256-entry table against 512-token windows and died with `indices[256] = 256 is not in [0, 256)`. |
+| `--vocab-size` | unset, resolved to the tokenizer's need padded to a multiple of 64: `50304` for the default `gpt2` encoding, `100288` for `cl100k_base` | The trainer's tokenizer is Tiktoken `gpt2`: `encoding_name` is a field of `ClmPretrainConfig` (default `"gpt2"`) with no flag, and the run log says `encoding 'gpt2'`, `vocab_size=50257`. Its 50,257 base ids are followed by the four special ids the config assigns, 50257 to 50260 (`cls_token_id`, `sep_token_id`, `pad_token_id`, `mask_token_id`), so a table that holds all of them has at least 50,261 rows (derived: 50260 + 1). A 50,257-row table failed with `indices[..] = 50259 is not in [0, 50257)`, which is the pad id of that list. 50,261 rounded up to a multiple of 64 is 50,304, the padded size the authors' released code uses too. |
+| `--max-seq-length` | `512` | The data pipeline chunks to this, so the position table must match. `build_backbone` forwards it to `max_seq_len`; before it did, a `tiny` run kept the variant's 256-entry table against 512-token windows and died with `indices[256] = 256 is not in [0, 256)`. |
 
-An earlier version of this table said `create_tokenizer` uses `cl100k_base`, whose
-special ids reach `100267`. That does not describe this trainer: `create_tokenizer`'s
-own default is `cl100k_base`, but the trainer passes `config.encoding_name`. The
-guard `_require_vocab_covers_tokenizer` compares `--vocab-size` with the larger of
-the base `vocab_size` the log prints (50257) and the largest special id plus one
-(50261), so a 50,257-row or 50,260-row table is refused at start-up by name, before
-the dataset is built; `build_backbone` checks the same number. Both failures above
-were measured on the pre-audit pipeline; the `--vocab-size 50257` case was not
-re-run on the packed dataset path the trainer uses now.
+The `--vocab-size` default used to be the literal `100277`, the size of
+`cl100k_base`, which this trainer does not use: about 50,000 embedding rows that the
+tokenizer never emits (39M parameters at width 784; the output head is tied to the table). The flag now defaults to `None` and `_config_from_args` resolves it
+through `resolve_vocab_size`: the larger of the encoding's base vocabulary
+(`tiktoken.get_encoding(encoding_name).n_vocab`) and the largest special id plus one,
+rounded up to a multiple of 64. It builds no tokenizer, so a run the command line
+refuses afterwards has done no run work. `config.json` records the integer that was
+used. A typed value is used as typed, and the guard
+`_require_vocab_covers_tokenizer` still compares it with the larger of the base
+`vocab_size` the log prints (50257) and the largest special id plus one (50261), so a
+50,257-row or 50,260-row table is refused at start-up by name, before the dataset is
+built; `build_backbone` checks the same number. The resolver and the refusal are
+pinned in `test_topolm_vocab_default.py`. The two failures above were measured on the
+pre-audit pipeline; the `--vocab-size 50257` case was not re-run on the packed
+dataset path the trainer uses now.
 
-Both are measured, not inferred: each was reproduced on a clean worktree at the
-pre-audit commit before being fixed here. `build_backbone` now also raises, rather
-than deferring the mismatch to the first forward.
+Both were measured, not inferred: each was reproduced on a clean worktree at the
+pre-audit commit before being fixed here. `build_backbone` also raises, rather than
+deferring the mismatch to the first forward.
 
 ### Run directory naming
 
@@ -269,7 +278,7 @@ alternative misleads:
 - **No contour lines around surviving cells.** At realistic BH-FDR densities
   that is a dense mesh over the whole panel that buries the t-values it annotates.
   Cluster edges come from the label grid instead, so a cluster outlined in a
-  figure is the cluster counted in the JSON — there is one source for both.
+  figure is the cluster counted in the JSON, there is one source for both.
 - **The figure says what its marks mean.** The line under the headline reads, for
   example, `positive = a, negative = b; hatched = not significant after BH-FDR;
   outline = cluster of significant units (solid black = a, dashed magenta = b)`.
@@ -293,20 +302,40 @@ This part is for a reader who has never seen a t-map, a Moran's I or a topograph
 model. Each term is explained where it first appears, and the glossary at the end
 repeats them one line each. The pictures come from two small runs made to show what
 the figures look like: 400 optimizer steps, seed 42, the built-in smoke stimuli, run
-with the code described below (stimuli framed like the training stream, responses
-pooled over the text tokens, length-matched sentences, one hatch box per rejected
-cell). Figures and numbers made before those changes should not be read with this
-guide: see [A correction to earlier 2D numbers](#a-correction-to-earlier-2d-numbers),
-which lists the corrections one by one.
+with the code described below (a feed-forward of one hidden layer, stimuli placed
+after a fixed neutral passage and the end-of-text id, responses pooled over the
+sentence tokens, length-matched sentences, one hatch box per rejected cell). Figures
+and numbers made before those changes should not be read with this guide: see
+[A correction to earlier 2D numbers](#a-correction-to-earlier-2d-numbers), which lists
+the corrections one by one.
 **They are toy runs. They show that the pipeline works and what its output looks
 like; they are not a result.**
 
 **The short version.** In both example runs the maps show a smooth topography
-forming, which is what the training penalty asks for. They show almost no selectivity
-for well-formed sentences over word lists: in the 2D run no unit passes the
-significance test, and in the 3D run about 5 of 343 units per tap do. Two controls
-(below) say that even that small 3D result is not isolated from other effects. The
-figures cannot show more than that at this scale, and
+forming, which is what the training penalty asks for, and a large share of the units
+respond differently to well-formed sentences than to word lists: in the 2D run 65.0
+of the 256 units per tap pass the significance test (34 to 119 depending on the tap),
+in 9 clusters that prefer the sentences and 9 that prefer the word lists; in the 3D run
+111.5 of 343 units per tap pass, in 7 and 11 clusters. Four controls (below) say what
+that does and does not mean. The pattern is not an effect of the sentence lengths (the
+sentences are matched, and word lists of unequal length make far smaller maps) and it
+is not what an arbitrary split of the ten sentences gives (of the 252 splits, every one
+except the real one and its mirror gives at most 0.25 significant units per tap in 2D
+and 24.75 in 3D). It does depend on how the sentence is introduced: with no passage
+before it, 3D drops to 2.0 or 1.625 significant units per tap. **But it is not made by
+the topographic penalty**: the same run with `--alpha 0` (no penalty) has as many
+significant units, 120.25 per tap in 2D and 108.125 in 3D, and no smoothness at all
+(Moran's I -0.019 and -0.001 against 0.771 and 0.593). What the penalty adds is the
+smooth arrangement, and that is what Moran's I measures; the counts of significant
+units and of clusters of this smoke contrast do not show topography by themselves.
+Nor do they say whether the units prefer grammar or vocabulary, because the two
+conditions differ in both. These checkpoints are a different model from the ones the
+earlier versions of this README showed (a feed-forward built from two chained MLPs,
+residual projections initialised without the depth factor, a mixed tanh and exact
+GELU, biases the authors' released code does not have), and those showed almost no
+selectivity; this README does not know which of the changes made the difference, and
+the new model also learns faster (validation loss 7.16 after 400 steps against about
+7.8 before).
 [What these figures do and do not tell you](#what-these-figures-do-and-do-not-tell-you)
 says what a real claim would need.
 
@@ -347,20 +376,28 @@ and compares how each unit reacts to them. The built-in set (`SMOKE_STIMULI` in
 (The set also holds conditions `c` and `d`, jabberwocky sentences and unconnected
 nonwords; the default test does not use them.) For every tap and every unit:
 
-1. **Frame** each sentence the way the training stream presents text: the model's
-   end-of-text id first (the **prefix**), then the text, then padding up to the
-   window length. There is no CLS and no SEP marker, because the model never sees
-   those in training. The model reads left to right, so the padding after the text
-   cannot change anything before it. The end-of-text id is read from the tokenizer
-   (`preprocessor.tokenizer.eot_token`), the same place the training pipeline reads
-   it.
+1. **Frame** each sentence the way text appears inside the training stream. The
+   stream cuts text into windows at arbitrary offsets, so a document usually starts in
+   the middle of a window, after the end of the previous one (an end-of-text id sits at
+   the first position of about 1 window in 441, an estimate derived from the trainer's
+   440 tokens per article). The trainer therefore
+   puts every sentence after a fixed neutral **context** of 60 tokens (`STIMULUS_CONTEXT`
+   in `common.py`, an encyclopedic passage about an invented town that shares no
+   content word with any stimulus), then the model's end-of-text id, then the
+   sentence, then padding up to the window length (70 tokens). Every sentence starts
+   at the same position, 61, after the same text. There is no CLS and no SEP marker,
+   because the model never sees those in training. The model reads left to right, so
+   the padding after the sentence cannot change anything before it. The end-of-text id
+   is read from the tokenizer (`preprocessor.tokenizer.eot_token`), the same place the
+   training pipeline reads it, and a preprocessor that cannot supply the encoder is
+   refused by name.
 2. Run each sentence through the model and record the unit's activation at every
    token position. The unit's **response** to a sentence is that activation
    averaged over the text tokens of the sentence: the word pieces the tokenizer
-   produced. The prefix and the padding are **excluded by id** (`extract_tap_activations`
-   builds the text mask from the ids it encoded), every text token weighs the same,
-   and a sentence with no text token at all is refused by name before the model
-   runs.
+   produced for the sentence. The context, the end-of-text id and the padding are
+   **excluded by id** (`extract_tap_activations` builds the text mask from the ids it
+   encoded), every text token weighs the same, and a sentence with no text token at
+   all is refused by name before the model runs.
 3. The unit now has 5 responses to condition `a` and 5 to condition `b`. Compute a
    two-sample **t value** from them (Student's t, which assumes the two groups have
    the same variance): the difference of the two group means (a minus b) divided by
@@ -385,23 +422,36 @@ right with learned **absolute** position embeddings, so a token's activation dep
 on where it sits and on how much text precedes it, and a longer text averages over
 later positions. The length control below measures how large that effect can be.
 
-**The prefix is a choice, and it moves the 3D result.** The end-of-text prefix
-follows the training stream; another framing gives different maps. On the two
-example checkpoints, with the same sentences and pooling, the a-versus-b contrast
-gives these significant units per tap (clusters of `a` and `b` over the taps in
-brackets):
+**The framing is a choice, and it moves the result.** The context in front of the
+sentence is part of the experiment. On the two example checkpoints, with the same
+sentences and pooling, the a-versus-b contrast gives these significant units per tap
+(clusters of `a` and `b` over the taps in brackets); the four contexts are four
+different passages, the first the one used here:
 
-| prefix | 2D `tiny` | 3D `tiny3d` |
+| framing | 2D `tiny` | 3D `tiny3d` |
 |---|---|---|
-| CLS marker | 0.0 (0 / 0) | 19.1 (4 / 3) |
-| end-of-text id (the one used here) | 0.0 (0 / 0) | 5.4 (0 / 1) |
-| none | 0.0 (0 / 0) | 40.5 (5 / 5) |
+| the shipped context (60 tokens), then the end-of-text id (the one used here) | 65.0 (9 / 9) | 111.25 (7 / 11) |
+| another context of 31 tokens (physics) | 38.0 (6 / 5) | 91.0 (11 / 10) |
+| another context of 59 tokens (sport) | 50.0 (6 / 8) | 113.375 (8 / 10) |
+| another context of 123 tokens (history) | 56.625 (7 / 9) | 99.125 (8 / 8) |
+| the end-of-text id only | 34.25 (4 / 2) | 2.0 (0 / 0) |
+| nothing before the sentence | 0.125 (0 / 0) | 1.625 (0 / 0) |
 
-So in 3D the same checkpoint gives between 5.4 and 40.5 significant units per tap
-depending on how the sentence is introduced; the Moran's I of the maps changes by at
-most 0.03 across the three prefixes (2D 0.771 to 0.790, 3D 0.670 to 0.698). Nothing
-says which framing is "right" for a given claim; the shipped one is the one that
-matches the training data.
+So with any of four passages in front of the sentence the checkpoint gives between 38
+and 65 significant units per tap in 2D and between 91 and 113 in 3D. In 3D the
+difference between passages is much smaller than the difference between having one and
+not: with the end-of-text id alone, or with nothing, about 2 units per tap are
+significant. In 2D the end-of-text id alone (34.25) is close to the lowest passage
+(38.0) and only the bare sentence at the start of the window loses nearly everything
+(0.125). The Moran's I of the maps varies much less
+than the counts: 2D 0.741 to 0.771, 3D 0.516 to 0.609. Nothing says which framing is
+"right" for a given claim; the shipped one was chosen because it resembles how the
+training stream presents text, and the three other passages were written afterwards
+and reported whatever they gave. (These numbers rescore the saved final weights on the
+CPU; the live run scored them on the GPU. The 3D count of the shipped framing is 111.25
+here and 111.5 in the figure caption: two units near the significance boundary, one in
+`block_2/attention_tap` and one in `block_2/mlp_tap`, fell on the other side. The
+cause was not isolated.)
 
 Read a significant cell as "this unit responds differently to these `a` sentences
 than to these `b` lists", which still mixes grammar, vocabulary and any length or
@@ -412,53 +462,55 @@ position effect the matching did not remove.
 <a href="figures/t_maps_2d_untrained.png"><img src="figures/t_maps_2d_untrained.png" width="900" alt="Eight 16 by 16 t-maps at step 0: salt-and-pepper noise, every cell hatched"></a>
 
 *`--variant tiny`, 400 steps, seed 42, smoke stimuli, drawn at step 0 (untrained).
-Mean Moran's I -0.008, 0.0 significant units per tap in all 8 taps, 0 clusters. t
-values run from -5.85 to 5.01 and the colour scale reaches +/-3.3 (the colour bar
+Mean Moran's I -0.011, 0.0 significant units per tap in all 8 taps, 0 clusters. t
+values run from -5.17 to 5.91 and the colour scale reaches +/-3.7 (the colour bar
 ticks stop at 3). Click for the full-size file (2356 x 856).*
 
-<a href="figures/t_maps_2d_trained.png"><img src="figures/t_maps_2d_trained.png" width="900" alt="Eight 16 by 16 t-maps at step 400: smooth red and blue regions, every cell hatched"></a>
+<a href="figures/t_maps_2d_trained.png"><img src="figures/t_maps_2d_trained.png" width="900" alt="Eight 16 by 16 t-maps at step 400: smooth red and blue regions, most cells hatched, a few unhatched islands inside solid black and dashed magenta outlines"></a>
 
-*The same run at step 400. Mean Moran's I 0.785 (per tap 0.612 to 0.877), 0.0
-significant units per tap (0 of 256 in every tap), 0 clusters for `a` and 0 for `b`
-over the 8 taps. t values run from -5.03 to 6.83 and the colour scale reaches +/-3.7
-(the colour bar ticks stop at 3). Every cell is hatched: none is significant. Click
-for the full-size file (2356 x 856).*
+*The same run at step 400. Mean Moran's I 0.771 (per tap 0.700 to 0.856), 65.0
+significant units per tap (34 to 119 of 256, depending on the tap), 9 clusters for `a`
+and 9 for `b` over the 8 taps. t values run from -11.64 to 11.26 and the colour scale
+reaches +/-8.0 (the colour bar ticks stop at 8). The unhatched cells inside the
+outlines are the significant ones. Click for the full-size file (2356 x 875).*
 
 Each small square is one tap, titled `block_k/attention_tap` or `block_k/mlp_tap`
 (the prefix `causal_language_model/topolm/` is the same for all of them, so the
 figure drops it and says so under the headline). Each cell is one unit at its grid
 position. The colour is its t value: red means the unit responded more to the
 sentences, blue means it responded more to the word lists, white means no
-difference. The colour bar on the right shows the scale. The hatching is explained
-in the next part; for now, hatched means "not significant".
+difference. The colour bar on the right shows the scale. The hatching and the
+outlines are explained in the next part; for now, hatched means "not significant".
 
 At step 0 the cells are salt and pepper: a red cell sits next to a blue one for no
 reason, because neighbours are unrelated. At step 400 there are smooth patches of one
-colour several cells wide, and the panels of the deeper blocks have the broadest
-ones. That is the topography forming: neighbouring units now tend to share a t value
-(the mean Moran's I went from -0.008 to 0.785). The patches exist because of the
-penalty; whether a patch means anything about language is a separate question the
+colour several cells wide in every panel, some of them much stronger than anything at
+step 0, and the strongest ones are unhatched and outlined. That is the topography
+forming: neighbouring units now tend to share a t value (the mean Moran's I went from
+-0.011 to 0.771), and part of the map is significant. The smooth patches exist because
+of the penalty; the significance does not (the control below has more of it without the
+penalty), and whether a patch means anything about language is a separate question the
 figure cannot answer.
 
-**Look at the hatching of the trained map: it covers every cell, so nothing in this
-2D example is significant.** The map is smooth, and it is not significant. Those are
-two different statements and both are true here. The colour is still readable under
-the diagonal lines (the lines lower the contrast of pale cells most), and what it
-shows is that neighbouring units agree. It does **not** show that any unit prefers
-sentences to word lists: the largest t of the run, 6.83 (`block_0/mlp_tap`), was not
-enough. The correction has to hold over 2048 comparisons (8 taps of 256 units), and
-with 5 sentences against 5 (8 degrees of freedom) the single strongest unit would
-need a |t| of about 8.7 to pass on its own; more units passing together relax the
-bar for each, but only large differences clear it. So "no unit is significant" here
-is also a statement about how little 5 against 5 can show, not a proof that the model
-has no such units.
+**Look at the unhatched islands of the trained map.** Most of the map is still
+hatched: of the 2048 units (8 taps of 256), 520 are significant (65.0 per tap) and 1528
+are not. The significant ones sit in a few connected islands, each outlined, for
+example the large outlined red region of `block_2/attention_tap` and the blue
+regions at its left edge and its lower right corner. The map is smooth, and part of it is significant. Those are two
+different statements and both are true here. Outside the islands the colour is still
+readable under the diagonal lines (the lines lower the contrast of pale cells most),
+and what it shows is that neighbouring units agree. The correction has to hold over
+2048 comparisons, and with 5 sentences against 5 (8 degrees of freedom) the single
+strongest unit would need a |t| of about 8.7 to pass on its own; the bar is not fixed,
+because when many units pass together it relaxes for each of them (about 3.2 when 520
+of the 2048 pass).
 
 **Do not compare colours between two figures.** Each figure sets its own colour
 limit, the 99th percentile of the absolute t values pooled over all its panels, and
-the colour bar says what it is. Step 0 is drawn on +/-3.3 and step 400 on +/-3.7, so
+the colour bar says what it is. Step 0 is drawn on +/-3.7 and step 400 on +/-8.0, so
 the same shade means a different t in the two pictures. Colours are comparable
 between the panels of one figure. A cell above the limit is drawn in the darkest
-shade (at step 400 the largest |t| is 6.83 on a scale of +/-3.7). The 2D maps are
+shade (at step 400 the largest |t| is 11.64 on a scale of +/-8.0). The 2D maps are
 shown here at a width of 900 pixels; the hatch strokes are blurred by that
 downscaling, so click through to the full-size file to see them.
 
@@ -469,8 +521,10 @@ rejected cell carries its own hatched box (the pattern `///`, strokes about one
 cell apart) and an accepted cell never does, so a hatched cell did not pass,
 whatever its colour. The converse holds at the sizes shown here and not at every
 size: a pixel count on the two 2D figures above found a stroke inside the middle
-half of every rejected cell (256 of 256 cells in each of the 8 panels of both
-figures); the strokes are spaced in inches, not in cells, so on a paper-size 28 by 28
+half of every rejected cell and none inside any accepted one (1528 of 2048 cells
+with a stroke in the trained figure, which is exactly the number of rejected cells,
+and 2048 of 2048 at step 0); the strokes are spaced in inches, not in cells, so on a
+paper-size 28 by 28
 panel about a third of the rejected cells (855 of 2664 in a test render) have no
 stroke in their middle half. The box is still exact there, but the stroke is no
 longer proof, so do not read a bare cell of a large grid as one that passed unless
@@ -484,7 +538,7 @@ of false alarms among the cells it marks significant at or below 5% (`fdr_alpha`
 says `fdr_scope: joint across all taps`), so the threshold is a statement about the
 whole model and not about each layer on its own. A cell without hatching passed it.
 At step 0 every cell is hatched: nothing is significant. At step 400 of the 2D run
-every cell is still hatched. In the 3D run a few cells are not (next part).
+1528 of the 2048 cells are still hatched and 520 are not.
 (An earlier version of the drawing left a rejected cell unhatched whenever one of
 its neighbours had passed, so a figure made before the per-cell hatch shows far
 fewer hatch strokes than it has rejected cells; it cannot be read this way.)
@@ -496,40 +550,46 @@ strongest unused significant cell (largest |t|) and adding touching significant
 cells of the same sign until none is left; a group of fewer than 10 cells is
 dropped. A **solid black** outline surrounds a cluster of condition `a` (red,
 positive t); a **dashed magenta** outline surrounds a cluster of condition `b` (blue,
-negative t). The two 2D figures above have no outline, because they have no
-significant cell. Here is what outlines and hatching look like when a population of
-units is selective, drawn from made-up numbers (a synthetic illustration, not a run):
+negative t). The step-0 figure has no outline, because it has no significant cell. A
+cell can be significant without being in any outline (its group has fewer than 10
+cells, or its neighbours of the same sign are not significant). Here is what outlines
+and hatching look like when a population of units is selective, drawn from made-up
+numbers (a synthetic illustration, not a run):
 
-<a href="figures/t_maps_2d_illustration.png"><img src="figures/t_maps_2d_illustration.png" width="900" alt="Four 16 by 16 t-maps drawn from made-up numbers: three outlined islands of significant cells in each panel, the rest hatched; the title says SYNTHETIC"></a>
+<a href="figures/t_maps_2d_illustration.png"><img src="figures/t_maps_2d_illustration.png" width="900" alt="Four 16 by 16 t-maps drawn from made-up numbers: outlined islands of significant cells in each panel, the rest hatched; the title says SYNTHETIC"></a>
 
-*SYNTHETIC illustration, made-up numbers, not a run. Four 16x16 maps built from
-smooth blobs plus noise, with a cell called significant when |t| is above 3.5, then
-outlined by the repo's own cluster code and drawn by the trainer's own t-map
-function. Every panel has two clusters of `a` (solid black) and one of `b` (dashed
-magenta); the first has 57 significant units. The title and the line under it say
-synthetic too. Full-size file 1604 x 488.*
+*SYNTHETIC illustration, made-up numbers, not a run. Four 16x16 maps made from
+smooth noise plus planted blobs, scored by the same chain as a real run (a Student t
+test on 5 against 5 made-up stimuli, one BH-FDR correction across the four panels,
+clusters of at least 10 cells) and drawn by the trainer's own t-map function. Each
+panel has one or two clusters of `a` (solid black) and one of `b` (dashed magenta);
+the first has 63 significant units. The title and the line under it say synthetic
+too. Full-size file 1617 x 488.*
 
-The contrast with the real 2D map above is the point: where units really are
-selective the picture has a few unhatched islands with outlines, and everything else
-is hatched. The real map is smooth and fully hatched.
+The illustration is what a map would look like if a few regions of the grid really
+were selective and everything else were noise. The real 2D map above looks something
+like it: outlined islands in a hatched field, on top of smooth colour everywhere. The
+difference is that the illustration's islands were planted, and the real ones were
+found; and an outlined island is not by itself evidence of topography, as the control
+without the penalty (below) shows.
 
 A large coloured region without an outline is one of three things: its cells are
 hatched (not significant), it is smaller than 10 cells, or its significant cells do
-not touch. Every coloured region of the step-400 2D map is the first kind: smooth
-because of the penalty, hatched because the test does not call it significant. The
+not touch. Several coloured regions of the step-400 2D map are the first kind: smooth
+because of the penalty, hatched because the test does not call them significant. The
 outline count in the JSON is the same number as the outlines you see: both come from
 one label grid.
 
 #### The 3D figures
 
-<a href="figures/t_maps_3d_trained.png"><img src="figures/t_maps_3d_trained.png" width="900" alt="Twenty-four slices through eight 7 by 7 by 7 t-maps, with a dashed green crosshair in each; a few unhatched cells and one dashed magenta outline in block_2/mlp_tap"></a>
+<a href="figures/t_maps_3d_trained.png"><img src="figures/t_maps_3d_trained.png" width="900" alt="Twenty-four slices through eight 7 by 7 by 7 t-maps, with a dashed green crosshair in each; many unhatched cells inside solid black and dashed magenta outlines"></a>
 
 *`--variant tiny3d` (343 units per tap on a 7x7x7 box), 400 steps, seed 42, smoke
-stimuli, step 400. Mean Moran's I 0.670 (per tap 0.490 to 0.759), 0 to 21
-significant units per tap (mean 5.4 of 343), 0 clusters for `a` and 1 for `b` over
-the 8 taps, t values from -9.97 to 8.78, colour scale +/-5.7. The panel titles are
+stimuli, step 400. Mean Moran's I 0.593 (per tap 0.404 to 0.677), 21 to 231
+significant units per tap (mean 111.5 of 343), 7 clusters for `a` and 11 for `b` over
+the 8 taps, t values from -10.76 to 10.72, colour scale +/-8.7. The panel titles are
 small (about 6 pt) at the width shown here; click for the full-size file
-(1521 x 1284).*
+(1522 x 1265).*
 
 A cube cannot be shown on a flat page, so every tap is drawn as **three slices** of
 the cube. A slice is the flat plane you get by fixing one of the three axes at one
@@ -539,42 +599,46 @@ axis.
 - The **dashed green crosshair** marks that cell: the one with the largest significant
   |t| of the tap (the largest |t| overall when no cell is significant, and the line
   under the headline says which applies).
-- A title such as `axis 0 = 6  @(6, 5, 5)` (the first panel of `block_0/attention_tap`
-  in the figure above) has two parts. `axis 0 = 6` says that this panel is the plane
-  at index 6 along axis 0. `@(6, 5, 5)` is the crosshair cell, as (axis 0, axis 1,
+- A title such as `axis 0 = 5  @(5, 5, 3)` (the first panel of `block_0/attention_tap`
+  in the figure above) has two parts. `axis 0 = 5` says that this panel is the plane
+  at index 5 along axis 0. `@(5, 5, 3)` is the crosshair cell, as (axis 0, axis 1,
   axis 2); every index runs from 0 to 6 on a 7x7x7 box. It is the same in the three
-  panels of one tap (`axis 0 = 6`, `axis 1 = 5`, `axis 2 = 5`), and the three panels
+  panels of one tap (`axis 0 = 5`, `axis 1 = 5`, `axis 2 = 3`), and the three panels
   are the planes through that cell.
 - The crosshair is a place to start looking, not a result. A cluster that does not
   pass through the crosshair cell is not in these three planes.
 
 Hatching, outlines and the colour scale mean what they mean in 2D, applied to each
 slice. The figure has no axis ticks, so the title is the only place that says which
-slice you are looking at. Most cells are hatched here too: 5.4 of 343 units per tap
-are significant on average (about 2 per cent), 0 to 21 depending on the tap, and 21
-of them are in `block_2/mlp_tap`, where the run's only cluster sits: one cluster of
-`b` of 12 units, the dashed magenta outline, which runs to the edge of the plane in
-all three planes. The unhatched dark blue cells inside that outline are its units;
-elsewhere in the figure the unhatched cells are single or paired ones. The controls below say how much weight that cluster can carry (little). The 3D map
-is also where the length control (below) found the largest effect.
+slice you are looking at. About a third of the cells are not hatched here:
+111.5 of 343 units per tap are significant on average (about 33 per cent), 21 to 231
+depending on the tap, and the most are in `block_3/attention_tap` (231), the fewest in
+`block_2/mlp_tap` (21, which also has the lowest Moran's I, 0.404, and no cluster at
+all). Because a 7x7x7 box is small, clusters often run to the edge of a plane and are
+cut by it, and a cluster that is in the cube can be hard to see in the three planes
+through one cell. The controls below say how much weight the counts can carry.
 
 #### The cluster figure
 
 `clusters_raw.png` is written only when the run finds at least one cluster of
-condition `a` in some tap. **Neither example run wrote one**: the 2D run has no
-cluster at all and the 3D run has one cluster of `b` and none of `a`, and this figure
-draws condition `a` only. So there is no real example image of it in `figures/`, and
-the synthetic illustration above is the nearest thing: it shows the same outlines on
-the t-map, not this figure.
+condition `a` in some tap. Both example runs wrote one this time:
 
-When it is written it shows **one tap, the deepest one that has a condition-`a`
-cluster**, and **one condition: `a` only**, which the title says (for example
-`block_2/mlp_tap (raw), condition a: 1 cluster`). Each cluster is one colour on a
+<a href="figures/clusters_2d.png"><img src="figures/clusters_2d.png" width="330" alt="One 16 by 16 square, white, with two coloured clusters"></a>
+<a href="figures/clusters_3d.png"><img src="figures/clusters_3d.png" width="620" alt="Seven slices along axis 0 of the 7 by 7 by 7 box, one coloured cluster growing from slice 3 to slice 6"></a>
+
+*Left, the 2D run: `block_3/mlp_tap (raw), condition a: 2 clusters`, of 10 and 16
+units (469 x 496). Right, the 3D run: `block_3/mlp_tap (raw), condition a: 1 cluster`,
+of 34 units, shown as the seven slices along axis 0 (1475 x 628).*
+
+The figure shows **one tap, the deepest one that has a condition-`a` cluster**, and
+**one condition: `a` only**, which the title says. Each cluster is one colour on a
 white background, and it is the same cluster as the solid black outline in the t-map
 of that tap, redrawn alone. On a 3D grid it is a montage of **every slice along
-axis 0**, so a cluster can be followed through the cube as one 3D object. The t-map
-shows both conditions, so a tap there can also have a dashed magenta cluster that
-this figure does not draw (a cluster of `b` never gets a figure of its own).
+axis 0**, so a cluster can be followed through the cube as one 3D object: in the 3D
+figure the cluster first appears as one cell in slice 3 and fills the lower right
+corner from slice 4 to slice 6. The t-map shows both conditions, so a tap there can
+also have a dashed magenta cluster that this figure does not draw (a cluster of `b`
+never gets a figure of its own).
 
 **The cluster colours only tell clusters apart; they do not encode the condition.**
 The first cluster is drawn in blue, which in the t-map means `b` (negative t), but
@@ -583,10 +647,10 @@ not in the colour.
 
 #### Moran's I
 
-<img src="figures/morans_i_by_depth_2d.png" width="620" alt="Moran's I per tap in depth order, one line between 0.6 and 0.9, a dashed line at 0">
+<img src="figures/morans_i_by_depth_2d.png" width="620" alt="Moran's I per tap in depth order, one line between 0.70 and 0.86, a dashed line at 0">
 
 *The 2D run, after training (`morans_i_raw.png`). Moran's I (standard) per tap in
-depth order: 0.630, 0.612, 0.808, 0.813, 0.848, 0.835, 0.858, 0.877. Full size,
+depth order: 0.833, 0.742, 0.778, 0.747, 0.856, 0.753, 0.758, 0.700. Full size,
 794 x 467.*
 
 **Moran's I** is one number per tap that answers: *do neighbouring cells hold similar
@@ -602,17 +666,20 @@ The **standard** version is computed on the whole unthresholded t-map of the tap
 cell, significant or not), because a patch of non-significant cells would otherwise
 count as agreement. This is the number in the pictures: one point per tap in the
 profile above, and the mean over the 8 taps (`mean_morans_i`) in the curve below. In
-this run the lowest tap is `block_0/mlp_tap` (0.612) and the highest
-`block_3/mlp_tap` (0.877), and the profile is flat across block 0, jumps at block 1
-and rises slowly after that. That is one 400-step run; do not read it as a law about
-depth.
+this run the lowest tap is `block_3/mlp_tap` (0.700) and the highest
+`block_2/attention_tap` (0.856). The profile does not rise with depth: it zigzags,
+because in every one of the four blocks the attention tap is smoother than the
+feed-forward tap of the same block (0.833 against 0.742, 0.778 against 0.747, 0.856
+against 0.753, 0.758 against 0.700), and in the 3D run too (0.660 against 0.583, 0.677
+against 0.606, 0.658 against 0.404, 0.604 against 0.554). That is one 400-step run;
+do not read it as a law about attention and feed-forward layers.
 
 **What Moran's I measures here, and what it does not.** It measures that nearby units
 respond alike to the stimuli, whatever the stimuli are. That is what the training
 penalty asks for, so a high value is evidence that the penalty works. It is **not**
 evidence of selectivity for sentences over word lists: the label-shuffle null below
 gives a Moran's I of the same size when the sentences are relabelled at random (2D
-median 0.810, the real labelling 0.785; 3D median 0.680, the real labelling 0.670).
+median 0.756, the real labelling 0.771; 3D median 0.602, the real labelling 0.593).
 Read the number as "the map is smooth", never as "the map separates a from b".
 
 The **islands** version is computed only inside each connected group (an "island") of
@@ -623,74 +690,123 @@ cells are significant and the standard value mostly describes the rest. It is in
 `topography_report.json` (`morans_i.islands`) and `metrics.jsonl`
 (`morans_i_islands`), and the figures do not plot it. **It can exceed 1**, so do not
 read it as a correlation: an earlier 2D example run (before the text-token pooling)
-had 1.034 at `block_0/attention_tap`. In the runs shown here it is `nan` in every 2D
-tap (no significant unit, so no island) and defined in 4 of the 8 3D taps, between
--0.500 and -0.094: the few significant 3D units are not next to each other.
+had 1.034 at `block_0/attention_tap`. In the runs shown here it is defined in all 8
+of the 8 2D taps, between -0.066 and 0.239, and in all 8 of the 8 3D taps, between
+-0.329 and 0.931. It is noisy for small islands, and nothing in this README rests on
+it.
 
 A third version, a **permutation p-value** (how often a random shuffle of the map
 scores at least as high), is off by default (`--permutation-p-value`); the example
 reports hold `nan` for it.
 
-#### Two controls, and what they say
+#### Four controls, and what they say
 
-Two checks were run on the same two checkpoints with the same code, on the CPU,
-reading the saved weights (`checkpoints/final.keras`). They are not part of the
-trainer; their results are recorded under `runs` in `figures/figure_facts.json`.
+Three checks were run on the same two checkpoints with the same code, on the CPU,
+reading the saved weights (`checkpoints/final.keras`); the fourth is two more runs. The
+command of the first three is
+`python -m train.topolm.controls --run 2d=<run dir> --run 3d=<run dir> --facts <file>`
+and their results are recorded under `runs` in `figures/figure_facts.json`; the first
+is the framing table above.
 
 **1. The label-shuffle null.** The question: would a contrast this large turn up
 under made-up labels? Take the 10 sentences, call any 5 of them `a` and the other 5
 `b`, and compute the t-maps, the significant units, the clusters and Moran's I as
 usual. Do it for all 252 ways to choose 5 of 10 (the real labelling and its mirror,
-`a` and `b` swapped, are 2 of the 252).
+`a` and `b` swapped, are 2 of the 252, and the mirror gives the same count).
 
 | over the 252 labellings | 2D | 3D |
 |---|---|---|
-| significant units per tap, real labelling | 0.0 | 5.4 |
-| shuffled: median, 95th percentile, maximum | 0.0, 0.0, 4.25 | 0.0, 0.0, 5.5 |
-| labellings with at least as many as the real one (itself included) | 252 | 4 |
-| clusters, real labelling | 0 | 1 |
-| labellings with at least one cluster (the real one and its mirror included) | 0 | 2 |
-| Moran's I, real labelling | 0.785 | 0.670 |
-| shuffled: median (5th to 95th percentile) | 0.810 (0.721 to 0.844) | 0.680 (0.619 to 0.721) |
+| significant units per tap, real labelling | 65.0 | 111.25 |
+| shuffled: median, 95th percentile | 0.0, 0.0 | 0.0, 0.0 |
+| the best other labelling (not the real one or its mirror) | 0.25 | 24.75 |
+| labellings with at least as many as the real one (itself and its mirror included) | 2 | 2 |
+| labellings with at least one cluster (the real one and its mirror included) | 2 | 4 |
+| Moran's I, real labelling | 0.771 | 0.593 |
+| shuffled: median (minimum to maximum) | 0.756 (0.689 to 0.799) | 0.602 (0.524 to 0.659) |
 
-In 2D the real labelling sits at the null's median: that is no a-versus-b effect.
-In 3D the real labelling is among the top 4 of 252 (4 of 252 is about 0.016, with
-the real one counted), which is unusual, but the two labellings with a strictly
-larger count (5.5) are not the real one: they call four sentences of `a` and one of
-`b` the group `a`, and its mirror. A mixed grouping does as well as the real one, so
-the 5.4 units and the one cluster do not isolate an effect of `a` against `b`; the
-only labellings with a cluster at all are the real one and its mirror, which is a
-hint and not a finding at 5 sentences per side. The Moran's I rows are the reason
-for the sentence above: the real values sit inside the shuffled range in both
-dimensions.
+The real labelling is the only one (with its mirror) that gives a sizeable count: the
+next best of the other 250 gives 0.25 significant units per tap in 2D and 24.75 in
+3D, which is a labelling that shares four of the five sentences with the real one. So
+the p-value of the real labelling is 2 of 252, about 0.008, and a labelling that
+mixes the two kinds of sentence does much worse. That says the effect is tied to the
+split into sentences and word lists, not to ten sentences having some split that
+works. The Moran's I rows are the reason for the sentence above about smoothness:
+the real values sit inside the shuffled range in both dimensions (rank 60 and 152
+from the top out of 252): the smoothness does not depend on which sentences are
+called `a`.
 
 **2. The length control.** The question: how large a map does a pure length
 difference make? Draw word lists from one vocabulary (the `b` words, or the `a`
 words), 5 lists per side, with no grammar and no difference in content, and compare
 a side of short lists with a side of long ones. 12 draws each; median significant
-units per tap:
+units per tap, and the largest of the 12 draws in brackets:
 
 | lists | 2D `tiny` (of 256) | 3D `tiny3d` (of 343) |
 |---|---|---|
-| 3 words against 7 words, `b` vocabulary | 42.4 | 214.4 |
-| 3 words against 7 words, `a` vocabulary | 55.6 | 213.6 |
-| 5 words against 5 words, either vocabulary | 0.0 | 0.0 |
+| 3 words against 7 words, `b` vocabulary | 2.5 (28.9) | 5.4 (26.0) |
+| 3 words against 7 words, `a` vocabulary | 0.1 (25.0) | 0.0 (31.8) |
+| 5 words against 5 words, either vocabulary | 0.0 (0.1) | 0.0 (2.1) |
 
-Equal lengths give 0.0 (at most 0.5 in any of the 12 draws), so the control is not
-trigger-happy. Different lengths give large maps in both dimensions, and a larger
-one in 3D, on these two checkpoints (their widths and neighbourhoods differ, so this
-is a measurement of two models and not a statement about 2D against 3D). What it
-means: the t-map of these models is very sensitive to the length of the text, so any
-real stimulus set must be length-matched in tokens, as the built-in one is, and no
-3D claim should rest on a set that is not. With the built-in set matched, the 3D
-contrast is 5.4 significant units per tap, against 214.4 for lists four words apart.
+Equal lengths give 0.0 as the median (at most 2.1 in any of the 12 draws), so the
+control is not trigger-happy. Different lengths give a median of at most 5.4 and a
+single draw as large as 31.8 on these two checkpoints, well below the 65.0 and
+111.25 of the real contrast. But a single random draw can still reach 38 to 44 per cent
+of the real count in 2D (25.0 and 28.9 of 65.0) and 23 to 29 per cent in 3D (26.0 and
+31.8 of 111.25), so the t-map is not insensitive to length, and any real stimulus set
+must be length-matched in tokens, as the built-in one is. (The
+checkpoints are two models with different widths and neighbourhoods, so the
+difference between 2D and 3D here is a measurement of two models and not a statement
+about 2D against 3D.)
+
+**3. The framing table**, above: the same contrast with other passages, the end-of-text
+id alone and nothing before the sentence. The result needs text before the sentence.
+
+**4. The run without the penalty.** The question: would the same counts appear in a
+model that is not topographic? The paper's own comparison is a control with `alpha = 0`:
+the taps are built and the weights are the same, but they add nothing to the loss
+(`--alpha 0`, or `--paired` for both arms in one command). Here it is the same command
+as the two example runs with `--alpha 0` added (same seed, data order, stimuli and 400
+steps), run once for 2D and once for 3D.
+
+<a href="figures/t_maps_2d_alpha0_control.png"><img src="figures/t_maps_2d_alpha0_control.png" width="900" alt="Eight 16 by 16 t-maps of the model trained without the penalty: salt-and-pepper colour, many unhatched cells scattered over the maps, outlines around groups of touching significant cells in a few panels"></a>
+
+*The 2D run without the penalty (`--alpha 0`, otherwise the trained 2D run above), step
+400. Mean Moran's I -0.019 (per tap -0.046 to 0.019), 120.2 significant units per tap
+(52 to 219 of 256, depending on the tap), 6 clusters for `a` and 6 for `b` over the 8
+taps. t values run from -18.24 to 15.27 and the colour scale reaches +/-11.9. Click for
+the full-size file (2365 x 875).*
+
+| at step 400 (seed 42, the same stimuli) | 2D, penalty on | 2D, `--alpha 0` | 3D, penalty on | 3D, `--alpha 0` |
+|---|---|---|---|---|
+| mean Moran's I | 0.771 | -0.019 | 0.593 | -0.001 |
+| significant units per tap | 65.0 | 120.25 | 111.5 | 108.125 |
+| clusters of `a` / `b` | 9 / 9 | 6 / 6 | 7 / 11 | 8 / 8 |
+| share of the significant units that sit in a cluster | 0.756 | 0.398 | 0.923 | 0.769 |
+| validation loss | 7.162 | 6.808 | 7.105 | 6.707 |
+
+The penalty is what makes the map smooth: the control's t-map is as spatially random as
+the untrained one (Moran's I about 0, salt and pepper in the figure). The penalty is
+**not** what makes units respond differently to sentences and to word lists: without it
+there are more significant units in 2D (120.25 against 65.0, 47 per cent of the cells)
+and about the same number in 3D (108.125 against 111.5). The units of a trained
+language model respond differently to these two kinds of text whether or not they are
+laid out smoothly. The control also has clusters, 6 and 6 in 2D and 8 and 8 in 3D,
+because when 47 per cent (2D) or 32 per cent (3D) of the cells are significant, groups of
+ten touching cells of one sign occur by themselves; the two arms differ less in how
+many clusters there are than in how much of the significance sits in them (75.6 per cent
+of the significant units in the 2D map with the penalty, 39.8 per cent without; 92.3 and
+76.9 per cent in 3D) and in whether the t values of neighbouring units agree (Moran's I).
+A cluster count is therefore a weak diagnostic here, and in 3D (7 and 11 against 8 and 8)
+it does not separate the two arms. The penalty also costs something: the validation
+loss after 400 steps is 7.162 with it and 6.808 without in 2D, 7.105 and 6.707 in 3D
+(0.355 and 0.399 nats; the paper's pair at convergence differs by 0.109).
 
 #### The live curve
 
-<a href="figures/live_curve_2d.png"><img src="figures/live_curve_2d.png" width="700" alt="Four stacked panels against the optimizer step: Moran's I rising and levelling off, clusters flat at zero, significant units flat at zero but for one point, validation loss"></a>
+<a href="figures/live_curve_2d.png"><img src="figures/live_curve_2d.png" width="700" alt="Four stacked panels against the optimizer step: Moran's I rising and levelling off, clusters of both conditions rising, significant units rising to 65, validation loss falling"></a>
 
 *`topography_curve.png` of the 2D run (`--variant tiny`, 400 steps, seed 42, a draw
-every 50 steps, validation every 100). Full-size file 1360 x 1432.*
+every 50 steps, validation every 100). Full-size file 1361 x 1432.*
 
 With `--viz-every-steps N` the trainer redraws this picture after every draw. Four
 panels share the step axis (steps 0, 50, ..., 400 here):
@@ -698,76 +814,92 @@ panels share the step axis (steps 0, 50, ..., 400 here):
 - **Top, Moran's I.** One thin line per tap (each has its own colour, marker and dash
   pattern, named in the legend on the right) and the mean over taps in bold black. The
   dashed horizontal line at 0 is "no pattern". Rising means the map is getting
-  smoother. Example: the mean goes from -0.008 at step 0 to 0.679 at step 50, peaks at
-  0.809 at step 100 and stays between 0.741 and 0.809 from step 100 on (0.780 to
-  0.785 from step 250 on); the taps end between 0.612 and 0.877. It rises within 50
-  steps and then moves little; single taps can still drift.
+  smoother. Example: the mean goes from -0.011 at step 0 to 0.748 at step 50, peaks at
+  0.805 at step 150 and stays between 0.767 and 0.805 from step 100 on (0.767 to
+  0.771 from step 250 on); the taps end between 0.700 and 0.856. It rises within 50
+  steps and then moves little; single taps can still drift (`block_3/mlp_tap` fell
+  from 0.741 at step 50 to 0.586 at step 150 and recovered to 0.700).
 - **Second, clusters.** The number of clusters of condition `a` (solid) and of `b`
-  (dashed), summed over all 8 taps, with integer ticks. Example: 0 and 0 at every
-  step, so the two lines lie on top of each other at 0 (the `b` line hides behind the
-  `a` line). That is what "no selectivity detected" looks like on this panel.
+  (dashed), summed over all 8 taps, with integer ticks. Example: none at steps 0 and
+  50, then 3 and 2 at step 100, and 9 and 9 at step 400. This is the panel that shows
+  the contrast being learned: it starts later than the smoothness and keeps growing
+  after the smoothness has levelled off. It is not specific to the penalty (the run
+  without it has 219.75 significant units per tap and 15 and 15 clusters at step 50).
 - **Third, significant units.** The mean over taps of how many units pass BH-FDR (out
-  of 256). Example: 0.0 at every step except 0.25 at step 200 (two units in one tap).
-  This is **not a growth curve**: it is a count that is 0 nearly everywhere, and a
-  single unit crossing the line moves it. Its axis runs from 0 to 1, so the 0.25 has
-  no tick of its own.
+  of 256). Example: 0.0 at steps 0 and 50, 14.5 at step 100, 40.75 at step 150, then 46.375,
+  45.875, 59.0, 61.875 and 65.0 at step 400. Unlike a smoothness curve it can fall
+  as well as rise, because it is a count of units over a line: it was flat from step
+  200 to 250 (46.375 and 45.875).
 - **Bottom, validation loss.** The ordinary language-model loss on held-out text,
   without the penalty term. Validation runs once per virtual epoch (every 100 steps
   here), so there is a point at 100, 200, 300 and 400, each at the step where it was
-  measured: 7.914, 7.813, 7.818, 7.818. That is a flat curve (a range of 0.1) and it is
-  not a trained model: 400 steps only prove the pipeline.
+  measured: 7.857, 7.386, 7.212, 7.162. That is a falling curve and it is still not a
+  trained model: 400 steps only prove the pipeline.
 
-What to expect: Moran's I jumps in the first 50 steps and then moves little. What
-would be a warning sign:
+What to expect: Moran's I jumps in the first 50 steps and then moves little, and the
+selectivity counts come later. What would be a warning sign:
 
 - **Moran's I stays near 0.** The penalty is not reaching the objective. Look at
   `spatial/unaccounted` ([section 2](#2-what-a-run-reports-and-which-number-to-read))
   and at the head's `aggregate_backbone_losses`
   ([section 1](#1-two-things-that-would-otherwise-look-like-bugs)).
-- **No clusters and no significant units while Moran's I is high.** This is the
-  example above: a smooth map whose units show no detected difference between these
-  stimuli. The curve cannot tell you more than that, and the next part says why a
-  small stimulus set cannot either.
+- **Clusters and significant units stay at 0 while Moran's I is high.** A smooth map
+  whose units show no detected difference between these stimuli. That is not a
+  failure by itself (it is what the previous example runs of this README showed),
+  but it cannot be told from a stimulus set that is too small.
 - **The validation loss rises.** The task is getting worse while the map forms.
 
 #### What these figures do and do not tell you
 
-- **They show a smooth topography forming.** Moran's I rises from about 0 to 0.785
-  (2D) and 0.670 (3D) within a few dozen steps and stays there. That is what the
+- **They show a smooth topography forming.** Moran's I rises from about 0 to 0.771
+  (2D) and 0.593 (3D) within a few dozen steps and stays there. That is what the
   penalty asks for, and it is the evidence that the penalty reaches the objective.
-- **They do not show selectivity for any stimulus class at this scale.** In 2D no
-  unit is significant. In 3D 5.4 units per tap are, and the label-shuffle null says a
-  mixed labelling does as well. Moran's I of the t-map does not test selectivity (see
-  above).
+- **They show units that respond differently to the sentences and to the word
+  lists, under one framing.** 65.0 of 256 units per tap in 2D and 111.5 of 343 in 3D
+  pass the correction, and the label-shuffle null and the length control do not
+  reproduce that. The framing control shows that this holds with a passage of text
+  before the sentence and mostly disappears without one.
+- **They do not show that the topographic penalty made that selectivity.** The run
+  without the penalty has as many significant units (120.25 per tap in 2D, 108.125 in
+  3D) and similar numbers of clusters. What the penalty adds, and the figures do show, is
+  the spatial agreement of neighbouring units (Moran's I 0.771 against -0.019, 0.593
+  against -0.001) and a larger share of the significant units sitting in clusters (in both dimensions).
+  A claim that selective units are grouped, as in the paper, needs a comparison against
+  the penalty-free run on a real stimulus set, several seeds and a trained model.
+- **They do not say what the units prefer.** The two conditions differ in grammar,
+  in vocabulary (function words such as "the" and "she" occur in `a` and not in `b`)
+  and in the shape of the sentence, and the contrast cannot separate them. Conditions
+  `c` and `d` (jabberwocky and nonwords) are in the stimulus set so that they could,
+  and the example runs do not contrast them.
 - **Five sentences per condition is very little.** With 5 against 5 only a |t| of
-  roughly 8.7 or more can pass for a single unit over this many comparisons. "Nothing
-  significant" is therefore not evidence that no selective unit exists, and a live map
-  is noisy from one draw to the next.
+  roughly 3 or more can pass for a unit when many units pass together, and 8.7 or more
+  when it is alone. A live map is noisy from one draw to the next, and these counts
+  come from one seed each.
 - **A t-map is not free of length and position effects.** The sentences are matched in
-  tokens, and the length control still found large maps for lists of unequal length.
-  The model has learned **absolute** position embeddings (a table with one learned
-  vector per position), so a token's activation depends on its position. A different
-  position-encoding option is being investigated separately.
-- **The prefix is a choice.** In 3D the number of significant units per tap moves by a
-  factor of about 7.5 with the framing (5.4 to 40.5).
+  tokens, and the length control still found single draws of 25 to 32 significant units
+  per tap for lists of unequal length. The model has learned **absolute** position
+  embeddings (a table with one learned vector per position), so a token's activation
+  depends on its position. A different position-encoding option is being investigated
+  separately.
+- **The framing is a choice.** In 3D the number of significant units per tap moves
+  from 1.6 to 113.4 with the framing; in 2D from 0.1 to 65.0.
 - **The runs are toys.** `tiny` has 256 units per tap and 4 blocks, `tiny3d` 343 units;
-  both ran 400 steps on 5 plus 5 sentences, with a validation loss near 7.8, which is
+  both ran 400 steps on 5 plus 5 sentences, with a validation loss near 7.1, which is
   not a trained language model. A GPU is not bit-reproducible, so a re-run gives
   similar and not identical pictures. The numbers in the captions are from one run
   each.
 - **No claim is made that 3D is better or worse than 2D.** They were never compared:
   the widths (256 against 343) and the neighbourhood radii differ, so their numbers
-  are not comparable. The only difference stated above is a measured one on these two
-  checkpoints: the length control gave larger maps in 3D. The 3D layout is an
-  extension of the paper, which is 2D only.
+  are not comparable. The 3D layout is an extension of the paper, which is 2D only.
 - **A real selectivity claim needs a larger stimulus set,** matched in length in
-  tokens, with more than 5 sentences per condition, a trained model, and the same
-  controls run on it. The repository has no such set (the paper's own stimuli are not
-  here).
+  tokens, with more than 5 sentences per condition, a trained model, several seeds,
+  and the same controls run on it. The repository has no such set (the paper's own
+  stimuli are not here).
 - **Earlier numbers need care.** Moran's I and cluster numbers made under the default
   permutation before a placement fix were computed on a scrambled map, and every
   t-map, significance count and cluster count made before the pooling, framing and
-  length-matching changes came from a different pipeline; see
+  length-matching changes, or on the model before its feed-forward was corrected,
+  came from a different pipeline; see
   [A correction to earlier 2D numbers](#a-correction-to-earlier-2d-numbers).
 
 #### Glossary
@@ -778,8 +910,8 @@ would be a warning sign:
 | grid, layout | the 2D square or 3D cube of cells; a fixed random permutation decides which unit sits in which cell |
 | tap | one place the penalty and the figures look at: the output of the attention part or the feed-forward part of a block (`block_k/attention_tap`, `block_k/mlp_tap`) |
 | condition `a`, `b` | the two kinds of test sentence: `a` well-formed sentences, `b` unconnected words; 5 of each, matched in length in tokens |
-| framing, prefix | how a sentence is presented to the model: the end-of-text id first (the prefix, as in the training stream), then the text, then padding; no CLS and no SEP. The prefix is a choice and it matters in 3D |
-| text token | a token of the sentence itself, as opposed to the prefix and the padding; only these enter a response |
+| framing, context | how a sentence is presented to the model: a fixed neutral passage of 60 tokens (the context), the end-of-text id, the sentence, then padding; no CLS and no SEP. The framing is a choice and it matters, most in 3D |
+| text token | a token of the sentence itself, as opposed to the context, the end-of-text id and the padding; only these enter a response |
 | response | a unit's activation for one sentence, averaged over the text tokens of the sentence |
 | t value, t-map | per unit, (mean response to `a` minus mean response to `b`) divided by its standard error (Student's t); the t-map is those values on the grid; red positive, blue negative |
 | significant, FDR | a unit that passes the BH-FDR correction (5%), applied jointly over all units of all taps |
@@ -789,6 +921,8 @@ would be a warning sign:
 | Moran's I (islands) | the same inside each island of significant cells, averaged; can exceed 1 |
 | label-shuffle null | the same analysis run for every way of calling 5 of the 10 sentences `a`; shows what a contrast looks like when the labels carry no meaning |
 | length control | the same analysis on word lists of unequal length drawn from one vocabulary; shows how large a map a length difference alone makes |
+| `alpha = 0` control | the same run without the penalty (weights and data identical, the taps add nothing to the loss); shows what the significance counts look like in a model that is not topographic |
+| framing table | the same contrast under other contexts, the end-of-text id alone and nothing before the sentence; shows how much the result depends on the framing |
 | synthetic | made up, not produced by any model: the illustration figure, labelled so in its title |
 | crosshair | the dashed green lines of a 3D figure, through the cell of largest significant \|t\| |
 | slice | one flat plane of the 3D cube, with one axis fixed at one index |
@@ -800,18 +934,21 @@ commands in section 5 with `--variant tiny` and `--variant tiny3d`, seed 42, mad
 with the code described above): `t_maps_2d_untrained.png` is
 `topography_live/step_0000000/t_maps_raw.png`; `t_maps_2d_trained.png` and
 `t_maps_3d_trained.png` are `topography_live/step_0000400/t_maps_raw.png`;
-`live_curve_2d.png` is `topography_live/topography_curve.png`;
-`morans_i_by_depth_2d.png` is `topography_live/step_0000400/morans_i_raw.png`.
-`t_maps_2d_illustration.png` comes from no run: its `how_made` and `params` entries
-in `figures/figure_facts.json` say how it was built. The other files are unchanged
-copies, kept in `figures/` next to this README, and no cluster figure is among them
-because no run wrote one.
+`clusters_2d.png` and `clusters_3d.png` are `topography_live/step_0000400/clusters_raw.png`
+of the matching run; `live_curve_2d.png` is `topography_live/topography_curve.png`;
+`morans_i_by_depth_2d.png` is `topography_live/step_0000400/morans_i_raw.png`;
+`t_maps_2d_alpha0_control.png` is `topography_live/step_0000400/t_maps_raw.png` of the same
+command with `--alpha 0` added (and `--save-dir` changed).
+`t_maps_2d_illustration.png` comes from no run: it is drawn by
+`python -m train.topolm.controls --illustration`, and its `how_made` and `params`
+entries in `figures/figure_facts.json` say how it was built. The other files are
+unchanged copies, kept in `figures/` next to this README.
 `figures/figure_facts.json` is written from those runs' `metrics.jsonl` and
-`topography_report.json` and records, for every image, its SHA-256, its size, the
+`topography_report.json` (the controls and the stimuli block by the command above)
+and records, for every image, its SHA-256, its size, the
 step and the run it came from, and every number a caption quotes (as a value and as
 the string the caption prints); the synthetic image is marked `"kind": "synthetic"`
-there, and the two cluster figures that were not written are listed as omitted with
-the reason. The README test pins each image to that file and checks that the captions
+there. The README test pins each image to that file and checks that the captions
 still print those strings, so a swapped figure or a caption that drifted from the
 data fails. A regenerated figure comes with a regenerated facts file.
 
@@ -867,8 +1004,8 @@ was written and `val_loss_step` is the step it was measured at. A draw at a step
 where a validation is also due is taken at the end of that batch, before Keras
 validates, so **the last full row lags the final value in `training_history.json`**:
 in the 400-step `tiny3d` example run (validation every 100 steps, a draw every 50)
-the step-400 row held 7.5335 (the validation of step 300) and the final history
-value was 7.4916; in the matching `tiny` run 7.8181 and 7.8184 (read from those two
+the step-400 row held 7.1596 (the validation of step 300) and the final history
+value was 7.1055; in the matching `tiny` run 7.2125 and 7.1624 (read from those two
 runs' `metrics.jsonl` and `training_history.json`; the `tiny` points are also in
 `figure_facts.json`, the `tiny3d` ones are not). The curve plots each validation once, at its own
 `val_loss_step`.
@@ -904,24 +1041,24 @@ the line is skipped with one warning and the next row starts on a line of its ow
 the raw arm only, no permutation test, in batches of 8 prompts. A live map is
 noisy, and the subtitle says so (`smoke stimuli, n=5/5 per condition`): it shows
 that a structure is forming, not a result. Each sentence is framed like the
-training stream (the end-of-text id first, then the text, then padding, no CLS or
-SEP), and each unit's response to it is its activation averaged over the sentence's
-text tokens only (see the guide above). The built-in sentences are matched in length
+training stream (a fixed 60-token passage, the end-of-text id, then the sentence, then
+padding, no CLS or SEP), and each unit's response to it is its activation averaged
+over the sentence's text tokens only (see the guide above). The built-in sentences are matched in length
 in gpt2 tokens.
 
 **The colour scale is per frame, on purpose.** Each figure uses the pooled 99th
 percentile of its own t-values (see the rules above), and the colour bar states
-that scale. The 2D `tiny` example run was on +/-3.3 at step 0 and +/-3.7 at step 400
-(the earlier example run, before the framing and matching changes, was on +/-3.5 and
-+/-7.0). Two frames are therefore not comparable by colour across steps; a fixed scale
+that scale. The 2D `tiny` example run was on +/-3.7 at step 0 and +/-8.0 at step 400
+(the previous example run, before the model was corrected, was on +/-3.3 and +/-3.7;
+the one before that, before the framing and matching changes, on +/-3.5 and +/-7.0). Two frames are therefore not comparable by colour across steps; a fixed scale
 would either clip the trained map or hide the early structure.
 
 **The frame size is not constant.** The figure is laid out in inches and the line
 under the headline wraps at clause boundaries (after a `;` or a `|`), so its height,
 and with it the PNG's pixel size, changes by a few pixels between draws when the
-subtitle gains or loses a wrapped line (the 2D example run of this README stayed at
-2356x856 at step 0 and at step 400, because no outline clause was added; an earlier
-example run went from 2356x856 at step 0 to 2356x875 at step 400). A viewer that reloads the file may resize its window
+subtitle gains or loses a wrapped line (the 2D example run of this README went from
+2356x856 at step 0 to 2356x875 at step 400, because the outline clause appeared once
+there were clusters and the subtitle wrapped onto a second line). A viewer that reloads the file may resize its window
 or rescale the picture; padding every frame to one size was not done, because it
 would change every figure. The 3D subtitle also says where the crosshair is and is
 true at every step: `crosshair at the largest significant |t|`, with `(the largest
@@ -949,9 +1086,12 @@ warnings, `Error occurred when finalizing GeneratorDataset iterator: FAILED_PREC
 Python interpreter state is not initialized`, after the final `Wrote ...` line. The exit code
 is 0 and every output is written: the data generator's iterators are finalized after the
 interpreter has begun to shut down. It is intermittent: on `tiny3d` runs of 400 steps with
-`--viz-every-steps 50` it appeared in 9 of 11 runs of the current code and 1 of 3 runs of
-an earlier callback, and in none of 6 runs without the live view (nor in 60-step runs with
-it). It was traced as far as exceptions retained inside `pyparsing` (matplotlib's math-text
+`--viz-every-steps 50` it appeared in 9 of 11 runs of an earlier version of the code and
+1 of 3 runs of an earlier callback, and in none of 6 runs without the live view (nor in
+60-step runs with it). In the runs of the corrected model made for this README it
+appeared in 4 of the 5 runs with the live view (the 2D example run, both 200-step
+`tiny` runs with `--viz-every-steps 25` and the `paper3d`-width run; not in the 3D
+example run) and in none of the 4 `tiny` runs without it. It was traced as far as exceptions retained inside `pyparsing` (matplotlib's math-text
 parser) keeping the `fit` frame, and with it the data iterators, alive to the end of the
 process; it was not traced to the callback's own code, and nothing was changed for it.
 
@@ -960,56 +1100,60 @@ gives bit-equal trainable and non-trainable weights, `SeedGenerator` states and
 per-epoch losses (`TestTheABInstrument`; its control run reproduces itself, and a
 callback doing a `training=True` forward is seen to fail it). On GPU the
 comparison cannot be bit-exact, because two identical runs without the callback
-differ from each other. Measured on GPU 0 (`tiny`, seed 42, 200 steps,
-`--eval-every-steps 50 --batch-size 8`, four runs without and two with
+differ from each other. Measured on GPU 0 on the corrected model (`tiny`, seed 42, 200
+steps, `--eval-every-steps 50 --batch-size 8`, four runs without and two with
 `--viz-every-steps 25`), the largest absolute difference over the trainable weights
 of the final checkpoints, as min / median / max:
 
 | Pairs | n | max abs difference |
 |---|---|---|
-| without vs without | 6 | 1.145e-2 / 1.331e-2 / 1.466e-2 |
-| with vs without | 8 | 1.071e-2 / 1.304e-2 / 1.581e-2 |
+| without vs without | 6 | 1.528e-2 / 1.657e-2 / 1.917e-2 |
+| with vs without | 8 | 9.056e-3 / 1.597e-2 / 2.072e-2 |
 
 The ranges overlap and most of the difference sits in the embedding table in both
-rows. The honest statement is: **bit-exact on CPU; on GPU no effect detectable
-above the device's own run-to-run noise (n=6 pairs without, n=8 with); the GPU is
-not deterministic.** A single-pair criterion set before the runs (with-callback
-difference no larger than the self-difference) was not met: 1.549e-2 against
-1.291e-2, which one pair cannot resolve at this noise level. Every
-`SeedGenerator` state and every non-trainable variable other than
-`last_spatial_loss` was bit-identical in all 15 pairs, and the tripwire never
-fired. One observation is unexplained: the epoch-3 training loss of both runs with
-the callback (8.93612 and 8.93605) is below all four runs without it (8.93624 to
-8.93645), by 1.2e-4 to 1.9e-4; no mechanism was found.
+rows (without the embedding: 2.852e-4 to 7.571e-4 against 1.046e-4 to 6.382e-4). The
+honest statement is: **bit-exact on CPU; on GPU no effect detectable above the
+device's own run-to-run noise (n=6 pairs without, n=8 with); the GPU is not
+deterministic.** A single-pair criterion set before the earlier measurement (the
+with-callback difference no larger than the self-difference) was not met there
+(1.549e-2 against 1.291e-2, on the previous model); the first pair of this
+measurement meets it (1.579e-2 against 1.859e-2), and one pair resolves nothing
+either way. Every `SeedGenerator` state and every non-trainable variable other than
+`last_spatial_loss` was bit-identical in all 15 pairs, and the tripwire never fired
+(no log line). One observation is unexplained and has now been seen twice: the
+training loss of both runs with the callback is below all four runs without it at
+epoch 2 (8.89954 and 8.89931 against 8.89966 to 8.90067) and at epoch 3 (8.55923 and
+8.55896 against 8.55926 to 8.56043), by 1e-4 on a loss near 8.5; the previous
+measurement, on the previous model, saw it at epoch 3. Two models make a coincidence
+less likely and no mechanism was found.
 
-**What it costs.** Two measurements, on an RTX 4090, 2026-10-24.
+**What it costs.** Two measurements, on an RTX 4090, 2026-10-24, one job at a time on
+an idle card (no other process in `nvidia-smi` before any job).
 
 - *Per draw*, the `seconds` field over the 9 draws of the two example runs of the
-  guide (current code: text-token pooling, the training-stream framing, per-cell
-  hatch; the card was idle, and the runs are recorded in `figures/figure_facts.json`,
-  key `runs`): `tiny` median 2.21 s (2.17 to 2.65; 20.3 s in all, in a run of 259.1 s)
-  and `tiny3d` median 1.97 s (1.93 to 2.50; 18.2 s in all, in a run of 170.9 s). Peak
-  memory held by each of those processes was 5,028 MiB (`tiny`) and 5,540 MiB
+  guide (the corrected model; the runs are recorded in `figures/figure_facts.json`,
+  key `runs`): `tiny` median 2.19 s (2.14 to 2.64; 20.3 s in all, in a run of 142.8 s)
+  and `tiny3d` median 2.30 s (1.90 to 2.82; 20.9 s in all, in a run of 146.2 s). Peak
+  memory held by each of those processes was 4,770 MiB (`tiny`) and 5,026 MiB
   (`tiny3d`) (the allocator's reserved memory under `TF_FORCE_GPU_ALLOW_GROWTH`, an
-  upper bound on use). The previous pair of example runs, before the framing and
-  matching changes, gave medians of 1.96 s and 1.89 s and 6,052 and 6,564 MiB; the
-  0.25 s difference in the `tiny` draw was not attributed to a cause. An
-  earlier measurement, on code from before the pooling and hatch changes and on a card that
-  another process was sharing (about 11,065 MiB of 24,564 MiB already in use),
-  gave `tiny` median 1.46 s (0.87 to 1.97), `tiny3d` median 1.93 s (1.28 to 2.37)
-  and a `paper3d`-width run (`--num-layers 2 --max-seq-length 128 --batch-size 4`,
-  not repeated since) median 1.75 s (0.76 to 2.16); the `tiny` difference was not
-  attributed to a cause. The step-0 draw is the cheapest: nothing is learned yet
-  and no cluster outlines are drawn.
-- *Against a run without it* (the earlier measurement, before the pooling and hatch
-  changes, on the shared card, the four runs without the callback agreeing in wall
-  time within 2.5%): `tiny`, 200 steps, a draw every 25 steps (9 draws).
-  The fit phase took a median of 100.15 s over four runs without the callback and
-  116.27 s and 117.07 s with it, i.e. 16.1 s and 16.9 s more (+16.1% and +16.9%).
-  A draw every 25 steps is much denser than a real run needs; the overhead at a
-  sparser cadence was not measured, and the example runs above (a draw every 50
-  steps) were not timed against a run without the callback. Peak memory held by the
-  process rose from 5,028 to 6,052 MiB in that measurement.
+  upper bound on use). In the `tiny3d` run the draws before the first cluster (steps 0
+  to 100) took 1.90 to 1.94 s and the later ones 2.27 to 2.82 s; drawing the cluster
+  outlines is the likely cause, which was not isolated. The previous pair of example
+  runs, on the previous model, gave medians of 2.21 s and 1.97 s and 5,028 and 5,540
+  MiB. A `paper3d`-width run (`--num-layers 2 --max-seq-length 128 --batch-size 4`, 200
+  steps, a draw every 25) gave a median of 2.26 s (1.51 to 2.49) over its 9 draws and a
+  peak of 3,484 MiB.
+- *Against a run without it*: `tiny`, 200 steps, a draw every 25 steps (9 draws),
+  four runs without the callback and two with it, one after the other. The fit phase
+  took a median of 84.05 s without the callback (83.11 to 85.49) and 110.17 s and
+  108.91 s with it, i.e. 26.1 s and 24.9 s more (+31.1% and +29.6%); the wall times of
+  the four runs without agree within 2.8%. The peak memory held by the process was
+  4,770 MiB with and without. The earlier measurement, on the previous model, gave a
+  fit phase of 100.15 s without and 116.27 s and 117.07 s with (+16.1% and +16.9%):
+  the draws cost about the same and the corrected model trains faster, so the same
+  draws are a larger share. A draw every 25 steps is much denser than a real run
+  needs; the overhead at a sparser cadence was not measured, and the example runs
+  above (a draw every 50 steps) were not timed against a run without the callback.
 
 ### Training a 3D variant
 
@@ -1054,28 +1198,39 @@ them like a 2D variant, with these differences.
   are the 2D ones, applied to each plane.
 - *Measured, `tiny3d`* (the 3D example run of the guide: `--train-steps 400
   --eval-every-steps 100 --viz-every-steps 50 --batch-size 8`, smoke stimuli, raw
-  arm, text-token pooling, end-of-text framing, length-matched sentences): the
+  arm, text-token pooling, the 60-token passage and the end-of-text id before each
+  sentence, length-matched sentences): the
   t-maps are finite and not all zero, and the mean Moran's I over the 8 taps went
-  from -0.0044 at step 0 to 0.584 at step 50 and 0.670 at step 400, while the mean
-  significant units per tap were 0.0 up to step 250, then 0.125 at steps 300 and 350
-  and 5.4 at step 400 (0 clusters for `a` and 1 for `b` at step 400). Read the
-  significance with the controls of the guide: the label-shuffle null finds a
-  labelling that mixes the classes with a larger count, and word lists of 3 against 7
-  words give a median of 214.4 significant units per tap on this checkpoint.
-- *Memory at paper width.* `--variant paper3d --num-layers 2 --train-steps 200
-  --eval-every-steps 50 --viz-every-steps 25 --batch-size 4`: the first attempt, at
-  the default `--max-seq-length 512`, held 8,608 MiB in its own process when it was
-  stopped by an 8,000 MiB cap set for that measurement on a shared card, so its
-  peak is not known. With `--max-seq-length 128` it finished, peaking at 6,558 MiB.
-  That run shows the pipeline and the figures work at the paper's width; it is not
-  what a real `paper3d` run looks like (2 layers, 200 steps).
+  from -0.0091 at step 0 to 0.528 at step 50 and 0.593 at step 400, while the mean
+  significant units per tap were 0.5 at step 50 and 0.125 at step 100, then 88.1 at
+  step 150 and between 107.5 and 111.9 from step 200 on (7 clusters for `a` and 11 for
+  `b` at step 400). The jump between steps 100 and 150 was not investigated. Read the
+  significance with the controls of the guide: the real labelling and its mirror
+  are the only two of 252 that give more than 24.75 significant units per tap, word lists of 3 against 7
+  words give a median of 5.4 significant units per tap on this checkpoint, and with
+  no passage before the sentence the count is 1.625.
+- *Memory at paper width.* `--variant paper3d --num-layers 2 --max-seq-length 128
+  --train-steps 200 --eval-every-steps 50 --viz-every-steps 25 --batch-size 4` ran to
+  the end on the corrected model, peaking at 3,484 MiB in its own process (the
+  allocator's reserve). The mean Moran's I of its raw arm went from 0.0005 at step 0
+  to 0.579 at step 25, 0.851 at step 100 and 0.836 at step 200, and the mean
+  significant units per tap were 614.5 of 1000 at step 25, when no validation had
+  run yet, and 731.25 at step 200 (4 clusters for each condition); the validation
+  loss was 7.576 after 200 steps. A count that large after 25 steps is a reason to
+  read the counts with the controls of the guide (and the `alpha = 0` check there),
+  which were not run on this model. The default `--max-seq-length 512` was not re-run
+  on the corrected model (the earlier model, stopped by an 8,000 MiB cap at that
+  length, held 8,608 MiB, so no peak was known). That run shows the pipeline and the
+  figures work at the paper's width; it is not what a real `paper3d` run looks like (2
+  layers, 200 steps, 128 positions).
 
 ### A correction to earlier 2D numbers
 
-This section holds three corrections: where the maps were placed on the grid (first
-paragraphs), what the t-maps were averaged over (**the second correction**) and how
-the stimuli were framed and matched in length (**the third correction**, at the end).
-Each changes numbers that earlier runs, logs and figures reported, in 2D and in 3D.
+This section holds five corrections: where the maps were placed on the grid (first
+paragraphs), what the t-maps were averaged over (**the second correction**), how the
+stimuli were framed and matched in length (**the third correction**), what precedes a
+stimulus (**the fourth**) and the model itself (**the fifth**, at the end). Each changes
+numbers that earlier runs, logs and figures reported, in 2D and in 3D.
 
 Before this change `evaluate_topography` put each tap's per-unit t and
 significance vectors on the grid with a plain `reshape`. Under the default
@@ -1163,14 +1318,58 @@ older, unmatched sentences, a against b, raw arm):
 
 Matching the lengths took the 3D contrast on those earlier checkpoints from 51.12 to
 5.25 significant units per tap (0 and 1 clusters) and left 2D at 0.0. The figures of
-this README come from regenerated 400-step runs with both changes, and give 0.0 in
-2D and 5.4 in 3D (the guide has the numbers and the two controls). Moran's I hardly
-moved through any of it (2D 0.786 to 0.818 on the earlier checkpoints, 0.785 now), so
-the smoothness of the maps is the finding that survives; the significance is not.
-**Every t-map, significance count and cluster count made before these changes,
-including every one in an earlier version of this README, should be recomputed
-before it is quoted.** Guarded by `TestStimuliAreFramedLikeTheTrainingStream` and
-`TestTheSmokeStimuliAreLengthMatched`.
+the version of this README that made that change were regenerated 400-step runs
+with both changes and gave 0.0 in 2D and 5.4 in 3D; Moran's I hardly moved through any
+of it (2D 0.786 to 0.818 on the earlier checkpoints). **Every t-map, significance
+count and cluster count made before these changes, including every one in an earlier
+version of this README, should be recomputed before it is quoted.** Guarded by
+`TestTheSmokeStimuliAreLengthMatched` and the framing tests of the fourth correction.
+
+**A fourth correction: the sentence is placed after a fixed passage.** The framing of
+the third correction put the end-of-text id at position 0 and the sentence at
+position 1. The training stream does not look like that: it joins documents with the
+end-of-text id and cuts windows at arbitrary offsets, so a document starts after the
+previous document's text and an end-of-text id sits at the first position of about 1
+window in 441 (derived from the trainer's 440 tokens per article). On the checkpoints
+of that time, three different passages in front of the end-of-text id gave 22 to 34
+significant units per tap in 2D and 127 to 163 in 3D, against 0.0 and 5.4 with the
+end-of-text id alone, so that earlier reading of "almost no selectivity at this scale"
+came from an out-of-distribution framing. Every sentence is now placed after a fixed
+neutral passage of 60 tokens, then the end-of-text id (the guide has the details and
+the framing table, which also reports the end-of-text id alone and no prefix). The
+trainer requires a preprocessor that publishes the raw encoder
+(`tokenizer.encode`, `tokenizer.eot_token`) and refuses any other by name: an older
+route that framed the stimuli `[CLS] text [SEP]` for a preprocessor that could only be
+called is deleted. Guarded by `TestStimuliAreFramedWithAFixedContext` and the tests
+in `test_topolm_encoder_api.py`.
+
+**A fifth correction: the model was not the model the paper describes, and every
+number changed with it.** The example runs of the previous versions of this README
+were made on a model whose feed-forward was two MLPs chained one after the other
+(four dense layers and two GELUs, 3.12 times the parameters of a GPT-2 feed-forward
+block), whose attention and feed-forward output projections started 3.5 times too
+large at depth 12 (the initial standard deviation lacked the 1 / sqrt(2 * depth)
+factor of GPT-2 and of the authors' code), whose first GELU was the tanh form and the
+second the exact one, which carried biases and a LayerNorm shift that the released
+code does not have, and whose `--vocab-size` default held about 50,000 unused rows.
+All of that is corrected (the model README has the list, the new knobs and the
+parameter counts), and the example runs, the controls and every figure of this README
+were regenerated on the corrected model. The earlier numbers, on the previous model
+and the same stimuli: 2D 0.0 significant units per tap, 0 / 0 clusters, Moran's I
+0.785; 3D 5.4, 0 / 1, 0.670; for word lists of 3 against 7 words a median of 42.4 and
+55.6 (2D) and 214.4 and 213.6 (3D) significant units per tap; the real 2D labelling
+at the median of the label-shuffle null. The corrected model gives 65.0 and 111.5,
+9 / 9 and 7 / 11 clusters, Moran's I 0.771 and 0.593, length-control medians of at
+most 5.4, and a real labelling that is the unique top of the shuffle null in both
+dimensions. So the earlier reading of "no selectivity at this scale" was a property of
+the previous model, and the guide above is what the corrected one shows, including
+that the counts of significant units are the same without the penalty. The previous
+model was not run without the penalty, so whether its near-absence of significant
+units was also true of its control is not known. **No ablation
+separates the five differences, so which one mattered is not known**: the corrected
+model also reaches a lower validation loss in the same 400 steps (7.162 against 7.818
+in 2D, 7.105 against 7.492 in 3D, both before), so it may simply be further along.
+Checkpoints of the previous model do not load into the corrected one.
 
 ---
 
@@ -1179,7 +1378,7 @@ before it is quoted.** Guarded by `TestStimuliAreFramedLikeTheTrainingStream` an
 The control is the paper's comparison and the point of running it, so the two arms
 share a seed, a data ordering and every other hyperparameter except `alpha`. The
 control's taps are still created and still built, which is what makes that true at
-the **weight level** rather than only at the config level — pinned in
+the **weight level** rather than only at the config level, pinned in
 `test_the_control_arm_is_only_alpha_that_differs` and
 `test_an_alpha_zero_control_holds_an_identical_weight_set`.
 
@@ -1207,8 +1406,8 @@ nothing. Pinned by `test_no_topography_reaches_both_arms` and
 the backbone is subclassed, so there is no `layer.output`, and wrapping internal
 tensors functionally would mean rebuilding the stack under a second model.
 
-Instead `TopoLM.call` accepts a `taps` argument — a sequence of identity layers,
-one per entry of `model.tap_layers` — and each capture returns its input
+Instead `TopoLM.call` accepts a `taps` argument, a sequence of identity layers,
+one per entry of `model.tap_layers`, and each capture returns its input
 unchanged. The captures are therefore invisible to the arithmetic, which is
 asserted directly:
 
@@ -1222,13 +1421,14 @@ np.testing.assert_array_equal(plain, observed)
 Pooling is a **mean** over the text tokens of a sentence, not a sum, so a longer
 encoding does not read as a stronger response, a confound the paper's own footnote 9
 reports for exactly this analysis. The stimuli are framed as the training stream
-presents text: the end-of-text id first, then the text, then padding, with no CLS
-and no SEP; the prefix and the padding are excluded by id and are not pooled, so
-a constant position never gets a weight that depends on the sentence's length.
+presents text: a fixed neutral passage, the end-of-text id, the sentence, then
+padding, with no CLS and no SEP; the passage, the end-of-text id and the padding are
+excluded by id and are not pooled, so a constant position never gets a weight that
+depends on the sentence's length.
 That is what makes the mean about the sentence: when it was a mean over all 512
 window positions, about 98 per cent of it was padding, and when the sentences began
 with a CLS marker the text tokens still attended to a token the model never sees
-(see the second and third corrections in *A correction to earlier 2D numbers*). A
+(see the second to fourth corrections in *A correction to earlier 2D numbers*). A
 mean over text tokens still depends on a token's position and context, so a stimulus
 set has to be matched in length in tokens (the built-in one is) before any contrast
 is read as a selectivity.
@@ -1273,7 +1473,7 @@ is reproducible from the run seed and independent per tap, so re-running one arm
 regenerates exactly the same numbers.
 
 > On `run_paired`: there is no function by that name in this package. The paired
-> run is `train_paired`, reached with `--paired`, and it **is** implemented — see
+> run is `train_paired`, reached with `--paired`, and it **is** implemented, see
 > §6. If a note elsewhere defers `run_paired`, it means this and should be read as
 > a stale reference to the same work, not as a gap.
 
@@ -1287,7 +1487,7 @@ pytest tests/test_train/test_topolm/
 
 The training-shaped tests drive the real `train_topolm` with the dataset loader
 and tokenizer replaced, because what is worth testing here is the cadence
-arithmetic, the objective wiring and the evaluation — none of which need
+arithmetic, the objective wiring and the evaluation, none of which need
 Wikipedia. The substitution is explicit in `_patch_data`, not hidden in a fixture,
 and the run directory is redirected under `tmp_path` by an autouse fixture.
 
@@ -1303,8 +1503,8 @@ hatched region's extent could not see the unmarked cells inside it.
 
 One note on the stub tokenizer: it takes a **list of strings**, which is what
 `TiktokenPreprocessor.__call__` accepts (`str` or `list`, and it raises `TypeError`
-on anything else). It used to take a `{"text": [...]}` mapping — a shape that
-matched neither the real preprocessor nor anything else — and that agreement
+on anything else). It used to take a `{"text": [...]}` mapping, a shape that
+matched neither the real preprocessor nor anything else, and that agreement
 between two unlike stubs is what hid the live `TypeError` in
 `extract_tap_activations` for the whole first pass of this code.
 
@@ -1340,8 +1540,8 @@ The 3D work and the live view live in these files (all under
   (the pooling of a response: a per-sentence loop oracle, window-length invariance,
   a 1e6 poison at each CLS, SEP and PAD position with a text-position control, the
   refusal of a sentence with no text token, the dotted length control),
-  `TestStimuliAreFramedLikeTheTrainingStream` (the ids the model sees: the
-  end-of-text id first, no CLS or SEP, padding only after the text) and
+  `TestStimuliAreFramedWithAFixedContext` (the ids the model sees: the fixed passage,
+  the end-of-text id, the sentence, padding only after the text, no CLS or SEP) and
   `TestTheSmokeStimuliAreLengthMatched` (the token counts of every sentence index).
 - `test_topolm_plotting.py`: `TestClusterBoundariesSitOnTheirCells`,
   `TestThreeDimensionalFigures`, `TestThreeDimensionalCrosshairAndMontageContent`,
@@ -1371,12 +1571,24 @@ The 3D work and the live view live in these files (all under
   block), the synthetic illustration must say `synthetic` in its caption and be
   marked so in the facts, and the sentences retracted by review (a wrong islands
   maximum, an impossible crosshair index, the padded-average pooling, a hatch
-  described through a contour, islands of significance in the 2D example, a cluster
-  figure that no run wrote) must not come back. A number of an earlier run must carry
+  described through a contour, a figure that no run wrote) must not come back, and
+  the conclusions of the guide must hold in the facts (a real labelling that tops the
+  shuffle null, a length control far below the real count, a framing table that
+  shows the dependence on the passage). A number of an earlier run must carry
   its label in the same bullet, table or paragraph (`TestTheLabelGuardCanFail`); the
   README tests are seen RED against swapped images, a changed caption number, a
   reinserted retracted claim and a caption without the word `synthetic`
   (`TestTheReadmeGuardsCanFail`).
+- `test_topolm_controls.py` (`TestTheLengthControl`, `TestTheLabelShuffleNull`,
+  `TestTheFramingTable`, `TestTheSyntheticIllustration`, `TestTheCommandLine`: the
+  three controls, the facts file and the illustration of the guide),
+  `test_topolm_encoder_api.py` (`TestAnEncoderIsRequired`: a preprocessor that
+  cannot supply the raw encoder is refused by name before any forward pass),
+  `test_topolm_vocab_default.py` (`TestTheDefaultIsResolvedNotTyped`,
+  `TestAnExplicitValueIsKept`, `TestConfigJsonRecordsTheInteger`: the `--vocab-size`
+  default of section 5) and `test_topolm_tap_placement.py`
+  (`TestTheEvaluationPathReadsEitherPlacement`: the t-maps are finite whichever
+  tensor the taps read).
 - `tests/test_metrics/test_spatial_autocorrelation.py` and
   `tests/test_metrics/test_topographic_selectivity.py`: golden pins of the 2D results
   (`TestMoransIGoldenPins`, `TestLabelIslandsGoldenPins`,
