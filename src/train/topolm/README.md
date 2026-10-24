@@ -943,14 +943,59 @@ command with `--alpha 0` added (and `--save-dir` changed).
 `python -m train.topolm.controls --illustration`, and its `how_made` and `params`
 entries in `figures/figure_facts.json` say how it was built. The other files are
 unchanged copies, kept in `figures/` next to this README.
-`figures/figure_facts.json` is written from those runs' `metrics.jsonl` and
-`topography_report.json` (the controls and the stimuli block by the command above)
-and records, for every image, its SHA-256, its size, the
+`figures/figure_facts.json` records, for every image, its SHA-256, its size, the
 step and the run it came from, and every number a caption quotes (as a value and as
 the string the caption prints); the synthetic image is marked `"kind": "synthetic"`
 there. The README test pins each image to that file and checks that the captions
 still print those strings, so a swapped figure or a caption that drifted from the
 data fails. A regenerated figure comes with a regenerated facts file.
+
+**Regenerating the facts file.** The file is written by `python -m train.topolm.figure_facts`
+(`src/train/topolm/figure_facts.py`), from the four run directories the figures come
+from (`2d`, `3d`, `2d_alpha0`, `3d_alpha0`; read only), with the controls of section
+"Four controls" computed for `2d` and `3d`:
+
+```bash
+CUDA_VISIBLE_DEVICES= MPLBACKEND=Agg python -m train.topolm.figure_facts \
+    --run 2d=<run dir> --run 3d=<run dir> \
+    --run 2d_alpha0=<run dir> --run 3d_alpha0=<run dir> \
+    --controls 2d --controls 3d --capture-dir <capture dir> \
+    --out src/train/topolm/figures/figure_facts.json
+```
+
+Add `--compare <the tracked file>` and an `--out` elsewhere to check a regeneration
+against the tracked file: the command lists the fields that differ as `provenance`
+(the git state at the time, the form of the run paths), `device_dependent` and
+`other`, and exits 1 when there are `other` ones. `--help` lists every option. What
+comes from where:
+
+- read from the run directories: `config.json`, `training_history.json`,
+  `topography_report.json`, `topography_live/metrics.jsonl` and the PNG files (hash,
+  size, the numbers of the draw each figure shows, the series of the curve, the
+  stimulus framing);
+- drawn: the synthetic illustration, by the function behind
+  `python -m train.topolm.controls --illustration`, into `t_maps_2d_illustration.png`
+  beside `--out`;
+- recomputed on the machine that runs the command: the colour limit of each t-map
+  figure (from `checkpoints/final.keras`, or from the seeded initial weights for step
+  0, checked against the run's own report and against the colour bar of the PNG) and
+  the controls. These are the `device_dependent` fields; the file records the list
+  (`generated_from.device_dependent_fields`) and the device
+  (`generated_from.recomputation_device`). The tracked file was computed on the CPU;
+- not in a run directory, so it comes from the capture of the training command
+  (`--capture-dir`, optional; without it those fields are left out): per run
+  `log_<name>.txt` (the console output of the trainer), `result_<name>.txt` (one line,
+  `exit=<code> wall_s=<seconds>`) and `gpu_samples_<name>.csv` (one line per second,
+  `<epoch seconds>,<MiB of the trainer process or NA>,<MiB used on the card>,<utilisation>`):
+  the exit code, the wall time, the GPU memory peak, the device name, the fit-phase
+  seconds and the count of TensorFlow shutdown warnings. These cannot be recomputed from the
+  run directory; they are properties of the machine and the command that made the run;
+- written by hand, passed with `--note KEY=TEXT`: the two free-text notes in
+  `generated_from` (`runs` and `note_tracked_clean`).
+
+The module has its own tests (`test_topolm_figure_facts.py`: `TestTheSmallFunctions`,
+`TestRunSummary`, `TestTheColourLimit`, `TestComparingFactsFiles`,
+`TestTheFigureFactsCommandLine`, `TestTheRegenerationCommandInThisReadme`).
 
 ### Watching a run: `--viz-every-steps`
 
@@ -1579,6 +1624,12 @@ The 3D work and the live view live in these files (all under
   README tests are seen RED against swapped images, a changed caption number, a
   reinserted retracted claim and a caption without the word `synthetic`
   (`TestTheReadmeGuardsCanFail`).
+- `test_topolm_figure_facts.py` (`TestTheSmallFunctions`, `TestRunSummary`,
+  `TestTheColourLimit`, `TestComparingFactsFiles`, `TestTheFigureFactsCommandLine`,
+  `TestTheRegenerationCommandInThisReadme`: the module that writes
+  `figures/figure_facts.json`; hand-computed cases, a colour bar read back from figures
+  of known limit, a real tiny run whose recomputed limit is checked against its own
+  report, and the README's regeneration command checked against the module's `--help`),
 - `test_topolm_controls.py` (`TestTheLengthControl`, `TestTheLabelShuffleNull`,
   `TestTheFramingTable`, `TestTheSyntheticIllustration`, `TestTheCommandLine`: the
   three controls, the facts file and the illustration of the guide),

@@ -526,6 +526,19 @@ def controls_for_run(
     return json.loads(json.dumps(block, allow_nan=False))
 
 
+def preprocessor_from_config(config: Mapping[str, Any]) -> Any:
+    """The tokenizer preprocessor the trainer builds from a run's ``config.json``.
+
+    Contract. ``config`` holds ``encoding_name``, ``max_seq_length`` and the four
+    special-token ids. Returns what ``train.common.nlp.create_tokenizer`` returns.
+    Failure mode: a missing key raises ``KeyError`` naming it.
+    """
+    return C.create_tokenizer(
+        config["encoding_name"], config["max_seq_length"], config["cls_token_id"],
+        config["sep_token_id"], config["pad_token_id"], config["mask_token_id"],
+    )
+
+
 def load_run(run_dir: str) -> Tuple[Any, Any, Dict[str, Any]]:
     """The backbone, the preprocessor and the config of a finished run.
 
@@ -543,11 +556,7 @@ def load_run(run_dir: str) -> Tuple[Any, Any, Dict[str, Any]]:
     )
     if backbone is None:
         raise ValueError(f"{run_dir}/checkpoints/final.keras holds no backbone with taps")
-    preprocessor = C.create_tokenizer(
-        config["encoding_name"], config["max_seq_length"], config["cls_token_id"],
-        config["sep_token_id"], config["pad_token_id"], config["mask_token_id"],
-    )
-    return backbone, preprocessor, config
+    return backbone, preprocessor_from_config(config), config
 
 
 def dump_facts(path: str, data: Mapping[str, Any]) -> None:
