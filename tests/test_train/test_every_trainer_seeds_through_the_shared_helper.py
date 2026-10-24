@@ -105,6 +105,10 @@ NOT_TRAINING: Dict[str, str] = {
     "train.topolm.controls": (
         "scores finished TopoLM runs against the framing, length and label-shuffle "
         "controls; its random draws are seeded by its own --seed"),
+    "train.topolm.figure_facts": (
+        "regenerates figure_facts.json from finished TopoLM run directories (read "
+        "only); it rebuilds the seeded initial weights of step 0 through "
+        "train.topolm.common.set_seeds and takes the controls' draws from --seed"),
     "train.vae.run_sampler_comparison": (
         "launches the seeded VAE trainer per arm and passes its --seed"),
 }
