@@ -64,29 +64,47 @@ LENGTH = 12
 # ---------------------------------------------------------------------
 
 
-class StubTokenizer:
-    """A deterministic stand-in for the Tiktoken preprocessor.
+#: The id the stub encoder gives the shipped stimulus context (one token), and
+#: the end-of-text id it publishes.
+CONTEXT_ID = 0
+STUB_EOT = VOCAB - 1
 
-    Character codes rather than random ids, so two calls with the same text
-    produce the same ids -- a random tokenizer would let a test pass on a prompt
-    ordering that never recurs.
 
-    Takes a LIST of strings, which is the shape
-    :class:`~dl_techniques.utils.tokenizer.TiktokenPreprocessor` actually
-    accepts. It took a ``{"text": [...]}`` mapping before, matching neither the
-    real preprocessor nor the trainer: ``__call__`` raises ``TypeError`` on
-    anything but a string or a list, so the stub was agreeing with no one and
-    hid a real defect. ``extract_tap_activations`` was passing the mapping and
-    only reached this stub in tests; the live run raised ``TypeError`` there.
+class StubEncoder:
+    """The raw-encoder surface the stimulus framing reads: ``encode`` and ``eot_token``.
+
+    One id per whitespace-separated word, in ``[1, VOCAB - 2]`` (so never the
+    end-of-text id ``VOCAB - 1`` or ``CONTEXT_ID``): deterministic, so two calls
+    with the same text give the same ids -- a random tokenizer would let a test
+    pass on a prompt ordering that never recurs. The shipped stimulus context
+    (:data:`train.topolm.common.STIMULUS_CONTEXT`, about 45 words) stands for ONE
+    token, ``CONTEXT_ID``, because the test models hold only ``LENGTH`` = 12
+    positions; the framing is then ``context+eot`` with a one-token context.
+    Tests of the real context (60 gpt2 tokens) use the real gpt2 tokenizer.
     """
 
-    def __call__(self, texts):
-        texts = [texts] if isinstance(texts, str) else texts
-        ids = np.zeros((len(texts), LENGTH), dtype="int32")
-        for row, text in enumerate(texts):
-            for column, character in enumerate(str(text)[:LENGTH - 1]):
-                ids[row, column] = (ord(character) * 7) % VOCAB
-        return {"input_ids": ids}
+    eot_token = STUB_EOT
+
+    def encode(self, text):
+        if text == C.STIMULUS_CONTEXT:
+            return [CONTEXT_ID]
+        return [
+            1 + (sum(ord(c) for c in word) * 7) % (VOCAB - 3)
+            for word in str(text).split()
+        ]
+
+
+class StubTokenizer:
+    """A stand-in for the Tiktoken preprocessor: just the encoder API.
+
+    ``.tokenizer.encode`` and ``.tokenizer.eot_token`` are what the stimulus
+    framing requires (D-031 f; a preprocessor that can only be called is refused).
+    There is deliberately no ``__call__``, ``vocab_size``, ``max_length`` or special
+    id: the framing falls back to the end-of-text id for padding, and the vocabulary
+    guard has nothing to check (the forward pass remains the backstop).
+    """
+
+    tokenizer = StubEncoder()
 
 
 @pytest.fixture(autouse=True)
@@ -587,25 +605,34 @@ class TestActivationExtraction:
 
         The paper's own footnote 9 reports that confound for a response-profile
         analysis, so the distinction is worth pinning rather than assuming.
+
+        The oracle frames the sentence by hand (the stub's one-token context, its
+        end-of-text id, then one id per word) and averages the captured tap over
+        the sentence positions with numpy, independently of the extraction.
         """
         backbone = self._backbone()
         tokenizer = StubTokenizer()
-        prompts = ["alpha bravo"]
+        prompts = ["alpha bravo charlie"]
 
         activations = extract_tap_activations(backbone, prompts, tokenizer)
         pooled = activations[backbone.tap_layers[0].path]
 
+        words = tokenizer.tokenizer.encode(prompts[0])
+        assert len(words) == 3
+        tokens = np.asarray([[CONTEXT_ID, STUB_EOT] + words], dtype="int32")
         captures = [TapCapture() for _ in backbone.tap_layers]
-        tokens = tokenizer(prompts)["input_ids"]
         backbone(tokens, training=False, taps=tuple(captures))
-        raw = keras.ops.convert_to_numpy(captures[0].value)
+        raw = keras.ops.convert_to_numpy(captures[0].value)[0].astype("float64")
 
+        sentence = raw[2:]
         np.testing.assert_allclose(
-            pooled[0], raw[0].mean(axis=0), rtol=1e-5, atol=1e-6
+            pooled[0], sentence.mean(axis=0), rtol=1e-5, atol=1e-6
         )
         # The two pooling rules must actually differ on this data, or the
         # assertion above is not discriminating.
-        assert not np.allclose(pooled[0], raw[0].sum(axis=0))
+        assert not np.allclose(pooled[0], sentence.sum(axis=0))
+        # and the context and eot positions are NOT part of the mean
+        assert not np.allclose(pooled[0], raw.mean(axis=0), rtol=1e-4, atol=1e-6)
 
     def test_an_empty_prompt_list_is_rejected(self):
         with pytest.raises(ValueError, match="prompts must not be empty"):
@@ -721,21 +748,6 @@ def _raw_taps(backbone, ids):
     }
 
 
-def _text_only_loop(raw, ids, special):
-    """The independent oracle: an explicit loop over sentences and positions."""
-    pooled = np.zeros((raw.shape[0], raw.shape[2]), dtype="float64")
-    for sentence in range(raw.shape[0]):
-        total = np.zeros(raw.shape[2], dtype="float64")
-        count = 0
-        for position in range(raw.shape[1]):
-            if int(ids[sentence, position]) in special:
-                continue
-            total += raw[sentence, position]
-            count += 1
-        pooled[sentence] = total / count
-    return pooled
-
-
 def _all_position_pooling(
     backbone, prompts, preprocessor, batch_size=32, context=None
 ):
@@ -771,9 +783,8 @@ def _forward_close(actual, expected):
 
 
 def _tokenizer(kind, window):
-    """``SpecialIdTokenizer`` ('stub') or the real gpt2 preprocessor ('gpt2')."""
-    if kind == "stub":
-        return SpecialIdTokenizer(window)
+    """The real gpt2 preprocessor (``kind`` is kept for the call sites)."""
+    assert kind == "gpt2", kind
     return C.create_tokenizer("gpt2", window, 50257, 50258, 50259, 50260)
 
 
@@ -781,17 +792,6 @@ def _model(kind, window):
     """A tiny model whose table holds every id the tokenizer of ``kind`` emits."""
     vocab = VOCAB if kind == "stub" else 50261
     return build_backbone(_config(vocab_size=vocab, max_seq_length=window))
-
-
-def _special_ids(preprocessor):
-    return {
-        int(preprocessor.cls_token_id),
-        int(preprocessor.sep_token_id),
-        int(preprocessor.pad_token_id),
-    }
-
-
-_KINDS = pytest.mark.parametrize("kind", ["stub", "gpt2"])
 
 
 class TestPoolingIsOverTextTokensOnly:
@@ -818,24 +818,7 @@ class TestPoolingIsOverTextTokensOnly:
     reproduce, and its thresholds sit well inside the six measured pairs.
     """
 
-    def test_it_equals_an_independent_loop_over_text_positions(self):
-        """The fallback path (a preprocessor that can only be called): CLS, SEP and
-        PAD ids are what separates text from the rest. The gpt2 framing has its
-        own oracle in ``TestStimuliAreFramedLikeTheTrainingStream`` (D-024)."""
-        kind = "stub"
-        backbone, preprocessor = _model(kind, 64), _tokenizer(kind, 64)
-        prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
-        ids = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
-        special = _special_ids(preprocessor)
-        assert (ids == int(preprocessor.pad_token_id)).any(), "no padding to test"
-
-        pooled = extract_tap_activations(backbone, prompts, preprocessor)
-        raw = _raw_taps(backbone, ids)
-        for path, values in pooled.items():
-            _forward_close(values, _text_only_loop(raw[path], ids, special))
-
-    @_KINDS
-    def test_the_window_length_does_not_change_the_response(self, kind):
+    def test_the_window_length_does_not_change_the_response(self):
         """THE discriminating control: the same text, more padding, same numbers.
 
         The model is causal, so the activation at a position cannot depend on a
@@ -843,11 +826,8 @@ class TestPoolingIsOverTextTokensOnly:
         activation, and a text-only pooling is exactly window-independent. The
         causal assumption is verified in the next test, not taken on trust.
         """
+        kind = "gpt2"
         backbone = _model(kind, 256)
-        # 96, not 64: the stub cuts a sentence to ``window - 2`` characters, and the
-        # longest smoke sentence is 64 (D-025 lengthened condition b), so a 64
-        # window would truncate TEXT and the two windows would not see the same
-        # sentences.
         long_window, short_window = _tokenizer(kind, 256), _tokenizer(kind, 96)
         prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
         short_ids = np.asarray(short_window(prompts)["input_ids"])
@@ -885,52 +865,8 @@ class TestPoolingIsOverTextTokensOnly:
         for path in short_raw:
             _forward_close(short_raw[path], long_raw[path][:, :40])
 
-    @pytest.mark.parametrize(
-        "excluded", ["cls", "sep", "pad"], ids=["cls", "sep", "pad"]
-    )
-    def test_a_special_token_position_does_not_enter_the_response(
-        self, excluded
-    ):
-        """Set every CLS (or SEP, or PAD) activation to 1e6: nothing moves.
-
-        The fallback path only: the gpt2 preprocessor's stimuli carry no CLS or SEP
-        any more (D-024), so a poison keyed on those ids would mark nothing and
-        pass vacuously; ``TestStimuliAreFramedLikeTheTrainingStream`` poisons the
-        end-of-text prefix and the pads instead.
-
-        Excluding only the pad ids would pass the loop oracle on a tokenizer
-        whose CLS and SEP happened to be quiet; the huge constant cannot hide.
-        The control below poisons one TEXT position and the response does move.
-        """
-        kind = "stub"
-        backbone, preprocessor = _model(kind, 48), _tokenizer(kind, 48)
-        prompts = list(SMOKE_STIMULI["a"])
-        token = int(getattr(preprocessor, f"{excluded}_token_id"))
-        clean = extract_tap_activations(backbone, prompts, preprocessor)
-
-        poisoned = extract_tap_activations(
-            _PoisonedBackbone(backbone, lambda ids: ids == token),
-            prompts, preprocessor,
-        )
-        for path in clean:
-            _forward_close(poisoned[path], clean[path])
-
-        special = _special_ids(preprocessor)
-
-        def first_text_position(ids):
-            marked = np.zeros(ids.shape, dtype=bool)
-            marked[:, 1] = ~np.isin(ids[:, 1], list(special))
-            return marked
-
-        moved = extract_tap_activations(
-            _PoisonedBackbone(backbone, first_text_position),
-            prompts, preprocessor,
-        )
-        for path in clean:
-            assert np.max(np.abs(moved[path] - clean[path])) > 1.0, path
-
     def test_a_sentence_with_no_text_token_is_refused_by_name(self):
-        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+        backbone, preprocessor = _model("stub", 24), StubTokenizer()
         with pytest.raises(ValueError) as excinfo:
             extract_tap_activations(
                 backbone, ["alpha beta", "", "gamma"], preprocessor
@@ -941,7 +877,7 @@ class TestPoolingIsOverTextTokensOnly:
 
     def test_the_refusal_comes_before_any_forward_pass(self):
         """Nothing is computed for a batch that cannot be pooled."""
-        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+        backbone, preprocessor = _model("stub", 24), StubTokenizer()
 
         class _Unbuilt:
             built = True
@@ -952,24 +888,6 @@ class TestPoolingIsOverTextTokensOnly:
 
         with pytest.raises(ValueError, match="no text token"):
             extract_tap_activations(_Unbuilt(), ["", "alpha"], preprocessor)
-
-    def test_a_preprocessor_without_special_ids_excludes_nothing(self):
-        """No attributes (or ``None``) means every position is text."""
-        backbone = build_backbone(_config())
-        prompts = ["alpha bravo", "charlie"]
-
-        class _NoneIds(StubTokenizer):
-            cls_token_id = None
-            sep_token_id = None
-            pad_token_id = None
-
-        plain = extract_tap_activations(backbone, prompts, StubTokenizer())
-        nones = extract_tap_activations(backbone, prompts, _NoneIds())
-        ids = np.asarray(StubTokenizer()(prompts)["input_ids"], dtype="int32")
-        raw = _raw_taps(backbone, ids)
-        for path in plain:
-            _forward_close(plain[path], raw[path].mean(axis=1))
-            _forward_close(nones[path], plain[path])
 
     def test_a_condition_against_itself_has_no_contrast(self):
         backbone, preprocessor = _model("gpt2", 512), _tokenizer("gpt2", 512)
@@ -1300,45 +1218,12 @@ class TestStimuliAreFramedLikeTheTrainingStream:
             cls_response = np.stack([row[path] for row in with_cls])
             assert np.max(np.abs(framed[path] - cls_response)) > 1e-3, path
 
-    def test_a_call_only_preprocessor_still_gets_the_cls_sep_pad_exclusion(self):
-        """No ``.tokenizer``: the previous path, the non-text ids left out."""
-        preprocessor = _tokenizer("stub", 24)
-        assert not hasattr(preprocessor, "tokenizer")
-        tokens, text, _ = C._encode_stimuli(preprocessor, ["ab", "abcd"], None)
-        assert tokens.shape == (2, 24)
-        assert np.all(tokens[:, 0] == CLS_ID)
-        assert text.sum(axis=1).tolist() == [2, 4]
-        assert not text[:, 0].any()
-
-
 #: Words the stimulus context may share with the smoke sentences: function words
 #: and pronouns, no content word (D-027).
 _FUNCTION_WORDS = frozenset({
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "is", "it", "its",
     "of", "on", "or", "that", "the", "to", "was", "which", "who", "with",
 })
-
-#: The eot-only pooled responses of commit 855af2cd7 (the previous commit), on
-#: ``keras.utils.set_random_seed(0)``; ``_model("gpt2", 64)``; the real gpt2
-#: preprocessor; the ten a and b smoke sentences. Per tap: the sum, the sum of
-#: absolute values, row 0's first four values and row 9's last four.
-_EOT_ONLY_RECORD = {
-    "topolm/block_0/attention_tap": (
-        1.2257726090055425, 46.9393310783243,
-        [0.013301650686318882, 0.020122189100624785, 0.030433871162434418,
-         0.0011712760897353292],
-        [0.029749557026661932, -0.020677630891441368, 0.012047200536471792,
-         0.04864271660335362],
-    ),
-    "topolm/block_0/mlp_tap": (
-        0.03052063577016515, 6.099825679961532,
-        [0.002595587633550167, -0.0021060948881010213, -0.0015844462905079126,
-         0.0012046263275098884],
-        [0.0017867240239866078, 0.0013677233655471355, -0.0027109537113574333,
-         -0.001965763818589039],
-    ),
-}
-
 
 def _words(texts):
     import re
@@ -1524,20 +1409,42 @@ class TestStimuliAreFramedWithAFixedContext:
             assert np.max(np.abs(shipped[path] - other[path])) > 1e-3, path
             assert np.max(np.abs(shipped[path] - eot_only[path])) > 1e-3, path
 
-    def test_an_empty_context_is_the_eot_only_framing_of_the_previous_commit(self):
-        """Pinned against numbers recorded at commit 855af2cd7, not against the
-        new code's own output."""
+    def test_an_empty_context_is_the_eot_framing_of_each_sentence_alone(self):
+        """The eot-only framing against an independent per-sentence oracle.
+
+        Each sentence is run ALONE as ``[eot] + gpt2 tokens`` (a batch of one, no
+        padding, no batching) and its tap activation averaged over the sentence
+        positions with numpy in float64. Nothing is shared with the batched
+        extraction under test but the model, and no recorded number from an earlier
+        model is involved. The control: the shipped context changes the response, so
+        the oracle is not satisfied by a framing that ignores ``context``.
+        """
         keras.utils.set_random_seed(0)
-        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 512)
+        encoding = _gpt2_encoding()
         pooled = extract_tap_activations(
             backbone, self.PROMPTS, preprocessor, context=""
         )
-        for path, (total, absolute, first, last) in _EOT_ONLY_RECORD.items():
-            values = pooled[path]
-            _forward_close(np.asarray(values[0, :4]), np.asarray(first))
-            _forward_close(np.asarray(values[9, -4:]), np.asarray(last))
-            np.testing.assert_allclose(values.sum(), total, rtol=1e-4, atol=1e-5)
-            np.testing.assert_allclose(np.abs(values).sum(), absolute, rtol=1e-4)
+
+        expected = {tap.path: [] for tap in backbone.tap_layers}
+        for prompt in self.PROMPTS:
+            ids = np.asarray(
+                [[int(encoding.eot_token)] + encoding.encode(prompt)], dtype="int32"
+            )
+            captures = [TapCapture() for _ in backbone.tap_layers]
+            backbone(ids, training=False, taps=tuple(captures))
+            for tap, capture in zip(backbone.tap_layers, captures):
+                raw = keras.ops.convert_to_numpy(capture.value).astype("float64")[0]
+                expected[tap.path].append(raw[1:].mean(axis=0))
+
+        for path, rows in expected.items():
+            assert pooled[path].shape == (len(self.PROMPTS), backbone.embed_dim)
+            _forward_close(pooled[path], np.stack(rows))
+
+        shipped = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        assert any(
+            np.max(np.abs(shipped[path] - pooled[path])) > 1e-3 for path in pooled
+        )
 
     # -- refusals ----------------------------------------------------------
 
@@ -1568,18 +1475,6 @@ class TestStimuliAreFramedWithAFixedContext:
         with pytest.raises(ValueError, match="66"):
             extract_tap_activations(backbone, SMOKE_STIMULI["a"], preprocessor)
 
-    # -- the legacy path ---------------------------------------------------
-
-    def test_none_is_the_legacy_call_only_path_with_cls_and_sep(self):
-        preprocessor = _tokenizer("gpt2", 40)
-        tokens, text, _ = C._encode_stimuli(
-            preprocessor, ["ab cd", "ab"], None, context=None
-        )
-        assert tokens.shape == (2, 40)
-        assert np.all(tokens[:, 0] == preprocessor.cls_token_id)
-        assert not text[:, 0].any()
-        assert (tokens == preprocessor.sep_token_id).any()
-
     # -- through the evaluation --------------------------------------------
 
     def test_the_evaluation_passes_its_context_to_the_extraction(self, monkeypatch):
@@ -1606,76 +1501,6 @@ class TestStimuliAreFramedWithAFixedContext:
             stimulus_context="",
         )
         assert seen == ["", ""], seen
-
-
-def _recorded_warnings(monkeypatch):
-    """Route the trainer's ``logger.warning`` into a list; reset the once-per-class set."""
-    messages = []
-    monkeypatch.setattr(
-        C.logger, "warning", lambda message, *a, **k: messages.append(str(message))
-    )
-    monkeypatch.setattr(C, "_LEGACY_FRAMING_WARNED", set())
-    return messages
-
-
-class TestTheLegacyFramingIsLoud:
-    """D-028: the call-only fallback is a production route (any preprocessor
-    without ``.tokenizer.encode`` and ``.tokenizer.eot_token``), so it says so."""
-
-    PROMPTS = ["alpha beta", "gamma delta"]
-
-    def test_a_call_only_preprocessor_warns_naming_its_class_and_the_framing(
-        self, monkeypatch
-    ):
-        messages = _recorded_warnings(monkeypatch)
-        C._encode_stimuli(SpecialIdTokenizer(24), self.PROMPTS, None)
-        assert len(messages) == 1, messages
-        text = messages[0]
-        for phrase in ("SpecialIdTokenizer", "legacy-call-only", "CLS-style"):
-            assert phrase in text, (phrase, text)
-        # the ids it leaves out of the pooling are the preprocessor's own
-        for name, value in (("cls_token_id", CLS_ID), ("sep_token_id", SEP_ID),
-                            ("pad_token_id", PAD_ID)):
-            assert f"{name}={value}" in text, (name, text)
-
-    def test_it_warns_once_per_class_not_once_per_call(self, monkeypatch):
-        messages = _recorded_warnings(monkeypatch)
-        for _ in range(3):
-            C._encode_stimuli(SpecialIdTokenizer(24), self.PROMPTS, None)
-        assert len(messages) == 1, messages
-        C._encode_stimuli(StubTokenizer(), self.PROMPTS, None)
-        assert len(messages) == 2 and "StubTokenizer" in messages[1], messages
-
-    def test_the_whole_evaluation_warns_once_not_once_per_condition(self, monkeypatch):
-        messages = _recorded_warnings(monkeypatch)
-        evaluate_topography(
-            build_backbone(_config()), SMOKE_STIMULI, ("a", "b"),
-            StubTokenizer(), readout_fwhm=None, min_cluster_size=2,
-        )
-        assert len(messages) == 1, messages
-
-    def test_the_real_tokenizer_with_a_context_does_not_warn(self, monkeypatch):
-        messages = _recorded_warnings(monkeypatch)
-        for context in (C.STIMULUS_CONTEXT, ""):
-            C._encode_stimuli(_tokenizer("gpt2", 512), self.PROMPTS, 128, context=context)
-        assert messages == []
-
-    def test_asking_the_real_tokenizer_for_no_context_warns_and_says_why(
-        self, monkeypatch
-    ):
-        messages = _recorded_warnings(monkeypatch)
-        C._encode_stimuli(_tokenizer("gpt2", 512), self.PROMPTS, 128, context=None)
-        assert len(messages) == 1, messages
-        assert "TiktokenPreprocessor" in messages[0] and "context=None" in messages[0]
-
-    def test_a_context_given_to_a_preprocessor_that_cannot_encode_it_is_said_to_be_dropped(
-        self, monkeypatch
-    ):
-        messages = _recorded_warnings(monkeypatch)
-        C._encode_stimuli(
-            SpecialIdTokenizer(24), self.PROMPTS, None, context=C.STIMULUS_CONTEXT
-        )
-        assert "not applied" in messages[0], messages
 
 
 class TestTheReportStatesHowTheStimuliWereFramed:
@@ -1707,31 +1532,6 @@ class TestTheReportStatesHowTheStimuliWereFramed:
         block = self._report(stimulus_context="")["stimuli"]
         assert block["framing"] == "eot" and block["context_tokens"] == 0, block
         assert block["token_counts"] == {"a": [9, 9, 7, 7, 8], "b": [9, 9, 7, 7, 8]}
-
-    def test_none_is_the_legacy_framing_and_its_counts_leave_out_cls_sep_and_pad(self):
-        # a 100-position window: the legacy path pads to the preprocessor's window
-        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 100)
-        report, _ = evaluate_topography(
-            backbone, self.STIMULI, ("a", "b"), preprocessor,
-            readout_fwhm=None, min_cluster_size=2, stimulus_context=None,
-        )
-        block = report["stimuli"]
-        assert block["framing"] == "legacy-call-only" and block["context_tokens"] == 0
-        assert block["token_counts"]["a"] == [9, 9, 7, 7, 8], block
-
-    def test_a_call_only_preprocessor_reports_the_legacy_framing_with_its_own_counts(self):
-        """Independent oracle: ``SpecialIdTokenizer`` writes one id per character."""
-        backbone = _model("stub", 128)
-        report, _ = evaluate_topography(
-            backbone, self.STIMULI, ("a", "b"), SpecialIdTokenizer(100),
-            readout_fwhm=None, min_cluster_size=2,
-        )
-        block = report["stimuli"]
-        assert block["framing"] == "legacy-call-only" and block["context_tokens"] == 0
-        assert block["token_counts"] == {
-            "a": [len(s) for s in SMOKE_STIMULI["a"]],
-            "b": [len(s) for s in SMOKE_STIMULI["b"]],
-        }, block
 
     def test_unequal_condition_sizes_are_reported_per_condition(self):
         stimuli = {"a": SMOKE_STIMULI["a"][:3], "b": SMOKE_STIMULI["b"]}
@@ -1777,10 +1577,10 @@ class TestTheReportStatesHowTheStimuliWereFramed:
 
 
 class TestARealTokenizerRunEndToEnd:
-    """D-028: every other run test uses ``StubTokenizer``, which takes the legacy
-    framing. This one keeps the REAL gpt2 tokenizer (only the DATA is replaced, as
-    ``_patch_data`` always does) so the framing the trainer ships is exercised
-    from ``train_topolm`` down to the report on disk."""
+    """D-028: every other run test uses ``StubTokenizer``, whose one-token context
+    stands for the real 60-token one. This one keeps the REAL gpt2 tokenizer (only
+    the DATA is replaced, as ``_patch_data`` always does) so the framing the trainer
+    ships is exercised from ``train_topolm`` down to the report on disk."""
 
     def test_a_short_run_frames_its_stimuli_with_the_context_and_reports_it(
         self, monkeypatch

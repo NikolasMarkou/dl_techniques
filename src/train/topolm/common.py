@@ -323,18 +323,15 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
     )
 
 
-#: The ids a call-only preprocessor wraps (CLS, SEP) and pads (PAD) every stimulus
-#: with: the tokens that are not text. :func:`_encode_stimuli` marks them as such
-#: on the fallback path (a preprocessor with a raw encoder is framed ``context
-#: <eot> sentence pad...`` and needs no id list); the attribute names are the
-#: preprocessor's own.
-_NON_TEXT_ID_ATTRIBUTES = (
+#: The special ids a config assigns the tokenizer (and the attribute names the
+#: preprocessor publishes them under). The embedding table must hold every one of
+#: them: :func:`_rows_needed` reads these.
+_SPECIAL_ID_ATTRIBUTES = (
     "cls_token_id",
     "sep_token_id",
     "pad_token_id",
+    "mask_token_id",
 )
-
-_SPECIAL_ID_ATTRIBUTES = _NON_TEXT_ID_ATTRIBUTES + ("mask_token_id",)
 
 #: The text every stimulus is placed after (D-027): a fixed, neutral, encyclopedic
 #: passage of 60 gpt2 tokens about an invented town. It shares no content word
@@ -350,88 +347,72 @@ STIMULUS_CONTEXT = (
     "thirteenth century as a centre for the trade in wool and grain."
 )
 
-#: The three framings a report can name (``stimuli.framing``).
+#: The two framings a report can name (``stimuli.framing``).
 FRAMING_CONTEXT = "context+eot"
 FRAMING_EOT = "eot"
-FRAMING_LEGACY = "legacy-call-only"
 
-#: Preprocessor classes the legacy-framing warning has already named (once per
-#: class per process, so a test double used a thousand times is one line).
-_LEGACY_FRAMING_WARNED: set = set()
+
+def _require_encoder(preprocessor: Any) -> Tuple[Any, int]:
+    """The raw encoder and end-of-text id of ``preprocessor``, or a ``TypeError``.
+
+    Contract. ``preprocessor`` must publish the surface of
+    :class:`~dl_techniques.utils.tokenizer.TiktokenPreprocessor`:
+    ``.tokenizer.encode(text) -> ids`` and ``.tokenizer.eot_token``. Returns
+    ``(encoder, int(eot_token))``. Raises ``TypeError`` naming the preprocessor's
+    class and each missing piece (``missing: tokenizer.encode, tokenizer.eot_token``).
+    There is no fallback: a preprocessor that can only be called would frame the
+    stimuli ``[CLS] text [SEP]``, which the model never sees (D-031 f).
+    """
+    encoder = getattr(preprocessor, "tokenizer", None)
+    missing = []
+    if not callable(getattr(encoder, "encode", None)):
+        missing.append("tokenizer.encode")
+    if getattr(encoder, "eot_token", None) is None:
+        missing.append("tokenizer.eot_token")
+    if missing:
+        raise TypeError(
+            f"{type(preprocessor).__name__} cannot frame the stimuli: the "
+            f"preprocessor must publish a raw encoder, .tokenizer.encode(text) and "
+            f".tokenizer.eot_token (as TiktokenPreprocessor does); "
+            f"missing: {', '.join(missing)}"
+        )
+    return encoder, int(encoder.eot_token)
 
 
 def _resolve_framing(
-    preprocessor: Any, context: Optional[str]
-) -> Tuple[str, Optional[int], List[int]]:
+    preprocessor: Any, context: str
+) -> Tuple[str, int, List[int]]:
     """Which framing ``preprocessor`` and ``context`` select.
 
-    Contract. Returns ``(framing, eot, context_ids)``. ``framing`` is
-    ``'context+eot'`` (a non-empty ``context`` that encodes to at least one
-    token), ``'eot'`` (``context == ''``) or ``'legacy-call-only'`` (``context is
-    None``, or the preprocessor has no raw encoder with an ``eot_token``, so the
-    context cannot be encoded). ``eot`` and ``context_ids`` are ``None`` and ``[]``
-    for the legacy framing. Never raises.
+    Contract. Returns ``(framing, eot, context_ids)``: ``'context+eot'`` for a
+    ``context`` that encodes to at least one token, ``'eot'`` for ``context == ''``
+    (or one that encodes to nothing). Raises ``TypeError`` when ``context`` is not a
+    string (``None`` was the removed call-only framing) or when the preprocessor has
+    no raw encoder (:func:`_require_encoder`).
     """
-    encoder = getattr(preprocessor, "tokenizer", None)
-    eot = getattr(encoder, "eot_token", None)
-    if (
-        context is None
-        or not callable(getattr(encoder, "encode", None))
-        or eot is None
-    ):
-        return FRAMING_LEGACY, None, []
+    if not isinstance(context, str):
+        raise TypeError(
+            f"context must be a string ('' for the eot-only framing), got "
+            f"{context!r}; the call-only framing that context=None selected is "
+            f"removed"
+        )
+    encoder, eot = _require_encoder(preprocessor)
     ids = [int(i) for i in encoder.encode(context)] if context else []
-    return (FRAMING_CONTEXT if ids else FRAMING_EOT), int(eot), ids
-
-
-def _warn_legacy_framing(preprocessor: Any, context: Optional[str]) -> None:
-    """Say, once per preprocessor class per process, that the legacy framing runs."""
-    # DECISION plan-2026-10-23T190557-972a9ac5/D-028: the call-only framing is a
-    # production route (any preprocessor without a raw encoder) and it is the
-    # framing that was found to manufacture significant units, so it must never
-    # be silent. Do NOT remove or demote this warning, do NOT make the legacy
-    # framing the quiet default for an unknown preprocessor, and do NOT log it
-    # once per call (a test double is used thousands of times: once per class).
-    # The report says the same in stimuli.framing. See decisions.md D-028;
-    # guarded by TestTheLegacyFramingIsLoud and TestTheReportStatesHowTheStimuliWereFramed.
-    name = type(preprocessor).__name__
-    if name in _LEGACY_FRAMING_WARNED:
-        return
-    _LEGACY_FRAMING_WARNED.add(name)
-    why = (
-        "context=None was passed"
-        if context is None
-        else "it has no raw encoder (.tokenizer.encode and .tokenizer.eot_token), "
-        "so the stimulus context cannot be encoded and is not applied"
-    )
-    non_text = [
-        f"{attribute}={getattr(preprocessor, attribute)}"
-        for attribute in _NON_TEXT_ID_ATTRIBUTES
-        if getattr(preprocessor, attribute, None) is not None
-    ]
-    logger.warning(
-        f"Stimulus framing 'legacy-call-only' for {name}: {why}. The stimuli are "
-        f"whatever calling it returns, i.e. CLS-style framing (it wraps and pads "
-        f"the text; the ids {', '.join(non_text) or '(none named)'} are left out "
-        f"of the pooling). The model never sees that framing in training, and the "
-        f"significant-unit counts it gives are framing-sensitive (D-027, D-028). "
-        f"The report says stimuli.framing = 'legacy-call-only'; use a "
-        f"preprocessor with a raw encoder for the 'context+eot' framing."
-    )
+    return (FRAMING_CONTEXT if ids else FRAMING_EOT), eot, ids
 
 
 def _encode_stimuli(
     preprocessor: Any,
     prompts: Sequence[str],
     max_positions: Optional[int],
-    context: Optional[str] = STIMULUS_CONTEXT,
+    context: str = STIMULUS_CONTEXT,
 ) -> Tuple[np.ndarray, np.ndarray, str]:
     """Encode ``prompts`` as ``context <eot> sentence pad...`` and mark the sentence.
 
     Contract. ``preprocessor`` is the tokenizer the trainer built. ``prompts`` is
     a non-empty list of strings. ``max_positions`` is the model's position-table
     length, or ``None`` when unknown. ``context`` is the text placed before every
-    sentence (``''`` for none, ``None`` for the legacy framing). Returns
+    sentence (``''`` for none). Returns
     ``(tokens, text, non_text)``: ``tokens`` is ``(num_prompts, window)`` int32,
     ``text`` the same shape bool (True where the id is a SENTENCE token, the only
     positions a response is pooled over) and ``non_text`` a phrase naming what the
@@ -440,24 +421,20 @@ def _encode_stimuli(
     Raises ``ValueError`` (naming the numbers) when a non-empty context plus the
     end-of-text id plus the longest sentence does not fit the window.
 
-    Three framings (:func:`_resolve_framing`).
+    Two framings (:func:`_resolve_framing`); the preprocessor must publish a raw
+    encoder (``TypeError`` otherwise, before anything is computed).
 
-    * ``'context+eot'``: the preprocessor owns a raw encoder (``.tokenizer.encode``
-      and ``.tokenizer.eot_token``, as :class:`~dl_techniques.utils.tokenizer.
-      TiktokenPreprocessor` does): the encoded ``context``, the encoder's own
-      ``eot_token`` (the object ``preprocess_clm_dataset`` takes it from, never
-      typed), the plain ``encode`` of the prompt, then the preprocessor's
-      ``pad_token_id`` (the ``eot_token`` when it has none). Every sentence
-      therefore starts at position ``len(context ids) + 1``. The window is that
-      prefix plus the longest encoded prompt, never the trainer's 512, and it must
-      fit ``min(preprocessor.max_length, max_positions)`` where those are known: a
+    * ``'context+eot'``: the encoded ``context``, the encoder's own ``eot_token``
+      (the object ``preprocess_clm_dataset`` takes it from, never typed), the plain
+      ``encode`` of the prompt, then the preprocessor's ``pad_token_id`` (the
+      ``eot_token`` when it has none). Every sentence therefore starts at position
+      ``len(context ids) + 1``. The window is that prefix plus the longest encoded
+      prompt, never the trainer's 512, and it must fit
+      ``min(preprocessor.max_length, max_positions)`` where those are known: a
       causal model's sentence positions do not depend on the pads behind them, so
       the shorter window gives identical responses for less compute.
     * ``'eot'`` (``context == ''``): the framing of D-024, ``<eot> sentence pad...``.
       A sentence longer than the window is cut, as before.
-    * ``'legacy-call-only'``: whatever ``preprocessor(prompts)`` returns, with the
-      CLS, SEP and PAD ids its attributes name marked as not text. Loud: a
-      WARNING names the preprocessor class once per class per process (D-028).
     """
     # DECISION plan-2026-10-23T190557-972a9ac5/D-027: frame each stimulus as
     # ``<context> <eot> <sentence>`` and pool the sentence only. Do NOT frame
@@ -472,25 +449,15 @@ def _encode_stimuli(
     # choose the context to change the result: it is fixed text that shares no
     # content word with the stimuli, and the README reports alternatives. See
     # decisions.md D-027; guarded by TestStimuliAreFramedWithAFixedContext.
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-031: the encoder API is REQUIRED.
+    # Do NOT restore a call-only fallback (whatever calling the preprocessor
+    # returns, CLS and SEP included, with the special ids left out of the pooling:
+    # the model never sees that framing and it is the one that manufactured
+    # significant units, D-027/D-028), do NOT accept context=None as "no
+    # framing", and do NOT guess an end-of-text id for a preprocessor without one:
+    # raise, naming what is missing, before any forward pass. Guarded by
+    # test_topolm_encoder_api.py. See decisions.md.
     framing, eot, context_ids = _resolve_framing(preprocessor, context)
-    if framing == FRAMING_LEGACY:
-        _warn_legacy_framing(preprocessor, context)
-        # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
-        # or a LIST of strings and raises TypeError on anything but those -- the
-        # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline
-        # uses and not this callable.
-        tokens = np.asarray(preprocessor(list(prompts))["input_ids"], dtype="int32")
-        non_text_ids = [
-            int(getattr(preprocessor, name))
-            for name in _NON_TEXT_ID_ATTRIBUTES
-            if getattr(preprocessor, name, None) is not None
-        ]
-        return (
-            tokens,
-            ~np.isin(tokens, non_text_ids),
-            f"the CLS, SEP and PAD ids {non_text_ids}",
-        )
-
     encoder = preprocessor.tokenizer
     pad = getattr(preprocessor, "pad_token_id", None)
     pad = eot if pad is None else int(pad)
@@ -546,12 +513,12 @@ def stimulus_summary(
     preprocessor: Any,
     stimuli: Mapping[str, Sequence[str]],
     max_positions: Optional[int],
-    context: Optional[str] = STIMULUS_CONTEXT,
+    context: str = STIMULUS_CONTEXT,
     contrast: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """The report's ``stimuli`` block: how the stimuli were framed and pooled.
 
-    Contract. Returns ``{"framing": 'context+eot' | 'eot' | 'legacy-call-only',
+    Contract. Returns ``{"framing": 'context+eot' | 'eot',
     "context_tokens": int, "pooling": 'sentence tokens', "token_counts":
     {condition: [tokens of sentence i]}, "sentences_per_condition": int (the
     common count) or {condition: count} when the conditions differ, "contrast":
@@ -1133,7 +1100,7 @@ def extract_tap_activations(
     prompts: Sequence[str],
     preprocessor,
     batch_size: int = 32,
-    context: Optional[str] = STIMULUS_CONTEXT,
+    context: str = STIMULUS_CONTEXT,
 ) -> Dict[str, np.ndarray]:
     """Each unit's response to each prompt, pooled over the SENTENCE tokens, per tap.
 
@@ -1156,10 +1123,9 @@ def extract_tap_activations(
     activations depend on what precedes them, and the README states the measured
     size of that. ``context=''`` is the eot-only framing of D-024 (``<eot>
     sentence``; D-024's claim that it is "the way the training stream presents
-    text" is retracted, D-027); ``context=None`` is the LEGACY call-only framing
-    (CLS and SEP from calling the preprocessor), kept for test doubles and for
-    reproducing earlier numbers, and logged loudly (a WARNING per preprocessor
-    class, D-028).
+    text" is retracted, D-027). There is no call-only framing (CLS and SEP from
+    calling the preprocessor) and no ``context=None``: both raise ``TypeError``
+    (D-031 f).
 
     Why text only (D-020). Averaged over a 512-position window, ~98% of a smoke
     sentence's positions were padding, so the t-map measured padding and sentence
@@ -1178,19 +1144,14 @@ def extract_tap_activations(
     that).
 
     Contract: ``backbone`` is a :class:`TopoLM` (``max_seq_len`` bounds the
-    window where it is known). ``preprocessor`` is either a tokenizer that owns a
-    raw encoder (``preprocessor.tokenizer.encode`` and ``.eot_token``, the
+    window where it is known). ``preprocessor`` must own a raw encoder
+    (``preprocessor.tokenizer.encode`` and ``.eot_token``, the
     ``TiktokenPreprocessor`` shape): the framing above, the pad id from
-    ``pad_token_id``; with a non-empty ``context`` the context, the ``<eot>`` and
-    the longest sentence must fit ``min(preprocessor.max_length, max_seq_len)``
-    (``ValueError`` naming the numbers otherwise); with ``context=''`` a longer
-    sentence is cut to that window minus one. Or a callable only (a test
-    double), or ``context=None``: the LEGACY framing, in which
-    ``preprocessor(prompts)["input_ids"]`` is ``(num_prompts, window)`` and the
-    positions whose id is the preprocessor's ``cls_token_id``, ``sep_token_id`` or
-    ``pad_token_id`` are left out; a missing or ``None`` attribute excludes
-    nothing, and a context that cannot be encoded is not applied. The
-    preprocessor's ``attention_mask`` is not used in either path.
+    ``pad_token_id`` (the ``eot_token`` when it has none); with a non-empty
+    ``context`` the context, the ``<eot>`` and the longest sentence must fit
+    ``min(preprocessor.max_length, max_seq_len)`` (``ValueError`` naming the
+    numbers otherwise); with ``context=''`` a longer sentence is cut to that window
+    minus one. The preprocessor's ``attention_mask`` is not used.
 
     :param backbone: The trained model.
     :type backbone: TopoLM
@@ -1201,8 +1162,8 @@ def extract_tap_activations(
     :param batch_size: Forward-pass batch size.
     :type batch_size: int
     :param context: Text placed before every sentence (D-027); ``''`` for the
-        eot-only framing, ``None`` for the legacy call-only framing.
-    :type context: Optional[str]
+        eot-only framing.
+    :type context: str
     :return: ``{tap_path: (num_prompts, num_units)}`` in original unit order, NOT
         grid order -- every consumer maps through the tap's own
         ``layout.cell_to_unit``.
@@ -1211,6 +1172,9 @@ def extract_tap_activations(
         (it encodes to nothing; the message names the prompt's index and text), or
         if the context and the longest sentence do not fit the window (the
         message names the numbers). Raised before any forward pass.
+    :raises TypeError: If ``preprocessor`` has no raw encoder (the message names
+        what is missing) or ``context`` is not a string. Raised before any forward
+        pass.
     """
     # DECISION plan-2026-10-23T190557-972a9ac5/D-020: pool over the TEXT tokens
     # only. Do NOT average over every position: stimuli padded to the window were
@@ -1385,7 +1349,7 @@ def evaluate_topography(
     is_smoke_set: bool = False,
     readout_skipped: Optional[str] = None,
     batch_size: int = 32,
-    stimulus_context: Optional[str] = STIMULUS_CONTEXT,
+    stimulus_context: str = STIMULUS_CONTEXT,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
     """Score the model's topographic organisation against one contrast.
 
@@ -1457,10 +1421,10 @@ def evaluate_topography(
         stays cheap. It cannot change which prompts are scored.
     :type batch_size: int
     :param stimulus_context: The text every stimulus is placed after (D-027):
-        :data:`STIMULUS_CONTEXT` by default, ``''`` for the eot-only framing,
-        ``None`` for the legacy call-only framing. Recorded in the report's
-        ``stimuli`` block.
-    :type stimulus_context: Optional[str]
+        :data:`STIMULUS_CONTEXT` by default, ``''`` for the eot-only framing.
+        Recorded in the report's ``stimuli`` block. The preprocessor must own a raw
+        encoder; a call-only one raises ``TypeError``.
+    :type stimulus_context: str
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
         ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
         grids **for that arm specifically**, so :func:`plot_topography` draws
@@ -1510,9 +1474,15 @@ def evaluate_topography(
             f"{len(grid_shape)}D: the Gaussian readout is 2-D only; the grid is "
             f"{_grid_label(grid_shape)} and only the raw arm is computed"
         )
-    # FIRST, so a context that does not fit the window is refused before any
-    # forward pass of any condition (tokenization only), and so the report records
-    # how the stimuli were framed and pooled (D-028).
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-028: the report STATES how the
+    # stimuli were framed and pooled (the stimuli block), so a report from before a
+    # framing correction cannot be mistaken for a current one. Do NOT drop the
+    # block or its framing value, and do NOT build it after a forward pass: it is
+    # tokenization only, FIRST, so a context that does not fit the window is
+    # refused before any condition is computed. (The loud warning that D-028 also
+    # put on the call-only framing went with that framing, D-031 f: a preprocessor
+    # without an encoder is now refused outright.) Guarded by
+    # TestTheReportStatesHowTheStimuliWereFramed.
     stimuli_block = stimulus_summary(
         preprocessor, stimuli, getattr(backbone, "max_seq_len", None),
         context=stimulus_context, contrast=contrast_conditions,

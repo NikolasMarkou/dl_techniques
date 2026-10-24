@@ -1422,9 +1422,10 @@ class TestARepeatedStepIsMerged:
 
 
 class TestADrawWithTheRealTokenizer:
-    """Every other live test passes ``StubTokenizer``, which has no raw encoder and
-    so takes the legacy framing. One draw with the real gpt2 preprocessor, the
-    framing the trainer ships, stimuli framed ``context + <eot> + sentence``."""
+    """Every other live test passes ``StubTokenizer``, whose one-token context stands
+    for the real 60-token one (the test models hold 12 positions). One draw with the
+    real gpt2 preprocessor, the framing the trainer ships, stimuli framed
+    ``context + <eot> + sentence``."""
 
     def test_a_draw_frames_the_stimuli_with_the_context_and_draws_finite_maps(
         self, monkeypatch, tmp_path

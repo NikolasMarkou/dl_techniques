@@ -7,7 +7,7 @@ D-027, D-029), and this module makes them reproducible from a finished run so th
 numbers in the README do not rest on a script nobody can run:
 
 * :func:`framing_table` -- the SAME contrast under the shipped context, other
-  contexts, ``<eot>`` only, no prefix at all and CLS. The counts depend on the
+  contexts, ``<eot>`` only and no prefix at all. The counts depend on the
   framing; Moran's I of the unthresholded map barely does.
 * :func:`length_control` -- word lists of ``short`` against ``long`` words drawn
   from ONE vocabulary (3 against 7, and the calibration 5 against 5). Any
@@ -206,29 +206,26 @@ def framing_table(
     fdr_alpha: float = 0.05,
     batch_size: int = 8,
 ) -> Dict[str, Dict[str, Any]]:
-    """The same contrast under every framing: context, eot, no prefix, CLS.
+    """The same contrast under every framing: context, eot, no prefix.
 
     Contract. ``stimuli`` defaults to the smoke set. Returns an ordered
     ``{row: {...}}`` with the rows ``'context'`` (the shipped
     :data:`~train.topolm.common.STIMULUS_CONTEXT`), ``'eot'`` (``<eot>``
-    sentence), ``'none'`` (the bare sentence), ``'cls'`` (the legacy call-only
-    framing, ``[CLS] sentence [SEP]``) and ``'context:<name>'`` for each of
-    ``extra_contexts``. A row holds ``framing`` (``'context+eot'``, ``'eot'``,
-    ``'none'`` or ``'legacy-call-only'``), ``context_tokens``, and
+    sentence), ``'none'`` (the bare sentence) and ``'context:<name>'`` for each of
+    ``extra_contexts``. (A ``'cls'`` row, ``[CLS] sentence [SEP]``, measured the
+    call-only framing and went with it, D-031 f.) A row holds ``framing``
+    (``'context+eot'``, ``'eot'`` or ``'none'``), ``context_tokens``, and
     ``significant_units_per_tap``, ``mean_significant_units_per_tap``,
     ``clusters_a``, ``clusters_b`` and ``mean_morans_i`` of the contrast. The
-    preprocessor needs a raw encoder for the 'none' row; the 'cls' row asks the
-    model for the preprocessor's whole window, so it needs a model whose position
-    table is at least that long. Failure mode: the extraction's own errors
-    (a window that does not fit).
+    preprocessor needs a raw encoder (``TypeError`` otherwise). Failure mode: the
+    extraction's own errors (a window that does not fit).
     """
     stimuli = C.SMOKE_STIMULI if stimuli is None else stimuli
     condition_a, condition_b = contrast
-    plan: List[Tuple[str, Optional[str]]] = [
+    plan: List[Tuple[str, str]] = [
         ("context", C.STIMULUS_CONTEXT),
         ("eot", ""),
         ("none", FRAMING_NONE),
-        ("cls", None),
     ]
     plan += [(f"context:{name}", text) for name, text in (extra_contexts or {}).items()]
     max_positions = getattr(backbone, "max_seq_len", None)

@@ -493,9 +493,9 @@ class TestTheFramingTable:
     def test_the_default_rows_and_their_fields(self):
         backbone, preprocessor = self._setup()
         table = K.framing_table(backbone, preprocessor, min_cluster_size=2)
-        assert list(table) == ["context", "eot", "none", "cls"]
+        assert list(table) == ["context", "eot", "none"]
         assert [table[k]["framing"] for k in table] == [
-            "context+eot", "eot", "none", "legacy-call-only",
+            "context+eot", "eot", "none",
         ]
         assert table["context"]["context_tokens"] == 60
         assert table["eot"]["context_tokens"] == table["none"]["context_tokens"] == 0
@@ -513,14 +513,14 @@ class TestTheFramingTable:
             backbone, preprocessor, min_cluster_size=2,
             extra_contexts={"physics": "A field assigns a number to every point."},
         )
-        assert list(table) == ["context", "eot", "none", "cls", "context:physics"]
+        assert list(table) == ["context", "eot", "none", "context:physics"]
         assert table["context:physics"]["framing"] == "context+eot"
         assert 0 < table["context:physics"]["context_tokens"] < 20
 
     def test_each_row_equals_evaluate_topography_under_the_same_framing(self):
         backbone, preprocessor = self._setup()
         table = K.framing_table(backbone, preprocessor, min_cluster_size=2)
-        for name, context in (("context", C.STIMULUS_CONTEXT), ("eot", ""), ("cls", None)):
+        for name, context in (("context", C.STIMULUS_CONTEXT), ("eot", "")):
             report, _ = evaluate_topography(
                 backbone, {"a": SMOKE_STIMULI["a"], "b": SMOKE_STIMULI["b"]},
                 ("a", "b"), preprocessor, readout_fwhm=None, min_cluster_size=2,
