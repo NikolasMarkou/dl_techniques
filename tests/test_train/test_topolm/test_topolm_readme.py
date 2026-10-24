@@ -701,8 +701,9 @@ def _prose_phrases(facts: dict):
         f"the run without it has {run2c['mean_significant_units_series']['50']} significant units per tap and "
         f"{run2c['clusters_ab_series']['50'][0]} and {run2c['clusters_ab_series']['50'][1]} clusters at step 50",
         f"has as many significant units ({_g(sig_mean(run2c))} per tap in 2D, {_g(sig_mean(run3c))} in 3D)",
-        f"(Moran's I {morans_end(run2d):.3f} against {morans_end(run2c):.3f}, {morans_end(run3d):.3f} against {morans_end(run3c):.3f})",
+        f"(Moran's I {morans_end(run2d):.3f} against {morans_end(run2c):.3f}, {morans_end(run3d):.3f} against {morans_end(run3c):.3f} at seed 42; ",
     ]
+    in_guide += _second_seed_phrases(facts, run2d, run3d, run2c, run3c, percent)
     assert sig[0] == sig[50] == 0 and sig[100] > 0 and sig[200] > sig[250], "the curve text describes this shape"
     assert ca[0] == ca[50] == cb[0] == cb[50] == 0 and ca[100] > 0 and cb[100] > 0
     # Outside the guide: the sections on watching a run and on training a 3D variant.
@@ -734,6 +735,115 @@ def _prose_phrases(facts: dict):
         f"{run2d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny`) and {run3d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny3d`)",
     ]
     return in_guide, in_readme
+
+
+def _second_seed_phrases(facts, run2d, run3d, run2c, run3c, percent):
+    """The phrases of the second-seed subsection (review pass 6, concern 12), built from the
+    facts, with the claims the sentences make asserted on the data first: a sentence
+    that says 'all four pairs' cannot outlive a pair that breaks it."""
+    runs = facts["runs"]
+    seed42 = {"2d": run2d, "2d_alpha0": run2c, "3d": run3d, "3d_alpha0": run3c}
+    seed43 = {name: runs[name + "_seed43"] for name in seed42}
+    for name, run in seed43.items():
+        assert run["config"]["seed"] == 43 and seed42[name]["config"]["seed"] == 42, name
+        assert run["config"]["spatial_alpha"] == seed42[name]["config"]["spatial_alpha"], name
+        assert run["config"]["train_steps"] == seed42[name]["config"]["train_steps"], name
+    sig_mean = lambda run: run["significant_units_total"] / 8
+    morans = lambda run: run["last_live_row_mean_morans_i"]
+    val = lambda run: run["training"]["final_val_loss"]
+    share = lambda run: run["share_of_significant_units_in_clusters"]
+    clusters = lambda run: run["clusters_ab_series"]["400"]
+    pairs = [(dict_["2d"], dict_["2d_alpha0"]) for dict_ in (seed42, seed43)] + [
+        (dict_["3d"], dict_["3d_alpha0"]) for dict_ in (seed42, seed43)]
+    # all four pairs: smoothness is the penalty's, and the penalty costs loss
+    assert all(morans(on) > 0.5 and abs(morans(off)) < 0.02 for on, off in pairs)
+    costs = [val(on) - val(off) for on, off in pairs]
+    assert all(0.32 < c < 0.40 for c in costs), costs
+    # the count does not order the arms: larger with the penalty in two pairs, smaller in two
+    assert sum(sig_mean(on) > sig_mean(off) for on, off in pairs) == 2
+    assert all(sig_mean(off) > 100 for on, off in pairs)
+    factor = sig_mean(seed43["2d"]) / sig_mean(seed42["2d"])
+    assert round(factor, 1) == 1.8
+    # the share is higher with the penalty in three pairs and a tie in the fourth
+    higher = [share(on) > share(off) + 0.01 for on, off in pairs]
+    assert sum(higher) == 3 and abs(share(seed43["3d"]) - share(seed43["3d_alpha0"])) < 0.005
+    total = lambda run: sum(clusters(run))
+    assert [total(seed42["2d"]), total(seed43["2d"]), total(seed42["2d_alpha0"]), total(seed43["2d_alpha0"])] == [18, 29, 12, 12]
+    assert [total(seed42["3d"]), total(seed43["3d"]), total(seed42["3d_alpha0"]), total(seed43["3d_alpha0"])] == [18, 16, 16, 18]
+    columns = lambda seed: [seed[n] for n in ("2d", "2d_alpha0", "3d", "3d_alpha0")]
+    rows = []
+    for label, fmt in (
+        ("mean Moran's I", lambda r: f"{morans(r):.3f}"),
+        ("significant units per tap", lambda r: _g(sig_mean(r))),
+        ("clusters of `a` / `b`", lambda r: f"{clusters(r)[0]} / {clusters(r)[1]}"),
+        ("share of the significant units that sit in a cluster", lambda r: f"{share(r):.3f}"),
+        ("validation loss", lambda r: f"{val(r):.3f}"),
+    ):
+        for number, seed in ((42, seed42), (43, seed43)):
+            rows.append(f"| {label}, seed {number} | " + " | ".join(fmt(r) for r in columns(seed)) + " |")
+    s43_2d, s43_3d = runs["2d_seed43"]["controls"], runs["3d_seed43"]["controls"]
+    s42_2d, s42_3d = runs["2d"]["controls"], runs["3d"]["controls"]
+    shuffle = [c["label_shuffle_null"] for c in (s43_2d, s43_3d)]
+    for block in shuffle:
+        assert block["n_at_or_above"] == 2 and block["n_strictly_above"] == 0 and block["n_splits"] == 252
+    framing = [c["framings"] for c in (s43_2d, s43_3d)]
+    length = [c["length_control"] for c in (s43_2d, s43_3d)]
+    others = lambda fr: [row["mean_significant_units_per_tap"] for key, row in fr.items() if key.startswith("context:")]
+    five = lambda ln: (max(ln["a_vocab_5v5"]["median"], ln["b_vocab_5v5"]["median"]),
+                       max(ln["a_vocab_5v5"]["max"], ln["b_vocab_5v5"]["max"]))
+    # the length control does not replicate cleanly at seed 43: a draw reaches 81 per cent in 3D
+    real3 = shuffle[1]["real"]["mean_significant_units_per_tap"]
+    assert percent(length[1]["b_vocab_3v7"]["max"], real3) == 81
+    assert five(length[0])[1] > 20 and five(length[1])[1] > 20
+    assert max(five(length[0])[0], five(length[1])[0], max(l["b_vocab_3v7"]["median"] for l in length)) < 12
+    seed42_five = [max(ln["a_vocab_5v5"]["max"], ln["b_vocab_5v5"]["max"]) for ln in (s42_2d["length_control"], s42_3d["length_control"])]
+    assert seed42_five == [0.125, 2.125]
+    mean = lambda c: c["label_shuffle_null"]["real"]["mean_significant_units_per_tap"]
+    table = [
+        f"| significant units per tap, real labelling | {_g(mean(s43_2d))} | {_g(mean(s43_3d))} |",
+        f"| the best other labelling (not the real one or its mirror) | {_g(shuffle[0]['top'][2]['mean_significant_units_per_tap'])} | "
+        f"{_g(shuffle[1]['top'][2]['mean_significant_units_per_tap'])} |",
+        f"| labellings with at least as many as the real one (itself and its mirror included) | {shuffle[0]['n_at_or_above']} | {shuffle[1]['n_at_or_above']} |",
+        f"| Moran's I, real labelling (shuffled median) | {morans(seed43['2d']):.3f} ({shuffle[0]['morans_i']['median']:.3f}) | "
+        f"{morans(seed43['3d']):.3f} ({shuffle[1]['morans_i']['median']:.3f}) |",
+        "| framing: the shipped passage, the end-of-text id alone, nothing | "
+        + " | ".join(f"{_g(fr['context']['mean_significant_units_per_tap'])}, {_g(fr['eot']['mean_significant_units_per_tap'])}, "
+                     f"{_g(fr['none']['mean_significant_units_per_tap'])}" for fr in framing) + " |",
+        f"| framing: three other passages | {_g(min(others(framing[0])))} to {_g(max(others(framing[0])))} | "
+        f"{_g(min(others(framing[1])))} to {_g(max(others(framing[1])))} |",
+        "| 3 words against 7 words, `b` vocabulary: median (largest draw) | "
+        + " | ".join(f"{ln['b_vocab_3v7']['median']:.1f} ({ln['b_vocab_3v7']['max']:.1f})" for ln in length) + " |",
+        "| 3 words against 7 words, `a` vocabulary: median (largest draw) | "
+        + " | ".join(f"{ln['a_vocab_3v7']['median']:.1f} ({ln['a_vocab_3v7']['max']:.1f})" for ln in length) + " |",
+        "| 5 words against 5 words, either vocabulary: median (largest draw) | "
+        + " | ".join(f"{five(ln)[0]:.1f} ({five(ln)[1]:.1f})" for ln in length) + " |",
+    ]
+    prose = [
+        f"Moran's I is {morans(seed43['2d']):.3f} and {morans(seed43['3d']):.3f}\n  with the penalty at seed 43 "
+        f"({morans(seed42['2d']):.3f} and {morans(seed42['3d']):.3f} at seed 42) and within 0.02 of zero\n  without it "
+        f"({morans(seed43['2d_alpha0']):.3f} and {morans(seed43['3d_alpha0']):.3f}; {morans(seed42['2d_alpha0']):.3f} and {morans(seed42['3d_alpha0']):.3f})",
+        f"0.323 and\n  0.370 nats at seed 43" if False else f"{val(seed43['2d']) - val(seed43['2d_alpha0']):.3f} and "
+        f"{val(seed43['3d']) - val(seed43['3d_alpha0']):.3f} nats lower at seed 43 "
+        f"({val(seed42['2d']) - val(seed42['2d_alpha0']):.3f} and {val(seed42['3d']) - val(seed42['3d_alpha0']):.3f} at seed 42)",
+        f"{_g(sig_mean(seed43['2d_alpha0']))} and {_g(sig_mean(seed43['3d_alpha0']))} significant units per tap at seed 43",
+        f"{_g(sig_mean(seed42['2d']))} at seed 42 and {_g(sig_mean(seed43['2d']))} at seed 43 in 2D ({_g(sig_mean(seed42['3d']))} and "
+        f"{_g(sig_mean(seed43['3d']))} in 3D)",
+        f"the same arm\n  moves by a factor of {factor:.1f} from one seed to the next ({_g(sig_mean(seed42['2d']))} to {_g(sig_mean(seed43['2d']))})",
+        f"({_g(share(seed42['2d']))} against {_g(share(seed42['2d_alpha0']))} and {_g(share(seed43['2d']))} against {_g(share(seed43['2d_alpha0']))} in\n  2D; "
+        f"{_g(share(seed42['3d']))} against {_g(share(seed42['3d_alpha0']))} in 3D)",
+        f"({_g(share(seed43['3d']))} against {_g(share(seed43['3d_alpha0']))}, 3D seed\n  43)",
+        f"larger with the penalty in 2D at both seeds ({total(seed42['2d'])} and\n  {total(seed43['2d'])} against {total(seed42['2d_alpha0'])} and {total(seed43['2d_alpha0'])}",
+        f"and not in 3D ({total(seed42['3d'])} and {total(seed43['3d'])} against {total(seed42['3d_alpha0'])} and {total(seed43['3d_alpha0'])})",
+        f"single draws reach {length[0]['b_vocab_3v7']['max']:.1f} in 2D and {length[1]['b_vocab_3v7']['max']:.2f} in 3D, which is "
+        f"{percent(length[1]['b_vocab_3v7']['max'], real3)} per cent of the\n  real {_g(real3)} in 3D",
+        f"a draw of {five(length[0])[1]:.1f} (2D) and\n  {five(length[1])[1]:.3f} (3D) where seed 42 gave at most {seed42_five[0]} and {seed42_five[1]}",
+        "The share of the significant units that sit in a cluster is higher with the\n  penalty in three of the four pairs",
+        "The penalty arm has the larger\n  count in two of the four pairs and the smaller in the other two",
+        f"3D falls from {_g(framing[1]['context']['mean_significant_units_per_tap'])} to {_g(framing[1]['eot']['mean_significant_units_per_tap'])}\n  "
+        f"and {_g(framing[1]['none']['mean_significant_units_per_tap'])} and 2D from {_g(framing[0]['context']['mean_significant_units_per_tap'])} to "
+        f"{_g(framing[0]['eot']['mean_significant_units_per_tap'])} and {_g(framing[0]['none']['mean_significant_units_per_tap'])}",
+    ]
+    return rows + table + prose
 
 
 def points_raw(curve: dict, step: int) -> float:
@@ -841,6 +951,12 @@ _RETRACTED_SENTENCES = (
     "validation loss 7.16 after 400 steps against about\n7.8 before",
     "so it may simply be further along",
     "also reaches a lower validation loss in the same 400 steps",
+    # review pass 6, concern 12: stated for one seed per arm, unscoped, and with the
+    # clusters called alike where they are 18 against 12 in 2D
+    "The units of a trained language model respond differently to these two kinds of text whether or not",
+    "and similar numbers of clusters",
+    "a larger share of the significant units sitting in clusters (in both dimensions)",
+    "come from one seed each",
     "7.162 against 7.818",
     "7.105 against 7.492",
     "the corrected model trains faster",
@@ -875,7 +991,7 @@ _REQUIRED_SENTENCES = (
     "A real selectivity claim needs a larger stimulus set",
     "A second correction: earlier t-maps were averaged over the padding",
     "A third correction: the stimuli framing and their lengths changed what the t-maps show",
-    "But it is not made by the topographic penalty",                # the alpha = 0 control
+    "But in these runs it is not made by the topographic penalty",   # the alpha = 0 control, two seeds
     "The penalty is **not** what makes units respond differently to sentences and to word lists",
     "They do not show that the topographic penalty made that selectivity",
     "A cluster count is therefore a weak diagnostic here",
@@ -887,6 +1003,15 @@ _REQUIRED_SENTENCES = (
     "The validation losses of the earlier and the corrected runs are not comparable",
     "so nothing here says which model learns faster",
     "no claim about learning speed is made",
+    # review pass 6, concern 12: the alpha = 0 reading is scoped to what two seeds support
+    "A second seed",
+    "The smoothness is the penalty's, in all four pairs",
+    "The penalty costs validation loss in all four pairs",
+    "The count of significant units does not order the arms",
+    "The length control does not replicate cleanly",
+    "In this pair of 400-step runs (one seed per arm; the second seed is below)",
+    "and the arms are not at the same point of training",
+    "so no count here is a result",
 )
 
 

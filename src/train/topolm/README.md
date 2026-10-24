@@ -318,16 +318,21 @@ of the 256 units per tap pass the significance test (34 to 119 depending on the 
 in 9 clusters that prefer the sentences and 9 that prefer the word lists; in the 3D run
 111.5 of 343 units per tap pass, in 7 and 11 clusters. Four controls (below) say what
 that does and does not mean. The pattern is not an effect of the sentence lengths (the
-sentences are matched, and word lists of unequal length make far smaller maps) and it
+sentences are matched, and word lists of unequal length make far smaller maps, though a
+single draw at the second seed reached 81 per cent of the real 3D count) and it
 is not what an arbitrary split of the ten sentences gives (of the 252 splits, every one
 except the real one and its mirror gives at most 0.25 significant units per tap in 2D
 and 24.75 in 3D). It does depend on how the sentence is introduced: with no passage
-before it, 3D drops to 2.0 or 1.625 significant units per tap. **But it is not made by
-the topographic penalty**: the same run with `--alpha 0` (no penalty) has as many
+before it, 3D drops to 2.0 or 1.625 significant units per tap. **But in these runs it is
+not made by the topographic penalty**: the same run with `--alpha 0` (no penalty) has as many
 significant units, 120.25 per tap in 2D and 108.125 in 3D, and no smoothness at all
 (Moran's I -0.019 and -0.001 against 0.771 and 0.593). What the penalty adds is the
 smooth arrangement, and that is what Moran's I measures; the counts of significant
 units and of clusters of this smoke contrast do not show topography by themselves.
+A second seed ([below](#a-second-seed)) agrees on the smoothness and on what the
+penalty costs in validation loss, and shows that the counts move more between the two
+seeds than between the arms (65.0 and 118.9 significant units per tap in 2D with the
+penalty, 120.25 and 101.5 without), so no count here is a result.
 Nor do they say whether the units prefer grammar or vocabulary, because the two
 conditions differ in both. These checkpoints are a different model from the ones the
 earlier versions of this README showed (a feed-forward built from two chained MLPs,
@@ -791,9 +796,11 @@ The penalty is what makes the map smooth: the control's t-map is as spatially ra
 the untrained one (Moran's I about 0, salt and pepper in the figure). The penalty is
 **not** what makes units respond differently to sentences and to word lists: without it
 there are more significant units in 2D (120.25 against 65.0, 47 per cent of the cells)
-and about the same number in 3D (108.125 against 111.5). The units of a trained
-language model respond differently to these two kinds of text whether or not they are
-laid out smoothly. The control also has clusters, 6 and 6 in 2D and 8 and 8 in 3D,
+and about the same number in 3D (108.125 against 111.5). In this pair of 400-step
+runs (one seed per arm; the second seed is below) the units respond differently to these
+two kinds of text whether or not they are laid out smoothly, and the two arms are not at
+the same point of training: the control's validation loss is lower, which moves the
+counts by itself. The control also has clusters, 6 and 6 in 2D and 8 and 8 in 3D,
 because when 47 per cent (2D) or 32 per cent (3D) of the cells are significant, groups of
 ten touching cells of one sign occur by themselves; the two arms differ less in how
 many clusters there are than in how much of the significance sits in them (75.6 per cent
@@ -803,6 +810,90 @@ A cluster count is therefore a weak diagnostic here, and in 3D (7 and 11 against
 it does not separate the two arms. The penalty also costs something: the validation
 loss after 400 steps is 7.162 with it and 6.808 without in 2D, 7.105 and 6.707 in 3D
 (0.355 and 0.399 nats; the paper's pair at convergence differs by 0.109).
+
+#### A second seed
+
+The four runs above use seed 42. The same four commands with `--seed 43` (other
+initial weights, other data order and validation split, the same stimuli, steps and
+settings) were run afterwards on the same GPU, one after the other. Their numbers are
+in `figures/figure_facts.json` (`2d_seed43`, `3d_seed43`, `2d_alpha0_seed43`,
+`3d_alpha0_seed43`); no figure of them is shipped. Both seeds, at step 400:
+
+| at step 400 | 2D, penalty on | 2D, `--alpha 0` | 3D, penalty on | 3D, `--alpha 0` |
+|---|---|---|---|---|
+| mean Moran's I, seed 42 | 0.771 | -0.019 | 0.593 | -0.001 |
+| mean Moran's I, seed 43 | 0.768 | -0.009 | 0.581 | 0.004 |
+| significant units per tap, seed 42 | 65.0 | 120.25 | 111.5 | 108.125 |
+| significant units per tap, seed 43 | 118.875 | 101.5 | 75.875 | 126.375 |
+| clusters of `a` / `b`, seed 42 | 9 / 9 | 6 / 6 | 7 / 11 | 8 / 8 |
+| clusters of `a` / `b`, seed 43 | 12 / 17 | 6 / 6 | 6 / 10 | 8 / 10 |
+| share of the significant units that sit in a cluster, seed 42 | 0.756 | 0.398 | 0.923 | 0.769 |
+| share of the significant units that sit in a cluster, seed 43 | 0.909 | 0.222 | 0.832 | 0.829 |
+| validation loss, seed 42 | 7.162 | 6.808 | 7.105 | 6.707 |
+| validation loss, seed 43 | 7.168 | 6.845 | 7.145 | 6.775 |
+
+Two seeds are not a distribution, but they are enough to say which statements of the
+single-seed reading survive and which do not.
+
+- **The smoothness is the penalty's, in all four pairs.** Moran's I is 0.768 and 0.581
+  with the penalty at seed 43 (0.771 and 0.593 at seed 42) and within 0.02 of zero
+  without it (-0.009 and 0.004; -0.019 and -0.001).
+- **The penalty costs validation loss in all four pairs.** The run without it ends
+  0.323 and 0.369 nats lower at seed 43 (0.355 and 0.399 at seed 42), so the arms are
+  never at the same point of training after 400 steps, and the counts of significant
+  units cannot be compared as if they were.
+- **Units that respond differently to sentences and word lists exist without the
+  penalty in every pair**: 101.5 and 126.375 significant units per tap at seed 43
+  (120.25 and 108.125 at seed 42).
+- **The count of significant units does not order the arms.** With the penalty it is
+  65.0 at seed 42 and 118.875 at seed 43 in 2D (111.5 and 75.875 in 3D); without it
+  120.25 and 101.5 in 2D (108.125 and 126.375 in 3D). The penalty arm has the larger
+  count in two of the four pairs and the smaller in the other two, and the same arm
+  moves by a factor of 1.8 from one seed to the next (65.0 to 118.875), more than the
+  arms differ in most pairs. At this scale the count measures the seed and the
+  training progress, not the penalty.
+- **The share of the significant units that sit in a cluster is higher with the
+  penalty in three of the four pairs** (0.756 against 0.398 and 0.909 against 0.222 in
+  2D; 0.923 against 0.769 in 3D) and equal in the fourth (0.832 against 0.829, 3D seed
+  43). The number of clusters is larger with the penalty in 2D at both seeds (18 and
+  29 against 12 and 12, `a` and `b` together) and not in 3D (18 and 16 against 16 and
+  18).
+
+The controls on the two penalty-on runs of seed 43 (the same code as above):
+
+| seed 43 | 2D | 3D |
+|---|---|---|
+| significant units per tap, real labelling | 118.875 | 75.875 |
+| the best other labelling (not the real one or its mirror) | 0.625 | 0.0 |
+| labellings with at least as many as the real one (itself and its mirror included) | 2 | 2 |
+| Moran's I, real labelling (shuffled median) | 0.768 (0.734) | 0.581 (0.624) |
+| framing: the shipped passage, the end-of-text id alone, nothing | 118.875, 23.5, 10.875 | 75.875, 0.0, 0.25 |
+| framing: three other passages | 101.75 to 124.75 | 78.625 to 99.5 |
+| 3 words against 7 words, `b` vocabulary: median (largest draw) | 11.8 (31.5) | 2.8 (61.2) |
+| 3 words against 7 words, `a` vocabulary: median (largest draw) | 0.0 (2.9) | 0.0 (27.5) |
+| 5 words against 5 words, either vocabulary: median (largest draw) | 0.0 (24.5) | 0.0 (30.6) |
+
+- The label-shuffle null replicates: the real labelling and its mirror are again the
+  only two of the 252 labellings with a sizeable count.
+- The dependence on the framing replicates in direction: without the passage (the
+  end-of-text id alone, or nothing in front of the sentence) 3D falls from 75.875 to 0.0
+  and 0.25 and 2D from 118.875 to 23.5 and 10.875; the three other passages give 101.75
+  to 124.75 in 2D and 78.625 to 99.5 in 3D, in the same range as the shipped one.
+- **The length control does not replicate cleanly.** The medians stay low (at most
+  11.8), but single draws reach 31.5 in 2D and 61.25 in 3D, which is 81 per cent of the
+  real 75.875 in 3D, and two word lists of the SAME length give a draw of 24.5 (2D) and
+  30.625 (3D) where seed 42 gave at most 0.125 and 2.125. A t-map of five sentences
+  against five is not a stable instrument at this scale, and a draw of the length
+  control can come close to the real count.
+
+So the conclusion this README draws is the one two seeds support: the penalty makes the
+map smooth and costs validation loss, in both dimensions and both seeds; a contrast
+between sentences and word lists is present with and without it, and its size
+(counts of significant units and of clusters) varies between seeds as much as between
+arms. Whether the penalty changes where the selective units sit needs more seeds and a
+real stimulus set, as the last bullets of the next section say. Seed 43 did not
+disagree with seed 42 on any of the statements marked "all four pairs" above; it
+disagreed on the ordering of the counts and on the length control, as stated.
 
 #### The live curve
 
@@ -862,13 +953,18 @@ selectivity counts come later. What would be a warning sign:
   pass the correction, and the label-shuffle null and the length control do not
   reproduce that. The framing control shows that this holds with a passage of text
   before the sentence and mostly disappears without one.
-- **They do not show that the topographic penalty made that selectivity.** The run
-  without the penalty has as many significant units (120.25 per tap in 2D, 108.125 in
-  3D) and similar numbers of clusters. What the penalty adds, and the figures do show, is
-  the spatial agreement of neighbouring units (Moran's I 0.771 against -0.019, 0.593
-  against -0.001) and a larger share of the significant units sitting in clusters (in both dimensions).
-  A claim that selective units are grouped, as in the paper, needs a comparison against
-  the penalty-free run on a real stimulus set, several seeds and a trained model.
+- **They do not show that the topographic penalty made that selectivity.** In this pair
+  of 400-step runs the run without the penalty has as many significant units (120.25 per
+  tap in 2D, 108.125 in 3D), and the arms are not at the same point of training (the
+  control's validation loss is 0.355 and 0.399 nats lower). The second seed (above)
+  gives 101.5 and 126.375 without the penalty against 118.875 and 75.875 with it, so the
+  count orders the arms differently at the two seeds. What the penalty adds, and the
+  figures do show in all four pairs, is the spatial agreement of neighbouring units
+  (Moran's I 0.771 against -0.019, 0.593 against -0.001 at seed 42; 0.768 against -0.009
+  and 0.581 against 0.004 at seed 43), and in three of the four a larger share of the
+  significant units sitting in clusters. A claim that selective units are grouped, as in
+  the paper, needs a comparison against the penalty-free run on a real stimulus set,
+  more than two seeds and a trained model.
 - **They do not say what the units prefer.** The two conditions differ in grammar,
   in vocabulary (function words such as "the" and "she" occur in `a` and not in `b`)
   and in the shape of the sentence, and the contrast cannot separate them. Conditions
@@ -876,11 +972,12 @@ selectivity counts come later. What would be a warning sign:
   and the example runs do not contrast them.
 - **Five sentences per condition is very little.** With 5 against 5 only a |t| of
   roughly 3 or more can pass for a unit when many units pass together, and 8.7 or more
-  when it is alone. A live map is noisy from one draw to the next, and these counts
-  come from one seed each.
+  when it is alone. A live map is noisy from one draw to the next, and the counts come
+  from two seeds at most (65.0 and 118.875 significant units per tap for the same 2D
+  run at the two seeds).
 - **A t-map is not free of length and position effects.** The sentences are matched in
   tokens, and the length control still found single draws of 25 to 32 significant units
-  per tap for lists of unequal length. The model has learned **absolute** position
+  per tap for lists of unequal length at seed 42, and up to 61.25 (3D) at seed 43. The model has learned **absolute** position
   embeddings (a table with one learned vector per position), so a token's activation
   depends on its position. A different position-encoding option is being investigated
   separately.
