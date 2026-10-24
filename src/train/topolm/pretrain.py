@@ -311,7 +311,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resume", type=str, default=None,
-        help="Path to a .keras checkpoint to resume from",
+        help=(
+            "Path to a .keras checkpoint of a run with the SAME model settings "
+            "(variant, num_layers, vocab size, sequence length, options); its weights "
+            "are loaded before training and a mismatch is refused by name. NOT "
+            "restored: the optimizer state, the learning-rate schedule (it starts at "
+            "its own step 0, so the run warms up again), the data position and the "
+            "random streams (the data seed moves by the checkpoint's step). Step "
+            "counters and figure labels continue from the number in the file name "
+            "(step_0000004.keras is step 4); final.keras carries no number and "
+            "counts from step 0"
+        ),
     )
 
     # Topographic evaluation

@@ -122,6 +122,7 @@ from dl_techniques.models.language.topolm.config import (
 )
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # ---------------------------------------------------------------------
 
@@ -927,6 +928,77 @@ def create_topolm_model(
         f"{len(backbone.tap_layers)} taps aggregated into the objective"
     )
     return head, backbone
+
+
+def require_resume_checkpoint(path: Optional[str]) -> None:
+    """Refuse a ``--resume`` path that cannot be a checkpoint, before any run work.
+
+    Contract. ``path`` is ``config.resume_from``: ``None`` passes. Anything else must
+    name an existing file ending in ``.keras``; otherwise this raises
+    ``FileNotFoundError`` / ``ValueError`` naming ``resume_from`` and the path. It
+    reads nothing from the file (that is :func:`restore_weights_from_checkpoint`'s
+    job, after the model exists); it exists so the refusal comes before the seeds,
+    the run directory, the tokenizer and the dataset, like the radius and the
+    vocabulary refusals.
+    """
+    if path is None:
+        return
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"resume_from (--resume) names {path!r}, which is not a file"
+        )
+    if not str(path).endswith(".keras"):
+        raise ValueError(
+            f"resume_from (--resume) must be a .keras checkpoint written by this "
+            f"trainer, got {path!r}"
+        )
+
+
+def restore_weights_from_checkpoint(model: CausalLanguageModel, path: str) -> None:
+    """Load a checkpoint's weights into the freshly built training head.
+
+    Contract. ``model`` is the BUILT training head of :func:`create_topolm_model`
+    (the wrapper, not the bare backbone); ``path`` a ``.keras`` file written by a
+    run of this trainer (``checkpoints/step_NNNNNNN.keras`` or ``final.keras``).
+    Every variable is copied, trainable and non-trainable (the tap index tables and
+    the last penalty included), so the model continues from the saved state. The
+    transfer is the shared one in complete-or-raise mode, in both directions
+    (:func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` with
+    ``strict=True`` and ``allow_unloaded=()``): a checkpoint of another variant,
+    depth, width, vocabulary, position-table length or option set raises a
+    ``ValueError`` that names ``resume_from``, the path and the run settings that
+    must match, and leaves the model untouched. Returns ``None``.
+
+    NOT restored, by design: the optimizer state (AdamW moments), the position of
+    the learning-rate schedule (the schedule is the new run's, from its own step 0:
+    a resumed run warms up again), the data position and the random streams (the
+    data seed moves by the checkpoint's step, so the article order is new). The step
+    counters and figure labels continue from the number in the file name
+    (``step_0000004.keras`` is step 4); ``final.keras`` carries no number and counts
+    from step 0.
+    """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-034: --resume LOADS the weights.
+    # It only offset the step counters and the data seed before: a "resumed" run
+    # trained from random weights while its labels said it continued. Do NOT
+    # restore the optimizer too (the schedule is built from the new run's horizon,
+    # so a restored step counter would put the learning rate on the wrong point of
+    # a different curve), do NOT load with skip_mismatch / strict=False (that
+    # returns normally having restored nothing), and do NOT build the model from
+    # the checkpoint's own config (the new run's config.json would then describe a
+    # model that is not the one trained). Guarded by test_topolm_resume.py. See
+    # decisions.md.
+    try:
+        load_weights_from_checkpoint(
+            model, path, skip_prefixes=(), strict=True, allow_unloaded=(),
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"resume_from (--resume) {path!r} does not fit this run's model: "
+            f"{str(error)[:500]}. A checkpoint can only be resumed by a run with the "
+            f"same model_variant, num_layers, vocab_size, max_seq_length, "
+            f"ffn/norm options and tap settings it was trained with."
+        ) from error
+    logger.info(f"Restored the weights of {path} (optimizer state not restored)")
 
 
 def compile_model(
@@ -1974,6 +2046,7 @@ def train_topolm(
     # a radius the variant's grid cannot hold is a property of two config values,
     # known now, and used to surface after a ~2 minute data load.
     check_variant_fits_radius(config)
+    require_resume_checkpoint(config.resume_from)
 
     set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
@@ -2027,6 +2100,8 @@ def train_topolm(
         config,
         required_vocab_size=_required_vocab_size(preprocessor),
     )
+    if config.resume_from:
+        restore_weights_from_checkpoint(model, config.resume_from)
     compile_model(model, config, epochs, steps_per_epoch)
     callbacks = build_callbacks(
         config, model, results_dir, initial_step,

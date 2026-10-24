@@ -1000,6 +1000,31 @@ The module has its own tests (`test_topolm_figure_facts.py`: `TestTheSmallFuncti
 `TestRunSummary`, `TestTheColourLimit`, `TestComparingFactsFiles`,
 `TestTheFigureFactsCommandLine`, `TestTheRegenerationCommandInThisReadme`).
 
+### Resuming a run: `--resume`
+
+`--resume PATH` loads the weights of a `.keras` checkpoint (`checkpoints/step_NNNNNNN.keras`
+or `final.keras` of an earlier run) into the model before the first step, every
+variable, trainable and non-trainable. It used to do something else: it only read the
+step number out of the file name for the counters and the data seed, so a "resumed"
+run trained from random weights while its labels said it continued (found in review
+pass 6; the flag is older than the live view). Now a checkpoint of another model
+variant, depth, width, vocabulary size, position-table length (`--max-seq-length`),
+option set or tap settings is refused by name, before it touches the model, and a
+missing or non-`.keras` path is refused before any run work.
+
+What is and is not restored:
+
+| | |
+|---|---|
+| restored | the weights, including the tap index tables and the last penalty |
+| not restored | the optimizer state (AdamW moments), the position of the learning-rate schedule (the schedule is the new run's, from its own step 0, so the run **warms up again**), the data position and the random streams |
+| step counters, figure labels | continue from the number in the file name: `step_0000400.keras` is step 400; `final.keras` carries no number and counts from step 0 |
+| data order | the data seed moves by that step, so a resumed run sees a different article order, not a replay |
+
+So it is a warm start from the saved weights, not a bit-exact continuation. It is
+pinned by `test_topolm_resume.py`: the weights a resumed run starts from equal the
+checkpoint's, read back through `keras.models.load_model`.
+
 ### Watching a run: `--viz-every-steps`
 
 ```bash
@@ -1013,7 +1038,7 @@ while it trains (what the pictures mean is in the
 step that is a multiple of `N`, and at the end of the run. **`N` counts optimizer
 steps and is independent of the virtual epoch**: `--eval-every-steps` sets the
 length of the epoch Keras validates at, `N` is a count of steps inside the run
-(a resumed run continues from its checkpoint's step), so `--viz-every-steps 500`
+(a resumed run's labels continue from the step in its checkpoint's file name), so `--viz-every-steps 500`
 in a run that validates every 2000 steps draws four times per virtual epoch.
 `0` adds no callback and no directory. A negative value is refused by name.
 `--no-topography` does not switch it off: that flag skips the post-hoc report
