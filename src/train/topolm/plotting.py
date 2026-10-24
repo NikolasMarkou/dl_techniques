@@ -66,6 +66,9 @@ import matplotlib
 matplotlib.use("Agg", force=False)
 
 import matplotlib.pyplot as plt  # noqa: E402  (after the backend selection)
+from matplotlib.collections import PatchCollection  # noqa: E402
+from matplotlib.patches import Rectangle  # noqa: E402
+from matplotlib.ticker import MaxNLocator  # noqa: E402
 
 from dl_techniques.utils.logger import logger
 
@@ -134,36 +137,47 @@ def _shared_limit(t_maps: Dict[str, np.ndarray], percentile: float) -> float:
 
 
 def _hatch_rejected(axis: plt.Axes, significant: np.ndarray) -> None:
-    """Hatch the cells of ``axis`` that FAILED BH-FDR; draw nothing if none did.
+    """Hatch every cell of ``axis`` that FAILED BH-FDR; draw nothing if none did.
 
     ``significant`` is a boolean array of the shape of the image on ``axis``.
     Shared by the 2-D panel and every 3-D plane, so "hatched" means the same
-    thing in both.
+    thing in both. The line under the headline says "hatched = not significant",
+    so a cell without hatch must be a cell that passed: each rejected cell gets
+    its own box, ``[col - 0.5, col + 0.5] x [row - 0.5, row + 0.5]`` in the
+    coordinates ``imshow`` gives the same axis, all in ONE collection with
+    no fill and a line width of 0, so no box outline is stroked and only the ``//``
+    strokes show, and the t-values under them stay readable. The edge colour is
+    the hatch colour and must NOT be ``"none"`` (matplotlib then draws no hatch at
+    all: the strokes take the edge colour, the box outline takes the line width). Cluster edges, the one place a line is wanted, are
+    drawn from the label grid, above this collection.
 
-    Hatching the REJECTED region, so "significant" is a visible property of the
-    panel rather than an inference from colour.
-
-    No contour LINES here. Contouring the mask at 0.5 traces every surviving
-    cell, and at realistic BH-FDR densities that is a dense mesh over the whole
-    panel that buries the t-values it was meant to annotate. The hatch alone
-    carries the same information and leaves the colour readable. Cluster edges,
-    the one place a line is wanted, are drawn from the label grid.
-
-    MEASURED, and the direction is counter-intuitive: contourf FILLS the
-    unmasked cells. So to hatch the REJECTED region the MASK argument is
-    ``significant`` (the significant cells) -- masking ``~significant`` instead
-    fills the survivors, which is the inverse of what the name suggests and
-    silently marks the wrong cells.
+    Interface: ``axis`` has an image drawn on it; ``significant`` is a bool array
+    of that image's shape (True = passed). Returns ``None``; it adds exactly one
+    ``PatchCollection`` (zorder 1: above the image, below the outlines) when some
+    cell was rejected and nothing otherwise.
     """
-    if significant.all():
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-021: one box per rejected cell, NOT
+    # a contour of the mask. The first drawer called ``contourf`` on a masked array
+    # of ones, which fills only the quads whose four neighbouring cells are ALL
+    # rejected: an isolated rejected cell and a one-cell-wide strip got no hatch,
+    # 326 of 545 rejected cells (60 %) on the trained 2-D example, so the figure
+    # contradicted its own subtitle. Do NOT go back to contourf (or any contour of
+    # the mask) to save patches; a 3-D plane or a paper-size grid is a few hundred
+    # boxes. See decisions.md D-021; guarded by TestTheHatchMarksEveryRejectedCell
+    # and TestTheHatchMarksEveryRejectedVoxelOfEveryPlane.
+    rejected = ~np.asarray(significant, dtype=bool)
+    if not rejected.any():
         return
-    rejected_fill = np.ma.masked_where(significant, np.ones(significant.shape))
-    axis.contourf(
-        rejected_fill,
-        levels=[0.5, 1.5],
-        colors="none",
-        hatches=["//"],
-        alpha=0.0,
+    boxes = [
+        Rectangle((col - 0.5, row - 0.5), 1.0, 1.0)
+        for row, col in np.argwhere(rejected)
+    ]
+    axis.add_collection(
+        PatchCollection(
+            boxes, facecolor="none", edgecolor=matplotlib.rcParams["hatch.color"],
+            linewidth=0.0, hatch="//",
+        ),
+        autolim=False,
     )
 
 
@@ -1290,6 +1304,21 @@ def _curve_legend_width(
     return max(body, head) + 0.45
 
 
+def _tick_at_whole_numbers(axis: plt.Axes) -> None:
+    """Tick the y axis of a counted quantity at integers only.
+
+    ``MaxNLocator(integer=True)`` alone is not enough: matplotlib gives up the
+    integer promise when the view spans less than one unit (no clusters yet, a
+    mean of half a unit) and falls back to ticks like -0.04, 0.04, 0.08. So the
+    view is widened to span at least 1.1 first, which puts both 0 and 1 in it.
+    Call after the data is plotted: the view is read from it.
+    """
+    axis.yaxis.set_major_locator(MaxNLocator(integer=True))
+    low, high = axis.get_ylim()
+    if high - low < 1.1:
+        axis.set_ylim(low, low + 1.1)
+
+
 def plot_topography_curve(
     rows: Sequence[Mapping[str, Any]],
     output_path: Optional[str] = None,
@@ -1405,6 +1434,11 @@ def plot_topography_curve(
         marker="o", markersize=3, linewidth=1.2, color="tab:red",
     )
     axes[2].set_ylabel("significant units\n(mean per tap)")
+    # The two count panels tick at whole numbers: with a handful of clusters or
+    # units the default locator picks 2.5, 7.5, 12.5 for a quantity that is
+    # counted. Moran's I and the loss are not counts and keep their own ticks.
+    for count_axis in (cluster_axis, axes[2]):
+        _tick_at_whole_numbers(count_axis)
 
     if "val_loss" in panels:
         axes[3].plot(val_steps, val_loss, marker="o", markersize=3, linewidth=1.2,

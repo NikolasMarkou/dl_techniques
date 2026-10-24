@@ -7,10 +7,12 @@ report, so these tests are about the two ways a topographic figure can lie:
   identical contrast, which is the easiest way to manufacture a topographic
   result out of an untrained model. A row that cannot share a scale must be
   visible as such.
-- **the significance overlay's direction.** ``contourf`` fills the UNMASKED
-  cells, so the obvious way to write "hatch the rejected region" hatches the
-  survivors instead. That inversion is invisible in a render and wrong in every
-  pixel, so it is pinned by measuring which cells the hatch covers.
+- **the significance overlay's direction and coverage.** Hatching the survivors
+  instead of the rejected cells (the first drawer's ``contourf`` filled the
+  UNMASKED cells, so the obvious mask argument did exactly that) is invisible in
+  a render and wrong in every pixel, and a hatch that skips cells reads as
+  "significant" there. Both are pinned by measuring, cell by cell, which cells the
+  hatch covers (step 4.6, D-021).
 """
 
 import numpy as np
@@ -90,6 +92,72 @@ def _hatched(axis):
     return found
 
 
+#: Where inside a cell a hatch is sampled: three offsets per axis, all strictly
+#: inside the cell ``[-0.5, 0.5]`` with 0.15 to spare, nine points a cell.
+_CELL_SAMPLES = (-0.35, 0.0, 0.35)
+
+
+def _hatch_paths(axis):
+    """The outline paths, in data coordinates, of EVERY hatch-bearing artist on
+    ``axis``: collections (a ``contourf`` set, a ``PatchCollection``, ...) and loose
+    patches. Reads only what is drawn, never how the module built it."""
+    paths = []
+    for collection in _hatched(axis):
+        assert collection.get_transform().contains_branch(axis.transData), (
+            "a hatch collection that is not in data coordinates"
+        )
+        assert not np.any(collection.get_offsets()), "a hatch drawn through offsets"
+        paths.extend(collection.get_paths())
+    for patch in axis.patches:
+        if patch.get_hatch():
+            paths.append(patch.get_patch_transform().transform_path(patch.get_path()))
+    return paths
+
+
+def _hatch_coverage(axis, shape):
+    """``(rows, cols, 9)`` boolean: which sample points of each cell lie inside a
+    hatched region. Cell ``(r, c)`` is centred on ``x = c``, ``y = r`` (``imshow``)."""
+    rows, cols = shape
+    points = np.array([
+        (col + dx, row + dy)
+        for row in range(rows) for col in range(cols)
+        for dy in _CELL_SAMPLES for dx in _CELL_SAMPLES
+    ])
+    inside = np.zeros(len(points), dtype=bool)
+    for path in _hatch_paths(axis):
+        inside |= path.contains_points(points)
+    return inside.reshape(rows, cols, len(_CELL_SAMPLES) ** 2)
+
+
+def _hatch_boxes(axis):
+    """Each hatch path's bounding box, rounded: ``(x0, y0, x1, y1)``."""
+    boxes = []
+    for path in _hatch_paths(axis):
+        extent = path.get_extents()
+        boxes.append(tuple(round(float(v), 6) for v in
+                           (extent.x0, extent.y0, extent.x1, extent.y1)))
+    return boxes
+
+
+def _assert_hatch_is_exactly(axis, significant):
+    """The hatch on ``axis`` covers EVERY cell that failed BH-FDR (``~significant``)
+    and NO cell that passed: all nine sample points of a rejected cell are hatched,
+    none of an accepted cell's."""
+    significant = np.asarray(significant, dtype=bool)
+    coverage = _hatch_coverage(axis, significant.shape)
+    rejected = ~significant
+    missed = np.argwhere(rejected & ~coverage.all(axis=2))
+    spilled = np.argwhere(~rejected & coverage.any(axis=2))
+    assert missed.size == 0, (
+        f"{len(missed)} of {int(rejected.sum())} rejected cells are not (fully) "
+        f"hatched, first (row, col) {missed[:5].tolist()}"
+    )
+    assert spilled.size == 0, (
+        f"the hatch covers {len(spilled)} accepted cells, first (row, col) "
+        f"{spilled[:5].tolist()}"
+    )
+
+
 class TestTheSharedColourScale:
     def test_every_panel_gets_the_same_limits(self):
         """The property that makes a row comparable, asserted on the artists.
@@ -152,10 +220,12 @@ class TestTheSignificanceOverlayDirection:
     def test_the_hatch_covers_rejected_cells_and_spares_surviving_ones(self):
         """The inversion this module exists to prevent, pinned by measurement.
 
-        ``contourf`` fills the UNMASKED cells, so
-        ``masked_where(~sig, ones)`` fills the SURVIVORS. Verified here by
-        locating the hatched region on the axes and comparing it against the
-        mask, rather than by reading the image.
+        Hatching the cells that PASSED instead of the cells that FAILED is
+        invisible in a render and wrong in every pixel (the first drawer used
+        ``contourf``, which fills the UNMASKED cells, so the obvious mask argument
+        marked the survivors). Verified here by locating the hatched region on the
+        axes and comparing it, cell by cell, against the mask rather than by
+        reading the image.
         """
         sig = np.zeros((GRID, GRID), dtype=bool)
         sig[3:5, 3:5] = True
@@ -166,30 +236,16 @@ class TestTheSignificanceOverlayDirection:
             _fn="plot_t_maps",
         )
         axis = np.atleast_2d(axes)[0, 0]
-        hatched = _hatched(axis)
-        assert len(hatched) == 1, (
-            f"expected one hatched region, found {len(hatched)}; the overlay was "
-            f"skipped or doubled"
-        )
+        assert _hatched(axis), "the overlay was skipped"
 
-        extent = hatched[0].get_paths()[0].get_extents()
+        _assert_hatch_is_exactly(axis, sig)
         plt.close(fig)
-
-        # The significant block is rows/cols 3:5, i.e. data coords ~3.0-5.0.
-        # A correct rejected-region hatch spans the panel and leaves that hole.
-        spans_panel = (
-            extent.x0 <= 0.5
-            and extent.y0 <= 0.5
-            and extent.x1 >= GRID - 1.5
-            and extent.y1 >= GRID - 1.5
+        # The block that PASSED (rows/cols 3:5) is the hole, not the hatch: the
+        # four cells of it are not hatched at all, whatever the mask direction.
+        assert not _hatch_coverage(axis, sig.shape)[3:5, 3:5].any(), (
+            "the hatch covers the significant block: the SURVIVORS are hatched, "
+            "the mask argument was inverted"
         )
-        assert spans_panel, (
-            f"the hatch covers only {extent}, not the rejected region; if this "
-            f"fails the mask argument was inverted and the SURVIVORS are hatched"
-        )
-        assert not (
-            extent.x0 > 2.5 and extent.x1 < 5.5 and extent.y0 > 2.5 and extent.y1 < 5.5
-        ), "the hatch is confined to the significant block"
 
     def test_no_hatch_is_drawn_when_everything_is_significant(self):
         """Nothing to reject means no overlay, not a hatch over the whole map."""
@@ -641,30 +697,36 @@ class TestTwoDimensionalUnchangedPixels:
         assert _pixel_digest(path) == ((468, 1993, 4), "445e18d5a116726c")
 
     def test_a_t_map_row_with_the_hatch_and_the_legend_but_no_clusters(self, tmp_path):
-        """Re-pinned twice. Layout (step 4.2): was ((547, 1983, 4),
+        """Re-pinned three times. Layout (step 4.2): was ((547, 1983, 4),
         "eab7091b764aa543"), then "25ac5e61b97c81a8". Step 4.4 (D-018): the line
         under the headline now says what the hatch means ("hatched = not
         significant after BH-FDR"), which is TEXT only: the figure keeps its size
-        (468 x 1993), and what it draws is pinned layout-independently in
-        :class:`TestTwoDimensionalContentDoesNotDependOnLayout` (image arrays,
-        colour limits, hatch geometry golden, outline edges), unchanged."""
+        (468 x 1993), pin "b0327169643eb99c". Step 4.6 (D-021): re-pinned to
+        "dc6f9805b89805b1" because the HATCH ITSELF changed, deliberately: the old
+        ``contourf`` hatch left 60 % of the rejected cells unmarked (this pin hashed
+        that faulty picture), the new one hatches every rejected cell. Size, colours,
+        image arrays, colour limits and outlines are unchanged (pinned
+        layout-independently in
+        :class:`TestTwoDimensionalContentDoesNotDependOnLayout`); the cell-by-cell
+        truth of the hatch is :class:`TestTheHatchMarksEveryRejectedCell`."""
         maps, sig = self._maps()
         path = plot_t_maps(
             maps, sig_grids=sig, arm="raw", condition_a="a", condition_b="b",
             output_path=str(tmp_path / "b.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "b0327169643eb99c")
+        assert _pixel_digest(path) == ((468, 1993, 4), "dc6f9805b89805b1")
 
     def test_an_all_zero_label_grid_changes_nothing(self, tmp_path):
         """No cluster, no outline: the same pixels as passing no label grids
-        (re-pinned with the figure above, same new subtitle text)."""
+        (re-pinned with the figure above, same new subtitle text and, since step
+        4.6, the same per-cell hatch: "b0327169643eb99c" -> "dc6f9805b89805b1")."""
         maps, sig = self._maps()
         empty = {k: np.zeros((8, 8), dtype=int) for k in maps}
         path = plot_t_maps(
             maps, sig_grids=sig, label_grids=empty, arm="raw",
             condition_a="a", condition_b="b", output_path=str(tmp_path / "c.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "b0327169643eb99c")
+        assert _pixel_digest(path) == ((468, 1993, 4), "dc6f9805b89805b1")
 
     def test_the_moran_profile(self, tmp_path):
         """Re-pinned (labels): the ticks are now the tap path without the shared
@@ -809,8 +871,10 @@ class TestThreeDimensionalFigures:
         assert limits == {(-expected, expected)}, limits
 
     def test_the_hatch_covers_the_rejected_cells_of_every_plane(self, monkeypatch, tmp_path):
-        """Same direction as in 2-D (``contourf`` fills the unmasked cells): on each
-        plane the hatch spans the panel and leaves a hole at the significant block."""
+        """Same direction as in 2-D: on each plane through the crosshair (5, 1, 9)
+        the hatch covers exactly the cells that FAILED, so the significant block
+        around the crosshair is the hole. Cell for cell, since the per-cell
+        oracle of :class:`TestTheHatchMarksEveryRejectedCell` is the full proof."""
         volume, significant = _volume_fixture()
         fig = _captured_figure(
             monkeypatch,
@@ -819,13 +883,12 @@ class TestThreeDimensionalFigures:
                 output_path=str(tmp_path / "t3d.png"),
             ),
         )
-        for ax in _image_axes(fig):
-            rows, cols = np.asarray(ax.images[0].get_array()).shape
-            hatched = _hatched(ax)
-            assert len(hatched) == 1, "the plane has no hatch, or two"
-            extent = hatched[0].get_paths()[0].get_extents()
-            assert extent.x0 <= 0.5 and extent.y0 <= 0.5
-            assert extent.x1 >= cols - 1.5 and extent.y1 >= rows - 1.5
+        planes = _image_axes(fig)
+        assert len(planes) == 3
+        expected = [significant[5, :, :], significant[:, 1, :], significant[:, :, 9]]
+        for ax, plane in zip(planes, expected):
+            assert not plane.all() and plane.any(), "the fixture plane must mix both"
+            _assert_hatch_is_exactly(ax, plane)
         plt.close(fig)
 
     def test_a_3d_cluster_grid_is_a_montage_with_one_panel_per_slice(
@@ -1331,9 +1394,14 @@ class TestTwoDimensionalContentDoesNotDependOnLayout:
     coordinates and independent of where the figure puts its axes."""
 
     # SHA-256 (first 16 hex digits) of the hatch paths' vertices and codes for the
-    # five fixture panels, taken on the code BEFORE step 4.2 and again after it: the
-    # hatch geometry did not change. Same environment pin as the pixel digests.
-    HATCH_GEOMETRY = "08d1c8a366184f84"
+    # five fixture panels. Same environment pin as the pixel digests. RE-PINNED ON
+    # PURPOSE in step 4.6 (D-021): "08d1c8a366184f84" hashed the ``contourf`` polygons,
+    # which covered only the cells whose four neighbours were all rejected (it was
+    # unchanged by the step-4.2 layout change, which is what it was for). The new
+    # value hashes one unit box per rejected cell, in row-major order, over the same
+    # five panels; that those boxes are EXACTLY the rejected cells is proved
+    # independently of this hash in TestTheHatchMarksEveryRejectedCell.
+    HATCH_GEOMETRY = "3a384d867d13f736"
 
     @staticmethod
     def _panels(fig):
@@ -1378,7 +1446,7 @@ class TestTwoDimensionalContentDoesNotDependOnLayout:
         self._check_content(fig, maps, labels)
         plt.close(fig)
 
-    def test_the_hatch_geometry_is_the_one_before_the_layout_change(self):
+    def test_the_hatch_geometry_is_one_box_per_rejected_cell(self):
         import hashlib
 
         maps, sig = TestTwoDimensionalUnchangedPixels._maps()
@@ -2423,3 +2491,364 @@ class TestTheSubtitleBreaksAtClauses:
         assert len(lines) >= 2, subtitle
         for line in lines[:-1]:
             assert line.endswith((";", " |")), f"a break inside a phrase: {line!r}"
+
+
+# =====================================================================
+# Step 4.6 (plan-2026-10-23T190557-972a9ac5, decision D-021): the hatch marks EVERY
+# rejected cell, and the count panels of the live curve have integer ticks.
+# Written RED-first against the c5cca75c3 drawers: ``contourf`` of a masked array
+# fills only the quads whose four corner cells are all rejected, so an isolated
+# rejected cell and a one-cell-wide strip carried no hatch (326 of 545 rejected
+# cells, 60 %, on the trained 2-D example) while the line under the headline says
+# "hatched = not significant after BH-FDR".
+# =====================================================================
+
+
+def _mask_cases():
+    """``{name: significant}`` for the 2-D panel; ``~significant`` is what must be
+    hatched. Covers the shapes a contour-based hatch gets wrong (isolated cell,
+    one-cell strips, checkerboard) and the extremes (none, all)."""
+    rng = np.random.default_rng(5)
+    isolated = np.ones((8, 8), dtype=bool)
+    isolated[3, 4] = False
+    vertical = np.ones((8, 8), dtype=bool)
+    vertical[:, 2] = False
+    horizontal = np.ones((8, 8), dtype=bool)
+    horizontal[5, :] = False
+    corner = np.ones((8, 8), dtype=bool)
+    corner[0, 0] = False
+    corner[7, 7] = False
+    return {
+        "random": rng.random((10, 10)) < 0.6,
+        "isolated_cell": isolated,
+        "one_cell_vertical_strip": vertical,
+        "one_cell_horizontal_strip": horizontal,
+        "two_corner_cells": corner,
+        "checkerboard": (np.indices((8, 8)).sum(axis=0) % 2).astype(bool),
+        "all_rejected": np.zeros((6, 6), dtype=bool),
+        "none_rejected": np.ones((6, 6), dtype=bool),
+        "non_square": rng.random((5, 9)) < 0.5,
+        "single_row": rng.random((1, 7)) < 0.5,
+    }
+
+
+_MASK_CASES = _mask_cases()
+
+
+class TestTheHatchMarksEveryRejectedCell:
+    """RED on c5cca75c3: its hatch exists only where all four neighbouring cells
+    are rejected, so every case with an isolated cell or a one-cell strip fails and
+    so does the rejected border of a full block. The oracle reads the artists on the
+    axes of the PUBLIC figure functions; it never calls ``_hatch_rejected``."""
+
+    @pytest.mark.parametrize("name", list(_MASK_CASES))
+    def test_the_2d_panel_hatches_exactly_the_rejected_cells(self, name):
+        significant = _MASK_CASES[name]
+        fig, axes = _capture_axes(
+            {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
+            _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        try:
+            _assert_hatch_is_exactly(axis, significant)
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize("name", list(_MASK_CASES))
+    def test_the_hatch_is_one_exact_cell_box_per_rejected_cell(self, name):
+        """The boxes themselves: cell ``(r, c)`` is ``[c - 0.5, c + 0.5] x
+        [r - 0.5, r + 0.5]`` in the coordinates the panel's image uses, each rejected
+        cell once, no box for an accepted cell."""
+        significant = _MASK_CASES[name]
+        fig, axes = _capture_axes(
+            {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
+            _fn="plot_t_maps",
+        )
+        boxes = _hatch_boxes(np.atleast_2d(axes)[0, 0])
+        plt.close(fig)
+        expected = [
+            (col - 0.5, row - 0.5, col + 0.5, row + 0.5)
+            for row, col in np.argwhere(~significant)
+        ]
+        assert sorted(boxes) == sorted(expected)
+
+    def test_nothing_rejected_draws_no_hatch_artist_at_all(self):
+        significant = np.ones((6, 6), dtype=bool)
+        fig, axes = _capture_axes(
+            {"t": np.zeros((6, 6))}, sig_grids={"t": significant}, _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        found = _hatch_paths(axis)
+        plt.close(fig)
+        assert found == []
+
+    def test_the_old_geometry_is_what_the_oracle_rejects(self):
+        """The oracle can fail: a contour-style hatch (the cells whose four corner
+        cells are all rejected, as ``contourf`` drew it) is refused on an isolated
+        cell. Without this the passing cases above prove nothing."""
+        from matplotlib.patches import Rectangle
+
+        significant = _MASK_CASES["isolated_cell"]
+        fig, axis = plt.subplots()
+        axis.imshow(np.zeros(significant.shape))
+        for row in range(significant.shape[0] - 1):
+            for col in range(significant.shape[1] - 1):
+                if not significant[row:row + 2, col:col + 2].any():
+                    axis.add_patch(Rectangle(
+                        (col, row), 1, 1, fill=False, hatch="//", linewidth=0,
+                    ))
+        try:
+            with pytest.raises(AssertionError, match="rejected cells are not"):
+                _assert_hatch_is_exactly(axis, significant)
+        finally:
+            plt.close(fig)
+
+    def test_the_hatch_pattern_and_look_are_the_ones_it_always_had(self):
+        """Same pattern (``//``), no fill, the rcParams hatch colour, and no outline
+        of the boxes (line width 0): only the hatch strokes show, as before."""
+        significant = _MASK_CASES["random"]
+        fig, axes = _capture_axes(
+            {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
+            _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        artists = _hatched(axis)
+        plt.close(fig)
+        assert len(artists) == 1
+        artist = artists[0]
+        patterns = [artist.get_hatch()] if artist.get_hatch() else list(artist.hatches)
+        assert patterns == ["//"]
+        assert all(c[3] == 0 for c in np.atleast_2d(artist.get_facecolor()).reshape(-1, 4)), (
+            "the cell boxes must not be filled: only the hatch shows"
+        )
+        edge = np.atleast_2d(artist.get_edgecolor()).reshape(-1, 4)
+        if len(edge) and np.all(np.asarray(artist.get_linewidth()) > 0):
+            pytest.fail("the cell boxes are outlined: only the hatch must show")
+        # The hatch strokes take the EDGE colour; an invisible one draws no hatch.
+        assert len(edge) == 1 and edge[0][3] == 1.0
+        assert tuple(edge[0]) == matplotlib.colors.to_rgba(matplotlib.rcParams["hatch.color"])
+
+    def test_the_hatch_strokes_are_actually_painted(self, tmp_path):
+        """The artists can be exactly right and draw nothing (an invisible edge
+        colour gives no hatch strokes): read the PIXELS. On a mid-grey image, an
+        all-rejected panel has dark strokes in the panel and a panel with nothing
+        rejected has none."""
+        def dark_pixels(significant):
+            path = plot_t_maps(
+                {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
+                output_path=str(tmp_path / f"p{int(significant.sum())}.png"),
+            )
+            pixels = mpimg.imread(path)[..., :3].mean(axis=2)
+            return int((pixels < 0.2).sum())
+
+        none_rejected = dark_pixels(np.ones((6, 6), dtype=bool))
+        all_rejected = dark_pixels(np.zeros((6, 6), dtype=bool))
+        assert all_rejected > none_rejected + 100, (none_rejected, all_rejected)
+
+    def test_the_hatch_is_above_the_image_and_below_the_cluster_outlines(self):
+        significant = _MASK_CASES["random"]
+        labels = np.zeros(significant.shape, dtype=int)
+        labels[2:5, 2:5] = 1
+        fig, axes = _capture_axes(
+            {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
+            label_grids={"t": labels}, _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        hatch_z = [artist.get_zorder() for artist in _hatched(axis)]
+        image_z = axis.images[0].get_zorder()
+        line_z = [line.get_zorder() for line in axis.get_lines()]
+        plt.close(fig)
+        assert hatch_z and line_z
+        assert min(hatch_z) > image_z, "the hatch is under the image"
+        assert max(hatch_z) < min(line_z), "the hatch is over the cluster outlines"
+
+    def test_every_tap_panel_is_hatched_from_its_own_mask(self):
+        rng = np.random.default_rng(8)
+        masks = {f"blocks.{i}.ffn/attn_pre": rng.random((7, 7)) < 0.5 for i in range(4)}
+        fig, axes = _capture_axes(
+            {k: np.zeros((7, 7)) for k in masks}, sig_grids=masks, _fn="plot_t_maps",
+        )
+        panels = [ax for ax in np.atleast_2d(axes).ravel() if ax.images]
+        try:
+            assert len(panels) == len(masks)
+            for axis, mask in zip(panels, masks.values()):
+                _assert_hatch_is_exactly(axis, mask)
+        finally:
+            plt.close(fig)
+
+
+def _distinct_volume(shape, crosshair):
+    """A volume whose every voxel has its own value, with the largest one at
+    ``crosshair``, so a drawn plane tells which voxels it shows, and the crosshair
+    (the largest ``|t|`` among the significant voxels) is where the test says."""
+    volume = np.arange(int(np.prod(shape)), dtype=float).reshape(shape)
+    volume[crosshair] = volume.max() + 1.0
+    return volume
+
+
+def _expected_plane_masks(volume, significant, plane_array):
+    """The significance of each cell of a drawn plane, found by looking each cell's
+    value up in the volume, so the expectation does not depend on how the module
+    picks the plane."""
+    where = {float(v): idx for idx, v in np.ndenumerate(volume)}
+    out = np.zeros(plane_array.shape, dtype=bool)
+    for (row, col), value in np.ndenumerate(plane_array):
+        out[row, col] = significant[where[float(value)]]
+    return out
+
+
+def _volume_mask_cases():
+    cases = {}
+    shape, crosshair = (7, 7, 7), (3, 5, 6)
+
+    random = np.random.default_rng(2).random(shape) < 0.55
+    random[crosshair] = True
+    cases["random"] = (shape, crosshair, random)
+
+    isolated = np.ones(shape, dtype=bool)
+    isolated[3, 2, 4] = False                       # on the axis-0 plane through (3, 5, 6)
+    cases["isolated_voxel"] = (shape, crosshair, isolated)
+
+    strip = np.ones(shape, dtype=bool)
+    strip[3, 0:7, 2] = False                        # a one-cell strip on the axis-0 plane
+    cases["one_cell_strip"] = (shape, crosshair, strip)
+
+    cases["all_rejected"] = (shape, crosshair, np.zeros(shape, dtype=bool))
+    cases["none_rejected"] = (shape, crosshair, np.ones(shape, dtype=bool))
+
+    odd_shape, odd_crosshair = (4, 6, 5), (1, 3, 2)
+    odd = np.random.default_rng(4).random(odd_shape) < 0.5
+    odd[odd_crosshair] = True
+    cases["non_cubic"] = (odd_shape, odd_crosshair, odd)
+    return cases
+
+
+_VOLUME_MASK_CASES = _volume_mask_cases()
+
+
+class TestTheHatchMarksEveryRejectedVoxelOfEveryPlane:
+    """The same oracle on the 3-D figure: each of the three planes through the
+    crosshair hatches exactly the voxels that failed BH-FDR on that plane."""
+
+    @pytest.mark.parametrize("name", list(_VOLUME_MASK_CASES))
+    def test_each_plane_hatches_exactly_its_rejected_cells(
+        self, monkeypatch, tmp_path, name
+    ):
+        shape, crosshair, significant = _VOLUME_MASK_CASES[name]
+        volume = _distinct_volume(shape, crosshair)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {"t": volume}, sig_grids={"t": significant},
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        planes = _image_axes(fig)
+        try:
+            assert len(planes) == 3
+            hatched_cells = 0
+            for axis in planes:
+                shown = np.asarray(axis.images[0].get_array())
+                plane_significant = _expected_plane_masks(volume, significant, shown)
+                _assert_hatch_is_exactly(axis, plane_significant)
+                hatched_cells += int((~plane_significant).sum())
+            if name == "none_rejected":
+                assert hatched_cells == 0
+            else:
+                assert hatched_cells > 0, "the case must put a rejected cell on a plane"
+        finally:
+            plt.close(fig)
+
+    def test_the_isolated_voxel_is_on_the_plane_the_case_claims(
+        self, monkeypatch, tmp_path
+    ):
+        """Guards the fixture, not the module: the isolated rejected voxel
+        (3, 2, 4) really is on one of the drawn planes, so the case above can fail."""
+        shape, crosshair, significant = _VOLUME_MASK_CASES["isolated_voxel"]
+        volume = _distinct_volume(shape, crosshair)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {"t": volume}, sig_grids={"t": significant},
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        shown = [np.asarray(ax.images[0].get_array()) for ax in _image_axes(fig)]
+        plt.close(fig)
+        target = float(volume[3, 2, 4])
+        assert any(np.any(plane == target) for plane in shown)
+
+
+class TestTheCurveCountPanelsHaveIntegerTicks:
+    """RED on c5cca75c3: with counts of 0 to 3 the clusters panel was ticked at
+    0.5 steps and the significant-units panel at 0.25 steps, for quantities that
+    are counted (or, for the units, averaged over taps but read as a count). The
+    first frames of a run are the hard case: ``MaxNLocator(integer=True)`` alone
+    falls back to ticks like -0.04, 0.04 when the view spans less than one unit."""
+
+    #: ``(clusters_a, clusters_b, mean significant units)`` per draw.
+    CASES = {
+        "a_few": [(0, 0, 0.0), (1, 1, 0.5), (2, 1, 1.5), (3, 2, 2.0)],
+        "first_frame_nothing_yet": [(0, 0, 0.0)],
+        "all_zero": [(0, 0, 0.0), (0, 0, 0.0), (0, 0, 0.0)],
+        "less_than_one_unit": [(0, 0, 0.0), (0, 0, 0.25), (0, 0, 0.5)],
+        "one_cluster": [(0, 0, 0.0), (1, 0, 1.0)],
+        "many": [(0, 0, 0.0), (7, 4, 51.5), (14, 9, 190.25)],
+    }
+
+    @classmethod
+    def _rows(cls, case):
+        counts = cls.CASES[case]
+        rows = _curve_rows(
+            [50 * i for i in range(len(counts))], [None] * len(counts),
+            [None] * len(counts),
+        )
+        for row, (a, b, units) in zip(rows, counts):
+            row["total_clusters_a"], row["total_clusters_b"] = a, b
+            row["mean_num_significant_units"] = units
+        return rows
+
+    @staticmethod
+    def _visible_ticks(axis):
+        low, high = sorted(axis.get_ylim())
+        return [float(t) for t in axis.get_yticks() if low - 1e-9 <= t <= high + 1e-9]
+
+    def _axis(self, monkeypatch, tmp_path, case, label):
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(
+                self._rows(case), output_path=str(tmp_path / "c.png")
+            ),
+        )
+        fig.canvas.draw()
+        axis = next(ax for ax in fig.axes if ax.get_ylabel().startswith(label))
+        return fig, axis
+
+    @pytest.mark.parametrize("case", list(CASES))
+    @pytest.mark.parametrize("label", ["clusters", "significant units"])
+    def test_the_count_panels_tick_at_whole_numbers(
+        self, monkeypatch, tmp_path, label, case
+    ):
+        fig, axis = self._axis(monkeypatch, tmp_path, case, label)
+        ticks = self._visible_ticks(axis)
+        plt.close(fig)
+        assert len(ticks) >= 2, ticks
+        assert all(t == round(t) for t in ticks), ticks
+
+    def test_the_data_stays_inside_the_view_of_a_widened_count_panel(
+        self, monkeypatch, tmp_path
+    ):
+        """Widening the view for the integer ticks must not clip the line."""
+        fig, axis = self._axis(monkeypatch, tmp_path, "less_than_one_unit", "significant units")
+        low, high = sorted(axis.get_ylim())
+        values = list(map(float, axis.lines[0].get_ydata()))
+        plt.close(fig)
+        assert low <= min(values) and max(values) <= high
+
+    def test_the_other_panels_keep_their_own_ticks(self, monkeypatch, tmp_path):
+        """Moran's I is not a count: its ticks must stay free to be fractional
+        (guards against the integer locator being applied to every panel)."""
+        fig, axis = self._axis(monkeypatch, tmp_path, "a_few", "Moran")
+        ticks = self._visible_ticks(axis)
+        plt.close(fig)
+        assert any(t != round(t) for t in ticks), ticks
