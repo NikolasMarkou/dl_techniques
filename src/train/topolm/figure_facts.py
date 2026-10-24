@@ -94,9 +94,6 @@ from train.topolm.plotting import _shared_limit, _validation_points, last_row_pe
 #: The repository root, found from this file (``<root>/src/train/topolm/``).
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-#: Where the shipped figures and their facts live.
-FIGURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
-
 #: The config keys copied into ``runs.<name>.config``.
 CONFIG_KEYS: Tuple[str, ...] = (
     "model_variant", "seed", "batch_size", "train_steps", "eval_every_steps",
@@ -884,7 +881,6 @@ def file_entry(
     name: str,
     spec: FigureSpec,
     run_dir: str,
-    rows: Sequence[Mapping[str, Any]],
     merged: Sequence[Mapping[str, Any]],
     report: Mapping[str, Any],
     recomputed: Optional[Mapping[str, Any]] = None,
@@ -896,7 +892,6 @@ def file_entry(
         source).
     :param spec: Where the figure comes from and what its facts hold.
     :param run_dir: The run directory the figure was made in.
-    :param rows: All rows of ``metrics.jsonl``.
     :param merged: One row per step.
     :param report: The run's ``topography_report.json``.
     :param recomputed: The colour-limit recomputation of the run, needed when
@@ -1162,7 +1157,7 @@ def build_facts(
             )
             recomputed[(spec.run, spec.colour)] = recompute(directory)
         out["files"][name] = file_entry(
-            name, spec, directory, data["rows"], data["merged"], data["report"],
+            name, spec, directory, data["merged"], data["report"],
             recomputed.get((spec.run, spec.colour)), device,
         )
     for name in runs:

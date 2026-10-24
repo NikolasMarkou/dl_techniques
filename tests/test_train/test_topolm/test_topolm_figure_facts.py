@@ -387,9 +387,9 @@ class TestAFileEntry:
 
     def test_hash_size_source_and_facts_of_the_figure_the_run_wrote(self, tmp_path):
         run = self._run(tmp_path)
-        rows, merged = [_row(step=100)], [_row(step=100)]
+        merged = [_row(step=100)]
         spec = F.FigureSpec("2d", "topography_live/step_0000100/morans_i_raw.png", 100)
-        entry = F.file_entry("morans_i_by_depth_2d.png", spec, str(run), rows, merged, {})
+        entry = F.file_entry("morans_i_by_depth_2d.png", spec, str(run), merged, {})
         png = run / "topography_live" / "step_0000100" / "morans_i_raw.png"
         assert entry["sha256"] == hashlib.sha256(png.read_bytes()).hexdigest()
         assert entry["bytes"] == png.stat().st_size
@@ -403,7 +403,7 @@ class TestAFileEntry:
         run = self._run(tmp_path)
         report = {"arms": {"raw": {"total_clusters_a": 0, "total_clusters_b": 4}}}
         spec = F.FigureSpec("3d", "topography_live/step_0000100/clusters_raw.png", 100, cluster=True)
-        entry = F.file_entry("clusters_3d.png", spec, str(run), [], [_row(step=100)], report)
+        entry = F.file_entry("clusters_3d.png", spec, str(run), [_row(step=100)], report)
         assert entry["omitted"] is True
         assert "clusters a = 0, b = 4 at step 100" in entry["reason"]
 
@@ -411,13 +411,13 @@ class TestAFileEntry:
         run = self._run(tmp_path)
         spec = F.FigureSpec("2d", "topography_live/step_0000100/t_maps_raw.png", 100)
         with pytest.raises(FileNotFoundError, match="t_maps_raw.png"):
-            F.file_entry("t_maps_2d_trained.png", spec, str(run), [], [_row(step=100)], {})
+            F.file_entry("t_maps_2d_trained.png", spec, str(run), [_row(step=100)], {})
 
     def test_a_step_the_run_did_not_draw_is_an_error_naming_the_drawn_steps(self, tmp_path):
         run = self._run(tmp_path)
         spec = F.FigureSpec("2d", "topography_live/step_0000100/morans_i_raw.png", 400)
         with pytest.raises(FileNotFoundError, match=r"step 400.*\[100\]"):
-            F.file_entry("x.png", spec, str(run), [], [_row(step=100)], {})
+            F.file_entry("x.png", spec, str(run), [_row(step=100)], {})
 
     def test_the_curve_carries_the_series_and_the_peak(self, tmp_path):
         run = tmp_path / "stamp" / "run"
@@ -431,7 +431,7 @@ class TestAFileEntry:
                  total_clusters_a=2, total_clusters_b=1, val_loss=6.5, val_loss_step=100),
         ]
         spec = F.FigureSpec("2d", "topography_live/topography_curve.png", 100, curve=True)
-        facts = F.file_entry("live_curve_2d.png", spec, str(run), merged, merged, {})["facts"]
+        facts = F.file_entry("live_curve_2d.png", spec, str(run), merged, {})["facts"]
         assert facts["mean_morans_i_peak"]["fmt"] == "0.600"
         assert facts["mean_morans_i_peak_step"]["value"] == 50
         assert (facts["first_step"]["value"], facts["last_step"]["value"]) == (0, 100)
@@ -934,7 +934,7 @@ class TestTheModuleStandsOnTheRepoAlone:
         source = self._source()
         for fragment in ("/media/", "/home/", "/tmp/", "plans/plan"):
             assert fragment not in source, fragment
-        assert "—" not in source
+        assert chr(0x2014) not in source
 
     def test_it_logs_through_the_logger_and_never_prints(self):
         calls = [

@@ -17,9 +17,13 @@ The mandated pins, with the numbers this suite measures:
   6. test_islands_morans_i_scores_a_large_region_highly  0.731 measured
 """
 
+import hashlib
+
 import numpy as np
 import pytest
+from scipy import ndimage
 
+from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
 from dl_techniques.metrics.spatial_autocorrelation import (
     CONNECTIVITIES,
     QUEEN_OFFSETS,
@@ -595,20 +599,9 @@ class TestMoransISummary:
 # own labelling, a closed form.
 # =====================================================================
 
-import hashlib
-
-from scipy import ndimage
-
-from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
-
-
 def _digest(array):
     """First 16 hex digits of the SHA-256 of an array's bytes (same environment pin)."""
     return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()[:16]
-
-
-def _hex_or_nan(value):
-    return "nan" if np.isnan(value) else float(value).hex()
 
 
 def _golden_island_map():

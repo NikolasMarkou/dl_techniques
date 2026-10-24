@@ -813,8 +813,7 @@ class TestPoolingIsOverTextTokensOnly:
     The a-versus-b smoke contrast gives 0 under both poolings on every one of
     those random models (an untrained network has no contrast to find), so the
     direction of the real effect is not asserted there: the trained 2D and 3D
-    example checkpoints measured it (plans/.../findings/
-    pooling-fix-measurements.md). The control is seeded below so the numbers
+    example checkpoints measured it. The control is seeded below so the numbers
     reproduce, and its thresholds sit well inside the six measured pairs.
     """
 
@@ -918,11 +917,10 @@ class TestPoolingIsOverTextTokensOnly:
         Scored in the eot-only framing (``stimulus_context=""``): the claim is
         about the POOLING, and the thresholds were calibrated there (0 to 3 of
         1024 over seeds 0 to 5). Under the default context framing (D-027) the
-        same control gives 29, 29, 112, 38, 37, 32 of 1024 (seeds 0 to 5,
-        ``scratch_step5_9/dotted_seeds.log``): the context is shared by every
+        same control gives 29, 29, 112, 38, 37, 32 of 1024 (seeds 0 to 5): the context is shared by every
         sentence, so the within-condition spread of the pooled response falls
         about 12-fold in the attention taps while the shift the four extra tokens
-        cause stays the same size (``dotted_why.log``: shift over spread 0.24 to
+        cause stays the same size (shift over spread 0.24 to
         0.49 eot-only, 0.50 to 0.98 with the context). The framing therefore
         makes the contrast MORE length-sensitive on random weights; the controls
         module measures the same on a trained model.

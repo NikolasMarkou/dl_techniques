@@ -142,8 +142,8 @@ from .config import (
 #: padded size the authors' released code uses too. It is the number the trainer
 #: resolves for its default ``gpt2`` encoding (``train.topolm.common.resolve_vocab_size``),
 #: so a model built without ``vocab_size`` and a trained one agree; a model with
-#: another tokenizer passes its own. It was cl100k's 100277 until step 13.2: about 50k
-#: rows no GPT-2 id ever selects (39M parameters at width 784).
+#: another tokenizer passes its own. The class default used to be cl100k's 100277:
+#: about 50k rows no GPT-2 id ever selects (39M parameters at width 784).
 DEFAULT_VOCAB_SIZE = 50304
 
 validate_all_variants(DEFAULT_RADIUS)

@@ -16,10 +16,14 @@ The mandated pins, with the numbers this suite measures:
   5. test_the_sign_of_a_cluster_follows_the_polarity      +1 / -1 disjoint
 """
 
+import hashlib
+
 import numpy as np
 import pytest
 import scipy.stats
+from scipy import ndimage
 
+from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
 from dl_techniques.metrics.topographic_selectivity import (
     CLUSTER_SIGNS,
     DEFAULT_MIN_CLUSTER_SIZE,
@@ -330,10 +334,6 @@ class TestGrowClusters:
         distinguishes them is that the unit ids, mapped back through the layout,
         reproduce the significant CELLS.
         """
-        from dl_techniques.layers.regularization.spatial_smoothness import (
-            SpatialLayout,
-        )
-
         layout = SpatialLayout(196, seed=0)  # 14 x 14
         t_grid, sig_grid = self._map()
 
@@ -527,13 +527,6 @@ class TestProfileConsistency:
 # 2-D); each compares the code with something that does not import the code:
 # ``scipy.ndimage.label``, ``SpatialLayout.positions``, a hand-built block.
 # =====================================================================
-
-import hashlib
-
-from scipy import ndimage
-
-from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
-
 
 def _digest(array):
     """First 16 hex digits of the SHA-256 of an array's bytes (same environment pin)."""

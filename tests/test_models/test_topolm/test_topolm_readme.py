@@ -115,7 +115,6 @@ def parameter_table() -> Dict[str, List[int]]:
 
 def built_counts(name: str) -> List[int]:
     """Trainable, non-trainable and ``count_params`` of ``create_topolm(name)``, built."""
-    import numpy as np
     from dl_techniques.models.language.topolm import create_topolm
 
     model = create_topolm(name)

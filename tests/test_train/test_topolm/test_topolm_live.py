@@ -1,7 +1,7 @@
 """The live topography callback: outputs, isolation, tripwire and non-perturbation.
 
-Written RED-first (plan-2026-10-23T190557-972a9ac5, step 1), against the API the
-plan fixes and nothing more: ``TopoLMTrainingConfig.viz_every_steps``,
+Written against the callback's public API and nothing more:
+``TopoLMTrainingConfig.viz_every_steps``,
 ``build_callbacks(config, model, results_dir, initial_step, backbone=...,
 preprocessor=...)`` appending the callback LAST, the Keras hooks
 (``on_train_begin``, ``on_train_batch_end``, ``on_train_end``), and the output
@@ -9,7 +9,7 @@ tree ``<run_dir>/topography_live/{step_NNNNNNN/, latest_*.png, metrics.jsonl,
 topography_curve.png}``. The callback is reached through ``build_callbacks`` so
 that no test depends on its constructor.
 
-Two instruments are GREEN today and must stay so, because the proof of
+Two instruments must stay green, because the proof of
 non-perturbation rests on them (a guard that cannot fail is not a guard):
 
 - ``TestAnEvalModePassTouchesNothing``: the eval-mode evaluation the callback
@@ -20,7 +20,7 @@ non-perturbation rests on them (a guard that cannot fail is not a guard):
   ``training=True`` forward makes the comparison fail, i.e. the instrument can
   see the defect it exists to rule out.
 
-Everything that needs the callback is RED until step 6.
+Every other test needs the callback.
 """
 
 import json
@@ -160,7 +160,7 @@ def _step_dirs(tmp_path):
 
 
 # ---------------------------------------------------------------------
-# GREEN today: the instruments
+# the instruments, which need no callback
 # ---------------------------------------------------------------------
 
 
@@ -203,7 +203,7 @@ class TestAnEvalModePassTouchesNothing:
 
 
 # ---------------------------------------------------------------------
-# the A/B instrument (GREEN today) and the callback's side of it (RED)
+# the A/B instrument and the callback's side of it
 # ---------------------------------------------------------------------
 
 #: ``(trainable, non_trainable, seed_generators, history)`` of the runs already
@@ -321,7 +321,7 @@ class TestTheABInstrument:
         )
 
     def test_the_live_pass_leaves_the_run_bit_identical(self, monkeypatch, tmp_path):
-        """THE A/B, RED until step 6: same config, same seed, ``viz_every_steps=2``.
+        """THE A/B: same config, same seed, ``viz_every_steps=2``.
         Trainable and non-trainable weights, SeedGenerator states and every
         per-epoch loss equal the plain run's, bit for bit."""
         plain = _train_and_snapshot(monkeypatch, tmp_path, "plain_a")
@@ -333,7 +333,7 @@ class TestTheABInstrument:
 
 
 # ---------------------------------------------------------------------
-# RED until step 6: wiring, outputs, cadence
+# wiring, outputs, cadence
 # ---------------------------------------------------------------------
 
 
@@ -439,7 +439,7 @@ class TestOutputs:
 
 
 # ---------------------------------------------------------------------
-# RED until step 6: a visualization failure never kills a run
+# a visualization failure never kills a run
 # ---------------------------------------------------------------------
 
 
@@ -487,7 +487,7 @@ class TestFailureIsolation:
 
 
 # ---------------------------------------------------------------------
-# RED until step 6: the tripwire
+# the tripwire
 # ---------------------------------------------------------------------
 
 

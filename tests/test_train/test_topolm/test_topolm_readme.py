@@ -75,7 +75,7 @@ _FIRST_37_LINES_SHA256 = "b90557ba90fa450f8dceb898fe899196e8b2baac32b32316258d68
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _FACTS_PATH = _TRAINER_README.parent / "figures" / "figure_facts.json"
-_EM_DASH = "—"
+_EM_DASH = chr(0x2014)
 
 
 def _readme_text() -> str:

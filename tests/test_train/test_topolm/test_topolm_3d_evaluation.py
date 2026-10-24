@@ -1,18 +1,16 @@
 """The TopoLM trainer on a 3-D grid: evaluation, figures and one real run.
 
-Written RED-first (plan-2026-10-23T190557-972a9ac5, step 1), before any 3-D code
-existed. The baseline refuses a 3-D variant by name and every metric and plot it
-would reach takes a ``(height, width)`` map, so each test below fails today for
-one of those reasons and is expected to turn green in the step that supplies the
-piece it exercises:
+A 3-D variant is a first-class citizen of the trainer, and every metric and plot
+it reaches takes a position-indexed map, not only a ``(height, width)`` one. Each
+test class below guards one piece of that chain:
 
 ====================================  ==========================================
-test class                            turns green with
+test class                            guards
 ====================================  ==========================================
-``TestThreeDimensionalPlacement``     the N-d metrics and ``to_grid`` (steps 2, 3)
-``TestThreeDimensionalReadout``       the readout refusal and skip (step 5)
-``TestThreeDimensionalFigures``       the 3-D drawers (step 4) and step 5
-``TestTheTrainerTrainsA3DVariant``    the whole chain, ``tiny3d`` on CPU (step 5)
+``TestThreeDimensionalPlacement``     the N-d metrics and ``to_grid``
+``TestThreeDimensionalReadout``       the readout refusal and skip
+``TestThreeDimensionalFigures``       the 3-D drawers
+``TestTheTrainerTrainsA3DVariant``    the whole chain, ``tiny3d`` on CPU
 ====================================  ==========================================
 
 The oracles share nothing with the code under test: the expected maps are built
@@ -334,11 +332,11 @@ class TestThreeDimensionalFigures:
 class TestTheTrainerTrainsA3DVariant:
     """Through the REAL ``train_topolm``: model, fit, report and figures.
 
-    Step 5 turns this green; today ``_require_two_dimensional_variant`` refuses
-    ``tiny3d`` by name before anything is built. ``spatial_radius=None`` asks for
-    the variant row's own radius (2, the only one a 7x7x7 grid can hold with a
-    cubic L-infinity patch), and the dataclass-default ``readout_fwhm=2.0`` is
-    left alone so the skip path is exercised too.
+    ``tiny3d`` must be built and trained, not refused by name.
+    ``spatial_radius=None`` asks for the variant row's own radius (2, the only
+    one a 7x7x7 grid can hold with a cubic L-infinity patch), and the
+    dataclass-default ``readout_fwhm=2.0`` is left alone so the skip path is
+    exercised too.
     """
 
     def test_a_tiny3d_run_trains_evaluates_and_draws(self, monkeypatch):
