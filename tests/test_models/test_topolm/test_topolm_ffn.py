@@ -12,6 +12,12 @@ Nothing in this file reads a structure back from the code under test:
 * the guards are proven able to fail: ``_ChainedMLPs`` rebuilds the old four-layer
   structure and both oracles must reject it.
 
+Step 11.1 (D-031) changed the defaults to the released architecture's: no
+feed-forward bias (``use_bias=False``) and no LayerNorm beta (``norm_center=False``).
+The oracles below read the bias and the beta only when the block has them, and the
+tests that are about the biased structure ask for it with ``use_bias=True`` /
+``norm_center=True``; the defaults themselves are pinned in ``test_topolm_knobs.py``.
+
 Run on CPU (``CUDA_VISIBLE_DEVICES=``): the tolerances are derived for float32 without
 TF32.
 """
@@ -62,9 +68,9 @@ def swiglu_params(hidden: int, **rule: int) -> int:
     return 3 * hidden * swiglu_width(hidden, **rule)
 
 
-def geglu_params(hidden: int, inner: int) -> int:
-    """``input_proj`` H -> 2I (gate and value), ``output_proj`` I -> H, both biased."""
-    return hidden * 2 * inner + 2 * inner + inner * hidden + hidden
+def geglu_params(hidden: int, inner: int, bias: bool = True) -> int:
+    """``input_proj`` H -> 2I (gate and value), ``output_proj`` I -> H, biased or not."""
+    return hidden * 2 * inner + inner * hidden + ((2 * inner + hidden) if bias else 0)
 
 
 def attention_params(hidden: int) -> int:
@@ -72,9 +78,11 @@ def attention_params(hidden: int) -> int:
     return 3 * hidden * hidden + hidden * hidden
 
 
-def norm_params(hidden: int, kind: str = "layer_norm") -> int:
-    """gamma and beta for layer norm, one scale for RMS norm."""
-    return 2 * hidden if kind == "layer_norm" else hidden
+def norm_params(hidden: int, kind: str = "layer_norm", center: bool = True) -> int:
+    """gamma (and beta when ``center``) for layer norm, one scale for RMS norm."""
+    if kind != "layer_norm":
+        return hidden
+    return 2 * hidden if center else hidden
 
 
 def trainable_count(layer: keras.layers.Layer) -> int:
@@ -104,13 +112,13 @@ def make_block(hidden: int = H, inner: int = I, heads: int = HEADS,
     return block
 
 
-def make_variant_block(name: str) -> TopoLMBlock:
+def make_variant_block(name: str, **kwargs: Any) -> TopoLMBlock:
     row = MODEL_VARIANTS[name]
     block = TopoLMBlock(
         hidden_size=row["embed_dim"], num_heads=row["num_heads"],
         intermediate_size=row["ffn_intermediate_size"],
         radius=row.get("radius", 5), grid_dim=row.get("grid_dim", 2),
-        name="block",
+        name="block", **kwargs,
     )
     block.build((None, 4, row["embed_dim"]))
     return block
@@ -197,8 +205,15 @@ def weights_by_suffix(layer: keras.layers.Layer) -> Dict[str, np.ndarray]:
     return found
 
 
+def norm_gamma_beta(norm: keras.layers.Layer):
+    """``(gamma, beta)`` of a layer norm; beta is 0 when the norm has none."""
+    found = {w.path.split("/")[-1]: keras.ops.convert_to_numpy(w)
+             for w in norm.weights}
+    return found["gamma"], found.get("beta", 0.0)
+
+
 def assert_ffn_param_count(block: TopoLMBlock, hidden: int, inner: int,
-                           bias: bool = True) -> None:
+                           bias: bool = False) -> None:
     """The oracle behind the count: one MLP is ``2HI + H + I`` parameters."""
     expected = mlp_params(hidden, inner, bias)
     got = ffn_count(block)
@@ -218,12 +233,11 @@ def assert_ffn_forward(block: TopoLMBlock, activation: str = "gelu",
     out, attn_out, mlp_out = run_with_spies(block, x)
 
     w = weights_by_suffix(block.ffn)
-    norm = {k: keras.ops.convert_to_numpy(v)
-            for k, v in zip(("gamma", "beta"), block.ffn_norm.weights)}
+    gamma, beta = norm_gamma_beta(block.ffn_norm)
     hidden = x.astype("float64") + attn_out.astype("float64")
-    normed = np_layer_norm(hidden, norm["gamma"], norm["beta"], eps)
-    inner = ACTIVATIONS[activation](normed @ w["fc1/kernel"] + w["fc1/bias"])
-    expected = inner @ w["fc2/kernel"] + w["fc2/bias"]
+    normed = np_layer_norm(hidden, gamma, beta, eps)
+    inner = ACTIVATIONS[activation](normed @ w["fc1/kernel"] + w.get("fc1/bias", 0.0))
+    expected = inner @ w["fc2/kernel"] + w.get("fc2/bias", 0.0)
 
     atol = reassociation_atol(
         [block.hidden_size, block.hidden_size, block.intermediate_size], 1,
@@ -266,39 +280,50 @@ def make_chained_block() -> TopoLMBlock:
 
 
 class TestTheFeedForwardIsOneMLP:
+    @pytest.mark.parametrize("bias", [False, True], ids=["bare", "biased"])
     @pytest.mark.parametrize("variant", VARIANT_NAMES)
-    def test_the_feed_forward_holds_the_closed_form_count(self, variant):
+    def test_the_feed_forward_holds_the_closed_form_count(self, variant, bias):
         row = MODEL_VARIANTS[variant]
-        block = make_variant_block(variant)
-        assert_ffn_param_count(block, row["embed_dim"], row["ffn_intermediate_size"])
+        block = make_variant_block(variant, use_bias=bias)
+        assert_ffn_param_count(block, row["embed_dim"], row["ffn_intermediate_size"],
+                               bias=bias)
 
+    @pytest.mark.parametrize("center", [False, True], ids=["bare", "centred"])
     @pytest.mark.parametrize("variant", VARIANT_NAMES)
-    def test_everything_but_the_feed_forward_is_unchanged(self, variant):
+    def test_everything_but_the_feed_forward_is_unchanged(self, variant, center):
         h = MODEL_VARIANTS[variant]["embed_dim"]
-        block = make_variant_block(variant)
+        block = make_variant_block(variant, norm_center=center)
         rest = trainable_count(block) - ffn_count(block)
-        assert rest == attention_params(h) + 2 * norm_params(h)
+        assert rest == attention_params(h) + 2 * norm_params(h, center=center)
 
     def test_the_tiny_block_is_the_gpt2_block(self):
-        """525,568 parameters at 256 / 1024; the four-Dense structure held 1,640,960."""
-        block = make_variant_block("tiny")
+        """525,568 parameters at 256 / 1024 with biases (GPT-2's); 524,288 without.
+
+        The four-Dense structure held 1,640,960.
+        """
+        block = make_variant_block("tiny", use_bias=True)
         assert ffn_count(block) == 525_568 == 2 * 256 * 1024 + 256 + 1024
+        assert ffn_count(make_variant_block("tiny")) == 524_288 == 2 * 256 * 1024
 
     def test_the_feed_forward_is_one_layer_with_two_projections(self):
-        block = make_block()
+        block = make_block(use_bias=True)
         assert isinstance(block.ffn, MLPBlock)
         assert sorted(weights_by_suffix(block.ffn)) == [
             "fc1/bias", "fc1/kernel", "fc2/bias", "fc2/kernel"]
+        assert sorted(weights_by_suffix(make_block().ffn)) == [
+            "fc1/kernel", "fc2/kernel"]
         assert not hasattr(block, "ffn_dense_1")
         assert not hasattr(block, "ffn_dense_2")
         assert tuple(block.ffn.fc1.kernel.shape) == (H, I)
         assert tuple(block.ffn.fc2.kernel.shape) == (I, H)
 
     def test_the_weight_paths_are_those_of_the_shared_block(self):
-        block = make_block()
+        block = make_block(use_bias=True)
         assert [w.path for w in block.ffn.weights] == [
             "block/ffn/fc1/kernel", "block/ffn/fc1/bias",
             "block/ffn/fc2/kernel", "block/ffn/fc2/bias"]
+        assert [w.path for w in make_block().ffn.weights] == [
+            "block/ffn/fc1/kernel", "block/ffn/fc2/kernel"]
 
 
 # ---------------------------------------------------------------------
@@ -307,9 +332,11 @@ class TestTheFeedForwardIsOneMLP:
 
 
 class TestTheForwardIsDenseActivationDense:
+    @pytest.mark.parametrize("full", [False, True], ids=["bare", "bias_and_beta"])
     @pytest.mark.parametrize("activation", ["gelu", "relu"])
-    def test_the_branch_equals_the_numpy_oracle(self, activation):
-        assert_ffn_forward(make_block(activation=activation), activation)
+    def test_the_branch_equals_the_numpy_oracle(self, activation, full):
+        block = make_block(activation=activation, use_bias=full, norm_center=full)
+        assert_ffn_forward(block, activation)
 
     def test_the_default_model_activation_is_the_exact_gelu(self):
         # step 11 (D-031): the model default was the tanh form while the block's
@@ -319,14 +346,13 @@ class TestTheForwardIsDenseActivationDense:
         assert_ffn_forward(block, "gelu", eps=model.layer_norm_eps)
 
     def test_the_post_norm_branch_runs_the_same_two_projections(self):
-        block = make_block(normalization_position="post")
+        block = make_block(normalization_position="post", use_bias=True,
+                           norm_center=True)
         randomize(block)
         x = np.random.default_rng(3).standard_normal((BATCH, SEQ, H)).astype("float32")
         out, attn_out, mlp_out = run_with_spies(block, x)
-        gamma = {k: keras.ops.convert_to_numpy(v) for k, v in zip(
-            ("g", "b"), block.attention_norm.weights)}
-        ffn_gamma = {k: keras.ops.convert_to_numpy(v) for k, v in zip(
-            ("g", "b"), block.ffn_norm.weights)}
+        gamma = dict(zip(("g", "b"), norm_gamma_beta(block.attention_norm)))
+        ffn_gamma = dict(zip(("g", "b"), norm_gamma_beta(block.ffn_norm)))
         hidden = np_layer_norm(x.astype("float64") + attn_out, gamma["g"], gamma["b"], 1e-5)
         w = weights_by_suffix(block.ffn)
         expected = ACTIVATIONS["gelu"](hidden @ w["fc1/kernel"] + w["fc1/bias"]) \
@@ -345,9 +371,10 @@ class TestTheForwardIsDenseActivationDense:
 class TestTheOraclesRejectTheOldStructure:
     def test_the_chained_block_fails_the_count_oracle(self):
         block = make_chained_block()
-        assert ffn_count(block) != mlp_params(H, I)
-        with pytest.raises(AssertionError):
-            assert_ffn_param_count(block, H, I)
+        assert ffn_count(block) not in (mlp_params(H, I, True), mlp_params(H, I, False))
+        for bias in (False, True):
+            with pytest.raises(AssertionError):
+                assert_ffn_param_count(block, H, I, bias=bias)
 
     def test_the_chained_block_fails_the_forward_oracle(self):
         with pytest.raises(AssertionError):
@@ -378,9 +405,10 @@ class TestEachOptionChangesTheBlockAsDocumented:
         assert swiglu_width(H, multiple=32) == 192
         assert ffn_count(block) == swiglu_params(H, multiple=32) == 3 * H * 192
 
-    def test_geglu_builds_runs_and_counts_by_its_own_rule(self):
-        block = make_block(ffn_type="geglu")
-        assert ffn_count(block) == geglu_params(H, I)
+    @pytest.mark.parametrize("bias", [False, True], ids=["bare", "biased"])
+    def test_geglu_builds_runs_and_counts_by_its_own_rule(self, bias):
+        block = make_block(ffn_type="geglu", use_bias=bias)
+        assert ffn_count(block) == geglu_params(H, I, bias)
         out = block(np.zeros((BATCH, SEQ, H), "float32"), training=False)
         assert tuple(out.shape) == (BATCH, SEQ, H)
 
@@ -401,14 +429,15 @@ class TestEachOptionChangesTheBlockAsDocumented:
         assert np.abs(outs["gelu"] - outs["relu"]).max() > 1e-3
 
     def test_use_bias_false_removes_exactly_the_feed_forward_biases(self):
-        biased, bare = make_block(), make_block(use_bias=False)
+        biased, bare = make_block(use_bias=True), make_block(use_bias=False)
         assert_ffn_param_count(bare, H, I, bias=False)
         assert ffn_count(biased) - ffn_count(bare) == H + I
         assert trainable_count(biased) - trainable_count(bare) == H + I
         assert sorted(weights_by_suffix(bare.ffn)) == ["fc1/kernel", "fc2/kernel"]
 
     def test_rms_norm_has_no_beta_and_both_norms_follow(self):
-        layer_norm, rms = make_block(), make_block(normalization_type="rms_norm")
+        layer_norm = make_block(norm_center=True)
+        rms = make_block(normalization_type="rms_norm", norm_center=True)
         assert isinstance(rms.attention_norm, RMSNorm)
         assert isinstance(rms.ffn_norm, RMSNorm)
         assert trainable_count(layer_norm) - trainable_count(rms) == 2 * H
@@ -417,7 +446,7 @@ class TestEachOptionChangesTheBlockAsDocumented:
         assert not [w.path for w in rms.weights if w.path.endswith("/beta")]
 
     def test_the_models_final_norm_follows_the_option(self):
-        plain = make_model()
+        plain = make_model(norm_center=True)
         rms = make_model(normalization_type="rms_norm")
         assert isinstance(rms.final_norm, RMSNorm)
         assert not isinstance(plain.final_norm, RMSNorm)
@@ -426,7 +455,7 @@ class TestEachOptionChangesTheBlockAsDocumented:
             "topolm/final_norm/gamma", "topolm/final_norm/beta"]
 
     def test_norm_args_reach_their_own_norm_only(self):
-        block = make_block(attention_norm_args={"center": False},
+        block = make_block(norm_center=True, attention_norm_args={"center": False},
                            ffn_norm_args={"epsilon": 1e-3})
         assert [w.path.split("/")[-1] for w in block.attention_norm.weights] == ["gamma"]
         assert [w.path.split("/")[-1] for w in block.ffn_norm.weights] == ["gamma", "beta"]
@@ -443,7 +472,7 @@ class TestEachOptionChangesTheBlockAsDocumented:
         multiple of its ``stddev``, so the ratio of the two kernels' sample stds
         is 1/sqrt(2) whatever that multiple is (8192 draws each: about 1.5% noise).
         """
-        block = make_block(hidden=64, inner=128)
+        block = make_block(hidden=64, inner=128, use_bias=True)
         fc1 = keras.ops.convert_to_numpy(block.ffn.fc1.kernel)
         fc2 = keras.ops.convert_to_numpy(block.ffn.fc2.kernel)
         ratio = float(fc2.std() / fc1.std())
@@ -509,18 +538,22 @@ class TestEachOptionChangesTheBlockAsDocumented:
 
     def test_the_model_counts_match_a_closed_form_under_every_option(self):
         cases = [
-            ({}, mlp_params(H, I), "layer_norm"),
-            ({"ffn_type": "swiglu"}, swiglu_params(H), "layer_norm"),
-            ({"ffn_type": "geglu"}, geglu_params(H, I), "layer_norm"),
-            ({"use_bias": False}, mlp_params(H, I, False), "layer_norm"),
-            ({"normalization_type": "rms_norm"}, mlp_params(H, I), "rms_norm"),
+            ({}, mlp_params(H, I, False), "layer_norm", False),
+            ({"use_bias": True}, mlp_params(H, I, True), "layer_norm", False),
+            ({"norm_center": True}, mlp_params(H, I, False), "layer_norm", True),
+            ({"ffn_type": "swiglu"}, swiglu_params(H), "layer_norm", False),
+            ({"ffn_type": "geglu"}, geglu_params(H, I, False), "layer_norm", False),
+            ({"ffn_type": "geglu", "use_bias": True}, geglu_params(H, I, True),
+             "layer_norm", False),
+            ({"normalization_type": "rms_norm"}, mlp_params(H, I, False),
+             "rms_norm", False),
         ]
-        for kwargs, ffn, norm in cases:
+        for kwargs, ffn, norm, center in cases:
             model = make_model(**kwargs)
             expected = (
                 50 * H + 16 * H
-                + 1 * (attention_params(H) + 2 * norm_params(H, norm) + ffn)
-                + norm_params(H, norm)
+                + 1 * (attention_params(H) + 2 * norm_params(H, norm, center) + ffn)
+                + norm_params(H, norm, center)
             )
             assert trainable_count(model) == expected, kwargs
 
@@ -548,7 +581,7 @@ class TestSerialization:
     def test_the_defaults_are_the_documented_ones(self):
         config = make_block(build=False).get_config()
         assert (config["ffn_type"], config["ffn_args"], config["use_bias"]) == (
-            "mlp", {}, True)
+            "mlp", {}, False)
         assert (config["normalization_type"], config["attention_norm_args"],
                 config["ffn_norm_args"]) == ("layer_norm", {}, {})
 

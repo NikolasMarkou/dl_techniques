@@ -360,7 +360,18 @@ class TestOptimizerRecipe:
             "observe what is decayed and would otherwise pass vacuously"
         )
 
+        # The default model has no bias and no beta (step 11.1, D-031: the released
+        # architecture), so the both-ways check on those two kinds needs a model
+        # that has them: the same backbone with the two knobs on.
+        from dl_techniques.models.language.topolm import TopoLM
+
+        knobbed = TopoLM.from_variant(
+            "tiny", vocab_size=VOCAB, depth=1, max_seq_len=LENGTH, radius=2,
+            use_bias=True, norm_center=True,
+        )
+        knobbed.build((None, LENGTH))
         paths = [variable.path for variable in head.trainable_variables]
+        paths += [variable.path for variable in knobbed.trainable_variables]
         excluded = [path for path in paths if pattern.search(path)]
         decayed = [path for path in paths if not pattern.search(path)]
 

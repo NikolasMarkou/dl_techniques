@@ -1694,19 +1694,19 @@ class TestTopoLMIncludeTop:
         """The backbone's paths are identical across tops (D-005 of the plan).
 
         The count is derived, not read off the model: 2 embedding tables; per
-        block 2 attention kernels (qkv, proj), 2 norms x (gamma, beta), the
-        feed-forward's 4 (fc1 and fc2, each kernel and bias; ONE MLP since
-        D-030, it was 8 as two chained MLPs) and 2 taps x 5 buffers (perm,
-        patch_table, triu_flat, d_unit, last_spatial_loss); then the final
-        norm's 2: 24 for this one-block config. An untied headless model adds
-        ``lm_head/kernel`` (25); a TEXT_CLASSIFICATION head adds 8 under
-        ``task_head/`` (32).
+        block 2 attention kernels (qkv, proj), 2 norms x gamma (no beta since
+        D-031: ``norm_center=False``), the feed-forward's 2 kernels (fc1 and
+        fc2; ONE MLP since D-030, and no biases since D-031: ``use_bias=False``)
+        and 2 taps x 5 buffers (perm, patch_table, triu_flat, d_unit,
+        last_spatial_loss); then the final norm's gamma: 19 for this one-block
+        config. An untied headless model adds ``lm_head/kernel`` (20); a
+        TEXT_CLASSIFICATION head adds 8 under ``task_head/`` (27).
         """
         embeddings = 2
-        per_block = 2 + 2 * 2 + 4 + 2 * 5
-        final_norm = 2
+        per_block = 2 + 2 * 1 + 2 + 2 * 5
+        final_norm = 1
         expected = embeddings + _HEAD_KW["depth"] * per_block + final_norm
-        assert expected == 24
+        assert expected == 19
         def paths(**kw):
             m = TopoLM(**_HEAD_KW, tie_word_embeddings=tie, name="topolm", **kw)
             m(_head_batch(), training=False)

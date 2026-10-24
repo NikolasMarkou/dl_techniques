@@ -47,6 +47,17 @@ difference in the loss curve is attributable to the added term alone. The branch
 dropout (GPT-2's ``resid_pdrop``) sits between the feed-forward and its tap and is
 the only dropout in the feed-forward path.
 
+``tap_placement='residual'`` moves each tap one step right in the diagram: it
+receives ``x + attn`` and ``x' + mlp`` instead of ``attn`` and ``mlp`` (the
+released training yaml's ``with_resid: True``; the paper text and the authors'
+evaluation scripts tap the branch). The forward values are identical either way;
+the penalised tensor, and the activations a ``taps=`` capture reads, are the
+tapped one. In a ``'post'``-norm block the sum is taken before the norm.
+
+The defaults follow the released code: no feed-forward bias, no LayerNorm beta
+(``use_bias=False``, ``norm_center=False``), exact GELU, residual projections
+scaled by ``1/sqrt(2 * num_layers)``.
+
 The block carries ``grid_dim`` (2, the paper's layout, or 3) and forwards it to
 every tap it makes; a tap resolves its grid lazily at its own build, so a dropped
 argument would leave a silently 2D tap in a 3D model.
@@ -93,6 +104,12 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Which branch outputs a block can tap. The paper taps both.
 TAP_SITES = ("attention", "mlp")
+
+#: Which tensor a tap receives: ``'branch'`` is the branch output itself, before
+#: the residual add (the paper text: the loss is applied "prior to normalization
+#: and addition into the residual stream"); ``'residual'`` is the post-add tensor
+#: (the released training yaml's ``with_resid: True``).
+TAP_PLACEMENTS = ("branch", "residual")
 
 
 def accepted_ffn_types() -> List[str]:
@@ -217,16 +234,29 @@ class TopoLMBlock(keras.layers.Layer):
         never filtered, so a misspelled key raises. ``dropout_rate`` is refused:
         the block's own ``dropout_rate`` is the only dropout.
     :type ffn_args: Optional[Dict[str, Any]]
-    :param use_bias: Whether the feed-forward projections carry a bias. The
-        attention projections never do. ``swiglu`` is bias-free by its own
-        default and the shared helper does not forward this flag to it
-        (``ffn_args={'use_bias': True}`` does).
+    :param use_bias: Whether the feed-forward projections carry a bias. Default
+        ``False``, the released code's ``bias=False``; the attention projections
+        never have one. ``swiglu`` is bias-free by its own default and the shared
+        helper does not forward this flag to it (``ffn_args={'use_bias': True}``
+        does).
     :type use_bias: bool
     :param normalization_type: Type of BOTH norms of the block (and, in
         :class:`~dl_techniques.models.topolm.model.TopoLM`, of the final norm), a
         key of the shared normalization factory: ``'layer_norm'`` (default),
         ``'rms_norm'`` (no ``beta``) and the rest.
     :type normalization_type: str
+    :param norm_center: Whether a ``'layer_norm'`` carries a ``beta`` (LayerNorm
+        ``center``), for BOTH norms of the block and, in
+        :class:`~dl_techniques.models.topolm.model.TopoLM`, the final norm.
+        Default ``False``, the released code's ``LayerNorm(bias=False)``. Read by
+        ``'layer_norm'`` only: ``'rms_norm'`` has no ``beta`` and the other types
+        manage their own (a norm's own ``*_norm_args`` still wins, per norm).
+    :type norm_center: bool
+    :param tap_placement: ``'branch'`` (default, the paper text) taps the branch
+        output before the residual add; ``'residual'`` taps the post-add tensor
+        (the released training yaml's ``with_resid: True``). One of
+        :data:`TAP_PLACEMENTS`.
+    :type tap_placement: str
     :param attention_norm_args: Extra arguments for the attention-side norm,
         e.g. ``{'epsilon': 1e-6}``, which overrides ``layer_norm_eps`` for that
         norm alone.
@@ -245,8 +275,9 @@ class TopoLMBlock(keras.layers.Layer):
         ``normalization_position`` is not ``'pre'`` or ``'post'``, or if
         ``grid_dim`` is not 2 or 3, or if ``ffn_type`` or ``normalization_type`` is
         not accepted, an args argument is not a dict, ``ffn_args`` sets
-        ``dropout_rate``, ``num_layers`` is not a positive integer, or a factory
-        refuses its arguments -- naming the offending value in each case.
+        ``dropout_rate``, ``num_layers`` is not a positive integer, ``norm_center``
+        is not a bool, ``tap_placement`` is not in :data:`TAP_PLACEMENTS`, or a
+        factory refuses its arguments -- naming the offending value in each case.
     """
 
     def __init__(
@@ -271,8 +302,10 @@ class TopoLMBlock(keras.layers.Layer):
         seed: Optional[int] = None,
         ffn_type: str = "mlp",
         ffn_args: Optional[Dict[str, Any]] = None,
-        use_bias: bool = True,
+        use_bias: bool = False,
         normalization_type: str = "layer_norm",
+        norm_center: bool = False,
+        tap_placement: str = "branch",
         attention_norm_args: Optional[Dict[str, Any]] = None,
         ffn_norm_args: Optional[Dict[str, Any]] = None,
         num_layers: int = 1,
@@ -324,6 +357,13 @@ class TopoLMBlock(keras.layers.Layer):
             raise ValueError(
                 f"num_layers must be a positive integer, got {num_layers!r}"
             )
+        if not isinstance(norm_center, bool):
+            raise ValueError(f"norm_center must be a bool, got {norm_center!r}")
+        if tap_placement not in TAP_PLACEMENTS:
+            raise ValueError(
+                f"tap_placement must be one of {list(TAP_PLACEMENTS)}, got "
+                f"{tap_placement!r}"
+            )
         tap_sites = tuple(tap_sites)
         unknown = sorted(set(tap_sites) - set(TAP_SITES))
         if unknown:
@@ -356,6 +396,8 @@ class TopoLMBlock(keras.layers.Layer):
         self.ffn_args = ffn_args
         self.use_bias = bool(use_bias)
         self.normalization_type = normalization_type
+        self.norm_center = norm_center
+        self.tap_placement = tap_placement
         self.attention_norm_args = attention_norm_args
         self.ffn_norm_args = ffn_norm_args
         self.num_layers = int(num_layers)
@@ -416,8 +458,14 @@ class TopoLMBlock(keras.layers.Layer):
             name="ffn",
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
-            # One resolver for the whole feed-forward: the string 'gelu_tanh' is a
-            # name the MLP's own resolver does not know.
+            # DECISION plan-2026-10-23T190557-972a9ac5/D-031: ONE activation for
+            # the whole feed-forward, resolved once here (the string 'gelu_tanh'
+            # is a name the MLP's own resolver does not know). Do NOT mix
+            # activations per layer or per projection (the model once ran the tanh
+            # GELU in one MLP and the exact one in the other), and do NOT default
+            # to the tanh form: the released code's nn.GELU() is the exact erf
+            # GELU. Guarded by test_topolm_fidelity.py::
+            # TestTheDefaultActivationIsTheExactGelu. See decisions.md.
             activation=resolve_activation(self.activation),
             dropout_rate=0.0,
             kernel_initializer=clone_initializer(kernel_initializer),
@@ -457,12 +505,17 @@ class TopoLMBlock(keras.layers.Layer):
 
         ``layer_norm_eps`` is the default epsilon of both; a norm's own args may
         override it (``{'epsilon': ...}``) without a duplicate-keyword error.
+        ``norm_center`` is the default ``center`` of a ``'layer_norm'`` (the only
+        type with that argument here), overridable the same way.
         """
+        defaults: Dict[str, Any] = {"epsilon": self.layer_norm_eps}
+        if self.normalization_type == "layer_norm":
+            defaults["center"] = self.norm_center
         try:
             return create_normalization_layer(
                 self.normalization_type,
                 name=name,
-                **{"epsilon": self.layer_norm_eps, **args},
+                **{**defaults, **args},
             )
         except (TypeError, ValueError) as error:
             raise ValueError(
@@ -588,48 +641,86 @@ class TopoLMBlock(keras.layers.Layer):
                     f"{expected} tapped site(s) {list(self.tap_sites)}"
                 )
 
-        residual = inputs
-
         if self.normalization_position == "pre":
             normed = self.attention_norm(inputs, training=training)
             attn_out = self.attention(
                 normed, attention_mask=attention_mask, training=training
             )
-            if "attention" in self.tap_sites:
-                attn_out = self.attention_tap(attn_out, training=training)
-                if taps is not None and "attention" in self.tap_sites:
-                    position = self.tap_sites.index("attention")
-                    attn_out = taps[position](attn_out, training=training)
-            hidden = attn_out + residual
+            hidden = self._add_tapped(
+                "attention", attn_out, inputs, taps, training
+            )
 
             normed = self.ffn_norm(hidden, training=training)
             mlp_out = self.ffn(normed, training=training)
             mlp_out = self.ffn_dropout(mlp_out, training=training)
-            if "mlp" in self.tap_sites:
-                mlp_out = self.mlp_tap(mlp_out, training=training)
-                if taps is not None and "mlp" in self.tap_sites:
-                    position = self.tap_sites.index("mlp")
-                    mlp_out = taps[position](mlp_out, training=training)
-            return mlp_out + hidden
+            return self._add_tapped("mlp", mlp_out, hidden, taps, training)
 
         attn_out = self.attention(
             inputs, attention_mask=attention_mask, training=training
         )
-        if "attention" in self.tap_sites:
-            attn_out = self.attention_tap(attn_out, training=training)
-            if taps is not None and "attention" in self.tap_sites:
-                position = self.tap_sites.index("attention")
-                attn_out = taps[position](attn_out, training=training)
-        hidden = self.attention_norm(attn_out + residual, training=training)
+        hidden = self.attention_norm(
+            self._add_tapped("attention", attn_out, inputs, taps, training),
+            training=training,
+        )
 
         mlp_out = self.ffn(hidden, training=training)
         mlp_out = self.ffn_dropout(mlp_out, training=training)
-        if "mlp" in self.tap_sites:
-            mlp_out = self.mlp_tap(mlp_out, training=training)
-            if taps is not None and "mlp" in self.tap_sites:
-                position = self.tap_sites.index("mlp")
-                mlp_out = taps[position](mlp_out, training=training)
-        return self.ffn_norm(mlp_out + hidden, training=training)
+        return self.ffn_norm(
+            self._add_tapped("mlp", mlp_out, hidden, taps, training),
+            training=training,
+        )
+
+    def _add_tapped(
+        self,
+        site: str,
+        branch: keras.KerasTensor,
+        stream: keras.KerasTensor,
+        taps: Optional[Tuple[Any, ...]],
+        training: Optional[bool],
+    ) -> keras.KerasTensor:
+        """Add ``branch`` to ``stream``, tapping one of the two per ``tap_placement``.
+
+        A site that is not in ``tap_sites`` is added untapped. The sum is
+        ``branch + stream`` in both placements, so the forward value does not
+        depend on the placement.
+
+        :param site: ``'attention'`` or ``'mlp'``.
+        :param branch: The branch output (after dropout, for the feed-forward).
+        :param stream: The residual stream it is added to.
+        :param taps: The optional capture layers of :meth:`call`.
+        :param training: Training flag, forwarded to the tap and the capture.
+        :return: ``branch + stream``.
+        """
+        # DECISION plan-2026-10-23T190557-972a9ac5/D-031: the placement is a
+        # choice between two tensors, made HERE and nowhere else. The default is
+        # ``'branch'`` (the paper text: the loss is applied "prior to
+        # normalization and addition into the residual stream", and the authors'
+        # evaluation scripts force ``with_resid`` False); ``'residual'`` is the
+        # released training yaml's ``with_resid: True``. Do NOT make ``'residual'``
+        # the default, do NOT tap both tensors (the loss would count one branch
+        # twice), and do NOT tap in ``call`` before this method on one path and
+        # after it on the other: the ``taps=`` capture must read the SAME tensor
+        # as the penalty tap in both placements. Guarded by
+        # test_topolm_knobs.py::TestTheTapSeesTheBranchOrTheSum. See decisions.md.
+        if site not in self.tap_sites:
+            return branch + stream
+        if self.tap_placement == "branch":
+            return self._tap_site(site, branch, taps, training) + stream
+        return self._tap_site(site, branch + stream, taps, training)
+
+    def _tap_site(
+        self,
+        site: str,
+        value: keras.KerasTensor,
+        taps: Optional[Tuple[Any, ...]],
+        training: Optional[bool],
+    ) -> keras.KerasTensor:
+        """Pass ``value`` through the site's spatial tap, then its capture, if any."""
+        tap = self.attention_tap if site == "attention" else self.mlp_tap
+        value = tap(value, training=training)
+        if taps is not None:
+            value = taps[self.tap_sites.index(site)](value, training=training)
+        return value
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -663,6 +754,8 @@ class TopoLMBlock(keras.layers.Layer):
             "ffn_args": dict(self.ffn_args),
             "use_bias": self.use_bias,
             "normalization_type": self.normalization_type,
+            "norm_center": self.norm_center,
+            "tap_placement": self.tap_placement,
             "attention_norm_args": dict(self.attention_norm_args),
             "ffn_norm_args": dict(self.ffn_norm_args),
             "num_layers": self.num_layers,

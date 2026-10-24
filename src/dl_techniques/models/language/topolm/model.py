@@ -256,13 +256,26 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :param ffn_args: Extra arguments for the feed-forward factory, e.g.
         ``{'ffn_multiple_of': 64}`` for ``swiglu``. ``dropout_rate`` is refused.
     :type ffn_args: Optional[Dict[str, Any]]
-    :param use_bias: Whether the feed-forward projections carry a bias (default
-        ``True``). Attention projections never do.
+    :param use_bias: Whether the feed-forward projections carry a bias. Default
+        ``False``, the released code's ``bias=False``; attention projections never
+        have one.
     :type use_bias: bool
     :param normalization_type: Type of every norm, both in each block and the
         final one: ``'layer_norm'`` (default), ``'rms_norm'``, or another key of
         the shared normalization factory.
     :type normalization_type: str
+    :param norm_center: Whether a ``'layer_norm'`` carries a ``beta``, for every
+        norm of the model (both in each block and the final one). Default
+        ``False``, the released code's ``LayerNorm(bias=False)``; ``'rms_norm'``
+        has no ``beta`` whatever this says.
+    :type norm_center: bool
+    :param tap_placement: ``'branch'`` (default, the paper text: the loss is applied
+        "prior to normalization and addition into the residual stream") taps each
+        branch output; ``'residual'`` taps the post-add tensor, which the released
+        training yaml's ``with_resid: True`` does. The forward values are the same;
+        the penalised tensor and the activations ``taps=`` captures are the tapped
+        one.
+    :type tap_placement: str
     :param attention_norm_args: Extra arguments for every block's attention-side
         norm; ``{'epsilon': ...}`` overrides ``layer_norm_eps`` for it.
     :type attention_norm_args: Optional[Dict[str, Any]]
@@ -345,8 +358,10 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         head_config_overrides: Optional[Dict[str, Any]] = None,
         ffn_type: str = "mlp",
         ffn_args: Optional[Dict[str, Any]] = None,
-        use_bias: bool = True,
+        use_bias: bool = False,
         normalization_type: str = "layer_norm",
+        norm_center: bool = False,
+        tap_placement: str = "branch",
         attention_norm_args: Optional[Dict[str, Any]] = None,
         ffn_norm_args: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
@@ -398,6 +413,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         self.ffn_args = dict(ffn_args) if ffn_args is not None else {}
         self.use_bias = bool(use_bias)
         self.normalization_type = normalization_type
+        self.norm_center = norm_center
+        self.tap_placement = tap_placement
         self.attention_norm_args = (
             dict(attention_norm_args) if attention_norm_args is not None else {}
         )
@@ -616,6 +633,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 ffn_args=self.ffn_args,
                 use_bias=self.use_bias,
                 normalization_type=self.normalization_type,
+                norm_center=self.norm_center,
+                tap_placement=self.tap_placement,
                 attention_norm_args=self.attention_norm_args,
                 ffn_norm_args=self.ffn_norm_args,
                 # The residual-projection init depends on the stack's depth.
@@ -629,13 +648,16 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             for index in range(self.depth)
         ]
 
-        # The same factory and type as the blocks' norms, so one option moves all
-        # of them: a stack whose final norm kept a beta while its blocks dropped
-        # theirs would be a different model from the one the option names.
+        # The same factory, type and centre flag as the blocks' norms, so one option
+        # moves all of them: a stack whose final norm kept a beta while its blocks
+        # dropped theirs would be a different model from the one the option names.
+        final_norm_args: Dict[str, Any] = {"epsilon": self.layer_norm_eps}
+        if self.normalization_type == "layer_norm":
+            final_norm_args["center"] = self.norm_center
         self.final_norm = create_normalization_layer(
             self.normalization_type,
             name="final_norm",
-            epsilon=self.layer_norm_eps,
+            **final_norm_args,
         )
 
         # A task head replaces the LM head: call() never runs lm_head then,
@@ -957,6 +979,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             "ffn_args": dict(self.ffn_args),
             "use_bias": self.use_bias,
             "normalization_type": self.normalization_type,
+            "norm_center": self.norm_center,
+            "tap_placement": self.tap_placement,
             "attention_norm_args": dict(self.attention_norm_args),
             "ffn_norm_args": dict(self.ffn_norm_args),
             "tie_word_embeddings": self.tie_word_embeddings,
