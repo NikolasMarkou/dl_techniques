@@ -420,7 +420,12 @@ them like a 2D variant, with these differences.
 
 - *Radius.* `--radius` unset resolves to the variant's own radius, so
   `--variant tiny3d` needs no radius flag. An explicit radius the grid cannot hold
-  is still an error from the model, naming the short axis.
+  is refused before the run starts: no run directory, tokenizer or dataset is
+  touched. The error names the radius, the variant and its unit grid, the unit
+  count a radius-r neighbourhood needs, and the largest radius the grid can use;
+  `--variant tiny3d --radius 5` reports the 7x7x7 grid, the 1331 units needed
+  against 343, and a largest usable radius of 3. When the unit count suffices but
+  an axis is short, it names that axis and its length.
 - *Readout.* The Gaussian readout is a `Conv2D`, so the readout arm is 2D only.
   `--readout-fwhm` unset means 2.0 on a 2D variant and no readout on a 3D one, `0`
   means no readout on either, and a positive value typed for a 3D variant is

@@ -114,6 +114,11 @@ from dl_techniques.models.language.topolm import (
     DEFAULT_RADIUS,
     TopoLM,
 )
+from dl_techniques.models.language.topolm.config import (
+    grid_shape_of,
+    radius_advice,
+    validate_variant,
+)
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.utils.logger import logger
 
@@ -377,10 +382,11 @@ def _require_vocab_covers_tokenizer(
     raise ValueError(
         f"vocab_size {config.vocab_size} cannot hold every id the "
         f"{encoding!r} tokenizer emits (it needs at least {required}; ids run "
-        f"to {required - 1}).{reason} Raise --vocab-size, or lower "
-        f"--encoding-name to a tokenizer with a smaller vocabulary. Left "
-        f"unchecked this fails on the first batch as an out-of-range Gather in "
-        f"Embedding.call."
+        f"to {required - 1}).{reason} Raise --vocab-size to at least "
+        f"{required}, or train with a tokenizer whose vocabulary is smaller "
+        f"(the command line has no flag for that: the tokenizer is the "
+        f"config's `encoding_name`). Left unchecked this fails on the first "
+        f"batch as an out-of-range Gather in Embedding.call."
     )
 
 
@@ -424,6 +430,59 @@ def resolve_spatial_radius(config: TopoLMTrainingConfig) -> int:
         return int(config.spatial_radius)
     row = TopoLM.MODEL_VARIANTS.get(config.model_variant, {})
     return int(row.get("radius", DEFAULT_RADIUS))
+
+
+def check_variant_fits_radius(config: TopoLMTrainingConfig) -> None:
+    """Refuse a variant row that cannot host the run's resolved radius, up front.
+
+    ``--variant tiny3d --radius 5`` used to pass the command line and die in the
+    model's constructor after the tokenizer, a ~2 minute dataset load and a run
+    directory holding ``config.json``. This runs first in :func:`train_topolm`
+    (before the seeds, the save directory, the tokenizer and the dataset) and
+    judges the row exactly as :func:`~dl_techniques.models.language.topolm.config.validate_variant`
+    does for the shipped table: the unit floor ``(2 r + 1) ** grid_dim``, the
+    grid's every axis against ``2 r + 1``, and the head count (``--num-heads``
+    replaces the row's). Nothing stricter is used, so a configuration that builds
+    is never refused: ``TestValidationAgreesWithTheTapBuild`` sweeps 1794
+    width/radius/rank cases against the tap build, and
+    ``TestTheVariantIsCheckedAgainstTheRadiusFirst`` compares this check with
+    ``build_backbone`` for ``tiny`` and ``tiny3d``.
+
+    Contract: reads ``model_variant``, ``spatial_radius`` (``None`` resolves to the
+    row's own) and ``num_heads``; returns ``None``; an unknown variant name passes
+    (``TopoLM.from_variant`` lists the valid names); raises ``ValueError`` and
+    nothing else.
+
+    :param config: The run's configuration.
+    :type config: TopoLMTrainingConfig
+    :raises ValueError: Naming the variant, the radius and where it came from,
+        the unit grid, the shortage and the largest usable radius.
+    """
+    row = TopoLM.MODEL_VARIANTS.get(config.model_variant)
+    if row is None:
+        return
+    row = dict(row)
+    if config.num_heads is not None:
+        row["num_heads"] = config.num_heads
+    radius = resolve_spatial_radius(config)
+    grid_dim = int(row.get("grid_dim", 2))
+    try:
+        validate_variant(config.model_variant, row, radius, grid_dim=grid_dim)
+    except ValueError as error:
+        if "divisible" in str(error):
+            raise
+        grid = grid_shape_of(int(row["embed_dim"]), grid_dim)
+        source = (
+            f"--radius {radius}"
+            if config.spatial_radius is not None
+            else f"the variant's own radius {radius}"
+        )
+        advice = radius_advice(grid)
+        detail = str(error) if advice in str(error) else f"{error} {advice}"
+        raise ValueError(
+            f"{source} does not fit the {_grid_label(grid)} unit grid of the "
+            f"{config.model_variant!r} variant. {detail} Nothing was started."
+        ) from error
 
 
 def build_backbone(
@@ -1431,6 +1490,11 @@ def train_topolm(
     # config), the model and the logs name the same integer even when the caller
     # left it unset (D-006). A 2D variant resolves to 5, as it always did.
     config = replace(config, spatial_radius=resolve_spatial_radius(config))
+
+    # Before ANY run work (seeds, the save directory, the tokenizer, the dataset):
+    # a radius the variant's grid cannot hold is a property of two config values,
+    # known now, and used to surface after a ~2 minute data load.
+    check_variant_fits_radius(config)
 
     set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)

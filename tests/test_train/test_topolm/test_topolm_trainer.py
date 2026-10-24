@@ -2055,3 +2055,160 @@ class TestVizEveryStepsField:
         names = [f.name for f in TopoLMTrainingConfig.__dataclass_fields__.values()]
         assert "viz_every_steps" in names
         assert names.index("viz_every_steps") > names.index("spatial_radius")
+
+
+# =====================================================================
+# Step 5.3 (plan-2026-10-23T190557-972a9ac5, decision D-018): the variant row
+# is checked against the resolved radius BEFORE any run work, and the vocab
+# message names only flags that exist. Written RED-first against 363aaaaa5.
+# =====================================================================
+
+
+class _NoRunWork:
+    """Spies on everything a refused run must not reach: the seeds, the save
+    directory, the tokenizer, the dataset and the run directory."""
+
+    def __init__(self, monkeypatch, tmp_path):
+        self.calls = []
+        for name in ("set_seeds", "create_tokenizer", "load_train_val_datasets",
+                     "prepare_run_dir"):
+            def spy(*args, _name=name, **kwargs):
+                self.calls.append(_name)
+                raise AssertionError(f"{_name} was reached by a refused run")
+            monkeypatch.setattr(C, name, spy)
+        self.save_dir = tmp_path / "save"
+        self.runs = tmp_path / "runs"
+
+    def assert_nothing_happened(self):
+        assert self.calls == []
+        assert not self.save_dir.exists(), "the save directory was created"
+        assert not self.runs.exists(), "a run directory was created"
+
+
+class TestTheVariantIsCheckedAgainstTheRadiusFirst:
+    @pytest.mark.parametrize(
+        "variant,grid,largest",
+        [("tiny3d", "7x7x7", 3), ("paper3d", "10x10x10", 4), ("tiny", "16x16", 7)],
+    )
+    def test_a_radius_the_grid_cannot_hold_is_refused_before_any_run_work(
+        self, monkeypatch, tmp_path, variant, grid, largest
+    ):
+        guard = _NoRunWork(monkeypatch, tmp_path)
+        radius = 9 if variant == "tiny" else 5
+        config = _config(
+            model_variant=variant, spatial_radius=radius,
+            save_dir=str(guard.save_dir),
+        )
+        with pytest.raises(ValueError) as caught:
+            C.train_topolm(config, preprocessor=StubTokenizer(), run_topography=False)
+        message = str(caught.value)
+        assert variant in message
+        assert f"--radius {radius}" in message and f"radius-{radius}" in message
+        assert grid in message
+        assert f"largest radius this grid can use is {largest}" in message
+        guard.assert_nothing_happened()
+
+    def test_a_paired_run_is_refused_the_same_way(self, monkeypatch, tmp_path):
+        guard = _NoRunWork(monkeypatch, tmp_path)
+        config = _config(
+            model_variant="tiny3d", spatial_radius=5, save_dir=str(guard.save_dir)
+        )
+        with pytest.raises(ValueError, match="tiny3d"):
+            C.train_paired(config, preprocessor=StubTokenizer(), run_topography=False)
+        guard.assert_nothing_happened()
+
+    def test_the_command_line_path_is_refused_by_name(self, monkeypatch, tmp_path):
+        guard = _NoRunWork(monkeypatch, tmp_path)
+        args = pretrain_cli._build_parser().parse_args(
+            ["--variant", "tiny3d", "--radius", "5", "--save-dir", str(guard.save_dir)]
+        )
+        config = pretrain_cli._config_from_args(args)
+        with pytest.raises(ValueError, match="tiny3d") as caught:
+            C.train_topolm(config)
+        assert "7x7x7" in str(caught.value)
+        guard.assert_nothing_happened()
+
+    def test_a_short_axis_is_named_when_the_unit_count_suffices(self, monkeypatch):
+        """784 units clear the 3-D floor of radius 4 (729) yet resolve to 7x8x14,
+        whose first axis cannot hold a 9-wide patch: the message names the axis."""
+        row = dict(MODEL_VARIANTS["tiny3d"], embed_dim=784, num_heads=8)
+        monkeypatch.setitem(MODEL_VARIANTS, "probe3d", row)
+        with pytest.raises(ValueError) as caught:
+            C.check_variant_fits_radius(
+                _config(model_variant="probe3d", spatial_radius=4)
+            )
+        message = str(caught.value)
+        assert "7x8x14" in message and "axis 0 has 7" in message
+        assert "largest radius this grid can use is 3" in message
+
+    @pytest.mark.parametrize("radius", [2, 3])
+    def test_a_radius_the_grid_holds_is_accepted(self, radius):
+        C.check_variant_fits_radius(
+            _config(model_variant="tiny3d", spatial_radius=radius)
+        )
+
+    @pytest.mark.parametrize("variant", sorted(MODEL_VARIANTS))
+    def test_every_shipped_variant_passes_at_its_own_resolved_radius(self, variant):
+        C.check_variant_fits_radius(
+            _config(model_variant=variant, spatial_radius=None)
+        )
+
+    def test_an_unknown_variant_is_left_to_the_model_to_name(self):
+        C.check_variant_fits_radius(_config(model_variant="no_such_variant"))
+
+    @pytest.mark.parametrize("variant", ["tiny", "tiny3d"])
+    @pytest.mark.parametrize("heads", [None, 3])
+    def test_the_verdict_equals_whether_the_model_builds(self, variant, heads):
+        """Not stricter and not looser than the model: for every radius and the
+        heads override, the pre-check raises exactly when ``build_backbone``
+        does (this is what keeps a 2-D config that builds today accepted)."""
+        for radius in range(1, 9):
+            config = _config(
+                model_variant=variant, spatial_radius=radius, num_layers=1,
+                num_heads=heads,
+            )
+            try:
+                C.check_variant_fits_radius(config)
+                checked = True
+            except ValueError:
+                checked = False
+            try:
+                build_backbone(config)
+                built = True
+            except ValueError:
+                built = False
+            assert checked == built, (variant, radius, heads, checked, built)
+
+
+class TestTheVocabularyMessageNamesOnlyRealFlags:
+    @staticmethod
+    def _flags_in(message):
+        import re
+
+        return set(re.findall(r"--[a-z][a-z-]*", message))
+
+    @staticmethod
+    def _real_flags():
+        return {
+            option
+            for action in pretrain_cli._build_parser()._actions
+            for option in action.option_strings
+        }
+
+    def test_the_preprocessor_guard_points_at_remedies_that_exist(self):
+        class _Tok:
+            vocab_size = 100277
+
+        with pytest.raises(ValueError) as caught:
+            C._require_vocab_covers_tokenizer(_config(vocab_size=50257), _Tok())
+        message = str(caught.value)
+        assert "--vocab-size" in message and "100277" in message
+        assert self._flags_in(message) <= self._real_flags(), (
+            self._flags_in(message) - self._real_flags()
+        )
+        assert "encoding-name" not in message
+
+    def test_the_backbone_guard_points_at_remedies_that_exist(self):
+        with pytest.raises(ValueError) as caught:
+            build_backbone(_config(vocab_size=50257), required_vocab_size=100277)
+        assert self._flags_in(str(caught.value)) <= self._real_flags()
