@@ -279,7 +279,10 @@ add cannot reach it: no flag, no hook, no `activity_regularizer`.
   `TransformerLayer` uses (`build_transformer_ffn_config` into
   `create_ffn_from_config`) rather than reimplementing them, so the reuse order
   (factories first, a bespoke layer last) is unchanged. The feed-forward is ONE
-  layer, `ffn` (for `ffn_type='mlp'`, `Linear`, activation, `Linear`);
+  layer, `ffn` (`Linear`, activation, `Linear`; `ffn_type='mlp'` is the only
+  accepted type, because the residual-projection init needs a factory that declares
+  `output_kernel_initializer` and the others are refused by name, as
+  `TransformerLayer` refuses them);
   `ffn_type`, `ffn_args`, `use_bias`, `normalization_type`, `norm_center`,
   `tap_placement` and the two norm-args dicts are serialized constructor knobs, also
   on `TopoLM` and `from_variant`. The defaults are the released code's: no

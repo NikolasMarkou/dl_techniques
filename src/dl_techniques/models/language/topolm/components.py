@@ -114,23 +114,43 @@ TAP_SITES = ("attention", "mlp")
 TAP_PLACEMENTS = ("branch", "residual")
 
 
-def accepted_ffn_types() -> List[str]:
-    """The feed-forward types a residual branch can use, sorted.
+def _width_compatible_ffn_types() -> List[str]:
+    """Registry types whose output width is set by ``output_dim``, sorted.
 
-    A type qualifies when the factory registry says its output width is set by
-    ``output_dim``: the branch is added to the residual stream, so it has to emit
-    ``hidden_size`` features, and ``hidden_size`` is handed to the factory as
-    ``output_dim``. Types that size their output by ``filters``, ``features`` or
-    ``units``, or keep the input width (``gated_dconv``, ``mixer``), are refused
-    by name rather than built into a width mismatch.
-
-    :return: Registry keys, e.g. ``['bilinear', 'geglu', ..., 'mlp', ..., 'swiglu']``.
-    :rtype: List[str]
+    A branch is added to the residual stream, so it has to emit ``hidden_size``
+    features, and ``hidden_size`` is handed to the factory as ``output_dim``. Types
+    that size their output by ``filters``, ``features`` or ``units``, or keep the
+    input width (``gated_dconv``, ``mixer``), are refused by name rather than built
+    into a width mismatch.
     """
     return sorted(
         name for name, info in FFN_REGISTRY.items()
         if info.get("output_dim_param") == "output_dim"
     )
+
+
+def accepted_ffn_types() -> List[str]:
+    """The feed-forward types a TopoLM branch can use, sorted.
+
+    A type qualifies when it fits the residual stream (its output width is set by
+    ``output_dim``) AND its factory declares ``output_kernel_initializer``, so that
+    the depth-scaled residual-projection init can reach its output projection. The
+    shared FFN helper drops a wrapper key the target type does not declare,
+    silently; a type that does not declare this one would start its output
+    projection at the plain ``initializer_range`` (3.5x too large at depth 12) while
+    the documentation promised the scaling, and two types do not read
+    ``initializer_range`` at all. ``TransformerLayer`` refuses the same combination
+    by name; so does :class:`TopoLMBlock`. Today only ``'mlp'`` qualifies; the list
+    is read from the registry, so a type that later declares the key is accepted
+    without an edit here.
+
+    :return: Registry keys, e.g. ``['mlp']``.
+    :rtype: List[str]
+    """
+    return [
+        name for name in _width_compatible_ffn_types()
+        if "output_kernel_initializer" in FFN_REGISTRY[name]["optional_params"]
+    ]
 
 
 def accepted_normalization_types() -> List[str]:
@@ -169,12 +189,8 @@ class TopoLMBlock(keras.layers.Layer):
     :type hidden_size: int
     :param num_heads: Attention heads. Must divide ``hidden_size``.
     :type num_heads: int
-    :param intermediate_size: Feed-forward hidden width. For ``ffn_type='mlp'`` it
-        is the width between the two projections (GPT-2's ``n_inner``). A type
-        that sizes itself, ``swiglu`` (a 2/3 rule from ``ffn_expansion_factor``,
-        rounded to ``ffn_multiple_of``), does not read it: the shared helper
-        withholds it, as it does for ``TransformerLayer``; resize through
-        ``ffn_args``.
+    :param intermediate_size: Feed-forward hidden width: the width between the two
+        projections of the MLP (GPT-2's ``n_inner``).
     :type intermediate_size: int
     :param alpha: Weight on each tap's spatial loss. ``0`` gives the control.
     :type alpha: float
@@ -208,8 +224,7 @@ class TopoLMBlock(keras.layers.Layer):
         (or the ``gelu_tanh`` callable) is GPT-2's tanh approximation. One resolver
         (:func:`dl_techniques.layers.activations.resolve_activation`) turns the
         value into the callable the whole feed-forward uses; there is no
-        per-layer mix. Types whose activation is their identity (``reglu``,
-        ``bilinear``, ``squared_relu``, ``swiglu``) do not read it.
+        per-layer mix.
     :type activation: Union[str, Any]
     :param dropout_rate: Dropout on the feed-forward branch output, applied once,
         after the output projection and before the tap and the residual add:
@@ -228,9 +243,14 @@ class TopoLMBlock(keras.layers.Layer):
     :type layer_norm_eps: float
     :param seed: Base seed for this block's taps.
     :type seed: Optional[int]
-    :param ffn_type: The feed-forward type, a key of the shared FFN registry whose
-        output width is ``output_dim`` (:func:`accepted_ffn_types`): ``'mlp'``
-        (the default, GPT-2's), ``'swiglu'``, ``'geglu'`` and the rest.
+    :param ffn_type: The feed-forward type, a key of the shared FFN registry
+        (:func:`accepted_ffn_types`). Only ``'mlp'`` (the default, GPT-2's) today:
+        a type must fit the residual stream AND declare
+        ``output_kernel_initializer``, because the output projection starts at
+        ``initializer_range / sqrt(2 * num_layers)`` and the shared helper would
+        otherwise drop that initializer silently. Every other registry type is
+        refused by name (``'swiglu'``, ``'geglu'`` and the rest); see
+        ``test_topolm_residual_init_per_ffn_type.py``.
     :type ffn_type: str
     :param ffn_args: Extra arguments for the feed-forward factory, merged last and
         never filtered, so a misspelled key raises. ``dropout_rate`` is refused:
@@ -238,9 +258,7 @@ class TopoLMBlock(keras.layers.Layer):
     :type ffn_args: Optional[Dict[str, Any]]
     :param use_bias: Whether the feed-forward projections carry a bias. Default
         ``False``, the released code's ``bias=False``; the attention projections
-        never have one. ``swiglu`` is bias-free by its own default and the shared
-        helper does not forward this flag to it (``ffn_args={'use_bias': True}``
-        does).
+        never have one.
     :type use_bias: bool
     :param normalization_type: Type of BOTH norms of the block (and, in
         :class:`~dl_techniques.models.topolm.model.TopoLM`, of the final norm), a
@@ -337,6 +355,26 @@ class TopoLMBlock(keras.layers.Layer):
         attention_norm_args = _args_dict("attention_norm_args", attention_norm_args)
         ffn_norm_args = _args_dict("ffn_norm_args", ffn_norm_args)
         if ffn_type not in accepted_ffn_types():
+            if ffn_type in _width_compatible_ffn_types():
+                # DECISION plan-2026-10-23T190557-972a9ac5/D-032: a type whose
+                # factory declares no output_kernel_initializer is REFUSED, as
+                # TransformerLayer._reject_unsupported_residual_output_init does.
+                # Do NOT let the shared helper drop the key (it measured 0.0176
+                # against the 0.0036 target at depth 12 for ten types, and two
+                # types do not read initializer_range at all), and do NOT rescale
+                # a foreign layer's output kernel after the build: that needs a
+                # hand-kept table of which variable is the output projection for
+                # ten layouts. Guarded by test_topolm_residual_init_per_ffn_type.py.
+                # See decisions.md.
+                raise ValueError(
+                    f"ffn_type {ffn_type!r} cannot take the depth-scaled "
+                    f"residual-projection init: its factory declares no "
+                    f"output_kernel_initializer, so initializer_range / "
+                    f"sqrt(2 * num_layers) would be silently dropped and its "
+                    f"output projection would start unscaled. Supported ffn_type "
+                    f"values: {accepted_ffn_types()}. (TransformerLayer takes the "
+                    f"other types, but it has no spatial taps.)"
+                )
             raise ValueError(
                 f"ffn_type must be one of {accepted_ffn_types()}, got {ffn_type!r}"
             )

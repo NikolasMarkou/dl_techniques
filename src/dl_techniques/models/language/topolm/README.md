@@ -376,8 +376,8 @@ variant rows; a config saved without one gets the default below.
 
 | option | default | what it does |
 |---|---|---|
-| `ffn_type` | `'mlp'` | feed-forward type: GPT-2's `Linear`, activation, `Linear`; `'swiglu'`, `'geglu'` and other registry types of the shared factory are accepted |
-| `ffn_args` | `None` | extra arguments for that factory (`dropout_rate` is refused: the block applies its own) |
+| `ffn_type` | `'mlp'` | feed-forward type: GPT-2's `Linear`, activation, `Linear`. It is the only accepted value: the output projection starts at `initializer_range / sqrt(2 * depth)`, which needs the type's factory to declare `output_kernel_initializer`, and only `mlp` does. Every other registry type (`'swiglu'`, `'geglu'` and the rest) is refused by name at construction, as `TransformerLayer` refuses the same combination, because the shared factory would otherwise drop the initializer silently and start the projection unscaled (0.0176 instead of 0.0036 at depth 12, measured). `TransformerLayer` takes those types but has no taps |
+| `ffn_args` | `None` | extra arguments for the MLP factory, merged last (`dropout_rate` is refused: the block applies its own) |
 | `ffn_intermediate_size` | `4 * embed_dim` | feed-forward width |
 | `activation` | `'gelu'` | the exact (erf) GELU of the released code; `'gelu_tanh'`, `'relu'`, a callable or a config dict are accepted, one activation for the whole feed-forward |
 | `use_bias` | `False` | bias on the feed-forward projections (the attention projections never have one) |
@@ -391,8 +391,10 @@ The attention output projection and the feed-forward output projection start at
 `initializer_range / sqrt(2 * depth)`, GPT-2's rule and the released code's (a
 standard deviation of 0.0041 against 0.0125 at depth 12 when the depth factor was
 missing); the query, key, value and feed-forward expansion kernels and the embeddings
-keep `initializer_range`. The defaults are the released code's, so a GPT-2 style model
-with biases and a norm shift is `use_bias=True, norm_center=True, activation='gelu_tanh'`.
+keep `initializer_range`. The defaults are the released code's. GPT-2's feed-forward
+biases, LayerNorm shift and tanh GELU are `use_bias=True, norm_center=True,
+activation='gelu_tanh'`; GPT-2's attention projections also carry biases and this
+block's never do, so that is still not a GPT-2 block.
 
 ### Against the paper and against the released code
 

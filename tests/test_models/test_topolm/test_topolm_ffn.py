@@ -5,8 +5,8 @@ Until plan-2026-10-23T190557-972a9ac5 step 10 (D-030) the block chained two
 the parameters of a GPT-2 MLP, while the tests compared every structure with itself.
 Nothing in this file reads a structure back from the code under test:
 
-* the parameter counts come from the closed forms below (``2 * H * I + H + I`` for
-  one MLP; the per-type forms from the factory docs for ``swiglu`` / ``geglu``),
+* the parameter counts come from the closed form below (``2 * H * I + H + I`` for
+  one MLP),
 * the forward values come from numpy applied to the block's OWN weights, taken from
   the branch just before the residual add through the ``taps=`` capture hook,
 * the guards are proven able to fail: ``_ChainedMLPs`` rebuilds the old four-layer
@@ -55,22 +55,6 @@ BATCH, SEQ = 2, 8
 def mlp_params(hidden: int, inner: int, bias: bool = True) -> int:
     """One GPT-2 MLP: ``Linear(H->I)``, activation, ``Linear(I->H)``."""
     return 2 * hidden * inner + ((hidden + inner) if bias else 0)
-
-
-def swiglu_width(hidden: int, factor: int = 4, multiple: int = 256) -> int:
-    """The 2/3 rule of the swiglu docs: ``int(H * factor * 2/3)`` up to a multiple."""
-    raw = int(hidden * factor * 2 / 3)
-    return multiple * math.ceil(raw / multiple)
-
-
-def swiglu_params(hidden: int, **rule: int) -> int:
-    """gate, up and down projections, no biases (the factory default)."""
-    return 3 * hidden * swiglu_width(hidden, **rule)
-
-
-def geglu_params(hidden: int, inner: int, bias: bool = True) -> int:
-    """``input_proj`` H -> 2I (gate and value), ``output_proj`` I -> H, biased or not."""
-    return hidden * 2 * inner + inner * hidden + ((2 * inner + hidden) if bias else 0)
 
 
 def attention_params(hidden: int) -> int:
@@ -392,32 +376,20 @@ class TestTheOraclesRejectTheOldStructure:
 
 
 class TestEachOptionChangesTheBlockAsDocumented:
-    def test_swiglu_builds_runs_and_counts_by_its_own_rule(self):
-        block = make_block(ffn_type="swiglu")
-        assert ffn_count(block) == swiglu_params(H) == 3 * H * 256
-        assert sorted(weights_by_suffix(block.ffn)) == [
-            "down_proj/kernel", "gate_proj/kernel", "up_proj/kernel"]
-        out = block(np.zeros((BATCH, SEQ, H), "float32"), training=False)
-        assert tuple(out.shape) == (BATCH, SEQ, H)
+    def test_ffn_args_reach_the_feed_forward_factory(self):
+        """An argument of the MLP factory, merged last: a bias initialiser of ones."""
+        block = make_block(use_bias=True, ffn_args={"bias_initializer": "ones"})
+        biases = [keras.ops.convert_to_numpy(w) for w in block.ffn.weights
+                  if w.path.endswith("/bias")]
+        assert len(biases) == 2 and all((b == 1.0).all() for b in biases)
+        plain = make_block(use_bias=True)
+        assert all(not keras.ops.convert_to_numpy(w).any()
+                   for w in plain.ffn.weights if w.path.endswith("/bias"))
 
-    def test_swiglu_sizes_itself_and_ffn_args_resize_it(self):
-        block = make_block(ffn_type="swiglu", ffn_args={"ffn_multiple_of": 32})
-        assert swiglu_width(H, multiple=32) == 192
-        assert ffn_count(block) == swiglu_params(H, multiple=32) == 3 * H * 192
-
-    @pytest.mark.parametrize("bias", [False, True], ids=["bare", "biased"])
-    def test_geglu_builds_runs_and_counts_by_its_own_rule(self, bias):
-        block = make_block(ffn_type="geglu", use_bias=bias)
-        assert ffn_count(block) == geglu_params(H, I, bias)
-        out = block(np.zeros((BATCH, SEQ, H), "float32"), training=False)
-        assert tuple(out.shape) == (BATCH, SEQ, H)
-
-    def test_the_type_changes_the_weight_set(self):
-        sets = {
-            t: sorted(w.path for w in make_block(ffn_type=t).ffn.weights)
-            for t in ("mlp", "swiglu", "geglu")
-        }
-        assert len({tuple(v) for v in sets.values()}) == 3
+    def test_intermediate_size_is_the_width_between_the_projections(self):
+        block = make_block(inner=96)
+        assert tuple(block.ffn.fc1.kernel.shape) == (H, 96)
+        assert tuple(block.ffn.fc2.kernel.shape) == (96, H)
 
     def test_the_activation_changes_the_output_on_a_fixed_input(self):
         x = np.random.default_rng(4).standard_normal((BATCH, SEQ, H)).astype("float32")
@@ -484,7 +456,7 @@ class TestEachOptionChangesTheBlockAsDocumented:
 
     def test_the_branch_dropout_is_applied_exactly_once(self):
         """GPT-2's ``resid_pdrop`` after the output projection and nowhere else."""
-        for ffn_type in ("mlp", "swiglu", "geglu"):
+        for ffn_type in ("mlp",):
             block = make_block(ffn_type=ffn_type, dropout_rate=0.5)
             inside = [l.rate for l in block.ffn._flatten_layers(include_self=False)
                       if isinstance(l, keras.layers.Dropout)]
@@ -517,8 +489,7 @@ class TestEachOptionChangesTheBlockAsDocumented:
     def test_the_ffn_type_error_lists_the_accepted_types(self):
         with pytest.raises(ValueError) as excinfo:
             make_block(build=False, ffn_type="not_an_ffn")
-        for accepted in ("mlp", "swiglu", "geglu"):
-            assert accepted in str(excinfo.value)
+        assert "['mlp']" in str(excinfo.value)
 
     def test_the_norm_type_error_lists_the_accepted_types(self):
         with pytest.raises(ValueError) as excinfo:
@@ -541,10 +512,6 @@ class TestEachOptionChangesTheBlockAsDocumented:
             ({}, mlp_params(H, I, False), "layer_norm", False),
             ({"use_bias": True}, mlp_params(H, I, True), "layer_norm", False),
             ({"norm_center": True}, mlp_params(H, I, False), "layer_norm", True),
-            ({"ffn_type": "swiglu"}, swiglu_params(H), "layer_norm", False),
-            ({"ffn_type": "geglu"}, geglu_params(H, I, False), "layer_norm", False),
-            ({"ffn_type": "geglu", "use_bias": True}, geglu_params(H, I, True),
-             "layer_norm", False),
             ({"normalization_type": "rms_norm"}, mlp_params(H, I, False),
              "rms_norm", False),
         ]
@@ -563,8 +530,8 @@ class TestEachOptionChangesTheBlockAsDocumented:
 # ---------------------------------------------------------------------
 
 EVERY_OPTION: Dict[str, Any] = dict(
-    ffn_type="swiglu", ffn_args={"ffn_multiple_of": 32}, activation="relu",
-    use_bias=False, normalization_type="rms_norm",
+    ffn_type="mlp", ffn_args={"bias_initializer": "ones"}, activation="relu",
+    use_bias=True, normalization_type="rms_norm",
     attention_norm_args={"epsilon": 1e-4}, ffn_norm_args={"epsilon": 1e-3},
 )
 
@@ -606,18 +573,20 @@ class TestSerialization:
     def test_a_variant_row_may_carry_the_options(self, monkeypatch):
         row = {"embed_dim": H, "depth": 1, "num_heads": HEADS,
                "ffn_intermediate_size": I, "max_seq_len": 16, "radius": 1,
-               "ffn_type": "geglu", "normalization_type": "rms_norm"}
+               "ffn_args": {"bias_initializer": "ones"},
+               "use_bias": True, "normalization_type": "rms_norm"}
         monkeypatch.setitem(TopoLM.MODEL_VARIANTS, "with_options", row)
         model = TopoLM.from_variant("with_options", vocab_size=50)
-        assert model.blocks[0].ffn_type == "geglu"
+        assert model.blocks[0].ffn_args == {"bias_initializer": "ones"}
+        assert model.blocks[0].use_bias is True
         assert model.get_config()["normalization_type"] == "rms_norm"
 
     def test_a_from_variant_keyword_sets_an_option(self):
         model = TopoLM.from_variant(
-            "tiny", vocab_size=50, depth=1, max_seq_len=16, ffn_type="swiglu",
-            use_bias=False)
-        assert model.blocks[0].ffn_type == "swiglu"
-        assert model.get_config()["use_bias"] is False
+            "tiny", vocab_size=50, depth=1, max_seq_len=16, ffn_type="mlp",
+            use_bias=True)
+        assert model.blocks[0].ffn_type == "mlp"
+        assert model.get_config()["use_bias"] is True
 
 
 # ---------------------------------------------------------------------
@@ -627,8 +596,8 @@ class TestSerialization:
 
 class TestTheTapsSitOnTheBranchOutputs:
     @pytest.mark.parametrize("kwargs", [
-        {}, {"ffn_type": "swiglu"}, {"normalization_type": "rms_norm"},
-    ], ids=["mlp", "swiglu", "rms_norm"])
+        {}, {"use_bias": True}, {"normalization_type": "rms_norm"},
+    ], ids=["mlp", "biased", "rms_norm"])
     def test_the_ffn_tap_is_handed_the_feed_forward_output_and_the_add_follows(self, kwargs):
         block = make_block(**kwargs)
         randomize(block)
@@ -664,8 +633,8 @@ class TestTheTapsSitOnTheBranchOutputs:
 
 class TestTheControlArmKeepsTheWeightSet:
     @pytest.mark.parametrize("kwargs", [
-        {}, EVERY_OPTION, {"ffn_type": "geglu", "normalization_type": "rms_norm"},
-    ], ids=["default", "every_option", "geglu_rms"])
+        {}, EVERY_OPTION, {"use_bias": True, "normalization_type": "rms_norm"},
+    ], ids=["default", "every_option", "biased_rms"])
     def test_alpha_zero_has_the_identical_weights(self, kwargs):
         trained = make_block(alpha=2.5, **kwargs)
         control = make_block(alpha=0.0, **kwargs)

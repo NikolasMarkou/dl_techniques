@@ -43,8 +43,9 @@ residual-path output projections initialised at ``initializer_range / sqrt(2 *
 depth)`` (the model hands its depth to every block). The geometry of the
 neighbourhood is the one place the paper text and the released code differ; see
 :mod:`~dl_techniques.models.topolm.config` for both readings and which this
-repository defaults to. A GPT-2-with-biases model is ``use_bias=True,
-norm_center=True`` away.
+repository defaults to. GPT-2's feed-forward biases and LayerNorm shift are
+``use_bias=True, norm_center=True`` away; GPT-2's attention projections also carry
+biases, and this block's never do, so the result is not a GPT-2 block.
 
 What is and is not here
 -----------------------
@@ -263,13 +264,15 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :type activation: Union[str, Any]
     :param ffn_type: Feed-forward type of every block: ``'mlp'`` (default), GPT-2's
         ``Linear(embed_dim -> ffn_intermediate_size)``, activation,
-        ``Linear(ffn_intermediate_size -> embed_dim)``; ``'swiglu'``, ``'geglu'``
-        and the other registry types whose output width is ``output_dim`` are
-        accepted (:func:`~dl_techniques.models.topolm.components.accepted_ffn_types`).
-        ``'swiglu'`` sizes itself and does not read ``ffn_intermediate_size``.
+        ``Linear(ffn_intermediate_size -> embed_dim)``. It is the only accepted type
+        (:func:`~dl_techniques.models.topolm.components.accepted_ffn_types`): the
+        residual-projection init needs the type to declare
+        ``output_kernel_initializer``, and every other registry type (``'swiglu'``,
+        ``'geglu'`` and the rest) is refused by name instead of silently starting
+        its output projection unscaled.
     :type ffn_type: str
     :param ffn_args: Extra arguments for the feed-forward factory, e.g.
-        ``{'ffn_multiple_of': 64}`` for ``swiglu``. ``dropout_rate`` is refused.
+        ``{'bias_initializer': 'ones'}`` for ``mlp``. ``dropout_rate`` is refused.
     :type ffn_args: Optional[Dict[str, Any]]
     :param use_bias: Whether the feed-forward projections carry a bias. Default
         ``False``, the released code's ``bias=False``; attention projections never
