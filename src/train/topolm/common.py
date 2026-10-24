@@ -823,8 +823,9 @@ def evaluate_topography(
     :type is_smoke_set: bool
     :param readout_skipped: Why a requested readout arm was NOT computed (set by
         :func:`run_topographic_evaluation` on a 3D backbone). Recorded as the
-        report's top-level ``readout_skipped``; ``None`` adds no key, so a 2D
-        report keeps exactly its keys.
+        report's top-level ``readout_skipped``. On a backbone whose grid is not
+        2-D the key is ALWAYS present (a generic reason when this is ``None``);
+        a 2D report never has it, so it keeps exactly its keys.
     :type readout_skipped: Optional[str]
     :param batch_size: Prompts per forward pass. Only the memory footprint of the
         pass; the live callback sets it small (8) so a draw on a shared card
@@ -868,6 +869,14 @@ def evaluate_topography(
             f"evaluated on its raw arm only. Pass readout_fwhm=None "
             f"(run_topographic_evaluation does this and records "
             f"readout_skipped)."
+        )
+    if len(grid_shape) != 2 and not readout_skipped:
+        # A 3-D report ALWAYS says its readout arm is absent, also when none was
+        # requested (the CLI leaves readout_fwhm unset for a 3-D variant): the
+        # reader of topography_report.json must not have to infer it.
+        readout_skipped = (
+            f"{len(grid_shape)}D: the Gaussian readout is 2-D only; the grid is "
+            f"{_grid_label(grid_shape)} and only the raw arm is computed"
         )
     report: Dict[str, Any] = {
         "grid_shape": [int(g) for g in grid_shape],
@@ -1496,8 +1505,9 @@ def run_topographic_evaluation(
     :type preprocessor: Any
     :param results_dir: Directory for the JSON report.
     :type results_dir: str
-    :return: The report dictionary. On a 3D backbone with a readout configured
-        it carries ``readout_skipped`` (the reason) and only the raw arm.
+    :return: The report dictionary. On a 3D backbone it carries
+        ``readout_skipped`` (the reason) and only the raw arm, whether or not a
+        readout was configured.
     :rtype: Dict[str, Any]
     """
     readout_fwhm = config.readout_fwhm

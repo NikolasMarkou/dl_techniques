@@ -233,6 +233,83 @@ class TestThreeDimensionalReadout:
         assert "t_maps_readout.png" not in os.listdir(tmp_path)
 
 
+class TestAThreeDimensionalReportAlwaysSaysItsReadoutIsAbsent:
+    """Completion fix step 5.1: the CLI leaves ``readout_fwhm`` unset for a 3-D
+    variant, so no readout was REQUESTED and the report used to carry no
+    ``readout_skipped`` at all. RED on the previous evaluation: the key was set only
+    on the path that requested a readout."""
+
+    def _planted_3d(self, monkeypatch):
+        backbone = _stub_3d()
+        boxes = _boxes(backbone)
+        effects = {
+            tap.path: _block_effect(tap.layout, *boxes[tap.path])
+            for tap in backbone.tap_layers
+        }
+        _plant(monkeypatch, backbone, effects)
+        return backbone
+
+    def test_evaluate_topography_without_a_readout_still_carries_the_key(
+        self, monkeypatch
+    ):
+        backbone = self._planted_3d(monkeypatch)
+        report, _ = _evaluate_planted(backbone)
+        assert list(report["arms"]) == ["raw"]
+        assert report["readout_skipped"].startswith("3D: the Gaussian readout is 2-D only")
+
+    def test_the_run_level_evaluation_without_a_readout_still_carries_the_key(
+        self, monkeypatch, tmp_path
+    ):
+        backbone = self._planted_3d(monkeypatch)
+        config = _config(
+            model_variant="tiny3d", spatial_radius=None, readout_fwhm=None,
+            stimuli=_PLANT_STIMULI,
+        )
+        report = run_topographic_evaluation(
+            backbone, config, StubTokenizer(), str(tmp_path)
+        )
+        written = json.loads((tmp_path / "topography_report.json").read_text())
+        assert report["readout_skipped"] == written["readout_skipped"]
+        assert "2-D only" in written["readout_skipped"]
+
+    def test_a_requested_readout_keeps_its_own_more_specific_reason(
+        self, monkeypatch, tmp_path
+    ):
+        backbone = self._planted_3d(monkeypatch)
+        config = _config(
+            model_variant="tiny3d", spatial_radius=None, readout_fwhm=2.0,
+            stimuli=_PLANT_STIMULI,
+        )
+        report = run_topographic_evaluation(
+            backbone, config, StubTokenizer(), str(tmp_path)
+        )
+        assert "readout_fwhm=2.0 was not applied" in report["readout_skipped"]
+
+    def test_a_short_cpu_tiny3d_run_with_no_readout_reports_the_key(self, monkeypatch):
+        _patch_data(monkeypatch)
+        config = _config(
+            model_variant="tiny3d", spatial_radius=None, num_layers=2,
+            readout_fwhm=None, save_dir="run3d_none",
+        )
+        result = train_topolm(config, preprocessor=StubTokenizer())
+        report = json.loads(open(
+            os.path.join(result["results_dir"], "topography_report.json")).read())
+        assert list(report["arms"]) == ["raw"]
+        assert "2-D only" in report["readout_skipped"], report.keys()
+
+    def test_a_two_dimensional_report_has_no_such_key(self, monkeypatch):
+        """The step-1 pin, restated on both 2-D paths: with or without a readout."""
+        _patch_data(monkeypatch)
+        result = train_topolm(
+            _config(readout_fwhm=None, save_dir="run2d_none"),
+            preprocessor=StubTokenizer(),
+        )
+        report = json.loads(open(
+            os.path.join(result["results_dir"], "topography_report.json")).read())
+        assert list(report["arms"]) == ["raw"]
+        assert "readout_skipped" not in report, report.keys()
+
+
 class TestThreeDimensionalFigures:
     def test_the_figure_set_of_a_3d_evaluation(self, monkeypatch, tmp_path):
         backbone = _stub_3d()
