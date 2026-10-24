@@ -1269,7 +1269,9 @@ def plot_topography(
                 plot_cluster_overlay(
                     labels[deepest],
                     output_path=os.path.join(output_dir, f"clusters_{arm}.png"),
-                    title=f"{tap_labels[deepest]} ({arm})",
+                    # The grids are condition A's, so the title says which
+                    # condition the figure shows (the t-map outlines both).
+                    title=f"{tap_labels[deepest]} ({arm}), condition {condition_a}",
                 )
             )
 

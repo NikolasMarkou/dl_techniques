@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import textwrap
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -266,15 +267,32 @@ def _prefix_note(shared_prefix: str) -> str:
 _SUBTITLE_CHARS_PER_INCH = 15.0
 
 
+#: Where a subtitle may be broken first: the space after a ``;`` and the space after
+#: the bar of `` | `` (never after the ``|`` of ``|t|``, which has no space before it).
+_CLAUSE_BOUNDARY = re.compile(r"(?<=;) |(?<= \|) ")
+
+
 def _wrap_subtitle(text: str, width_in: float) -> str:
-    """Break the line under the headline at spaces so it fits a figure ``width_in`` wide.
+    """Break the line under the headline so it fits a figure ``width_in`` wide.
 
     A one-row figure of two taps is about 5.6 in wide, and the subtitle (the
     conditions, the live callback's note, the dropped tap prefix) is wider than
-    that. Lines are joined with ``"\n"``; text that already fits is unchanged.
+    that. Lines break at clause boundaries first, after a ``;`` or the bar of
+    `` | ``, so a phrase such as ``dashed magenta = b`` stays on one line; only a
+    clause wider than the figure is broken at spaces. Lines are joined with
+    ``"\n"``, and joining them with a space gives the text back; text that
+    already fits is unchanged.
     """
     columns = max(20, int((width_in - 0.4) * _SUBTITLE_CHARS_PER_INCH))
-    return "\n".join(textwrap.wrap(text, width=columns, break_long_words=False)) or text
+    lines: List[str] = []
+    for clause in _CLAUSE_BOUNDARY.split(text):
+        if lines and len(lines[-1]) + 1 + len(clause) <= columns:
+            lines[-1] += " " + clause
+        elif len(clause) <= columns:
+            lines.append(clause)
+        else:
+            lines.extend(textwrap.wrap(clause, width=columns, break_long_words=False))
+    return "\n".join(lines) or text
 
 
 def _save_and_close(fig: plt.Figure, output_path: Optional[str], what: str) -> Optional[str]:
@@ -569,6 +587,53 @@ def _crosshair_outline() -> list:
     ]
 
 
+def _tap_mask(
+    sig_grids: Optional[Mapping[str, np.ndarray]], name: str, grid_shape: Tuple[int, ...]
+) -> Optional[np.ndarray]:
+    """The BH-FDR mask of tap ``name`` as booleans, or ``None`` if absent or of another shape."""
+    if sig_grids is None or name not in sig_grids:
+        return None
+    mask = np.asarray(sig_grids[name], dtype=bool)
+    return mask if mask.shape == grid_shape else None
+
+
+def _crosshair_candidates(
+    t_map: np.ndarray, significant: Optional[np.ndarray]
+) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """``(|t|, candidate mask, restricted)``: where a crosshair may sit.
+
+    The candidates are the finite voxels that are significant when the mask has
+    the map's shape and any of them survives, else every finite voxel; ``restricted``
+    says which of the two it is. The ONE rule behind :func:`_crosshair_voxel` and the
+    sentence under the headline (:func:`_crosshair_clause`), so the figure never
+    says "significant" about a crosshair that is not on a significant voxel.
+    """
+    magnitude = np.abs(np.asarray(t_map, dtype="float64"))
+    finite = np.isfinite(magnitude)
+    if significant is not None and significant.shape == magnitude.shape:
+        survivors = finite & significant
+        if survivors.any():
+            return magnitude, survivors, True
+    return magnitude, finite, False
+
+
+def _crosshair_clause(restricted: Sequence[bool], masks_given: bool) -> str:
+    """The sentence naming where the dashed green crosshair sits, true for this figure.
+
+    :param restricted: Per tap, whether its crosshair is restricted to significant
+        voxels (:func:`_crosshair_candidates`).
+    :param masks_given: Whether any tap had a usable significance mask.
+    """
+    where = "dashed green = crosshair at the largest"
+    if restricted and all(restricted):
+        return f"{where} significant |t|"
+    if any(restricted):
+        return f"{where} significant |t| (the largest |t| where none is significant)"
+    if masks_given:
+        return f"{where} |t| (nothing is significant)"
+    return f"{where} |t|"
+
+
 def _crosshair_voxel(t_map: np.ndarray, significant: Optional[np.ndarray]) -> Tuple[int, ...]:
     """The voxel of a 3-D map the three planes pass through.
 
@@ -582,13 +647,7 @@ def _crosshair_voxel(t_map: np.ndarray, significant: Optional[np.ndarray]) -> Tu
     positive polarity. The significance restriction is deliberate too: the
     largest ``|t|`` overall is often a lone voxel that failed FDR.
     """
-    magnitude = np.abs(np.asarray(t_map, dtype="float64"))
-    finite = np.isfinite(magnitude)
-    candidates = finite
-    if significant is not None and significant.shape == magnitude.shape:
-        survivors = finite & significant
-        if survivors.any():
-            candidates = survivors
+    magnitude, candidates, _ = _crosshair_candidates(t_map, significant)
     if not candidates.any():
         return (0,) * magnitude.ndim
     score = np.where(candidates, magnitude, -np.inf)
@@ -700,7 +759,15 @@ def plot_t_maps_3d(
     title, subtitle = _t_map_headline(
         arm, condition_a, condition_b, suptitle, note, legend
     )
-    legend_note = "; dashed green = crosshair at the largest significant |t|"
+    masks = {
+        name: _tap_mask(sig_grids, name, grid_shape) for name, _ in ordered
+    }
+    restricted = [
+        _crosshair_candidates(values, masks[name])[2] for name, values in ordered
+    ]
+    legend_note = "; " + _crosshair_clause(
+        restricted, masks_given=any(mask is not None for mask in masks.values())
+    )
     legend_note += _prefix_note(shared_prefix)
     subtitle = _wrap_subtitle(subtitle + legend_note, fig_w)
     margin_top += 0.12 * subtitle.count("\n")
@@ -712,11 +779,7 @@ def plot_t_maps_3d(
 
     image = None
     for tap_index, (name, values) in enumerate(ordered):
-        mask = None
-        if sig_grids is not None and name in sig_grids:
-            mask = np.asarray(sig_grids[name], dtype=bool)
-            if mask.shape != grid_shape:
-                mask = None
+        mask = masks[name]
         labels = None
         if label_grids is not None and name in label_grids:
             labels = np.asarray(label_grids[name])
@@ -1174,6 +1237,38 @@ def _validation_points(rows: Sequence[Mapping[str, Any]]) -> Tuple[np.ndarray, n
     return where[kept], values[kept]
 
 
+#: Markers and dash patterns the tap lines of the curve cycle through, so two lines
+#: differ in more than a hue where they overlap.
+_TAP_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "<", ">", "*")
+_TAP_LINESTYLES = ("-", "--", "-.", ":")
+
+
+def _tap_line_styles(n_taps: int) -> List[Dict[str, Any]]:
+    """One ``{color, marker, linestyle}`` per tap line of the curve.
+
+    Colours are CATEGORICAL, not a ramp: ``tab10`` for up to ten taps (nine
+    near-neighbours of a sequential map cannot be told apart at a crossing) and
+    ``tab20`` beyond. The marker advances with the tap and shifts one place each
+    time the palette wraps, so no two of up to 200 taps share colour and marker;
+    the dash pattern cycles on top. The legend is built from the same lines, so it
+    always matches.
+
+    :param n_taps: How many tap lines the figure has.
+    :type n_taps: int
+    :return: ``n_taps`` style dictionaries for ``Axes.plot``.
+    :rtype: List[Dict[str, Any]]
+    """
+    palette = plt.get_cmap("tab10" if n_taps <= 10 else "tab20").colors
+    return [
+        {
+            "color": palette[index % len(palette)],
+            "marker": _TAP_MARKERS[(index + index // len(palette)) % len(_TAP_MARKERS)],
+            "linestyle": _TAP_LINESTYLES[index % len(_TAP_LINESTYLES)],
+        }
+        for index in range(n_taps)
+    ]
+
+
 #: Taps up to which the curve's legend is one column in the larger font.
 _LEGEND_SINGLE_COLUMN_MAX_TAPS = 8
 
@@ -1204,10 +1299,11 @@ def plot_topography_curve(
 
     The figure the live callback rewrites after every draw, from the rows of its
     ``metrics.jsonl`` (``null`` for a value that was not finite). Stacked panels
-    share the step axis: Moran's I of every tap (thin, coloured by depth, named in
-    a legend to the right of the axes with the shared path prefix as its title)
-    with the mean over taps in black; the clusters found for each polarity; the mean number
-    of BH-FDR-significant units; and the validation loss when a row carries one,
+    share the step axis: Moran's I of every tap (thin, each its own categorical
+    colour, marker and dash pattern, named in a legend to the right of the axes
+    with the shared path prefix as its title) with the mean over taps in black;
+    the clusters found for each polarity; the mean number of BH-FDR-significant
+    units; and the validation loss when a row carries one,
     each validation once at the step it was measured (``val_loss_step``, see
     :func:`_validation_points`). A single row draws as markers, so the first
     frame is not an empty axis.
@@ -1231,9 +1327,14 @@ def plot_topography_curve(
     """
     if not rows:
         raise ValueError("cannot draw a topography curve from zero rows")
-    # Every validation is a measurement, whichever row repeats it: the points are
-    # read from ALL the rows, because merging a closing row over the full row of its
-    # step would otherwise drop the older validation only that full row carried.
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-019: the validation points are read
+    # from ALL the rows, not from the merged ones. Every validation is a measurement
+    # whichever row repeats it, and merging the closing metrics-only row over the full
+    # row of its step overwrites that row's older ``val_loss``, which can be the only
+    # place a validation (measured one cadence earlier) is recorded. Do NOT move this
+    # line below ``last_row_per_step``: the curve would silently lose a point.
+    # See decisions.md D-019; guarded by test_the_curve_keeps_every_validation_even_
+    # when_a_row_is_shadowed.
     val_steps, val_loss = _validation_points(rows)
     rows = last_row_per_step(rows)
 
@@ -1258,14 +1359,13 @@ def plot_topography_curve(
     axes = [row[0] for row in axes]
 
     moran_axis = axes[0]
-    colours = plt.get_cmap("viridis")(np.linspace(0.0, 0.9, max(1, len(taps))))
     tap_lines = []
-    for colour, tap in zip(colours, taps):
+    for style, tap in zip(_tap_line_styles(len(taps)), taps):
         (line,) = moran_axis.plot(
             steps,
             _series(rows, lambda row, tap=tap: row["per_tap"][tap]["morans_i"]),
-            color=colour, linewidth=0.7, alpha=0.65, marker="o", markersize=2,
-            label=tap_labels[tap],
+            linewidth=1.0, alpha=0.85, markersize=3.2, label=tap_labels[tap],
+            **style,
         )
         tap_lines.append(line)
     (mean_line,) = moran_axis.plot(

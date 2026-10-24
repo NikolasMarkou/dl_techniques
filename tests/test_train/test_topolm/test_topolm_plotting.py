@@ -1579,7 +1579,9 @@ class TestTheClusterFigureNamesItsTapAndCountsCorrectly:
         fig = _cluster_figure_title(monkeypatch, tmp_path, names, names[-1])
         title = fig.axes[0].get_title()
         plt.close(fig)
-        assert title == "block_3/mlp_tap (raw): 1 cluster", title
+        # Re-pinned on purpose (step 4.5, D2): the figure shows condition A's
+        # clusters only and now says so; it was "block_3/mlp_tap (raw): 1 cluster".
+        assert title == "block_3/mlp_tap (raw), condition a: 1 cluster", title
 
     def test_a_single_tap_keeps_its_whole_path_and_stays_inside_the_figure(
         self, monkeypatch, tmp_path
@@ -2056,3 +2058,368 @@ class TestTheCurveNamesItsTapLines:
         entries = [t.get_text() for t in legend.get_texts()]
         plt.close(fig)
         assert len(handles) == len(entries) == len(names) + 1
+
+
+# =====================================================================
+# Step 4.5 (plan-2026-10-23T190557-972a9ac5, decision D-019, defects D2, D3, D5,
+# D6): what the real GPU run's figures got wrong. Written RED-first against the
+# c28fc90b5 drawers.
+# =====================================================================
+
+import re
+
+
+def _cluster_report_3d(names, populated, shape=(4, 5, 5), contrast=("a", "b")):
+    """Like :func:`_cluster_report_and_arrays`, with 3-D grids (a montage)."""
+    rng = np.random.default_rng(2)
+    labels = {n: np.zeros(shape, dtype=int) for n in names}
+    labels[populated][1:3, 1:4, 1:3] = 1
+    report = {
+        "contrast": list(contrast),
+        "arms": {"raw": {"per_tap": {
+            n: {"morans_i": {"standard": 0.3}} for n in names}}},
+    }
+    arrays = {"arms": {"raw": {
+        "t_maps": {n: rng.normal(size=shape) * 2 for n in names},
+        "sig_grids": {n: np.zeros(shape, dtype=bool) for n in names},
+        "label_grids": labels,
+    }}}
+    return report, arrays
+
+
+def _cluster_figure(monkeypatch, tmp_path, report, arrays):
+    from train.topolm import common
+
+    holder = {}
+    original = Figure.savefig
+
+    def recording(self, path, *args, **kwargs):
+        if "clusters_" in str(path):
+            holder["fig"] = self
+        return original(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", recording)
+    common.plot_topography(report, arrays, str(tmp_path))
+    return holder["fig"]
+
+
+class TestTheClusterFigureNamesTheConditionItShows:
+    """D2: ``clusters_raw.png`` drew condition A's clusters and said nothing about
+    it, while the t-map of the same tap outlines both conditions."""
+
+    def test_the_2d_title_names_condition_a(self, monkeypatch, tmp_path):
+        names = _real_tap_names(4)
+        report, arrays = _cluster_report_and_arrays(names, names[-1])
+        fig = _cluster_figure(monkeypatch, tmp_path, report, arrays)
+        title = fig.axes[0].get_title()
+        plt.close(fig)
+        assert title == "block_3/mlp_tap (raw), condition a: 1 cluster"
+
+    def test_the_name_is_the_contrasts_first_condition_not_a_literal(
+        self, monkeypatch, tmp_path
+    ):
+        names = _real_tap_names(2)
+        report, arrays = _cluster_report_and_arrays(names, names[-1])
+        report["contrast"] = ["tall", "short"]
+        fig = _cluster_figure(monkeypatch, tmp_path, report, arrays)
+        title = fig.axes[0].get_title()
+        plt.close(fig)
+        assert "condition tall" in title and "short" not in title, title
+
+    def test_the_figure_shows_the_grid_the_title_names(self, monkeypatch, tmp_path):
+        """The condition in the title is the condition of the drawn labels: the
+        figure's image holds A's cluster cells and nothing of B's."""
+        names = _real_tap_names(2)
+        report, arrays = _cluster_report_and_arrays(names, names[-1])
+        arrays["arms"]["raw"]["label_grids_b"] = {
+            n: np.zeros((8, 8), dtype=int) for n in names
+        }
+        arrays["arms"]["raw"]["label_grids_b"][names[-1]][6:8, 5:8] = 1
+        fig = _cluster_figure(monkeypatch, tmp_path, report, arrays)
+        drawn = np.asarray(fig.axes[0].images[0].get_array())
+        plt.close(fig)
+        assert np.array_equal(drawn > 0, arrays["arms"]["raw"]["label_grids"][names[-1]] > 0)
+
+    def test_the_3d_montage_title_names_condition_a_too(self, monkeypatch, tmp_path):
+        names = _real_tap_names(2)
+        report, arrays = _cluster_report_3d(names, names[-1])
+        fig = _cluster_figure(monkeypatch, tmp_path, report, arrays)
+        title = fig._suptitle.get_text()
+        plt.close(fig)
+        assert title == "block_1/mlp_tap (raw), condition a: 1 cluster", title
+
+    @pytest.mark.parametrize("three_d", [False, True], ids=["2d", "3d"])
+    def test_a_long_title_stays_inside_the_figure(self, monkeypatch, tmp_path, three_d):
+        """The longest realistic title (a readout arm, a double-digit block, a
+        clipped palette) must not leave the figure."""
+        names = _real_tap_names(12)
+        build = _cluster_report_3d if three_d else _cluster_report_and_arrays
+        report, arrays = build(names, names[-2])
+        report["contrast"] = ["sentences_a", "sentences_b"]
+        arrays["arms"]["readout"] = arrays["arms"].pop("raw")
+        report["arms"]["readout"] = report["arms"].pop("raw")
+        fig = _cluster_figure(monkeypatch, tmp_path, report, arrays)
+        text = fig._suptitle if three_d else fig.axes[0].title
+        fig.canvas.draw()
+        box = text.get_window_extent(fig.canvas.get_renderer())
+        content = text.get_text()
+        bounds = fig.bbox
+        plt.close(fig)
+        assert "condition sentences_a" in content.replace("\n", " ")
+        assert _inside(box, bounds), (content, box, bounds)
+
+
+def _tap_lines(fig):
+    """The per-tap Moran's I lines of a curve figure, in tap order (not the mean,
+    not the zero line)."""
+    axis = fig.axes[0]
+    return [
+        line for line in axis.lines
+        if line.get_label() and not line.get_label().startswith(("mean", "_"))
+    ]
+
+
+def _rgb_distance(a, b):
+    return float(np.linalg.norm(np.asarray(a[:3]) - np.asarray(b[:3])))
+
+
+def _curve_figure(monkeypatch, tmp_path, n_blocks):
+    names = _real_tap_names(n_blocks)
+    return _captured_figure(
+        monkeypatch,
+        lambda: plot_topography_curve(
+            _legend_rows(names), output_path=str(tmp_path / f"palette{n_blocks}.png")
+        ),
+    )
+
+
+class TestTheTapLinesCanBeToldApart:
+    """D3: eight tap lines in near-identical viridis hues could not be matched to
+    the legend where they overlapped."""
+
+    @pytest.mark.parametrize("n_blocks", [1, 4, 5], ids=["2taps", "8taps", "10taps"])
+    def test_up_to_ten_taps_get_well_separated_colours_and_their_own_marker(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        fig = _curve_figure(monkeypatch, tmp_path, n_blocks)
+        lines = _tap_lines(fig)
+        plt.close(fig)
+        assert len(lines) == 2 * n_blocks
+        colours = [matplotlib.colors.to_rgba(line.get_color()) for line in lines]
+        nearest = min(
+            _rgb_distance(a, b)
+            for i, a in enumerate(colours) for b in colours[i + 1:]
+        )
+        assert nearest >= 0.25, f"two tap lines are nearly the same colour ({nearest:.3f})"
+        assert len({line.get_marker() for line in lines}) == len(lines), "markers repeat"
+
+    @pytest.mark.parametrize("n_blocks", [1, 5, 8, 12], ids=["2taps", "10taps", "16taps", "24taps"])
+    def test_no_two_tap_lines_share_colour_marker_and_style(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        fig = _curve_figure(monkeypatch, tmp_path, n_blocks)
+        lines = _tap_lines(fig)
+        plt.close(fig)
+        triples = [
+            (matplotlib.colors.to_hex(line.get_color()), line.get_marker(),
+             line.get_linestyle())
+            for line in lines
+        ]
+        assert len(set(triples)) == len(triples), triples
+
+    def test_beyond_ten_taps_the_colours_come_from_a_20_colour_categorical_palette(
+        self, monkeypatch, tmp_path
+    ):
+        fig = _curve_figure(monkeypatch, tmp_path, 12)
+        lines = _tap_lines(fig)
+        plt.close(fig)
+        colours = [matplotlib.colors.to_hex(line.get_color()) for line in lines]
+        tab20 = {matplotlib.colors.to_hex(c) for c in plt.get_cmap("tab20").colors}
+        assert len(lines) == 24
+        assert set(colours) <= tab20, "a colour outside the categorical palette"
+        assert len(set(colours)) == 20, "the 20 colours are not all used"
+
+    def test_the_mean_line_is_black_and_no_tap_line_is(self, monkeypatch, tmp_path):
+        fig = _curve_figure(monkeypatch, tmp_path, 3)
+        mean = next(l for l in fig.axes[0].lines if l.get_label() == "mean over taps")
+        taps = _tap_lines(fig)
+        plt.close(fig)
+        assert matplotlib.colors.same_color(mean.get_color(), "black")
+        assert not any(matplotlib.colors.same_color(l.get_color(), "black") for l in taps)
+
+    @pytest.mark.parametrize("n_blocks", [1, 4, 12], ids=["2taps", "8taps", "24taps"])
+    def test_every_legend_handle_matches_its_line(self, monkeypatch, tmp_path, n_blocks):
+        fig = _curve_figure(monkeypatch, tmp_path, n_blocks)
+        legend = fig.axes[0].get_legend()
+        by_label = {l.get_label(): l for l in fig.axes[0].lines if l.get_label()}
+        checked = 0
+        for handle, text in zip(legend.legend_handles, legend.get_texts()):
+            line = by_label[text.get_text()]
+            assert matplotlib.colors.same_color(handle.get_color(), line.get_color())
+            assert handle.get_marker() == line.get_marker(), text.get_text()
+            assert handle.get_linestyle() == line.get_linestyle(), text.get_text()
+            checked += 1
+        plt.close(fig)
+        assert checked == 2 * n_blocks + 1
+
+    def test_the_lines_are_visible_enough_to_follow(self, monkeypatch, tmp_path):
+        fig = _curve_figure(monkeypatch, tmp_path, 4)
+        lines = _tap_lines(fig)
+        plt.close(fig)
+        assert all(l.get_linewidth() >= 0.8 and l.get_alpha() >= 0.75 for l in lines)
+
+
+class TestTheCrosshairSentenceIsTrueAtEveryStep:
+    """D5: the 3-D subtitle said the crosshair sits at the largest SIGNIFICANT
+    ``|t|`` at step 0, where nothing is significant."""
+
+    def _text(self, monkeypatch, tmp_path, volume, significant, n_taps=1):
+        names = _real_tap_names(n_taps)[:n_taps]
+        maps = {n: volume for n in names}
+        sig = None if significant is None else {
+            n: (significant[i] if isinstance(significant, list) else significant)
+            for i, n in enumerate(names)
+        }
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids=sig, condition_a="a", condition_b="b",
+                output_path=str(tmp_path / "cross.png"),
+            ),
+        )
+        text = _subtitle_of(fig)
+        plt.close(fig)
+        return text
+
+    def test_when_something_is_significant_it_says_so_plainly(self, monkeypatch, tmp_path):
+        volume, significant = _volume_fixture()
+        text = self._text(monkeypatch, tmp_path, volume, significant)
+        assert "dashed green = crosshair at the largest significant |t|" in text
+        assert "nothing is significant" not in text and "where none" not in text
+
+    def test_when_nothing_is_significant_it_does_not_claim_significance(
+        self, monkeypatch, tmp_path
+    ):
+        volume, _ = _volume_fixture()
+        text = self._text(monkeypatch, tmp_path, volume, np.zeros(_VOLUME, dtype=bool))
+        assert "dashed green = crosshair at the largest |t| (nothing is significant)" in text
+        assert "largest significant" not in text
+
+    def test_without_a_mask_it_names_the_largest_abs_t_and_claims_nothing_more(
+        self, monkeypatch, tmp_path
+    ):
+        volume, _ = _volume_fixture()
+        text = self._text(monkeypatch, tmp_path, volume, None)
+        assert "dashed green = crosshair at the largest |t|" in text
+        assert "largest significant" not in text and "nothing is significant" not in text
+
+    def test_when_only_some_taps_have_significant_cells_it_names_the_fallback(
+        self, monkeypatch, tmp_path
+    ):
+        volume, significant = _volume_fixture()
+        none = np.zeros(_VOLUME, dtype=bool)
+        text = self._text(monkeypatch, tmp_path, volume, [significant, none], n_taps=2)
+        assert (
+            "crosshair at the largest significant |t| "
+            "(the largest |t| where none is significant)"
+        ) in text
+
+    def test_a_mask_of_the_wrong_shape_counts_as_no_mask(self, monkeypatch, tmp_path):
+        volume, _ = _volume_fixture()
+        text = self._text(monkeypatch, tmp_path, volume, np.ones((2, 2, 2), dtype=bool))
+        assert "largest significant" not in text
+
+    def test_the_sentence_and_the_crosshair_use_one_rule(self):
+        """The count of taps the sentence calls significant is the count whose
+        crosshair is restricted to significant cells (both from the same helper)."""
+        from train.topolm.plotting import _crosshair_voxel
+
+        volume, significant = _volume_fixture()
+        assert _crosshair_voxel(volume, significant) == (5, 1, 9)
+        assert _crosshair_voxel(volume, np.zeros(_VOLUME, dtype=bool)) == (0, 7, 13)
+
+
+class TestTheSubtitleBreaksAtClauses:
+    """D6: the 3-D subtitle wrapped mid-phrase (``dashed`` at the end of one line,
+    ``magenta = b`` at the start of the next)."""
+
+    TEXT = (
+        "positive = a, negative = b; hatched = not significant after BH-FDR; "
+        "outline = cluster of significant units (solid black = a, dashed magenta = b); "
+        "dashed green = crosshair at the largest significant |t| | step 400 | "
+        "smoke stimuli, n=5/5 per condition"
+    )
+
+    def _clauses(self, text):
+        # a clause ends at "; " or at the bar of " | " (never inside "|t|")
+        return re.split(r"(?<=;) |(?<= \|) ", text)
+
+    @pytest.mark.parametrize("width_in", [6.0, 7.5, 9.6])
+    def test_every_break_falls_on_a_clause_boundary_when_each_clause_fits(self, width_in):
+        from train.topolm.plotting import _SUBTITLE_CHARS_PER_INCH, _wrap_subtitle
+
+        columns = max(20, int((width_in - 0.4) * _SUBTITLE_CHARS_PER_INCH))
+        assert max(map(len, self._clauses(self.TEXT))) <= columns, "fixture too wide"
+        wrapped = _wrap_subtitle(self.TEXT, width_in)
+        lines = wrapped.split("\n")
+        assert len(lines) > 1
+        for line in lines[:-1]:
+            assert line.endswith((";", " |")), line
+        assert all(len(line) <= columns for line in lines)
+        assert " ".join(lines) == self.TEXT, "the wrap lost or changed text"
+
+    def test_a_clause_wider_than_the_figure_falls_back_to_spaces(self):
+        from train.topolm.plotting import _wrap_subtitle
+
+        wrapped = _wrap_subtitle(self.TEXT, 3.0)
+        lines = wrapped.split("\n")
+        assert " ".join(lines) == self.TEXT
+        assert all(len(line) <= 39 for line in lines), lines
+
+    def test_the_bars_of_abs_t_are_not_a_boundary(self):
+        """``|t|`` has a pipe on each side and a space after the second: a break
+        there would split ``the largest |t|`` from the words it belongs to. The
+        clause fits on a line of its own, so it must move down whole."""
+        from train.topolm.plotting import _wrap_subtitle
+
+        first = "A" * 21 + ";"
+        second = "the largest |t| " + "B" * 20
+        wrapped = _wrap_subtitle(f"{first} {second}", 3.2)       # 42 columns
+        assert wrapped.split("\n") == [first, second]
+
+    def test_a_bar_between_spaces_is_a_boundary(self):
+        from train.topolm.plotting import _wrap_subtitle
+
+        first = "A" * 20 + " |"
+        second = "B" * 30
+        assert _wrap_subtitle(f"{first} {second}", 3.2).split("\n") == [first, second]
+
+    def test_text_that_fits_is_unchanged(self):
+        from train.topolm.plotting import _wrap_subtitle
+
+        assert _wrap_subtitle("positive = a, negative = b", 6.0) == "positive = a, negative = b"
+
+    def test_the_real_3d_subtitle_never_breaks_inside_a_phrase(self, monkeypatch, tmp_path):
+        names = _real_tap_names(2)
+        rng = np.random.default_rng(3)
+        maps = {n: rng.normal(size=(7, 8, 7)) for n in names}
+        labels = {n: np.zeros((7, 8, 7), dtype=int) for n in names}
+        for grid in labels.values():
+            grid[1:3, 1:3, 1:3] = 1
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids={n: np.abs(m) > 1 for n, m in maps.items()},
+                label_grids=labels, label_grids_b=labels, condition_a="a",
+                condition_b="b", note=_LIVE_NOTE,
+                output_path=str(tmp_path / "wrap3d.png"),
+            ),
+        )
+        subtitle = next(
+            t.get_text() for t in fig.texts if t is not fig._suptitle and t.get_text()
+        )
+        plt.close(fig)
+        lines = subtitle.split("\n")
+        assert len(lines) >= 2, subtitle
+        for line in lines[:-1]:
+            assert line.endswith((";", " |")), f"a break inside a phrase: {line!r}"
