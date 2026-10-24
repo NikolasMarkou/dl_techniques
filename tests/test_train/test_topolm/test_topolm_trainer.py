@@ -802,8 +802,11 @@ class TestPoolingIsOverTextTokensOnly:
     reproduce, and its thresholds sit well inside the six measured pairs.
     """
 
-    @_KINDS
-    def test_it_equals_an_independent_loop_over_text_positions(self, kind):
+    def test_it_equals_an_independent_loop_over_text_positions(self):
+        """The fallback path (a preprocessor that can only be called): CLS, SEP and
+        PAD ids are what separates text from the rest. The gpt2 framing has its
+        own oracle in ``TestStimuliAreFramedLikeTheTrainingStream`` (D-024)."""
+        kind = "stub"
         backbone, preprocessor = _model(kind, 64), _tokenizer(kind, 64)
         prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
         ids = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
@@ -865,16 +868,21 @@ class TestPoolingIsOverTextTokensOnly:
     @pytest.mark.parametrize(
         "excluded", ["cls", "sep", "pad"], ids=["cls", "sep", "pad"]
     )
-    @_KINDS
     def test_a_special_token_position_does_not_enter_the_response(
-        self, kind, excluded
+        self, excluded
     ):
         """Set every CLS (or SEP, or PAD) activation to 1e6: nothing moves.
+
+        The fallback path only: the gpt2 preprocessor's stimuli carry no CLS or SEP
+        any more (D-024), so a poison keyed on those ids would mark nothing and
+        pass vacuously; ``TestStimuliAreFramedLikeTheTrainingStream`` poisons the
+        end-of-text prefix and the pads instead.
 
         Excluding only the pad ids would pass the loop oracle on a tokenizer
         whose CLS and SEP happened to be quiet; the huge constant cannot hide.
         The control below poisons one TEXT position and the response does move.
         """
+        kind = "stub"
         backbone, preprocessor = _model(kind, 48), _tokenizer(kind, 48)
         prompts = list(SMOKE_STIMULI["a"])
         token = int(getattr(preprocessor, f"{excluded}_token_id"))
@@ -995,6 +1003,255 @@ class TestPoolingIsOverTextTokensOnly:
         assert unfixed > 0.05 * units, (unfixed, units)
         assert fixed < 0.25 * unfixed, (fixed, unfixed)
         assert fixed < 0.02 * units, (fixed, units)
+
+
+class _SpyBackbone:
+    """A real backbone that records the ids it is given; everything else delegates."""
+
+    def __init__(self, backbone):
+        self._backbone = backbone
+        self.calls = []
+
+    def __getattr__(self, name):
+        return getattr(self._backbone, name)
+
+    def __call__(self, tokens, **kwargs):
+        self.calls.append(np.asarray(tokens).copy())
+        return self._backbone(tokens, **kwargs)
+
+
+class _RawEncoder:
+    """The raw-encoder surface of a tiktoken ``Encoding``: ``encode`` and ``eot_token``.
+
+    Character codes as ids in ``[10, VOCAB)`` and an end-of-text id (77) that is
+    neither the real gpt2 one nor any CLS/SEP/PAD id, so an id typed into the code
+    fails here.
+    """
+
+    eot_token = 77
+
+    def encode(self, text):
+        return [10 + (ord(c) * 7) % (VOCAB - 10) for c in str(text)]
+
+
+class _RawEncoderPreprocessor(SpecialIdTokenizer):
+    """``SpecialIdTokenizer`` that also publishes ``.tokenizer``, like the real one."""
+
+    def __init__(self, max_length):
+        super().__init__(max_length)
+        self.tokenizer = _RawEncoder()
+
+
+def _gpt2_encoding():
+    import tiktoken
+
+    return tiktoken.get_encoding("gpt2")
+
+
+def _ids_the_model_sees(backbone, prompts, preprocessor, **kwargs):
+    """``(ids the model was called with, pooled responses)``: one spy per call.
+
+    The model is built first, so the one-row build call of an unbuilt backbone is
+    not mistaken for a stimulus batch.
+    """
+    backbone(np.zeros((1, 4), dtype="int32"), training=False)
+    spy = _SpyBackbone(backbone)
+    pooled = extract_tap_activations(spy, prompts, preprocessor, **kwargs)
+    return np.concatenate(spy.calls) if spy.calls else None, pooled
+
+
+def _framed_oracle(backbone, encoding, prompts, keep=None, pad_to=None):
+    """Independent oracle: each sentence ALONE, ``[eot] + text`` (+ optional pads).
+
+    The mean over the text positions (1 .. n) of one forward pass of one sentence.
+    No batching and, by default, no padding, so neither can be what the function
+    under test is compared against.
+    """
+    pooled = {tap.path: [] for tap in backbone.tap_layers}
+    for prompt in prompts:
+        text = encoding.encode(prompt)[:keep]
+        ids = [int(encoding.eot_token)] + text
+        if pad_to is not None:
+            ids = ids + [50259] * (pad_to - len(ids))
+        raw = _raw_taps(backbone, np.asarray([ids], dtype="int32"))
+        for path, values in raw.items():
+            pooled[path].append(values[0, 1:1 + len(text)].mean(axis=0))
+    return {path: np.stack(rows) for path, rows in pooled.items()}
+
+
+class TestStimuliAreFramedLikeTheTrainingStream:
+    """D-024: a stimulus is ``<eot> text pad...``, not ``[CLS] text [SEP] pad...``.
+
+    The model is causal: a text token's activation depends on everything before
+    it. The packed training stream never contains CLS; a document there starts
+    after ``<|endoftext|>``. Framing the stimuli with CLS fed every text token a
+    context the model never trained on, and the trained 2D example's selective
+    "islands" (38.9 significant units per tap, 5/7 clusters) were largely a
+    product of it: with ``<eot>`` instead, 0.0 and 0/0 (review pass 3, concern 1).
+
+    Pooling is over the text tokens, so the prefix position is excluded exactly as
+    CLS was (a constant position weighted 1/n would re-introduce a length
+    dependence). The gpt2 tests run on the REAL preprocessor.
+    """
+
+    PROMPTS = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
+
+    def _ids(self, window=512):
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", window)
+        return backbone, preprocessor, _ids_the_model_sees(
+            backbone, self.PROMPTS, preprocessor
+        )
+
+    def test_every_stimulus_starts_with_the_end_of_text_id_and_carries_no_cls_or_sep(
+        self,
+    ):
+        _, preprocessor, (ids, _) = self._ids()
+        eot = int(_gpt2_encoding().eot_token)
+        assert eot == int(preprocessor.tokenizer.eot_token) == 50256
+        assert np.all(ids[:, 0] == eot), ids[:, 0]
+        assert not np.isin(
+            ids, [preprocessor.cls_token_id, preprocessor.sep_token_id]
+        ).any(), "a CLS or SEP id reached the model"
+        assert np.count_nonzero(ids == eot) == len(self.PROMPTS), (
+            "the end-of-text id appears somewhere other than the prefix"
+        )
+
+    def test_the_text_ids_are_the_plain_tokenization_followed_by_pads_only(self):
+        _, preprocessor, (ids, _) = self._ids()
+        encoding = _gpt2_encoding()
+        for row, prompt in enumerate(self.PROMPTS):
+            expected = encoding.encode(prompt)
+            np.testing.assert_array_equal(ids[row, 1:1 + len(expected)], expected)
+            assert np.all(ids[row, 1 + len(expected):] == preprocessor.pad_token_id)
+
+    def test_the_end_of_text_id_is_read_from_the_encoder_not_typed_in(self):
+        backbone = build_backbone(_config())
+        preprocessor = _RawEncoderPreprocessor(max_length=LENGTH)
+        ids, _ = _ids_the_model_sees(backbone, ["ab", "abcd"], preprocessor)
+        assert np.all(ids[:, 0] == _RawEncoder.eot_token), ids[:, 0]
+        assert not np.isin(ids, [CLS_ID, SEP_ID]).any()
+
+    def test_the_batch_is_padded_to_the_longest_stimulus_plus_the_prefix_only(self):
+        _, _, (ids, _) = self._ids(window=512)
+        encoding = _gpt2_encoding()
+        longest = max(len(encoding.encode(p)) for p in self.PROMPTS)
+        assert ids.shape == (len(self.PROMPTS), longest + 1), ids.shape
+
+    def test_it_equals_an_independent_loop_one_sentence_at_a_time(self):
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        expected = _framed_oracle(backbone, _gpt2_encoding(), self.PROMPTS)
+        for path, values in pooled.items():
+            _forward_close(values, expected[path])
+
+    def test_more_padding_after_the_text_does_not_change_the_response(self):
+        """The same sentences with 60 more pad ids behind them: same numbers.
+
+        The model is causal (``test_the_model_is_causal_so_the_trailing_pads_cannot_matter``),
+        so the batch padded to the longest stimulus and a window of 70 agree.
+        """
+        backbone, preprocessor = _model("gpt2", 80), _tokenizer("gpt2", 512)
+        pooled = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        padded = _framed_oracle(
+            backbone, _gpt2_encoding(), self.PROMPTS, pad_to=70
+        )
+        for path, values in pooled.items():
+            _forward_close(values, padded[path])
+
+    def test_a_stimulus_longer_than_the_position_table_is_cut_not_refused(self):
+        """Window = min(preprocessor window, model ``max_seq_len``); prefix included."""
+        backbone, preprocessor = _model("gpt2", 8), _tokenizer("gpt2", 512)
+        ids, pooled = _ids_the_model_sees(backbone, self.PROMPTS, preprocessor)
+        assert ids.shape[1] == 8, ids.shape
+        expected = _framed_oracle(
+            backbone, _gpt2_encoding(), self.PROMPTS, keep=7
+        )
+        for path, values in pooled.items():
+            _forward_close(values, expected[path])
+
+    @pytest.mark.parametrize("poisoned", ["prefix", "pad"])
+    def test_a_non_text_position_does_not_enter_the_response(self, poisoned):
+        """1e6 at every end-of-text prefix (or every pad) position: nothing moves.
+
+        The text-position control below moves the response by more than 1, so the
+        poison is visible when it lands on a pooled position, and the hit counter
+        proves it landed on positions at all.
+        """
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        clean = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        hits = []
+
+        def select(ids):
+            marked = np.zeros(ids.shape, dtype=bool)
+            if poisoned == "prefix":
+                marked[:, 0] = True
+            else:
+                marked |= ids == int(preprocessor.pad_token_id)
+            hits.append(int(marked.sum()))
+            return marked
+
+        poisoned_result = extract_tap_activations(
+            _PoisonedBackbone(backbone, select), self.PROMPTS, preprocessor
+        )
+        assert hits and hits[0] > 0, "the poison marked no position"
+        for path in clean:
+            _forward_close(poisoned_result[path], clean[path])
+
+        def first_text_position(ids):
+            marked = np.zeros(ids.shape, dtype=bool)
+            marked[:, 1] = True
+            return marked
+
+        moved = extract_tap_activations(
+            _PoisonedBackbone(backbone, first_text_position),
+            self.PROMPTS, preprocessor,
+        )
+        for path in clean:
+            assert np.max(np.abs(moved[path] - clean[path])) > 1.0, path
+
+    def test_a_sentence_with_no_text_token_is_refused_by_name_before_any_pass(self):
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        spy = _SpyBackbone(backbone)
+        with pytest.raises(ValueError) as excinfo:
+            extract_tap_activations(spy, ["alpha beta", "", "gamma"], preprocessor)
+        message = str(excinfo.value)
+        assert "index 1" in message and "''" in message, message
+        assert "no text token" in message, message
+        assert spy.calls == []
+
+    def test_the_prefix_is_a_real_input_so_it_changes_the_response(self):
+        """The framing is a choice that matters: with CLS in front the numbers differ.
+
+        Without this the tests above would pass for a framing that ignored the
+        prefix altogether. The old CLS framing is rebuilt by hand and fed to the
+        same backbone.
+        """
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        framed = extract_tap_activations(backbone, self.PROMPTS, preprocessor)
+        encoding = _gpt2_encoding()
+        with_cls = []
+        for prompt in self.PROMPTS:
+            text = encoding.encode(prompt)
+            ids = np.asarray(
+                [[int(preprocessor.cls_token_id)] + text], dtype="int32"
+            )
+            raw = _raw_taps(backbone, ids)
+            with_cls.append(
+                {path: values[0, 1:].mean(axis=0) for path, values in raw.items()}
+            )
+        for path in framed:
+            cls_response = np.stack([row[path] for row in with_cls])
+            assert np.max(np.abs(framed[path] - cls_response)) > 1e-3, path
+
+    def test_a_call_only_preprocessor_still_gets_the_cls_sep_pad_exclusion(self):
+        """No ``.tokenizer``: the previous path, the non-text ids left out."""
+        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+        assert not hasattr(preprocessor, "tokenizer")
+        tokens, text, _ = C._encode_stimuli(preprocessor, ["ab", "abcd"], None)
+        assert tokens.shape == (2, 24)
+        assert np.all(tokens[:, 0] == CLS_ID)
+        assert text.sum(axis=1).tolist() == [2, 4]
+        assert not text[:, 0].any()
 
 
 # ---------------------------------------------------------------------

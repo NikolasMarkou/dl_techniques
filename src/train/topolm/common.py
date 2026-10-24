@@ -296,9 +296,10 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
     )
 
 
-#: The ids the pipeline wraps (CLS, SEP) and pads (PAD) every stimulus with: the
-#: tokens that are not text. :func:`extract_tap_activations` leaves them out of a
-#: unit's response; the attribute names are the preprocessor's own.
+#: The ids a call-only preprocessor wraps (CLS, SEP) and pads (PAD) every stimulus
+#: with: the tokens that are not text. :func:`_encode_stimuli` marks them as such
+#: on the fallback path (a preprocessor with a raw encoder is framed ``<eot> text
+#: pad...`` and needs no id list); the attribute names are the preprocessor's own.
 _NON_TEXT_ID_ATTRIBUTES = (
     "cls_token_id",
     "sep_token_id",
@@ -306,6 +307,95 @@ _NON_TEXT_ID_ATTRIBUTES = (
 )
 
 _SPECIAL_ID_ATTRIBUTES = _NON_TEXT_ID_ATTRIBUTES + ("mask_token_id",)
+
+
+def _encode_stimuli(
+    preprocessor: Any,
+    prompts: Sequence[str],
+    max_positions: Optional[int],
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    """Encode ``prompts`` the way the packed training stream presents text.
+
+    Contract. ``preprocessor`` is the tokenizer the trainer built. ``prompts`` is
+    a non-empty list of strings. ``max_positions`` is the model's position-table
+    length, or ``None`` when unknown. Returns ``(tokens, text, non_text)``:
+    ``tokens`` is ``(num_prompts, window)`` int32, ``text`` the same shape bool
+    (True where the id is a text token, the only positions a response is pooled
+    over) and ``non_text`` a phrase naming what the other positions hold, for an
+    error message. Never raises on an empty prompt: ``text`` simply has no True in
+    that row, and the caller refuses it by name.
+
+    Two framings.
+
+    * The preprocessor owns a raw encoder (``.tokenizer.encode`` and
+      ``.tokenizer.eot_token``, as :class:`~dl_techniques.utils.tokenizer.
+      TiktokenPreprocessor` does): ``<eot> text pad...``. The end-of-text id is
+      the encoder's own ``eot_token``, read from the object
+      ``preprocess_clm_dataset`` takes it from; the text ids are the plain
+      ``encode`` of the prompt; the pad id is the preprocessor's
+      ``pad_token_id`` (the encoder's ``eot_token`` when it has none). The window
+      is the longest encoded prompt plus the prefix, never the trainer's 512, cut
+      to ``min(preprocessor.max_length, max_positions)`` where those are known:
+      a causal model's text positions do not depend on the pads behind them, so
+      the shorter window gives identical responses for less compute.
+    * Otherwise (a test double that can only be called): the previous framing,
+      whatever ``preprocessor(prompts)`` returns, with the CLS, SEP and PAD ids
+      its attributes name marked as not text.
+    """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-024: frame the stimuli as the
+    # training stream presents text. Do NOT frame them ``[CLS] text [SEP]``: the
+    # model never sees CLS in training and, being causal, every text token attends
+    # to it (on the trained 2D example the selective "islands" of 38.9
+    # significant units per tap and 5/7 clusters were largely that prefix: with
+    # ``<eot>`` 0.0 and 0/0). Do NOT pool the prefix position: a constant
+    # position weighted 1/n re-introduces a length dependence (it is not in
+    # ``text``). Do NOT type the end-of-text id (50256 is gpt2's; another
+    # encoding has another): read it from the encoder, where
+    # ``preprocess_clm_dataset`` reads it. See decisions.md D-024; guarded by
+    # ``TestStimuliAreFramedLikeTheTrainingStream``.
+    encoder = getattr(preprocessor, "tokenizer", None)
+    eot = getattr(encoder, "eot_token", None)
+    if not callable(getattr(encoder, "encode", None)) or eot is None:
+        # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
+        # or a LIST of strings and raises TypeError on anything but those -- the
+        # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline
+        # uses and not this callable.
+        tokens = np.asarray(preprocessor(list(prompts))["input_ids"], dtype="int32")
+        non_text_ids = [
+            int(getattr(preprocessor, name))
+            for name in _NON_TEXT_ID_ATTRIBUTES
+            if getattr(preprocessor, name, None) is not None
+        ]
+        return (
+            tokens,
+            ~np.isin(tokens, non_text_ids),
+            f"the CLS, SEP and PAD ids {non_text_ids}",
+        )
+
+    eot = int(eot)
+    pad = getattr(preprocessor, "pad_token_id", None)
+    pad = eot if pad is None else int(pad)
+    limits = [
+        int(value)
+        for value in (getattr(preprocessor, "max_length", None), max_positions)
+        if value is not None
+    ]
+    encoded = [list(encoder.encode(prompt)) for prompt in prompts]
+    if limits:
+        if min(limits) < 2:
+            raise ValueError(
+                f"a stimulus needs room for the end-of-text prefix and one text "
+                f"token, but the window is {min(limits)} positions"
+            )
+        encoded = [ids[:min(limits) - 1] for ids in encoded]
+    window = 1 + max(len(ids) for ids in encoded)
+    tokens = np.full((len(encoded), window), pad, dtype="int32")
+    text = np.zeros((len(encoded), window), dtype=bool)
+    tokens[:, 0] = eot
+    for row, ids in enumerate(encoded):
+        tokens[row, 1:1 + len(ids)] = ids
+        text[row, 1:1 + len(ids)] = True
+    return tokens, text, f"the end-of-text id {eot} and padding"
 
 
 def _required_vocab_size(preprocessor: Any) -> Optional[int]:
@@ -812,39 +902,48 @@ def extract_tap_activations(
     """Each unit's response to each prompt, pooled over the TEXT tokens, per tap.
 
     A unit's response to a sentence is its tap activation averaged over the
-    sentence's text tokens: the positions whose id is not the preprocessor's
-    ``cls_token_id``, ``sep_token_id`` or ``pad_token_id``. Each text token has
-    the same weight (``sum(activation * text) / sum(text)`` in float64, per
-    sentence), so a sentence of 20 tokens and one of 8 each give one number per
-    unit and neither reads as a stronger response because it is longer.
+    sentence's text tokens. Each text token has the same weight
+    (``sum(activation * text) / sum(text)`` in float64, per sentence), so a
+    sentence of 20 tokens and one of 8 each give one number per unit and neither
+    reads as a stronger response because it is longer.
 
-    The pipeline wraps every stimulus ``[CLS] text [SEP]`` and pads it to the
-    window (512 in the trainer), ids the model never sees as inputs in training.
-    Averaged over the whole window, ~98% of a smoke sentence's positions were
-    padding, so the t-map measured padding and sentence length rather than the
-    conditions (review pass 2, D-020; pad positions carried 83 to 98% of the
-    a-minus-b difference on the trained 2D example). CLS and SEP are left out as
-    well as PAD because their combined weight is ``2 / n`` of a sentence of ``n``
-    text tokens: a shorter sentence would give them more of its average, which
-    re-introduces a length dependence by a smaller door. The paper's footnote 9
-    (a longer encoding must not look like a stronger response) therefore stays
-    true: this is a mean, not a sum.
+    The stimuli are encoded the way the packed training stream presents text
+    (D-024): ``<eot> text pad...``, the end-of-text id first (read from the
+    preprocessor's raw encoder, never typed), then the plain ``encode`` of the
+    prompt, then pads to the longest stimulus. There is no CLS and no SEP: the
+    model never sees them in training and, being causal, every text token attends
+    to the prefix, so a CLS prefix shaped the response of every token after it.
+    The prefix and the pads are not text and are not pooled (a constant prefix
+    position weighted ``1 / n`` would make a shorter sentence read differently).
+    The framing is still a choice: a causal model's text activations depend on
+    what precedes them, and the README states the measured size of that.
 
-    Measured on the tiny test model (random weights, window 512, gpt2
-    preprocessor; ``TestPoolingIsOverTextTokensOnly``): the five condition-a
-    smoke sentences against themselves with ``' . . . .'`` appended gave 109 to
-    211 of 1024 significant units (four taps, FDR 0.05, seeds 0 to 5) under the
-    all-position mean and 0 to 2 under this pooling; the same text in a
-    64-token and a 256-token window gives identical responses (the model is
-    causal, so trailing pads cannot reach a text position, and the test
-    verifies that).
+    Why text only (D-020). Averaged over a 512-position window, ~98% of a smoke
+    sentence's positions were padding, so the t-map measured padding and sentence
+    length rather than the conditions (review pass 2; pad positions carried 83 to
+    98% of the a-minus-b difference on the trained 2D example). The paper's
+    footnote 9 (a longer encoding must not look like a stronger response)
+    therefore stays true: this is a mean, not a sum.
 
-    Contract: ``preprocessor(prompts)`` returns a mapping whose ``"input_ids"``
-    is ``(num_prompts, window)``. The three ids are read from the
-    preprocessor's own attributes, as :func:`_required_vocab_size` reads them; a
-    missing or ``None`` one excludes nothing (a test double with no special ids
-    pools every position). The preprocessor's ``attention_mask`` is not used: the
-    id attributes are what the pipeline pads with.
+    Measured on the tiny test model (random weights, gpt2 preprocessor;
+    ``TestPoolingIsOverTextTokensOnly``): the five condition-a smoke sentences
+    against themselves with ``' . . . .'`` appended gave 109 to 211 of 1024
+    significant units (four taps, FDR 0.05, seeds 0 to 5) under the all-position
+    mean and 0 to 2 under this pooling. The batch is padded to the longest
+    stimulus only, and a longer window gives identical responses (the model is
+    causal, so trailing pads cannot reach a text position; the tests verify
+    that).
+
+    Contract: ``backbone`` is a :class:`TopoLM` (``max_seq_len`` bounds the
+    window where it is known). ``preprocessor`` is either a tokenizer that owns a
+    raw encoder (``preprocessor.tokenizer.encode`` and ``.eot_token``, the
+    ``TiktokenPreprocessor`` shape): the framing above, the pad id from
+    ``pad_token_id``, text cut to ``min(preprocessor.max_length, max_seq_len) - 1``
+    tokens. Or a callable only (a test double): the FALLBACK, in which
+    ``preprocessor(prompts)["input_ids"]`` is ``(num_prompts, window)`` and the
+    positions whose id is the preprocessor's ``cls_token_id``, ``sep_token_id`` or
+    ``pad_token_id`` are left out; a missing or ``None`` attribute excludes
+    nothing. The preprocessor's ``attention_mask`` is not used in either path.
 
     :param backbone: The trained model.
     :type backbone: TopoLM
@@ -859,47 +958,37 @@ def extract_tap_activations(
         ``layout.cell_to_unit``.
     :rtype: Dict[str, numpy.ndarray]
     :raises ValueError: If ``prompts`` is empty, or if a prompt has no text token
-        (it encodes to nothing but CLS, SEP and PAD); the message names the
-        prompt's index and text. Raised before any forward pass.
+        (it encodes to nothing); the message names the prompt's index and text.
+        Raised before any forward pass.
     """
     # DECISION plan-2026-10-23T190557-972a9ac5/D-020: pool over the TEXT tokens
-    # only. Do NOT average over every position: the tokenizer pads each stimulus
-    # to the window with CLS/SEP/PAD, so ~98% of the average was a token the model
-    # never saw as an input, and the t-map measured padding and sentence length
-    # (two conditions of different length differed by the pad share alone; the
-    # same sentences with ' . . . .' appended gave 109 to 211 of 1024
-    # significant units against themselves). Do NOT mask only the pads: CLS and SEP weigh 2/n of a
-    # sentence of n text tokens, which keeps a length dependence. Do NOT hard-code
-    # the ids: they come from the preprocessor's attributes, as in
-    # _required_vocab_size. Do NOT return NaN for a sentence with no text token:
-    # it is refused by name. See decisions.md D-020; guarded by
-    # TestPoolingIsOverTextTokensOnly (loop oracle, window-length invariance, a
-    # huge constant at each special position, the dotted length control).
+    # only. Do NOT average over every position: stimuli padded to the window were
+    # ~98% padding, a token the model never saw as an input, and the t-map
+    # measured padding and sentence length (two conditions of different length
+    # differed by the pad share alone; the same sentences with ' . . . .'
+    # appended gave 109 to 211 of 1024 significant units against themselves). Do
+    # NOT weight the non-text positions: the prefix (CLS, before D-024) weighs
+    # 1/n of a sentence of n text tokens, which keeps a length dependence. Do NOT
+    # return NaN for a sentence with no text token: it is refused by name. The
+    # framing of the text (D-024) is _encode_stimuli's. See decisions.md D-020;
+    # guarded by TestPoolingIsOverTextTokensOnly (loop oracle, window-length
+    # invariance, a huge constant at each non-text position, the dotted length
+    # control).
     prompts = list(prompts)
     if not prompts:
         raise ValueError("prompts must not be empty")
 
-    # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
-    # or a LIST of strings and raises TypeError on anything but those -- the
-    # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline uses
-    # and not this callable.
-    tokens = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
-
-    non_text_ids = [
-        int(getattr(preprocessor, name))
-        for name in _NON_TEXT_ID_ATTRIBUTES
-        if getattr(preprocessor, name, None) is not None
-    ]
-    text = ~np.isin(tokens, non_text_ids)
+    tokens, text, non_text = _encode_stimuli(
+        preprocessor, prompts, getattr(backbone, "max_seq_len", None)
+    )
     counts = text.sum(axis=1)
     empty = np.flatnonzero(counts == 0)
     if empty.size:
         index = int(empty[0])
         raise ValueError(
             f"prompt index {index} ({prompts[index]!r}) has no text "
-            f"token: it encodes to nothing but the CLS, SEP and PAD ids "
-            f"{non_text_ids}, so its response is undefined. Remove it from the "
-            f"stimuli."
+            f"token: it encodes to nothing but {non_text}, so its response is "
+            f"undefined. Remove it from the stimuli."
         )
 
     if not backbone.built:
@@ -967,8 +1056,8 @@ def evaluate_topography(
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
 
     1. a two-sample t-map between the two conditions, on activations that are
-       MEAN-POOLED over each sentence's TEXT tokens (CLS, SEP and PAD left out,
-       :func:`extract_tap_activations`);
+       MEAN-POOLED over each sentence's TEXT tokens (the ``<eot>`` prefix and the
+       pads left out, :func:`extract_tap_activations`);
     2. BH-FDR corrected ACROSS ALL TAPS, then split back;
     3. clusters grown from the surviving cells, both polarities;
     4. Moran's I on the UNTHRESHOLDED map, plus the islands variant.
