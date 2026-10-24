@@ -191,7 +191,8 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
         own" (:func:`resolve_spatial_radius`: the row's ``radius``, else the
         paper's 5). A radius-``r`` patch holds ``(2 * r + 1) ** grid_dim`` units,
         so every axis of the grid must be at least ``2 * r + 1`` across; the 3D
-        rows carry the radius their grid can hold (``tiny3d`` 2, ``paper3d`` 4).
+        rows carry the radius they ship with (``tiny3d`` 2, ``paper3d`` 4; the
+        ``7x7x7`` grid of ``tiny3d`` holds up to 3).
     :ivar spatial_neighborhoods: Neighbourhoods sampled per tap per step, and
         averaged. ``5`` is the paper's value.
     :ivar spatial_distance: Distance metric behind each tap's prior. ``'linf'`` is
@@ -295,12 +296,16 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
     )
 
 
-_SPECIAL_ID_ATTRIBUTES = (
+#: The ids the pipeline wraps (CLS, SEP) and pads (PAD) every stimulus with: the
+#: tokens that are not text. :func:`extract_tap_activations` leaves them out of a
+#: unit's response; the attribute names are the preprocessor's own.
+_NON_TEXT_ID_ATTRIBUTES = (
     "cls_token_id",
     "sep_token_id",
     "pad_token_id",
-    "mask_token_id",
 )
+
+_SPECIAL_ID_ATTRIBUTES = _NON_TEXT_ID_ATTRIBUTES + ("mask_token_id",)
 
 
 def _required_vocab_size(preprocessor: Any) -> Optional[int]:
@@ -399,8 +404,8 @@ def resolve_spatial_radius(config: TopoLMTrainingConfig) -> int:
     """The neighbourhood radius a run actually uses.
 
     An explicit ``config.spatial_radius`` wins. Unset (``None``), the variant's
-    own row decides (``tiny3d`` 2, ``paper3d`` 4: the largest radius their grid
-    holds), and a row without a ``radius`` (the three 2D variants) gets the
+    own row decides (``tiny3d`` 2, ``paper3d`` 4: the radius each row ships with,
+    not the largest its grid holds: ``tiny3d``'s 7x7x7 grid holds 3), and a row without a ``radius`` (the three 2D variants) gets the
     paper's :data:`~dl_techniques.models.language.topolm.DEFAULT_RADIUS`. An
     unknown variant name falls through to the default and is reported by
     ``TopoLM.from_variant`` with the list of available names, as before.
@@ -786,13 +791,42 @@ def extract_tap_activations(
     preprocessor,
     batch_size: int = 32,
 ) -> Dict[str, np.ndarray]:
-    """Mean-pooled activations at every tap, keyed by tap path.
+    """Each unit's response to each prompt, pooled over the TEXT tokens, per tap.
 
-    Pooling is a MEAN over each stimulus's token positions, not a sum, so a longer
-    encoding does not read as a stronger response. That confound is not
-    hypothetical: the paper's own footnote 9 reports it for a response-profile
-    analysis run on stimuli that still carried their determiners, and a sum-pool
-    would reproduce it exactly.
+    A unit's response to a sentence is its tap activation averaged over the
+    sentence's text tokens: the positions whose id is not the preprocessor's
+    ``cls_token_id``, ``sep_token_id`` or ``pad_token_id``. Each text token has
+    the same weight (``sum(activation * text) / sum(text)`` in float64, per
+    sentence), so a sentence of 20 tokens and one of 8 each give one number per
+    unit and neither reads as a stronger response because it is longer.
+
+    The pipeline wraps every stimulus ``[CLS] text [SEP]`` and pads it to the
+    window (512 in the trainer), ids the model never sees as inputs in training.
+    Averaged over the whole window, ~98% of a smoke sentence's positions were
+    padding, so the t-map measured padding and sentence length rather than the
+    conditions (review pass 2, D-020; pad positions carried 83 to 98% of the
+    a-minus-b difference on the trained 2D example). CLS and SEP are left out as
+    well as PAD because their combined weight is ``2 / n`` of a sentence of ``n``
+    text tokens: a shorter sentence would give them more of its average, which
+    re-introduces a length dependence by a smaller door. The paper's footnote 9
+    (a longer encoding must not look like a stronger response) therefore stays
+    true: this is a mean, not a sum.
+
+    Measured on the tiny test model (random weights, window 512, gpt2
+    preprocessor; ``TestPoolingIsOverTextTokensOnly``): the five condition-a
+    smoke sentences against themselves with ``' . . . .'`` appended gave 109 to
+    211 of 1024 significant units (four taps, FDR 0.05, seeds 0 to 5) under the
+    all-position mean and 0 to 2 under this pooling; the same text in a
+    64-token and a 256-token window gives identical responses (the model is
+    causal, so trailing pads cannot reach a text position, and the test
+    verifies that).
+
+    Contract: ``preprocessor(prompts)`` returns a mapping whose ``"input_ids"``
+    is ``(num_prompts, window)``. The three ids are read from the
+    preprocessor's own attributes, as :func:`_required_vocab_size` reads them; a
+    missing or ``None`` one excludes nothing (a test double with no special ids
+    pools every position). The preprocessor's ``attention_mask`` is not used: the
+    id attributes are what the pipeline pads with.
 
     :param backbone: The trained model.
     :type backbone: TopoLM
@@ -806,18 +840,49 @@ def extract_tap_activations(
         grid order -- every consumer maps through the tap's own
         ``layout.cell_to_unit``.
     :rtype: Dict[str, numpy.ndarray]
-    :raises ValueError: If ``prompts`` is empty.
+    :raises ValueError: If ``prompts`` is empty, or if a prompt has no text token
+        (it encodes to nothing but CLS, SEP and PAD); the message names the
+        prompt's index and text. Raised before any forward pass.
     """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-020: pool over the TEXT tokens
+    # only. Do NOT average over every position: the tokenizer pads each stimulus
+    # to the window with CLS/SEP/PAD, so ~98% of the average was a token the model
+    # never saw as an input, and the t-map measured padding and sentence length
+    # (two conditions of different length differed by the pad share alone; the
+    # same sentences with ' . . . .' appended gave 109 to 211 of 1024
+    # significant units against themselves). Do NOT mask only the pads: CLS and SEP weigh 2/n of a
+    # sentence of n text tokens, which keeps a length dependence. Do NOT hard-code
+    # the ids: they come from the preprocessor's attributes, as in
+    # _required_vocab_size. Do NOT return NaN for a sentence with no text token:
+    # it is refused by name. See decisions.md D-020; guarded by
+    # TestPoolingIsOverTextTokensOnly (loop oracle, window-length invariance, a
+    # huge constant at each special position, the dotted length control).
     prompts = list(prompts)
     if not prompts:
         raise ValueError("prompts must not be empty")
 
     # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
-    # or a LIST of strings and raises TypeError on anything else -- the mapping
-    # form is HF-dataset-shaped, which is what the *dataset* pipeline uses and
-    # not this callable. The padded result is fine here: activations are pooled
-    # over positions, so padding contributes an equal share to every condition.
+    # or a LIST of strings and raises TypeError on anything but those -- the
+    # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline uses
+    # and not this callable.
     tokens = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
+
+    non_text_ids = [
+        int(getattr(preprocessor, name))
+        for name in _NON_TEXT_ID_ATTRIBUTES
+        if getattr(preprocessor, name, None) is not None
+    ]
+    text = ~np.isin(tokens, non_text_ids)
+    counts = text.sum(axis=1)
+    empty = np.flatnonzero(counts == 0)
+    if empty.size:
+        index = int(empty[0])
+        raise ValueError(
+            f"prompt index {index} ({prompts[index]!r}) has no text "
+            f"token: it encodes to nothing but the CLS, SEP and PAD ids "
+            f"{non_text_ids}, so its response is undefined. Remove it from the "
+            f"stimuli."
+        )
 
     if not backbone.built:
         # A subclassed model's sub-layers have no `path` until something has built
@@ -833,6 +898,8 @@ def extract_tap_activations(
     }
     for start in range(0, tokens.shape[0], batch_size):
         chunk = tokens[start:start + batch_size]
+        weights = text[start:start + batch_size].astype("float64")
+        totals = counts[start:start + batch_size].astype("float64")
         captures = [TapCapture() for _ in backbone.tap_layers]
         backbone(chunk, training=False, taps=tuple(captures))
         for tap, capture in zip(backbone.tap_layers, captures):
@@ -841,10 +908,11 @@ def extract_tap_activations(
                     f"tap {tap.path} produced no activation for a "
                     f"{chunk.shape[0]}-prompt batch"
                 )
-            pooled = np.mean(
+            pooled = np.einsum(
+                "blu,bl->bu",
                 keras.ops.convert_to_numpy(capture.value).astype("float64"),
-                axis=1,
-            )
+                weights,
+            ) / totals[:, None]
             captured[tap.path].append(pooled)
 
     return {name: np.concatenate(rows) for name, rows in captured.items()}
@@ -881,7 +949,8 @@ def evaluate_topography(
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
 
     1. a two-sample t-map between the two conditions, on activations that are
-       MEAN-POOLED over token positions;
+       MEAN-POOLED over each sentence's TEXT tokens (CLS, SEP and PAD left out,
+       :func:`extract_tap_activations`);
     2. BH-FDR corrected ACROSS ALL TAPS, then split back;
     3. clusters grown from the surviving cells, both polarities;
     4. Moran's I on the UNTHRESHOLDED map, plus the islands variant.

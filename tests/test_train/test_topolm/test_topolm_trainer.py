@@ -636,6 +636,368 @@ class TestActivationExtraction:
 
 
 # ---------------------------------------------------------------------
+# activation extraction: what is pooled (D-020)
+# ---------------------------------------------------------------------
+
+CLS_ID, SEP_ID, PAD_ID = 7, 8, 9
+
+
+class SpecialIdTokenizer:
+    """A stand-in that wraps and pads like the Tiktoken preprocessor does.
+
+    ``[CLS] text [SEP] [PAD] ...`` to ``max_length``, with the three special ids
+    published as attributes (``cls_token_id`` and friends) exactly as
+    :class:`~dl_techniques.utils.tokenizer.TiktokenPreprocessor` publishes them,
+    and DIFFERENT from the real ones, so a hard-coded id fails here. Text ids sit
+    in ``[10, VOCAB)``.
+    """
+
+    cls_token_id = CLS_ID
+    sep_token_id = SEP_ID
+    pad_token_id = PAD_ID
+
+    def __init__(self, max_length):
+        self.max_length = max_length
+
+    def __call__(self, texts):
+        texts = [texts] if isinstance(texts, str) else texts
+        ids = np.full((len(texts), self.max_length), PAD_ID, dtype="int32")
+        for row, text in enumerate(texts):
+            body = [
+                10 + (ord(c) * 7) % (VOCAB - 10)
+                for c in str(text)[:self.max_length - 2]
+            ]
+            sequence = [CLS_ID] + body + [SEP_ID]
+            ids[row, :len(sequence)] = sequence
+        return {"input_ids": ids}
+
+
+class _PoisonedBackbone:
+    """A real backbone whose captures are overwritten at chosen positions.
+
+    The function under test reads ``backbone.tap_layers``, ``backbone.built`` and
+    calls ``backbone(tokens, training=False, taps=...)``; everything else is
+    delegated. After the real forward pass it writes ``value`` into every capture
+    at the positions ``select(tokens)`` marks, which is the position-wise oracle
+    for "this position does not enter the pooled response".
+    """
+
+    def __init__(self, backbone, select, value=1.0e6):
+        self._backbone = backbone
+        self._select = select
+        self._value = value
+
+    def __getattr__(self, name):
+        return getattr(self._backbone, name)
+
+    def __call__(self, tokens, **kwargs):
+        output = self._backbone(tokens, **kwargs)
+        marked = self._select(np.asarray(tokens))
+        for capture in kwargs["taps"]:
+            raw = keras.ops.convert_to_numpy(capture.value).copy()
+            raw[marked] = self._value
+            capture.value = raw
+        return output
+
+
+def _raw_taps(backbone, ids):
+    """``{tap_path: (batch, positions, units)}`` float64, one forward pass."""
+    captures = [TapCapture() for _ in backbone.tap_layers]
+    backbone(ids, training=False, taps=tuple(captures))
+    return {
+        tap.path: keras.ops.convert_to_numpy(capture.value).astype("float64")
+        for tap, capture in zip(backbone.tap_layers, captures)
+    }
+
+
+def _text_only_loop(raw, ids, special):
+    """The independent oracle: an explicit loop over sentences and positions."""
+    pooled = np.zeros((raw.shape[0], raw.shape[2]), dtype="float64")
+    for sentence in range(raw.shape[0]):
+        total = np.zeros(raw.shape[2], dtype="float64")
+        count = 0
+        for position in range(raw.shape[1]):
+            if int(ids[sentence, position]) in special:
+                continue
+            total += raw[sentence, position]
+            count += 1
+        pooled[sentence] = total / count
+    return pooled
+
+
+def _all_position_pooling(backbone, prompts, preprocessor, batch_size=32):
+    """The pre-D-020 behaviour, kept as a reference: a mean over EVERY position.
+
+    Used as the measuring instrument for the length controls ("what would the
+    old code have reported on this model"), never as the code under test.
+    """
+    ids = np.asarray(preprocessor(list(prompts))["input_ids"], dtype="int32")
+    pooled = {tap.path: [] for tap in backbone.tap_layers}
+    for start in range(0, ids.shape[0], batch_size):
+        for path, raw in _raw_taps(backbone, ids[start:start + batch_size]).items():
+            pooled[path].append(raw.mean(axis=1))
+    return {path: np.concatenate(rows) for path, rows in pooled.items()}
+
+
+def _forward_close(actual, expected):
+    """Compare two forward-pass results under the matmul regime in force.
+
+    Same recipe as ``test_batching_does_not_change_the_result``: exact float32
+    tolerance on CPU, ``MATMUL_ULP_ALLOWANCE`` TF32 roundoffs of the largest
+    magnitude on a TF32 device.
+    """
+    unit_roundoff = matmul_unit_roundoff()
+    if unit_roundoff > float(np.finfo(np.float32).eps) / 2.0:
+        atol = MATMUL_ULP_ALLOWANCE * unit_roundoff * np.max(np.abs(expected))
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=atol)
+    else:
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def _tokenizer(kind, window):
+    """``SpecialIdTokenizer`` ('stub') or the real gpt2 preprocessor ('gpt2')."""
+    if kind == "stub":
+        return SpecialIdTokenizer(window)
+    return C.create_tokenizer("gpt2", window, 50257, 50258, 50259, 50260)
+
+
+def _model(kind, window):
+    """A tiny model whose table holds every id the tokenizer of ``kind`` emits."""
+    vocab = VOCAB if kind == "stub" else 50261
+    return build_backbone(_config(vocab_size=vocab, max_seq_length=window))
+
+
+def _special_ids(preprocessor):
+    return {
+        int(preprocessor.cls_token_id),
+        int(preprocessor.sep_token_id),
+        int(preprocessor.pad_token_id),
+    }
+
+
+_KINDS = pytest.mark.parametrize("kind", ["stub", "gpt2"])
+
+
+class TestPoolingIsOverTextTokensOnly:
+    """D-020: a unit's response is its mean over the TEXT tokens of a sentence.
+
+    The tokenizer wraps every stimulus ``[CLS] text [SEP]`` and pads it to the
+    window (512 in the trainer), tokens the model never sees as inputs in
+    training. A mean over all positions was ~98% padding, so a t-map between two
+    conditions measured padding and sentence length (review pass 2, concern 1).
+
+    The measured effect on the TINY test model (random weights, window 512, the
+    gpt2 preprocessor, CPU, seeds 0 to 5), significant units summed over the four
+    taps (1024 units) at FDR 0.05, for the reviewer's control "the five
+    condition-a sentences against themselves with ' . . . .' appended":
+
+        pooling over all positions (the old code)    109 to 211 of 1024
+        pooling over text tokens (this code)           0 to 2 of 1024
+
+    The a-versus-b smoke contrast gives 0 under both poolings on every one of
+    those random models (an untrained network has no contrast to find), so the
+    direction of the real effect is not asserted there: the trained 2D and 3D
+    example checkpoints measured it (plans/.../findings/
+    pooling-fix-measurements.md). The control is seeded below so the numbers
+    reproduce, and its thresholds sit well inside the six measured pairs.
+    """
+
+    @_KINDS
+    def test_it_equals_an_independent_loop_over_text_positions(self, kind):
+        backbone, preprocessor = _model(kind, 64), _tokenizer(kind, 64)
+        prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
+        ids = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
+        special = _special_ids(preprocessor)
+        assert (ids == int(preprocessor.pad_token_id)).any(), "no padding to test"
+
+        pooled = extract_tap_activations(backbone, prompts, preprocessor)
+        raw = _raw_taps(backbone, ids)
+        for path, values in pooled.items():
+            _forward_close(values, _text_only_loop(raw[path], ids, special))
+
+    @_KINDS
+    def test_the_window_length_does_not_change_the_response(self, kind):
+        """THE discriminating control: the same text, more padding, same numbers.
+
+        The model is causal, so the activation at a position cannot depend on a
+        later one; pads after the text therefore cannot change a text position's
+        activation, and a text-only pooling is exactly window-independent. The
+        causal assumption is verified in the next test, not taken on trust.
+        """
+        backbone = _model(kind, 256)
+        long_window, short_window = _tokenizer(kind, 256), _tokenizer(kind, 64)
+        prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
+        short_ids = np.asarray(short_window(prompts)["input_ids"])
+        assert (short_ids == int(short_window.pad_token_id)).any()
+
+        long = extract_tap_activations(backbone, prompts, long_window)
+        short = extract_tap_activations(backbone, prompts, short_window)
+        for path in long:
+            _forward_close(short[path], long[path])
+
+        # The control has power: the all-position mean moves by orders of
+        # magnitude more than the tolerance when the window changes.
+        old_long = _all_position_pooling(backbone, prompts, long_window)
+        old_short = _all_position_pooling(backbone, prompts, short_window)
+        gap = max(
+            float(np.max(np.abs(old_long[p] - old_short[p]))) for p in old_long
+        )
+        scale = max(float(np.max(np.abs(long[p]))) for p in long)
+        assert gap > 0.05 * scale, (gap, scale)
+
+    def test_the_model_is_causal_so_the_trailing_pads_cannot_matter(self):
+        """The assumption behind the invariance test, executed.
+
+        One backbone, the same prompts through a 40-token and a 256-token window:
+        the first 40 positions of every captured activation are identical.
+        """
+        backbone = _model("gpt2", 256)
+        prompts = list(SMOKE_STIMULI["a"])
+        short, long = _tokenizer("gpt2", 40), _tokenizer("gpt2", 256)
+        short_ids = np.asarray(short(prompts)["input_ids"], dtype="int32")
+        long_ids = np.asarray(long(prompts)["input_ids"], dtype="int32")
+        np.testing.assert_array_equal(short_ids, long_ids[:, :40])
+        short_raw = _raw_taps(backbone, short_ids)
+        long_raw = _raw_taps(backbone, long_ids)
+        for path in short_raw:
+            _forward_close(short_raw[path], long_raw[path][:, :40])
+
+    @pytest.mark.parametrize(
+        "excluded", ["cls", "sep", "pad"], ids=["cls", "sep", "pad"]
+    )
+    @_KINDS
+    def test_a_special_token_position_does_not_enter_the_response(
+        self, kind, excluded
+    ):
+        """Set every CLS (or SEP, or PAD) activation to 1e6: nothing moves.
+
+        Excluding only the pad ids would pass the loop oracle on a tokenizer
+        whose CLS and SEP happened to be quiet; the huge constant cannot hide.
+        The control below poisons one TEXT position and the response does move.
+        """
+        backbone, preprocessor = _model(kind, 48), _tokenizer(kind, 48)
+        prompts = list(SMOKE_STIMULI["a"])
+        token = int(getattr(preprocessor, f"{excluded}_token_id"))
+        clean = extract_tap_activations(backbone, prompts, preprocessor)
+
+        poisoned = extract_tap_activations(
+            _PoisonedBackbone(backbone, lambda ids: ids == token),
+            prompts, preprocessor,
+        )
+        for path in clean:
+            _forward_close(poisoned[path], clean[path])
+
+        special = _special_ids(preprocessor)
+
+        def first_text_position(ids):
+            marked = np.zeros(ids.shape, dtype=bool)
+            marked[:, 1] = ~np.isin(ids[:, 1], list(special))
+            return marked
+
+        moved = extract_tap_activations(
+            _PoisonedBackbone(backbone, first_text_position),
+            prompts, preprocessor,
+        )
+        for path in clean:
+            assert np.max(np.abs(moved[path] - clean[path])) > 1.0, path
+
+    def test_a_sentence_with_no_text_token_is_refused_by_name(self):
+        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+        with pytest.raises(ValueError) as excinfo:
+            extract_tap_activations(
+                backbone, ["alpha beta", "", "gamma"], preprocessor
+            )
+        message = str(excinfo.value)
+        assert "index 1" in message and "''" in message, message
+        assert "no text token" in message, message
+
+    def test_the_refusal_comes_before_any_forward_pass(self):
+        """Nothing is computed for a batch that cannot be pooled."""
+        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+
+        class _Unbuilt:
+            built = True
+            tap_layers = backbone.tap_layers
+
+            def __call__(self, *args, **kwargs):
+                raise AssertionError("the forward pass ran before the refusal")
+
+        with pytest.raises(ValueError, match="no text token"):
+            extract_tap_activations(_Unbuilt(), ["", "alpha"], preprocessor)
+
+    def test_a_preprocessor_without_special_ids_excludes_nothing(self):
+        """No attributes (or ``None``) means every position is text."""
+        backbone = build_backbone(_config())
+        prompts = ["alpha bravo", "charlie"]
+
+        class _NoneIds(StubTokenizer):
+            cls_token_id = None
+            sep_token_id = None
+            pad_token_id = None
+
+        plain = extract_tap_activations(backbone, prompts, StubTokenizer())
+        nones = extract_tap_activations(backbone, prompts, _NoneIds())
+        ids = np.asarray(StubTokenizer()(prompts)["input_ids"], dtype="int32")
+        raw = _raw_taps(backbone, ids)
+        for path in plain:
+            _forward_close(plain[path], raw[path].mean(axis=1))
+            _forward_close(nones[path], plain[path])
+
+    def test_a_condition_against_itself_has_no_contrast(self):
+        backbone, preprocessor = _model("gpt2", 512), _tokenizer("gpt2", 512)
+        report, arrays = evaluate_topography(
+            backbone,
+            {"x": SMOKE_STIMULI["a"], "y": SMOKE_STIMULI["a"]},
+            ("x", "y"),
+            preprocessor,
+            min_cluster_size=2,
+            batch_size=8,
+        )
+        for values in arrays["arms"]["raw"]["t_maps"].values():
+            assert np.all(values == 0.0)
+        for entry in report["arms"]["raw"]["per_tap"].values():
+            assert entry["num_significant_units"] == 0
+
+    def test_extra_neutral_tokens_do_not_create_a_contrast(
+        self, monkeypatch
+    ):
+        """The reviewer's length control, end to end through the evaluation.
+
+        The same five sentences against themselves with ' . . . .' appended.
+        Under an all-position mean the length difference alone makes a large
+        part of the units significant; over text tokens it does not. Both numbers
+        are measured on the same model in the same test, so the control cannot
+        pass because the model happens to be quiet.
+        """
+        keras.utils.set_random_seed(0)
+        backbone, preprocessor = _model("gpt2", 512), _tokenizer("gpt2", 512)
+        stimuli = {
+            "plain": list(SMOKE_STIMULI["a"]),
+            "dotted": [s + " . . . ." for s in SMOKE_STIMULI["a"]],
+        }
+
+        def significant():
+            report, _ = evaluate_topography(
+                backbone, stimuli, ("dotted", "plain"), preprocessor,
+                min_cluster_size=2, batch_size=8,
+            )
+            return sum(
+                entry["num_significant_units"]
+                for entry in report["arms"]["raw"]["per_tap"].values()
+            )
+
+        fixed = significant()
+        monkeypatch.setattr(C, "extract_tap_activations", _all_position_pooling)
+        unfixed = significant()
+        monkeypatch.undo()
+
+        units = len(backbone.tap_layers) * backbone.embed_dim
+        assert unfixed > 0.05 * units, (unfixed, units)
+        assert fixed < 0.25 * unfixed, (fixed, unfixed)
+        assert fixed < 0.02 * units, (fixed, units)
+
+
+# ---------------------------------------------------------------------
 # topographic evaluation
 # ---------------------------------------------------------------------
 
