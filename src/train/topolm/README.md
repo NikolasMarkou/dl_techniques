@@ -954,23 +954,37 @@ still print those strings, so a swapped figure or a caption that drifted from th
 data fails. A regenerated figure comes with a regenerated facts file.
 
 **Regenerating the facts file.** The file is written by `python -m train.topolm.figure_facts`
-(`src/train/topolm/figure_facts.py`), from the four run directories the figures come
-from (`2d`, `3d`, `2d_alpha0`, `3d_alpha0`; read only), with the controls of section
-"Four controls" computed for `2d` and `3d`:
+(`src/train/topolm/figure_facts.py`), run from the repository root with `src` on the
+`PYTHONPATH`, from the eight run directories (read only): the four the figures come from
+(`2d`, `3d`, `2d_alpha0`, `3d_alpha0`, seed 42) and the four of the second seed
+(`2d_seed43`, `3d_seed43`, `2d_alpha0_seed43`, `3d_alpha0_seed43`, the same four
+commands with `--seed 43`), with the controls of section "Four controls" computed for
+the penalty-on run of each seed and dimension. `<run-dir>` is the run directory that
+holds `config.json` (`results/<save dir>/<run name>/`), `<capture-dir>` the directory
+described below; both are outside the repository, so the command reproduces the
+tracked file only on a machine that has them:
 
 ```bash
-CUDA_VISIBLE_DEVICES= MPLBACKEND=Agg python -m train.topolm.figure_facts \
-    --run 2d=<run dir> --run 3d=<run dir> \
-    --run 2d_alpha0=<run dir> --run 3d_alpha0=<run dir> \
-    --controls 2d --controls 3d --capture-dir <capture dir> \
+CUDA_VISIBLE_DEVICES= PYTHONPATH=src MPLBACKEND=Agg python -m train.topolm.figure_facts \
+    --run 2d=<run-dir> --run 3d=<run-dir> \
+    --run 2d_alpha0=<run-dir> --run 3d_alpha0=<run-dir> \
+    --run 2d_seed43=<run-dir> --run 3d_seed43=<run-dir> \
+    --run 2d_alpha0_seed43=<run-dir> --run 3d_alpha0_seed43=<run-dir> \
+    --controls 2d --controls 3d --controls 2d_seed43 --controls 3d_seed43 \
+    --capture-dir <capture-dir> \
+    --note "runs=2d and 3d: the penalty on (alpha 2.5), seed 42; 2d_alpha0 and 3d_alpha0: the same command with --alpha 0; 2d_seed43, 3d_seed43, 2d_alpha0_seed43 and 3d_alpha0_seed43: the same four commands with --seed 43" \
+    --note "note_tracked_clean=recorded when the runs were made, from git status of src/train/topolm and src/dl_techniques/metrics (clean for both batches); the seed-42 runs were made at 20325a0e4 and the seed-43 runs at 9dce29788, after step 13 changed the model's ffn_type validation, the model's class default vocabulary and the trainer's --resume, none of which is on the path of these commands; afterwards no model, trainer or metric code was edited" \
     --out src/train/topolm/figures/figure_facts.json
 ```
 
-Add `--compare <the tracked file>` and an `--out` elsewhere to check a regeneration
-against the tracked file: the command lists the fields that differ as `provenance`
-(the git state at the time, the form of the run paths), `device_dependent` and
-`other`, and exits 1 when there are `other` ones. `--help` lists every option. What
-comes from where:
+To check a regeneration against the tracked file, replace the `--out` by another path
+and add `--compare src/train/topolm/figures/figure_facts.json`: the command lists the
+fields that differ as `provenance` (the git state at the time, the form of the run
+paths and the keys the module records about itself), `device_dependent` (the
+recomputed colour limits) and `other`, and exits 1 when there are `other` ones. Run on
+the CPU, as above, the regeneration of the tracked file exits 0: the controls and
+every other number are compared exactly. `--help` lists every option. What comes from
+where:
 
 - read from the run directories: `config.json`, `training_history.json`,
   `topography_report.json`, `topography_live/metrics.jsonl` and the PNG files (hash,
@@ -996,12 +1010,14 @@ comes from where:
   the exit code, the wall time, the GPU memory peak, the device name, the fit-phase
   seconds and the count of TensorFlow shutdown warnings. These cannot be recomputed from the
   run directory; they are properties of the machine and the command that made the run;
-- written by hand, passed with `--note KEY=TEXT`: the two free-text notes in
-  `generated_from` (`runs` and `note_tracked_clean`).
+- written by hand, passed with `--note KEY=TEXT` (they are in the command above, so a
+  regeneration reproduces them): the two free-text notes in `generated_from` (`runs`
+  and `note_tracked_clean`).
 
 The module has its own tests (`test_topolm_figure_facts.py`: `TestTheSmallFunctions`,
 `TestRunSummary`, `TestTheColourLimit`, `TestComparingFactsFiles`,
-`TestTheFigureFactsCommandLine`, `TestTheRegenerationCommandInThisReadme`).
+`TestTheFigureFactsCommandLine`, `TestTheRegenerationCommandInThisReadme`,
+`TestAChangedControlNumberFailsTheComparison`, `TestTheTrackedFileIsWhatTheModuleWrites`).
 
 ### Resuming a run: `--resume`
 
@@ -1660,7 +1676,8 @@ The 3D work and the live view live in these files (all under
   (`TestTheReadmeGuardsCanFail`).
 - `test_topolm_figure_facts.py` (`TestTheSmallFunctions`, `TestRunSummary`,
   `TestTheColourLimit`, `TestComparingFactsFiles`, `TestTheFigureFactsCommandLine`,
-  `TestTheRegenerationCommandInThisReadme`: the module that writes
+  `TestTheRegenerationCommandInThisReadme`, `TestAChangedControlNumberFailsTheComparison`,
+  `TestTheTrackedFileIsWhatTheModuleWrites`: the module that writes
   `figures/figure_facts.json`; hand-computed cases, a colour bar read back from figures
   of known limit, a real tiny run whose recomputed limit is checked against its own
   report, and the README's regeneration command checked against the module's `--help`),

@@ -972,8 +972,11 @@ class TestTheRegenerationCommandInThisReadme:
         done = subprocess.run([sys.executable, "-m", module, "--help"], capture_output=True,
                               text=True, env=env, cwd=REPO)
         assert done.returncode == 0, done.stderr[-500:]
-        flags = set(re.findall(r"(--[a-z][a-z-]+)", block))
-        assert flags >= {"--run", "--out", "--controls", "--capture-dir"}
+        # the flags are the command's own arguments, not words inside a --note text
+        import shlex
+
+        flags = {a for a in shlex.split(block) if re.fullmatch(r"--[a-z][a-z-]+", a)}
+        assert flags >= {"--run", "--out", "--controls", "--capture-dir", "--note"}
         for flag in flags:
             assert flag in done.stdout, f"{flag} is in the README command but not in --help"
 
@@ -1118,3 +1121,69 @@ class TestAChangedControlNumberFailsTheComparison:
         clock = {"second", "seconds", "wall", "elapsed", "duration", "time", "ms", "s"}
         found = [p for p in names if clock & set(re.split(r"[._]", p))]
         assert not found, found
+
+
+# ---------------------------------------------------------------------
+# the README command reproduces the tracked file (review pass 6, concern 6)
+# ---------------------------------------------------------------------
+
+
+def _command_arguments():
+    """The arguments of the README's regeneration command, split the way a shell does."""
+    import shlex
+
+    return shlex.split(_regeneration_block())
+
+
+def _notes_of_the_command():
+    arguments = _command_arguments()
+    return dict(
+        argument.split("=", 1)
+        for flag, argument in zip(arguments, arguments[1:]) if flag == "--note"
+    )
+
+
+class TestTheTrackedFileIsWhatTheModuleWrites:
+    """The tracked file used to be the scratch output of step 12, never rewritten by the
+    module: it lacked the provenance keys the README described, and the README command
+    (no ``--note``) did not reproduce its two hand-written notes, so a regeneration
+    exited 1. Now the tracked file is the module's own output, and the command carries
+    the notes."""
+
+    def test_it_has_the_provenance_keys_the_readme_describes(self):
+        provenance = _tracked()["generated_from"]
+        assert provenance["device_dependent_fields"] == list(F.DEVICE_DEPENDENT_FIELDS)
+        assert isinstance(provenance["recomputation_device"], str) and provenance["recomputation_device"]
+        assert "read from log_<name>.txt" in provenance["capture"]
+        assert provenance["recomputation_device"].lower() == "cpu"
+
+    def test_the_readme_says_what_the_tracked_file_has(self):
+        text = " ".join(_readme().split())
+        for key in ("generated_from.device_dependent_fields", "generated_from.recomputation_device"):
+            assert key in text
+            assert key.split(".")[1] in _tracked()["generated_from"]
+
+    def test_the_commands_notes_are_the_tracked_notes(self):
+        notes = _notes_of_the_command()
+        assert sorted(notes) == ["note_tracked_clean", "runs"]
+        for key, text in notes.items():
+            assert _tracked()["generated_from"][key] == text
+
+    def test_every_run_and_every_controls_name_of_the_command_is_in_the_tracked_file(self):
+        arguments = _command_arguments()
+        named = [a.split("=", 1)[0] for flag, a in zip(arguments, arguments[1:]) if flag == "--run"]
+        controls = [a for flag, a in zip(arguments, arguments[1:]) if flag == "--controls"]
+        tracked = _tracked()
+        assert sorted(named) == sorted(tracked["runs"])
+        assert controls and all("controls" in tracked["runs"][name] for name in controls)
+        assert sorted(controls) == sorted(n for n, r in tracked["runs"].items() if "controls" in r)
+
+    def test_the_commands_placeholders_are_the_ones_the_readme_explains(self):
+        block = _regeneration_block()
+        assert set(re.findall(r"<([^>]+)>", block)) == {"run-dir", "capture-dir"}
+        text = _readme()
+        assert "`<run-dir>`" in text and "`<capture-dir>`" in text
+
+    def test_the_command_writes_the_tracked_file_and_compare_is_how_it_is_checked(self):
+        assert "--out src/train/topolm/figures/figure_facts.json" in _regeneration_block()
+        assert "--compare" in _readme()
