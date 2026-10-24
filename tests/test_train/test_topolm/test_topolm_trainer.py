@@ -769,6 +769,18 @@ class TestThePermutationStatistic:
         )
 
 
+def _real_tokenizer(config):
+    """The tokenizer ``train_topolm`` builds from ``config``, arguments verbatim."""
+    return C.create_tokenizer(
+        config.encoding_name,
+        config.max_seq_length,
+        config.cls_token_id,
+        config.sep_token_id,
+        config.pad_token_id,
+        config.mask_token_id,
+    )
+
+
 class TestTheVocabularyGuard:
     """A vocabulary too small for the tokenizer used to fail on the first batch."""
 
@@ -812,6 +824,50 @@ class TestTheVocabularyGuard:
             build_backbone(_config(vocab_size=50257), required_vocab_size=100277)
         # And stays silent when told nothing.
         assert build_backbone(_config(vocab_size=50257)) is not None
+
+    def test_the_requirement_includes_the_special_ids_of_the_real_tokenizer(self):
+        """The base size (50257) is not the requirement; the special ids are.
+
+        The config assigns cls 50257, sep 50258, pad 50259 and mask 50260, all
+        above the Tiktoken gpt2 base vocabulary, and padding is ``max_length`` so
+        the pad id reaches every batch. A 50257-row table therefore dies on the
+        first batch with ``indices[..] = 50259 is not in [0, 50257)``.
+        """
+        preprocessor = _real_tokenizer(_config())
+        assert preprocessor.vocab_size == 50257
+        assert C._required_vocab_size(preprocessor) == 50261
+
+    @pytest.mark.parametrize("rows", [50257, 50260])
+    def test_a_table_that_misses_a_special_id_is_rejected_by_name(self, rows):
+        config = _config(vocab_size=rows)
+        preprocessor = _real_tokenizer(config)
+        with pytest.raises(ValueError, match=r"--vocab-size") as excinfo:
+            C._require_vocab_covers_tokenizer(config, preprocessor)
+        message = str(excinfo.value)
+        assert f"vocab_size {rows}" in message
+        assert "50261" in message
+        assert "special" in message
+        # And the model-side check, fed the value train_topolm feeds it.
+        with pytest.raises(ValueError, match=r"--vocab-size"):
+            build_backbone(
+                config,
+                required_vocab_size=C._required_vocab_size(preprocessor),
+            )
+
+    @pytest.mark.parametrize("rows", [50261, 100277])
+    def test_a_table_that_holds_every_id_is_accepted(self, rows):
+        config = _config(vocab_size=rows)
+        preprocessor = _real_tokenizer(config)
+        C._require_vocab_covers_tokenizer(config, preprocessor)
+        # The model-side check accepts the same table at the true minimum.
+        build_backbone(config, required_vocab_size=50261)
+
+    def test_a_tokenizer_without_special_ids_keeps_its_base_size(self):
+        class _Tok:
+            vocab_size = 100277
+
+        assert C._required_vocab_size(_Tok()) == 100277
+        assert C._required_vocab_size(object()) is None
 
     def test_the_guard_fires_before_the_dataset_is_built(self, monkeypatch):
         """The point of the check's position, not just its existence.

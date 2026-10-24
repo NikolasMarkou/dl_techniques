@@ -205,8 +205,10 @@ worth stating rather than leaving to `--help`:
 An earlier version of this table said `create_tokenizer` uses `cl100k_base`, whose
 special ids reach `100267`. That does not describe this trainer: `create_tokenizer`'s
 own default is `cl100k_base`, but the trainer passes `config.encoding_name`. The
-guard `_require_vocab_covers_tokenizer` compares `--vocab-size` with the base
-`vocab_size` the log prints (50257), not with the special ids. Both failures above
+guard `_require_vocab_covers_tokenizer` compares `--vocab-size` with the larger of
+the base `vocab_size` the log prints (50257) and the largest special id plus one
+(50261), so a 50,257-row or 50,260-row table is refused at start-up by name, before
+the dataset is built; `build_backbone` checks the same number. Both failures above
 were measured on the pre-audit pipeline; the `--vocab-size 50257` case was not
 re-run on the packed dataset path the trainer uses now.
 

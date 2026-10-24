@@ -112,7 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "(50257 base ids plus special ids 50257..50260), so at least 50261 "
             "rows; the default 100277 satisfies that. 50257 rows fail on the "
             "first batch with an out-of-range Gather in word_embeddings "
-            "(measured on the earlier pipeline, not re-run on the packed path)."
+            "(measured on the earlier pipeline, not re-run on the packed path); "
+            "the start-up guard refuses anything below 50261."
         ),
     )
     parser.add_argument(

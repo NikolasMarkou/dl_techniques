@@ -290,6 +290,43 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
     )
 
 
+_SPECIAL_ID_ATTRIBUTES = (
+    "cls_token_id",
+    "sep_token_id",
+    "pad_token_id",
+    "mask_token_id",
+)
+
+
+def _required_vocab_size(preprocessor: Any) -> Optional[int]:
+    """The smallest embedding table that can hold every id the tokenizer emits.
+
+    Contract: ``preprocessor`` is the tokenizer the data pipeline will call.
+    Returns ``max(vocab_size, largest special id + 1)`` as a plain ``int``, or
+    ``None`` when the object has no ``vocab_size`` (a stub or a plain callable:
+    nothing to check, the forward pass remains the backstop). The special ids
+    are read from the SAME attributes the pipeline pads and wraps with
+    (``cls_token_id``, ``sep_token_id``, ``pad_token_id``, ``mask_token_id``, as
+    set by ``create_tokenizer`` from the config); one that is missing or
+    ``None`` is skipped. Never raises. Called by
+    :func:`_require_vocab_covers_tokenizer` and :func:`train_topolm`, so the
+    early guard and the model-side check name the same integer.
+
+    :param preprocessor: Tokenizer whose ids must fit the embedding table.
+    :type preprocessor: Any
+    :return: The minimum number of embedding rows, or ``None``.
+    :rtype: Optional[int]
+    """
+    base = getattr(preprocessor, "vocab_size", None)
+    if base is None:
+        return None
+    special = [
+        getattr(preprocessor, name, None) for name in _SPECIAL_ID_ATTRIBUTES
+    ]
+    top = max([int(i) + 1 for i in special if i is not None], default=0)
+    return max(int(base), top)
+
+
 def _require_vocab_covers_tokenizer(
     config: TopoLMTrainingConfig, preprocessor: Any
 ) -> None:
@@ -302,13 +339,14 @@ def _require_vocab_covers_tokenizer(
     inside ``Embedding.call`` -- which names no argument and arrives only after
     the dataset has been tokenized and cached.
 
-    The bound is the tokenizer's OWN ``vocab_size``, not a constant, so changing
-    ``encoding_name`` moves the requirement with it. That matters because the
-    natural wrong value is GPT-2's base size 50257, which is what this CLI used
-    to default to although the trainer's ``gpt2`` tokenizer also emits special
-    ids 50257..50260. NOTE: the bound compared is the tokenizer's base
-    ``vocab_size`` (50257), not the largest special id plus one (50261), so a
-    50257-row table passes this check.
+    The bound is computed from the tokenizer, not a constant, so changing
+    ``encoding_name`` moves the requirement with it: see
+    :func:`_required_vocab_size`. That matters because the natural wrong value
+    is GPT-2's base size 50257, which this CLI used to default to although the
+    trainer's ``gpt2`` tokenizer also emits the special ids 50257..50260. The
+    requirement is therefore the base ``vocab_size`` (50257) or the largest
+    special id plus one (50261), whichever is larger, so a 50257-row or
+    50260-row table is refused here.
 
     :param config: The run's configuration.
     :type config: TopoLMTrainingConfig
@@ -317,23 +355,32 @@ def _require_vocab_covers_tokenizer(
     :raises ValueError: If ``config.vocab_size`` cannot represent every id the
         tokenizer can emit -- naming the flag, the two sizes, and the encoding.
     """
-    required = getattr(preprocessor, "vocab_size", None)
+    required = _required_vocab_size(preprocessor)
     if required is None:
         # A stub or a callable without the attribute. Refusing here would break
         # every test double that stands in for the tokenizer; the forward pass
         # remains the backstop.
         return
-    if config.vocab_size >= int(required):
+    if config.vocab_size >= required:
         return
     encoding = getattr(
         getattr(preprocessor, "tokenizer", None), "name", "unknown"
     )
+    base = int(preprocessor.vocab_size)
+    reason = ""
+    if required > base:
+        reason = (
+            f" The base vocabulary is {base}, but the special ids "
+            f"(cls/sep/pad/mask) run above it, so the table needs {required} "
+            f"rows."
+        )
     raise ValueError(
         f"vocab_size {config.vocab_size} cannot hold every id the "
         f"{encoding!r} tokenizer emits (it needs at least {required}; ids run "
-        f"to {required - 1}). Raise --vocab-size, or lower --encoding-name to "
-        f"a tokenizer with a smaller vocabulary. Left unchecked this fails on "
-        f"the first batch as an out-of-range Gather in Embedding.call."
+        f"to {required - 1}).{reason} Raise --vocab-size, or lower "
+        f"--encoding-name to a tokenizer with a smaller vocabulary. Left "
+        f"unchecked this fails on the first batch as an out-of-range Gather in "
+        f"Embedding.call."
     )
 
 
@@ -1424,7 +1471,7 @@ def train_topolm(
 
     model, backbone = create_topolm_model(
         config,
-        required_vocab_size=getattr(preprocessor, "vocab_size", None),
+        required_vocab_size=_required_vocab_size(preprocessor),
     )
     compile_model(model, config, epochs, steps_per_epoch)
     callbacks = build_callbacks(
