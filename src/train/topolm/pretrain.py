@@ -63,6 +63,7 @@ from .common import (
     check_variant_fits_radius,
     check_viz_every_steps,
     resolve_spatial_radius,
+    resolve_vocab_size,
     train_paired,
     train_topolm,
 )
@@ -75,9 +76,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     Every default here mirrors the dataclass default, so an unflagged run is the
     paper's recipe rather than the trainer's idea of one. Two flags are the
-    exception on purpose: ``--radius`` and ``--readout-fwhm`` default to ``None``
-    ("not typed") and :func:`_config_from_args` resolves them per variant, because
-    a typed value and an untyped one must be distinguishable (a 3D variant has its
+    exception on purpose: ``--radius``, ``--readout-fwhm`` and ``--vocab-size``
+    default to ``None`` ("not typed") and :func:`_config_from_args` resolves them
+    (per variant for the first two, from the tokenizer for the third), because a
+    typed value and an untyped one must be distinguishable (a 3D variant has its
     own radius and no readout) and the resolved integer is what ``config.json``
     records.
     """
@@ -106,15 +108,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vocab-size",
         type=int,
-        default=100277,
+        default=None,
         help=(
             "Embedding table rows. Must hold every id the tokenizer emits, "
-            "special ids included. The trainer's tokenizer is Tiktoken 'gpt2' "
-            "(50257 base ids plus special ids 50257..50260), so at least 50261 "
-            "rows; the default 100277 satisfies that. 50257 rows fail on the "
-            "first batch with an out-of-range Gather in word_embeddings "
-            "(measured on the earlier pipeline, not re-run on the packed path); "
-            "the start-up guard refuses anything below 50261."
+            "special ids included. Unset, it is the smallest multiple of 64 "
+            "that does: 50304 for the trainer's Tiktoken 'gpt2' (50257 base "
+            "ids plus special ids 50257..50260, so 50261 are needed), the "
+            "padded size of the released code, and config.json records that "
+            "integer. A typed value is used as given; one below the "
+            "tokenizer's need (50257 rows fail on the first batch with an "
+            "out-of-range Gather in word_embeddings) is refused at start-up."
         ),
     )
     parser.add_argument(
@@ -440,18 +443,22 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
     """Map parsed CLI arguments onto one :class:`TopoLMTrainingConfig`.
 
     Every argument appears here exactly once, so a new flag cannot be added
-    without deciding where in the dataclass it lands. ``--radius`` and
-    ``--readout-fwhm`` are RESOLVED here (see :func:`_build_parser`), so the
-    returned config, and the ``config.json`` written from it, hold the values the
-    run uses.
+    without deciding where in the dataclass it lands. ``--radius``,
+    ``--readout-fwhm`` and ``--vocab-size`` are RESOLVED here (see
+    :func:`_build_parser`), so the returned config, and the ``config.json`` written
+    from it, hold the values the run uses.
 
     :raises ValueError: If a nonzero ``--readout-fwhm`` is typed for a 3D variant,
         or ``--viz-every-steps`` is negative.
     """
+    # An unset --vocab-size keeps the dataclass default for the moment and is
+    # resolved below, from the tokenizer the config names; a typed one is used as
+    # given.
+    typed_vocab = {} if args.vocab_size is None else {"vocab_size": args.vocab_size}
     config = TopoLMTrainingConfig(
         # Model
         model_variant=args.variant,
-        vocab_size=args.vocab_size,
+        **typed_vocab,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         tie_word_embeddings=args.tie_word_embeddings,
@@ -512,6 +519,8 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
         save_dir=args.save_dir,
     )
     config.spatial_radius = resolve_spatial_radius(config)
+    if args.vocab_size is None:
+        config.vocab_size = resolve_vocab_size(config)
     return config
 
 

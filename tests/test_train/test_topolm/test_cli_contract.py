@@ -328,9 +328,13 @@ import dataclasses
 #: readout 2.0 included. The parser defaults of ``--radius`` and ``--readout-fwhm``
 #: are allowed to become ``None`` (resolved per variant), the CONFIG values are
 #: not allowed to move. The one permitted addition is ``viz_every_steps: 0``.
+#: One deliberate move since (step 11.2, D-031 e): ``vocab_size`` was 100277
+#: (cl100k's size, 39M unused rows for the gpt2 tokenizer) and is 50304, the
+#: smallest multiple of 64 that holds the 50261 ids the tokenizer emits; the
+#: derivation is pinned in ``test_topolm_vocab_default.py``.
 BASELINE_2D_CONFIG = {
     'model_variant': 'small',
-    'vocab_size': 100277,
+    'vocab_size': 50304,
     'max_seq_length': 512,
     'num_layers': None,
     'num_heads': None,

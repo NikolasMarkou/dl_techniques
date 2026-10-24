@@ -67,6 +67,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+import tiktoken
 
 import keras
 
@@ -599,11 +600,66 @@ def _required_vocab_size(preprocessor: Any) -> Optional[int]:
     base = getattr(preprocessor, "vocab_size", None)
     if base is None:
         return None
-    special = [
-        getattr(preprocessor, name, None) for name in _SPECIAL_ID_ATTRIBUTES
-    ]
-    top = max([int(i) + 1 for i in special if i is not None], default=0)
+    return _rows_needed(
+        base,
+        [getattr(preprocessor, name, None) for name in _SPECIAL_ID_ATTRIBUTES],
+    )
+
+
+def _rows_needed(base: int, special_ids: Sequence[Optional[int]]) -> int:
+    """``max(base, largest special id + 1)``: the one definition of the requirement.
+
+    ``special_ids`` may hold ``None`` (an id the pipeline does not set), which is
+    skipped. Used by :func:`_required_vocab_size` (from a built tokenizer) and
+    :func:`resolve_vocab_size` (from the encoding a config names), so the default
+    the CLI resolves and the guard that checks a typed value name the same integer.
+    """
+    top = max([int(i) + 1 for i in special_ids if i is not None], default=0)
     return max(int(base), top)
+
+
+#: The released code pads GPT-2's 50257 ids up to 50304 rows: a multiple of 64 keeps
+#: the embedding and the tied output matmul on aligned shapes.
+VOCAB_SIZE_MULTIPLE = 64
+
+
+def round_up_vocab_size(required: int, multiple: int = VOCAB_SIZE_MULTIPLE) -> int:
+    """The smallest multiple of ``multiple`` at or above ``required``.
+
+    Contract. ``required`` is a positive integer (the rows a tokenizer needs).
+    Returns a plain ``int`` ``>= required`` and ``< required + multiple``. Never
+    raises for a positive ``required``.
+    """
+    return -(-int(required) // int(multiple)) * int(multiple)
+
+
+def resolve_vocab_size(config: TopoLMTrainingConfig) -> int:
+    """The embedding rows an unset ``--vocab-size`` means: the tokenizer's need, padded.
+
+    Contract. Reads the encoding ``config.encoding_name`` names
+    (``tiktoken.get_encoding``: its base vocabulary, the same ``n_vocab`` the
+    trainer's preprocessor reports) and the config's four special ids, takes the
+    larger of the base size and the largest special id plus one
+    (:func:`_rows_needed`, the rule :func:`_required_vocab_size` applies to a built
+    tokenizer) and rounds that up to a multiple of :data:`VOCAB_SIZE_MULTIPLE`:
+    50304 for the default gpt2 encoding (50257 base ids, specials 50257..50260).
+    Returns a plain ``int``. It builds no tokenizer, so a run the CLI refuses
+    afterwards has still done no run work. Failure mode: an unknown
+    ``encoding_name`` raises what ``tiktoken.get_encoding`` raises.
+    """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-031: the default is derived from
+    # the encoding, not typed. Do NOT restore a literal default (100277 was
+    # cl100k's size: about 50k unused rows, 39M parameters at width 784, for a
+    # gpt2 tokenizer), do NOT round below the tokenizer's need (the
+    # explicit-too-small refusal, _require_vocab_covers_tokenizer, stays for typed
+    # values), and do NOT build a tokenizer here: _config_from_args runs before the
+    # variant/radius refusal and a refused run must do no run work. Guarded by
+    # test_topolm_vocab_default.py. See decisions.md.
+    required = _rows_needed(
+        tiktoken.get_encoding(config.encoding_name).n_vocab,
+        [getattr(config, name) for name in _SPECIAL_ID_ATTRIBUTES],
+    )
+    return round_up_vocab_size(required)
 
 
 def _require_vocab_covers_tokenizer(

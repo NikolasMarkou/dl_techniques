@@ -893,7 +893,7 @@ ANCHOR_PATTERN = re.compile(r"# DECISION (plan-\d{4}-\d\d-\d\dT\d{6}-[0-9a-f]{8}
 #: lives in ``src/dl_techniques/metrics``, outside this census).
 ANCHORED_DECISIONS = {
     "D-001", "D-002", "D-006", "D-007", "D-019", "D-020", "D-021", "D-022",
-    "D-024", "D-025", "D-026", "D-027", "D-028", "D-029",
+    "D-024", "D-025", "D-026", "D-027", "D-028", "D-029", "D-031",
 }
 
 
