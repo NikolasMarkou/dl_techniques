@@ -1320,9 +1320,11 @@ def build_callbacks(
     :type preprocessor: Any
     :return: The callback list, in the order they fire. With
         ``viz_every_steps > 0`` the live topography callback is appended LAST, so
-        its final frame is drawn after the early stopper has restored the best
-        weights, like the post-hoc figure; with ``0`` the list is exactly the
-        four callbacks a run always had.
+        its ``on_train_end`` runs after the early stopper has restored its
+        snapshot and redraws the final step when the weights changed since the
+        last draw (a second row for that step, ``restored_weights: true``), so the
+        last frame shows the model the run ends with, like the post-hoc figure;
+        with ``0`` the list is exactly the four callbacks a run always had.
     :rtype: List[keras.callbacks.Callback]
     :raises ValueError: If ``viz_every_steps`` is negative, or positive with no
         ``backbone`` or ``preprocessor`` to draw from.

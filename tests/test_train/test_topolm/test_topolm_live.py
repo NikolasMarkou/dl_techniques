@@ -760,3 +760,254 @@ class TestTheDrawIsCheapAndTheTripwireIsNotBlind:
         )
         callback.on_train_begin()
         assert any("SeedGenerator" in message for message in warnings)
+
+
+# =====================================================================
+# step 6.2 (plan-2026-10-23T190557-972a9ac5, decision D-018): the final frame
+# shows the weights the run ENDS with, and a damaged metrics.jsonl does not
+# kill the view. Written RED-first against the 02af58996 callback.
+# =====================================================================
+
+
+def _rows(tmp_path):
+    return [
+        json.loads(line)
+        for line in (_live_dir(tmp_path) / "metrics.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def _force_an_early_stop_at_the_second_evaluation(monkeypatch):
+    """Make ``ConsecutiveIncreaseEarlyStopping`` see an increase at every
+    evaluation after the first, so with ``early_stop_patience=1`` it stops at
+    evaluation 2 and restores the snapshot taken at evaluation 1. The real
+    callback, its real ``on_train_end`` restore: only the verdict is forced."""
+    from dl_techniques.callbacks import consecutive_increase_early_stopping as stopping
+
+    def forced(self, value):
+        if self._previous is None:
+            self._previous = value
+            return False
+        return True
+
+    monkeypatch.setattr(
+        stopping.ConsecutiveIncreaseEarlyStopping, "_is_increase", forced
+    )
+
+
+def _stopped_run(monkeypatch, tmp_path, viz_every_steps):
+    """A 16-step budget, validation every 4 steps, forced stop at evaluation 2
+    (step 8). Returns ``(config, result, rows)`` of a real CPU ``train_topolm``."""
+    _patch_data(monkeypatch)
+    _force_an_early_stop_at_the_second_evaluation(monkeypatch)
+    monkeypatch.setattr(
+        C, "_run_dir", lambda config: str(tmp_path / f"stopped_{viz_every_steps}")
+    )
+    config = _config(
+        train_steps=16, eval_every_steps=4, viz_every_steps=viz_every_steps,
+        early_stop_patience=1,
+    )
+    with keras.device("cpu"):
+        result = train_topolm(config, preprocessor=StubTokenizer(), run_topography=False)
+    live = tmp_path / f"stopped_{viz_every_steps}" / "topography_live"
+    rows = [json.loads(l) for l in (live / "metrics.jsonl").read_text().splitlines()]
+    return config, result, live, rows
+
+
+def _post_fit_mean_morans_i(config, result):
+    """The mean Moran's I of the model ``fit`` left behind, scored by the same
+    public function the callback uses, but called by the test on its own."""
+    report, _ = evaluate_topography(
+        result["backbone"], SMOKE_STIMULI, ("a", "b"), StubTokenizer(),
+        readout_fwhm=None, min_cluster_size=config.min_cluster_size,
+        permutation_p_value=False, batch_size=8,
+    )
+    return report["arms"]["raw"]["mean_morans_i"]
+
+
+class TestTheFinalFrameShowsTheEndingWeights:
+    def test_a_stop_on_a_draw_step_redraws_the_restored_model(self, monkeypatch, tmp_path):
+        """``viz_every_steps=4`` divides the stopping step 8: the batch-end draw
+        scores the pre-restore weights, the early stopper then restores, and the
+        last frame must be the restored model, equal to an independent
+        evaluation of the model ``fit`` returned."""
+        config, result, live, rows = _stopped_run(monkeypatch, tmp_path, 4)
+        assert len(result["history"].history["loss"]) == 2, "the forced stop did not happen"
+
+        assert [row["step"] for row in rows] == [0, 4, 8, 8]
+        pre_restore, last = rows[2], rows[3]
+        expected = _post_fit_mean_morans_i(config, result)
+        assert last["mean_morans_i"] == pytest.approx(expected, rel=1e-9, abs=1e-12)
+        assert pre_restore["mean_morans_i"] != pytest.approx(expected, rel=1e-6), (
+            "the pre-restore frame equals the restored one: the test cannot tell them apart"
+        )
+        assert last["restored_weights"] is True
+        assert all("restored_weights" not in row for row in rows[:3])
+
+        # the frame on disk is the redrawn one
+        assert (live / "latest_t_maps_raw.png").read_bytes() == (
+            live / "step_0000008" / "t_maps_raw.png"
+        ).read_bytes()
+        assert sorted(n for n in os.listdir(live) if n.startswith("step_")) == [
+            "step_0000000", "step_0000004", "step_0000008",
+        ]
+
+    def test_a_stop_off_the_draw_grid_still_ends_on_the_restored_model(
+        self, monkeypatch, tmp_path
+    ):
+        """``viz_every_steps=3``: step 8 was not drawn, so the end-of-training draw
+        is the first draw of that step and is a plain row, already restored."""
+        config, result, live, rows = _stopped_run(monkeypatch, tmp_path, 3)
+        assert [row["step"] for row in rows] == [0, 3, 6, 8]
+        assert rows[-1]["mean_morans_i"] == pytest.approx(
+            _post_fit_mean_morans_i(config, result), rel=1e-9, abs=1e-12
+        )
+        assert all("restored_weights" not in row for row in rows)
+
+    def test_weights_that_change_after_the_last_draw_are_drawn_again(self, tmp_path):
+        """The mechanism without a ``fit``: a stand-in for the early stopper
+        overwrites the weights between the last batch-end draw and
+        ``on_train_end``."""
+        _, _, backbone, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        before = _rows(tmp_path)[-1]["mean_morans_i"]
+        for variable in backbone.trainable_variables:
+            variable.assign(variable + 0.37)
+        callback.on_train_end()
+
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 2]
+        assert rows[-1]["restored_weights"] is True and "restored_weights" not in rows[1]
+        assert rows[-1]["mean_morans_i"] != before
+        assert _step_dirs(tmp_path) == ["step_0000000", "step_0000002"]
+        assert (_live_dir(tmp_path) / "latest_t_maps_raw.png").read_bytes() == (
+            _live_dir(tmp_path) / "step_0000002" / "t_maps_raw.png"
+        ).read_bytes()
+
+    def test_unchanged_weights_are_not_drawn_twice(self, monkeypatch, tmp_path):
+        """No restore, no change: the run ends on a draw step and nothing is
+        redrawn, so the steps stay strictly increasing and no row is flagged."""
+        _, _, _, callback = _live(tmp_path)
+        calls = _spy_on_evaluate(monkeypatch, lambda n, real, a, k: real(*a, **k))
+        callback.on_train_begin()
+        for batch in range(4):
+            callback.on_train_batch_end(batch, {})
+        callback.on_train_end()
+
+        assert len(calls) == 3
+        rows = _rows(tmp_path)
+        steps = [row["step"] for row in rows]
+        assert steps == [0, 2, 4] and steps == sorted(set(steps))
+        assert all("restored_weights" not in row for row in rows)
+
+    def test_the_fingerprint_sees_a_weight_change_and_nothing_else(self, tmp_path):
+        """The both-ways twin of the two tests above, on the fingerprint itself."""
+        from train.topolm.live import same_fingerprint
+
+        _, _, backbone, callback = _live(tmp_path)
+        first = callback._fingerprint()
+        assert same_fingerprint(callback._fingerprint(), first)
+        variable = backbone.trainable_variables[0]
+        old = np.array(variable.numpy())
+        variable.assign(old + 1e-3)
+        assert not same_fingerprint(callback._fingerprint(), first)
+        variable.assign(old)
+        assert same_fingerprint(callback._fingerprint(), first)
+        assert not same_fingerprint(first, None)
+
+    def test_a_fingerprint_never_touches_an_rng_or_the_weights(self, tmp_path):
+        _, head, backbone, callback = _live(tmp_path)
+        before_rng = _rng_snapshot(head)
+        before = [np.array(v.numpy()) for v in backbone.weights]
+        callback._fingerprint()
+        _assert_same_snapshot(before_rng, _rng_snapshot(head))
+        for old, variable in zip(before, backbone.weights):
+            assert np.array_equal(old, variable.numpy())
+
+    def test_the_curve_uses_the_last_row_of_a_repeated_step(self, monkeypatch):
+        """``plot_topography_curve`` draws one point per step: the LAST row of a
+        step that was drawn twice (before and after the restore)."""
+        import matplotlib.axes
+        from train.topolm.plotting import plot_topography_curve
+
+        def row(step, moran, **extra):
+            return {
+                "step": step, "mean_morans_i": moran, "total_clusters_a": 1,
+                "total_clusters_b": 1, "mean_num_significant_units": 3.0,
+                "val_loss": None, "val_loss_step": None,
+                "per_tap": {"t/a": {"morans_i": moran}}, **extra,
+            }
+
+        rows = [row(0, 0.0), row(4, 0.2), row(4, 0.1, restored_weights=True)]
+        drawn = []
+        real = matplotlib.axes.Axes.plot
+
+        def spy(self, *args, **kwargs):
+            drawn.append((kwargs.get("label"), np.asarray(args[0]), np.asarray(args[1])))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy)
+        plot_topography_curve(rows, None)
+        mean_line = [d for d in drawn if d[0] == "mean over taps"]
+        assert len(mean_line) == 1
+        assert mean_line[0][1].tolist() == [0.0, 4.0]
+        assert mean_line[0][2].tolist() == pytest.approx([0.0, 0.1])
+        for _, x, _ in drawn:
+            assert len(x) == len(set(x.tolist())), "a step was drawn twice"
+
+
+class TestADamagedMetricsFileDoesNotKillTheView:
+    def _write_damaged(self, tmp_path):
+        """One good row, then a row cut off mid-write (no newline at the end)."""
+        _, _, _, probe = _live(tmp_path / "donor")
+        probe.on_train_begin()
+        good = (_live_dir(tmp_path / "donor") / "metrics.jsonl").read_text()
+        _live_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        (_live_dir(tmp_path) / "metrics.jsonl").write_text(
+            good + good[: len(good) // 2]
+        )
+        return good
+
+    def test_a_truncated_last_line_is_skipped_with_one_warning(
+        self, monkeypatch, tmp_path
+    ):
+        self._write_damaged(tmp_path)
+        _, _, _, callback = _live(tmp_path)
+        warnings = []
+        monkeypatch.setattr(
+            logger, "warning", lambda message, *a, **k: warnings.append(str(message))
+        )
+        callback.on_train_begin()
+        for batch in range(2):                      # a second draw, at step 2
+            callback.on_train_batch_end(batch, {})
+
+        assert not callback.disabled
+        assert callback._consecutive_failures == 0 and callback._draws == 2
+        about_the_file = [w for w in warnings if "metrics.jsonl" in w]
+        assert len(about_the_file) == 1, about_the_file
+        assert "skipped" in about_the_file[0]
+        assert (_live_dir(tmp_path) / "topography_curve.png").read_bytes()[:4] == b"\x89PNG"
+
+    def test_a_row_appended_after_a_truncated_line_is_a_whole_row(self, tmp_path):
+        """A cut-off row has no newline, so a plain append would glue the next
+        row onto it and lose BOTH. The new row must start on its own line."""
+        self._write_damaged(tmp_path)
+        _, _, _, callback = _live(tmp_path)
+        callback.on_train_begin()
+        lines = (_live_dir(tmp_path) / "metrics.jsonl").read_text().splitlines()
+        assert len(lines) == 3
+        assert json.loads(lines[0])["step"] == 0
+        with pytest.raises(ValueError):
+            json.loads(lines[1])
+        assert json.loads(lines[2])["step"] == 0
+
+    def test_an_intact_file_warns_about_nothing(self, monkeypatch, tmp_path):
+        _, _, _, callback = _live(tmp_path)
+        warnings = []
+        monkeypatch.setattr(
+            logger, "warning", lambda message, *a, **k: warnings.append(str(message))
+        )
+        callback.on_train_begin()
+        assert not [w for w in warnings if "metrics.jsonl" in w]

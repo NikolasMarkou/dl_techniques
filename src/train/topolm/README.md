@@ -317,6 +317,19 @@ row holds 7.5333 and the final history value is 7.4917; in the matching `tiny` r
 7.8182 and 7.8185. The
 curve plots each validation once, at its own `val_loss_step`.
 
+**The last frame is the model the run ends with.** `fit` draws the last step at
+the end of its final batch; `ConsecutiveIncreaseEarlyStopping` restores its
+snapshot only afterwards. When the weights differ from the ones the last draw saw
+(a fingerprint of the trainable weights decides), the end of training draws that
+step again: the step directory and the `latest_*` files are replaced and
+`metrics.jsonl` gets a second row with the same `step` and
+`"restored_weights": true`. A run without a restore has strictly increasing steps
+and no such field. A reader takes the last row of a repeated step (the curve does,
+through `last_row_per_step`). A stop that falls between two draws gets one final
+frame labelled with the step it stopped at, already showing the restored weights.
+A `metrics.jsonl` with a damaged line (a crash mid-write) does not stop the view:
+the line is skipped with one warning and the next row starts on a line of its own.
+
 **What a draw scores.** The two contrast conditions of the built-in smoke stimuli
 (five sentences per condition; the command line has no flag for other stimuli),
 the raw arm only, no permutation test, in batches of 8 prompts. A live map is

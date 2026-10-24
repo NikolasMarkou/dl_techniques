@@ -11,6 +11,21 @@ where a person can open them while ``fit`` is still running::
         topography_curve.png         Moran's I, clusters, significant units against step
         metrics.jsonl                one strict-JSON row per draw (``tail -f`` it)
 
+The last frame shows the model the run ENDS with. ``fit`` draws the last step at
+the end of its final batch, and only then does
+``ConsecutiveIncreaseEarlyStopping.on_train_end`` put back the weights it snapshot
+before the final rising streak, so a run that stops early would otherwise end on a
+frame of weights it no longer has. ``on_train_end`` therefore compares a
+fingerprint of the trainable weights (per-variable float64 sums, taken at every
+draw) with the last draw's, and draws again when the step differs or the weights
+do. That second draw of an already-drawn step overwrites the step directory and
+the ``latest_*`` files and appends a row with the SAME ``step`` and
+``"restored_weights": true``; nothing is redrawn when nothing changed. A run
+without a restore therefore has strictly increasing steps and no such field, and
+a reader (the curve is one) takes the LAST row of a repeated step. The frame is
+labelled with the step the run stopped at, which is not the step the restored
+weights were trained to.
+
 The counter counts OPTIMIZER steps, resumed runs included (``initial_step``), and
 is independent of the virtual epoch: ``steps_per_epoch`` is ``eval_every_steps``,
 so a draw every 500 steps in a run validating every 2000 is four draws per
@@ -193,6 +208,69 @@ def _failure_site(error: BaseException) -> str:
     return f"{os.path.basename(last.filename)}:{last.lineno} in {last.name}"
 
 
+def weights_fingerprint(variables: Sequence[Any]) -> np.ndarray:
+    """A cheap, exact-enough identity of a set of weights: ``(n, 2)`` float64.
+
+    One row per variable, ``[sum, sum of squares]`` accumulated in float64. It
+    reads the values (``convert_to_numpy``) and nothing else: no RNG, no optimizer
+    or metric state, no forward pass. Two weight sets that differ in any variable
+    by more than float64 rounding of these two sums are told apart; it is an
+    equality test for "did the weights change", not a hash for storage.
+
+    :param variables: Keras variables (typically ``backbone.trainable_variables``).
+    :type variables: Sequence[keras.Variable]
+    :return: The fingerprint; compare two with :func:`same_fingerprint` (a NaN
+        weight must not make a run differ from itself).
+    :rtype: numpy.ndarray
+    """
+    rows = []
+    for variable in variables:
+        values = np.asarray(keras.ops.convert_to_numpy(variable), dtype="float64")
+        rows.append([values.sum(dtype="float64"), np.square(values).sum(dtype="float64")])
+    return np.asarray(rows, dtype="float64").reshape(-1, 2)
+
+
+def same_fingerprint(left: Optional[np.ndarray], right: Optional[np.ndarray]) -> bool:
+    """Whether two :func:`weights_fingerprint` results are equal (NaN equals NaN)."""
+    if left is None or right is None:
+        return False
+    return left.shape == right.shape and bool(np.array_equal(left, right, equal_nan=True))
+
+
+def read_metrics_rows(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Every readable row of a ``metrics.jsonl``, and how many lines were not.
+
+    A crash mid-write leaves a truncated last line; a reader must survive it. A
+    line that is not a JSON object is skipped and counted. A repeated ``step``
+    (the redraw after a weight restore, ``"restored_weights": true``) stays as
+    written: take the last row of a step with
+    :func:`train.topolm.plotting.last_row_per_step`.
+
+    :param path: The file; a missing file is an empty list.
+    :type path: str
+    :return: ``(rows, skipped)``.
+    :rtype: Tuple[List[Dict[str, Any]], int]
+    """
+    rows: List[Dict[str, Any]] = []
+    skipped = 0
+    if not os.path.exists(path):
+        return rows, skipped
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                skipped += 1
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+            else:
+                skipped += 1
+    return rows, skipped
+
+
 def _metrics_row(
     step: int,
     seconds: float,
@@ -200,12 +278,15 @@ def _metrics_row(
     val_loss_step: Optional[int],
     report: Mapping[str, Any],
     arrays: Mapping[str, Any],
+    restored_weights: bool = False,
 ) -> Dict[str, Any]:
     """The ``metrics.jsonl`` row of one draw (raw arm), JSON-safe.
 
     ``per_tap`` holds, for every tap in depth order: standard and islands Moran's
     I, the BH-FDR significant units, the clusters found for each polarity and the
-    min, max and mean absolute value of the t-map.
+    min, max and mean absolute value of the t-map. ``restored_weights`` adds the
+    boolean field of that name (``true``) to the redraw of an already-drawn step
+    whose weights changed afterwards; an ordinary row does not carry it.
     """
     arm = report["arms"]["raw"]
     t_maps = arrays["arms"]["raw"]["t_maps"]
@@ -222,7 +303,7 @@ def _metrics_row(
             "t_max": float(np.max(t_map)),
             "t_abs_mean": float(np.mean(np.abs(t_map))),
         }
-    return _json_safe({
+    row = {
         "step": step,
         "seconds": seconds,
         "val_loss": val_loss,
@@ -235,7 +316,19 @@ def _metrics_row(
         "total_clusters_a": arm["total_clusters_a"],
         "total_clusters_b": arm["total_clusters_b"],
         "per_tap": per_tap,
-    })
+    }
+    if restored_weights:
+        row["restored_weights"] = True
+    return _json_safe(row)
+
+
+def _ends_with_newline(path: str) -> bool:
+    """Whether ``path`` is missing, empty or ends in a newline (an append starts a line)."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return True
+    with open(path, "rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) == b"\n"
 
 
 # ---------------------------------------------------------------------
@@ -247,10 +340,25 @@ class TopographyLiveCallback(keras.callbacks.Callback):
     """Draw the model's topography during ``fit``, without changing the run.
 
     Built by :func:`~train.topolm.common.build_callbacks` when
-    ``viz_every_steps > 0`` and appended LAST, so its final frame is drawn after
-    ``ConsecutiveIncreaseEarlyStopping`` has restored the best weights, like the
-    post-hoc figure. See the module docstring for the outputs and the two
-    promises.
+    ``viz_every_steps > 0`` and appended LAST, so ``on_train_end`` runs after
+    ``ConsecutiveIncreaseEarlyStopping`` has restored its snapshot. The final
+    frame shows the weights the run ends with, like the post-hoc figure: when the
+    last step was already drawn (``viz_every_steps`` divides it) and the weights
+    have changed since, ``on_train_end`` draws that step again, flagged
+    ``restored_weights`` in its row (see the module docstring). See it too for
+    the outputs and the two promises.
+
+    What the non-perturbation check covers, and what it does not. The tripwire
+    compares every ``SeedGenerator`` in the model tree (the head's and the
+    backbone's, found through ``Layer._seed_generators``) and the Python and NumPy
+    global RNG states around each draw. It does NOT snapshot Keras's own global
+    ``SeedGenerator`` (what ``keras.random.*`` uses when no ``seed`` is given) or
+    TensorFlow's global op-seed counter. A draw does not use either: the eval-mode
+    pass calls no ``keras.random`` function and no seeded TF op, and that is
+    pinned by the same-seed A/B in ``test_topolm_live.py`` (trainable and
+    non-trainable weights, SeedGenerator states and per-epoch losses bit-equal to
+    a run without the callback), not by the tripwire. A future draw that used a
+    global generator would be caught by the A/B, not by the tripwire.
 
     :param backbone: The TopoLM backbone to score (2D or 3D).
     :type backbone: TopoLM
@@ -322,6 +430,8 @@ class TopographyLiveCallback(keras.callbacks.Callback):
         self._val_loss: Optional[float] = None
         self._val_loss_step: Optional[int] = None
         self._last_attempt: Optional[int] = None
+        self._last_fingerprint: Optional[np.ndarray] = None
+        self._warned_unreadable = False
         self._consecutive_failures = 0
         self._draws = 0
         self.disabled = False
@@ -364,9 +474,19 @@ class TopographyLiveCallback(keras.callbacks.Callback):
             self._val_loss_step = self.step
 
     def on_train_end(self, logs=None) -> None:
-        """Draw the final frame unless the last step was already drawn."""
+        """Draw the final frame: the model the run ends with.
+
+        Draws when the last step was never drawn, and also when it was but the
+        weights are not the ones that draw saw (the early stopper restored its
+        snapshot after the last batch). That redraw replaces the step's frame and
+        appends a row with the same step and ``restored_weights: true``. With
+        nothing changed it draws nothing, so a run without a restore keeps its
+        strictly increasing steps.
+        """
         if self._last_attempt != self.step:
             self._draw(self.step)
+        elif not same_fingerprint(self._fingerprint(), self._last_fingerprint):
+            self._draw(self.step, restored_weights=True)
         logger.info(
             f"Live topography: {self._draws} frame(s) in {self.output_dir}"
             + (" (switched off during the run)" if self.disabled else "")
@@ -374,12 +494,16 @@ class TopographyLiveCallback(keras.callbacks.Callback):
 
     # -- one draw ------------------------------------------------------
 
+    def _fingerprint(self) -> np.ndarray:
+        """:func:`weights_fingerprint` of the backbone's trainable weights."""
+        return weights_fingerprint(self.backbone.trainable_variables)
+
     def _guarded_model(self):
         """The model whose generators the tripwire watches: the head under
         ``fit``, the backbone when the callback is driven without one."""
         return self.model if self.model is not None else self.backbone
 
-    def _draw(self, step: int) -> None:
+    def _draw(self, step: int, restored_weights: bool = False) -> None:
         """One draw, isolated and checked by the tripwire.
 
         The frame is written inside ``try``; whatever happens, the run state is
@@ -388,6 +512,9 @@ class TopographyLiveCallback(keras.callbacks.Callback):
 
         :param step: The step label of the frame.
         :type step: int
+        :param restored_weights: Mark the row (and the figure note) as the redraw
+            of ``step`` after the weights changed, i.e. a restore.
+        :type restored_weights: bool
         """
         # DECISION plan-2026-10-23T190557-972a9ac5/D-007
         # The draw is an EVAL-MODE pass and nothing else. Do NOT call the backbone
@@ -403,9 +530,10 @@ class TopographyLiveCallback(keras.callbacks.Callback):
             return
         self._last_attempt = step
         model = self._guarded_model()
+        self._last_fingerprint = self._fingerprint()
         before = capture_run_state(model)
         try:
-            self._write_frame(step)
+            self._write_frame(step, restored_weights)
         except Exception as error:
             # Exception, not BaseException: KeyboardInterrupt and SystemExit
             # must reach the user.
@@ -438,7 +566,7 @@ class TopographyLiveCallback(keras.callbacks.Callback):
                 f"bug in the draw, not in the model."
             )
 
-    def _write_frame(self, step: int) -> None:
+    def _write_frame(self, step: int, restored_weights: bool = False) -> None:
         """Evaluate, plot, publish ``latest_*``, append the row, redraw the curve."""
         started = time.perf_counter()
         report, arrays = C.evaluate_topography(
@@ -455,7 +583,10 @@ class TopographyLiveCallback(keras.callbacks.Callback):
         written = C.plot_topography(
             report, arrays,
             os.path.join(self.output_dir, f"step_{step:07d}"),
-            note=f"step {step} | {self._stimulus_label()}",
+            note=(
+                f"step {step}{', restored weights' if restored_weights else ''}"
+                f" | {self._stimulus_label()}"
+            ),
         )
         for path in written:
             name = os.path.basename(path)
@@ -466,7 +597,7 @@ class TopographyLiveCallback(keras.callbacks.Callback):
                 )
         row = _metrics_row(
             step, time.perf_counter() - started, self._val_loss,
-            self._val_loss_step, report, arrays,
+            self._val_loss_step, report, arrays, restored_weights,
         )
         rows = self._append_row(row)
 
@@ -488,19 +619,31 @@ class TopographyLiveCallback(keras.callbacks.Callback):
         return f"{kind}, n={sizes} per condition"
 
     def _append_row(self, row: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        """Append ``row`` to ``metrics.jsonl`` and return every row now in it.
+        """Append ``row`` to ``metrics.jsonl`` and return every readable row in it.
 
         Strict JSON (``allow_nan=False``), flushed and fsynced so a reader
-        tailing the file, or a crash, sees whole rows.
+        tailing the file, or a crash, sees whole rows. A file that ends in a
+        partial line (a crash mid-write) gets a newline first, so the new row
+        starts on its own line instead of being glued to the fragment; unreadable
+        lines are skipped when the file is read back, with one warning per
+        callback.
         """
         os.makedirs(self.output_dir, exist_ok=True)
         path = os.path.join(self.output_dir, "metrics.jsonl")
+        prefix = "" if _ends_with_newline(path) else "\n"
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, allow_nan=False) + "\n")
+            handle.write(prefix + json.dumps(row, allow_nan=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        with open(path, "r", encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+        rows, skipped = read_metrics_rows(path)
+        if skipped and not self._warned_unreadable:
+            self._warned_unreadable = True
+            logger.warning(
+                f"Live topography: {path} has {skipped} unreadable line(s) "
+                f"(a crash mid-write?); skipped, the view goes on. Further "
+                f"unreadable lines are not reported again."
+            )
+        return rows
 
     def _publish(self, name: str, write: Callable[[str], Any]) -> str:
         """Make ``<output_dir>/<name>`` appear whole or not at all.
