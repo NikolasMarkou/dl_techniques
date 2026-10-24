@@ -42,6 +42,7 @@ from train.topolm import (
 )
 from train.topolm import common as C
 from dl_techniques.utils.logger import logger
+from tests.index_weights import GPU_VISIBLE
 
 from .test_topolm_trainer import (  # noqa: F401  (the autouse fixture must be in scope)
     LENGTH,
@@ -830,6 +831,47 @@ def _post_fit_mean_morans_i(config, result):
     return report["arms"]["raw"]["mean_morans_i"]
 
 
+def _final_frame_rel_tolerance():
+    """Relative tolerance for "the last frame IS the restored model" (D-023).
+
+    Two evaluations of the SAME weights agree bit for bit on a CPU (measured:
+    relative gap 0.0), so the CPU keeps the strict 1e-9. On a GPU they differ by
+    float32 reduction order: 0.10646916973453358 against 0.10646915724341968, a
+    relative gap of 1.2e-7, one float32 ulp, so a GPU run compares at 1e-5 (about
+    80 ulp of headroom). The looser bound keeps the guard's power because the
+    frame it must tell apart is far away: the pre-restore frame of the same run
+    differs from the restored model by about 7.8e-2 (relative 0.73), and the frame
+    of the step before the end by about 4.8e-2; both tests assert (through
+    :func:`_assert_a_stale_frame_is_distinguishable`) that gap exceeds
+    :data:`_DISCRIMINATING_GAP` and 100 times the tolerance in force, so a
+    tolerance loosened past the signal fails the test itself.
+    ``GPU_VISIBLE`` is the repo's own device switch (``tests/index_weights.py``):
+    TensorFlow sees a GPU, whether or not a given op lands on it.
+    """
+    return 1e-5 if GPU_VISIBLE else 1e-9
+
+
+#: The smallest absolute gap between a stale frame and the restored model that
+#: the final-frame tests accept as proof that they can tell them apart.
+_DISCRIMINATING_GAP = 1e-3
+
+
+def _assert_a_stale_frame_is_distinguishable(stale, expected):
+    """The final-frame comparison can FAIL at the tolerance in force: a frame that
+    is not the restored model sits more than :data:`_DISCRIMINATING_GAP` away, and
+    more than 100 times the tolerance, so loosening the tolerance past the signal
+    makes the test itself fail rather than the guard go quietly blind."""
+    gap = abs(stale - expected)
+    tolerance = _final_frame_rel_tolerance()
+    assert gap > _DISCRIMINATING_GAP, (
+        f"the stale frame is only {gap:.2e} from the restored model: "
+        f"the test cannot tell them apart"
+    )
+    assert gap > 100 * tolerance * abs(expected), (
+        f"a relative tolerance of {tolerance:g} is not far below the {gap:.2e} gap"
+    )
+
+
 class TestTheFinalFrameShowsTheEndingWeights:
     def test_a_stop_on_a_draw_step_redraws_the_restored_model(self, monkeypatch, tmp_path):
         """``viz_every_steps=4`` divides the stopping step 8: the batch-end draw
@@ -842,10 +884,12 @@ class TestTheFinalFrameShowsTheEndingWeights:
         assert [row["step"] for row in rows] == [0, 4, 8, 8]
         pre_restore, last = rows[2], rows[3]
         expected = _post_fit_mean_morans_i(config, result)
-        assert last["mean_morans_i"] == pytest.approx(expected, rel=1e-9, abs=1e-12)
-        assert pre_restore["mean_morans_i"] != pytest.approx(expected, rel=1e-6), (
-            "the pre-restore frame equals the restored one: the test cannot tell them apart"
-        )
+        tolerance = _final_frame_rel_tolerance()
+        assert last["mean_morans_i"] == pytest.approx(expected, rel=tolerance, abs=1e-12)
+        # The guard can fail at the tolerance in force: the pre-restore frame is
+        # about 7.8e-2 away from the restored model, 1e-3 is the floor we demand.
+        _assert_a_stale_frame_is_distinguishable(pre_restore["mean_morans_i"], expected)
+        assert pre_restore["mean_morans_i"] != pytest.approx(expected, rel=tolerance)
         assert last["restored_weights"] is True
         assert all("restored_weights" not in row for row in rows[:3])
 
@@ -864,9 +908,13 @@ class TestTheFinalFrameShowsTheEndingWeights:
         is the first draw of that step and is a plain row, already restored."""
         config, result, live, rows = _stopped_run(monkeypatch, tmp_path, 3)
         assert [row["step"] for row in rows] == [0, 3, 6, 8]
-        assert rows[-1]["mean_morans_i"] == pytest.approx(
-            _post_fit_mean_morans_i(config, result), rel=1e-9, abs=1e-12
-        )
+        expected = _post_fit_mean_morans_i(config, result)
+        tolerance = _final_frame_rel_tolerance()
+        assert rows[-1]["mean_morans_i"] == pytest.approx(expected, rel=tolerance, abs=1e-12)
+        # The frame BEFORE the end (step 6, a model trained two steps past the one
+        # the stopper restored) is about 4.8e-2 away: a final frame that kept it
+        # would fail the line above at the GPU tolerance as well.
+        _assert_a_stale_frame_is_distinguishable(rows[-2]["mean_morans_i"], expected)
         assert all("restored_weights" not in row for row in rows)
 
     def test_weights_that_change_after_the_last_draw_are_drawn_again(self, tmp_path):
