@@ -8,6 +8,8 @@ warm-up ("without using warm-up training epochs"), DropPath 0.3 (0.4 for cn_64_5
 AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation, and
 random erasing 0.25. Remaining differences from the authors' run: the cosine here
 decays per step and ends at 1e-5 (alpha 0.01), theirs per epoch to 0.
+
+Label smoothing is opt-in (``--label-smoothing``, off in the paper recipe).
 """
 
 import os
@@ -49,6 +51,7 @@ from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
 from train.common.datasets import get_class_names
 from train.common.run_io import save_training_history_json
+from train.convnext.common import build_loss
 
 
 # ---------------------------------------------------------------------
@@ -555,9 +558,14 @@ def train_model(args) -> None:
             keras.metrics.SparseTopKCategoricalAccuracy(k=5, name="top5_accuracy")
         )
 
+    if args.label_smoothing > 0.0:
+        logger.info(
+            f"Label smoothing {args.label_smoothing:g}: loss and val_loss include "
+            "the smoothing and are not comparable with unsmoothed runs"
+        )
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        loss=build_loss(args.label_smoothing),
         metrics=metrics,
     )
 
@@ -611,6 +619,7 @@ def train_model(args) -> None:
         "weight_decay": args.weight_decay,
         "stochastic_depth_rate": args.stochastic_depth_rate,
         "dropout_rate": args.dropout_rate,
+        "label_smoothing": args.label_smoothing,
         "cli_mode": args.cli_mode, "ctx_mode": args.ctx_mode,
         "use_global_context": args.use_global_context,
         "warmup_epochs": args.warmup_epochs,
@@ -699,7 +708,8 @@ def train_model(args) -> None:
         f.write(f"Parameters: {model.count_params():,}\n\n")
         f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
         f.write(f"LR: {args.learning_rate}, Weight decay: {args.weight_decay}\n")
-        f.write(f"Stochastic depth: {args.stochastic_depth_rate}\n\n")
+        f.write(f"Stochastic depth: {args.stochastic_depth_rate}\n")
+        f.write(f"Label smoothing: {args.label_smoothing}\n\n")
         f.write("Test Results:\n")
         for key, val in test_results.items():
             f.write(f"  {key}: {val:.4f}\n")
@@ -765,6 +775,11 @@ def main() -> None:
                              'Default: 0.4 for cn_64_5, else 0.3.')
     parser.add_argument('--dropout-rate', type=float, default=0.0,
                         dest='dropout_rate')
+    parser.add_argument('--label-smoothing', type=float, default=0.0,
+                        dest='label_smoothing',
+                        help='Label smoothing in [0, 1) (0 = off, the stock loss). '
+                             'Above 0 the loss and val_loss include the smoothing '
+                             'and are not comparable with unsmoothed runs.')
 
     # Augmentation
     parser.add_argument('--random-erasing-prob', type=float, default=0.25,
@@ -797,6 +812,8 @@ def main() -> None:
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
+    if not 0.0 <= args.label_smoothing < 1.0:
+        parser.error(f"--label-smoothing must be in [0, 1), got {args.label_smoothing}")
     # DECISION plan-2026-10-23T100412-e7eaaa02/D-009
     # Flags the user did not pass take the PRESET's value. Do NOT give these
     # three flags their own defaults again: always passing cli_mode='full' and

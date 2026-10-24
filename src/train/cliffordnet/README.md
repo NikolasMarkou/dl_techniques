@@ -94,6 +94,7 @@ actually uses.
 | `--layer-scale-init` | `1e-5` | |
 | `--stochastic-depth-rate` | `0.3` (`0.4` for `cn_64_5`) | Maximum DropPath, linearly ramped over depth. |
 | `--dropout-rate` | `0.0` | |
+| `--label-smoothing` | `0.0` | Opt-in, `a` in `[0, 1)`, anything else is a parser error. `0.0` keeps the stock `SparseCategoricalCrossentropy(from_logits=True)`; above 0 the loss is `train.convnext.common.SmoothedSparseCategoricalCrossentropy`, so `loss` and `val_loss` include the smoothing and are not comparable with unsmoothed runs (accuracy is unchanged in meaning). |
 | `--random-erasing-prob` | `0.25` | |
 | `--epoch-analysis-every` | `0` | Standard analysis schedule, 0 = off: the data-free weight/spectral analyzer runs before training (`epoch_000`), after epoch 1, then at N, 2N, ... into `<run>/epoch_analysis/epoch_NNN/`. |
 | `--gpu` | none | |
