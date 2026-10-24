@@ -467,14 +467,118 @@ _OLDER_RUN_NUMBERS = {
     "35.9": "dotted control, 3D, new pooling",
     "1.034": "islands Moran's I of the earlier 2D example, block_0/attention_tap",
 }
-_LABELS = re.compile(r"padded|earlier|previous|old|before", re.I)
+#: Whole words only (step 9.1): ``old`` used to match inside ``hold``, ``holds`` and
+#: ``threshold`` and let an unlabelled number through.
+_LABELS = re.compile(r"\b(?:padded|earlier|previous|older|old|before)\b", re.I)
+
+#: A line that opens a new bullet or numbered item. A bullet list is ONE blank-line
+#: paragraph, so labelling per paragraph let one bullet's "earlier run" cover
+#: another bullet's number. A table is one unit: its header row labels its columns.
+_BULLET_START = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s)")
+_TABLE_ROW = re.compile(r"^\s*\|")
 
 
-def test_numbers_of_the_earlier_runs_are_kept_only_with_their_label():
-    paragraphs = [_squash(p) for p in re.split(r"\n\s*\n", _readme_text())]
+def _label_units(text: str):
+    """The stretches a label may cover, each squashed to one line: a bullet or
+    numbered item with its continuation lines, a whole table, or a paragraph's
+    plain lines. A label counts for the unit it is written in and for no other."""
+    units = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        current, in_table = [], False
+        for line in paragraph.splitlines():
+            row = bool(_TABLE_ROW.match(line))
+            if current and (_BULLET_START.match(line) or row != in_table):
+                units.append(_squash(" ".join(current)))
+                current = []
+            in_table = row
+            current.append(line)
+        if current:
+            units.append(_squash(" ".join(current)))
+    return units
+
+
+def _unlabelled_older_numbers(text: str, numbers=_OLDER_RUN_NUMBERS):
+    """Numbers of ``numbers`` that some unit quotes without a label of its own.
+
+    Raises ``AssertionError`` for a number no unit quotes at all (the table has gone
+    stale), so a vanished figure is not read as a clean pass."""
+    units = _label_units(text)
     unlabelled = []
-    for number in _OLDER_RUN_NUMBERS:
-        holders = [p for p in paragraphs if re.search(rf"(?<![\d.]){re.escape(number)}(?!\d)", p)]
-        assert holders, f"{number} ({_OLDER_RUN_NUMBERS[number]}) is no longer quoted; drop it from the table"
-        unlabelled += [number for p in holders if not _LABELS.search(p)]
-    assert unlabelled == []
+    for number in numbers:
+        holders = [u for u in units if re.search(rf"(?<![\d.]){re.escape(number)}(?!\d)", u)]
+        assert holders, f"{number} ({numbers[number]}) is no longer quoted; drop it from the table"
+        unlabelled += [number for u in holders if not _LABELS.search(u)]
+    return unlabelled
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "the README bullet that starts 'Cutting every `a` sentence to the exact token "
+        "lengths' (about line 372) quotes 36.5 and 92.8, numbers of the EARLIER "
+        "checkpoints, with no label of its own: the finding of this stricter guard "
+        "(step 9.1). Step 8.5 rewrites that bullet; when it does, this test XPASSes "
+        "and strict=True fails it, which is the cue to delete this mark."
+    ),
+)
+def test_numbers_of_the_earlier_runs_are_kept_only_with_their_label():
+    assert _unlabelled_older_numbers(_readme_text()) == []
+
+
+_TWO = {"36.5": "t", "92.8": "t"}
+
+
+class TestTheLabelGuardCanFail:
+    """Step 9.1: the guard of the test above, seen RED on texts built to beat it."""
+
+    def test_old_inside_another_word_is_not_a_label(self):
+        text = "- the figure holds 36.5 significant units\n- the threshold gives 92.8\n"
+        assert _unlabelled_older_numbers(text, _TWO) == ["36.5", "92.8"]
+
+    def test_a_label_in_one_bullet_does_not_cover_another_bullet(self):
+        text = "- 36.5 significant units are shown\n- the earlier run had 92.8\n"
+        assert _unlabelled_older_numbers(text, _TWO) == ["36.5"]
+
+    def test_a_tables_header_label_covers_its_rows_but_not_the_text_after_it(self):
+        text = (
+            "| run | earlier units |\n| 2D | 36.5 |\n| 3D | 92.8 |\n"
+            "- but now 36.5 is quoted bare\n"
+        )
+        assert _unlabelled_older_numbers(text, _TWO) == ["36.5"]
+
+    def test_a_table_with_no_label_anywhere_is_flagged(self):
+        text = "| run | units |\n| 2D | 36.5 |\n| 3D | 92.8 |\n"
+        assert _unlabelled_older_numbers(text, _TWO) == ["36.5", "92.8"]
+
+    def test_a_label_in_the_same_bullet_or_paragraph_is_enough(self):
+        text = (
+            "- the earlier run had 36.5\n  and, on the previous checkpoint, 92.8\n\n"
+            "The old padded average gave 36.5 and\nthe same table has 92.8.\n"
+        )
+        assert _unlabelled_older_numbers(text, _TWO) == []
+
+    def test_a_number_nobody_quotes_is_reported_not_passed(self):
+        with pytest.raises(AssertionError, match="no longer quoted"):
+            _unlabelled_older_numbers("- the earlier run had 36.5\n", _TWO)
+
+    def test_the_real_guide_with_an_unlabelled_bullet_slipped_in_is_flagged(self):
+        """The README itself, mutated: a bullet quoting an older-run number with no
+        label is inserted right BEFORE a labelled bullet, in the same list. The old
+        paragraph-level check read the neighbour's label as its own."""
+        lines = _readme_text().splitlines()
+        number = re.compile(r"(?<![\d.])(?:%s)(?!\d)" % "|".join(map(re.escape, _OLDER_RUN_NUMBERS)))
+
+        def labelled_bullet_at(start):
+            end = start + 1
+            while end < len(lines) and lines[end].strip() and not _BULLET_START.match(lines[end]):
+                end += 1
+            unit = " ".join(lines[start:end])
+            return bool(number.search(unit) and _LABELS.search(unit))
+
+        target = next(
+            i for i, line in enumerate(lines)
+            if _BULLET_START.match(line) and labelled_bullet_at(i)
+        )
+        lines.insert(target, "- the guide reports 72.9 significant units")
+        flagged = _unlabelled_older_numbers("\n".join(lines))
+        assert "72.9" in flagged, flagged

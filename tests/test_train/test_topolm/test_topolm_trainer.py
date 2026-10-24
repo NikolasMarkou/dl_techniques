@@ -2724,7 +2724,9 @@ class TestRadiusResolution:
     overrides the row's own radius and fits no 3-D width in the table."""
 
     def test_the_resolver_is_importable(self):
-        from train.topolm.common import resolve_spatial_radius  # noqa: F401
+        import train.topolm.common as module
+
+        assert callable(module.resolve_spatial_radius)
 
     @pytest.mark.parametrize(
         "variant,expected",

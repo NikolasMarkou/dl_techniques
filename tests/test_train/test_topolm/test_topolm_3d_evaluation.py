@@ -29,21 +29,16 @@ import os
 import numpy as np
 import pytest
 
-from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
 from tests.test_metrics.test_spatial_autocorrelation import _brute_force_morans_i
 from train.topolm import (
     SMOKE_STIMULI,
-    TopoLMTrainingConfig,
     evaluate_topography,
     plot_topography,
     run_topographic_evaluation,
     train_topolm,
 )
-from train.topolm import common as C
 
 from .test_topolm_trainer import (  # noqa: F401  (the autouse fixture must be in scope)
-    LENGTH,
-    VOCAB,
     StubTokenizer,
     _block_effect,
     _config,
@@ -56,6 +51,12 @@ from .test_topolm_trainer import (  # noqa: F401  (the autouse fixture must be i
     _plant,
     _stub_backbone,
 )
+
+#: The imported autouse fixture is what keeps run directories out of ``results/``
+#: for this module. The name is imported only to be in scope for pytest, which
+#: pyflakes cannot know (it does not read the noqa marker on the import), so this
+#: tuple is the one use of the name it can see.
+_AUTOUSE_FIXTURES_IN_SCOPE = (_never_write_to_repo_results,)
 
 #: The non-cubic grid every placement test uses: 7 x 8 x 14 = 784 units, so an
 #: implementation that swaps two axes cannot also keep the shape.

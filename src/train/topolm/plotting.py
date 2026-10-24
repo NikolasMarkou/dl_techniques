@@ -1422,7 +1422,7 @@ def plot_topography_curve(
     )
     moran_axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
     moran_axis.set_ylabel("Moran's I")
-    legend = moran_axis.legend(
+    moran_axis.legend(
         handles=[mean_line, *tap_lines], loc="upper left",
         bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, ncol=legend_columns,
         fontsize=legend_fontsize, title=tap_prefix.rstrip("/") or None,

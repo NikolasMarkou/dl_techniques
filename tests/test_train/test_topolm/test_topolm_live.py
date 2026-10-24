@@ -46,12 +46,17 @@ from tests.index_weights import GPU_VISIBLE
 
 from .test_topolm_trainer import (  # noqa: F401  (the autouse fixture must be in scope)
     LENGTH,
-    VOCAB,
     StubTokenizer,
     _config,
     _never_write_to_repo_results,
     _patch_data,
 )
+
+#: The imported autouse fixture is what keeps run directories out of ``results/``
+#: for this module. The name is imported only to be in scope for pytest, which
+#: pyflakes cannot know (it does not read the noqa marker on the import), so this
+#: tuple is the one use of the name it can see.
+_AUTOUSE_FIXTURES_IN_SCOPE = (_never_write_to_repo_results,)
 
 #: The tiny head has one ``SeedGenerator`` per tap (4 taps), MEASURED; a Keras
 #: that renames ``Layer._seed_generators`` would make the snapshot find none and

@@ -817,10 +817,10 @@ class TestThreeDimensionalFigures:
     3-D array (``_panel_shape`` demands 2-D), and the 3-D drawers do not exist."""
 
     def test_the_drawers_exist(self):
-        from train.topolm.plotting import (  # noqa: F401
-            plot_cluster_montage_3d,
-            plot_t_maps_3d,
-        )
+        import train.topolm.plotting as module
+
+        assert callable(module.plot_t_maps_3d)
+        assert callable(module.plot_cluster_montage_3d)
 
     def test_a_3d_t_map_row_is_dispatched_and_written(self, tmp_path):
         volume, significant = _volume_fixture()
