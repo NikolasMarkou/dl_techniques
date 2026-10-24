@@ -2040,8 +2040,8 @@ _VARIANTS_3D = sorted(
 class TestThreeDimensionalVariantsTrain:
     """A 3D row builds at its OWN radius and trains; nothing refuses it.
 
-    Rewritten deliberately from ``TestThreeDimensionalVariantsAreRefused`` (plan
-    972a9ac5 step 5, D-005 and D-006). The refusal existed because the trainer
+    Rewritten deliberately from the class that pinned the refusal of a 3D variant
+    (plan 972a9ac5 step 5, D-005 and D-006). The refusal existed because the trainer
     overrode the row's radius with ``spatial_radius=5`` (no 3D width holds that)
     and because evaluation, plots and the readout were 2D-only. The radius is
     now resolved from the row, the metrics and plots follow the grid's rank, and

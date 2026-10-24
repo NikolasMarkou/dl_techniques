@@ -1140,3 +1140,11 @@ def test_the_uniform_guess_arithmetic_of_the_vocabulary_caveat_is_right():
     text = _squash(_readme_text())
     assert f"ln 100,277 = {math.log(100277):.2f} nats against ln 50,304 = {math.log(50304):.2f}" in text
     assert f"differs by {math.log(100277) - math.log(50304):.2f} nats" in text
+
+
+def test_no_test_file_names_the_removed_refusal_class():
+    """Final verification criterion 8b: the removed refusal class is named by no test
+    file (a docstring in the trainer tests still did)."""
+    removed = "TestThreeDimensional" + "VariantsAreRefused"  # not spelled out: this file is searched too
+    for path in Path(__file__).parent.glob("*.py"):
+        assert removed not in path.read_text(encoding="utf-8"), path.name
