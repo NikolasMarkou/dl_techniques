@@ -638,6 +638,167 @@ class TestControlsForARunAndTheFactsFile:
         assert sorted(facts["runs"]) == ["3d"]
 
 
+# ---------------------------------------------------------------------
+# the synthetic illustration (D-029)
+# ---------------------------------------------------------------------
+
+
+def _bh_step_up(p_values, alpha):
+    """Independent Benjamini-Hochberg: the largest k with p_(k) <= alpha * k / m."""
+    flat = p_values.ravel()
+    order = np.argsort(flat)
+    passed = flat[order] <= alpha * np.arange(1, flat.size + 1) / flat.size
+    reject = np.zeros(flat.size, dtype=bool)
+    if passed.any():
+        reject[order[: np.max(np.flatnonzero(passed)) + 1]] = True
+    return reject.reshape(p_values.shape)
+
+
+class TestTheSyntheticIllustration:
+    """The figure that shows what outlines look like for a SELECTIVE population is
+    made from made-up RESPONSES (10 stimuli by 256 units per panel, planted blobs)
+    that go through the real t-test, the real joint BH-FDR and the real cluster
+    growth, so its subtitle 'after BH-FDR' is true. It was drawn from a fixed
+    threshold |t| > 3.5 and said BH-FDR (pass-4 review, note 8)."""
+
+    def _make(self, **kwargs):
+        return K.synthetic_illustration(**kwargs)
+
+    def test_each_panel_has_ten_stimuli_five_a_and_five_b(self):
+        result = self._make()
+        responses = result["arrays"]["responses"]
+        assert len(responses) == 4
+        for name, matrix in responses.items():
+            assert matrix.shape == (10, 256), name
+        assert result["facts"]["n_per_condition"] == 5
+
+    def test_the_t_maps_are_students_t_of_the_responses(self):
+        import scipy.stats
+
+        result = self._make()
+        for name, matrix in result["arrays"]["responses"].items():
+            t_values, _ = scipy.stats.ttest_ind(matrix[:5], matrix[5:], axis=0, equal_var=True)
+            np.testing.assert_allclose(
+                result["arrays"]["t_maps"][name], t_values.reshape(16, 16), rtol=1e-9
+            )
+
+    def test_the_significance_mask_is_the_joint_bh_fdr_of_those_p_values(self):
+        import scipy.stats
+
+        result = self._make()
+        names = list(result["arrays"]["responses"])
+        p_values = np.stack([
+            scipy.stats.ttest_ind(
+                result["arrays"]["responses"][n][:5],
+                result["arrays"]["responses"][n][5:], axis=0, equal_var=True,
+            )[1]
+            for n in names
+        ])
+        expected = _bh_step_up(p_values, 0.05)  # ONE correction across all panels
+        for row, name in enumerate(names):
+            np.testing.assert_array_equal(
+                result["arrays"]["sig_grids"][name], expected[row].reshape(16, 16), err_msg=name
+            )
+        assert expected.sum() > 0, "nothing survived: the check is vacuous"
+
+    def test_it_is_not_a_fixed_threshold_on_t(self):
+        """BH-FDR and ``|t| > 3.5`` disagree somewhere, so this test fails for the
+        old figure."""
+        result = self._make()
+        differs = [
+            bool(np.any(
+                result["arrays"]["sig_grids"][n] != (np.abs(result["arrays"]["t_maps"][n]) > 3.5)
+            ))
+            for n in result["arrays"]["t_maps"]
+        ]
+        assert any(differs), "the mask equals |t| > 3.5 in every panel"
+
+    def test_the_outlines_are_grow_clusters_of_that_mask(self):
+        from dl_techniques.metrics.topographic_selectivity import grow_clusters
+
+        result = self._make()
+        arrays = result["arrays"]
+        for name in arrays["t_maps"]:
+            for sign, key in ((1, "label_grids"), (-1, "label_grids_b")):
+                _, labels = grow_clusters(
+                    arrays["t_maps"][name], arrays["sig_grids"][name], sign=sign,
+                    min_size=result["facts"]["min_cluster_size"], connectivity="queen",
+                )
+                np.testing.assert_array_equal(arrays[key][name], labels, err_msg=(name, key))
+
+    def test_the_outlined_cells_are_the_connected_components_of_the_mask_by_an_independent_route(
+        self,
+    ):
+        import scipy.ndimage
+
+        result = self._make()
+        arrays = result["arrays"]
+        minimum = result["facts"]["min_cluster_size"]
+        full = np.ones((3, 3), dtype=bool)  # queen connectivity
+        for name in arrays["t_maps"]:
+            for sign, key in ((1, "label_grids"), (-1, "label_grids_b")):
+                mask = arrays["sig_grids"][name] & (sign * arrays["t_maps"][name] > 0)
+                components, count = scipy.ndimage.label(mask, structure=full)
+                expected = np.zeros(mask.shape, dtype=bool)
+                for label in range(1, count + 1):
+                    cells = components == label
+                    if cells.sum() >= minimum:
+                        expected |= cells
+                np.testing.assert_array_equal(arrays[key][name] > 0, expected, err_msg=(name, key))
+
+    def test_every_panel_has_a_cluster_of_each_polarity(self):
+        """The planted blobs are recovered: two positive and one negative per panel."""
+        facts = self._make()["facts"]
+        for name, panel in facts["per_panel"].items():
+            assert panel["clusters_a"] >= 1 and panel["clusters_b"] >= 1, (name, panel)
+
+    def test_the_figure_is_drawn_by_plot_t_maps_from_those_arrays_and_says_synthetic(
+        self, monkeypatch, tmp_path
+    ):
+        from train.topolm import plotting
+
+        calls = []
+        real = plotting.plot_t_maps
+
+        def spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(plotting, "plot_t_maps", spy)
+        out = tmp_path / "illustration.png"
+        result = self._make(output_path=str(out))
+        (args, kwargs), = calls
+        assert out.stat().st_size > 0
+        assert "SYNTHETIC" in kwargs["suptitle"]
+        assert "synthetic" in kwargs["note"] and "not a run" in kwargs["note"]
+        for key, name in (("sig_grids", "sig_grids"), ("label_grids", "label_grids"),
+                          ("label_grids_b", "label_grids_b")):
+            for panel, grid in kwargs[key].items():
+                np.testing.assert_array_equal(grid, result["arrays"][name][panel])
+        assert result["facts"]["kind"] == "synthetic"
+        assert result["facts"]["written"] == str(out)
+
+    def test_the_same_seed_gives_the_same_arrays_and_picture(self, tmp_path):
+        first = self._make(output_path=str(tmp_path / "a.png"), seed=5)
+        again = self._make(output_path=str(tmp_path / "b.png"), seed=5)
+        other = self._make(seed=6)
+        for name in first["arrays"]["responses"]:
+            np.testing.assert_array_equal(
+                first["arrays"]["responses"][name], again["arrays"]["responses"][name]
+            )
+        assert (tmp_path / "a.png").read_bytes() == (tmp_path / "b.png").read_bytes()
+        assert not np.array_equal(
+            first["arrays"]["responses"]["synthetic/tap_1"],
+            other["arrays"]["responses"]["synthetic/tap_1"],
+        )
+
+    def test_the_facts_are_strict_json_and_name_the_test_that_was_applied(self):
+        facts = self._make()["facts"]
+        text = json.dumps(facts, allow_nan=False)
+        assert "BH-FDR" in facts["significance"] and "joint" in facts["significance"]
+        assert json.loads(text) == facts
+
+
 class TestTheFactsFileKeepsItsFormat:
     def test_the_tracked_file_is_reproduced_byte_for_byte(self, tmp_path):
         """``dump_facts`` is the format of ``figure_facts.json``: loading the tracked
@@ -673,6 +834,18 @@ class TestTheCommandLine:
         with pytest.raises(SystemExit) as excinfo:
             K.main(["--run", "no-equals-sign", "--facts", "x.json"])
         assert excinfo.value.code == 2
+
+    def test_the_illustration_option_needs_no_run(self, monkeypatch, tmp_path):
+        calls = []
+        monkeypatch.setattr(
+            K, "synthetic_illustration", lambda *a, **k: calls.append((a, k)) or {}
+        )
+        monkeypatch.setattr(K, "facts", lambda *a, **k: pytest.fail("facts was called"))
+        K.main(["--illustration", str(tmp_path / "x.png")])
+        (args, kwargs), = calls
+        assert (args and args[0] == str(tmp_path / "x.png")) or kwargs.get("output_path") == str(
+            tmp_path / "x.png"
+        )
 
     def test_main_passes_its_arguments_to_facts(self, monkeypatch, tmp_path):
         calls = []

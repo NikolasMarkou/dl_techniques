@@ -136,18 +136,36 @@ PAPER_CONDITIONS = (
     "unconnected_nonwords",
 )
 
+# DECISION plan-2026-10-23T190557-972a9ac5/D-025: the four smoke conditions are
+# matched in gpt2 TEXT tokens, sentence by sentence. Do NOT edit a stimulus
+# without keeping the per-index token count equal across a, b, c and d (sentence
+# i has 9, 9, 7, 7 or 8 tokens in every condition), and do NOT put a real word
+# into a pseudo-word list (condition d held "zipped" and "she" and was still
+# called nonwords): a contrast between conditions of unequal length measures the
+# length. See decisions.md D-025; guarded by TestTheSmokeStimuliAreLengthMatched
+# (counts per index, the contrast pairs) and TestConditionDHoldsOnlyPseudoWords.
+#
 #: A minimal stand-in stimulus set, so the evaluation block is runnable without a
 #: neuroscience dataset. It is NOT a substitute for Fedorenko et al. (2010)'s
 #: sentence / nonword materials, and every report it produces is stamped
 #: ``stimuli_are_smoke_set: true``.
 #:
+#: The conditions: ``a`` sentences; ``b`` unconnected real words; ``c``
+#: Jabberwocky-style frames (function words around mostly pseudo-words; ``zipped``
+#: and ``stomped`` are real verbs and stay); ``d`` unconnected pseudo-words only
+#: (no English word in it, checked against the system word lists when it was
+#: written).
+#:
 #: Sentence ``i`` has the SAME number of gpt2 text tokens in all four conditions:
 #: 9, 9, 7, 7, 8 (D-025). A t-map between conditions of unequal length measures
-#: the length: word lists from one vocabulary, 3 against 7 words, gave a median
-#: 225 significant units per tap on the trained 3D example, and equal lengths gave
-#: 0. A real stimulus set must be matched too. The counts are pinned in
-#: ``TestTheSmokeStimuliAreLengthMatched``, which fails when a sentence is edited
-#: out of balance.
+#: the length: word lists from one vocabulary, 3 against 7 words, give a median
+#: of 87.5 and 92.3 significant units per tap on the trained 2D example and 12.5
+#: and 14.5 on the trained 3D one, against 0.0 for 5 against 5
+#: (``train.topolm.controls.length_control``, shipped context, 12 draws, seed 0;
+#: the medians move with the draws and with the framing, the README quotes them
+#: with their draws). A real stimulus set must be matched too. The counts are
+#: pinned in ``TestTheSmokeStimuliAreLengthMatched``, which fails when a sentence
+#: is edited out of balance.
 SMOKE_STIMULI: Dict[str, List[str]] = {
     "a": [
         "the quick brown fox jumps over the lazy dog",
@@ -171,10 +189,10 @@ SMOKE_STIMULI: Dict[str, List[str]] = {
         "we should plarn the plort before",
     ],
     "d": [
-        "wug blarnket zipped slarn",
-        "frarn plort glimped doark she",
-        "she prarn glimped brarn",
-        "zipped starn mibbed",
+        "wug blarnket zopped slarn",
+        "frarn plort glimped blarnket",
+        "mibbed glimped brarn",
+        "zopped starn mibbed",
         "doark glarn slarn prarn",
     ],
 }

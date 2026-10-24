@@ -1903,6 +1903,61 @@ class TestTheSmokeStimuliAreLengthMatched:
         )
 
 
+class TestConditionDHoldsOnlyPseudoWords:
+    """D-025 (pass-4 note 9): condition d is described as unconnected NONWORDS, and
+    four of its five lists held a real word (``zipped``, ``she``). Every word of d
+    is now a pseudo-word, with the per-index gpt2 token counts unchanged."""
+
+    #: Each checked against the system word lists (american-english and
+    #: british-english) when this was written: none is an English word.
+    PSEUDO_WORDS = frozenset({
+        "blarnket", "brarn", "doark", "frarn", "glarn", "glimped", "mibbed",
+        "plort", "prarn", "slarn", "starn", "wug", "zopped",
+    })
+
+    def _words(self):
+        return {w for sentence in SMOKE_STIMULI["d"] for w in sentence.split()}
+
+    def test_every_word_of_condition_d_is_a_listed_pseudo_word(self):
+        assert self._words() <= self.PSEUDO_WORDS, self._words() - self.PSEUDO_WORDS
+
+    def test_the_two_real_words_that_were_there_are_gone(self):
+        assert not self._words() & {"zipped", "she"}
+
+    def test_no_word_of_d_is_in_the_system_dictionary_when_there_is_one(self):
+        paths = ["/usr/share/dict/american-english", "/usr/share/dict/british-english"]
+        present = [p for p in paths if os.path.exists(p)]
+        if not present:
+            pytest.skip("no system word list on this machine")
+        english = set()
+        for path in present:
+            with open(path, encoding="utf-8", errors="ignore") as handle:
+                english |= {line.strip().lower() for line in handle}
+        assert not self._words() & english, self._words() & english
+
+    def test_the_token_counts_per_index_are_still_matched(self):
+        counts = _text_token_counts(SMOKE_STIMULI)
+        assert counts["d"] == counts["c"] == counts["a"] == counts["b"] == [9, 9, 7, 7, 8]
+
+
+class TestTheStimuliAnchor:
+    def test_the_smoke_set_carries_its_decision_anchor_and_names_its_guard(self):
+        source = open(C.__file__, encoding="utf-8").read()
+        anchor = "# DECISION plan-2026-10-23T190557-972a9ac5/D-025"
+        assert anchor in source
+        assert source.index(anchor) < source.index("SMOKE_STIMULI: Dict[str, List[str]] = {")
+        block = source[source.index(anchor):source.index("SMOKE_STIMULI: Dict[str, List[str]] = {")]
+        assert "TestTheSmokeStimuliAreLengthMatched" in block
+        assert "per-index" in block and "token count" in block
+
+    def test_the_comment_quotes_no_stale_median(self):
+        """The 225 of the pass-3 checkpoint; the controls module produces the
+        current numbers (README and facts quote those)."""
+        source = open(C.__file__, encoding="utf-8").read()
+        head = source[: source.index("SMOKE_STIMULI: Dict[str, List[str]] = {")]
+        assert "median 225" not in head and "225 significant" not in head
+
+
 # ---------------------------------------------------------------------
 # topographic evaluation
 # ---------------------------------------------------------------------

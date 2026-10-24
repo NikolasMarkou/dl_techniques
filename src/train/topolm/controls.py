@@ -16,6 +16,9 @@ numbers in the README do not rest on a script nobody can run:
   scored with the same pipeline: how often a labelling at least as good as the
   real one arises from the sentences alone.
 
+:func:`synthetic_illustration` draws what outlines look like when a unit
+population IS selective, from made-up responses that go through the same chain.
+
 Every contrast is scored by :func:`train.topolm.common.score_contrast`, the chain
 :func:`~train.topolm.common.evaluate_topography` also runs (t-map, BH-FDR across
 all taps, clusters, Moran's I), so a control scores exactly what the report
@@ -29,12 +32,16 @@ module imports nothing from a plan directory.
 import argparse
 import itertools
 import json
+import math
 import os
+import types
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
+from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
 from dl_techniques.metrics.spatial_autocorrelation import morans_i_grid
 from dl_techniques.utils.logger import logger
 from train.topolm import common as C
@@ -607,6 +614,143 @@ def facts(
 
 
 # ---------------------------------------------------------------------
+# the synthetic illustration
+# ---------------------------------------------------------------------
+
+#: The illustration's grid and its stimuli per condition (a t-test on 5 against 5
+#: has 8 degrees of freedom, as the smoke contrast does).
+ILLUSTRATION_GRID: Tuple[int, int] = (16, 16)
+ILLUSTRATION_N_PER_CONDITION = 5
+
+#: Planted selective blobs per panel, ``(row, column, sigma in cells, t at the
+#: centre)``: two positive (more response to a) and one negative (more to b).
+ILLUSTRATION_BLOBS: Dict[str, List[Tuple[float, float, float, float]]] = {
+    "synthetic/tap_1": [(4.0, 4.5, 2.2, 7.0), (11.5, 11.0, 2.0, 6.0), (4.5, 12.0, 2.0, -6.0)],
+    "synthetic/tap_2": [(3.5, 10.0, 2.4, 7.2), (12.0, 4.0, 2.1, 6.4), (10.5, 12.0, 2.2, -6.5)],
+    "synthetic/tap_3": [(7.0, 3.5, 2.0, 6.5), (11.0, 10.5, 2.3, 7.0), (3.5, 11.5, 2.1, -5.8)],
+    "synthetic/tap_4": [(5.0, 6.0, 2.5, 7.0), (12.5, 12.0, 1.9, 5.8), (11.5, 3.0, 2.0, -6.2)],
+}
+
+
+def synthetic_illustration(
+    output_path: Optional[str] = None,
+    seed: int = 100,
+    fdr_alpha: float = 0.05,
+    min_cluster_size: int = 10,
+) -> Dict[str, Any]:
+    """What outlines look like when a unit population IS selective: made-up responses.
+
+    No model and no run. Each of the four panels is a made-up ``(10 stimuli, 256
+    units)`` response matrix: spatially smooth unit-variance noise, plus a planted
+    effect (two positive blobs and one negative one, :data:`ILLUSTRATION_BLOBS`)
+    that is added to the five ``a`` stimuli and subtracted from the five ``b``
+    ones. The matrices go through the real chain,
+    :func:`~train.topolm.common.score_contrast` (Student's t-test, ONE BH-FDR
+    correction across all four panels, queen cluster growth), and
+    :func:`~train.topolm.plotting.plot_t_maps` draws the result, so the subtitle
+    'after BH-FDR' is true: the mask is the BH-FDR output, not a threshold on t.
+    The title and the note say SYNTHETIC.
+
+    Contract. Seeded (panel ``k`` uses ``seed + k``); the same seed gives the same
+    arrays and the same PNG. ``output_path`` is the PNG to write, or ``None`` to
+    draw nothing. Returns ``{"facts": {...}, "arrays": {...}}``: ``facts`` is strict
+    JSON (``kind: 'synthetic'``, the significance procedure, per-panel counts and
+    cluster sizes, the planted blobs); ``arrays`` holds ``responses``, ``t_maps``,
+    ``sig_grids``, ``label_grids`` (a) and ``label_grids_b`` per panel name.
+    """
+    from train.topolm import plotting  # matplotlib stays out of the module import
+
+    height, width = ILLUSTRATION_GRID
+    units = height * width
+    n = ILLUSTRATION_N_PER_CONDITION
+    rows, columns = np.mgrid[0:height, 0:width].astype("float64")
+
+    taps, values_a, values_b = [], {}, {}
+    responses: Dict[str, np.ndarray] = {}
+    for panel, (name, blobs) in enumerate(ILLUSTRATION_BLOBS.items()):
+        rng = np.random.default_rng(seed + panel)
+        effect = np.zeros((height, width))
+        for row, column, sigma, t_centre in blobs:
+            # a mean difference of d between 5 and 5 unit-variance responses has
+            # t = d / sqrt(2 / 5)
+            effect += (t_centre * math.sqrt(2.0 / n)) * np.exp(
+                -((rows - row) ** 2 + (columns - column) ** 2) / (2 * sigma**2)
+            )
+        noise = np.empty((2 * n, height, width))
+        for stimulus in range(2 * n):
+            smooth = gaussian_filter(rng.standard_normal((height, width)), 1.2)
+            noise[stimulus] = smooth / smooth.std()
+        matrix = noise.reshape(2 * n, units)
+        matrix[:n] += effect.reshape(units) / 2.0
+        matrix[n:] -= effect.reshape(units) / 2.0
+        responses[name] = matrix
+        values_a[name], values_b[name] = matrix[:n], matrix[n:]
+        taps.append(types.SimpleNamespace(
+            path=name,
+            layout=SpatialLayout(units, grid_shape=ILLUSTRATION_GRID, permute=False),
+        ))
+
+    scored = C.score_contrast(
+        types.SimpleNamespace(tap_layers=taps), values_a, values_b, "a", "b",
+        min_cluster_size=min_cluster_size, fdr_alpha=fdr_alpha,
+    )
+    arrays = {
+        "responses": responses,
+        "t_maps": {k: v["t_grid"] for k, v in scored.items()},
+        "sig_grids": {k: v["sig_grid"] for k, v in scored.items()},
+        "label_grids": {k: v["label_grid"] for k, v in scored.items()},
+        "label_grids_b": {k: v["label_grid_b"] for k, v in scored.items()},
+    }
+    if output_path is not None:
+        directory = os.path.dirname(output_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        plotting.plot_t_maps(
+            arrays["t_maps"],
+            sig_grids=arrays["sig_grids"],
+            label_grids=arrays["label_grids"],
+            label_grids_b=arrays["label_grids_b"],
+            condition_a="a",
+            condition_b="b",
+            output_path=output_path,
+            max_panels_per_row=4,
+            suptitle=(
+                "SYNTHETIC illustration (made-up responses, not a run): "
+                "significance islands of a selective population"
+            ),
+            note="synthetic illustration, made-up responses, not a run",
+        )
+    facts = {
+        "kind": "synthetic",
+        "significance": (
+            f"Student t-test, BH-FDR {fdr_alpha} jointly across the {len(scored)} panels, "
+            f"clusters of at least {min_cluster_size} cells (queen connectivity)"
+        ),
+        "grid_shape": list(ILLUSTRATION_GRID),
+        "panels": len(scored),
+        "n_per_condition": n,
+        "seed": seed,
+        "fdr_alpha": fdr_alpha,
+        "min_cluster_size": min_cluster_size,
+        "blobs_per_panel": {k: [list(b) for b in v] for k, v in ILLUSTRATION_BLOBS.items()},
+        "per_panel": {
+            name: {
+                "significant_units": int(entry["sig_grid"].sum()),
+                "clusters_a": len(entry["clusters"]["a"]),
+                "clusters_b": len(entry["clusters"]["b"]),
+                "cluster_sizes_a": [len(c) for c in entry["clusters"]["a"]],
+                "cluster_sizes_b": [len(c) for c in entry["clusters"]["b"]],
+                "t_min": float(entry["t_grid"].min()),
+                "t_max": float(entry["t_grid"].max()),
+            }
+            for name, entry in scored.items()
+        },
+        "written": output_path,
+    }
+    return {"facts": json.loads(json.dumps(facts, allow_nan=False)), "arrays": arrays}
+
+
+# ---------------------------------------------------------------------
 # command line
 # ---------------------------------------------------------------------
 
@@ -622,12 +766,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--run", action="append", required=True, metavar="NAME=DIR",
+        "--run", action="append", default=[], metavar="NAME=DIR",
         help="a run to score, e.g. 2d=results/topolm_.../topolm_tiny_...; repeatable",
     )
     parser.add_argument(
-        "--facts", required=True, metavar="PATH",
-        help="the figure-facts JSON file to write",
+        "--facts", default=None, metavar="PATH",
+        help="the figure-facts JSON file to write (needed with --run)",
+    )
+    parser.add_argument(
+        "--illustration", default=None, metavar="PNG",
+        help="draw the SYNTHETIC illustration (made-up responses through the real "
+             "BH-FDR chain) to this PNG; needs no run",
     )
     parser.add_argument(
         "--extend", default=None, metavar="PATH",
@@ -653,17 +802,25 @@ def _parse_runs(parser: argparse.ArgumentParser, specs: Sequence[str]) -> Dict[s
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Parse the arguments first, then score the runs and write the facts file."""
+    """Parse the arguments first, then draw the illustration and score the runs."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     runs = _parse_runs(parser, args.run)
+    if not runs and args.illustration is None:
+        parser.error("give --run NAME=DIR with --facts PATH, or --illustration PNG")
+    if runs and args.facts is None:
+        parser.error("--run needs --facts PATH, the file the controls are written to")
     if args.n_draws < 1:
         parser.error(f"--n-draws must be >= 1, got {args.n_draws}")
-    facts(
-        runs, args.facts, n_draws=args.n_draws, seed=args.seed,
-        existing_path=args.extend, max_splits=args.max_splits,
-    )
-    logger.info(f"Wrote {args.facts}")
+    if args.illustration is not None:
+        synthetic_illustration(args.illustration)
+        logger.info(f"Wrote {args.illustration}")
+    if runs:
+        facts(
+            runs, args.facts, n_draws=args.n_draws, seed=args.seed,
+            existing_path=args.extend, max_splits=args.max_splits,
+        )
+        logger.info(f"Wrote {args.facts}")
 
 
 if __name__ == "__main__":
