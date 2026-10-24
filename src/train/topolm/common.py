@@ -140,6 +140,14 @@ PAPER_CONDITIONS = (
 #: neuroscience dataset. It is NOT a substitute for Fedorenko et al. (2010)'s
 #: sentence / nonword materials, and every report it produces is stamped
 #: ``stimuli_are_smoke_set: true``.
+#:
+#: Sentence ``i`` has the SAME number of gpt2 text tokens in all four conditions:
+#: 9, 9, 7, 7, 8 (D-025). A t-map between conditions of unequal length measures
+#: the length: word lists from one vocabulary, 3 against 7 words, gave a median
+#: 225 significant units per tap on the trained 3D example, and equal lengths gave
+#: 0. A real stimulus set must be matched too. The counts are pinned in
+#: ``TestTheSmokeStimuliAreLengthMatched``, which fails when a sentence is edited
+#: out of balance.
 SMOKE_STIMULI: Dict[str, List[str]] = {
     "a": [
         "the quick brown fox jumps over the lazy dog",
@@ -149,25 +157,25 @@ SMOKE_STIMULI: Dict[str, List[str]] = {
         "we should finish the report before friday",
     ],
     "b": [
-        "bright table yellow winter quiet glass",
-        "silver morning pocket corner gentle",
-        "cloud seven river anchor timber",
+        "bright table yellow winter quiet glass paper forest bridge",
+        "silver morning pocket corner gentle garden window marble feather",
+        "cloud seven river anchor timber island velvet",
         "purple station lantern meadow stone",
-        "copper valley whisper candle ridge",
+        "copper valley whisper candle ridge harbor mirror",
     ],
     "c": [
-        "the wug zipped through the blarnket tree",
-        "she mibbed a slarn around the glarn",
-        "they frolicked past the prarn wall",
-        "he glimped the doark and stomped out",
-        "we should plarn the plort before frarn",
+        "the wug zipped the blarnket",
+        "she mibbed a slarn around it",
+        "they stomped past the prarn",
+        "he glimped the doark out",
+        "we should plarn the plort before",
     ],
     "d": [
-        "wug blarnket zipped she mibbed slarn",
-        "frarn plort glimped doark glarn starn",
-        "she prarn frolicked glimped brarn",
-        "zipped starn mibbed wug frolicked",
-        "doark glarn slarn she prarn plort",
+        "wug blarnket zipped slarn",
+        "frarn plort glimped doark she",
+        "she prarn glimped brarn",
+        "zipped starn mibbed",
+        "doark glarn slarn prarn",
     ],
 }
 

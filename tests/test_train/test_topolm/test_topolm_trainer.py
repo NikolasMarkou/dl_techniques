@@ -828,7 +828,11 @@ class TestPoolingIsOverTextTokensOnly:
         causal assumption is verified in the next test, not taken on trust.
         """
         backbone = _model(kind, 256)
-        long_window, short_window = _tokenizer(kind, 256), _tokenizer(kind, 64)
+        # 96, not 64: the stub cuts a sentence to ``window - 2`` characters, and the
+        # longest smoke sentence is 64 (D-025 lengthened condition b), so a 64
+        # window would truncate TEXT and the two windows would not see the same
+        # sentences.
+        long_window, short_window = _tokenizer(kind, 256), _tokenizer(kind, 96)
         prompts = list(SMOKE_STIMULI["a"]) + list(SMOKE_STIMULI["b"])
         short_ids = np.asarray(short_window(prompts)["input_ids"])
         assert (short_ids == int(short_window.pad_token_id)).any()
@@ -1245,13 +1249,100 @@ class TestStimuliAreFramedLikeTheTrainingStream:
 
     def test_a_call_only_preprocessor_still_gets_the_cls_sep_pad_exclusion(self):
         """No ``.tokenizer``: the previous path, the non-text ids left out."""
-        backbone, preprocessor = _model("stub", 24), _tokenizer("stub", 24)
+        preprocessor = _tokenizer("stub", 24)
         assert not hasattr(preprocessor, "tokenizer")
         tokens, text, _ = C._encode_stimuli(preprocessor, ["ab", "abcd"], None)
         assert tokens.shape == (2, 24)
         assert np.all(tokens[:, 0] == CLS_ID)
         assert text.sum(axis=1).tolist() == [2, 4]
         assert not text[:, 0].any()
+
+
+def _trainer_tokenizer():
+    """The preprocessor ``train_topolm`` builds when none is passed (D-025).
+
+    Same call, same config fields, so the lengths a test counts are the lengths
+    the trainer's stimuli have.
+    """
+    config = TopoLMTrainingConfig()
+    return C.create_tokenizer(
+        config.encoding_name,
+        config.max_seq_length,
+        config.cls_token_id,
+        config.sep_token_id,
+        config.pad_token_id,
+        config.mask_token_id,
+    )
+
+
+def _text_token_counts(stimuli):
+    """``{condition: [number of gpt2 text tokens of sentence i]}``."""
+    encoder = _trainer_tokenizer().tokenizer
+    return {
+        condition: [len(encoder.encode(sentence)) for sentence in sentences]
+        for condition, sentences in stimuli.items()
+    }
+
+
+class TestTheSmokeStimuliAreLengthMatched:
+    """D-025: sentence i has the same number of gpt2 TEXT tokens in every condition.
+
+    A t-map between two conditions of different length measures the length. The
+    built-in smoke set used to differ by 8.0 against 5.8 text tokens (a against
+    b) and 10.2 against 11.6 (c against d); length-only differences
+    produced a large contrast on the trained 3D example (word lists from one
+    vocabulary, 3 against 7 words: median 225 significant units per tap, against
+    89 for the shipped a-versus-b), while equal lengths gave 0 in 12 draws.
+
+    The counts are those of the trainer's own tokenizer after D-024's framing:
+    the text ids are the plain ``encode`` of the sentence, so the count is
+    ``len(encoder.encode(sentence))`` with no CLS and no SEP in it.
+    """
+
+    #: Text tokens of sentence i, the same in a, b, c and d.
+    COUNTS = [9, 9, 7, 7, 8]
+
+    def test_every_condition_has_the_same_token_count_at_every_index(self):
+        counts = _text_token_counts(SMOKE_STIMULI)
+        assert counts == {c: self.COUNTS for c in ("a", "b", "c", "d")}, counts
+
+    def test_the_contrast_pairs_are_matched_whatever_the_other_conditions_do(self):
+        """The two pairs the trainer contrasts (a/b) and the paper's (c/d)."""
+        counts = _text_token_counts(SMOKE_STIMULI)
+        assert counts["a"] == counts["b"]
+        assert counts["c"] == counts["d"]
+
+    def test_there_are_four_conditions_of_five_sentences(self):
+        assert sorted(SMOKE_STIMULI) == ["a", "b", "c", "d"]
+        assert {len(v) for v in SMOKE_STIMULI.values()} == {5}
+
+    def test_no_sentence_is_repeated_inside_or_across_conditions(self):
+        every = [s for sentences in SMOKE_STIMULI.values() for s in sentences]
+        assert len(set(every)) == len(every)
+
+    def test_each_sentence_is_short(self):
+        assert max(max(v) for v in _text_token_counts(SMOKE_STIMULI).values()) <= 12
+
+    def test_the_conditions_keep_their_meaning(self):
+        """b and d are lists, not sentences: no function word from a's frames
+        and, for c and d, the nonwords are not words of the real-word lists."""
+        function_words = {"the", "a", "and", "by", "over", "through", "before"}
+        for condition in ("b",):
+            for sentence in SMOKE_STIMULI[condition]:
+                assert not function_words & set(sentence.split()), sentence
+        real_words = {w for s in SMOKE_STIMULI["b"] for w in s.split()}
+        nonwords = {"wug", "blarnket", "mibbed", "slarn", "glarn", "prarn", "doark"}
+        for condition in ("c", "d"):
+            used = {w for s in SMOKE_STIMULI[condition] for w in s.split()}
+            assert used & nonwords, condition
+            assert not used & real_words, condition
+        # c is a sentence frame (function words present), d is a list of
+        # nonwords with no frame: the three first words of c's sentences are
+        # function words or pronouns, d's are not required to be.
+        assert all(
+            s.split()[0] in {"the", "she", "they", "he", "we"}
+            for s in SMOKE_STIMULI["c"]
+        )
 
 
 # ---------------------------------------------------------------------
