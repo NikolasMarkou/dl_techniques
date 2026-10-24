@@ -49,7 +49,7 @@ volume = create_topolm("tiny3d")   # 343 units on a 7 x 7 x 7 box, radius 2
 ## 2. The objective
 
 For one square neighbourhood of radius `rho` centred on the grid (a cube when
-`grid_dim=3`) — covering `P = (2*rho + 1)**grid_dim` units — the penalty compares
+`grid_dim=3`), covering `P = (2*rho + 1)**grid_dim` units, the penalty compares
 two things that should agree:
 
 - `r`, the Pearson correlation of every unit pair's activations across the `M`
@@ -70,8 +70,8 @@ Implemented in
 
 ### The whole grid is never scored at once
 
-`r` for all `N` units is `N*(N-1)/2` numbers — 306,936 of them at the paper's
-`N = 784`, a 2D grid — computed from a `K x M x P` gather every step. The loss instead
+`r` for all `N` units is `N*(N-1)/2` numbers, 306,936 of them at the paper's
+`N = 784`, a 2D grid, computed from a `K x M x P` gather every step. The loss instead
 samples `K` neighbourhoods per step, which is what makes it affordable, and is
 why centres are restricted to those whose patch fits entirely inside the grid: a
 constant `P` means `d` is identical for every neighbourhood and can be
@@ -101,33 +101,37 @@ cube (885,115 / 7,260 = 121.9 in pairs) and about 36x for `paper3d`'s radius 4
 model exists to time: a radius-5 patch needs 11 cells on every axis, and the
 shipped 3D widths (1000 and 343) have axes of 10 and 7.
 
-What was measured (CPU table build and a jitted training step on GPU 0; the scripts
-and raw rows live in the 3D plan's scratch directory, which is not tracked, so these
-numbers are a record, not something the test suite re-derives):
+What was measured (CPU table build and a jitted training step on GPU 0, repeated on the
+corrected model on 2026-10-24; the scripts and raw rows live in a plan's scratch
+directory, which is not tracked, so these numbers are a record, not something the test
+suite re-derives; the procedure is one fresh process per run, `jit_compile=True`, SGD,
+the step time being the median of 30 timed `train_on_batch` calls after a warm-up, taken
+three times):
 
 | quantity | config | measured |
 |---|---|---|
-| `build_patch_tables` wall time | CPU, radius 5, `linf`, 3 fresh processes; 11 x 11 x 11 with 1 centre | median 0.060 s (0.059 to 0.061), +105 MB resident |
-| same | 12 x 12 x 12 with 8 centres | median 0.063 s (0.060 to 0.064), +105 MB resident |
-| same, for reference | 28 x 28 (2D) with 324 centres | median 0.0021 s, +1.5 MB resident |
-| jitted training step, taps on | GPU 0 (RTX 4090), depth 2, vocabulary 2048, batch 8, sequence 256, `jit_compile=True`, SGD, median of three run medians of 30 steps | 2D width 784 radius 5: 12.8 ms; `tiny3d` width 343 radius 2: 5.2 ms; `paper3d` width 1000 radius 4: 21.7 ms |
-| same, batch 4, sequence 64 | as above | 4.1 ms, 2.3 ms, 6.4 ms |
-| tap share (taps on minus taps off, same config, batch 8, sequence 256) | as above | 2D 0.93 ms; `tiny3d` 0.39 ms; `paper3d` 6.09 ms |
-| process peak GPU memory, taps on (TensorFlow allocator, excludes the CUDA context) | batch 8, sequence 256 | 860 MiB (2D 784); 291 MiB (`tiny3d`); 1357 to 1384 MiB (`paper3d`) |
+| `build_patch_tables` wall time | CPU, radius 5, `linf`, 3 fresh processes; 11 x 11 x 11 with 1 centre | median 0.059 s (0.058 to 0.062), +105 MB resident |
+| same | 12 x 12 x 12 with 8 centres | median 0.059 s (0.058 to 0.060), +105 MB resident |
+| same, for reference | 28 x 28 (2D) with 324 centres | median 0.0020 s, +1.4 MB resident |
+| jitted training step, taps on | GPU 0 (RTX 4090, idle: 0% utilisation and 501 MiB in use before every run), depth 2, vocabulary 2048, batch 8, sequence 256, SGD, median of three run medians of 30 steps | 2D width 784 radius 5: 7.42 ms; `tiny3d` width 343 radius 2: 3.91 ms; `paper3d` width 1000 radius 4: 14.13 ms |
+| same, batch 4, sequence 64 | as above | 2.50 ms, 1.93 ms, 3.94 ms |
+| tap share (taps on minus taps off, same config, batch 8, sequence 256) | as above | 2D 0.80 ms; `tiny3d` 0.60 ms; `paper3d` 5.97 ms |
+| process peak GPU memory, taps on (TensorFlow allocator, excludes the CUDA context) | batch 8, sequence 256 | 590 MiB (2D 784); 272 MiB (`tiny3d`); 717 MiB (`paper3d`) |
 
-The whole-step time of `paper3d` against the 2D width-784 step is 1.70 at batch 8 x
-256 and 1.56 at batch 4 x 64 (derived from the medians above); the tap share alone
-is 6.6 and 3.9 times the 2D tap share. Both are far below the derived 36 because a
+The whole-step time of `paper3d` against the 2D width-784 step is 1.90 at batch 8 x
+256 and 1.58 at batch 4 x 64 (derived from the medians above); the tap share alone
+is 7.5 and 5.8 times the 2D tap share. Both are far below the derived 36 because a
 step also pays for embeddings, attention and the feed-forward, and because the
-widths differ (1000 against 784).
+widths differ (1000 against 784). The earlier measurement on the previous
+feed-forward (two chained MLPs) gave whole steps of 12.8, 5.2 and 21.7 ms and a ratio
+of 1.70; the corrected step is cheaper (a third of the feed-forward parameters) and
+the 2D tap share is a larger fraction of it (10.8 per cent against 7.3).
 
-**Caveats that travel with every timing above.** GPU 0 was shared with another
-process whose load during the timed loops is unknown, so these are timings of a
-shared card, not of an isolated device; the 4 x 64 tap-share differences are of the
-order of the 0.1 to 0.5 ms run-to-run spread and are weak evidence (the 8 x 256
-figures are the better ones). The vocabulary was 2048 and the optimiser plain SGD, so
-none of this says anything about the cost of a full-vocabulary head. No radius-5 3D
-step was timed.
+**Caveats that travel with every timing above.** The vocabulary was 2048 and the
+optimiser plain SGD, so none of this says anything about the cost of a full-vocabulary
+head. The 4 x 64 tap-share differences are of the order of the 0.1 ms run-to-run
+spread and are weak evidence (the 8 x 256 figures are the better ones). No radius-5
+3D step was timed.
 
 **Few centres.** A 3D box leaves few admissible centres once the radius is large:
 `paper3d` has 8 and `tiny3d` 27. Centres are drawn with
@@ -150,7 +154,7 @@ heavily. That is a property of the shipped geometry, recorded here, not a defect
 Two of those rows are load-bearing. The negation row is the **sign-discriminating**
 probe: 0.174 and 0.826 are not reachable by loosening a tolerance, so nothing
 about `d`'s direction or scale is unconstrained. And the `f=9` row is the
-anti-smooth arm — a field whose wavelength is much finer than the neighbourhood
+anti-smooth arm, a field whose wavelength is much finer than the neighbourhood
 is anti-smooth *at that neighbourhood's scale*. A checkerboard does **not**
 demonstrate this: at l-infinity separation 1 it has three offset classes, two of
 them negative, so it averages to zero correlation and scores exactly what noise
@@ -187,7 +191,7 @@ input_ids [B, S]
      │
      ▼  last_hidden_state [B, S, D]
 ┌─────────────────────────┐
-│ final LayerNorm         │
+│ final norm              │  follows normalization_type
 └─────────────────────────┘
      │
      ├──► {"last_hidden_state"}
@@ -211,19 +215,21 @@ adds each straight into the residual stream; in the pre-norm path the branch
 tensor is a local overwritten by stochastic depth and layer scale before the
 residual add, so it is gone by the time `call` returns. The spatial loss has to be
 computed on that tensor, at exactly that point. There is no flag, no hook and no
-`activity_regularizer` that reaches it — and `TextDecoder` has no per-block config
+`activity_regularizer` that reaches it, and `TextDecoder` has no per-block config
 to hang a tap on, and only `gpt2/` uses it anyway.
 
 So [`TopoLMBlock`](components.py) is written here, and it **composes** the shared
-`create_attention_layer` / `create_ffn_layer` / `create_normalization_layer`
-factories rather than reimplementing any of them. The reuse order is unchanged:
+`create_attention_layer` and `create_normalization_layer` factories and the
+feed-forward path `TransformerLayer` uses (`build_transformer_ffn_config` into
+`create_ffn_from_config`) rather than reimplementing any of them. The reuse order is unchanged:
 factories first, a bespoke layer last. Precedent: `hnet`, `wave_field`,
 `tree_transformer`, `qwen3_next`.
 
-The taps sit **on** the branch outputs, before the residual add. Their forward
-pass is the identity, so the residual arithmetic is byte-identical to a plain
-GPT-2 block and any difference in the loss curve is attributable to the added term
-alone.
+The taps sit **on** the branch outputs, before the residual add (the default,
+`tap_placement='branch'`; `'residual'` taps the post-add tensor instead, see the
+options below). Their forward pass is the identity, so the residual arithmetic is
+byte-identical to a plain GPT-2 block and any difference in the loss curve is
+attributable to the added term alone.
 
 **The taps carry `grid_dim`.** `TopoLMBlock` and `TopoLM` take `grid_dim` (2 or 3),
 validate it, forward it to every tap, and write it in `get_config`; a config without
@@ -286,7 +292,7 @@ The two 3D rows carry their own `"grid_dim": 3` and `"radius"` keys, which
 `from_variant` passes to the constructor (`description` is dropped), so
 `create_topolm("paper3d", radius=3)` overrides the row's radius.
 
-784 is not a free parameter — it is the only plausible hidden size near GPT-2
+784 is not a free parameter, it is the only plausible hidden size near GPT-2
 small that factors into a **square** unit grid (784 = 28 x 28), which is what the
 spatial loss needs. `small`'s 16 x 32 grid is deliberately non-square so the
 orientation probes have a transposed stride to miss.
@@ -333,6 +339,113 @@ builds; the existing tests pin that
 (`test_a_two_dimensional_model_still_constructs_with_a_short_axis`). The variant table
 (`validate_variant`) is strict in both ranks, so no shipped row can reach that hole.
 
+### Parameter counts
+
+At vocabulary 50,304 (the size the trainer resolves for its `gpt2` tokenizer, see
+`src/train/topolm/README.md`), with the head tied to the token table and the
+defaults below (no feed-forward bias, no norm shift), the **trainable** count is the
+closed form `V*H + S*H + L*(4*H*H + 2*H*I + 2*H) + H`: the token table, the position
+table, then per block the attention (query, key, value and output, `4*H*H`), the
+feed-forward (`2*H*I`) and two norm scales, then the final norm scale. `H` is
+`embed_dim`, `I` the feed-forward width (4 times `H`), `S` the position-table length,
+`L` the depth and `V` the vocabulary. The taps add non-trainable weights on top (the
+index tables of every neighbourhood and the last penalty), which `count_params()`
+includes. Counts as built on 2026-10-24 (`create_topolm(name, vocab_size=50304)`;
+`sum` of the trainable and of the non-trainable weight sizes); the closed form for the
+trainable count is pinned in `tests/test_models/test_topolm/test_topolm_knobs.py`.
+
+| variant | trainable parameters | non-trainable (tap tables) | `count_params()` |
+|---|---|---|---|
+| `tiny` | 16,091,392 | 153,064 | 16,244,456 |
+| `small` | 44,898,816 | 372,060 | 45,270,876 |
+| `paper` | 128,771,216 | 1,308,216 | 130,079,432 |
+| `tiny3d` | 22,992,319 | 153,752 | 23,146,071 |
+| `paper3d` | 195,353,000 | 12,901,080 | 208,254,080 |
+
+`paper` is 128.8M trainable, equal to the count the authors' released configuration
+gives by arithmetic (12 layers, width 784, vocabulary 50,304, bias-free, tied head). An
+earlier version of this model built its feed-forward from two chained MLPs and
+counted 255.5M in `count_params()` at the same vocabulary (130.1M now); that build no
+longer exists, and checkpoints written by it do not load.
+
+### The block's options
+
+All of these are constructor arguments of `TopoLMBlock` and `TopoLM`, written by
+`get_config`, accepted by `from_variant` and `create_topolm` as keywords and by the
+variant rows; a config saved without one gets the default below.
+
+| option | default | what it does |
+|---|---|---|
+| `ffn_type` | `'mlp'` | feed-forward type: GPT-2's `Linear`, activation, `Linear`; `'swiglu'`, `'geglu'` and other registry types of the shared factory are accepted |
+| `ffn_args` | `None` | extra arguments for that factory (`dropout_rate` is refused: the block applies its own) |
+| `ffn_intermediate_size` | `4 * embed_dim` | feed-forward width |
+| `activation` | `'gelu'` | the exact (erf) GELU of the released code; `'gelu_tanh'`, `'relu'`, a callable or a config dict are accepted, one activation for the whole feed-forward |
+| `use_bias` | `False` | bias on the feed-forward projections (the attention projections never have one) |
+| `normalization_type` | `'layer_norm'` | type of every norm, the two in each block and the final one (`'rms_norm'` and the other keys of the shared factory) |
+| `norm_center` | `False` | whether a `'layer_norm'` has a shift (`beta`); `'rms_norm'` has none whatever this says |
+| `attention_norm_args`, `ffn_norm_args` | `None` | per-side norm arguments, which win over the two options above for that norm |
+| `tap_placement` | `'branch'` | `'branch'` taps each branch output before the residual add (the paper text); `'residual'` taps the post-add tensor (the authors' training yaml, `with_resid: True`). The forward values do not change, only the penalised and captured tensor, and the taps and the `alpha=0` control keep the same weight set in both |
+| `num_layers` (block) | `1` | read only by the residual-projection initializer; `TopoLM` passes its depth to every block |
+
+The attention output projection and the feed-forward output projection start at
+`initializer_range / sqrt(2 * depth)`, GPT-2's rule and the released code's (a
+standard deviation of 0.0041 against 0.0125 at depth 12 when the depth factor was
+missing); the query, key, value and feed-forward expansion kernels and the embeddings
+keep `initializer_range`. The defaults are the released code's, so a GPT-2 style model
+with biases and a norm shift is `use_bias=True, norm_center=True, activation='gelu_tanh'`.
+
+### Against the paper and against the released code
+
+The released code is the authors' repository (`epflneuroailab/topolm`, read at
+`b8dafde2`), and the paper is arXiv 2410.11516v3. The model here was compared with
+both; the rows list what differs, as of this writing. Nothing was trained to measure
+the effect of any difference.
+
+| | this repository | released code | paper text |
+|---|---|---|---|
+| block | pre-norm, one MLP, 12 blocks at `paper`, attention without bias, tied head | the same | silent on the feed-forward width |
+| residual-projection init | std / sqrt(2 * depth) | std / sqrt(2 * depth) | silent |
+| bias, norm shift | none by default (`use_bias`, `norm_center`) | none | silent |
+| activation | exact GELU | exact GELU | "GELU" |
+| vocabulary | 50,304 (trainer default, resolved) | 50,304 | GPT-2 BPE |
+| tapped tensor | branch outputs (`tap_placement='branch'`) | training yaml: post-add stream; evaluation scripts: branch outputs; the checkpoint name says pre-residual | "prior to normalization and addition into the residual stream" |
+| neighbourhood | radius 5, `linf`: 11x11 = 121 units, 324 centres (the default) | strict `distance < 5`: 9x9 = 81 units, 400 centres, with an L2 prior | "L-infinity radius 5" |
+| neighbourhood draw | with replacement | without | "5 randomly selected" |
+
+Two settings reproduce each reading: `radius=5, distance='linf'` is the paper's text
+and the repository default; `radius=4, distance='l2'` is the released code's geometry
+(a 9x9 patch, 400 centres, an L2 prior). The two priors correlate 0.98 over the
+patch, computed once. The released code's 9x9 patch is what `radius=4` gives here, and
+`config.py` records both.
+
+Differences that are not in the model and not reproduced here, stated so that no
+number of this repository is read as the paper's:
+
+- **Training scale and data.** The released training configuration reads FineWeb-Edu
+  (sample-10BT) with a batch of 48 sequences of 1024 tokens and 20 gradient-accumulation
+  steps, which is 983,040 tokens per optimizer step (derived from the yaml; the actual
+  run configuration is not published). The trainer here reads Wikipedia, 8 sequences
+  of 512 tokens (4,096 tokens per step) and has no gradient accumulation and no
+  FineWeb-Edu source.
+- **Schedule and decay.** The released run warms up for 2000 iterations and decays the
+  cosine to 6e-5; the trainer here warms up for 5 per cent of the horizon and decays
+  to 0. The released code decays every tensor with two or more dimensions, the
+  embedding included; the trainer excludes biases, norm scales and shifts, and the
+  tied embedding.
+- **Stopping.** The released code monitors the total validation loss (task plus
+  spatial); the trainer's patience-3 rule monitors the pure task loss, because the
+  taps add nothing at evaluation.
+- **Evaluation.** The authors localise with their own stimulus files (24 sentences
+  and 24 non-words per file, in 10 files), pool the response as a mean over all
+  positions including the right padding, with no text before the stimulus, apply the
+  Gaussian readout before the test and use Welch's t. This repository ships only 20
+  built-in smoke sentences, pools over the sentence tokens after a fixed passage and
+  the end-of-text id (the stimuli framing section of the trainer README), tests with
+  Student's t and applies one BH-FDR correction across all taps. The trainer README's
+  framing table reports the no-prefix framing, which is the closest to the authors',
+  and the sentence-token pooling is a deliberate choice that their pooling does not
+  share.
+
 ---
 
 ## 6. Training
@@ -346,7 +459,7 @@ from dl_techniques.models.common.masked_language_model import CausalLanguageMode
 
 head = CausalLanguageModel(
     backbone=create_topolm("paper"),
-    vocab_size=100277,
+    vocab_size=50304,
     skip_head=True,
     output_key="logits",
     aggregate_backbone_losses=True,   # load-bearing
@@ -356,9 +469,11 @@ head = CausalLanguageModel(
 `aggregate_backbone_losses=True` is not a default worth overriding. The taps reach
 the objective only through `backbone.losses`; without the flag the head computes
 every penalty, discards it, and the run produces a non-topographic model with a
-perfectly healthy loss curve. Measured on the same weights at `alpha = 2.5`: a
-reported training loss of **15.31** aggregated against **5.36** not, with an
-evaluation loss of 5.31 either way.
+perfectly healthy loss curve. Measured on the corrected `tiny` variant (8 taps) at
+`alpha = 2.5`, the same seed and the same two batches of random tokens (vocabulary 2048,
+SGD, one epoch, CPU): a reported training loss of **17.67** aggregated against **7.68**
+not, a gap of 9.99 against a derived 8 * 2.5 * 0.5 = 10.0, with an evaluation loss of
+7.49 either way.
 
 [`train/topolm/`](../../../../train/topolm/) is the trainer. Two things about it
 are worth knowing before reading its code, both of which would otherwise look like
@@ -481,9 +596,10 @@ The trainer scores a trained backbone through four steps, and each has a way to
 go quietly wrong:
 
 1. a two-sample t-map between two stimulus conditions, on activations
-   **mean-pooled** over the text tokens of each sentence, which the trainer frames as
-   the training stream presents text (end-of-text id first, no CLS or SEP, padding
-   after; the prefix and the padding are excluded by id);
+   **mean-pooled** over the text tokens of each sentence, which the trainer frames the
+   way the training stream presents text (a fixed neutral passage, the end-of-text id,
+   the sentence, then padding; no CLS or SEP; the passage, the end-of-text id and the
+   padding are excluded by id);
 2. BH-FDR corrected **across all taps**, then split back;
 3. clusters grown from the surviving cells, both polarities;
 4. Moran's I on the **unthresholded** map, plus the islands variant.
@@ -515,8 +631,8 @@ one categorical cluster map (a slice montage on a 3D grid). That is `train.topol
 `run_topographic_evaluation` on the same arrays the report counts. Its rules are
 in the trainer's README (`src/train/topolm/README.md` § *Figures*); the short
 version is that a topographic figure has exactly two ways of lying by
-construction — a per-panel autoscaled colour map, and a significance overlay on
-the wrong half of the cells — and both are pinned by tests that measure the
+construction, a per-panel autoscaled colour map, and a significance overlay on
+the wrong half of the cells, and both are pinned by tests that measure the
 artists rather than eyeballing a PNG.
 
 Two things the metrics do *not* do, deliberately:
@@ -527,7 +643,7 @@ Two things the metrics do *not* do, deliberately:
   rather than Keras' zero-padded `'same'`, which lets a constant field decay at
   the grid border.
 - **The islands statistic is not a strict improvement.** On a small island it is
-  high-variance and sometimes *negative* — a compact blob carries more same-sign
+  high-variance and sometimes *negative*, a compact blob carries more same-sign
   diagonal pairs than the queen weighting expects (Anselin's queen-contiguity
   instability). It is reported alongside the standard value, never instead of it.
 
@@ -553,7 +669,7 @@ Two things the metrics do *not* do, deliberately:
 An identity forward pass. All the work happens in the training-only loss, so the
 tap is invisible to the residual arithmetic and to validation. Place it on a
 tensor whose last axis is the model's unit dimension and where spatial neighbours
-*should* respond alike — on the residual-path output of an attention or
+*should* respond alike, on the residual-path output of an attention or
 feed-forward branch, before normalization and before the add.
 
 `grid_dim=3` lays the same units out as a box and cuts cubic neighbourhoods; the loss
@@ -580,14 +696,14 @@ the earlier int32 tables still loads, with identical values.
 
 Two numerical rules, both measured rather than assumed:
 
-- the correlation block runs at `numpy.promote_types(input_dtype, "float32")` —
+- the correlation block runs at `numpy.promote_types(input_dtype, "float32")`:
   a hard cast to `float32` *narrows* the reduction under a `float64` policy;
 - `add_loss` is skipped for a symbolic `KerasTensor`, so the penalty is never
   computed from an unrealisable shape.
 
 **The second rule is belt-and-braces, and this README used to overstate it.** An
 earlier draft claimed `add_loss` accepts a `KerasTensor`, stores it, and that the
-stored tensor never becomes a value — so a training loss would silently lack the
+stored tensor never becomes a value, so a training loss would silently lack the
 spatial term. That could not be reproduced. `add_loss` on a symbolic tensor here
 stores *nothing at all*, so the term is absent either way; and this model's
 `build()` materialises the tree without a forward pass, so no tap is ever reached
@@ -644,5 +760,5 @@ rows) and `tests/test_train/test_topolm/test_topolm_trainer.py`
 the `requires_gpu` marker from `tests/index_weights.py`; one of them runs a 3D model
 under XLA.
 
-Do not run the full suite as a routine check — it takes about 1.5 hours and is
+Do not run the full suite as a routine check, it takes about 1.5 hours and is
 also the pre-push hook. Scope pytest to the modules you touched.
