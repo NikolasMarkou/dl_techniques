@@ -1200,6 +1200,93 @@ def extract_tap_activations(
 # ---------------------------------------------------------------------
 
 
+def score_contrast(
+    backbone: TopoLM,
+    values_a: Mapping[str, np.ndarray],
+    values_b: Mapping[str, np.ndarray],
+    condition_a: str,
+    condition_b: str,
+    min_cluster_size: int = 10,
+    fdr_alpha: float = 0.05,
+) -> Dict[str, Dict[str, Any]]:
+    """The measurement chain for one contrast: t-map, joint BH-FDR, clusters.
+
+    The one place the chain lives. :func:`evaluate_topography` calls it for each
+    arm and ``train.topolm.controls`` calls it for every control, so a control
+    scores exactly what the report scores.
+
+    Contract. ``values_a`` and ``values_b`` are ``{tap_path: (num_stimuli,
+    num_units)}`` in UNIT order, as :func:`extract_tap_activations` returns them;
+    both hold the same tap paths and at least two stimuli per condition. The
+    t-test is Student's (:func:`~dl_techniques.metrics.topographic_selectivity.
+    contrast_tmap`); the correction is BH-FDR applied ONCE across every tap
+    (:func:`fdr_across_layers`), then split back. Returns ``{tap_path: {"t_grid",
+    "sig_grid", "clusters", "label_grid", "label_grid_b"}}`` in the order of
+    ``backbone.tap_layers``: ``t_grid`` and ``sig_grid`` are the unthresholded
+    t-values and the BH-FDR rejections on the tap's grid (2-D or 3-D, placed
+    through the tap's own layout); ``clusters`` is ``{condition_a: [[unit ids]],
+    condition_b: [[unit ids]]}``, the clusters grown from the positive and the
+    negative t of the rejections (queen connectivity, at least
+    ``min_cluster_size`` cells), largest first; ``label_grid`` and
+    ``label_grid_b`` label those clusters on the grid (``0`` is none), A's and B's
+    separately, because a cell has one sign. Failure mode: a tap path missing from
+    ``values_b`` raises ``KeyError``; fewer than two stimuli per condition raises
+    the t-test's ``ValueError``.
+    """
+    t_maps: Dict[str, np.ndarray] = {}
+    p_maps: Dict[str, np.ndarray] = {}
+    for name, condition_a_values in values_a.items():
+        t_values, p_values = contrast_tmap(condition_a_values, values_b[name])
+        t_maps[name] = t_values
+        p_maps[name] = p_values
+
+    corrected = fdr_across_layers(p_maps, alpha=fdr_alpha)
+
+    scored: Dict[str, Dict[str, Any]] = {}
+    for tap in backbone.tap_layers:
+        name = tap.path
+        # DECISION plan-2026-10-23T190557-972a9ac5/D-001: the t and
+        # significance vectors are in UNIT order, and unit i sits at cell
+        # perm[i], not at cell i. They go onto the grid through the tap's own
+        # layout. Do NOT write `.reshape(grid_shape)` here: that is the same
+        # map only when the layout is the identity (permute=False) and
+        # scrambles every other one, so Moran's I, the clusters and the
+        # figures all describe noise (measured: 0.7927 through to_grid
+        # against 0.0005 through reshape on a layout-smooth 28x28 field).
+        # The readout arm needs the same call: _apply_readout hands back
+        # unit order too. See decisions.md D-001; guarded by
+        # TestTheMapPlacementFollowsTheLayout and
+        # TestThreeDimensionalPlacement.
+        sig_grid = tap.layout.to_grid(
+            np.asarray(corrected[name]["reject"], dtype=bool)
+        )
+        t_grid = tap.layout.to_grid(t_maps[name])
+
+        clusters: Dict[str, List[List[int]]] = {}
+        labels: Dict[str, np.ndarray] = {}
+        for sign, label, key in (
+            (1, condition_a, "label_grid"),
+            (-1, condition_b, "label_grid_b"),
+        ):
+            grown, label_grid = grow_clusters(
+                t_grid,
+                sig_grid,
+                sign=sign,
+                min_size=min_cluster_size,
+                connectivity="queen",
+                cell_to_unit=tap.layout.cell_to_unit,
+            )
+            clusters[label] = [cluster.tolist() for cluster in grown]
+            labels[key] = label_grid
+        scored[name] = {
+            "t_grid": t_grid,
+            "sig_grid": sig_grid,
+            "clusters": clusters,
+            **labels,
+        }
+    return scored
+
+
 def evaluate_topography(
     backbone: TopoLM,
     stimuli: Mapping[str, Sequence[str]],
@@ -1392,59 +1479,31 @@ def evaluate_topography(
                 for condition, activations in per_condition.items()
             }
 
-        t_maps: Dict[str, np.ndarray] = {}
-        p_maps: Dict[str, np.ndarray] = {}
-        for name, condition_a_values in per_condition[condition_a].items():
-            t_values, p_values = contrast_tmap(
-                condition_a_values, per_condition[condition_b][name]
-            )
-            t_maps[name] = t_values
-            p_maps[name] = p_values
-
-        corrected = fdr_across_layers(p_maps, alpha=fdr_alpha)
+        scored = score_contrast(
+            backbone,
+            per_condition[condition_a],
+            per_condition[condition_b],
+            condition_a,
+            condition_b,
+            min_cluster_size=min_cluster_size,
+            fdr_alpha=fdr_alpha,
+        )
 
         tap_reports: Dict[str, Any] = {}
         for tap in backbone.tap_layers:
             name = tap.path
-            # DECISION plan-2026-10-23T190557-972a9ac5/D-001: the t and
-            # significance vectors are in UNIT order, and unit i sits at cell
-            # perm[i], not at cell i. They go onto the grid through the tap's own
-            # layout. Do NOT write `.reshape(grid_shape)` here: that is the same
-            # map only when the layout is the identity (permute=False) and
-            # scrambles every other one, so Moran's I, the clusters and the
-            # figures all describe noise (measured: 0.7927 through to_grid
-            # against 0.0005 through reshape on a layout-smooth 28x28 field).
-            # The readout arm needs the same call: _apply_readout hands back
-            # unit order too. See decisions.md D-001; guarded by
-            # TestTheMapPlacementFollowsTheLayout and
-            # TestThreeDimensionalPlacement.
-            sig_grid = tap.layout.to_grid(
-                np.asarray(corrected[name]["reject"], dtype=bool)
-            )
-            t_grid = tap.layout.to_grid(t_maps[name])
-
-            clusters: Dict[str, List[List[int]]] = {}
-            for sign, label in ((1, condition_a), (-1, condition_b)):
-                grown, label_grid = grow_clusters(
-                    t_grid,
-                    sig_grid,
-                    sign=sign,
-                    min_size=min_cluster_size,
-                    connectivity="queen",
-                    cell_to_unit=tap.layout.cell_to_unit,
-                )
-                clusters[label] = [cluster.tolist() for cluster in grown]
-                # Both polarities' label grids go to the figure: condition A's
-                # (positive t) as ``label_grids``, B's (negative t) as
-                # ``label_grids_b``. Each is its own grid, so one map shows both
-                # without a distinction a single label grid does not carry; the t
-                # map and the significance mask are the same for both.
-                if sign == 1:
-                    plotted[name] = t_grid
-                    plotted_sig[name] = sig_grid
-                    plotted_labels[name] = label_grid
-                else:
-                    plotted_labels_b[name] = label_grid
+            sig_grid = scored[name]["sig_grid"]
+            t_grid = scored[name]["t_grid"]
+            clusters = scored[name]["clusters"]
+            # Both polarities' label grids go to the figure: condition A's
+            # (positive t) as ``label_grids``, B's (negative t) as
+            # ``label_grids_b``. Each is its own grid, so one map shows both
+            # without a distinction a single label grid does not carry; the t
+            # map and the significance mask are the same for both.
+            plotted[name] = t_grid
+            plotted_sig[name] = sig_grid
+            plotted_labels[name] = scored[name]["label_grid"]
+            plotted_labels_b[name] = scored[name]["label_grid_b"]
 
             tap_reports[name] = {
                 # The permutation seed is DERIVED from the run seed and the tap's

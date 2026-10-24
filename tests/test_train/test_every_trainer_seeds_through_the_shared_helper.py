@@ -102,6 +102,9 @@ NOT_TRAINING: Dict[str, str] = {
     "train.time_series.prism.export": "exports a saved model",
     "train.time_series.tirex.export": "exports a saved model",
     "train.time_series.xlstm.export": "exports a saved model",
+    "train.topolm.controls": (
+        "scores finished TopoLM runs against the framing, length and label-shuffle "
+        "controls; its random draws are seeded by its own --seed"),
     "train.vae.run_sampler_comparison": (
         "launches the seeded VAE trainer per arm and passes its --seed"),
 }
