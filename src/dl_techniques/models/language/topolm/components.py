@@ -75,6 +75,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
     serialize_activation,
 )
+from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.ffn import create_ffn_from_config
 from dl_techniques.layers.ffn.factory import FFN_REGISTRY
@@ -183,8 +184,13 @@ class TopoLMBlock(keras.layers.Layer):
     :param normalization_position: ``'pre'`` (the paper's) or ``'post'``.
     :type normalization_position: str
     :param activation: Feed-forward activation, applied between the two
-        projections of an MLP. Types whose activation is their identity
-        (``reglu``, ``bilinear``, ``squared_relu``, ``swiglu``) do not read it.
+        projections of an MLP. Default ``'gelu'``, the exact (erf) GELU, which is
+        what the released TopoLM code's ``nn.GELU()`` computes; ``'gelu_tanh'``
+        (or the ``gelu_tanh`` callable) is GPT-2's tanh approximation. One resolver
+        (:func:`dl_techniques.layers.activations.resolve_activation`) turns the
+        value into the callable the whole feed-forward uses; there is no
+        per-layer mix. Types whose activation is their identity (``reglu``,
+        ``bilinear``, ``squared_relu``, ``swiglu``) do not read it.
     :type activation: Union[str, Any]
     :param dropout_rate: Dropout on the feed-forward branch output, applied once,
         after the output projection and before the tap and the residual add:
@@ -194,6 +200,8 @@ class TopoLMBlock(keras.layers.Layer):
     :param attention_dropout_rate: Dropout on the attention output.
     :type attention_dropout_rate: float
     :param initializer_range: Stddev for the block's ``TruncatedNormal`` inits.
+        The two residual-path output projections (attention output, feed-forward
+        output) use ``initializer_range / sqrt(2 * num_layers)`` instead.
     :type initializer_range: float
     :param layer_norm_eps: Normalization epsilon, passed to BOTH norms. The
         factory default is 1e-6; GPT-2 uses 1e-5, and a stack whose two norms run
@@ -225,14 +233,20 @@ class TopoLMBlock(keras.layers.Layer):
     :type attention_norm_args: Optional[Dict[str, Any]]
     :param ffn_norm_args: The same for the feed-forward-side norm.
     :type ffn_norm_args: Optional[Dict[str, Any]]
+    :param num_layers: Depth of the stack this block belongs to; only the
+        residual-projection init reads it (``initializer_range / sqrt(2 *
+        num_layers)``: each block adds two branches to the stream, so the
+        stream's variance would otherwise grow with depth). A model passes its
+        own ``depth``; a block used alone is a one-layer stack, the default.
+    :type num_layers: int
     :param kwargs: Forwarded to ``keras.layers.Layer``.
     :raises ValueError: If ``hidden_size`` does not divide among ``num_heads``,
         if a name in ``tap_sites`` is not in :data:`TAP_SITES`, or if
         ``normalization_position`` is not ``'pre'`` or ``'post'``, or if
         ``grid_dim`` is not 2 or 3, or if ``ffn_type`` or ``normalization_type`` is
         not accepted, an args argument is not a dict, ``ffn_args`` sets
-        ``dropout_rate``, or a factory refuses its arguments -- naming the
-        offending value in each case.
+        ``dropout_rate``, ``num_layers`` is not a positive integer, or a factory
+        refuses its arguments -- naming the offending value in each case.
     """
 
     def __init__(
@@ -261,6 +275,7 @@ class TopoLMBlock(keras.layers.Layer):
         normalization_type: str = "layer_norm",
         attention_norm_args: Optional[Dict[str, Any]] = None,
         ffn_norm_args: Optional[Dict[str, Any]] = None,
+        num_layers: int = 1,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -301,6 +316,14 @@ class TopoLMBlock(keras.layers.Layer):
                 f"normalization_type must be one of "
                 f"{accepted_normalization_types()}, got {normalization_type!r}"
             )
+        if (
+            not isinstance(num_layers, int)
+            or isinstance(num_layers, bool)
+            or num_layers < 1
+        ):
+            raise ValueError(
+                f"num_layers must be a positive integer, got {num_layers!r}"
+            )
         tap_sites = tuple(tap_sites)
         unknown = sorted(set(tap_sites) - set(TAP_SITES))
         if unknown:
@@ -335,6 +358,7 @@ class TopoLMBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.attention_norm_args = attention_norm_args
         self.ffn_norm_args = ffn_norm_args
+        self.num_layers = int(num_layers)
 
         # One initializer INSTANCE per block is deliberate: Keras hands the same
         # instance to identically-shaped sublayers inside a layer, so sharing it
@@ -343,11 +367,21 @@ class TopoLMBlock(keras.layers.Layer):
         kernel_initializer = keras.initializers.TruncatedNormal(
             stddev=self.initializer_range
         )
-        # The two residual-path projections are scaled by depth, matching GPT-2's
-        # _init_weights, which divides by sqrt(2 * n_layer) because each block
-        # performs two residual additions.
+        # DECISION plan-2026-10-23T190557-972a9ac5/D-031: the two residual-path
+        # output projections (attention output, feed-forward output) start at
+        # initializer_range / sqrt(2 * num_layers), the rule of the authors'
+        # released TopoLM code (models/model.py, std / sqrt(2 * n_layer)), GPT-2's
+        # _init_weights and TextDecoder: each block adds two branches to the
+        # stream, so the stream's variance grows with depth unless each branch
+        # starts smaller. Do NOT drop the depth factor (the previous
+        # initializer_range / sqrt(2) was 3.5x too large at depth 12 under a
+        # comment that claimed parity), do NOT hard-code a depth here (the model
+        # passes its own as num_layers), and do NOT apply it to the query, key,
+        # value or feed-forward expansion kernels or to the embeddings, which keep
+        # initializer_range. Guarded by test_topolm_fidelity.py::
+        # TestTheResidualProjectionsAreScaledByDepth. See decisions.md.
         residual_initializer = keras.initializers.TruncatedNormal(
-            stddev=self.initializer_range / math.sqrt(2.0)
+            stddev=self.initializer_range / math.sqrt(2.0 * self.num_layers)
         )
 
         self.attention_norm = self._make_norm(
@@ -382,7 +416,9 @@ class TopoLMBlock(keras.layers.Layer):
             name="ffn",
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
-            activation=self.activation,
+            # One resolver for the whole feed-forward: the string 'gelu_tanh' is a
+            # name the MLP's own resolver does not know.
+            activation=resolve_activation(self.activation),
             dropout_rate=0.0,
             kernel_initializer=clone_initializer(kernel_initializer),
             bias_initializer="zeros",
@@ -629,5 +665,6 @@ class TopoLMBlock(keras.layers.Layer):
             "normalization_type": self.normalization_type,
             "attention_norm_args": dict(self.attention_norm_args),
             "ffn_norm_args": dict(self.ffn_norm_args),
+            "num_layers": self.num_layers,
         })
         return config

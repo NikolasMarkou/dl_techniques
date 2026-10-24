@@ -173,7 +173,7 @@ def run_with_spies(block: TopoLMBlock, x: np.ndarray, training: bool = False):
 ACTIVATIONS = {
     # The exact (erf) GELU: what the string 'gelu' resolves to in this repo.
     "gelu": lambda v: 0.5 * v * (1.0 + scipy.special.erf(v / math.sqrt(2.0))),
-    # GPT-2's tanh approximation: what the model's default ``gelu_tanh`` computes.
+    # GPT-2's tanh approximation: what ``activation='gelu_tanh'`` computes.
     "gelu_tanh": lambda v: 0.5 * v * (1.0 + np.tanh(
         math.sqrt(2.0 / math.pi) * (v + 0.044715 * v ** 3))),
     "relu": lambda v: np.maximum(v, 0.0),
@@ -311,10 +311,12 @@ class TestTheForwardIsDenseActivationDense:
     def test_the_branch_equals_the_numpy_oracle(self, activation):
         assert_ffn_forward(make_block(activation=activation), activation)
 
-    def test_the_default_model_activation_is_the_tanh_gelu(self):
+    def test_the_default_model_activation_is_the_exact_gelu(self):
+        # step 11 (D-031): the model default was the tanh form while the block's
+        # was the exact one; both are the exact erf GELU now.
         model = make_model()
         block = model.blocks[0]
-        assert_ffn_forward(block, "gelu_tanh", eps=model.layer_norm_eps)
+        assert_ffn_forward(block, "gelu", eps=model.layer_norm_eps)
 
     def test_the_post_norm_branch_runs_the_same_two_projections(self):
         block = make_block(normalization_position="post")
@@ -434,8 +436,10 @@ class TestEachOptionChangesTheBlockAsDocumented:
     def test_the_output_projection_is_scaled_for_the_residual_path(self):
         """GPT-2 divides the residual projections by sqrt(2 * n_layer).
 
-        The block scales them by sqrt(2) (each block adds two branches); fc1 keeps
-        ``initializer_range``. A ``TruncatedNormal`` sample's std is a fixed
+        A block used alone is a one-layer stack (``num_layers=1``), so it scales
+        them by sqrt(2) (each block adds two branches); fc1 keeps
+        ``initializer_range``. The depth factor of a model is pinned in
+        ``test_topolm_fidelity.py``. A ``TruncatedNormal`` sample's std is a fixed
         multiple of its ``stddev``, so the ratio of the two kernels' sample stds
         is 1/sqrt(2) whatever that multiple is (8192 draws each: about 1.5% noise).
         """

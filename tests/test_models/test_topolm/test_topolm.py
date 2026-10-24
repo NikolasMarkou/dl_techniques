@@ -1169,12 +1169,21 @@ class TestSerialization:
             assert key in config, key
 
     def test_the_activation_survives_the_config_round_trip(self):
-        """A callable activation would be handed back raw on some backends."""
-        model = _build()
+        """A callable activation would be handed back raw on some backends.
+
+        The default is the string ``'gelu'`` since step 11 (D-031), so the callable
+        case is built explicitly with ``gelu_tanh``.
+        """
+        from dl_techniques.layers.activations import gelu_tanh
+
+        model = _build(activation=gelu_tanh)
         rebuilt = TopoLM.from_config(model.get_config())
+        assert callable(rebuilt.activation)
         assert keras.ops.convert_to_tensor(
             rebuilt.activation(keras.ops.convert_to_tensor([1.0]))
         ) is not None
+        default = TopoLM.from_config(_build().get_config())
+        assert default.activation == "gelu"
 
     def test_the_taps_do_not_appear_in_the_config(self):
         """They travel as weights; a config entry would re-derive a layout."""

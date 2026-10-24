@@ -98,7 +98,6 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
     serialize_activation,
 )
-from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
@@ -242,8 +241,10 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :param layer_norm_eps: Normalization epsilon. Default 1e-5, GPT-2's value;
         Keras' own default is 1e-3, a 1000x spread in every denominator.
     :type layer_norm_eps: float
-    :param activation: Feed-forward activation. Defaults to ``gelu_tanh``, GPT-2's
-        tanh approximation, not the exact-erf ``'gelu'`` string.
+    :param activation: Feed-forward activation of every block. Defaults to
+        ``'gelu'``, the exact (erf) GELU, which is what the released TopoLM code's
+        ``nn.GELU()`` computes; ``'gelu_tanh'`` (or the ``gelu_tanh`` callable) is
+        GPT-2's tanh approximation. One activation for the whole feed-forward.
     :type activation: Union[str, Any]
     :param ffn_type: Feed-forward type of every block: ``'mlp'`` (default), GPT-2's
         ``Linear(embed_dim -> ffn_intermediate_size)``, activation,
@@ -335,7 +336,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         attention_dropout_rate: float = 0.0,
         initializer_range: float = 0.02,
         layer_norm_eps: float = 1e-5,
-        activation: Union[str, Any] = gelu_tanh,
+        activation: Union[str, Any] = "gelu",
         tie_word_embeddings: bool = True,
         seed: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -617,6 +618,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 normalization_type=self.normalization_type,
                 attention_norm_args=self.attention_norm_args,
                 ffn_norm_args=self.ffn_norm_args,
+                # The residual-projection init depends on the stack's depth.
+                num_layers=self.depth,
                 # Each tap's seed is derived from (base seed, its index in the
                 # whole model's tap sequence), so no two of the 2 * depth taps
                 # share a layout.
