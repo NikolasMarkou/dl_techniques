@@ -708,25 +708,36 @@ class TestTwoDimensionalUnchangedPixels:
         image arrays, colour limits and outlines are unchanged (pinned
         layout-independently in
         :class:`TestTwoDimensionalContentDoesNotDependOnLayout`); the cell-by-cell
-        truth of the hatch is :class:`TestTheHatchMarksEveryRejectedCell`."""
+        truth of the hatch is :class:`TestTheHatchMarksEveryRejectedCell`.
+
+        Step 4.7 (D-026): re-pinned to "2af516f6faf8f240" because the hatch is
+        DENSER on purpose (``///`` instead of ``//``): at ``//`` the strokes are
+        about two cells apart, so 241 of 868 rejected cells of a trained-like 2-D
+        figure carried no stroke in their middle half; at ``///`` none does
+        (:class:`TestEveryRejectedCellCarriesStrokes`). Nothing else moved: the
+        size (468 x 1993), the image arrays, the colour limits and the outlines are
+        the same, and the no-overlay figure (``445e18d5a116726c``) and the Moran
+        profile (``2a787e0115cb9d6c``) are NOT re-pinned."""
         maps, sig = self._maps()
         path = plot_t_maps(
             maps, sig_grids=sig, arm="raw", condition_a="a", condition_b="b",
             output_path=str(tmp_path / "b.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "dc6f9805b89805b1")
+        assert _pixel_digest(path) == ((468, 1993, 4), "2af516f6faf8f240")
 
     def test_an_all_zero_label_grid_changes_nothing(self, tmp_path):
         """No cluster, no outline: the same pixels as passing no label grids
         (re-pinned with the figure above, same new subtitle text and, since step
-        4.6, the same per-cell hatch: "b0327169643eb99c" -> "dc6f9805b89805b1")."""
+        4.6, the same per-cell hatch: "b0327169643eb99c" -> "dc6f9805b89805b1"; since
+        step 4.7 the denser ``///`` hatch: "dc6f9805b89805b1" -> "2af516f6faf8f240",
+        the same value as the figure above, which is what "changes nothing" means)."""
         maps, sig = self._maps()
         empty = {k: np.zeros((8, 8), dtype=int) for k in maps}
         path = plot_t_maps(
             maps, sig_grids=sig, label_grids=empty, arm="raw",
             condition_a="a", condition_b="b", output_path=str(tmp_path / "c.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "dc6f9805b89805b1")
+        assert _pixel_digest(path) == ((468, 1993, 4), "2af516f6faf8f240")
 
     def test_the_moran_profile(self, tmp_path):
         """Re-pinned (labels): the ticks are now the tap path without the shared
@@ -1401,7 +1412,12 @@ class TestTwoDimensionalContentDoesNotDependOnLayout:
     # value hashes one unit box per rejected cell, in row-major order, over the same
     # five panels; that those boxes are EXACTLY the rejected cells is proved
     # independently of this hash in TestTheHatchMarksEveryRejectedCell.
-    HATCH_GEOMETRY = "3a384d867d13f736"
+    # RE-PINNED ON PURPOSE again in step 4.7 (D-026): the digest also covers each
+    # collection's hatch PATTERN now. It covered only the geometry before, so a
+    # change of the pattern was invisible to it ("3a384d867d13f736" is the same
+    # boxes without the pattern; with the old ``//`` it is "ecb45af41c88cf6b").
+    # The boxes are unchanged; the pattern is the denser ``///``.
+    HATCH_GEOMETRY = "4d27b3e3fa1594d4"
 
     @staticmethod
     def _panels(fig):
@@ -1458,6 +1474,7 @@ class TestTwoDimensionalContentDoesNotDependOnLayout:
                     digest.update(np.round(path.vertices, 6).tobytes())
                     if path.codes is not None:
                         digest.update(path.codes.tobytes())
+                digest.update(repr(collection.get_hatch()).encode())
         plt.close(fig)
         assert digest.hexdigest()[:16] == self.HATCH_GEOMETRY
 
@@ -2604,8 +2621,9 @@ class TestTheHatchMarksEveryRejectedCell:
             plt.close(fig)
 
     def test_the_hatch_pattern_and_look_are_the_ones_it_always_had(self):
-        """Same pattern (``//``), no fill, the rcParams hatch colour, and no outline
-        of the boxes (line width 0): only the hatch strokes show, as before."""
+        """The pattern is ``///`` since step 4.7 (D-026; ``//`` before), no fill, the
+        rcParams hatch colour, and no outline of the boxes (line width 0): only the
+        hatch strokes show, as before."""
         significant = _MASK_CASES["random"]
         fig, axes = _capture_axes(
             {"t": np.zeros(significant.shape)}, sig_grids={"t": significant},
@@ -2617,7 +2635,7 @@ class TestTheHatchMarksEveryRejectedCell:
         assert len(artists) == 1
         artist = artists[0]
         patterns = [artist.get_hatch()] if artist.get_hatch() else list(artist.hatches)
-        assert patterns == ["//"]
+        assert patterns == ["///"]
         assert all(c[3] == 0 for c in np.atleast_2d(artist.get_facecolor()).reshape(-1, 4)), (
             "the cell boxes must not be filled: only the hatch shows"
         )
@@ -2852,3 +2870,224 @@ class TestTheCurveCountPanelsHaveIntegerTicks:
         ticks = self._visible_ticks(axis)
         plt.close(fig)
         assert any(t != round(t) for t in ticks), ticks
+
+
+# =====================================================================
+# Step 4.7 (plan-2026-10-23T190557-972a9ac5, decision D-026): the hatch strokes are
+# dense enough that every rejected cell carries some. Written RED-first against the
+# ``//`` pattern, whose strokes are about two cells apart: at the figures' saved
+# scale 241 of 868 rejected cells of a trained-like 2-D figure (the reviewer
+# measured 244 of 1737 on the real example) had no stroke pixel in their middle
+# half, although the line under the headline says "hatched = not significant after
+# BH-FDR" and the guide says a hatched cell did not pass. The per-cell boxes of step
+# 4.6 are exact, and exactness of the BOXES does not make the STROKES reach every
+# box: only the pixels can say that.
+# =====================================================================
+
+#: The figures are saved at ``dpi=160``; the stroke pitch and the stroke width both
+#: scale with the dpi, so the census is taken at the scale the files have.
+_SAVED_DPI = 160
+
+#: A rejected cell must hold a stroke pixel inside the MIDDLE HALF of the cell (a
+#: quarter of its width and height off on every side); an accepted cell must hold
+#: none inside all but a tenth margin (the strokes are clipped to the boxes, so a
+#: pixel of antialiasing at an edge is not a stroke inside the cell).
+_REJECTED_MARGIN = 0.25
+_ACCEPTED_MARGIN = 0.10
+
+
+def _trained_like_mask(shape, seed, accepted_fraction=0.15):
+    """A significance mask shaped like a trained map's: a few smooth islands of
+    accepted cells in a field of rejected ones (single cells and thin strips
+    included), about 15 % accepted as on the 2-D example (38.9 of 256 per tap)."""
+    from scipy.ndimage import gaussian_filter
+
+    field = np.abs(gaussian_filter(
+        np.random.default_rng(seed).normal(size=shape), 1.2, mode="wrap"
+    ))
+    return field > np.quantile(field, 1.0 - accepted_fraction)
+
+
+def _render_rgba(fig):
+    fig.set_dpi(_SAVED_DPI)
+    fig.canvas.draw()
+    return np.asarray(fig.canvas.buffer_rgba()).astype(int).copy()
+
+
+def _painted_hatch_pixels(fig):
+    """``(height, width)`` bool: the pixels the hatch paints dark at the saved scale.
+
+    Found as the difference between the render with the hatch collections shown and
+    the render with them hidden, so what the map underneath looks like cannot be
+    mistaken for a stroke; a pixel counts only if it is dark (the rcParams hatch
+    colour is black), which an invisible edge colour would not give.
+    """
+    shown = _render_rgba(fig)
+    hidden = [
+        artist for axis in fig.axes for artist in _hatched(axis)
+    ]
+    assert hidden, "no hatch artist on the figure"
+    for artist in hidden:
+        artist.set_visible(False)
+    try:
+        bare = _render_rgba(fig)
+    finally:
+        for artist in hidden:
+            artist.set_visible(True)
+    changed = np.abs(shown - bare).max(axis=2) > 0
+    return changed & (shown[..., :3].max(axis=2) < 128)
+
+
+def _stroke_census(fig, panels):
+    """Count, over ``[(axis, significant), ...]``, the rejected cells without a stroke
+    in their middle half and the accepted cells with a stroke anywhere inside.
+
+    A cell ``(row, col)`` of an ``imshow`` axis is ``[col - 0.5, col + 0.5] x
+    [row - 0.5, row + 0.5]`` in data coordinates; its pixel box comes from the axis'
+    own transform at the saved dpi, so no layout is assumed.
+    """
+    painted = _painted_hatch_pixels(fig)
+    height = painted.shape[0]
+    census = dict(rejected=0, bare_rejected=0, accepted=0, stroked_accepted=0)
+    for axis, significant in panels:
+        for (row, col), passed in np.ndenumerate(np.asarray(significant, dtype=bool)):
+            (x0, y0), (x1, y1) = axis.transData.transform(
+                [(col - 0.5, row - 0.5), (col + 0.5, row + 0.5)]
+            )
+            left, right = sorted((x0, x1))
+            top, bottom = sorted((height - y0, height - y1))
+            margin = _ACCEPTED_MARGIN if passed else _REJECTED_MARGIN
+            inside = painted[
+                int(np.ceil(top + margin * (bottom - top))):
+                int(np.floor(bottom - margin * (bottom - top))),
+                int(np.ceil(left + margin * (right - left))):
+                int(np.floor(right - margin * (right - left))),
+            ]
+            if passed:
+                census["accepted"] += 1
+                census["stroked_accepted"] += int(inside.any())
+            else:
+                census["rejected"] += 1
+                census["bare_rejected"] += int(not inside.any())
+    return census
+
+
+def _two_dimensional_figure(monkeypatch, tmp_path):
+    maps = {
+        f"blocks.{i}.ffn/attn_pre": np.random.default_rng(i).normal(size=(16, 16))
+        for i in range(4)
+    }
+    masks = [_trained_like_mask((16, 16), 10 + i) for i in range(4)]
+    fig = _captured_figure(
+        monkeypatch,
+        lambda: plot_t_maps(
+            maps, sig_grids=dict(zip(maps, masks)), arm="raw",
+            condition_a="a", condition_b="b", output_path=str(tmp_path / "t.png"),
+        ),
+    )
+    return fig, list(zip(_image_axes(fig), masks))
+
+
+def _three_dimensional_figure(shape):
+    def build(monkeypatch, tmp_path):
+        return _three_dimensional_figure_of(shape, monkeypatch, tmp_path)
+
+    return build
+
+
+def _three_dimensional_figure_of(shape, monkeypatch, tmp_path):
+    crosshair = (3, 5, 6)
+    volume = _distinct_volume(shape, crosshair)
+    significant = _trained_like_mask(shape, 4, accepted_fraction=0.25)
+    significant[crosshair] = True
+    fig = _captured_figure(
+        monkeypatch,
+        lambda: plot_t_maps(
+            {"t": volume}, sig_grids={"t": significant}, arm="raw",
+            condition_a="a", condition_b="b", output_path=str(tmp_path / "t3.png"),
+        ),
+    )
+    planes = _image_axes(fig)
+    assert len(planes) == 3
+    return fig, [
+        (axis, _expected_plane_masks(volume, significant, np.asarray(axis.images[0].get_array())))
+        for axis in planes
+    ]
+
+
+def _old_pitch_hatch(axis, significant):
+    """The step-4.6 drawer verbatim, with the old ``//`` pattern: the negative
+    control that proves the census can fail."""
+    from matplotlib.collections import PatchCollection
+    from matplotlib.patches import Rectangle
+
+    rejected = ~np.asarray(significant, dtype=bool)
+    if rejected.any():
+        axis.add_collection(
+            PatchCollection(
+                [Rectangle((c - 0.5, r - 0.5), 1.0, 1.0) for r, c in np.argwhere(rejected)],
+                facecolor="none", edgecolor=matplotlib.rcParams["hatch.color"],
+                linewidth=0.0, hatch="//",
+            ),
+            autolim=False,
+        )
+
+
+#: kind -> (figure builder, fewest rejected cells the fixture must contain). The
+#: grids are the example runs' (16 x 16 and 7 x 7 x 7) and the 3-D paper grid
+#: (10 x 10 x 10, where ``//`` already leaves bare cells).
+_FIGURES = {
+    "2d_16x16": (_two_dimensional_figure, 800),
+    "3d_7x7x7": (_three_dimensional_figure((7, 7, 7)), 90),
+    "3d_10x10x10": (_three_dimensional_figure((10, 10, 10)), 250),
+}
+
+
+class TestEveryRejectedCellCarriesStrokes:
+    """RED on the ``//`` pattern (D-026): painted stroke pixels per cell, read from
+    the render at the saved scale, for a trained-like 2-D figure and a 3-D figure."""
+
+    @pytest.mark.parametrize("kind", list(_FIGURES))
+    def test_every_rejected_cell_has_a_stroke_in_its_middle_half(
+        self, monkeypatch, tmp_path, kind
+    ):
+        build, fewest = _FIGURES[kind]
+        fig, panels = build(monkeypatch, tmp_path)
+        try:
+            census = _stroke_census(fig, panels)
+        finally:
+            plt.close(fig)
+        assert census["rejected"] >= fewest, census
+        assert census["bare_rejected"] == 0, census
+
+    @pytest.mark.parametrize("kind", list(_FIGURES))
+    def test_no_accepted_cell_holds_a_hatch_stroke(self, monkeypatch, tmp_path, kind):
+        build, _ = _FIGURES[kind]
+        fig, panels = build(monkeypatch, tmp_path)
+        try:
+            census = _stroke_census(fig, panels)
+        finally:
+            plt.close(fig)
+        assert census["accepted"] >= 30, census
+        assert census["stroked_accepted"] == 0, census
+
+    @pytest.mark.parametrize(
+        "kind, at_least", [("2d_16x16", 100), ("3d_10x10x10", 30)]
+    )
+    def test_the_census_can_fail_the_old_pattern_leaves_bare_cells(
+        self, monkeypatch, tmp_path, kind, at_least
+    ):
+        """The same figures drawn with ``//``: many rejected cells hold no stroke
+        (241 of 868 in 2-D, 62 of 262 in 3-D). Without this the tests above could
+        pass for a census that sees nothing."""
+        import train.topolm.plotting as module
+
+        monkeypatch.setattr(module, "_hatch_rejected", _old_pitch_hatch)
+        build, _ = _FIGURES[kind]
+        fig, panels = build(monkeypatch, tmp_path)
+        try:
+            census = _stroke_census(fig, panels)
+        finally:
+            plt.close(fig)
+        assert census["bare_rejected"] > at_least, census
+        assert census["stroked_accepted"] == 0, census

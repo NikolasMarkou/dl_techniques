@@ -145,17 +145,35 @@ def _hatch_rejected(axis: plt.Axes, significant: np.ndarray) -> None:
     so a cell without hatch must be a cell that passed: each rejected cell gets
     its own box, ``[col - 0.5, col + 0.5] x [row - 0.5, row + 0.5]`` in the
     coordinates ``imshow`` gives the same axis, all in ONE collection with
-    no fill and a line width of 0, so no box outline is stroked and only the ``//``
+    no fill and a line width of 0, so no box outline is stroked and only the ``///``
     strokes show, and the t-values under them stay readable. The edge colour is
     the hatch colour and must NOT be ``"none"`` (matplotlib then draws no hatch at
     all: the strokes take the edge colour, the box outline takes the line width). Cluster edges, the one place a line is wanted, are
     drawn from the label grid, above this collection.
+
+    The pattern is ``///`` and not ``//`` (D-026): the boxes are exact, but a
+    stroke only shows where the pattern puts one, and at ``//`` the strokes are
+    about two cells apart, so 241 of 868 rejected cells of a trained-like 2-D
+    figure (the reviewer: 244 of 1737 on the real example) had no stroke in their
+    middle half at the saved ``dpi=160``. At ``///`` every rejected cell of the
+    example grids (16 x 16, 7 x 7 x 7, 10 x 10 x 10) holds one. The pitch is fixed
+    in inches, not in cells: on a paper-size 28 x 28 panel (cells about 12 px) even
+    ``///`` leaves 855 of 2664 rejected cells (32 %) without a stroke in their
+    middle half, so there the box is still exact and the stroke is not a per-cell
+    proof.
 
     Interface: ``axis`` has an image drawn on it; ``significant`` is a bool array
     of that image's shape (True = passed). Returns ``None``; it adds exactly one
     ``PatchCollection`` (zorder 1: above the image, below the outlines) when some
     cell was rejected and nothing otherwise.
     """
+    # DECISION plan-2026-10-23T190557-972a9ac5/D-026: the denser ``///`` pattern, NOT
+    # ``//``. Do NOT go back to ``//`` for a lighter look: its strokes are about two
+    # cells apart, so a quarter of the rejected cells (241 of 868 on a trained-like
+    # 16 x 16 figure at the saved dpi) carry no stroke in their middle half and read
+    # as cells that passed. See decisions.md D-026; guarded by
+    # TestEveryRejectedCellCarriesStrokes (a pixel census at dpi 160) and the
+    # re-pinned hatch golden, which now hashes the pattern.
     # DECISION plan-2026-10-23T190557-972a9ac5/D-021: one box per rejected cell, NOT
     # a contour of the mask. The first drawer called ``contourf`` on a masked array
     # of ones, which fills only the quads whose four neighbouring cells are ALL
@@ -175,7 +193,7 @@ def _hatch_rejected(axis: plt.Axes, significant: np.ndarray) -> None:
     axis.add_collection(
         PatchCollection(
             boxes, facecolor="none", edgecolor=matplotlib.rcParams["hatch.color"],
-            linewidth=0.0, hatch="//",
+            linewidth=0.0, hatch="///",
         ),
         autolim=False,
     )
