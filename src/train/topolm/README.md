@@ -332,10 +332,13 @@ Nor do they say whether the units prefer grammar or vocabulary, because the two
 conditions differ in both. These checkpoints are a different model from the ones the
 earlier versions of this README showed (a feed-forward built from two chained MLPs,
 residual projections initialised without the depth factor, a mixed tanh and exact
-GELU, biases the authors' released code does not have), and those showed almost no
-selectivity; this README does not know which of the changes made the difference, and
-the new model also learns faster (validation loss 7.16 after 400 steps against about
-7.8 before).
+GELU, biases the authors' released code does not have, and an output vocabulary of
+100,277 rows instead of 50,304), and those showed almost no selectivity; this README
+does not know which of the changes made the difference. The validation losses of the
+earlier and the corrected runs are not comparable, so nothing here says which model
+learns faster (the earlier runs took a softmax over 100,277 rows and these over 50,304:
+a uniform guess alone costs ln 100,277 = 11.52 nats against ln 50,304 = 10.83, and the
+50,000 extra rows of a tied table must be pushed down as well).
 [What these figures do and do not tell you](#what-these-figures-do-and-do-not-tell-you)
 says what a real claim would need.
 
@@ -1223,8 +1226,10 @@ an idle card (no other process in `nvidia-smi` before any job).
   the four runs without agree within 2.8%. The peak memory held by the process was
   4,770 MiB with and without. The earlier measurement, on the previous model, gave a
   fit phase of 100.15 s without and 116.27 s and 117.07 s with (+16.1% and +16.9%):
-  the draws cost about the same and the corrected model trains faster, so the same
-  draws are a larger share. A draw every 25 steps is much denser than a real run
+  the draws cost about the same and the corrected model's step is cheaper (one
+  feed-forward hidden layer instead of two, 50,304 output rows instead of 100,277),
+  so the same draws are a larger share. The two fit-phase times belong to different
+  models and are not a measure of how fast either learns. A draw every 25 steps is much denser than a real run
   needs; the overhead at a sparser cadence was not measured, and the example runs
   above (a draw every 50 steps) were not timed against a run without the callback.
 
@@ -1439,9 +1444,10 @@ the previous model, and the guide above is what the corrected one shows, includi
 that the counts of significant units are the same without the penalty. The previous
 model was not run without the penalty, so whether its near-absence of significant
 units was also true of its control is not known. **No ablation
-separates the five differences, so which one mattered is not known**: the corrected
-model also reaches a lower validation loss in the same 400 steps (7.162 against 7.818
-in 2D, 7.105 against 7.492 in 3D, both before), so it may simply be further along.
+separates the five differences, so which one mattered is not known**, and the
+validation losses cannot help: the earlier runs had 100,277 output rows and these
+50,304 (the uniform-guess loss alone differs by 0.69 nats), among the other changes, so
+the two losses are not compared here and no claim about learning speed is made.
 Checkpoints of the previous model do not load into the corrected one.
 
 ---

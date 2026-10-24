@@ -579,7 +579,6 @@ def _prose_phrases(facts: dict):
         f"{three['total_clusters_a']['fmt']} and {three['total_clusters_b']['fmt']} clusters",
         f"every one except the real one and its mirror gives at most {_g(best2)} significant units per tap in 2D and {_g(best3)} in 3D",
         f"3D drops to {_g(framing3['eot']['mean_significant_units_per_tap'])} or {_g(framing3['none']['mean_significant_units_per_tap'])} significant units per tap",
-        f"(validation loss {points[-1]:.2f} after 400 steps against about 7.8 before)",
         # the framing and the matching
         f"{', '.join(str(c) for c in counts[:-1])} and {counts[-1]} for i = 0 to 4 (mean {mean_tokens:.1f} in every condition)",
         *framing_rows,
@@ -836,6 +835,15 @@ _RETRACTED_SENTENCES = (
     "no unit passes the\nsignificance test",
     "a smooth map whose units show no detected difference between these\n  stimuli. The curve cannot",
     "the prefix is a choice",                  # the framing is a passage now, not a prefix
+    # Review pass 6, concern 5: losses over 100,277 and over 50,304 output rows are not
+    # comparable, so no claim about learning speed may stand on them.
+    "the new model also learns faster",
+    "validation loss 7.16 after 400 steps against about\n7.8 before",
+    "so it may simply be further along",
+    "also reaches a lower validation loss in the same 400 steps",
+    "7.162 against 7.818",
+    "7.105 against 7.492",
+    "the corrected model trains faster",
 )
 
 
@@ -874,6 +882,11 @@ _REQUIRED_SENTENCES = (
     "A fourth correction: the sentence is placed after a fixed passage",
     "A fifth correction: the model was not the model the paper describes",
     "No ablation separates the five differences, so which one mattered is not known",
+    # review pass 6, concern 5: the vocabulary is one of the changes, the losses do not compare
+    "and an output vocabulary of 100,277 rows instead of 50,304",
+    "The validation losses of the earlier and the corrected runs are not comparable",
+    "so nothing here says which model learns faster",
+    "no claim about learning speed is made",
 )
 
 
@@ -1118,3 +1131,12 @@ class TestTheReadmeGuardsCanFail:
         # ... and in the alt text.
         no_alt = guide.replace("the title says SYNTHETIC", "the title says so", 1)
         assert "alt text" in _illustration_failures(no_alt, facts)
+
+
+def test_the_uniform_guess_arithmetic_of_the_vocabulary_caveat_is_right():
+    """Review pass 6, concern 5: the numbers the caveat quotes are the logarithms it names."""
+    import math
+
+    text = _squash(_readme_text())
+    assert f"ln 100,277 = {math.log(100277):.2f} nats against ln 50,304 = {math.log(50304):.2f}" in text
+    assert f"differs by {math.log(100277) - math.log(50304):.2f} nats" in text
