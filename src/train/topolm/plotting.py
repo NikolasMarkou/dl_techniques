@@ -166,22 +166,88 @@ def _hatch_rejected(axis: plt.Axes, significant: np.ndarray) -> None:
     )
 
 
+#: How condition B's cluster outlines are drawn, next to A's solid black: dashed
+#: magenta shows on both the red and the blue half of the colour scale, and a
+#: second colour survives a grid so large that a dash pattern cannot (each outline
+#: is one short segment per cell edge, and a dash pattern restarts on every one).
+_B_OUTLINE = dict(color="magenta", linestyle="--")
+
+
+def _overlay_flags(
+    grid_shape: Tuple[int, ...],
+    sig_grids: Optional[Mapping[str, np.ndarray]],
+    label_grids: Optional[Mapping[str, np.ndarray]],
+    label_grids_b: Optional[Mapping[str, np.ndarray]],
+) -> Tuple[bool, bool, bool]:
+    """What the panels will actually draw: ``(hatched, outlined_a, outlined_b)``.
+
+    The line under the headline explains only what is on the figure, so it is
+    derived from the same inputs the panels use: a hatch is drawn when some
+    panel's mask (of the grid's shape) rejects at least one cell, and an outline
+    when some label grid of the grid's shape holds a cluster.
+    """
+    def has_clusters(grids):
+        return any(
+            np.asarray(grid).shape == grid_shape and np.any(np.asarray(grid) > 0)
+            for grid in (grids or {}).values()
+        )
+
+    hatched = any(
+        np.asarray(mask).shape == grid_shape and not np.asarray(mask, dtype=bool).all()
+        for mask in (sig_grids or {}).values()
+    )
+    return hatched, has_clusters(label_grids), has_clusters(label_grids_b)
+
+
+def _overlay_legend(
+    condition_a: Optional[str],
+    condition_b: Optional[str],
+    hatched: bool,
+    outlined_a: bool,
+    outlined_b: bool,
+    b_given: bool,
+) -> str:
+    """The sentence saying what the hatch and the outlines on a t-map mean.
+
+    Empty when the figure carries neither. When condition B's label grids were
+    not handed over it says so, instead of leaving a reader to take the absence of
+    a dashed outline for the absence of a cluster.
+    """
+    name_a, name_b = condition_a or "positive", condition_b or "negative"
+    parts = []
+    if hatched:
+        parts.append("hatched = not significant after BH-FDR")
+    if outlined_a or outlined_b:
+        styles = (
+            f"solid black = {name_a}, dashed magenta = {name_b}"
+            if b_given
+            else f"solid black = {name_a}; {name_b} clusters not drawn"
+        )
+        parts.append(f"outline = cluster of significant units ({styles})")
+    return "; ".join(parts)
+
+
 def _t_map_headline(
     arm: str,
     condition_a: Optional[str],
     condition_b: Optional[str],
     suptitle: Optional[str],
     note: Optional[str] = None,
+    legend: str = "",
 ) -> Tuple[str, str]:
     """The figure title and the line under it, for the 2-D and 3-D t-map rows.
 
-    ``note`` (the live callback's step and stimulus set) is appended to the line
-    under the title; ``None`` leaves it exactly as it was.
+    ``legend`` (from :func:`_overlay_legend`) says what the hatch and the outlines
+    mean and follows the sign convention; ``note`` (the live callback's step and
+    stimulus set) is appended after it. With no conditions, no legend and no note
+    the line is the one the figure always had.
     """
     if condition_a and condition_b:
         subtitle = f"positive = {condition_a}, negative = {condition_b}"
+        if legend:
+            subtitle = f"{subtitle}; {legend}"
     else:
-        subtitle = "hatched outline = rejected by BH-FDR"
+        subtitle = legend or "hatched outline = rejected by BH-FDR"
     if note:
         subtitle = f"{subtitle} | {note}"
     return suptitle or f"TopoLM t-maps ({arm})", subtitle
@@ -238,6 +304,7 @@ def plot_t_maps(
     limit_percentile: float = 99.0,
     suptitle: Optional[str] = None,
     note: Optional[str] = None,
+    label_grids_b: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[str]:
     """Render one t-map per tapped layer, with significance and cluster overlays.
 
@@ -249,8 +316,9 @@ def plot_t_maps(
     :param sig_grids: ``{tap_path: (height, width) bool}`` BH-FDR rejections, or
         ``None`` to omit the hatch overlay.
     :type sig_grids: Optional[Mapping[str, numpy.ndarray]]
-    :param label_grids: ``{tap_path: (height, width) int}`` cluster labels, ``0``
-        unassigned, or ``None`` to omit the boundaries.
+    :param label_grids: ``{tap_path: (height, width) int}`` cluster labels of
+        condition A (positive t), ``0`` unassigned, or ``None`` to omit the
+        boundaries. Outlined solid black.
     :type label_grids: Optional[Mapping[str, numpy.ndarray]]
     :param arm: ``"raw"`` or ``"readout"``, for the title.
     :type arm: str
@@ -269,6 +337,11 @@ def plot_t_maps(
     :param note: Appended to the line under the title (the live callback's step
         and stimulus set); ``None`` adds nothing.
     :type note: Optional[str]
+    :param label_grids_b: Same as ``label_grids`` for condition B (negative t),
+        outlined dashed magenta. ``None`` draws no B outline and the line under
+        the title says so when A's are drawn; the two grids never label the same
+        cell, because a cell has one sign.
+    :type label_grids_b: Optional[Mapping[str, numpy.ndarray]]
     :return: The written path, or ``None`` if ``output_path`` was ``None``.
     :rtype: Optional[str]
     :raises ValueError: If ``t_maps`` is empty, a map is neither 2-D nor 3-D, or
@@ -288,6 +361,7 @@ def plot_t_maps(
             limit_percentile=limit_percentile,
             suptitle=suptitle,
             note=note,
+            label_grids_b=label_grids_b,
         )
 
     ordered: List[Tuple[str, np.ndarray]] = [
@@ -319,7 +393,16 @@ def plot_t_maps(
     grid_h = n_rows * cell + (n_rows - 1) * gap_y
     fig_w = margin_left + grid_w + margin_right
 
-    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle, note)
+    hatched, outlined_a, outlined_b = _overlay_flags(
+        grid_shape, sig_grids, label_grids, label_grids_b
+    )
+    legend = _overlay_legend(
+        condition_a, condition_b, hatched, outlined_a, outlined_b,
+        b_given=label_grids_b is not None,
+    )
+    title, subtitle = _t_map_headline(
+        arm, condition_a, condition_b, suptitle, note, legend
+    )
     subtitle = _wrap_subtitle(subtitle + _prefix_note(shared_prefix), fig_w)
     subtitle_lines = subtitle.count("\n") + 1
     # From the top: a margin, the headline (10 pt), the subtitle (7 pt, any number of
@@ -350,6 +433,8 @@ def plot_t_maps(
                 _hatch_rejected(axis, mask)
         if label_grids is not None and name in label_grids:
             _draw_boundaries(axis, np.asarray(label_grids[name]))
+        if label_grids_b is not None and name in label_grids_b:
+            _draw_boundaries(axis, np.asarray(label_grids_b[name]), **_B_OUTLINE)
         axis.set_title(tap_labels[name], fontsize=title_fontsize, pad=3)
         axis.set_xticks([])
         axis.set_yticks([])
@@ -522,6 +607,7 @@ def plot_t_maps_3d(
     limit_percentile: float = 99.0,
     suptitle: Optional[str] = None,
     note: Optional[str] = None,
+    label_grids_b: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[str]:
     """Render 3-D t-maps as three orthogonal planes per tapped layer.
 
@@ -545,8 +631,9 @@ def plot_t_maps_3d(
         ``None`` to omit the hatch and to place the crosshair on the largest
         ``|t|`` overall.
     :type sig_grids: Optional[Mapping[str, numpy.ndarray]]
-    :param label_grids: ``{tap_path: (n0, n1, n2) int}`` cluster labels, ``0``
-        unassigned, or ``None`` to omit the outlines.
+    :param label_grids: ``{tap_path: (n0, n1, n2) int}`` cluster labels of
+        condition A, ``0`` unassigned, or ``None`` to omit the outlines. Outlined
+        solid black on each plane.
     :type label_grids: Optional[Mapping[str, numpy.ndarray]]
     :param arm: ``"raw"`` or ``"readout"``, for the title.
     :type arm: str
@@ -565,6 +652,9 @@ def plot_t_maps_3d(
     :param note: Appended to the line under the title (the live callback's step
         and stimulus set); ``None`` adds nothing.
     :type note: Optional[str]
+    :param label_grids_b: Same as ``label_grids`` for condition B, outlined dashed
+        magenta; see :func:`plot_t_maps`.
+    :type label_grids_b: Optional[Mapping[str, numpy.ndarray]]
     :return: The written path, or ``None`` if ``output_path`` was ``None``.
     :rtype: Optional[str]
     :raises ValueError: If ``t_maps`` is empty, a map is not 3-D, or the maps
@@ -600,7 +690,16 @@ def plot_t_maps_3d(
     fig_w = margin_left + n_cols * cell + (n_cols - 1) * gap_x + margin_right
     # The line under the headline can be wider than a one-tap figure (5.2 in): wrap
     # it, and grow the top margin by the extra lines. One line changes nothing.
-    title, subtitle = _t_map_headline(arm, condition_a, condition_b, suptitle, note)
+    hatched, outlined_a, outlined_b = _overlay_flags(
+        grid_shape, sig_grids, label_grids, label_grids_b
+    )
+    legend = _overlay_legend(
+        condition_a, condition_b, hatched, outlined_a, outlined_b,
+        b_given=label_grids_b is not None,
+    )
+    title, subtitle = _t_map_headline(
+        arm, condition_a, condition_b, suptitle, note, legend
+    )
     legend_note = "; dashed green = crosshair at the largest significant |t|"
     legend_note += _prefix_note(shared_prefix)
     subtitle = _wrap_subtitle(subtitle + legend_note, fig_w)
@@ -621,6 +720,9 @@ def plot_t_maps_3d(
         labels = None
         if label_grids is not None and name in label_grids:
             labels = np.asarray(label_grids[name])
+        labels_b = None
+        if label_grids_b is not None and name in label_grids_b:
+            labels_b = np.asarray(label_grids_b[name])
         crosshair = _crosshair_voxel(values, mask)
 
         for plane_axis in range(3):
@@ -640,6 +742,8 @@ def plot_t_maps_3d(
                 _hatch_rejected(axis, mask[index])
             if labels is not None and labels.shape == grid_shape:
                 _draw_boundaries(axis, labels[index])
+            if labels_b is not None and labels_b.shape == grid_shape:
+                _draw_boundaries(axis, labels_b[index], **_B_OUTLINE)
             # The in-plane coordinates of the crosshair: the two axes that are
             # NOT the plane axis, in order (rows, then columns).
             row_axis, col_axis = [a for a in range(3) if a != plane_axis]
@@ -684,8 +788,16 @@ def plot_t_maps_3d(
     return _save_and_close(fig, output_path, "3-D t-maps")
 
 
-def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
+def _draw_boundaries(
+    axis: plt.Axes,
+    labels: np.ndarray,
+    color: str = "black",
+    linestyle: str = "-",
+) -> None:
     """Outline each connected cluster in a ``label_grid``.
+
+    ``color`` and ``linestyle`` tell condition A's outlines (the defaults, solid
+    black) from condition B's (:data:`_B_OUTLINE`).
 
     Boundaries are traced between cells whose labels differ, so a cluster's edge
     is its own -- not the bounding box of the coloured cells underneath.
@@ -718,7 +830,7 @@ def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
         for col in np.where(above != below)[0]:
             axis.plot(
                 [col - 1.5, col - 0.5], [row - 0.5, row - 0.5],
-                color="black", linewidth=1.1,
+                color=color, linewidth=1.1, linestyle=linestyle,
             )
     for col in range(values.shape[1] + 1):
         left = padded[:, col]
@@ -726,7 +838,7 @@ def _draw_boundaries(axis: plt.Axes, labels: np.ndarray) -> None:
         for row in np.where(left != right)[0]:
             axis.plot(
                 [col - 0.5, col - 0.5], [row - 1.5, row - 0.5],
-                color="black", linewidth=1.1,
+                color=color, linewidth=1.1, linestyle=linestyle,
             )
 
 
@@ -1040,6 +1152,27 @@ def _validation_points(rows: Sequence[Mapping[str, Any]]) -> Tuple[np.ndarray, n
     return where[kept], values[kept]
 
 
+#: Taps up to which the curve's legend is one column in the larger font.
+_LEGEND_SINGLE_COLUMN_MAX_TAPS = 8
+
+
+def _curve_legend_width(
+    entries: Sequence[str], title: str, columns: int, fontsize: float
+) -> float:
+    """Inches the curve's outside legend needs: a deliberately generous estimate.
+
+    A glyph of the legend font averages about half its point size; 0.6 leaves a
+    margin, and the handle, the gap between columns and the frame are added. The
+    geometric test in test_topolm_plotting.py measures the rendered legend, so an
+    estimate that is too small fails there instead of clipping a figure.
+    """
+    char_in = 0.6 * fontsize / 72.0
+    column = 0.35 + max((len(entry) for entry in entries), default=0) * char_in
+    body = columns * column + (columns - 1) * 0.15
+    head = len(title) * char_in
+    return max(body, head) + 0.45
+
+
 def plot_topography_curve(
     rows: Sequence[Mapping[str, Any]],
     output_path: Optional[str] = None,
@@ -1049,8 +1182,9 @@ def plot_topography_curve(
 
     The figure the live callback rewrites after every draw, from the rows of its
     ``metrics.jsonl`` (``null`` for a value that was not finite). Stacked panels
-    share the step axis: Moran's I of every tap (thin, coloured by depth) with the
-    mean over taps in black; the clusters found for each polarity; the mean number
+    share the step axis: Moran's I of every tap (thin, coloured by depth, named in
+    a legend to the right of the axes with the shared path prefix as its title)
+    with the mean over taps in black; the clusters found for each polarity; the mean number
     of BH-FDR-significant units; and the validation loss when a row carries one,
     each validation once at the step it was measured (``val_loss_step``, see
     :func:`_validation_points`). A single row draws as markers, so the first
@@ -1079,29 +1213,53 @@ def plot_topography_curve(
     steps = _series(rows, lambda row: row["step"])
     val_steps, val_loss = _validation_points(rows)
     panels = ["moran", "clusters", "units"] + (["val_loss"] if val_loss.size else [])
+    taps = list(rows[0].get("per_tap", {}))
+    # One legend entry per tap line, outside the axes on the right so it covers no
+    # data, with the shared path prefix named once in its title. Many taps (24 at
+    # paper depth) get two columns and a smaller font.
+    tap_labels, tap_prefix, _ = _panel_tap_labels(taps, max_chars=10 ** 6)
+    legend_columns = 1 if len(taps) <= _LEGEND_SINGLE_COLUMN_MAX_TAPS else 2
+    legend_fontsize = 6.5 if legend_columns == 1 else 5.5
+    legend_width = _curve_legend_width(
+        [tap_labels[t] for t in taps] + ["mean over taps"], tap_prefix,
+        legend_columns, legend_fontsize,
+    )
+    fig_width = 6.6 + legend_width
     fig, axes = plt.subplots(
-        len(panels), 1, figsize=(6.6, 2.1 * len(panels) + 0.7),
+        len(panels), 1, figsize=(fig_width, 2.1 * len(panels) + 0.7),
         sharex=True, squeeze=False,
     )
     axes = [row[0] for row in axes]
 
     moran_axis = axes[0]
-    taps = list(rows[0].get("per_tap", {}))
     colours = plt.get_cmap("viridis")(np.linspace(0.0, 0.9, max(1, len(taps))))
+    tap_lines = []
     for colour, tap in zip(colours, taps):
-        moran_axis.plot(
+        (line,) = moran_axis.plot(
             steps,
             _series(rows, lambda row, tap=tap: row["per_tap"][tap]["morans_i"]),
             color=colour, linewidth=0.7, alpha=0.65, marker="o", markersize=2,
+            label=tap_labels[tap],
         )
-    moran_axis.plot(
+        tap_lines.append(line)
+    (mean_line,) = moran_axis.plot(
         steps, _series(rows, lambda row: row["mean_morans_i"]),
         color="black", linewidth=1.8, marker="o", markersize=3.5,
         label="mean over taps",
     )
     moran_axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
     moran_axis.set_ylabel("Moran's I")
-    moran_axis.legend(fontsize=7, loc="best")
+    legend = moran_axis.legend(
+        handles=[mean_line, *tap_lines], loc="upper left",
+        bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, ncol=legend_columns,
+        fontsize=legend_fontsize, title=tap_prefix.rstrip("/") or None,
+        title_fontsize=legend_fontsize, handlelength=1.6, columnspacing=1.0,
+        labelspacing=0.35,
+    )
+    # The legend stays IN the layout: tight_layout reserves its measured width, and
+    # ``bbox_inches="tight"`` at save time keeps it (a legend taken out of the
+    # layout is cropped away from the saved PNG). The figure is already widened by
+    # the estimate in ``_curve_legend_width``, so the axes keep about 6.6 in.
 
     cluster_axis = axes[1]
     cluster_axis.plot(

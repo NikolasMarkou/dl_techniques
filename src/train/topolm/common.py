@@ -955,6 +955,7 @@ def evaluate_topography(
         plotted: Dict[str, np.ndarray] = {}
         plotted_sig: Dict[str, np.ndarray] = {}
         plotted_labels: Dict[str, np.ndarray] = {}
+        plotted_labels_b: Dict[str, np.ndarray] = {}
         per_condition = {
             condition: extract_tap_activations(
                 backbone, prompts, preprocessor, batch_size=batch_size
@@ -1011,14 +1012,17 @@ def evaluate_topography(
                     cell_to_unit=tap.layout.cell_to_unit,
                 )
                 clusters[label] = [cluster.tolist() for cluster in grown]
-                # Keep the dominant polarity's labels for the figure. One map
-                # cannot show both polarities' boundaries at once without
-                # inventing a distinction the label grid does not carry, so the
-                # positive one is drawn and the counts stay in the JSON.
+                # Both polarities' label grids go to the figure: condition A's
+                # (positive t) as ``label_grids``, B's (negative t) as
+                # ``label_grids_b``. Each is its own grid, so one map shows both
+                # without a distinction a single label grid does not carry; the t
+                # map and the significance mask are the same for both.
                 if sign == 1:
                     plotted[name] = t_grid
                     plotted_sig[name] = sig_grid
                     plotted_labels[name] = label_grid
+                else:
+                    plotted_labels_b[name] = label_grid
 
             tap_reports[name] = {
                 # The permutation seed is DERIVED from the run seed and the tap's
@@ -1053,6 +1057,7 @@ def evaluate_topography(
             "t_maps": plotted,
             "sig_grids": plotted_sig,
             "label_grids": plotted_labels,
+            "label_grids_b": plotted_labels_b,
         }
 
         report["arms"][arm] = {
@@ -1120,7 +1125,10 @@ def plot_topography(
     :param report: The report returned by :func:`evaluate_topography`.
     :type report: Dict[str, Any]
     :param arrays: The second return value of :func:`evaluate_topography` --
-        ``{"arms": {arm: {"t_maps", "sig_grids", "label_grids"}}}``.
+        ``{"arms": {arm: {"t_maps", "sig_grids", "label_grids",
+        "label_grids_b"}}}`` -- the label grids are condition A's and B's cluster
+        labels; ``label_grids_b`` may be absent (arrays from an older caller), in
+        which case only A's clusters are outlined and the figure says so.
     :type arrays: Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :param output_dir: Directory for the PNGs.
     :type output_dir: str
@@ -1164,6 +1172,7 @@ def plot_topography(
                 arm_arrays["t_maps"],
                 sig_grids=arm_arrays["sig_grids"],
                 label_grids=arm_arrays["label_grids"],
+                label_grids_b=arm_arrays.get("label_grids_b"),
                 arm=arm,
                 condition_a=condition_a,
                 condition_b=condition_b,

@@ -1318,7 +1318,9 @@ class TestEvaluation:
         assert set(arrays["arms"]) == set(report["arms"])
         for arm in arrays["arms"]:
             arm_arrays = arrays["arms"][arm]
-            assert set(arm_arrays) == {"t_maps", "sig_grids", "label_grids"}
+            assert set(arm_arrays) == {
+                "t_maps", "sig_grids", "label_grids", "label_grids_b"
+            }
             assert set(arm_arrays["t_maps"]) == set(report["arms"][arm]["per_tap"])
             for name, values in arm_arrays["t_maps"].items():
                 assert values.shape == tuple(report["grid_shape"])
@@ -1911,7 +1913,9 @@ class TestTwoDimensionalUnchangedReport:
         assert report["grid_shape"] == [16, 16]
         assert report["fdr_scope"] == "joint across all taps"
         assert sorted(arrays) == ["arms"]
-        assert sorted(arrays["arms"]["raw"]) == ["label_grids", "sig_grids", "t_maps"]
+        assert sorted(arrays["arms"]["raw"]) == [
+            "label_grids", "label_grids_b", "sig_grids", "t_maps",
+        ]
 
     def test_the_raw_only_report_has_the_same_keys_without_a_readout_section(self):
         backbone = build_backbone(_config())

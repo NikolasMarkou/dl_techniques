@@ -641,24 +641,30 @@ class TestTwoDimensionalUnchangedPixels:
         assert _pixel_digest(path) == ((468, 1993, 4), "445e18d5a116726c")
 
     def test_a_t_map_row_with_the_hatch_and_the_legend_but_no_clusters(self, tmp_path):
-        """Re-pinned (layout): was ((547, 1983, 4), "eab7091b764aa543")."""
+        """Re-pinned twice. Layout (step 4.2): was ((547, 1983, 4),
+        "eab7091b764aa543"), then "25ac5e61b97c81a8". Step 4.4 (D-018): the line
+        under the headline now says what the hatch means ("hatched = not
+        significant after BH-FDR"), which is TEXT only: the figure keeps its size
+        (468 x 1993), and what it draws is pinned layout-independently in
+        :class:`TestTwoDimensionalContentDoesNotDependOnLayout` (image arrays,
+        colour limits, hatch geometry golden, outline edges), unchanged."""
         maps, sig = self._maps()
         path = plot_t_maps(
             maps, sig_grids=sig, arm="raw", condition_a="a", condition_b="b",
             output_path=str(tmp_path / "b.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "25ac5e61b97c81a8")
+        assert _pixel_digest(path) == ((468, 1993, 4), "b0327169643eb99c")
 
     def test_an_all_zero_label_grid_changes_nothing(self, tmp_path):
         """No cluster, no outline: the same pixels as passing no label grids
-        (re-pinned with the figure above, same new layout)."""
+        (re-pinned with the figure above, same new subtitle text)."""
         maps, sig = self._maps()
         empty = {k: np.zeros((8, 8), dtype=int) for k in maps}
         path = plot_t_maps(
             maps, sig_grids=sig, label_grids=empty, arm="raw",
             condition_a="a", condition_b="b", output_path=str(tmp_path / "c.png"),
         )
-        assert _pixel_digest(path) == ((468, 1993, 4), "25ac5e61b97c81a8")
+        assert _pixel_digest(path) == ((468, 1993, 4), "b0327169643eb99c")
 
     def test_the_moran_profile(self, tmp_path):
         """Re-pinned (labels): the ticks are now the tap path without the shared
@@ -1632,3 +1638,421 @@ class TestTheCrosshairIsVisibleOnSaturatedCells:
                 checked += 1
         plt.close(fig)
         assert checked == 6, "three planes with two lines each"
+
+
+# =====================================================================
+# Step 4.4 (plan-2026-10-23T190557-972a9ac5, decision D-018): what the outlines and
+# the hatch MEAN, both conditions' outlines, and a legend on the live curve.
+# Written RED-first against the 02af58996 drawers.
+# =====================================================================
+
+#: Outline colour of condition B; condition A keeps the black it always had.
+_A_COLOUR, _B_COLOUR = "black", "magenta"
+
+
+def _pieces_in_colour(axis, colour):
+    """The unit pieces of the boundary lines of ONE colour on ``axis`` (the
+    multiset the step-3 oracle compares), so A's and B's outlines are told apart
+    by how they are drawn and not by trusting the code that drew them."""
+    found = Counter()
+    for line in axis.get_lines():
+        if matplotlib.colors.same_color(line.get_color(), colour):
+            xs, ys = line.get_xdata(), line.get_ydata()
+            for (xa, ya), (xb, yb) in zip(zip(xs, ys), zip(xs[1:], ys[1:])):
+                found.update(_pieces(xa, ya, xb, yb))
+    return found
+
+
+def _two_condition_labels():
+    """A's clusters and B's, on cells A and B never share (a cell has one sign)."""
+    a = np.zeros((8, 8), dtype=int)
+    a[0:3, 0:3] = 1                # touches the corner
+    a[6, 6] = 2
+    b = np.zeros((8, 8), dtype=int)
+    b[4:7, 1:4] = 1
+    b[2:4, 5] = 2                  # a vertical pair
+    b[4, 0] = 3
+    assert not np.any((a > 0) & (b > 0))
+    return a, b
+
+
+def _subtitle_of(fig):
+    return " ".join(
+        t.get_text().replace("\n", " ") for t in fig.texts if t is not fig._suptitle
+    )
+
+
+class TestTheTMapOutlinesCoverBothConditions:
+    def test_both_conditions_outlines_equal_the_brute_force_cell_edges(
+        self, monkeypatch, tmp_path
+    ):
+        a, b = _two_condition_labels()
+        fig, axes = _capture_axes(
+            {"t": np.zeros((8, 8))}, label_grids={"t": a}, label_grids_b={"t": b},
+            condition_a="a", condition_b="b",
+            output_path=str(tmp_path / "ab.png"), _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        drawn_a = _pieces_in_colour(axis, _A_COLOUR)
+        drawn_b = _pieces_in_colour(axis, _B_COLOUR)
+        plt.close(fig)
+        assert drawn_a == _expected_pieces(a), "condition A's outline moved"
+        assert drawn_b == _expected_pieces(b), {
+            "missing": sorted((_expected_pieces(b) - drawn_b).elements())[:6],
+            "unexpected": sorted((drawn_b - _expected_pieces(b)).elements())[:6],
+        }
+
+    def test_the_two_conditions_are_drawn_in_different_styles(self, tmp_path):
+        a, b = _two_condition_labels()
+        fig, axes = _capture_axes(
+            {"t": np.zeros((8, 8))}, label_grids={"t": a}, label_grids_b={"t": b},
+            output_path=str(tmp_path / "s.png"), _fn="plot_t_maps",
+        )
+        lines = np.atleast_2d(axes)[0, 0].get_lines()
+        plt.close(fig)
+        styles = {(l.get_color(), l.get_linestyle()) for l in lines}
+        assert len(styles) == 2, styles
+        assert ("black", "-") in styles
+
+    def test_without_condition_b_grids_nothing_new_is_drawn(self, tmp_path):
+        a, _ = _two_condition_labels()
+        fig, axes = _capture_axes(
+            {"t": np.zeros((8, 8))}, label_grids={"t": a},
+            output_path=str(tmp_path / "a.png"), _fn="plot_t_maps",
+        )
+        axis = np.atleast_2d(axes)[0, 0]
+        drawn = _drawn_pieces(axis)
+        plt.close(fig)
+        assert drawn == _expected_pieces(a)
+        assert not _pieces_in_colour(axis, _B_COLOUR)
+
+    def test_the_3d_planes_outline_both_conditions_at_the_crosshair(
+        self, monkeypatch, tmp_path
+    ):
+        from train.topolm.plotting import _crosshair_voxel
+
+        volume, significant = _volume_fixture()
+        a = np.zeros(volume.shape, dtype=int)
+        b = np.zeros(volume.shape, dtype=int)
+        a[2:4, 2:5, 3:6] = 1
+        b[4:7, 0:3, 8:11] = 1                      # around the crosshair voxel (5, 1, 9)
+        name = "blocks.0.ffn/attn_pre"
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                {name: volume}, sig_grids={name: significant},
+                label_grids={name: a}, label_grids_b={name: b},
+                condition_a="a", condition_b="b",
+                output_path=str(tmp_path / "t3d.png"),
+            ),
+        )
+        crosshair = _crosshair_voxel(volume, significant)
+        axes = _image_axes(fig)
+        checked = 0
+        for plane_axis, axis in enumerate(axes):
+            index = [slice(None)] * 3
+            index[plane_axis] = crosshair[plane_axis]
+            index = tuple(index)
+            assert _pieces_in_colour(axis, _A_COLOUR) == _expected_pieces(a[index])
+            drawn_b = _pieces_in_colour(axis, _B_COLOUR)
+            assert drawn_b == _expected_pieces(b[index])
+            checked += len(drawn_b)
+        plt.close(fig)
+        assert checked > 0, "the fixture put no B cluster on the crosshair planes"
+
+
+class TestTheTMapSaysWhatItShows:
+    def _subtitle(self, monkeypatch, tmp_path, **kwargs):
+        a, b = _two_condition_labels()
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                _t_maps(n_taps=2),
+                sig_grids={k: np.abs(v) > 1.5 for k, v in _t_maps(n_taps=2).items()},
+                output_path=str(tmp_path / "sub.png"),
+                **kwargs,
+            ),
+        )
+        text = _subtitle_of(fig)
+        plt.close(fig)
+        return text
+
+    def test_the_subtitle_explains_the_hatch_and_both_outlines(self, monkeypatch, tmp_path):
+        a, b = _two_condition_labels()
+        labels = {k: a for k in _t_maps(n_taps=2)}
+        labels_b = {k: b for k in _t_maps(n_taps=2)}
+        text = self._subtitle(
+            monkeypatch, tmp_path, condition_a="a", condition_b="b",
+            label_grids=labels, label_grids_b=labels_b,
+        )
+        assert "positive = a, negative = b" in text
+        assert "hatched = not significant after BH-FDR" in text
+        assert "outline = cluster of significant units" in text
+        assert "solid black = a" in text and "dashed magenta = b" in text
+
+    def test_when_only_condition_a_is_given_it_says_b_is_not_drawn(
+        self, monkeypatch, tmp_path
+    ):
+        a, _ = _two_condition_labels()
+        text = self._subtitle(
+            monkeypatch, tmp_path, condition_a="a", condition_b="b",
+            label_grids={k: a for k in _t_maps(n_taps=2)},
+        )
+        assert "solid black = a" in text
+        assert "b clusters not drawn" in text
+        assert "dashed" not in text
+
+    def test_no_clusters_means_no_outline_sentence(self, monkeypatch, tmp_path):
+        empty = {k: np.zeros((8, 8), dtype=int) for k in _t_maps(n_taps=2)}
+        text = self._subtitle(
+            monkeypatch, tmp_path, condition_a="a", condition_b="b",
+            label_grids=empty, label_grids_b=empty,
+        )
+        assert "outline" not in text and "hatched = not significant" in text
+
+    def test_no_hatch_and_no_clusters_is_not_described(self, monkeypatch, tmp_path):
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(_t_maps(n_taps=2), condition_a="a", condition_b="b",
+                                output_path=str(tmp_path / "plain.png")),
+        )
+        text = _subtitle_of(fig)
+        plt.close(fig)
+        assert text.strip() == "positive = a, negative = b"
+
+    @pytest.mark.parametrize("n_blocks", _REAL_NAME_CASES)
+    def test_the_longer_subtitle_still_clears_everything_in_2d(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        maps = _real_maps(n_blocks)
+        sig = {k: np.abs(v) > 3 for k, v in maps.items()}
+        a, b = _two_condition_labels()
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids=sig, condition_a="a", condition_b="b",
+                label_grids={k: a for k in maps}, label_grids_b={k: b for k in maps},
+                note=_LIVE_NOTE, output_path=str(tmp_path / "long.png"),
+            ),
+        )
+        titles, frames, bar, texts = _t_map_geometry(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert len(texts) == 2
+        assert all(_inside(box, bounds) for box in titles + frames + texts + [bar])
+        assert not _overlap(texts[0], texts[1])
+        for text in texts:
+            assert not _overlap(text, bar)
+            assert not any(_overlap(text, frame) for frame in frames)
+        for i, title in enumerate(titles):
+            assert not any(_overlap(title, text) for text in texts)
+            assert not _overlap(title, bar)
+            assert not any(_overlap(title, titles[j]) for j in range(i + 1, len(titles)))
+
+    @pytest.mark.parametrize("n_blocks", [1, 2, 12], ids=["2taps", "4taps", "24taps"])
+    def test_the_longer_subtitle_still_clears_everything_in_3d(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        names = _real_tap_names(n_blocks)
+        rng = np.random.default_rng(3)
+        maps = {n: rng.normal(size=(7, 8, 7)) for n in names}
+        labels = {n: np.zeros((7, 8, 7), dtype=int) for n in names}
+        for grid in labels.values():
+            grid[1:3, 1:3, 1:3] = 1
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_t_maps(
+                maps, sig_grids={n: np.abs(m) > 1 for n, m in maps.items()},
+                label_grids=labels, label_grids_b=labels,
+                condition_a="a", condition_b="b", note=_LIVE_NOTE,
+                output_path=str(tmp_path / "long3d.png"),
+            ),
+        )
+        titles, frames, texts = _title_boxes_and_obstacles(fig)
+        bounds = fig.bbox
+        plt.close(fig)
+        assert "dashed magenta = b" in " ".join(
+            t.get_text().replace("\n", " ") for t in fig.texts
+        )
+        for index, (_, box) in enumerate(titles):
+            assert _inside(box, bounds), f"title {index} clipped"
+            assert not any(_overlap(box, text) for text in texts), index
+            assert not any(
+                _overlap(box, other) for j, (_, other) in enumerate(titles) if j > index
+            )
+        for text in texts:
+            assert _inside(text, bounds)
+
+
+def _populated_evaluation(tmp_path):
+    """A real ``evaluate_topography`` with every unit significant, so both
+    polarities form clusters on an untrained tiny head."""
+    from train.topolm import SMOKE_STIMULI, evaluate_topography
+    from tests.test_train.test_topolm.test_topolm_trainer import (
+        StubTokenizer,
+        _config,
+    )
+    from train.topolm import build_backbone
+
+    backbone = build_backbone(_config())
+    return evaluate_topography(
+        backbone, SMOKE_STIMULI, ("a", "b"), StubTokenizer(),
+        readout_fwhm=None, min_cluster_size=2, fdr_alpha=1.0,
+        permutation_p_value=False,
+    )
+
+
+class TestTheCallSitesPassBothConditions:
+    def test_the_arrays_carry_condition_b_labels_that_match_the_report(self, tmp_path):
+        report, arrays = _populated_evaluation(tmp_path)
+        arm = arrays["arms"]["raw"]
+        assert set(arm) == {"t_maps", "sig_grids", "label_grids", "label_grids_b"}
+        total_b = 0
+        for name, entry in report["arms"]["raw"]["per_tap"].items():
+            a, b = np.asarray(arm["label_grids"][name]), np.asarray(arm["label_grids_b"][name])
+            assert not np.any((a > 0) & (b > 0)), "one cell in two conditions' clusters"
+            assert int((a > 0).sum()) == sum(entry["cluster_sizes_a"])
+            assert int((b > 0).sum()) == sum(entry["cluster_sizes_b"])
+            assert len(np.unique(b[b > 0])) == len(entry["cluster_sizes_b"])
+            total_b += len(entry["cluster_sizes_b"])
+        assert total_b > 0, "no B cluster formed: the check above was vacuous"
+
+    def test_plot_topography_outlines_both_from_the_evaluation(self, monkeypatch, tmp_path):
+        from train.topolm import plot_topography
+
+        report, arrays = _populated_evaluation(tmp_path)
+        holder = {}
+        original = Figure.savefig
+
+        def recording(self, path, *args, **kwargs):
+            if "t_maps_raw" in str(path):
+                holder["fig"] = self
+            return original(self, path, *args, **kwargs)
+
+        monkeypatch.setattr(Figure, "savefig", recording)
+        plot_topography(report, arrays, str(tmp_path))
+        fig = holder["fig"]
+        raw = arrays["arms"]["raw"]
+        checked_b = 0
+        for axis, name in zip(_image_axes(fig), raw["t_maps"]):
+            assert _pieces_in_colour(axis, _A_COLOUR) == _expected_pieces(raw["label_grids"][name])
+            drawn_b = _pieces_in_colour(axis, _B_COLOUR)
+            assert drawn_b == _expected_pieces(raw["label_grids_b"][name])
+            checked_b += len(drawn_b)
+        text = _subtitle_of(fig)
+        plt.close(fig)
+        assert checked_b > 0
+        assert "dashed magenta = b" in text
+
+    def test_arrays_without_condition_b_grids_still_plot(self, tmp_path):
+        from train.topolm import plot_topography
+
+        report, arrays = _cluster_report_and_arrays(["t0", "t1"], "t1")
+        assert "label_grids_b" not in arrays["arms"]["raw"]
+        written = plot_topography(report, arrays, str(tmp_path))
+        assert any(p.endswith("t_maps_raw.png") for p in written)
+
+
+# -- the live curve's legend ---------------------------------------------------
+
+
+def _legend_rows(names, steps=(0, 25, 50)):
+    return [
+        {
+            "step": step, "val_loss": None, "val_loss_step": None,
+            "mean_morans_i": 0.05 * i, "total_clusters_a": i, "total_clusters_b": i,
+            "mean_num_significant_units": 3.0,
+            "per_tap": {n: {"morans_i": 0.05 * i + 0.01 * k} for k, n in enumerate(names)},
+        }
+        for i, step in enumerate(steps)
+    ]
+
+
+class TestTheCurveNamesItsTapLines:
+    @pytest.mark.parametrize("n_blocks", [1, 3, 12], ids=["2taps", "6taps", "24taps"])
+    def test_the_legend_sits_right_of_the_axes_and_inside_the_figure(
+        self, monkeypatch, tmp_path, n_blocks
+    ):
+        names = _real_tap_names(n_blocks)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(
+                _legend_rows(names), output_path=str(tmp_path / "c.png"),
+                note="smoke stimuli, n=5/5 per condition",
+            ),
+        )
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        moran_axis = fig.axes[0]
+        legend = moran_axis.get_legend()
+        assert legend is not None, "the curve has no legend"
+        box = legend.get_window_extent(renderer)
+        frames = [ax.get_window_extent(renderer) for ax in fig.axes]
+        texts = [t.get_window_extent(renderer) for t in fig.texts if t.get_text()]
+        entries = [t.get_text() for t in legend.get_texts()]
+        bounds = fig.bbox
+        # What ``savefig(bbox_inches="tight")`` keeps: a legend that is not in the
+        # layout is rendered on the canvas and CROPPED OUT of the saved PNG.
+        saved = fig.get_tightbbox(renderer)
+        saved_px = (saved.x0 * fig.dpi, saved.y0 * fig.dpi, saved.x1 * fig.dpi, saved.y1 * fig.dpi)
+        plt.close(fig)
+
+        assert saved_px[0] - 0.5 <= box.x0 and box.x1 <= saved_px[2] + 0.5, (
+            f"the saved figure's extent {saved_px} cuts the legend {box}"
+        )
+        assert saved_px[1] - 0.5 <= box.y0 and box.y1 <= saved_px[3] + 0.5, (
+            f"the saved figure's extent {saved_px} cuts the legend {box}"
+        )
+        assert len(entries) == len(names) + 1, entries     # the taps and the mean line
+        assert "mean over taps" in entries
+        # the shortened labels: the shared prefix is gone, the block and tap stay
+        parts = [n.split("/") for n in names]
+        shared = 0
+        while (
+            len(names) > 1 and shared < min(map(len, parts)) - 1
+            and len({p[shared] for p in parts}) == 1
+        ):
+            shared += 1
+        for path in parts:
+            assert "/".join(path[shared:]) in entries, (path, shared, entries)
+        # right of every axes, below nothing it could cover, inside the figure
+        for index, frame in enumerate(frames):
+            assert box.x0 >= frame.x1 - 0.5 or box.y1 <= frame.y0 or box.y0 >= frame.y1, (
+                f"the legend covers axes {index}: {box} {frame}"
+            )
+        assert box.x0 >= frames[0].x1 - 0.5, "the legend is not to the right of the axes"
+        assert _inside(box, bounds), f"the legend leaves the figure: {box} in {bounds}"
+        for text in texts:
+            assert not _overlap(box, text)
+
+    def test_24_taps_use_two_columns_and_a_smaller_font_than_2(self, monkeypatch, tmp_path):
+        def legend_of(n_blocks):
+            fig = _captured_figure(
+                monkeypatch,
+                lambda: plot_topography_curve(
+                    _legend_rows(_real_tap_names(n_blocks)),
+                    output_path=str(tmp_path / f"c{n_blocks}.png"),
+                ),
+            )
+            legend = fig.axes[0].get_legend()
+            info = (legend._ncols, legend.get_texts()[0].get_fontsize())
+            plt.close(fig)
+            return info
+
+        few, many = legend_of(1), legend_of(12)
+        assert few[0] == 1 and many[0] == 2
+        assert many[1] < few[1]
+
+    def test_every_tap_line_is_named_by_its_legend_entry(self, monkeypatch, tmp_path):
+        names = _real_tap_names(2)
+        fig = _captured_figure(
+            monkeypatch,
+            lambda: plot_topography_curve(
+                _legend_rows(names), output_path=str(tmp_path / "c.png")
+            ),
+        )
+        legend = fig.axes[0].get_legend()
+        handles = legend.legend_handles
+        entries = [t.get_text() for t in legend.get_texts()]
+        plt.close(fig)
+        assert len(handles) == len(entries) == len(names) + 1

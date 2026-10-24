@@ -233,7 +233,7 @@ positive.
 
 | File | Contents |
 |---|---|
-| `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, clusters outlined; on a 3D grid, three orthogonal planes per tap |
+| `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, both conditions' clusters outlined (solid black for A, dashed magenta for B); on a 3D grid, three orthogonal planes per tap |
 | `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout (2D variants only) |
 | `morans_i_raw.png`, `morans_i_readout.png` | standard Moran's I against depth |
 | `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster; on a 3D grid, every slice along axis 0 |
@@ -255,6 +255,13 @@ alternative misleads:
   that is a dense mesh over the whole panel that buries the t-values it annotates.
   Cluster edges come from the label grid instead, so a cluster outlined in a
   figure is the cluster counted in the JSON — there is one source for both.
+- **The figure says what its marks mean.** The line under the headline reads, for
+  example, `positive = a, negative = b; hatched = not significant after BH-FDR;
+  outline = cluster of significant units (solid black = a, dashed magenta = b)`.
+  Both conditions' clusters are outlined, because a map shows both signs and a
+  large blue region without an outline would read as "not a cluster". Only the
+  marks actually drawn are described, and if a caller hands over condition A's
+  labels alone the line says that B's clusters are not drawn.
 
 The figures are drawn by `train.topolm.plotting` from the arrays
 `evaluate_topography` already computed, which it returns alongside the report.
@@ -291,8 +298,9 @@ arm draws into its own run directory.
     latest_t_maps_raw.png       the newest t-maps
     latest_morans_i_raw.png     the newest Moran's I profile
     metrics.jsonl               one JSON row per draw
-    topography_curve.png        Moran's I per tap, clusters, significant units and
-                                validation loss against step
+    topography_curve.png        Moran's I per tap (named in a legend right of the
+                                axes), clusters, significant units and validation
+                                loss against step
 ```
 
 **How to watch it live.** Open `latest_t_maps_raw.png` in an image viewer that
