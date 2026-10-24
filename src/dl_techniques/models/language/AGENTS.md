@@ -275,12 +275,19 @@ add cannot reach it: no flag, no hook, no `activity_regularizer`.
   layout and the default, or 3, repo-authored: `paper3d` and `tiny3d` rows with their own radius,
   trained by `train/topolm/` on the raw arm only, since the Gaussian readout is 2D; the model constructor's per-axis check is 3D-only while
   `validate_variant` is strict in both ranks). It composes
-  `create_attention_layer` / `create_ffn_layer` / `create_normalization_layer`
-  rather than reimplementing them, so the reuse order (factories first, a bespoke
-  layer last) is unchanged. The three factory calls pass **positional string
-  literals** for their types on purpose: the repo's dropped-param sweep resolves a
-  literal type statically and cannot resolve a variable one, and its ceiling is
-  explicitly not to be raised to absorb a new site.
+  `create_attention_layer`, `create_normalization_layer` and the feed-forward path
+  `TransformerLayer` uses (`build_transformer_ffn_config` into
+  `create_ffn_from_config`) rather than reimplementing them, so the reuse order
+  (factories first, a bespoke layer last) is unchanged. The feed-forward is ONE
+  layer, `ffn` (for `ffn_type='mlp'`, GPT-2's `Linear`, activation, `Linear`);
+  `ffn_type`, `ffn_args`, `use_bias`, `normalization_type` and the two norm-args
+  dicts are serialized constructor knobs, also on `TopoLM` and `from_variant`. The
+  attention call still passes a **positional string literal** for its type on
+  purpose: the repo's dropped-param sweep resolves a literal type statically and
+  cannot resolve a variable one, and its ceiling is explicitly not to be raised to
+  absorb a new site. The feed-forward goes through `create_ffn_from_config`, which
+  the sweep does not cover, and the two norms plus `TopoLM.final_norm` are named in
+  the norm census (`RULED_DYNAMIC_KNOBS`).
 - `hnet/` — same constraint, different reason (learned chunk boundaries).
 
 If you are adding a third, budget for it: a per-layer config knob is unreachable

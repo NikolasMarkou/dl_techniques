@@ -99,6 +99,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
 )
 from dl_techniques.layers.activations import gelu_tanh
+from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     TASK_HEAD_NAME,
@@ -150,7 +151,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                  │
                  ▼  last_hidden_state [B, S, D]
             ┌─────────────────────────┐
-            │ final LayerNorm         │
+            │ final norm (per option) │
             └─────────────────────────┘
                  │
                  ├──► {"last_hidden_state"}
@@ -244,6 +245,28 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :param activation: Feed-forward activation. Defaults to ``gelu_tanh``, GPT-2's
         tanh approximation, not the exact-erf ``'gelu'`` string.
     :type activation: Union[str, Any]
+    :param ffn_type: Feed-forward type of every block: ``'mlp'`` (default), GPT-2's
+        ``Linear(embed_dim -> ffn_intermediate_size)``, activation,
+        ``Linear(ffn_intermediate_size -> embed_dim)``; ``'swiglu'``, ``'geglu'``
+        and the other registry types whose output width is ``output_dim`` are
+        accepted (:func:`~dl_techniques.models.topolm.components.accepted_ffn_types`).
+        ``'swiglu'`` sizes itself and does not read ``ffn_intermediate_size``.
+    :type ffn_type: str
+    :param ffn_args: Extra arguments for the feed-forward factory, e.g.
+        ``{'ffn_multiple_of': 64}`` for ``swiglu``. ``dropout_rate`` is refused.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param use_bias: Whether the feed-forward projections carry a bias (default
+        ``True``). Attention projections never do.
+    :type use_bias: bool
+    :param normalization_type: Type of every norm, both in each block and the
+        final one: ``'layer_norm'`` (default), ``'rms_norm'``, or another key of
+        the shared normalization factory.
+    :type normalization_type: str
+    :param attention_norm_args: Extra arguments for every block's attention-side
+        norm; ``{'epsilon': ...}`` overrides ``layer_norm_eps`` for it.
+    :type attention_norm_args: Optional[Dict[str, Any]]
+    :param ffn_norm_args: The same for every block's feed-forward-side norm.
+    :type ffn_norm_args: Optional[Dict[str, Any]]
     :param tie_word_embeddings: Reuse the transposed token embedding as the LM
         head. Default ``True``, which builds no ``lm_head``.
     :type tie_word_embeddings: bool
@@ -319,6 +342,12 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         include_top: bool = False,
         task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
+        ffn_type: str = "mlp",
+        ffn_args: Optional[Dict[str, Any]] = None,
+        use_bias: bool = True,
+        normalization_type: str = "layer_norm",
+        attention_norm_args: Optional[Dict[str, Any]] = None,
+        ffn_norm_args: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -362,6 +391,16 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         self.initializer_range = float(initializer_range)
         self.layer_norm_eps = float(layer_norm_eps)
         self.activation = activation
+        # The block validates these (type names, dict-ness, the dropout rule) and
+        # raises by name; the model stores what it was given, as copies.
+        self.ffn_type = ffn_type
+        self.ffn_args = dict(ffn_args) if ffn_args is not None else {}
+        self.use_bias = bool(use_bias)
+        self.normalization_type = normalization_type
+        self.attention_norm_args = (
+            dict(attention_norm_args) if attention_norm_args is not None else {}
+        )
+        self.ffn_norm_args = dict(ffn_norm_args) if ffn_norm_args is not None else {}
         self.tie_word_embeddings = bool(tie_word_embeddings)
         self.seed = seed
         self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
@@ -572,6 +611,12 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
                 initializer_range=self.initializer_range,
                 layer_norm_eps=self.layer_norm_eps,
                 activation=self.activation,
+                ffn_type=self.ffn_type,
+                ffn_args=self.ffn_args,
+                use_bias=self.use_bias,
+                normalization_type=self.normalization_type,
+                attention_norm_args=self.attention_norm_args,
+                ffn_norm_args=self.ffn_norm_args,
                 # Each tap's seed is derived from (base seed, its index in the
                 # whole model's tap sequence), so no two of the 2 * depth taps
                 # share a layout.
@@ -581,8 +626,13 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             for index in range(self.depth)
         ]
 
-        self.final_norm = keras.layers.LayerNormalization(
-            epsilon=self.layer_norm_eps, name="final_norm"
+        # The same factory and type as the blocks' norms, so one option moves all
+        # of them: a stack whose final norm kept a beta while its blocks dropped
+        # theirs would be a different model from the one the option names.
+        self.final_norm = create_normalization_layer(
+            self.normalization_type,
+            name="final_norm",
+            epsilon=self.layer_norm_eps,
         )
 
         # A task head replaces the LM head: call() never runs lm_head then,
@@ -900,6 +950,12 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             "initializer_range": self.initializer_range,
             "layer_norm_eps": self.layer_norm_eps,
             "activation": serialize_activation(self.activation),
+            "ffn_type": self.ffn_type,
+            "ffn_args": dict(self.ffn_args),
+            "use_bias": self.use_bias,
+            "normalization_type": self.normalization_type,
+            "attention_norm_args": dict(self.attention_norm_args),
+            "ffn_norm_args": dict(self.ffn_norm_args),
             "tie_word_embeddings": self.tie_word_embeddings,
             "seed": self.seed,
             "pad_token_id": self.pad_token_id,

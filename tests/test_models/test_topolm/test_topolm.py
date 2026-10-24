@@ -1075,8 +1075,13 @@ class TestSpatialLossReachesTheObjective:
             )
 
         with_term, without_term = totals[True], totals[False]
-        # Roughly 2 * depth * alpha * 0.5 of extra reported loss, ~9.9 here.
-        assert with_term[0] > without_term[0] + 5.0, with_term
+        # The extra reported loss is alpha * the sum of the taps' SL, and
+        # SL = 0.5 * (1 - r) is 0.5 for activations uncorrelated with the distance
+        # prior: 2.5 * 4 taps * 0.5 = 5.0 here (measured 4.9985 with the one-MLP
+        # feed-forward; ~9.9 with the old four-Dense one, whose units were
+        # anti-correlated, and the old margin of 5.0 was calibrated to that). Half
+        # the uncorrelated value is required: a missing term adds 0.0.
+        assert with_term[0] > without_term[0] + 2.5, with_term
         # And the EVALUATION loss is the pure task loss either way, because the
         # taps add nothing when `training` is not True.
         assert with_term[1] == pytest.approx(without_term[1], rel=0.05)
@@ -1679,10 +1684,20 @@ class TestTopoLMIncludeTop:
     def test_the_backbone_weight_paths_do_not_depend_on_the_head(self, tie):
         """The backbone's paths are identical across tops (D-005 of the plan).
 
-        Measured on this config: 28 backbone weights (embeddings, one block with
-        its two taps, final norm); untied headless adds ``lm_head/kernel`` (29);
-        a TEXT_CLASSIFICATION head adds 8 under ``task_head/`` (36).
+        The count is derived, not read off the model: 2 embedding tables; per
+        block 2 attention kernels (qkv, proj), 2 norms x (gamma, beta), the
+        feed-forward's 4 (fc1 and fc2, each kernel and bias; ONE MLP since
+        D-030, it was 8 as two chained MLPs) and 2 taps x 5 buffers (perm,
+        patch_table, triu_flat, d_unit, last_spatial_loss); then the final
+        norm's 2: 24 for this one-block config. An untied headless model adds
+        ``lm_head/kernel`` (25); a TEXT_CLASSIFICATION head adds 8 under
+        ``task_head/`` (32).
         """
+        embeddings = 2
+        per_block = 2 + 2 * 2 + 4 + 2 * 5
+        final_norm = 2
+        expected = embeddings + _HEAD_KW["depth"] * per_block + final_norm
+        assert expected == 24
         def paths(**kw):
             m = TopoLM(**_HEAD_KW, tie_word_embeddings=tie, name="topolm", **kw)
             m(_head_batch(), training=False)
@@ -1690,7 +1705,8 @@ class TestTopoLMIncludeTop:
 
         headless = paths()
         backbone = [p for p in headless if not p.startswith("topolm/lm_head/")]
-        assert (len(backbone), len(headless)) == (28, 28 if tie else 29)
+        assert (len(backbone), len(headless)) == (
+            expected, expected if tie else expected + 1)
         assert headless[:len(backbone)] == backbone
         for task in (_CLF, _NER):
             headed = paths(include_top=True, task_config=task)

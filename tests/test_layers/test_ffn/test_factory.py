@@ -2028,14 +2028,14 @@ def _b_models_neural_hmm_encoders():
 
 def _b_models_topolm_components():
     from dl_techniques.models.language.topolm.components import TopoLMBlock
-    # BOTH call sites (`ffn_dense_1` widens, `ffn_dense_2` projects back) are
-    # in `__init__` and pass the hardcoded 'mlp' literal; the build checks the
-    # pair composes at the configured widths. radius=1 is the probe's config,
+    # ONE call site in `__init__`: `create_ffn_from_config` over the config that
+    # `build_transformer_ffn_config` assembles, at the default ffn_type 'mlp'
+    # (GPT-2's Linear, activation, Linear; D-030). radius=1 is the probe's config,
     # not a product defect: at hidden_size=16 the taps lay out a 4x4 grid, and
     # the default radius 5 needs 11x11, which SpatialSmoothness refuses in build.
     b = TopoLMBlock(hidden_size=16, num_heads=2, intermediate_size=32, radius=1)
     b.build((None, 8, 16))
-    return b.ffn_dense_2
+    return b.ffn
 
 
 _FFN_CONSTRUCTION_SITE_BUILDERS = {

@@ -9,7 +9,10 @@ variable (an ``Attribute`` such as ``self.normalization_type`` or a bare
 ``Name``) cannot be checked by any static instrument, because no sweep can know
 which registry key it will ask for. Measured at Step 15 of
 ``plan-2026-10-14T062616-81938e81`` (D-253): **200 sites in 100 files, 153
-dynamic, 47 literal.**
+dynamic, 47 literal.** Plan-2026-10-23T190557-972a9ac5 step 10 (D-030) moved the
+TopoLM block's two norms (now one ``_make_norm`` call site) and the model's final
+norm from literal ``'layer_norm'`` to the ``normalization_type`` knob: **200 sites
+in 101 files, 155 dynamic, 45 literal.**
 
 The population was first pinned by two ``<=`` ceilings (D-201 of
 ``plan-2026-08-22T035419-a11304c8``: 151 dynamic, 180 total, 2026-09-04). A
@@ -50,7 +53,9 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: wrong in both directions here, D-140 of plan a11304c8):
 #: ``{path relative to src/: (dynamic sites, literal sites)}``. Re-derived at
 #: Step 15 of plan-2026-10-14T062616-81938e81 (D-253): 200 sites, 100 files,
-#: 153 dynamic, 47 literal. Edit it in the commit that adds or removes a site.
+#: 153 dynamic, 47 literal; then D-030 of plan-2026-10-23T190557-972a9ac5 (TopoLM's
+#: ``normalization_type`` knob): 200 sites, 101 files, 155 dynamic, 45 literal.
+#: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
     "dl_techniques/layers/attention/capsule_routing_attention.py": (2, 0),
@@ -110,7 +115,8 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/language/qwen/qwen3.py": (1, 0),
     "dl_techniques/models/language/qwen/qwen3_embeddings.py": (2, 0),
     "dl_techniques/models/language/qwen/qwen3_next.py": (1, 0),
-    "dl_techniques/models/language/topolm/components.py": (0, 2),
+    "dl_techniques/models/language/topolm/components.py": (1, 0),
+    "dl_techniques/models/language/topolm/model.py": (1, 0),
     "dl_techniques/models/language/tree_transformer/components.py": (3, 0),
     "dl_techniques/models/language/tree_transformer/model.py": (1, 0),
     "dl_techniques/models/neural_computer/nam/cell.py": (2, 0),
@@ -154,7 +160,10 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "train/rms_variants_train/norm_overhead_bench.py": (1, 0),
 }
 
-#: The six dynamic sites D-253 ruled real constructor knobs (D-122 item 4):
+#: The six dynamic sites D-253 ruled real constructor knobs (D-122 item 4), and the
+#: two D-030 of plan-2026-10-23T190557-972a9ac5 added: ``TopoLMBlock._make_norm``,
+#: the one call that builds both block norms (so the name it passes is the
+#: ``name`` parameter), and ``TopoLM.final_norm``:
 #: ``(file relative to src/, class, the attribute the norm is assigned to)``.
 #: Each class documents ``normalization_type`` (``:param``), takes it in
 #: ``__init__`` and returns it from ``get_config``; a literal type there would
@@ -168,6 +177,8 @@ RULED_DYNAMIC_KNOBS: Tuple[Tuple[str, str, str], ...] = (
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "stem_norm"),
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "final_norm"),
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "merge_norm_"),
+    ("dl_techniques/models/language/topolm/components.py", "TopoLMBlock", "name"),
+    ("dl_techniques/models/language/topolm/model.py", "TopoLM", "final_norm"),
 )
 
 
@@ -238,7 +249,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (153, 47, 100), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (155, 45, 101), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

@@ -13,11 +13,17 @@ computed on that tensor, at exactly that point, before normalization and before
 the add. There is no flag, no hook and no ``activity_regularizer`` that reaches it.
 
 So the block is written here, and it composes the shared factories
-(``create_attention_layer``, ``create_ffn_layer``,
-``create_normalization_layer``) rather than reimplementing any of them. That is
-the same shape ``hnet``, ``wave_field`` and ``tree_transformer`` use for their own
+(``create_attention_layer``, ``create_normalization_layer`` and the feed-forward
+path ``TransformerLayer`` uses: ``build_transformer_ffn_config`` into
+``create_ffn_from_config``) rather than reimplementing any of them. That is the
+same shape ``hnet``, ``wave_field`` and ``tree_transformer`` use for their own
 blocks, and the reuse order is unchanged: the factories first, a bespoke layer
 last.
+
+The feed-forward is ONE layer, ``ffn``: for the default ``ffn_type='mlp'`` it is
+``Linear(H -> I)``, the activation, ``Linear(I -> H)``, exactly GPT-2's MLP. Its
+type, its arguments, its bias, the normalization type of both norms and their
+arguments are constructor options, serialized by :meth:`TopoLMBlock.get_config`.
 
 .. code-block:: text
 
@@ -31,13 +37,15 @@ last.
                                                     │
                             ┌───────────────────────┘
                             ▼
-    x' ──► ffn_norm ──► ffn_dense_1 ──► ffn_dense_2 ──► mlp_tap ──┐
-                                                             ▼
-                                                       x' + mlp
+    x' ──► ffn_norm ──► ffn ──► mlp_tap ──┐
+                                          ▼
+                                    x' + mlp
 
 The taps sit ON the branch outputs, not around them: their forward pass is the
-identity, so the residual arithmetic is byte-identical to a plain GPT-2 block and
-any difference in the loss curve is attributable to the added term alone.
+identity, so the residual arithmetic is that of a plain GPT-2 block and any
+difference in the loss curve is attributable to the added term alone. The branch
+dropout (GPT-2's ``resid_pdrop``) sits between the feed-forward and its tap and is
+the only dropout in the feed-forward path.
 
 The block carries ``grid_dim`` (2, the paper's layout, or 3) and forwards it to
 every tap it makes; a tap resolves its grid lazily at its own build, so a dropped
@@ -54,7 +62,7 @@ References:
 """
 
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import keras
 
@@ -68,14 +76,58 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
 )
 from dl_techniques.layers.attention import create_attention_layer
-from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.ffn import create_ffn_from_config
+from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+from dl_techniques.layers.norms import (
+    create_normalization_layer,
+    get_normalization_info,
+)
+from dl_techniques.layers.transformers.transformer import (
+    build_transformer_ffn_config,
+)
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 #: Which branch outputs a block can tap. The paper taps both.
 TAP_SITES = ("attention", "mlp")
+
+
+def accepted_ffn_types() -> List[str]:
+    """The feed-forward types a residual branch can use, sorted.
+
+    A type qualifies when the factory registry says its output width is set by
+    ``output_dim``: the branch is added to the residual stream, so it has to emit
+    ``hidden_size`` features, and ``hidden_size`` is handed to the factory as
+    ``output_dim``. Types that size their output by ``filters``, ``features`` or
+    ``units``, or keep the input width (``gated_dconv``, ``mixer``), are refused
+    by name rather than built into a width mismatch.
+
+    :return: Registry keys, e.g. ``['bilinear', 'geglu', ..., 'mlp', ..., 'swiglu']``.
+    :rtype: List[str]
+    """
+    return sorted(
+        name for name, info in FFN_REGISTRY.items()
+        if info.get("output_dim_param") == "output_dim"
+    )
+
+
+def accepted_normalization_types() -> List[str]:
+    """The normalization types of the shared factory, sorted."""
+    return sorted(get_normalization_info())
+
+
+def _args_dict(name: str, value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Copy an optional args mapping into a dict, refusing anything else by name."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"{name} must be a dict of keyword arguments or None, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    return dict(value)
 
 
 @register_dl_technique("dl_techniques.models.topolm.components")
@@ -97,7 +149,12 @@ class TopoLMBlock(keras.layers.Layer):
     :type hidden_size: int
     :param num_heads: Attention heads. Must divide ``hidden_size``.
     :type num_heads: int
-    :param intermediate_size: Feed-forward hidden width.
+    :param intermediate_size: Feed-forward hidden width. For ``ffn_type='mlp'`` it
+        is the width between the two projections (GPT-2's ``n_inner``). A type
+        that sizes itself, ``swiglu`` (a 2/3 rule from ``ffn_expansion_factor``,
+        rounded to ``ffn_multiple_of``), does not read it: the shared helper
+        withholds it, as it does for ``TransformerLayer``; resize through
+        ``ffn_args``.
     :type intermediate_size: int
     :param alpha: Weight on each tap's spatial loss. ``0`` gives the control.
     :type alpha: float
@@ -125,9 +182,14 @@ class TopoLMBlock(keras.layers.Layer):
     :type tap_sites: Tuple[str, ...]
     :param normalization_position: ``'pre'`` (the paper's) or ``'post'``.
     :type normalization_position: str
-    :param activation: Feed-forward activation.
+    :param activation: Feed-forward activation, applied between the two
+        projections of an MLP. Types whose activation is their identity
+        (``reglu``, ``bilinear``, ``squared_relu``, ``swiglu``) do not read it.
     :type activation: Union[str, Any]
-    :param dropout_rate: Dropout on the feed-forward branch.
+    :param dropout_rate: Dropout on the feed-forward branch output, applied once,
+        after the output projection and before the tap and the residual add:
+        GPT-2's ``resid_pdrop``. The feed-forward layer itself is built with no
+        dropout, so the rate never stacks with a second one inside it.
     :type dropout_rate: float
     :param attention_dropout_rate: Dropout on the attention output.
     :type attention_dropout_rate: float
@@ -139,11 +201,38 @@ class TopoLMBlock(keras.layers.Layer):
     :type layer_norm_eps: float
     :param seed: Base seed for this block's taps.
     :type seed: Optional[int]
+    :param ffn_type: The feed-forward type, a key of the shared FFN registry whose
+        output width is ``output_dim`` (:func:`accepted_ffn_types`): ``'mlp'``
+        (the default, GPT-2's), ``'swiglu'``, ``'geglu'`` and the rest.
+    :type ffn_type: str
+    :param ffn_args: Extra arguments for the feed-forward factory, merged last and
+        never filtered, so a misspelled key raises. ``dropout_rate`` is refused:
+        the block's own ``dropout_rate`` is the only dropout.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param use_bias: Whether the feed-forward projections carry a bias. The
+        attention projections never do. ``swiglu`` is bias-free by its own
+        default and the shared helper does not forward this flag to it
+        (``ffn_args={'use_bias': True}`` does).
+    :type use_bias: bool
+    :param normalization_type: Type of BOTH norms of the block (and, in
+        :class:`~dl_techniques.models.topolm.model.TopoLM`, of the final norm), a
+        key of the shared normalization factory: ``'layer_norm'`` (default),
+        ``'rms_norm'`` (no ``beta``) and the rest.
+    :type normalization_type: str
+    :param attention_norm_args: Extra arguments for the attention-side norm,
+        e.g. ``{'epsilon': 1e-6}``, which overrides ``layer_norm_eps`` for that
+        norm alone.
+    :type attention_norm_args: Optional[Dict[str, Any]]
+    :param ffn_norm_args: The same for the feed-forward-side norm.
+    :type ffn_norm_args: Optional[Dict[str, Any]]
     :param kwargs: Forwarded to ``keras.layers.Layer``.
     :raises ValueError: If ``hidden_size`` does not divide among ``num_heads``,
         if a name in ``tap_sites`` is not in :data:`TAP_SITES`, or if
         ``normalization_position`` is not ``'pre'`` or ``'post'``, or if
-        ``grid_dim`` is not 2 or 3 -- naming the offending value in each case.
+        ``grid_dim`` is not 2 or 3, or if ``ffn_type`` or ``normalization_type`` is
+        not accepted, an args argument is not a dict, ``ffn_args`` sets
+        ``dropout_rate``, or a factory refuses its arguments -- naming the
+        offending value in each case.
     """
 
     def __init__(
@@ -166,6 +255,12 @@ class TopoLMBlock(keras.layers.Layer):
         initializer_range: float = 0.02,
         layer_norm_eps: float = 1e-5,
         seed: Optional[int] = None,
+        ffn_type: str = "mlp",
+        ffn_args: Optional[Dict[str, Any]] = None,
+        use_bias: bool = True,
+        normalization_type: str = "layer_norm",
+        attention_norm_args: Optional[Dict[str, Any]] = None,
+        ffn_norm_args: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -188,6 +283,24 @@ class TopoLMBlock(keras.layers.Layer):
         )
 
         grid_dim = validate_grid_dim(grid_dim)
+        ffn_args = _args_dict("ffn_args", ffn_args)
+        attention_norm_args = _args_dict("attention_norm_args", attention_norm_args)
+        ffn_norm_args = _args_dict("ffn_norm_args", ffn_norm_args)
+        if ffn_type not in accepted_ffn_types():
+            raise ValueError(
+                f"ffn_type must be one of {accepted_ffn_types()}, got {ffn_type!r}"
+            )
+        if "dropout_rate" in ffn_args:
+            raise ValueError(
+                "ffn_args must not set dropout_rate: the block's own dropout_rate "
+                "is applied once, to the branch output, and a second rate inside "
+                "the feed-forward would stack with it"
+            )
+        if normalization_type not in accepted_normalization_types():
+            raise ValueError(
+                f"normalization_type must be one of "
+                f"{accepted_normalization_types()}, got {normalization_type!r}"
+            )
         tap_sites = tuple(tap_sites)
         unknown = sorted(set(tap_sites) - set(TAP_SITES))
         if unknown:
@@ -216,6 +329,12 @@ class TopoLMBlock(keras.layers.Layer):
         self.initializer_range = float(initializer_range)
         self.layer_norm_eps = float(layer_norm_eps)
         self.seed = seed
+        self.ffn_type = ffn_type
+        self.ffn_args = ffn_args
+        self.use_bias = bool(use_bias)
+        self.normalization_type = normalization_type
+        self.attention_norm_args = attention_norm_args
+        self.ffn_norm_args = ffn_norm_args
 
         # One initializer INSTANCE per block is deliberate: Keras hands the same
         # instance to identically-shaped sublayers inside a layer, so sharing it
@@ -231,10 +350,8 @@ class TopoLMBlock(keras.layers.Layer):
             stddev=self.initializer_range / math.sqrt(2.0)
         )
 
-        self.attention_norm = create_normalization_layer(
-            "layer_norm",
-            name="attention_norm",
-            epsilon=self.layer_norm_eps,
+        self.attention_norm = self._make_norm(
+            "attention_norm", self.attention_norm_args
         )
         self.attention = create_attention_layer(
             "multi_head",
@@ -246,31 +363,40 @@ class TopoLMBlock(keras.layers.Layer):
             output_kernel_initializer=residual_initializer,
             use_bias=False,
         )
-        self.ffn_norm = create_normalization_layer(
-            "layer_norm",
-            name="ffn_norm",
-            epsilon=self.layer_norm_eps,
-        )
-        self.ffn_dense_1 = create_ffn_layer(
-            "mlp",
-            name="ffn_dense_1",
-            hidden_dim=self.hidden_size,
-            output_dim=self.intermediate_size,
+        self.ffn_norm = self._make_norm("ffn_norm", self.ffn_norm_args)
+
+        # DECISION plan-2026-10-23T190557-972a9ac5/D-030: the feed-forward is ONE
+        # layer, built through the helper TransformerLayer uses. Do NOT chain two
+        # create_ffn_layer("mlp") calls: each is already Linear -> activation ->
+        # Linear, so two made four Dense layers and two activations, 3.12x GPT-2's
+        # parameters, and the layers were named as if each were one Dense. Do NOT
+        # build the layer outside build_transformer_ffn_config (its per-type
+        # policy and the registry intersection are shared). Do NOT pass
+        # dropout_rate into it: an MLP applies dropout after the activation, and
+        # the branch dropout below is GPT-2's resid_pdrop, so both would stack.
+        # Guarded by test_topolm_ffn.py::TestTheFeedForwardIsOneMLP,
+        # ::TestTheForwardIsDenseActivationDense and
+        # ::TestTheOraclesRejectTheOldStructure. See decisions.md.
+        ffn_config = build_transformer_ffn_config(
+            ffn_type=self.ffn_type,
+            name="ffn",
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
             activation=self.activation,
-            dropout_rate=self.dropout_rate,
-            kernel_initializer=kernel_initializer,
-            output_kernel_initializer=kernel_initializer,
-            use_bias=True,
+            dropout_rate=0.0,
+            kernel_initializer=clone_initializer(kernel_initializer),
+            bias_initializer="zeros",
+            use_bias=self.use_bias,
+            output_kernel_initializer=clone_initializer(residual_initializer),
+            ffn_args=self.ffn_args,
         )
-        self.ffn_dense_2 = create_ffn_layer(
-            "mlp",
-            name="ffn_dense_2",
-            hidden_dim=self.intermediate_size,
-            output_dim=self.hidden_size,
-            kernel_initializer=kernel_initializer,
-            output_kernel_initializer=residual_initializer,
-            use_bias=True,
-        )
+        try:
+            self.ffn = create_ffn_from_config(ffn_config)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Failed to create the {self.ffn_type!r} feed-forward layer. "
+                f"ffn_args: {sorted(self.ffn_args)}. Original error: {error}"
+            ) from error
         self.ffn_dropout = keras.layers.Dropout(
             self.dropout_rate, name="ffn_dropout"
         )
@@ -289,6 +415,24 @@ class TopoLMBlock(keras.layers.Layer):
             f"alpha={self.alpha}, radius={self.radius}, "
             f"normalization_position={self.normalization_position!r}"
         )
+
+    def _make_norm(self, name: str, args: Mapping[str, Any]) -> keras.layers.Layer:
+        """One of the block's two norms, through the shared factory.
+
+        ``layer_norm_eps`` is the default epsilon of both; a norm's own args may
+        override it (``{'epsilon': ...}``) without a duplicate-keyword error.
+        """
+        try:
+            return create_normalization_layer(
+                self.normalization_type,
+                name=name,
+                **{"epsilon": self.layer_norm_eps, **args},
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Failed to create the {self.normalization_type!r} normalization "
+                f"layer {name!r}. Args: {sorted(args)}. Original error: {error}"
+            ) from error
 
     def _tap_seed(self, index: int) -> int:
         """The layout seed of one of this block's taps.
@@ -360,9 +504,7 @@ class TopoLMBlock(keras.layers.Layer):
         self.attention.build(input_shape)
 
         self.ffn_norm.build(input_shape)
-        self.ffn_dense_1.build(input_shape)
-        widened = tuple(input_shape[:-1]) + (self.intermediate_size,)
-        self.ffn_dense_2.build(widened)
+        self.ffn.build(input_shape)
         self.ffn_dropout.build(input_shape)
 
         if "attention" in self.tap_sites:
@@ -425,9 +567,7 @@ class TopoLMBlock(keras.layers.Layer):
             hidden = attn_out + residual
 
             normed = self.ffn_norm(hidden, training=training)
-            mlp_out = self.ffn_dense_2(
-                self.ffn_dense_1(normed, training=training), training=training
-            )
+            mlp_out = self.ffn(normed, training=training)
             mlp_out = self.ffn_dropout(mlp_out, training=training)
             if "mlp" in self.tap_sites:
                 mlp_out = self.mlp_tap(mlp_out, training=training)
@@ -446,9 +586,7 @@ class TopoLMBlock(keras.layers.Layer):
                 attn_out = taps[position](attn_out, training=training)
         hidden = self.attention_norm(attn_out + residual, training=training)
 
-        mlp_out = self.ffn_dense_2(
-            self.ffn_dense_1(hidden, training=training), training=training
-        )
+        mlp_out = self.ffn(hidden, training=training)
         mlp_out = self.ffn_dropout(mlp_out, training=training)
         if "mlp" in self.tap_sites:
             mlp_out = self.mlp_tap(mlp_out, training=training)
@@ -485,5 +623,11 @@ class TopoLMBlock(keras.layers.Layer):
             "initializer_range": self.initializer_range,
             "layer_norm_eps": self.layer_norm_eps,
             "seed": self.seed,
+            "ffn_type": self.ffn_type,
+            "ffn_args": dict(self.ffn_args),
+            "use_bias": self.use_bias,
+            "normalization_type": self.normalization_type,
+            "attention_norm_args": dict(self.attention_norm_args),
+            "ffn_norm_args": dict(self.ffn_norm_args),
         })
         return config
