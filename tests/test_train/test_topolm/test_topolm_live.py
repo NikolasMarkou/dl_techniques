@@ -389,7 +389,12 @@ class TestOutputs:
             json.loads(line, parse_constant=lambda c: pytest.fail(f"bare {c}"))
             for line in (live / "metrics.jsonl").read_text().splitlines()
         ]
-        assert [row["step"] for row in rows] == [0, 2, 4, 6]
+        # The map draws are 0, 2, 4, 6 (the end of training does not duplicate
+        # the multiple of 2). The epoch-end validation of step 6 runs AFTER that
+        # last draw, so the file closes with one metrics-only row of step 6
+        # (step 6.3, TestTheLastValidationIsDrawn pins it); it is not a draw.
+        assert [row["step"] for row in rows if not row.get("val_only")] == [0, 2, 4, 6]
+        assert [row["step"] for row in rows if row.get("val_only")] == [6]
 
     def test_the_labels_add_the_resume_offset(self, tmp_path):
         """The batch index restarts every virtual epoch; the label is
@@ -1011,3 +1016,346 @@ class TestADamagedMetricsFileDoesNotKillTheView:
         )
         callback.on_train_begin()
         assert not [w for w in warnings if "metrics.jsonl" in w]
+
+
+# =====================================================================
+# step 6.3 (plan-2026-10-23T190557-972a9ac5, decision D-019, defect D1): the
+# last epoch-end validation is shown. Keras validates AFTER the last batch-end
+# draw, so without a closing metrics-only row the curve ends one cadence early.
+# Written RED-first against the 244970b78 callback.
+# =====================================================================
+
+
+def _curve_row(step, moran=0.1, **extra):
+    """A complete metrics row, as far as the curve reads one."""
+    return {
+        "step": step, "mean_morans_i": moran, "total_clusters_a": 1,
+        "total_clusters_b": 1, "mean_num_significant_units": 3.0,
+        "val_loss": None, "val_loss_step": None,
+        "per_tap": {"t/a": {"morans_i": moran}}, **extra,
+    }
+
+
+def _val_only(step, val_loss, val_loss_step):
+    return {
+        "step": step, "val_only": True, "val_loss": val_loss,
+        "val_loss_step": val_loss_step,
+    }
+
+
+def _plotted_validation_points(monkeypatch, rows):
+    """``[(x list, y list)]`` of every line the curve draws in the val_loss panel
+    (the only green one), captured from ``Axes.plot`` itself."""
+    import matplotlib.axes
+    from train.topolm.plotting import plot_topography_curve
+
+    drawn = []
+    real = matplotlib.axes.Axes.plot
+
+    def spy(self, *args, **kwargs):
+        if isinstance(kwargs.get("color"), str) and kwargs["color"] == "tab:green":
+            drawn.append((np.asarray(args[0]).tolist(), np.asarray(args[1]).tolist()))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy)
+    plot_topography_curve(rows, None)
+    return drawn
+
+
+def _drive_to_a_trailing_validation(callback, batches=2, val_loss=3.25):
+    """``batches`` optimizer steps (the last one a draw step), then the epoch-end
+    validation Keras runs AFTER that batch-end draw, then the end of training."""
+    callback.on_train_begin()
+    for batch in range(batches):
+        callback.on_train_batch_end(batch, {})
+    callback.on_epoch_end(0, {"val_loss": val_loss})
+    callback.on_train_end()
+
+
+class TestTheLastValidationIsDrawn:
+    def test_a_validation_after_the_last_draw_gets_a_metrics_only_row(self, tmp_path):
+        _, _, _, callback = _live(tmp_path)
+        _drive_to_a_trailing_validation(callback)
+
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 2]
+        full, closing = rows[1], rows[2]
+        assert full["val_loss"] is None and "val_only" not in full
+        assert closing["val_only"] is True
+        assert closing["val_loss"] == 3.25 and closing["val_loss_step"] == 2
+        for name in ("per_tap", "mean_morans_i", "total_clusters_a", "seconds",
+                     "grid_shape", "restored_weights"):
+            assert name not in closing, name
+        # strict JSON, like every other row
+        json.loads(
+            (_live_dir(tmp_path) / "metrics.jsonl").read_text().splitlines()[-1],
+            parse_constant=lambda c: pytest.fail(f"bare {c}"),
+        )
+
+    def test_the_closing_row_redraws_only_the_curve(self, monkeypatch, tmp_path):
+        """No second map draw: no evaluation, no new step directory, the t-map
+        and Moran's I frames untouched byte for byte, the curve rewritten."""
+        _, _, _, callback = _live(tmp_path)
+        calls = _spy_on_evaluate(monkeypatch, lambda n, real, a, k: real(*a, **k))
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        live = _live_dir(tmp_path)
+        names = ("latest_t_maps_raw.png", "latest_morans_i_raw.png")
+        before = {name: (live / name).read_bytes() for name in names}
+        curve_before = (live / "topography_curve.png").read_bytes()
+        drawn = []
+        real_plot = C.plot_topography
+        monkeypatch.setattr(
+            C, "plot_topography", lambda *a, **k: drawn.append(1) or real_plot(*a, **k)
+        )
+        callback.on_train_end()
+
+        assert len(calls) == 2 and drawn == [], "a map was drawn for the closing row"
+        assert _step_dirs(tmp_path) == ["step_0000000", "step_0000002"]
+        for name in names:
+            assert (live / name).read_bytes() == before[name], name
+        assert (live / "topography_curve.png").read_bytes() != curve_before
+        assert not [n for n in os.listdir(live) if n.startswith(".")]
+
+    def test_no_validation_after_the_last_draw_adds_no_row(self, tmp_path):
+        """The validation of step 2 is already in the step-4 row, and a run that
+        never validated has nothing to add."""
+        _, _, _, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        for batch in range(2, 4):
+            callback.on_train_batch_end(batch, {})
+        callback.on_train_end()
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 4]
+        assert rows[-1]["val_loss"] == 3.25 and rows[-1]["val_loss_step"] == 2
+        assert all("val_only" not in row for row in rows)
+
+        _, _, _, plain = _live(tmp_path / "never_validated")
+        plain.on_train_begin()
+        for batch in range(2):
+            plain.on_train_batch_end(batch, {})
+        plain.on_train_end()
+        assert all(
+            "val_only" not in row for row in _rows(tmp_path / "never_validated")
+        )
+
+    def test_a_validation_that_the_end_draw_already_carries_adds_no_row(self, tmp_path):
+        """Off the draw grid the on_train_end draw happens AFTER the validation, so
+        its own row holds the newest value."""
+        _, _, _, callback = _live(tmp_path)
+        _drive_to_a_trailing_validation(callback, batches=3)
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 3]
+        assert rows[-1]["val_loss"] == 3.25 and rows[-1]["val_loss_step"] == 3
+        assert all("val_only" not in row for row in rows)
+
+    def test_a_restored_redraw_carries_the_validation_and_needs_no_closing_row(
+        self, tmp_path
+    ):
+        """Restore (step 6.2) and trailing validation together: the redraw is
+        made after the validation, so it is the last word and nothing is added."""
+        _, _, backbone, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        for variable in backbone.trainable_variables:
+            variable.assign(variable + 0.37)
+        callback.on_train_end()
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 2]
+        assert rows[-1]["restored_weights"] is True
+        assert rows[-1]["val_loss"] == 3.25 and rows[-1]["val_loss_step"] == 2
+        assert all("val_only" not in row for row in rows)
+
+    def test_a_restore_whose_redraw_failed_still_gets_the_closing_row(
+        self, monkeypatch, tmp_path
+    ):
+        """The redraw of a restored model fails, the earlier row of that step has
+        a stale validation: the closing row still brings the newest one."""
+        _, _, backbone, callback = _live(tmp_path)
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        for variable in backbone.trainable_variables:
+            variable.assign(variable + 0.37)
+        _spy_on_evaluate(monkeypatch, _raise(RuntimeError("redraw failed")))
+        callback.on_train_end()
+        rows = _rows(tmp_path)
+        assert [row["step"] for row in rows] == [0, 2, 2]
+        assert rows[-1]["val_only"] is True and rows[-1]["val_loss"] == 3.25
+
+    def test_a_switched_off_callback_writes_no_closing_row(self, tmp_path):
+        _, _, _, callback = _live(tmp_path)
+        callback.on_train_begin()
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+        callback.disabled = True
+        callback.on_train_end()
+        assert [row["step"] for row in _rows(tmp_path)] == [0]
+
+    def test_a_failure_writing_the_closing_row_is_logged_and_never_raised(
+        self, monkeypatch, tmp_path
+    ):
+        import train.topolm.plotting as plotting
+
+        _, _, _, callback = _live(tmp_path)
+        warnings = []
+        monkeypatch.setattr(
+            logger, "warning", lambda message, *a, **k: warnings.append(str(message))
+        )
+        callback.on_train_begin()
+        for batch in range(2):
+            callback.on_train_batch_end(batch, {})
+        callback.on_epoch_end(0, {"val_loss": 3.25})
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("curve broke")
+
+        monkeypatch.setattr(plotting, "plot_topography_curve", boom)
+        callback.on_train_end()                     # must not raise
+        assert any("curve broke" in w for w in warnings), warnings
+
+    def test_the_curve_of_a_real_run_ends_on_the_last_validation(self, monkeypatch, tmp_path):
+        """End to end on CPU: six steps validated every second step. The closing
+        row's value is Keras' own last ``val_loss``, and the curve's val_loss
+        panel draws it at the step it was measured (the old curve stopped at 4)."""
+        _patch_data(monkeypatch)
+        monkeypatch.setattr(C, "_run_dir", lambda config: str(tmp_path / "closing"))
+        with keras.device("cpu"):
+            result = train_topolm(
+                _config(viz_every_steps=2), preprocessor=StubTokenizer(),
+                run_topography=False,
+            )
+        history = result["history"].history["val_loss"]
+        assert len(history) == 3
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "closing" / "topography_live" / "metrics.jsonl")
+            .read_text().splitlines()
+        ]
+        assert [row["step"] for row in rows] == [0, 2, 4, 6, 6]
+        assert [row.get("val_only", False) for row in rows] == [False] * 4 + [True]
+        assert rows[-1]["val_loss"] == pytest.approx(history[-1])
+        assert rows[-1]["val_loss_step"] == 6
+        assert rows[3]["val_loss_step"] == 4, "the full row is the one before the validation"
+
+        drawn = _plotted_validation_points(monkeypatch, rows)
+        assert len(drawn) == 1
+        xs, ys = drawn[0]
+        assert xs == [2.0, 4.0, 6.0]
+        assert ys == pytest.approx(history)
+
+
+class TestARepeatedStepIsMerged:
+    def test_a_metrics_only_row_does_not_shadow_the_map_statistics(self):
+        from train.topolm.plotting import last_row_per_step
+
+        rows = [
+            _curve_row(0), _curve_row(4, moran=0.4, val_loss=3.5, val_loss_step=2),
+            _val_only(4, 3.1, 4),
+        ]
+        kept = last_row_per_step(rows)
+        assert [row["step"] for row in kept] == [0, 4]
+        merged = kept[1]
+        assert merged["mean_morans_i"] == 0.4 and merged["per_tap"] == {"t/a": {"morans_i": 0.4}}
+        assert merged["val_loss"] == 3.1 and merged["val_loss_step"] == 4
+        assert "val_only" not in merged, "the merged row is a full row"
+
+    def test_a_later_null_does_not_erase_an_earlier_value(self):
+        from train.topolm.plotting import last_row_per_step
+
+        kept = last_row_per_step([
+            _curve_row(4, val_loss=3.5, val_loss_step=2),
+            {"step": 4, "val_only": True, "val_loss": None, "val_loss_step": None},
+        ])
+        assert len(kept) == 1
+        assert kept[0]["val_loss"] == 3.5 and kept[0]["val_loss_step"] == 2
+
+    def test_a_lone_metrics_only_row_stays_what_it_is(self):
+        from train.topolm.plotting import last_row_per_step
+
+        kept = last_row_per_step([_val_only(4, 3.1, 4)])
+        assert kept == [_val_only(4, 3.1, 4)]
+
+    def test_the_restored_weights_row_still_replaces_the_row_before_it(self):
+        """A map row describes a draw completely, so a non-finite statistic of the
+        restored model (null) must not be filled in from the pre-restore draw."""
+        from train.topolm.plotting import last_row_per_step
+
+        restored = _curve_row(4, moran=None, restored_weights=True)
+        restored["per_tap"] = {"t/a": {"morans_i": None}}
+        kept = last_row_per_step([_curve_row(0), _curve_row(4, moran=0.2), restored])
+        assert len(kept) == 2
+        assert kept[1]["mean_morans_i"] is None and kept[1]["restored_weights"] is True
+        assert kept[1]["per_tap"] == {"t/a": {"morans_i": None}}
+
+    def test_a_restore_followed_by_a_closing_row_keeps_both_semantics(self):
+        from train.topolm.plotting import last_row_per_step
+
+        rows = [
+            _curve_row(4, moran=0.2),
+            _curve_row(4, moran=0.1, restored_weights=True),
+            _val_only(4, 3.1, 4),
+        ]
+        kept = last_row_per_step(rows)
+        assert len(kept) == 1
+        assert kept[0]["mean_morans_i"] == 0.1 and kept[0]["restored_weights"] is True
+        assert kept[0]["val_loss"] == 3.1
+
+    def test_rows_of_distinct_steps_and_stepless_rows_are_untouched(self):
+        from train.topolm.plotting import last_row_per_step
+
+        stepless = {"note": "x"}
+        rows = [_curve_row(0), stepless, _curve_row(2)]
+        assert last_row_per_step(rows) == rows
+
+    def test_the_input_rows_are_not_modified(self):
+        from train.topolm.plotting import last_row_per_step
+        import copy
+
+        rows = [_curve_row(4, val_loss=3.5, val_loss_step=2), _val_only(4, 3.1, 4)]
+        snapshot = copy.deepcopy(rows)
+        last_row_per_step(rows)
+        assert rows == snapshot
+
+    def test_the_curve_keeps_every_validation_even_when_a_row_is_shadowed(
+        self, monkeypatch
+    ):
+        """Cadence of the validation equal to the cadence of the draw: the step-4
+        full row is the only one that carries the validation measured at step 2.
+        Merging the closing row over it must not delete that point."""
+        rows = [
+            _curve_row(0), _curve_row(2),
+            _curve_row(4, val_loss=3.5, val_loss_step=2),
+            _val_only(4, 3.1, 4),
+        ]
+        drawn = _plotted_validation_points(monkeypatch, rows)
+        assert len(drawn) == 1
+        assert drawn[0][0] == [2.0, 4.0]
+        assert drawn[0][1] == pytest.approx([3.5, 3.1])
+
+    def test_a_curve_with_a_closing_row_draws_the_statistics_of_the_full_row(
+        self, monkeypatch
+    ):
+        import matplotlib.axes
+        from train.topolm.plotting import plot_topography_curve
+
+        drawn = []
+        real = matplotlib.axes.Axes.plot
+
+        def spy(self, *args, **kwargs):
+            drawn.append((kwargs.get("label"), np.asarray(args[0]), np.asarray(args[1])))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy)
+        plot_topography_curve([_curve_row(0, 0.0), _curve_row(4, 0.4), _val_only(4, 3.1, 4)], None)
+        mean_line = [d for d in drawn if d[0] == "mean over taps"]
+        assert len(mean_line) == 1
+        assert mean_line[0][1].tolist() == [0.0, 4.0]
+        assert mean_line[0][2].tolist() == pytest.approx([0.0, 0.4])

@@ -9,7 +9,8 @@ where a person can open them while ``fit`` is still running::
         latest_t_maps_raw.png        the newest t-maps; open this one
         latest_morans_i_raw.png      the newest Moran's I profile
         topography_curve.png         Moran's I, clusters, significant units against step
-        metrics.jsonl                one strict-JSON row per draw (``tail -f`` it)
+        metrics.jsonl                one strict-JSON row per draw (``tail -f`` it), plus
+                                     a closing metrics-only row for the last validation
 
 The last frame shows the model the run ENDS with. ``fit`` draws the last step at
 the end of its final batch, and only then does
@@ -25,6 +26,19 @@ without a restore therefore has strictly increasing steps and no such field, and
 a reader (the curve is one) takes the LAST row of a repeated step. The frame is
 labelled with the step the run stopped at, which is not the step the restored
 weights were trained to.
+
+The last VALIDATION is shown too. Keras validates after the last batch, so the
+final batch-end draw (and a restore redraw never changes this) cannot know the
+validation that follows it, and the curve would end one cadence early on a
+``val_loss`` that is not the run's last. ``on_train_end`` therefore appends one
+METRICS-ONLY row when the newest ``val_loss`` is newer than the one the last row
+carries: ``"val_only": true``, the ``step`` of the last row, the newer ``val_loss``
+and its ``val_loss_step``, and nothing else (no map statistics). It redraws the
+curve only, with no evaluation and no second set of map figures. A reader merges
+it onto the full row of that step with
+:func:`train.topolm.plotting.last_row_per_step`. A draw made after the validation
+(an off-grid last step, a restore redraw) already carries the newest value and
+adds no such row.
 
 The counter counts OPTIMIZER steps, resumed runs included (``initial_step``), and
 is independent of the virtual epoch: ``steps_per_epoch`` is ``eval_every_steps``,
@@ -242,9 +256,9 @@ def read_metrics_rows(path: str) -> Tuple[List[Dict[str, Any]], int]:
 
     A crash mid-write leaves a truncated last line; a reader must survive it. A
     line that is not a JSON object is skipped and counted. A repeated ``step``
-    (the redraw after a weight restore, ``"restored_weights": true``) stays as
-    written: take the last row of a step with
-    :func:`train.topolm.plotting.last_row_per_step`.
+    (the redraw after a weight restore, ``"restored_weights": true``, and the
+    closing metrics-only row, ``"val_only": true``) stays as written: merge the
+    rows of a step with :func:`train.topolm.plotting.last_row_per_step`.
 
     :param path: The file; a missing file is an empty list.
     :type path: str
@@ -431,6 +445,9 @@ class TopographyLiveCallback(keras.callbacks.Callback):
         self._val_loss_step: Optional[int] = None
         self._last_attempt: Optional[int] = None
         self._last_fingerprint: Optional[np.ndarray] = None
+        #: ``(step, val_loss_step)`` of the last row written (a map row or the
+        #: closing metrics-only row); ``None`` until a row exists.
+        self._last_row: Optional[Tuple[int, Optional[int]]] = None
         self._warned_unreadable = False
         self._consecutive_failures = 0
         self._draws = 0
@@ -474,23 +491,59 @@ class TopographyLiveCallback(keras.callbacks.Callback):
             self._val_loss_step = self.step
 
     def on_train_end(self, logs=None) -> None:
-        """Draw the final frame: the model the run ends with.
+        """Draw the final frame: the model the run ends with, and its last validation.
 
         Draws when the last step was never drawn, and also when it was but the
         weights are not the ones that draw saw (the early stopper restored its
         snapshot after the last batch). That redraw replaces the step's frame and
         appends a row with the same step and ``restored_weights: true``. With
         nothing changed it draws nothing, so a run without a restore keeps its
-        strictly increasing steps.
+        strictly increasing steps. Then, if a validation newer than the last
+        row's ran after it, :meth:`_close_with_validation` adds the metrics-only
+        row and redraws the curve.
         """
         if self._last_attempt != self.step:
             self._draw(self.step)
         elif not same_fingerprint(self._fingerprint(), self._last_fingerprint):
             self._draw(self.step, restored_weights=True)
+        self._close_with_validation()
         logger.info(
             f"Live topography: {self._draws} frame(s) in {self.output_dir}"
             + (" (switched off during the run)" if self.disabled else "")
         )
+
+    def _close_with_validation(self) -> None:
+        """Show a validation that ran after the last row: one metrics-only row.
+
+        Keras validates after the last batch, so the last draw cannot hold that
+        value. When the newest ``val_loss`` was measured at a different step from
+        the one the last row carries, append ``{"step": <last row's step>,
+        "val_only": true, "val_loss", "val_loss_step"}`` and redraw the curve
+        (nothing else: no evaluation, no map figures). A switched-off callback, a
+        run with no row yet and a run with no validation add nothing. A failure
+        is logged and never raised: the run is over and its outputs are complete.
+        """
+        if self.disabled or self._last_row is None or self._val_loss_step is None:
+            return
+        step, row_val_step = self._last_row
+        if row_val_step == self._val_loss_step:
+            return
+        row = _json_safe({
+            "step": step,
+            "val_only": True,
+            "val_loss": self._val_loss,
+            "val_loss_step": self._val_loss_step,
+        })
+        try:
+            self._publish_curve(self._append_row(row))
+        except Exception as error:
+            logger.warning(
+                f"Live topography: the closing validation row at step {step} "
+                f"failed: {type(error).__name__}: {error} (at "
+                f"{_failure_site(error)}). The run is unaffected."
+            )
+        else:
+            self._last_row = (step, self._val_loss_step)
 
     # -- one draw ------------------------------------------------------
 
@@ -600,7 +653,11 @@ class TopographyLiveCallback(keras.callbacks.Callback):
             self._val_loss_step, report, arrays, restored_weights,
         )
         rows = self._append_row(row)
+        self._last_row = (step, self._val_loss_step)
+        self._publish_curve(rows)
 
+    def _publish_curve(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Replace ``topography_curve.png`` with the curve of ``rows``, atomically."""
         # Local, like plot_topography's: importing the callback (it is exported
         # from the package) must not import matplotlib.
         from train.topolm.plotting import plot_topography_curve

@@ -194,8 +194,10 @@ _OPTIONAL_OUTPUT = {
          'keypoint figures'),
     ],
     'train/topolm/live.py': [
-        ('_draw', 'Live topography draw at step', 'self._write_frame(step)',
+        ('_draw', 'Live topography draw at step', 'self._write_frame(step, restored_weights)',
          'live topography frames, metrics rows and curve; three failures in a row switch it off'),
+        ('_close_with_validation', 'Live topography: the closing valida', 'self._publish_curve(self._append_row(row))',
+         'the closing metrics-only row and the curve redraw after the run is over'),
     ],
     'train/yolo12/train_coco.py': [
         ('_prepare_visualization_samples', 'Failed to prepare COCO visualization sam', 'sample_batch = next(iter(self.validation_data',
@@ -560,13 +562,17 @@ def test_the_census_counts_are_pinned():
 
     Optional 57 -> 58 at plan-2026-10-23T190557-972a9ac5 step 6: the live
     topography callback's per-draw handler (``train/topolm/live.py``), whose try
-    body is one call that evaluates and plots, never a ``fit``/``evaluate``/save."""
+    body is one call that evaluates and plots, never a ``fit``/``evaluate``/save.
+
+    Optional 58 -> 59 at plan-2026-10-23T190557-972a9ac5 step 6.3: the same
+    callback's closing-row handler (``_close_with_validation``), whose try body is
+    one append of a metrics row plus the curve redraw, run after ``fit`` has ended."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 58, "exempt": 60, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
+                      "optional": 59, "exempt": 60, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 59
     assert sum(len(entries) for entries in _EXEMPT.values()) == 60
 
 

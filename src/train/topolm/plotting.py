@@ -1096,12 +1096,28 @@ def _series(rows: Sequence[Mapping[str, Any]], getter) -> np.ndarray:
 
 
 def last_row_per_step(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
-    """``rows`` with one row per ``step``: the LAST one written for it.
+    """``rows`` with one row per ``step``, repeated steps merged.
 
-    The live callback redraws a step when the early stopper restored weights after
-    that step's draw (the second row carries ``"restored_weights": true``); the
-    later row describes the model the run ended with. Order is by first
-    appearance of each step; a row without a ``step`` is kept as it is.
+    The live callback writes a step more than once in two situations. After a
+    weight restore it redraws the step (the second row carries
+    ``"restored_weights": true`` and describes the model the run ended with). At
+    the end of training it closes the file with a metrics-only row
+    (``"val_only": true``: ``step``, ``val_loss``, ``val_loss_step``, no map
+    statistics) for a validation that Keras ran after the last draw. Both give
+    one entry here:
+
+    - a row that carries map statistics (a ``per_tap`` entry) describes a draw
+      completely and REPLACES what was kept for its step, nulls included: a
+      non-finite statistic of the restored model must not be filled in from the
+      pre-restore draw;
+    - a row without them (the metrics-only row) is MERGED onto the kept row:
+      its non-null fields override, its nulls and its absences leave the earlier
+      value alone, so it cannot shadow the map statistics. The merged row is a
+      full row, so ``val_only`` is dropped from it; a metrics-only row with
+      nothing to merge onto stays as it is.
+
+    Order is by first appearance of each step; a row without a ``step`` is kept
+    as it is. The input rows are not modified.
 
     :param rows: Parsed ``metrics.jsonl`` rows, oldest first.
     :type rows: Sequence[Mapping[str, Any]]
@@ -1112,12 +1128,18 @@ def last_row_per_step(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, An
     kept: List[Mapping[str, Any]] = []
     for row in rows:
         step = row.get("step") if hasattr(row, "get") else None
-        if step is not None and step in position:
-            kept[position[step]] = row
-        else:
+        if step is None or step not in position:
             if step is not None:
                 position[step] = len(kept)
             kept.append(row)
+        elif "per_tap" in row:
+            kept[position[step]] = row
+        else:
+            merged = dict(kept[position[step]])
+            merged.update({key: value for key, value in row.items() if value is not None})
+            if "per_tap" in merged:
+                merged.pop("val_only", None)
+            kept[position[step]] = merged
     return kept
 
 
@@ -1191,8 +1213,9 @@ def plot_topography_curve(
     frame is not an empty axis.
 
     :param rows: Parsed ``metrics.jsonl`` rows, oldest first; a step written twice
-        (the redraw after a weight restore) is drawn once, from its last row
-        (:func:`last_row_per_step`). Each has ``step``,
+        (the redraw after a weight restore, the closing metrics-only row of the
+        last validation) is drawn once, merged by :func:`last_row_per_step`; the
+        validations are read from every row. Each has ``step``,
         ``mean_morans_i``, ``total_clusters_a``, ``total_clusters_b``,
         ``mean_num_significant_units``, ``val_loss`` (with ``val_loss_step``)
         and ``per_tap``
@@ -1208,10 +1231,13 @@ def plot_topography_curve(
     """
     if not rows:
         raise ValueError("cannot draw a topography curve from zero rows")
+    # Every validation is a measurement, whichever row repeats it: the points are
+    # read from ALL the rows, because merging a closing row over the full row of its
+    # step would otherwise drop the older validation only that full row carried.
+    val_steps, val_loss = _validation_points(rows)
     rows = last_row_per_step(rows)
 
     steps = _series(rows, lambda row: row["step"])
-    val_steps, val_loss = _validation_points(rows)
     panels = ["moran", "clusters", "units"] + (["val_loss"] if val_loss.size else [])
     taps = list(rows[0].get("per_tap", {}))
     # One legend entry per tap line, outside the axes on the right so it covers no
