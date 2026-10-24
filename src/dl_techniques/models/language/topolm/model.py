@@ -137,8 +137,14 @@ from .config import (
 
 # ---------------------------------------------------------------------
 
-#: Tiktoken ``cl100k_base``, the pipeline this repository's trainers tokenize with.
-DEFAULT_VOCAB_SIZE = 100277
+#: GPT-2's 50,257 base ids plus the four special ids the trainer's config assigns
+#: (50257 to 50260) is 50,261 rows, padded to the next multiple of 64: 50,304, the
+#: padded size the authors' released code uses too. It is the number the trainer
+#: resolves for its default ``gpt2`` encoding (``train.topolm.common.resolve_vocab_size``),
+#: so a model built without ``vocab_size`` and a trained one agree; a model with
+#: another tokenizer passes its own. It was cl100k's 100277 until step 13.2: about 50k
+#: rows no GPT-2 id ever selects (39M parameters at width 784).
+DEFAULT_VOCAB_SIZE = 50304
 
 validate_all_variants(DEFAULT_RADIUS)
 
@@ -206,7 +212,10 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     constructor's per-axis check is 3D-only, so a directly built 2D model with an
     explicit short-axis grid constructs as before and fails at tap build.
 
-    :param vocab_size: Vocabulary size. Default 100277 (cl100k_base).
+    :param vocab_size: Vocabulary size. Default 50304: GPT-2's 50,257 ids and the
+        trainer's four special ids, padded to a multiple of 64 (the size the
+        trainer resolves for its ``gpt2`` encoding and the authors' released code
+        uses). Pass the tokenizer's own size for another vocabulary.
     :type vocab_size: int
     :param embed_dim: Model width, and the tapped axis' length. Must be a
         product of ``grid_dim`` factors (two or three), each at least
@@ -309,8 +318,8 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
         carries no ``attention_mask``. Read only with ``include_top=True``; the
         blocks never derive a mask from it. Default None, which derives no
         padding (the head sees every position): id 0 is a real token in
-        ``cl100k_base``, so with right-padded batches pass the tokenizer's pad id
-        or an ``attention_mask``. An explicit int is stored and serialized as given.
+        the GPT-2 and ``cl100k_base`` vocabularies, so with right-padded
+        batches pass the tokenizer's pad id or an ``attention_mask``. An explicit int is stored and serialized as given.
     :type pad_token_id: Optional[int]
     :param include_top: Whether the model owns a task head (and no LM head).
         Default False: no head layer and no head weight exist. With a head the

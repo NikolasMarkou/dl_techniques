@@ -55,6 +55,20 @@ class TestTheDefaultIsResolvedNotTyped:
         assert (base, required) == (50257, 50261)
         assert _config().vocab_size == padded(required) == 50304
 
+    def test_the_model_class_default_is_the_same_number(self):
+        """One default, two places: the class's and the trainer's resolved one (step 13.2).
+
+        The trainer resolved 50304 while ``TopoLM`` still defaulted to cl100k's 100277,
+        so ``create_topolm("paper")`` built 168.0M parameters under a README that said
+        128.8M. The model has no tokenizer, so its default is a constant; this test is
+        the coupling.
+        """
+        from dl_techniques.models.language.topolm import TopoLM
+
+        assert C.resolve_vocab_size(TopoLMTrainingConfig()) == 50304
+        assert TopoLM(embed_dim=64, depth=1, num_heads=4, ffn_intermediate_size=128,
+                      max_seq_len=16, radius=1).vocab_size == _config().vocab_size
+
     def test_the_resolved_value_is_a_plain_int_multiple_of_64(self):
         value = _config().vocab_size
         assert type(value) is int and value % 64 == 0

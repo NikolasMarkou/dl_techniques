@@ -341,8 +341,9 @@ builds; the existing tests pin that
 
 ### Parameter counts
 
-At vocabulary 50,304 (the size the trainer resolves for its `gpt2` tokenizer, see
-`src/train/topolm/README.md`), with the head tied to the token table and the
+At the default vocabulary, 50,304 (`DEFAULT_VOCAB_SIZE`: GPT-2's 50,257 ids and the
+trainer's four special ids padded to a multiple of 64, the size the trainer resolves
+for its `gpt2` tokenizer, see `src/train/topolm/README.md`), with the head tied to the token table and the
 defaults below (no feed-forward bias, no norm shift), the **trainable** count is the
 closed form `V*H + S*H + L*(4*H*H + 2*H*I + 2*H) + H`: the token table, the position
 table, then per block the attention (query, key, value and output, `4*H*H`), the
@@ -350,9 +351,13 @@ feed-forward (`2*H*I`) and two norm scales, then the final norm scale. `H` is
 `embed_dim`, `I` the feed-forward width (4 times `H`), `S` the position-table length,
 `L` the depth and `V` the vocabulary. The taps add non-trainable weights on top (the
 index tables of every neighbourhood and the last penalty), which `count_params()`
-includes. Counts as built on 2026-10-24 (`create_topolm(name, vocab_size=50304)`;
-`sum` of the trainable and of the non-trainable weight sizes); the closed form for the
+includes. Counts as built on 2026-10-24 (`create_topolm(name)` with no vocabulary
+argument; `sum` of the trainable and of the non-trainable weight sizes). Every row is
+rebuilt from the code and compared with this table by
+`tests/test_models/test_topolm/test_topolm_readme.py`, and the closed form for the
 trainable count is pinned in `tests/test_models/test_topolm/test_topolm_knobs.py`.
+A model for another tokenizer passes its own `vocab_size`; the table changes by
+`H` per row of the token table.
 
 | variant | trainable parameters | non-trainable (tap tables) | `count_params()` |
 |---|---|---|---|
@@ -389,8 +394,9 @@ variant rows; a config saved without one gets the default below.
 
 The attention output projection and the feed-forward output projection start at
 `initializer_range / sqrt(2 * depth)`, GPT-2's rule and the released code's (a
-standard deviation of 0.0041 against 0.0125 at depth 12 when the depth factor was
-missing); the query, key, value and feed-forward expansion kernels and the embeddings
+standard deviation of 0.0036 against 0.0124 at depth 12 when the depth factor was
+missing, measured on the built kernels, which the 2-sigma truncation shrinks to 0.88x
+the `stddev` argument); the query, key, value and feed-forward expansion kernels and the embeddings
 keep `initializer_range`. The defaults are the released code's. GPT-2's feed-forward
 biases, LayerNorm shift and tanh GELU are `use_bias=True, norm_center=True,
 activation='gelu_tanh'`; GPT-2's attention projections also carry biases and this
@@ -406,10 +412,11 @@ the effect of any difference.
 | | this repository | released code | paper text |
 |---|---|---|---|
 | block | pre-norm, one MLP, 12 blocks at `paper`, attention without bias, tied head | the same | silent on the feed-forward width |
+| initial weights | `TruncatedNormal(std)`, cut at 2 sigma, so every kernel and embedding starts at 0.88x `std` (0.0176 against 0.02) | `normal(0, std)` | silent |
 | residual-projection init | std / sqrt(2 * depth) | std / sqrt(2 * depth) | silent |
 | bias, norm shift | none by default (`use_bias`, `norm_center`) | none | silent |
 | activation | exact GELU | exact GELU | "GELU" |
-| vocabulary | 50,304 (trainer default, resolved) | 50,304 | GPT-2 BPE |
+| vocabulary | 50,304 (the class default and the trainer's resolved default) | 50,304 | GPT-2 BPE |
 | tapped tensor | branch outputs (`tap_placement='branch'`) | training yaml: post-add stream; evaluation scripts: branch outputs; the checkpoint name says pre-residual | "prior to normalization and addition into the residual stream" |
 | neighbourhood | radius 5, `linf`: 11x11 = 121 units, 324 centres (the default) | strict `distance < 5`: 9x9 = 81 units, 400 centres, with an L2 prior | "L-infinity radius 5" |
 | neighbourhood draw | with replacement | without | "5 randomly selected" |
@@ -461,7 +468,7 @@ from dl_techniques.models.common.masked_language_model import CausalLanguageMode
 
 head = CausalLanguageModel(
     backbone=create_topolm("paper"),
-    vocab_size=50304,
+    vocab_size=50304,                 # the backbone's: create_topolm's default
     skip_head=True,
     output_key="logits",
     aggregate_backbone_losses=True,   # load-bearing
