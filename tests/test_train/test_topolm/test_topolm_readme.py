@@ -1,13 +1,25 @@
 """The TopoLM READMEs may cite only test classes that exist, and none of the figures
-that were retracted (plan-2026-10-23T190557-972a9ac5, step 8.2).
+that were retracted (plan-2026-10-23T190557-972a9ac5, step 8.2); and the guide to
+the figures is held to the DATA of the figures, not only to its own form (step 8.4,
+decision D-022).
 
 A README names the test classes that guard a claim; a class that was renamed or
 deleted leaves a sentence pointing at nothing. This reads the two READMEs and
 greps the test tree for each cited ``Test...`` name.
+
+``src/train/topolm/figures/figure_facts.json`` is written, by a script, from the
+real runs the seven example images came from (``metrics.jsonl``,
+``topography_report.json``, the PNG files). The tests below pin every image to the
+SHA-256, byte size and pixel size recorded there (a swapped figure fails) and require
+each caption to print the exact string the facts hold for each number it quotes (a
+caption that drifted from the data fails). A review once swapped two figures and
+changed a caption number to 42.0 and every form-only test stayed green.
 """
 
 import hashlib
+import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -60,6 +72,7 @@ _FIRST_LINE = "# `train/topolm`: pre-training a topographic language model"
 _FIRST_37_LINES_SHA256 = "b90557ba90fa450f8dceb898fe899196e8b2baac32b32316258d684684a33ecb"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_FACTS_PATH = _TRAINER_README.parent / "figures" / "figure_facts.json"
 _EM_DASH = "—"
 
 
@@ -119,7 +132,9 @@ def test_every_image_the_guide_shows_is_a_real_png():
 def test_no_figure_file_sits_unreferenced_in_the_figures_directory():
     shipped = {p.name for p in (_TRAINER_README.parent / "figures").glob("*")}
     referenced = {Path(t).name for t in _relative_targets(_guide_text())}
-    assert shipped - referenced == set(), "an image nothing in the guide shows"
+    # The facts file is data, not an image: the guide names it in prose, not as a link.
+    assert shipped - referenced == {_FACTS_PATH.name}, "a file nothing in the guide shows"
+    assert _FACTS_PATH.name in _guide_text()
 
 
 def test_the_guide_sits_after_the_figures_table_and_before_watching_a_run():
@@ -164,3 +179,302 @@ def test_the_guide_has_no_em_dash_and_no_retracted_figure():
     guide = _guide_text()
     assert _EM_DASH not in guide
     assert [literal for literal in _RETRACTED if literal in guide] == []
+
+
+# ---------------------------------------------------------------------------
+# Truth, not form (step 8.4, D-022): the guide against the figures' data.
+# ---------------------------------------------------------------------------
+
+
+def _facts() -> dict:
+    return json.loads(_FACTS_PATH.read_text(encoding="utf-8"))
+
+
+def _squash(text: str) -> str:
+    """Whitespace collapsed to single spaces, so a phrase may wrap across lines."""
+    return " ".join(text.split())
+
+
+def _png_size(data: bytes):
+    """Width and height from the IHDR chunk of a PNG (bytes 16 to 24)."""
+    return struct.unpack(">II", data[16:24])
+
+
+def _figure_context(name: str) -> dict:
+    """Every ``fmt`` string the facts hold for one image, flat, plus its pixel size.
+
+    ``per_tap`` and ``colour_limit`` are nested; ``colour_limit`` is flattened to
+    its own ``fmt`` and the per-tap lists are read by the tests that need them.
+    """
+    entry = _facts()["files"][name]
+    context = {
+        key: value["fmt"]
+        for key, value in entry["facts"].items()
+        if isinstance(value, dict) and "fmt" in value
+    }
+    context["width"], context["height"] = entry["width"], entry["height"]
+    return context
+
+
+def _caption(name: str) -> str:
+    """The italic paragraph that follows the image tag of ``name`` in the guide,
+    whitespace collapsed."""
+    guide = _guide_text()
+    start = guide.index(f"figures/{name}")
+    match = re.search(r"\n\n(\*.*?)\n\n", guide[start:], re.S)
+    assert match, f"no caption paragraph follows {name}"
+    return _squash(match.group(1))
+
+
+def test_the_facts_file_pins_every_image_by_hash_size_and_pixels():
+    entries = _facts()["files"]
+    figures = _TRAINER_README.parent / "figures"
+    assert sorted(entries) == sorted(p.name for p in figures.glob("*.png"))
+    for name, entry in entries.items():
+        data = (figures / name).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == entry["sha256"], f"{name} is not the figure the facts describe"
+        assert len(data) == entry["bytes"], name
+        assert _png_size(data) == (entry["width"], entry["height"]), name
+
+
+#: What each caption must print, as ``str.format`` templates over the ``fmt``
+#: strings of that image's facts (``_figure_context``). Written once, by hand, from
+#: the captions; the NUMBERS come from the facts, so a caption that drifts from the
+#: data (or a facts file rebuilt while the caption stayed) fails here.
+_CAPTION_QUOTES = {
+    "t_maps_2d_untrained.png": (
+        "step {step}",
+        "Mean Moran's I {mean_morans_i}",
+        "{mean_significant_units_per_tap} significant units per tap",
+        "{total_clusters_a} clusters",
+        "t values run from {t_min_over_taps} to {t_max_over_taps}",
+        "+/-{colour_limit}",
+        "({width} x {height})",
+    ),
+    "t_maps_2d_trained.png": (
+        "Mean Moran's I {mean_morans_i} (per tap {morans_i_min_over_taps} to {morans_i_max_over_taps})",
+        "{significant_units_min_over_taps} to {significant_units_max_over_taps} significant units per tap"
+        " (mean {mean_significant_units_per_tap} of {units_per_tap})",
+        "{total_clusters_a} clusters for `a` and {total_clusters_b} for `b` over the {num_taps} taps",
+        "t values run from {t_min_over_taps} to {t_max_over_taps}",
+        "+/-{colour_limit}",
+        "({width} x {height})",
+    ),
+    "t_maps_3d_trained.png": (
+        "({units_per_tap} units per tap on a {grid_shape} box)",
+        "Mean Moran's I {mean_morans_i} (per tap {morans_i_min_over_taps} to {morans_i_max_over_taps})",
+        "{significant_units_min_over_taps} to {significant_units_max_over_taps} significant units per tap"
+        " (mean {mean_significant_units_per_tap} of {units_per_tap})",
+        "{total_clusters_a} clusters for `a` and {total_clusters_b} for `b` over the {num_taps} taps",
+        "t values from {t_min_over_taps} to {t_max_over_taps}",
+        "colour scale +/-{colour_limit}",
+        "({width} x {height})",
+    ),
+    "clusters_2d.png": (
+        "tap `{cluster_figure_tap_name}`, condition `a`, one cluster of {cluster_figure_tap_sizes_a} units",
+        "{width} x {height}",
+    ),
+    "clusters_3d.png": (
+        "tap `{cluster_figure_tap_name}`, condition `a` only, one cluster of {cluster_figure_tap_sizes_a} units",
+        "{width} x {height}",
+    ),
+    "morans_i_by_depth_2d.png": (
+        "depth order: {per_tap_morans_i}",
+        "{width} x {height}",
+    ),
+    "live_curve_2d.png": (
+        "Full-size file {width} x {height}",
+    ),
+}
+
+
+def _quote_context(name: str) -> dict:
+    context = _figure_context(name)
+    facts = _facts()["files"][name]["facts"]
+    if "cluster_figure_tap" in facts:
+        tap = facts["cluster_figure_tap"]
+        context["cluster_figure_tap_name"] = tap["name"]["fmt"]
+        context["cluster_figure_tap_sizes_a"] = tap["cluster_sizes_a"]["fmt"]
+        context["cluster_figure_tap_sizes_b"] = tap["cluster_sizes_b"]["fmt"]
+    context["colour_limit"] = facts["colour_limit"]["fmt"] if "colour_limit" in facts else ""
+    context["per_tap_morans_i"] = ", ".join(v["morans_i"]["fmt"] for v in facts["per_tap"].values())
+    return context
+
+
+@pytest.mark.parametrize("name", sorted(_CAPTION_QUOTES))
+def test_each_caption_prints_the_numbers_the_facts_hold(name):
+    caption = _caption(name)
+    context = _quote_context(name)
+    missing = []
+    for template in _CAPTION_QUOTES[name]:
+        phrase = _squash(template.format(**context))
+        if phrase not in caption:
+            missing.append(phrase)
+    assert missing == [], f"{name}: the caption does not say {missing}; it says {caption!r}"
+
+
+def test_every_figure_has_a_caption_row_in_the_quote_table():
+    assert sorted(_CAPTION_QUOTES) == sorted(_facts()["files"])
+
+
+def test_the_prose_beside_the_figures_quotes_the_facts_too():
+    """Numbers that sit in the guide's prose rather than in a caption: the live curve
+    bullets, the per-tap sentences, the cluster sizes, the colour limits and the frame
+    sizes. Every phrase is built from the facts file."""
+    guide = _squash(_guide_text())
+    facts = _facts()
+    curve = facts["files"]["live_curve_2d.png"]["facts"]
+    run2d, run3d = facts["runs"]["2d"], facts["runs"]["3d"]
+    trained = facts["files"]["t_maps_2d_trained.png"]["facts"]
+    untrained = facts["files"]["t_maps_2d_untrained.png"]["facts"]
+    cluster2d = facts["files"]["clusters_2d.png"]["facts"]["cluster_figure_tap"]
+    cluster3d = facts["files"]["clusters_3d.png"]["facts"]["cluster_figure_tap"]
+    moran = {int(k): v for k, v in run2d["mean_morans_i_series"].items()}
+    sig = {int(k): v for k, v in curve["significant_units_mean_series"].items()}
+    ca = {int(k): v for k, v in curve["clusters_a_series"].items()}
+    cb = {int(k): v for k, v in curve["clusters_b_series"].items()}
+    later = [moran[s] for s in moran if s >= 100]
+    points = list(curve["validation_loss_points_drawn"]["value"].values())
+    per_tap = trained["per_tap"]
+    phrases = [
+        # the live curve, panel by panel
+        f"from {curve['mean_morans_i_first_step']['fmt']} at step 0 to {moran[50]:.3f} at step 50",
+        f"peaks at {curve['mean_morans_i_peak']['fmt']} at step {curve['mean_morans_i_peak_step']['fmt']}",
+        f"between {min(later):.3f} and {max(later):.3f} from step 100 on",
+        f"between {trained['morans_i_min_over_taps']['fmt']} and {trained['morans_i_max_over_taps']['fmt']}",
+        f"{ca[200]} and {cb[200]} at step 200",
+        f"{ca[250]} and {cb[250]} again at step 250",
+        f"{ca[300]} and {cb[300]} at step 300",
+        f"{ca[350]} and {cb[350]} at steps 350 and 400",
+        f"{sig[200]:.1f} at step 200",
+        f"{sig[250]:.1f} at step 250",
+        f"{sig[300]:.1f}, {sig[350]:.1f} and {sig[400]:.1f} at steps 300, 350 and 400",
+        ", ".join(f"{v:.3f}" for v in points),
+        # the colour scale of the two 2D frames
+        f"Step 0 is drawn on +/-{untrained['colour_limit']['fmt']} and step 400 on +/-{trained['colour_limit']['fmt']}",
+        # the two taps that show almost no island
+        f"`block_1/mlp_tap` has {per_tap['block_1/mlp_tap']['significant_units']['fmt']} significant units",
+        f"`block_3/mlp_tap` has {per_tap['block_3/mlp_tap']['significant_units']['fmt']},",
+        # the 15 per cent: the mean over the units per tap, rounded
+        f"{round(100 * trained['mean_significant_units_per_tap']['value'] / trained['units_per_tap']['value'])} per cent of the cells on average",
+        # the largest islands value over the taps
+        f"{trained['morans_i_islands_max_over_taps']['fmt']} in 2D and "
+        f"{facts['files']['t_maps_3d_trained.png']['facts']['morans_i_islands_max_over_taps']['fmt']} in 3D",
+        # the cluster that the t-map outlines in magenta beside the one the cluster figure draws
+        f"dashed magenta cluster of {cluster2d['cluster_sizes_b']['fmt']} units",
+        f"dashed magenta cluster of {cluster3d['cluster_sizes_b']['fmt']} units",
+        f"`{cluster2d['title_as_drawn']}`",
+    ]
+    # Outside the guide: the sections on watching a run and on training a 3D variant.
+    elsewhere = [
+        f"on +/-{untrained['colour_limit']['fmt']} at step 0 and +/-{trained['colour_limit']['fmt']} at step 400",
+        # frame sizes of the 2D example run, quoted as a figure that changes size
+        f"{facts['files']['t_maps_2d_untrained.png']['width']}x{facts['files']['t_maps_2d_untrained.png']['height']} at step 0 "
+        f"to {facts['files']['t_maps_2d_trained.png']['width']}x{facts['files']['t_maps_2d_trained.png']['height']} at step 400",
+        # the 3D training bullet
+        f"from {run3d['mean_morans_i_series']['0']:.4f} at step 0 to {run3d['mean_morans_i_series']['50']:.3f} at step 50 "
+        f"and {run3d['mean_morans_i_series']['400']:.3f} at step 400",
+        f"{run3d['mean_significant_units_series']['250']:.1f}, {run3d['mean_significant_units_series']['300']:.1f}, "
+        f"{run3d['mean_significant_units_series']['350']:.1f} and {run3d['mean_significant_units_series']['400']:.1f} at steps 250, 300, 350 and 400",
+        f"{facts['files']['t_maps_3d_trained.png']['facts']['total_clusters_a']['fmt']} clusters for `a` and "
+        f"{facts['files']['t_maps_3d_trained.png']['facts']['total_clusters_b']['fmt']} for `b` at step 400",
+    ]
+    readme = _squash(_readme_text())
+    cost = [
+        f"median {run2d['seconds_per_draw_median']['fmt']} s ({run2d['seconds_per_draw_min']['fmt']} to {run2d['seconds_per_draw_max']['fmt']}; "
+        f"{run2d['seconds_per_draw_sum']['fmt']} s in all, in a run of {run2d['total_wall_s']['fmt']} s)",
+        f"median {run3d['seconds_per_draw_median']['fmt']} s ({run3d['seconds_per_draw_min']['fmt']} to {run3d['seconds_per_draw_max']['fmt']}; "
+        f"{run3d['seconds_per_draw_sum']['fmt']} s in all, in a run of {run3d['total_wall_s']['fmt']} s)",
+        f"{run2d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny`) and {run3d['peak_own_gpu_mib_nvidia_smi_1s_samples']['value']:,} MiB (`tiny3d`)",
+    ]
+    absent = [p for p in phrases if p not in guide] + [p for p in elsewhere + cost if p not in readme]
+    assert absent == [], f"the prose does not say {absent}"
+
+
+def test_a_crosshair_index_the_guide_prints_exists_on_the_grid_it_describes():
+    """A 3D index runs from 0 to (axis length - 1); the guide once printed
+    ``@(3, 4, 9)`` on a 7x7x7 grid."""
+    grid = _facts()["files"]["t_maps_3d_trained.png"]["facts"]["grid_shape"]["value"]
+    found = re.findall(r"@\((\d+), (\d+), (\d+)\)", _guide_text())
+    assert found, "the guide has no crosshair title example"
+    for triple in found:
+        for index, length in zip(map(int, triple), grid):
+            assert index < length, f"@{tuple(map(int, triple))} is outside a {grid} grid"
+    # And the panel title's own plane index equals the crosshair coordinate on that axis.
+    for axis, plane, x, y, z in re.findall(r"`axis (\d) = (\d)  @\((\d+), (\d+), (\d+)\)`", _guide_text()):
+        assert (x, y, z)[int(axis)] == plane
+
+
+#: A sentence a review found false or a drawing that no longer exists; a README that
+#: says it again is wrong. Each is a literal of one specific retraction.
+_RETRACTED_SENTENCES = (
+    "0.249",                                   # the 3D islands maximum; the run says 0.972
+    "@(3, 4, 9)",                              # index 9 does not exist on a 7x7x7 grid
+    "contourf",                                # the hatch is one box per rejected cell
+    "averaged over all positions",             # the pooling is over the text tokens
+    "does not leave the padding out",
+    "averaged over the positions of the input window",
+    "mean-pooled over token positions",
+    "Pooling is a **mean** over token positions",
+    "most cells passed",                       # the trained 2D map is mostly hatched
+    "large patches of one\ncolour",            # (the earlier caption of the trained map)
+    "187.9 of 256",                            # old-run caption numbers, see _OLDER_RUN_NUMBERS
+    "142 to 206",
+    "-17.3 to 19.1",
+    "fell from 191 at step 50",
+    "0.555 at step 50",
+    "7.5333",
+)
+
+
+@pytest.mark.parametrize("readme", _READMES, ids=lambda p: p.parent.name)
+def test_no_retracted_sentence_is_back(readme):
+    text = readme.read_text(encoding="utf-8")
+    squashed = _squash(text)
+    assert [s for s in _RETRACTED_SENTENCES if _squash(s) in squashed] == []
+
+
+#: What the guide must now say, each a sentence the review asked for.
+_REQUIRED_SENTENCES = (
+    "averaged over the text tokens of the sentence",                 # the pooling (D-020)
+    "excluded by id",
+    "not free of length effects",
+    "islands of significance in a mostly non-significant field",
+    "a hatched cell did not pass",                                  # literally true since D-021
+    "only tell clusters apart",                                     # the cluster colours
+    "do not encode the condition",
+    "not a growth curve",                                           # the significant-units line
+    "A second correction: earlier t-maps were averaged over the padding",
+)
+
+
+def test_the_guide_says_what_the_review_asked_it_to_say():
+    guide = _squash(_readme_text())
+    assert [s for s in _REQUIRED_SENTENCES if s not in guide] == []
+
+
+#: Numbers of the EARLIER example runs (the padded average) or of controls measured
+#: on them. They stay in the README only labelled as such, and each is listed here
+#: with where it was measured, so none is mistaken for a number of the figures shown.
+_OLDER_RUN_NUMBERS = {
+    "187.9": "pooling-fix measurements, mean over 8 taps, 2D old (padded average)",
+    "36.5": "same table, 2D new (text tokens), on the earlier checkpoint",
+    "72.9": "same table, 3D old",
+    "92.8": "same table, 3D new, on the earlier checkpoint",
+    "202.9": "dotted control, 2D, old pooling",
+    "10.9": "dotted control, 2D, new pooling",
+    "111.0": "dotted control, 3D, old pooling",
+    "35.9": "dotted control, 3D, new pooling",
+    "1.034": "islands Moran's I of the earlier 2D example, block_0/attention_tap",
+}
+_LABELS = re.compile(r"padded|earlier|previous|old|before", re.I)
+
+
+def test_numbers_of_the_earlier_runs_are_kept_only_with_their_label():
+    paragraphs = [_squash(p) for p in re.split(r"\n\s*\n", _readme_text())]
+    unlabelled = []
+    for number in _OLDER_RUN_NUMBERS:
+        holders = [p for p in paragraphs if re.search(rf"(?<![\d.]){re.escape(number)}(?!\d)", p)]
+        assert holders, f"{number} ({_OLDER_RUN_NUMBERS[number]}) is no longer quoted; drop it from the table"
+        unlabelled += [number for p in holders if not _LABELS.search(p)]
+    assert unlabelled == []

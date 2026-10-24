@@ -481,7 +481,7 @@ The trainer scores a trained backbone through four steps, and each has a way to
 go quietly wrong:
 
 1. a two-sample t-map between two stimulus conditions, on activations
-   **mean-pooled** over token positions;
+   **mean-pooled** over the text tokens (CLS, SEP and pad positions excluded by id);
 2. BH-FDR corrected **across all taps**, then split back;
 3. clusters grown from the surviving cells, both polarities;
 4. Moran's I on the **unthresholded** map, plus the islands variant.

@@ -1,0 +1,2210 @@
+{
+ "generated_from": {
+  "head_sha": "2720677b8b0695405b75b7fda706325c8b423f43",
+  "last_commit_touching_topolm_trainer_or_metrics": "12a946e11c98872dfdf4567c43a887469423e8eb",
+  "topolm_and_metrics_tracked_files_clean": true,
+  "seed": 42,
+  "run_dir_2d": "results/topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034",
+  "run_dir_3d": "results/topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400"
+ },
+ "files": {
+  "t_maps_2d_untrained.png": {
+   "sha256": "6d1bd8208bded197c5cdbffe9564af6224f799a1958b8c0a219bb0c47a9dc020",
+   "bytes": 186301,
+   "width": 2356,
+   "height": 856,
+   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000000/t_maps_raw.png",
+   "step": 0,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": -0.013179545613537094,
+     "fmt": "-0.013"
+    },
+    "morans_i_min_over_taps": {
+     "value": -0.06037008738401731,
+     "fmt": "-0.060"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.05617682604568976,
+     "fmt": "0.056"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": null,
+     "fmt": "n/a"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 0.0,
+     "fmt": "0.0"
+    },
+    "significant_units_min_over_taps": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "significant_units_max_over_taps": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "total_clusters_a": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "total_clusters_b": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "t_min_over_taps": {
+     "value": -6.03070236915491,
+     "fmt": "-6.03"
+    },
+    "t_max_over_taps": {
+     "value": 5.204057445711545,
+     "fmt": "5.20"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": -0.05856840979744698,
+       "fmt": "-0.059"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.012203542826611164,
+       "fmt": "0.012"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.032533760786361006,
+       "fmt": "0.033"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": -0.06037008738401731,
+       "fmt": "-0.060"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": -0.05731351117913601,
+       "fmt": "-0.057"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": -0.035027518816835,
+       "fmt": "-0.035"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.05617682604568976,
+       "fmt": "0.056"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.004929032610476637,
+       "fmt": "0.005"
+      },
+      "significant_units": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "colour_limit": {
+     "value": 3.4649676203044235,
+     "fmt": "3.5",
+     "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
+     "recomputation_check": {
+      "limit_pooled_p99_abs_t": 3.4649676203044235,
+      "max_abs_t": 6.029013504051529,
+      "recomputed_mean_morans_i": -0.013167944400523516,
+      "run_step0_mean_morans_i": -0.013179545613537094,
+      "max_abs_diff_t_min": 0.008316769668666346,
+      "max_abs_diff_t_max": 0.008453949217142487,
+      "significant_units_all_zero": true
+     },
+     "printed_tick_range": {
+      "value": 3.0,
+      "fmt": "3",
+      "ticks": [
+       -3.0,
+       -2.0,
+       -1.0,
+       0.0,
+       1.0,
+       2.0,
+       3.0
+      ]
+     },
+     "pixel_cross_check": {
+      "nearest_candidate_limit": 3.4800000000000026,
+      "relative_difference": 0.004338389659831346,
+      "mismatch_px": 0.23727422003288115,
+      "all_candidates": [
+       {
+        "limit": 3.4800000000000026,
+        "mismatch_px": 0.23727422003288115,
+        "ticks": [
+         -3.0,
+         -2.0,
+         -1.0,
+         0.0,
+         1.0,
+         2.0,
+         3.0
+        ]
+       },
+       {
+        "limit": 1.740000000000001,
+        "mismatch_px": 0.23727422003286489,
+        "ticks": [
+         -1.5,
+         -1.0,
+         -0.5,
+         0.0,
+         0.5,
+         1.0,
+         1.5
+        ]
+       },
+       {
+        "limit": 0.7000000000000002,
+        "mismatch_px": 0.5408163265306355,
+        "ticks": [
+         -0.6000000000000001,
+         -0.4,
+         -0.19999999999999996,
+         0.0,
+         0.19999999999999996,
+         0.40000000000000013,
+         0.6000000000000001
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "t_maps_2d_trained.png": {
+   "sha256": "bf83f9a4dec834db3c75ae541a67c262a28896e8b31f1ffc4b4576b10606c5fa",
+   "bytes": 205438,
+   "width": 2356,
+   "height": 875,
+   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/t_maps_raw.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7858730760123217,
+     "fmt": "0.786"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.596735420598046,
+     "fmt": "0.597"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.9378441544782128,
+     "fmt": "0.938"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.17184774303047012,
+     "fmt": "0.172"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 38.875,
+     "fmt": "38.9"
+    },
+    "significant_units_min_over_taps": {
+     "value": 1,
+     "fmt": "1"
+    },
+    "significant_units_max_over_taps": {
+     "value": 63,
+     "fmt": "63"
+    },
+    "total_clusters_a": {
+     "value": 5,
+     "fmt": "5"
+    },
+    "total_clusters_b": {
+     "value": 7,
+     "fmt": "7"
+    },
+    "t_min_over_taps": {
+     "value": -8.564705202388957,
+     "fmt": "-8.56"
+    },
+    "t_max_over_taps": {
+     "value": 14.192000948163841,
+     "fmt": "14.19"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.7109943431759382,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 33,
+       "fmt": "33"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.596735420598046,
+       "fmt": "0.597"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7896917732507592,
+       "fmt": "0.790"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.732025547920894,
+       "fmt": "0.732"
+      },
+      "significant_units": {
+       "value": 11,
+       "fmt": "11"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8449454980629185,
+       "fmt": "0.845"
+      },
+      "significant_units": {
+       "value": 51,
+       "fmt": "51"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8198092434527591,
+       "fmt": "0.820"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8549386271590461,
+       "fmt": "0.855"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.9378441544782128,
+       "fmt": "0.938"
+      },
+      "significant_units": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "colour_limit": {
+     "value": 7.036065279789275,
+     "fmt": "7.0",
+     "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
+     "recomputation_check": {
+      "limit_pooled_p99_abs_t": 7.036065279789275,
+      "max_abs_t": 14.202902813081021,
+      "recomputed_mean_morans_i": 0.7858559982173503,
+      "run_mean_morans_i": 0.7858730760123217,
+      "mean_morans_abs_diff": 1.7077794971398497e-05,
+      "significant_units_equal": true,
+      "clusters_equal": true
+     },
+     "printed_tick_range": {
+      "value": 6.0,
+      "fmt": "6",
+      "ticks": [
+       -6.0,
+       -4.0,
+       -2.0,
+       0.0,
+       2.0,
+       4.0,
+       6.0
+      ]
+     },
+     "pixel_cross_check": {
+      "nearest_candidate_limit": 7.080000000000005,
+      "relative_difference": 0.006244217252635569,
+      "mismatch_px": 0.2255851493139533,
+      "all_candidates": [
+       {
+        "limit": 7.080000000000005,
+        "mismatch_px": 0.2255851493139533,
+        "ticks": [
+         -6.0,
+         -4.0,
+         -2.0,
+         0.0,
+         2.0,
+         4.0,
+         6.0
+        ]
+       },
+       {
+        "limit": 3.5400000000000027,
+        "mismatch_px": 0.2255851493139533,
+        "ticks": [
+         -3.0,
+         -2.0,
+         -1.0,
+         0.0,
+         1.0,
+         2.0,
+         3.0
+        ]
+       },
+       {
+        "limit": 1.7700000000000011,
+        "mismatch_px": 0.2255851493139533,
+        "ticks": [
+         -1.5,
+         -1.0,
+         -0.5,
+         0.0,
+         0.5,
+         1.0,
+         1.5
+        ]
+       },
+       {
+        "limit": 0.7100000000000002,
+        "mismatch_px": 0.4436619718310015,
+        "ticks": [
+         -0.6000000000000001,
+         -0.4,
+         -0.19999999999999996,
+         0.0,
+         0.19999999999999996,
+         0.40000000000000013,
+         0.6000000000000001
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "t_maps_3d_trained.png": {
+   "sha256": "e9d56411efeb153f460fd0a1facdd97be4116ffeacf8478acb921a30d3e72e66",
+   "bytes": 299548,
+   "width": 1522,
+   "height": 1265,
+   "source": "topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400/topography_live/step_0000400/t_maps_raw.png",
+   "step": 400,
+   "run": "3d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      7,
+      7,
+      7
+     ],
+     "fmt": "7x7x7"
+    },
+    "units_per_tap": {
+     "value": 343,
+     "fmt": "343"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7109463363165125,
+     "fmt": "0.711"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.5328885420997992,
+     "fmt": "0.533"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.8017428633430992,
+     "fmt": "0.802"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.9723838198484271,
+     "fmt": "0.972"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 89.25,
+     "fmt": "89.2"
+    },
+    "significant_units_min_over_taps": {
+     "value": 67,
+     "fmt": "67"
+    },
+    "significant_units_max_over_taps": {
+     "value": 115,
+     "fmt": "115"
+    },
+    "total_clusters_a": {
+     "value": 10,
+     "fmt": "10"
+    },
+    "total_clusters_b": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "t_min_over_taps": {
+     "value": -11.231236551248296,
+     "fmt": "-11.23"
+    },
+    "t_max_over_taps": {
+     "value": 8.738154414436256,
+     "fmt": "8.74"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.6054713890134106,
+       "fmt": "0.605"
+      },
+      "significant_units": {
+       "value": 67,
+       "fmt": "67"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.7743436124638997,
+       "fmt": "0.774"
+      },
+      "significant_units": {
+       "value": 100,
+       "fmt": "100"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7108857575583479,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 95,
+       "fmt": "95"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.5328885420997992,
+       "fmt": "0.533"
+      },
+      "significant_units": {
+       "value": 91,
+       "fmt": "91"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.7886711059422261,
+       "fmt": "0.789"
+      },
+      "significant_units": {
+       "value": 79,
+       "fmt": "79"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.7650391099142382,
+       "fmt": "0.765"
+      },
+      "significant_units": {
+       "value": 115,
+       "fmt": "115"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.7085283101970785,
+       "fmt": "0.709"
+      },
+      "significant_units": {
+       "value": 92,
+       "fmt": "92"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.8017428633430992,
+       "fmt": "0.802"
+      },
+      "significant_units": {
+       "value": 75,
+       "fmt": "75"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     }
+    },
+    "colour_limit": {
+     "value": 7.054252479472767,
+     "fmt": "7.1",
+     "how": "pooled 99th percentile of |t| over all taps (plotting._shared_limit), recomputed on the CPU from the run's own weights (checkpoints/final.keras, or the seed-42 initial weights for step 0) with the trainer's own evaluate_topography; the colour bar spans -limit..+limit",
+     "recomputation_check": {
+      "limit_pooled_p99_abs_t": 7.054252479472767,
+      "max_abs_t": 11.229288159131391,
+      "recomputed_mean_morans_i": 0.7109501798362061,
+      "run_mean_morans_i": 0.7109463363165125,
+      "mean_morans_abs_diff": 3.843519693624842e-06,
+      "significant_units_equal": false,
+      "clusters_equal": true
+     },
+     "printed_tick_range": {
+      "value": 6.0,
+      "fmt": "6",
+      "ticks": [
+       -6.0,
+       -4.0,
+       -2.0,
+       0.0,
+       2.0,
+       4.0,
+       6.0
+      ]
+     },
+     "pixel_cross_check": {
+      "nearest_candidate_limit": 7.100000000000006,
+      "relative_difference": 0.006485098266663937,
+      "mismatch_px": 0.20120724346072297,
+      "all_candidates": [
+       {
+        "limit": 7.100000000000006,
+        "mismatch_px": 0.20120724346072297,
+        "ticks": [
+         -6.0,
+         -4.0,
+         -2.0,
+         0.0,
+         2.0,
+         4.0,
+         6.0
+        ]
+       },
+       {
+        "limit": 3.5500000000000025,
+        "mismatch_px": 0.2012072434607473,
+        "ticks": [
+         -3.0,
+         -2.0,
+         -1.0,
+         0.0,
+         1.0,
+         2.0,
+         3.0
+        ]
+       },
+       {
+        "limit": 1.7700000000000011,
+        "mismatch_px": 0.27441485068602234,
+        "ticks": [
+         -1.5,
+         -1.0,
+         -0.5,
+         0.0,
+         0.5,
+         1.0,
+         1.5
+        ]
+       },
+       {
+        "limit": 0.7100000000000002,
+        "mismatch_px": 0.20120724346076355,
+        "ticks": [
+         -0.6000000000000001,
+         -0.4,
+         -0.19999999999999996,
+         0.0,
+         0.19999999999999996,
+         0.40000000000000013,
+         0.6000000000000001
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "live_curve_2d.png": {
+   "sha256": "c8006606f4d091c62ad88eb29e52a7cee051fb73849873d5936be2dd3b5a39fd",
+   "bytes": 214948,
+   "width": 1360,
+   "height": 1432,
+   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/topography_curve.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7858730760123217,
+     "fmt": "0.786"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.596735420598046,
+     "fmt": "0.597"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.9378441544782128,
+     "fmt": "0.938"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.17184774303047012,
+     "fmt": "0.172"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 38.875,
+     "fmt": "38.9"
+    },
+    "significant_units_min_over_taps": {
+     "value": 1,
+     "fmt": "1"
+    },
+    "significant_units_max_over_taps": {
+     "value": 63,
+     "fmt": "63"
+    },
+    "total_clusters_a": {
+     "value": 5,
+     "fmt": "5"
+    },
+    "total_clusters_b": {
+     "value": 7,
+     "fmt": "7"
+    },
+    "t_min_over_taps": {
+     "value": -8.564705202388957,
+     "fmt": "-8.56"
+    },
+    "t_max_over_taps": {
+     "value": 14.192000948163841,
+     "fmt": "14.19"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.7109943431759382,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 33,
+       "fmt": "33"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.596735420598046,
+       "fmt": "0.597"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7896917732507592,
+       "fmt": "0.790"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.732025547920894,
+       "fmt": "0.732"
+      },
+      "significant_units": {
+       "value": 11,
+       "fmt": "11"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8449454980629185,
+       "fmt": "0.845"
+      },
+      "significant_units": {
+       "value": 51,
+       "fmt": "51"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8198092434527591,
+       "fmt": "0.820"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8549386271590461,
+       "fmt": "0.855"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.9378441544782128,
+       "fmt": "0.938"
+      },
+      "significant_units": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "validation_loss_points_drawn": {
+     "value": {
+      "100": 7.914386749267578,
+      "200": 7.812617301940918,
+      "300": 7.818270206451416,
+      "400": 7.81881856918335
+     },
+     "fmt": "100: 7.914, 200: 7.813, 300: 7.818, 400: 7.819"
+    },
+    "mean_morans_i_first_step": {
+     "value": -0.013179545613537094,
+     "fmt": "-0.013"
+    },
+    "mean_morans_i_last_step": {
+     "value": 0.7858730760123217,
+     "fmt": "0.786"
+    },
+    "first_step": {
+     "value": 0,
+     "fmt": "0"
+    },
+    "last_step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "mean_morans_i_peak": {
+     "value": 0.792790991029724,
+     "fmt": "0.793"
+    },
+    "mean_morans_i_peak_step": {
+     "value": 100,
+     "fmt": "100"
+    },
+    "significant_units_mean_series": {
+     "0": 0.0,
+     "50": 0.0,
+     "100": 0.0,
+     "150": 0.0,
+     "200": 19.875,
+     "250": 1.125,
+     "300": 39.5,
+     "350": 40.75,
+     "400": 38.875
+    },
+    "clusters_a_series": {
+     "0": 0,
+     "50": 0,
+     "100": 0,
+     "150": 0,
+     "200": 1,
+     "250": 0,
+     "300": 7,
+     "350": 5,
+     "400": 5
+    },
+    "clusters_b_series": {
+     "0": 0,
+     "50": 0,
+     "100": 0,
+     "150": 0,
+     "200": 2,
+     "250": 0,
+     "300": 6,
+     "350": 7,
+     "400": 7
+    }
+   }
+  },
+  "clusters_2d.png": {
+   "sha256": "c97393044e069707651a29099fbc83ebc13e7930d4fd8467cb5c0ee382dd8852",
+   "bytes": 9527,
+   "width": 469,
+   "height": 496,
+   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/clusters_raw.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7858730760123217,
+     "fmt": "0.786"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.596735420598046,
+     "fmt": "0.597"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.9378441544782128,
+     "fmt": "0.938"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.17184774303047012,
+     "fmt": "0.172"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 38.875,
+     "fmt": "38.9"
+    },
+    "significant_units_min_over_taps": {
+     "value": 1,
+     "fmt": "1"
+    },
+    "significant_units_max_over_taps": {
+     "value": 63,
+     "fmt": "63"
+    },
+    "total_clusters_a": {
+     "value": 5,
+     "fmt": "5"
+    },
+    "total_clusters_b": {
+     "value": 7,
+     "fmt": "7"
+    },
+    "t_min_over_taps": {
+     "value": -8.564705202388957,
+     "fmt": "-8.56"
+    },
+    "t_max_over_taps": {
+     "value": 14.192000948163841,
+     "fmt": "14.19"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.7109943431759382,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 33,
+       "fmt": "33"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.596735420598046,
+       "fmt": "0.597"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7896917732507592,
+       "fmt": "0.790"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.732025547920894,
+       "fmt": "0.732"
+      },
+      "significant_units": {
+       "value": 11,
+       "fmt": "11"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8449454980629185,
+       "fmt": "0.845"
+      },
+      "significant_units": {
+       "value": 51,
+       "fmt": "51"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8198092434527591,
+       "fmt": "0.820"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8549386271590461,
+       "fmt": "0.855"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.9378441544782128,
+       "fmt": "0.938"
+      },
+      "significant_units": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    },
+    "cluster_figure_tap": {
+     "name": {
+      "value": "causal_language_model/topolm/block_2/mlp_tap",
+      "fmt": "block_2/mlp_tap"
+     },
+     "clusters_a": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "clusters_b": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "cluster_sizes_a": {
+      "value": [
+       19
+      ],
+      "fmt": "19"
+     },
+     "cluster_sizes_b": {
+      "value": [
+       19
+      ],
+      "fmt": "19"
+     },
+     "morans_i": {
+      "value": 0.8198092434527591,
+      "fmt": "0.820"
+     },
+     "significant_units": {
+      "value": 57,
+      "fmt": "57"
+     },
+     "title_as_drawn": "block_2/mlp_tap (raw), condition a: 1 cluster"
+    }
+   }
+  },
+  "clusters_3d.png": {
+   "sha256": "c4504c499dc1d1a2e2db4b4d6740b0a28e2937ae229e24436e815b2f025e1a61",
+   "bytes": 17835,
+   "width": 1475,
+   "height": 628,
+   "source": "topolm_viz_final2_3d_20261024_113827/topolm_tiny3d_topo_alpha2.5_20261024_114400/topography_live/step_0000400/clusters_raw.png",
+   "step": 400,
+   "run": "3d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      7,
+      7,
+      7
+     ],
+     "fmt": "7x7x7"
+    },
+    "units_per_tap": {
+     "value": 343,
+     "fmt": "343"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7109463363165125,
+     "fmt": "0.711"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.5328885420997992,
+     "fmt": "0.533"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.8017428633430992,
+     "fmt": "0.802"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.9723838198484271,
+     "fmt": "0.972"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 89.25,
+     "fmt": "89.2"
+    },
+    "significant_units_min_over_taps": {
+     "value": 67,
+     "fmt": "67"
+    },
+    "significant_units_max_over_taps": {
+     "value": 115,
+     "fmt": "115"
+    },
+    "total_clusters_a": {
+     "value": 10,
+     "fmt": "10"
+    },
+    "total_clusters_b": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "t_min_over_taps": {
+     "value": -11.231236551248296,
+     "fmt": "-11.23"
+    },
+    "t_max_over_taps": {
+     "value": 8.738154414436256,
+     "fmt": "8.74"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.6054713890134106,
+       "fmt": "0.605"
+      },
+      "significant_units": {
+       "value": 67,
+       "fmt": "67"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.7743436124638997,
+       "fmt": "0.774"
+      },
+      "significant_units": {
+       "value": 100,
+       "fmt": "100"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7108857575583479,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 95,
+       "fmt": "95"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.5328885420997992,
+       "fmt": "0.533"
+      },
+      "significant_units": {
+       "value": 91,
+       "fmt": "91"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.7886711059422261,
+       "fmt": "0.789"
+      },
+      "significant_units": {
+       "value": 79,
+       "fmt": "79"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.7650391099142382,
+       "fmt": "0.765"
+      },
+      "significant_units": {
+       "value": 115,
+       "fmt": "115"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.7085283101970785,
+       "fmt": "0.709"
+      },
+      "significant_units": {
+       "value": 92,
+       "fmt": "92"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.8017428633430992,
+       "fmt": "0.802"
+      },
+      "significant_units": {
+       "value": 75,
+       "fmt": "75"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     }
+    },
+    "cluster_figure_tap": {
+     "name": {
+      "value": "causal_language_model/topolm/block_3/mlp_tap",
+      "fmt": "block_3/mlp_tap"
+     },
+     "clusters_a": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "clusters_b": {
+      "value": 1,
+      "fmt": "1"
+     },
+     "cluster_sizes_a": {
+      "value": [
+       30
+      ],
+      "fmt": "30"
+     },
+     "cluster_sizes_b": {
+      "value": [
+       45
+      ],
+      "fmt": "45"
+     },
+     "morans_i": {
+      "value": 0.8017428633430992,
+      "fmt": "0.802"
+     },
+     "significant_units": {
+      "value": 75,
+      "fmt": "75"
+     },
+     "title_as_drawn": "block_3/mlp_tap (raw), condition a: 1 cluster"
+    }
+   }
+  },
+  "morans_i_by_depth_2d.png": {
+   "sha256": "35d0612360c913305c020743dc109f254bac65e9a991a513059d3ad91d5072fa",
+   "bytes": 51310,
+   "width": 782,
+   "height": 467,
+   "source": "topolm_viz_final2_2d_20261024_113827/topolm_tiny_topo_alpha2.5_20261024_114034/topography_live/step_0000400/morans_i_raw.png",
+   "step": 400,
+   "run": "2d",
+   "facts": {
+    "step": {
+     "value": 400,
+     "fmt": "400"
+    },
+    "grid_shape": {
+     "value": [
+      16,
+      16
+     ],
+     "fmt": "16x16"
+    },
+    "units_per_tap": {
+     "value": 256,
+     "fmt": "256"
+    },
+    "num_taps": {
+     "value": 8,
+     "fmt": "8"
+    },
+    "mean_morans_i": {
+     "value": 0.7858730760123217,
+     "fmt": "0.786"
+    },
+    "morans_i_min_over_taps": {
+     "value": 0.596735420598046,
+     "fmt": "0.597"
+    },
+    "morans_i_max_over_taps": {
+     "value": 0.9378441544782128,
+     "fmt": "0.938"
+    },
+    "morans_i_islands_max_over_taps": {
+     "value": 0.17184774303047012,
+     "fmt": "0.172"
+    },
+    "mean_significant_units_per_tap": {
+     "value": 38.875,
+     "fmt": "38.9"
+    },
+    "significant_units_min_over_taps": {
+     "value": 1,
+     "fmt": "1"
+    },
+    "significant_units_max_over_taps": {
+     "value": 63,
+     "fmt": "63"
+    },
+    "total_clusters_a": {
+     "value": 5,
+     "fmt": "5"
+    },
+    "total_clusters_b": {
+     "value": 7,
+     "fmt": "7"
+    },
+    "t_min_over_taps": {
+     "value": -8.564705202388957,
+     "fmt": "-8.56"
+    },
+    "t_max_over_taps": {
+     "value": 14.192000948163841,
+     "fmt": "14.19"
+    },
+    "per_tap": {
+     "block_0/attention_tap": {
+      "morans_i": {
+       "value": 0.7109943431759382,
+       "fmt": "0.711"
+      },
+      "significant_units": {
+       "value": 33,
+       "fmt": "33"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_0/mlp_tap": {
+      "morans_i": {
+       "value": 0.596735420598046,
+       "fmt": "0.597"
+      },
+      "significant_units": {
+       "value": 63,
+       "fmt": "63"
+      },
+      "clusters_a": {
+       "value": 2,
+       "fmt": "2"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_1/attention_tap": {
+      "morans_i": {
+       "value": 0.7896917732507592,
+       "fmt": "0.790"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 2,
+       "fmt": "2"
+      }
+     },
+     "block_1/mlp_tap": {
+      "morans_i": {
+       "value": 0.732025547920894,
+       "fmt": "0.732"
+      },
+      "significant_units": {
+       "value": 11,
+       "fmt": "11"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     },
+     "block_2/attention_tap": {
+      "morans_i": {
+       "value": 0.8449454980629185,
+       "fmt": "0.845"
+      },
+      "significant_units": {
+       "value": 51,
+       "fmt": "51"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_2/mlp_tap": {
+      "morans_i": {
+       "value": 0.8198092434527591,
+       "fmt": "0.820"
+      },
+      "significant_units": {
+       "value": 57,
+       "fmt": "57"
+      },
+      "clusters_a": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/attention_tap": {
+      "morans_i": {
+       "value": 0.8549386271590461,
+       "fmt": "0.855"
+      },
+      "significant_units": {
+       "value": 38,
+       "fmt": "38"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 1,
+       "fmt": "1"
+      }
+     },
+     "block_3/mlp_tap": {
+      "morans_i": {
+       "value": 0.9378441544782128,
+       "fmt": "0.938"
+      },
+      "significant_units": {
+       "value": 1,
+       "fmt": "1"
+      },
+      "clusters_a": {
+       "value": 0,
+       "fmt": "0"
+      },
+      "clusters_b": {
+       "value": 0,
+       "fmt": "0"
+      }
+     }
+    }
+   }
+  }
+ },
+ "runs": {
+  "2d": {
+   "exit_code": 0,
+   "total_wall_s": {
+    "value": 256.168636649,
+    "fmt": "256.2"
+   },
+   "number_of_draws": {
+    "value": 9,
+    "fmt": "9"
+   },
+   "seconds_per_draw_min": {
+    "value": 1.896140333992662,
+    "fmt": "1.90"
+   },
+   "seconds_per_draw_median": {
+    "value": 1.959816923015751,
+    "fmt": "1.96"
+   },
+   "seconds_per_draw_max": {
+    "value": 2.3266370439960156,
+    "fmt": "2.33"
+   },
+   "seconds_per_draw_sum": {
+    "value": 17.90642690495588,
+    "fmt": "17.9"
+   },
+   "peak_own_gpu_mib_nvidia_smi_1s_samples": {
+    "value": 6052,
+    "fmt": "6052"
+   },
+   "gpu_samples": 130,
+   "last_live_row_equals_report": true,
+   "last_live_row_mean_morans_i": 0.7858730760123217,
+   "report_mean_morans_i": 0.7858730760123217,
+   "rows_in_metrics_jsonl": 10,
+   "rows_after_merge_per_step": 9,
+   "steps_drawn": [
+    0,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400
+   ],
+   "restored_weights_rows": 0,
+   "val_only_rows": 1,
+   "stimuli_are_smoke_set": true,
+   "readout_skipped": null,
+   "arms": [
+    "raw",
+    "readout"
+   ],
+   "mean_morans_i_series": {
+    "0": -0.013179545613537094,
+    "50": 0.6853011077383909,
+    "100": 0.792790991029724,
+    "150": 0.7798465026897164,
+    "200": 0.7484478461845341,
+    "250": 0.7629885098826796,
+    "300": 0.7764090084921983,
+    "350": 0.7844725969959302,
+    "400": 0.7858730760123217
+   },
+   "mean_significant_units_series": {
+    "0": 0.0,
+    "50": 0.0,
+    "100": 0.0,
+    "150": 0.0,
+    "200": 19.875,
+    "250": 1.125,
+    "300": 39.5,
+    "350": 40.75,
+    "400": 38.875
+   },
+   "clusters_ab_series": {
+    "0": [
+     0,
+     0
+    ],
+    "50": [
+     0,
+     0
+    ],
+    "100": [
+     0,
+     0
+    ],
+    "150": [
+     0,
+     0
+    ],
+    "200": [
+     1,
+     2
+    ],
+    "250": [
+     0,
+     0
+    ],
+    "300": [
+     7,
+     6
+    ],
+    "350": [
+     5,
+     7
+    ],
+    "400": [
+     5,
+     7
+    ]
+   },
+   "device": "NVIDIA GeForce RTX 4090",
+   "first_stamped_line_to_cadence_s": 119.267,
+   "fit_phase_s_cadence_to_best_evaluation": 125.345,
+   "cadence_to_wrote_s": 130.258,
+   "tf_shutdown_warnings_python_interpreter_state": 0,
+   "traceback_lines": 0,
+   "config": {
+    "model_variant": "tiny",
+    "seed": 42,
+    "batch_size": 8,
+    "train_steps": 400,
+    "eval_every_steps": 100,
+    "viz_every_steps": 50,
+    "spatial_radius": 5,
+    "spatial_alpha": 2.5,
+    "max_seq_length": 512,
+    "tap_sites": "both",
+    "min_cluster_size": 10,
+    "num_permutations": 9999,
+    "permutation_p_value": false
+   }
+  },
+  "3d": {
+   "exit_code": 0,
+   "total_wall_s": {
+    "value": 198.004301653,
+    "fmt": "198.0"
+   },
+   "number_of_draws": {
+    "value": 9,
+    "fmt": "9"
+   },
+   "seconds_per_draw_min": {
+    "value": 1.803595839010086,
+    "fmt": "1.80"
+   },
+   "seconds_per_draw_median": {
+    "value": 1.8897589139814954,
+    "fmt": "1.89"
+   },
+   "seconds_per_draw_max": {
+    "value": 2.895108954020543,
+    "fmt": "2.90"
+   },
+   "seconds_per_draw_sum": {
+    "value": 19.63251970699639,
+    "fmt": "19.6"
+   },
+   "peak_own_gpu_mib_nvidia_smi_1s_samples": {
+    "value": 6564,
+    "fmt": "6564"
+   },
+   "gpu_samples": 142,
+   "last_live_row_equals_report": true,
+   "last_live_row_mean_morans_i": 0.7109463363165125,
+   "report_mean_morans_i": 0.7109463363165125,
+   "rows_in_metrics_jsonl": 10,
+   "rows_after_merge_per_step": 9,
+   "steps_drawn": [
+    0,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400
+   ],
+   "restored_weights_rows": 0,
+   "val_only_rows": 1,
+   "stimuli_are_smoke_set": true,
+   "readout_skipped": "3D: the Gaussian readout is 2-D only; the grid is 7x7x7 and only the raw arm is computed",
+   "arms": [
+    "raw"
+   ],
+   "mean_morans_i_series": {
+    "0": -0.0014802153701720976,
+    "50": 0.6131023566327037,
+    "100": 0.7161993910559263,
+    "150": 0.7368083872101472,
+    "200": 0.7214907619333653,
+    "250": 0.7166376484447826,
+    "300": 0.7128635824504153,
+    "350": 0.7108535181230935,
+    "400": 0.7109463363165125
+   },
+   "mean_significant_units_series": {
+    "0": 0.0,
+    "50": 0.0,
+    "100": 0.0,
+    "150": 0.0,
+    "200": 0.0,
+    "250": 58.75,
+    "300": 87.0,
+    "350": 91.375,
+    "400": 89.25
+   },
+   "clusters_ab_series": {
+    "0": [
+     0,
+     0
+    ],
+    "50": [
+     0,
+     0
+    ],
+    "100": [
+     0,
+     0
+    ],
+    "150": [
+     0,
+     0
+    ],
+    "200": [
+     0,
+     0
+    ],
+    "250": [
+     9,
+     7
+    ],
+    "300": [
+     10,
+     8
+    ],
+    "350": [
+     10,
+     8
+    ],
+    "400": [
+     10,
+     8
+    ]
+   },
+   "device": "NVIDIA GeForce RTX 4090",
+   "first_stamped_line_to_cadence_s": 48.923,
+   "fit_phase_s_cadence_to_best_evaluation": 140.198,
+   "cadence_to_wrote_s": 142.685,
+   "tf_shutdown_warnings_python_interpreter_state": 5,
+   "traceback_lines": 0,
+   "config": {
+    "model_variant": "tiny3d",
+    "seed": 42,
+    "batch_size": 8,
+    "train_steps": 400,
+    "eval_every_steps": 100,
+    "viz_every_steps": 50,
+    "spatial_radius": 2,
+    "spatial_alpha": 2.5,
+    "max_seq_length": 512,
+    "tap_sites": "both",
+    "min_cluster_size": 10,
+    "num_permutations": 9999,
+    "permutation_p_value": false
+   }
+  }
+ }
+}
