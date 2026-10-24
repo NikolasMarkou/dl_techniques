@@ -48,13 +48,17 @@ written) except three kinds of input and one kind of recomputation:
 
 Device dependence
 -----------------
-The recomputed values (the colour limit and its check, and the controls) come
-from running the model here, and a different device rounds differently in the last
-digits. :data:`DEVICE_DEPENDENT_FIELDS` lists those fields, the output records the
-list and the device it was computed on (``generated_from.recomputation_device``),
-and :func:`compare_facts` reports differences in them separately from the rest.
-Run with ``CUDA_VISIBLE_DEVICES=`` to compute on the CPU. The git provenance
-(``head_sha`` and the two fields beside it) differs by construction.
+The recomputed colour limit and its checks come from running the model here, and a
+different device rounds them differently in the last digits.
+:data:`DEVICE_DEPENDENT_FIELDS` lists those fields, the output records the list and
+the device it was computed on (``generated_from.recomputation_device``), and
+:func:`compare_facts` reports differences in them separately from the rest. The
+controls are NOT on that list: they are counts, statistics of seeded draws and labels
+(none is a duration), they reproduce exactly on the CPU, and a comparison that exempted
+them could never fail on the most claim-bearing numbers of the README (review pass 6,
+concern 3: the framing count 65.0 changed to 0.0 and the label-shuffle null 2 changed to
+120 passed it). Run with ``CUDA_VISIBLE_DEVICES=`` to compute on the CPU. The git
+provenance (``head_sha`` and the two fields beside it) differs by construction.
 
 The module imports nothing from a plan directory and carries no absolute path.
 """
@@ -120,7 +124,6 @@ DEVICE_DEPENDENT_FIELDS: Tuple[str, ...] = (
     "files.*.facts.colour_limit.how",
     "files.*.facts.colour_limit.recomputation_check.*",
     "files.*.facts.colour_limit.pixel_cross_check.relative_difference",
-    "runs.*.controls.*",
 )
 
 #: Fields that differ by construction between two generations: the git state at

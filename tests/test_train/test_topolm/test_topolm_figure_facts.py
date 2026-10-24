@@ -741,13 +741,20 @@ class TestComparingFactsFiles:
     def test_each_difference_lands_in_its_kind(self):
         actual = self._actual(**{
             "generated_from/head_sha": "bbb",
-            "runs/2d/controls": {"y": 2.5},
+            "files/f.png/facts/colour_limit/value": 8.5,
             "generated_from/seed": 43,
         })
         diff = F.compare_facts(self.EXPECTED, actual)
         assert diff["provenance"] == [("generated_from.head_sha", "aaa", "bbb")]
-        assert diff["device_dependent"] == [("runs.2d.controls.y", 2.0, 2.5)]
+        assert diff["device_dependent"] == [("files.f.png.facts.colour_limit.value", 8.0, 8.5)]
         assert diff["other"] == [("generated_from.seed", 42, 43)]
+
+    def test_a_changed_control_number_is_an_other_difference(self):
+        """Review pass 6, concern 3: the controls were classed as device dependent, so a
+        changed control count could never fail the comparison."""
+        diff = F.compare_facts(self.EXPECTED, self._actual(**{"runs/2d/controls": {"y": 2.5}}))
+        assert diff["other"] == [("runs.2d.controls.y", 2.0, 2.5)]
+        assert not diff["device_dependent"] and not diff["provenance"]
 
     def test_a_changed_hash_is_an_other_difference(self):
         diff = F.compare_facts(self.EXPECTED, self._actual(**{"files/f.png/sha256": "g"}))
@@ -1040,3 +1047,74 @@ class TestTheTrackedFactsHaveTheShapeTheModuleWrites:
             assert ("cluster_figure_tap" in entry["facts"]) == spec.cluster, name
             assert ("validation_loss_points_drawn" in entry["facts"]) == spec.curve, name
 
+
+
+# ---------------------------------------------------------------------
+# the controls are compared exactly (review pass 6, concern 3)
+# ---------------------------------------------------------------------
+
+
+def _tracked():
+    with open(TRACKED_FACTS, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _with(facts, dotted, value):
+    """A deep copy of ``facts`` with the value at ``dotted`` replaced."""
+    changed = json.loads(json.dumps(facts))
+    *parents, last = dotted.split(".")
+    node = changed
+    for key in parents:
+        node = node[key]
+    assert last in node, dotted
+    node[last] = value
+    return changed
+
+
+#: The three control numbers the review changed (the README's four-controls numbers):
+#: the shipped framing's count, the label-shuffle null's count at or above the real
+#: split, and a median of the length control.
+CONTROL_FIELDS = {
+    "runs.2d.controls.framings.context.mean_significant_units_per_tap": 0.0,
+    "runs.2d.controls.label_shuffle_null.n_at_or_above": 120,
+    "runs.2d.controls.length_control.b_vocab_3v7.median": 64.0,
+    "runs.3d.controls.observed_a_vs_b.clusters_a": 0,
+}
+
+
+class TestAChangedControlNumberFailsTheComparison:
+    def test_the_controls_are_not_listed_as_device_dependent(self):
+        assert not [p for p in F.DEVICE_DEPENDENT_FIELDS if "controls" in p]
+
+    @pytest.mark.parametrize("dotted, value", sorted(CONTROL_FIELDS.items()))
+    def test_each_changed_control_number_is_an_other_difference(self, dotted, value):
+        tracked = _tracked()
+        diff = F.compare_facts(tracked, _with(tracked, dotted, value))
+        assert [d[0] for d in diff["other"]] == [dotted]
+        assert not diff["device_dependent"] and not diff["provenance"]
+
+    @pytest.mark.parametrize("dotted, value", sorted(CONTROL_FIELDS.items()))
+    def test_the_command_exits_1_for_it(self, monkeypatch, tmp_path, dotted, value):
+        tracked = _tracked()
+        monkeypatch.setattr(F, "write_facts", lambda *a, **k: _with(tracked, dotted, value))
+        path = tmp_path / "tracked.json"
+        path.write_text(json.dumps(tracked))
+        argv = _all_runs(tmp_path) + ["--out", str(tmp_path / "f.json"), "--compare", str(path)]
+        with pytest.raises(SystemExit) as excinfo:
+            F.main(argv)
+        assert excinfo.value.code == 1
+
+    def test_the_unchanged_file_compares_clean(self):
+        tracked = _tracked()
+        assert F.compare_facts(tracked, json.loads(json.dumps(tracked))) == {
+            "other": [], "device_dependent": [], "provenance": []}
+
+    def test_no_control_field_is_a_wall_clock_measurement(self):
+        """The reason nothing in the controls block needs an exemption: every field is a
+        count, a statistic of a seeded draw or a label, and none a duration."""
+        flat = F._flatten(_tracked())
+        names = [p for p in flat if ".controls." in p]
+        assert names
+        clock = {"second", "seconds", "wall", "elapsed", "duration", "time", "ms", "s"}
+        found = [p for p in names if clock & set(re.split(r"[._]", p))]
+        assert not found, found

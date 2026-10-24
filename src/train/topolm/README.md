@@ -978,10 +978,13 @@ comes from where:
   beside `--out`;
 - recomputed on the machine that runs the command: the colour limit of each t-map
   figure (from `checkpoints/final.keras`, or from the seeded initial weights for step
-  0, checked against the run's own report and against the colour bar of the PNG) and
-  the controls. These are the `device_dependent` fields; the file records the list
+  0, checked against the run's own report and against the colour bar of the PNG).
+  These are the `device_dependent` fields; the file records the list
   (`generated_from.device_dependent_fields`) and the device
-  (`generated_from.recomputation_device`). The tracked file was computed on the CPU;
+  (`generated_from.recomputation_device`). The controls are computed here too, but
+  they are compared exactly: they are counts and statistics of seeded draws, they
+  reproduce bit for bit on the CPU, and a changed control number is an `other`
+  difference. The tracked file was computed on the CPU;
 - not in a run directory, so it comes from the capture of the training command
   (`--capture-dir`, optional; without it those fields are left out): per run
   `log_<name>.txt` (the console output of the trainer), `result_<name>.txt` (one line,
