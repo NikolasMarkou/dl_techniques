@@ -336,6 +336,11 @@ FRAMING_CONTEXT = "context+eot"
 FRAMING_EOT = "eot"
 FRAMING_LEGACY = "legacy-call-only"
 
+#: Preprocessor classes the legacy-framing warning has already named (once per
+#: class per process, so a test double used a thousand times is one line).
+_LEGACY_FRAMING_WARNED: set = set()
+
+
 def _resolve_framing(
     preprocessor: Any, context: Optional[str]
 ) -> Tuple[str, Optional[int], List[int]]:
@@ -358,6 +363,34 @@ def _resolve_framing(
         return FRAMING_LEGACY, None, []
     ids = [int(i) for i in encoder.encode(context)] if context else []
     return (FRAMING_CONTEXT if ids else FRAMING_EOT), int(eot), ids
+
+
+def _warn_legacy_framing(preprocessor: Any, context: Optional[str]) -> None:
+    """Say, once per preprocessor class per process, that the legacy framing runs."""
+    name = type(preprocessor).__name__
+    if name in _LEGACY_FRAMING_WARNED:
+        return
+    _LEGACY_FRAMING_WARNED.add(name)
+    why = (
+        "context=None was passed"
+        if context is None
+        else "it has no raw encoder (.tokenizer.encode and .tokenizer.eot_token), "
+        "so the stimulus context cannot be encoded and is not applied"
+    )
+    non_text = [
+        f"{attribute}={getattr(preprocessor, attribute)}"
+        for attribute in _NON_TEXT_ID_ATTRIBUTES
+        if getattr(preprocessor, attribute, None) is not None
+    ]
+    logger.warning(
+        f"Stimulus framing 'legacy-call-only' for {name}: {why}. The stimuli are "
+        f"whatever calling it returns, i.e. CLS-style framing (it wraps and pads "
+        f"the text; the ids {', '.join(non_text) or '(none named)'} are left out "
+        f"of the pooling). The model never sees that framing in training, and the "
+        f"significant-unit counts it gives are framing-sensitive (D-027, D-028). "
+        f"The report says stimuli.framing = 'legacy-call-only'; use a "
+        f"preprocessor with a raw encoder for the 'context+eot' framing."
+    )
 
 
 def _encode_stimuli(
@@ -396,7 +429,8 @@ def _encode_stimuli(
     * ``'eot'`` (``context == ''``): the framing of D-024, ``<eot> sentence pad...``.
       A sentence longer than the window is cut, as before.
     * ``'legacy-call-only'``: whatever ``preprocessor(prompts)`` returns, with the
-      CLS, SEP and PAD ids its attributes name marked as not text.
+      CLS, SEP and PAD ids its attributes name marked as not text. Loud: a
+      WARNING names the preprocessor class once per class per process (D-028).
     """
     # DECISION plan-2026-10-23T190557-972a9ac5/D-027: frame each stimulus as
     # ``<context> <eot> <sentence>`` and pool the sentence only. Do NOT frame
@@ -413,6 +447,7 @@ def _encode_stimuli(
     # decisions.md D-027; guarded by TestStimuliAreFramedWithAFixedContext.
     framing, eot, context_ids = _resolve_framing(preprocessor, context)
     if framing == FRAMING_LEGACY:
+        _warn_legacy_framing(preprocessor, context)
         # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
         # or a LIST of strings and raises TypeError on anything but those -- the
         # mapping form is HF-dataset-shaped, which is what the *dataset* pipeline
@@ -478,6 +513,42 @@ def _encode_stimuli(
         tokens[row, start:start + len(ids)] = ids
         text[row, start:start + len(ids)] = True
     return tokens, text, f"the stimulus context, the end-of-text id {eot} and padding"
+
+
+def stimulus_summary(
+    preprocessor: Any,
+    stimuli: Mapping[str, Sequence[str]],
+    max_positions: Optional[int],
+    context: Optional[str] = STIMULUS_CONTEXT,
+    contrast: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """The report's ``stimuli`` block: how the stimuli were framed and pooled.
+
+    Contract. Returns ``{"framing": 'context+eot' | 'eot' | 'legacy-call-only',
+    "context_tokens": int, "pooling": 'sentence tokens', "token_counts":
+    {condition: [tokens of sentence i]}, "sentences_per_condition": int (the
+    common count) or {condition: count} when the conditions differ, "contrast":
+    [a, b]}``. Tokenizes only; runs no model. Raises what :func:`_encode_stimuli`
+    raises (a context that does not fit), so calling it first refuses before any
+    forward pass.
+    """
+    framing, _, context_ids = _resolve_framing(preprocessor, context)
+    counts: Dict[str, List[int]] = {}
+    for condition, prompts in stimuli.items():
+        _, text, _ = _encode_stimuli(
+            preprocessor, list(prompts), max_positions, context=context
+        )
+        counts[condition] = [int(n) for n in text.sum(axis=1)]
+    sizes = {condition: len(values) for condition, values in counts.items()}
+    common = set(sizes.values())
+    return {
+        "framing": framing,
+        "context_tokens": len(context_ids),
+        "pooling": "sentence tokens",
+        "token_counts": counts,
+        "sentences_per_condition": common.pop() if len(common) == 1 else sizes,
+        "contrast": [str(name) for name in contrast],
+    }
 
 
 def _required_vocab_size(preprocessor: Any) -> Optional[int]:
@@ -1005,7 +1076,8 @@ def extract_tap_activations(
     sentence``; D-024's claim that it is "the way the training stream presents
     text" is retracted, D-027); ``context=None`` is the LEGACY call-only framing
     (CLS and SEP from calling the preprocessor), kept for test doubles and for
-    reproducing earlier numbers.
+    reproducing earlier numbers, and logged loudly (a WARNING per preprocessor
+    class, D-028).
 
     Why text only (D-020). Averaged over a 512-position window, ~98% of a smoke
     sentence's positions were padding, so the t-map measured padding and sentence
@@ -1217,7 +1289,8 @@ def evaluate_topography(
     :type batch_size: int
     :param stimulus_context: The text every stimulus is placed after (D-027):
         :data:`STIMULUS_CONTEXT` by default, ``''`` for the eot-only framing,
-        ``None`` for the legacy call-only framing.
+        ``None`` for the legacy call-only framing. Recorded in the report's
+        ``stimuli`` block.
     :type stimulus_context: Optional[str]
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
         ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
@@ -1229,8 +1302,8 @@ def evaluate_topography(
     :raises ValueError: If the two contrast conditions are absent from
         ``stimuli`` -- naming them --, ``num_permutations`` is not positive, a
         readout is requested on a backbone whose grid is not 2-D, or the context
-        and the longest stimulus do not fit the window (raised by the first
-        condition's extraction, before its forward pass).
+        and the longest stimulus do not fit the window (raised before any
+        forward pass).
     """
     condition_a, condition_b = contrast_conditions
     missing = [
@@ -1268,10 +1341,18 @@ def evaluate_topography(
             f"{len(grid_shape)}D: the Gaussian readout is 2-D only; the grid is "
             f"{_grid_label(grid_shape)} and only the raw arm is computed"
         )
+    # FIRST, so a context that does not fit the window is refused before any
+    # forward pass of any condition (tokenization only), and so the report records
+    # how the stimuli were framed and pooled (D-028).
+    stimuli_block = stimulus_summary(
+        preprocessor, stimuli, getattr(backbone, "max_seq_len", None),
+        context=stimulus_context, contrast=contrast_conditions,
+    )
     report: Dict[str, Any] = {
         "grid_shape": [int(g) for g in grid_shape],
         "contrast": [condition_a, condition_b],
         "conditions": sorted(stimuli),
+        "stimuli": stimuli_block,
         "stimuli_are_smoke_set": bool(is_smoke_set),
         "fdr_alpha": float(fdr_alpha),
         "fdr_scope": "joint across all taps",
@@ -1946,6 +2027,12 @@ def run_topographic_evaluation(
         seed=config.seed,
         is_smoke_set=config.stimuli is None,
         readout_skipped=readout_skipped,
+    )
+    framed = report["stimuli"]
+    logger.info(
+        f"Stimuli framed '{framed['framing']}' ({framed['context_tokens']} "
+        f"context tokens), pooled over {framed['pooling']}; the framing is a "
+        f"choice and the significant-unit counts depend on it"
     )
     for arm, values in report["arms"].items():
         logger.info(

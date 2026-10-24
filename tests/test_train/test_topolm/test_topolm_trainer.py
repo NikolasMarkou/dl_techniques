@@ -1597,6 +1597,225 @@ class TestStimuliAreFramedWithAFixedContext:
         assert seen == ["", ""], seen
 
 
+def _recorded_warnings(monkeypatch):
+    """Route the trainer's ``logger.warning`` into a list; reset the once-per-class set."""
+    messages = []
+    monkeypatch.setattr(
+        C.logger, "warning", lambda message, *a, **k: messages.append(str(message))
+    )
+    monkeypatch.setattr(C, "_LEGACY_FRAMING_WARNED", set())
+    return messages
+
+
+class TestTheLegacyFramingIsLoud:
+    """D-028: the call-only fallback is a production route (any preprocessor
+    without ``.tokenizer.encode`` and ``.tokenizer.eot_token``), so it says so."""
+
+    PROMPTS = ["alpha beta", "gamma delta"]
+
+    def test_a_call_only_preprocessor_warns_naming_its_class_and_the_framing(
+        self, monkeypatch
+    ):
+        messages = _recorded_warnings(monkeypatch)
+        C._encode_stimuli(SpecialIdTokenizer(24), self.PROMPTS, None)
+        assert len(messages) == 1, messages
+        text = messages[0]
+        for phrase in ("SpecialIdTokenizer", "legacy-call-only", "CLS-style"):
+            assert phrase in text, (phrase, text)
+        # the ids it leaves out of the pooling are the preprocessor's own
+        for name, value in (("cls_token_id", CLS_ID), ("sep_token_id", SEP_ID),
+                            ("pad_token_id", PAD_ID)):
+            assert f"{name}={value}" in text, (name, text)
+
+    def test_it_warns_once_per_class_not_once_per_call(self, monkeypatch):
+        messages = _recorded_warnings(monkeypatch)
+        for _ in range(3):
+            C._encode_stimuli(SpecialIdTokenizer(24), self.PROMPTS, None)
+        assert len(messages) == 1, messages
+        C._encode_stimuli(StubTokenizer(), self.PROMPTS, None)
+        assert len(messages) == 2 and "StubTokenizer" in messages[1], messages
+
+    def test_the_whole_evaluation_warns_once_not_once_per_condition(self, monkeypatch):
+        messages = _recorded_warnings(monkeypatch)
+        evaluate_topography(
+            build_backbone(_config()), SMOKE_STIMULI, ("a", "b"),
+            StubTokenizer(), readout_fwhm=None, min_cluster_size=2,
+        )
+        assert len(messages) == 1, messages
+
+    def test_the_real_tokenizer_with_a_context_does_not_warn(self, monkeypatch):
+        messages = _recorded_warnings(monkeypatch)
+        for context in (C.STIMULUS_CONTEXT, ""):
+            C._encode_stimuli(_tokenizer("gpt2", 512), self.PROMPTS, 128, context=context)
+        assert messages == []
+
+    def test_asking_the_real_tokenizer_for_no_context_warns_and_says_why(
+        self, monkeypatch
+    ):
+        messages = _recorded_warnings(monkeypatch)
+        C._encode_stimuli(_tokenizer("gpt2", 512), self.PROMPTS, 128, context=None)
+        assert len(messages) == 1, messages
+        assert "TiktokenPreprocessor" in messages[0] and "context=None" in messages[0]
+
+    def test_a_context_given_to_a_preprocessor_that_cannot_encode_it_is_said_to_be_dropped(
+        self, monkeypatch
+    ):
+        messages = _recorded_warnings(monkeypatch)
+        C._encode_stimuli(
+            SpecialIdTokenizer(24), self.PROMPTS, None, context=C.STIMULUS_CONTEXT
+        )
+        assert "not applied" in messages[0], messages
+
+
+class TestTheReportStatesHowTheStimuliWereFramed:
+    """D-028: ``topography_report.json`` carries a ``stimuli`` block, so a report
+    from before the corrections cannot be mistaken for a current one."""
+
+    STIMULI = {"a": SMOKE_STIMULI["a"], "b": SMOKE_STIMULI["b"]}
+
+    def _report(self, **kwargs):
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 512)
+        report, _ = evaluate_topography(
+            backbone, self.STIMULI, ("a", "b"), preprocessor,
+            readout_fwhm=None, min_cluster_size=2, **kwargs,
+        )
+        return report
+
+    def test_the_default_block_describes_the_context_framing(self):
+        block = self._report()["stimuli"]
+        assert block == {
+            "framing": "context+eot",
+            "context_tokens": 60,
+            "pooling": "sentence tokens",
+            "token_counts": {"a": [9, 9, 7, 7, 8], "b": [9, 9, 7, 7, 8]},
+            "sentences_per_condition": 5,
+            "contrast": ["a", "b"],
+        }, block
+
+    def test_an_empty_context_is_the_eot_framing_with_no_context_tokens(self):
+        block = self._report(stimulus_context="")["stimuli"]
+        assert block["framing"] == "eot" and block["context_tokens"] == 0, block
+        assert block["token_counts"] == {"a": [9, 9, 7, 7, 8], "b": [9, 9, 7, 7, 8]}
+
+    def test_none_is_the_legacy_framing_and_its_counts_leave_out_cls_sep_and_pad(self):
+        # a 100-position window: the legacy path pads to the preprocessor's window
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 100)
+        report, _ = evaluate_topography(
+            backbone, self.STIMULI, ("a", "b"), preprocessor,
+            readout_fwhm=None, min_cluster_size=2, stimulus_context=None,
+        )
+        block = report["stimuli"]
+        assert block["framing"] == "legacy-call-only" and block["context_tokens"] == 0
+        assert block["token_counts"]["a"] == [9, 9, 7, 7, 8], block
+
+    def test_a_call_only_preprocessor_reports_the_legacy_framing_with_its_own_counts(self):
+        """Independent oracle: ``SpecialIdTokenizer`` writes one id per character."""
+        backbone = _model("stub", 128)
+        report, _ = evaluate_topography(
+            backbone, self.STIMULI, ("a", "b"), SpecialIdTokenizer(100),
+            readout_fwhm=None, min_cluster_size=2,
+        )
+        block = report["stimuli"]
+        assert block["framing"] == "legacy-call-only" and block["context_tokens"] == 0
+        assert block["token_counts"] == {
+            "a": [len(s) for s in SMOKE_STIMULI["a"]],
+            "b": [len(s) for s in SMOKE_STIMULI["b"]],
+        }, block
+
+    def test_unequal_condition_sizes_are_reported_per_condition(self):
+        stimuli = {"a": SMOKE_STIMULI["a"][:3], "b": SMOKE_STIMULI["b"]}
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 512)
+        report, _ = evaluate_topography(
+            backbone, stimuli, ("a", "b"), preprocessor, readout_fwhm=None,
+            min_cluster_size=2,
+        )
+        assert report["stimuli"]["sentences_per_condition"] == {"a": 3, "b": 5}
+
+    def test_the_block_reaches_the_json_on_disk(self, tmp_path):
+        backbone, preprocessor = _model("gpt2", 128), _tokenizer("gpt2", 512)
+        report, _ = evaluate_topography(
+            backbone, self.STIMULI, ("a", "b"), preprocessor,
+            output_dir=str(tmp_path), readout_fwhm=None, min_cluster_size=2,
+        )
+        import json
+
+        on_disk = json.loads((tmp_path / "topography_report.json").read_text())
+        assert on_disk["stimuli"] == report["stimuli"]
+
+    def test_a_three_dimensional_report_carries_it_too(self):
+        backbone = build_backbone(_config(
+            model_variant="tiny3d", spatial_radius=None, vocab_size=50261,
+            max_seq_length=128, readout_fwhm=None,
+        ))
+        report, _ = evaluate_topography(
+            backbone, self.STIMULI, ("a", "b"), _tokenizer("gpt2", 512),
+            readout_fwhm=None, min_cluster_size=2,
+        )
+        assert report["grid_shape"] == [7, 7, 7]
+        assert report["stimuli"]["framing"] == "context+eot"
+        assert report["stimuli"]["context_tokens"] == 60
+
+    def test_a_context_that_does_not_fit_is_refused_before_any_forward_pass(self):
+        backbone, preprocessor = _model("gpt2", 64), _tokenizer("gpt2", 512)
+        spy = _SpyBackbone(backbone)
+        with pytest.raises(ValueError, match="do not fit"):
+            evaluate_topography(
+                spy, self.STIMULI, ("a", "b"), preprocessor, readout_fwhm=None
+            )
+        assert spy.calls == []
+
+
+class TestARealTokenizerRunEndToEnd:
+    """D-028: every other run test uses ``StubTokenizer``, which takes the legacy
+    framing. This one keeps the REAL gpt2 tokenizer (only the DATA is replaced, as
+    ``_patch_data`` always does) so the framing the trainer ships is exercised
+    from ``train_topolm`` down to the report on disk."""
+
+    def test_a_short_run_frames_its_stimuli_with_the_context_and_reports_it(
+        self, monkeypatch
+    ):
+        import json
+
+        _patch_data(monkeypatch)
+        seen = []
+        real = C._encode_stimuli
+
+        def spy(*args, **kwargs):
+            result = real(*args, **kwargs)
+            seen.append(result[0].copy())
+            return result
+
+        monkeypatch.setattr(C, "_encode_stimuli", spy)
+        config = _config(
+            vocab_size=50261, max_seq_length=128, save_dir="run_real",
+            readout_fwhm=None,
+        )
+        result = train_topolm(config)
+
+        report = result["topography"]
+        assert report["stimuli"]["framing"] == "context+eot", report["stimuli"]
+        assert report["stimuli"]["context_tokens"] == 60
+        assert report["stimuli"]["token_counts"]["a"] == [9, 9, 7, 7, 8]
+        on_disk = json.loads(
+            open(os.path.join(result["results_dir"], "topography_report.json")).read()
+        )
+        assert on_disk["stimuli"] == report["stimuli"]
+
+        context = _gpt2_encoding().encode(C.STIMULUS_CONTEXT)
+        assert seen, "no stimulus was encoded"
+        for tokens in seen:
+            assert list(tokens[0, :60]) == context
+            assert np.all(tokens[:, 60] == 50256)
+            assert not np.isin(tokens, [50257, 50258]).any(), "CLS or SEP reached the model"
+
+        arrays_finite = evaluate_topography(
+            result["backbone"], SMOKE_STIMULI, ("a", "b"), _tokenizer("gpt2", 512),
+            readout_fwhm=None, min_cluster_size=2,
+        )[1]["arms"]["raw"]["t_maps"]
+        for name, t_map in arrays_finite.items():
+            assert np.all(np.isfinite(t_map)), name
+
+
 def _trainer_tokenizer():
     """The preprocessor ``train_topolm`` builds when none is passed (D-025).
 
@@ -2091,7 +2310,7 @@ class TestTheGridIsReportedAtItsOwnRank:
             stub,
             stimuli=SMOKE_STIMULI,
             contrast_conditions=("a", "b"),
-            preprocessor=None,
+            preprocessor=StubTokenizer(),
             readout_fwhm=None,
             min_cluster_size=2,
             is_smoke_set=False,
@@ -2682,7 +2901,8 @@ def _plant(monkeypatch, backbone, effects):
 def _evaluate_planted(backbone, readout_fwhm=None, **overrides):
     settings = dict(
         stimuli=_PLANT_STIMULI, contrast_conditions=("a", "b"),
-        preprocessor=None, readout_fwhm=readout_fwhm, min_cluster_size=2,
+        preprocessor=StubTokenizer(), readout_fwhm=readout_fwhm,
+        min_cluster_size=2,
     )
     settings.update(overrides)
     return evaluate_topography(backbone, **settings)
@@ -2940,9 +3160,16 @@ class TestTwoDimensionalUnchangedReport:
 
     def test_the_report_has_exactly_these_keys_at_every_level(self):
         report, arrays = self._report()
+        # "stimuli" is a deliberate addition (D-028, step 5.10): the framing and
+        # the pooling a report was measured under; a report without it predates
+        # the corrections of D-020, D-024 and D-027.
         assert sorted(report) == [
             "arms", "conditions", "contrast", "fdr_alpha", "fdr_scope",
-            "grid_shape", "num_taps", "stimuli_are_smoke_set",
+            "grid_shape", "num_taps", "stimuli", "stimuli_are_smoke_set",
+        ]
+        assert sorted(report["stimuli"]) == [
+            "context_tokens", "contrast", "framing", "pooling",
+            "sentences_per_condition", "token_counts",
         ]
         assert sorted(report["arms"]) == ["raw", "readout"]
         for arm in report["arms"].values():

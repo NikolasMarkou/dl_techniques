@@ -1414,3 +1414,58 @@ class TestARepeatedStepIsMerged:
         assert len(mean_line) == 1
         assert mean_line[0][1].tolist() == [0.0, 4.0]
         assert mean_line[0][2].tolist() == pytest.approx([0.0, 0.4])
+
+
+# ---------------------------------------------------------------------
+# the REAL tokenizer through the live callback (D-028)
+# ---------------------------------------------------------------------
+
+
+class TestADrawWithTheRealTokenizer:
+    """Every other live test passes ``StubTokenizer``, which has no raw encoder and
+    so takes the legacy framing. One draw with the real gpt2 preprocessor, the
+    framing the trainer ships, stimuli framed ``context + <eot> + sentence``."""
+
+    def test_a_draw_frames_the_stimuli_with_the_context_and_draws_finite_maps(
+        self, monkeypatch, tmp_path
+    ):
+        from .test_topolm_trainer import _gpt2_encoding, _tokenizer
+
+        config = _config(
+            viz_every_steps=2, vocab_size=50261, max_seq_length=128,
+            readout_fwhm=None,
+        )
+        head, backbone = create_topolm_model(config)
+        callbacks = build_callbacks(
+            config, head, str(tmp_path), 0,
+            backbone=backbone, preprocessor=_tokenizer("gpt2", 512),
+        )
+        callback = callbacks[-1]
+        callback.set_model(head)
+
+        seen = []
+        real = C._encode_stimuli
+
+        def spy(*args, **kwargs):
+            result = real(*args, **kwargs)
+            seen.append(result[0].copy())
+            return result
+
+        monkeypatch.setattr(C, "_encode_stimuli", spy)
+        callback.on_train_begin()
+
+        context = _gpt2_encoding().encode(C.STIMULUS_CONTEXT)
+        # each contrast condition is encoded for the report's block and again for
+        # the forward pass
+        assert len(seen) >= 2, len(seen)
+        for tokens in seen:
+            assert list(tokens[0, :60]) == context
+            assert np.all(tokens[:, 60] == 50256), "the eot follows the context"
+            assert not np.isin(tokens, [50257, 50258]).any(), "CLS or SEP reached the model"
+
+        step_dir = _live_dir(tmp_path) / "step_0000000"
+        assert (step_dir / "t_maps_raw.png").stat().st_size > 0
+        row = json.loads((_live_dir(tmp_path) / "metrics.jsonl").read_text())
+        assert np.isfinite(row["mean_morans_i"])
+        for entry in row["per_tap"].values():
+            assert np.isfinite(entry["t_min"]) and np.isfinite(entry["t_max"])
