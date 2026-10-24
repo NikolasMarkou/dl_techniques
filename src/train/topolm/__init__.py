@@ -20,8 +20,9 @@ both numbers are logged before the first step.
 **The training head must be told to aggregate the backbone's losses.**
 ``create_topolm_model`` passes ``aggregate_backbone_losses=True``, and it is
 load-bearing: the taps reach the objective only through ``backbone.losses``. On
-the same weights at ``alpha = 2.5`` a reported training loss of 15.31 aggregated
-became 5.36 not -- computed every step and discarded, with a healthy curve. The
+the same weights at ``alpha = 2.5`` (the corrected ``tiny`` variant, two batches of
+random tokens) a reported training loss of 17.67 aggregated became 7.68 not --
+computed every step and discarded, with a healthy curve. The
 run's ``spatial/unaccounted`` field is what makes that visible if it ever
 recurs.
 

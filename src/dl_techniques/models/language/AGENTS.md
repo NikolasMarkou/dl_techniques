@@ -50,7 +50,7 @@ so it doubles as the generation path. Flags that change the contract:
 | `output_key=` | `skip_head` backbone returning a mapping (e.g. `{"logits": …}`) |
 | `pre_shifted=True` | batches already `(input_ids, labels)` shifted upstream (`preprocess_clm_packed_dataset`); also forces `loss_weights=None`. Passing it otherwise trains every position against the wrong target |
 | `loss_fn=` | replace CE wholesale (focal, label smoothing); delegates entirely, no stacking |
-| `aggregate_backbone_losses=True` | backbone uses `add_loss` in `call()` (HNet boundary term; **TopoLM**'s spatial-smoothness taps, where it is the difference between training the objective and computing it every step and discarding it — measured 15.31 aggregated against 5.36 not on identical weights) |
+| `aggregate_backbone_losses=True` | backbone uses `add_loss` in `call()` (HNet boundary term; **TopoLM**'s spatial-smoothness taps, where it is the difference between training the objective and computing it every step and discarding it — measured 17.67 aggregated against 7.68 not on identical weights, the corrected `tiny` variant at `alpha = 2.5`) |
 | `causality_probe_plain_tensor=True` | backbone `call()` takes a plain tensor, not the `{input_ids, attention_mask}` dict — without it the probe silently degrades to a warning and nothing was checked |
 
 ## Task heads: `include_top` (fine-tuning, not pretraining)

@@ -158,10 +158,12 @@ PAPER_CONDITIONS = (
 #: written).
 #:
 #: Sentence ``i`` has the SAME number of gpt2 text tokens in all four conditions:
-#: 9, 9, 7, 7, 8 (D-025). A t-map between conditions of unequal length measures
-#: the length: word lists from one vocabulary, 3 against 7 words, give a median
-#: of 87.5 and 92.3 significant units per tap on the trained 2D example and 12.5
-#: and 14.5 on the trained 3D one, against 0.0 for 5 against 5
+#: 9, 9, 7, 7, 8 (D-025). A t-map between conditions of unequal length partly
+#: measures the length: word lists from one vocabulary, 3 against 7 words, give a
+#: median of 2.5 and 0.1 significant units per tap (``b`` and ``a`` vocabulary) on
+#: the trained 2D example and 5.4 and 0.0 on the trained 3D one, with single draws
+#: up to 28.9 and 31.8, against 0.0 for 5 against 5 and 65.0 and 111.25 for the
+#: real a-versus-b contrast on the same checkpoints
 #: (``train.topolm.controls.length_control``, shipped context, 12 draws, seed 0;
 #: the medians move with the draws and with the framing, the README quotes them
 #: with their draws). A real stimulus set must be matched too. The counts are
@@ -885,8 +887,9 @@ def create_topolm_model(
     overriding. The taps reach the objective only through ``backbone.losses``;
     without the flag the head computes every penalty, discards it, and the run
     produces a non-topographic model with a healthy loss curve. Measured on the
-    same weights at ``alpha = 2.5``: a reported training loss of 15.31 aggregated
-    against 5.36 not, with an EVALUATION loss of 5.31 either way -- the taps are
+    same weights at ``alpha = 2.5`` (the corrected ``tiny`` variant, two batches of
+    random tokens, SGD, one epoch): a reported training loss of 17.67 aggregated
+    against 7.68 not, with an EVALUATION loss of 7.49 either way -- the taps are
     training-only, so the validation curve is the pure task loss in both arms.
 
     An eager forward pass runs here on the WRAPPER, not the bare backbone: it

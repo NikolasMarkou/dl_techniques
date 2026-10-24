@@ -345,8 +345,8 @@ class TestSpatialLossLogger:
 
         Whether the training loop folds the backbone's losses into its reported
         loss is the HEAD's decision, and it is proven end-to-end in
-        ``tests/test_models/test_topolm/`` (train loss 15.31 aggregated against
-        5.36 not). What belongs here is the logger's own reading of the two cases,
+        ``tests/test_models/test_topolm/`` (train loss 17.67 aggregated against
+        7.68 not on the tiny variant). What belongs here is the logger's own reading of the two cases,
         driven with hand-built ``logs`` so the arithmetic is pinned rather than
         inherited from whichever path the head happens to take.
 

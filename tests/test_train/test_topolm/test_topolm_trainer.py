@@ -1656,15 +1656,16 @@ def _text_token_counts(stimuli):
 class TestTheSmokeStimuliAreLengthMatched:
     """D-025: sentence i has the same number of gpt2 TEXT tokens in every condition.
 
-    A t-map between two conditions of different length measures the length. The
-    built-in smoke set used to differ by 8.0 against 5.8 text tokens (a against
-    b) and 10.2 against 11.6 (c against d). Length-only contrasts (word lists
-    from one vocabulary, 3 against 7 words) give a large count where the real
-    contrast is matched: under the shipped context a median 87.5 and 92.3
-    significant units per tap on the trained 2D example (the matched a-versus-b
-    gives 24.9) and 12.5 and 14.5 on the trained 3D one (matched: 135.75); equal
-    lengths (5 against 5) give 0.0 (``train.topolm.controls.length_control``, 12
-    draws, seed 0; the numbers move with the draws and with the framing).
+    A t-map between two conditions of different length partly measures the
+    length. The built-in smoke set used to differ by 8.0 against 5.8 text tokens
+    (a against b) and 10.2 against 11.6 (c against d). Length-only contrasts
+    (word lists from one vocabulary, 3 against 7 words) give a smaller count than
+    the matched real contrast on the corrected model's trained examples: under the
+    shipped context a median 2.5 and 0.1 significant units per tap in 2D (the
+    matched a-versus-b gives 65.0) and 5.4 and 0.0 in 3D (matched: 111.25), single
+    draws up to 28.9 and 31.8; equal lengths (5 against 5) give 0.0 at most 2.1
+    (``train.topolm.controls.length_control``, 12 draws, seed 0; the numbers move
+    with the draws and with the framing).
 
     The counts are those of the trainer's own tokenizer: the text ids are the
     plain ``encode`` of the sentence, so the count is
