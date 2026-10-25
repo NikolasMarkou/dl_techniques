@@ -89,22 +89,22 @@ class Ideogram4Pipeline:
               │                         │
               ▼                         ▼
         ┌──────────────┐       Euler loop, num_steps
-        │ _build_inputs │       ┌────────────────────┐
-        └──────┬───────┘        │ transformer (pos)   │◄── llm_features
-               │                │ transformer (neg)   │◄── zeroed feats
+        │ _build_inputs│        ┌──────────────────────┐
+        └──────┬───────┘        │ transformer (pos)    │◄── llm_features
+               │                │ transformer (neg)    │◄── zeroed feats
                ▼                │ cfg blend -> v       │
         position/segment/       │ z += v * (s - t)     │
-        indicator ids           └──────────┬───────────┘
+        indicator ids           └───────────┬──────────┘
                                             ▼
                                    final latent z [B,N,C]
                                             │
                                             ▼
                                     ┌───────────────┐
-                                    │ _decode        │
-                                    │ unpatchify     │
-                                    │ (optional)     │
-                                    │ latent denorm  │
-                                    │ VAE decode     │
+                                    │ _decode       │
+                                    │ unpatchify    │
+                                    │ (optional)    │
+                                    │ latent denorm │
+                                    │ VAE decode    │
                                     └───────┬───────┘
                                             ▼
                                   image [B,H,W,out_ch] in [0,1]

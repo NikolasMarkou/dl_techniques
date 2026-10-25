@@ -102,12 +102,12 @@ class Ideogram4Transformer(keras.Model):
         ┌──────────────────────────┐              ┌─────────────┐
         │ h = image + text (masked │              │ t_embedding │
         │ add) + indicator embed   │              │ + adaln proj│
-        └────────────┬─────────────┘              └──────┬──────┘
-                      │                                   │
-                      │  cos, sin ◄── mRoPE(position_ids)  │
-                      ▼                                   │
-              ┌───────────────────┐                       │
-              │ block_0 .. block_N│◄── segment_ids  ◄──────┘
+        └─────────────┬────────────┘              └──────┬──────┘
+                      │                                  │
+                      │  cos, sin ◄── mRoPE(position_ids)│
+                      ▼                                  │
+              ┌───────────────────┐                      │
+              │ block_0 .. block_N│◄── segment_ids  ◄────┘
               └────────┬──────────┘   (attention mask)
                        ▼
                 ┌─────────────┐
