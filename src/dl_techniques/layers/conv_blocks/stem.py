@@ -243,7 +243,7 @@ class ConvStem(keras.layers.Layer):
         self.normalization_kwargs = dict(normalization_kwargs or {})
         self.activation_type = _canonical_activation(activation_type)
         self.activation_kwargs = dict(activation_kwargs or {})
-        self.final_activation = final_activation
+        self.final_activation = bool(final_activation)
         self.use_pooling = use_pooling
         self.pool_type = pool_type
         self.pool_size = pool_size

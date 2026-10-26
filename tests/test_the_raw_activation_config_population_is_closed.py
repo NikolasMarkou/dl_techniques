@@ -51,6 +51,12 @@ signature of the surviving ``yolo12_conv_block()`` helper -- so
 ``test_the_provable_residue_is_still_provable``'s first assertion would have kept
 passing on an unrelated line. What actually caught the removal was its SECOND
 assertion (the site no longer appears in the sweep). Do not weaken that one.
+
+UPDATED 2026-10-26 (plan-2026-10-26T125959-7af851e5 step 1.1): the roster is 7.
+The seventh, ``layers/conv_blocks/stem.py::ConvStem::final_activation``, is a
+plain ``bool`` (a "run the activation after the second conv" switch, coerced
+with ``bool(...)``), not an activation object; its key merely ends in
+``activation``. The public name is kept; the argument was not renamed.
 """
 
 import ast
@@ -87,6 +93,8 @@ _PROVABLY_NOT_AN_ACTIVATION_OBJECT = {
         "self.hopfield_activation = str(hopfield_activation)",
     "dl_techniques/models/graph/graph_energy_transformer/model.py::GraphEnergyTransformerBackbone::hopfield_activation":
         "self.hopfield_activation = str(hopfield_activation)",
+    "dl_techniques/layers/conv_blocks/stem.py::ConvStem::final_activation":
+        "self.final_activation = bool(final_activation)",
 }
 
 
@@ -200,4 +208,4 @@ class TestTheRawActivationFamilyIsClosed:
         'the same sites are still the ones exempt' are different claims and only
         the second is what an exemption asserts.
         """
-        assert len(population) == len(_PROVABLY_NOT_AN_ACTIVATION_OBJECT) == 6
+        assert len(population) == len(_PROVABLY_NOT_AN_ACTIVATION_OBJECT) == 7
