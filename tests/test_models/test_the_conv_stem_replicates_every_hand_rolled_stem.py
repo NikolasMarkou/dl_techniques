@@ -81,6 +81,7 @@ from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
+from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
 from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
@@ -1157,6 +1158,73 @@ VAE_LINEAR = _vae_case(
     identity_activation=True,
 )
 
+# ---------------------------------------------------------------------
+# CliffordRBFProtoNet patch-embedding stem
+# ---------------------------------------------------------------------
+
+# Original: ``src/dl_techniques/models/vision/rbf_protonet/model.py`` at the
+# parent of the Step 12 commit (``_build_stem``): ``Conv2D(channels, 3,
+# strides=patch_size, padding="same", use_bias=True, kernel_regularizer,
+# name="stem_conv")`` with Keras' default glorot_uniform kernel and zeros bias,
+# then a bare ``BatchNormalization(momentum=0.9)`` (Keras epsilon 1e-3), no
+# activation, no pool. The ``# DECISION plan-2026-09-16T064227-b83f88ad/D-005``
+# anchor in that file pins this exact pairing.
+_RBF_CHANNELS = 8
+_RBF_KERNEL_REG = 1e-4
+
+
+def _rbf_clifford_original(patch_size: int, regularized: bool) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=_RBF_CHANNELS,
+        kernel_size=3,
+        strides=patch_size,
+        padding="same",
+        use_bias=True,
+        kernel_regularizer=(
+            keras.regularizers.L2(_RBF_KERNEL_REG) if regularized else None
+        ),
+        name="stem_conv",
+    )
+    norm = keras.layers.BatchNormalization(momentum=0.9, name="stem_bn")
+
+    def forward(x, training):
+        return norm(conv(x), training=training)
+
+    return Original(sublayers={"conv1": conv, "norm1": norm}, forward=forward)
+
+
+def _rbf_clifford_model(patch_size: int, regularized: bool) -> CliffordRBFProtoNet:
+    return CliffordRBFProtoNet(
+        input_shape=(16, 16, 3),
+        num_classes=4,
+        channels=_RBF_CHANNELS,
+        depth=1,
+        feature_dim=_RBF_CHANNELS,
+        patch_size=patch_size,
+        kernel_regularizer=(
+            keras.regularizers.L2(_RBF_KERNEL_REG) if regularized else None
+        ),
+    )
+
+
+def _rbf_clifford_case(patch_size: int, regularized: bool) -> StemCase:
+    side = -(-16 // patch_size)  # ceil under ``same`` padding
+    return StemCase(
+        case_id=f"rbf-clifford-patch{patch_size}-{'l2' if regularized else 'noreg'}",
+        make_model=lambda: _rbf_clifford_model(patch_size, regularized),
+        make_original=lambda: _rbf_clifford_original(patch_size, regularized),
+        input_shape=(16, 16, 3),
+        expected_output_shape=(side, side, _RBF_CHANNELS),
+    )
+
+
+RBF_CLIFFORD_P1 = _rbf_clifford_case(1, True)
+RBF_CLIFFORD_P2 = _rbf_clifford_case(2, True)
+RBF_CLIFFORD_P2_NOREG = _rbf_clifford_case(2, False)
+RBF_CLIFFORD_P4 = _rbf_clifford_case(4, True)
+# 16 -> ceil(16 / 3) = 6 under ``same`` padding.
+RBF_CLIFFORD_P3 = _rbf_clifford_case(3, True)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1202,6 +1270,11 @@ CASES = [
     VAE_RELU_STRING,
     VAE_LEAKY_RELU_INSTANCE,
     VAE_LINEAR,
+    RBF_CLIFFORD_P1,
+    RBF_CLIFFORD_P2,
+    RBF_CLIFFORD_P2_NOREG,
+    RBF_CLIFFORD_P4,
+    RBF_CLIFFORD_P3,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1241,6 +1314,7 @@ BUILT_STEM_ROWS = [
         (32, 32, 3),
         _vae_stem_of,
     ),
+    ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
 ]
 
 

@@ -58,6 +58,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.mixtures.factory import create_mixture_layer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -704,7 +705,7 @@ class CliffordRBFProtoNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the patch-embedding stem: strided ``Conv2D`` + ``BatchNormalization``.
+        """Build the patch-embedding stem: a ``ConvStem`` of strided ``Conv2D`` + ``BatchNormalization``.
 
         # DECISION plan-2026-09-16T064227-b83f88ad/D-005: this exact composition
         # (Conv2D(strides=patch_size) -> BatchNormalization(momentum=0.9))
@@ -714,19 +715,26 @@ class CliffordRBFProtoNet(keras.Model):
         # this specific pairing is what was measured NaN/Inf-clean with
         # live gradients across all 12 downstream blocks. See decisions.md
         # D-005.
+
+        The composition is built by ``ConvStem``: Conv2D(strides=patch_size)
+        -> BatchNormalization(momentum=0.9, epsilon=1e-3), no activation, no
+        pool (``epsilon`` is stated because the norm factory's default is
+        ``1e-6``, not the Keras ``1e-3`` the smoke measured). The D-005
+        smoke is a standing test, ``TestCliffordRBFProtoNetD005StandingSmoke``
+        in ``tests/test_models/test_rbf_protonet/test_clifford_model.py``
+        (plan-2026-10-26-7af851e5 D-010).
         """
-        self.stem_conv = keras.layers.Conv2D(
+        self.stem = ConvStem(
             filters=self.channels,
             kernel_size=3,
             strides=self.patch_size,
             padding="same",
             use_bias=True,
+            normalization_type="batch_norm",
+            normalization_kwargs={"momentum": 0.9, "epsilon": 1e-3},
+            activation_type="linear",
             kernel_regularizer=self.kernel_regularizer,
-            name="stem_conv",
-        )
-        self.stem_bn = keras.layers.BatchNormalization(
-            momentum=0.9,
-            name="stem_bn",
+            name="stem",
         )
 
     def _build_blocks(self) -> None:
@@ -809,8 +817,7 @@ class CliffordRBFProtoNet(keras.Model):
         :return: Per-class probability tensor `(batch_size, num_classes)`,
             rows summing to 1.0 (``output_mode='normalized'`` contract).
         """
-        x = self.stem_conv(inputs)
-        x = self.stem_bn(x, training=training)
+        x = self.stem(inputs, training=training)
 
         for block, drop_path in zip(self.blocks, self.drop_paths):
             x = x + drop_path(block(x, training=training), training=training)
