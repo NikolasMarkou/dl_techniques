@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.vision.mambalct import MambaLCT, create_mambalct
+from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
 
 
 def _tiny_model() -> MambaLCT:
@@ -203,3 +204,67 @@ def test_serialization_round_trip(tiny_inputs: tuple) -> None:
         np.testing.assert_allclose(
             np.asarray(orig[key]), np.asarray(rest[key]), atol=1e-6, rtol=0
         )
+
+
+def _tiny_uca_encoder() -> UcaEncoder:
+    return UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4])
+
+
+def _count_calls(layer: keras.layers.Layer) -> list:
+    """Wrap ``layer.call`` so each execution appends to the returned list.
+
+    Interface contract: returns the (initially empty) list the wrapper appends
+    ``1`` to on every call of ``layer.call``; the layer is mutated in place and
+    is never restored, so use it on a throwaway instance.
+    """
+    calls: list = []
+    original_call = layer.call
+
+    def counting_call(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        return original_call(*args, **kwargs)
+
+    layer.call = counting_call
+    return calls
+
+
+def test_the_uca_encoder_applies_its_stem_norm_exactly_once() -> None:
+    """The stem is conv -> norm ONCE (the pre-migration encoder).
+
+    The migration onto ``ConvStem`` (which already owns the norm) left a second
+    ``self.stem_norm(x)`` in ``call()``: the stem norm ran twice and the encoder
+    computed a different function. Counting the calls of ``stem.norm1`` during
+    one forward sees it. Positive controls: the counter sees the single call of
+    ``final_norm``, and it reads 2 on a planted encoder that applies the stem
+    norm twice, so a reading of 1 is a real count and not a blind counter.
+    """
+    x = np.random.default_rng(0).uniform(0, 1, (1, 16, 16, 3)).astype("float32")
+
+    encoder = _tiny_uca_encoder()
+    stem_norm_calls = _count_calls(encoder.stem.norm1)
+    final_norm_calls = _count_calls(encoder.final_norm)
+    encoder(x, training=False)
+    assert len(final_norm_calls) == 1, "the counter did not see final_norm run"
+    assert len(stem_norm_calls) == 1, (
+        f"the stem norm ran {len(stem_norm_calls)} times in one forward; "
+        f"the pre-migration encoder applied it once"
+    )
+
+    planted = _tiny_uca_encoder()
+    planted_calls = _count_calls(planted.stem.norm1)
+    stem_call = planted.stem.call
+
+    def stem_then_norm_again(*args, **kwargs):  # type: ignore[no-untyped-def]
+        out = stem_call(*args, **kwargs)
+        return planted.stem.norm1(out, training=kwargs.get("training"))
+
+    planted.stem.call = stem_then_norm_again
+    planted(x, training=False)
+    assert len(planted_calls) == 2, "the counter cannot see a planted double norm"
+
+
+def test_the_uca_encoder_has_no_stem_aliases() -> None:
+    """``stem`` is the only stem handle: no ``stem_conv`` / ``stem_norm`` alias."""
+    encoder = _tiny_uca_encoder()
+    assert not hasattr(encoder, "stem_conv")
+    assert not hasattr(encoder, "stem_norm")

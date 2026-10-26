@@ -60,6 +60,7 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
+from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
 from dl_techniques.models.vision.resnet.model import ResNet
 from tests.numerics import true_float32_matmul
 
@@ -466,6 +467,64 @@ HIER_P2 = StemCase(
     expected_output_shape=(8, 8, 16),
 )
 
+# ---------------------------------------------------------------------
+# UcaEncoder (MambaLCT)
+# ---------------------------------------------------------------------
+
+# Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/mambalct/uca_encoder.py``
+# lines 128-134: ``Conv2D(dims[0], kernel 4, strides 4, padding "valid",
+# use_bias, name="stem")`` then ``create_normalization_layer(normalization_type,
+# epsilon=norm_epsilon, name="stem_norm")`` and ``call()`` ran conv then norm
+# ONCE, with no activation. Default initializers and no regularizer. Built here
+# with a non-default epsilon so a dropped ``norm_epsilon`` is seen.
+_UCA_EPSILON = 1e-3
+
+
+def _uca_original(use_bias: bool = True) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=16,
+        kernel_size=4,
+        strides=4,
+        padding="valid",
+        use_bias=use_bias,
+        name="stem",
+    )
+    norm = create_normalization_layer(
+        "layer_norm", epsilon=_UCA_EPSILON, name="stem_norm"
+    )
+
+    def forward(x, training):
+        return norm(conv(x), training=training)
+
+    return Original(sublayers={"conv1": conv, "norm1": norm}, forward=forward)
+
+
+def _uca_model(use_bias: bool = True) -> UcaEncoder:
+    return UcaEncoder(
+        stage_dims=[16, 32],
+        stage_depths=[1, 1],
+        num_heads=[2, 4],
+        normalization_type="layer_norm",
+        norm_epsilon=_UCA_EPSILON,
+        use_bias=use_bias,
+    )
+
+
+UCA_ENCODER = StemCase(
+    case_id="uca-encoder",
+    make_model=_uca_model,
+    make_original=_uca_original,
+    input_shape=(16, 16, 3),
+    expected_output_shape=(4, 4, 16),
+)
+UCA_ENCODER_NOBIAS = StemCase(
+    case_id="uca-encoder-no-bias",
+    make_model=lambda: _uca_model(use_bias=False),
+    make_original=lambda: _uca_original(use_bias=False),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(4, 4, 16),
+)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -477,6 +536,8 @@ CASES = [
     CLIFFORD_P2_NOBIAS,
     HIER_P1,
     HIER_P2,
+    UCA_ENCODER,
+    UCA_ENCODER_NOBIAS,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -489,6 +550,7 @@ BUILT_STEM_ROWS = [
     ("cliffordnet-patch3", lambda: _clifford_model(3), (16, 16, 3)),
     ("hierarchical-patch1", lambda: _hierarchical_model(1), (16, 16, 3)),
     ("hierarchical-patch2", lambda: _hierarchical_model(2), (16, 16, 3)),
+    ("uca-encoder", _uca_model, (16, 16, 3)),
 ]
 
 

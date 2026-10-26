@@ -139,9 +139,6 @@ class UcaEncoder(keras.layers.Layer):
             use_pooling=False,
             name="stem",
         )
-        # Keep aliases so existing references to stem_conv / stem_norm keep working.
-        self.stem_conv = self.stem.conv1
-        self.stem_norm = self.stem.norm1
 
         self.merges: List[keras.layers.Layer] = []
         self.merge_norms: List[keras.layers.Layer] = []
@@ -234,7 +231,6 @@ class UcaEncoder(keras.layers.Layer):
         shape: Tuple[Optional[int], ...] = input_shape
         self.stem.build(shape)
         shape = self.stem.compute_output_shape(shape)
-        # stem_norm is an alias for stem.norm1, already built by ConvStem.build().
         for s in range(len(self.stage_dims)):
             if s > 0:
                 self.merges[s - 1].build(shape)
@@ -264,7 +260,6 @@ class UcaEncoder(keras.layers.Layer):
         :return: Tokens ``(B, N, stage_dims[-1])``.
         """
         x = self.stem(inputs, training=training)
-        x = self.stem_norm(x, training=training)
         for s in range(len(self.stage_dims)):
             if s > 0:
                 x = self.merges[s - 1](x, training=training)
