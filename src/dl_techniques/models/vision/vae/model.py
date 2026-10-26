@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.activations.exact_activations import substitute_exact
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.generative.sampling import create_sampling_layer, vmf_kl_divergence
 from dl_techniques.utils.activation_serialization import (
@@ -439,24 +440,29 @@ class VAE(keras.Model):
         """
         x = inputs
 
-        # Initial conv layer
-        x = keras.layers.Conv2D(
+        # Initial conv layer: the stem, one ConvStem. Its BatchNormalization is
+        # the Keras one the encoder always used (momentum 0.99, epsilon 1e-3;
+        # the norm factory's epsilon default is 1e-6), with ``center`` following
+        # ``use_bias``. The per-stage downsample below is a downsampling block,
+        # not a stem, and stays inline.
+        x = ConvStem(
             filters=self.filters[0],
             kernel_size=3,
             strides=1,
             padding="same",
             use_bias=self.use_bias,
+            normalization_type="batch_norm" if self.use_batch_norm else None,
+            normalization_kwargs=(
+                {"momentum": 0.99, "epsilon": 1e-3, "center": self.use_bias}
+                if self.use_batch_norm
+                else None
+            ),
+            # D-277: float64-exact, bit-identical to stock at float32.
+            activation_type=substitute_exact(self.activation),
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="encoder_stem_conv",
+            name="encoder_stem",
         )(x)
-
-        if self.use_batch_norm:
-            x = keras.layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(
-                x
-            )
-        x = keras.layers.Activation(
-            substitute_exact(self.activation), name="encoder_stem_activation")(x)  # D-277: float64-exact, bit-identical to stock at float32
 
         # Encoder blocks with downsampling
         for depth in range(self.depths):

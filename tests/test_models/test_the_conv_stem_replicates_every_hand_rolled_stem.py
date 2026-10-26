@@ -42,7 +42,10 @@ How to add a case (one per original variant, later steps extend the table):
   stays at ``rtol=0, atol=0`` because the conv, then the same ReLU, is the same
   op sequence. Every other case must still list every role the stem carries.
 * Write a ``_<model>_model()`` factory returning a built-able model whose
-  ``.stem`` is the ``ConvStem`` under test.
+  ``.stem`` is the ``ConvStem`` under test. A model that keeps its stem
+  elsewhere (the VAE builds a functional graph, so its stem is a layer of it)
+  gives the case a ``stem_of(model)`` accessor instead; ``StemCase.stem_of``
+  and the optional fourth element of a ``BUILT_STEM_ROWS`` row carry it.
 * Append ONE ``StemCase`` to ``CASES`` and, when the model has a ``stem``
   attribute, ONE row to ``BUILT_STEM_ROWS`` (``test_every_migrated_model_
   builds_its_stem``). Nothing else in this file changes.
@@ -81,6 +84,7 @@ from dl_techniques.models.vision.rad_convnet.model import RADConvNet
 from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+from dl_techniques.models.vision.vae.model import VAE
 from tests.numerics import true_float32_matmul
 
 
@@ -126,7 +130,7 @@ class StemCase:
     """One original stem variant.
 
     :param case_id: pytest id.
-    :param make_model: returns a fresh model whose ``.stem`` is a ``ConvStem``.
+    :param make_model: returns a fresh model that holds the ``ConvStem`` under test.
     :param make_original: returns the ``Original`` (fresh layers every call).
     :param input_shape: ``(H, W, C)`` fed to the stem.
     :param expected_output_shape: ``(H', W', C')`` the ORIGINAL stem yields, so
@@ -138,6 +142,7 @@ class StemCase:
     make_original: Callable[[], Original]
     input_shape: Tuple[int, int, int]
     expected_output_shape: Tuple[int, int, int]
+    stem_of: Callable[[keras.Model], ConvStem] = lambda model: model.stem
 
 
 def _np(tensor) -> np.ndarray:
@@ -1021,6 +1026,137 @@ SQUEEZENET_V2_NOPOOL = StemCase(
     expected_output_shape=(29, 29, 96),
 )
 
+# ---------------------------------------------------------------------
+# VAE encoder stem
+# ---------------------------------------------------------------------
+
+# Original: ``git show HEAD~1:src/dl_techniques/models/vision/vae/model.py``
+# (``_build_encoder``), the functional initial stem: ``Conv2D(filters[0], 3,
+# strides=1, padding="same", use_bias, kernel_initializer, kernel_regularizer)``
+# -> (``use_batch_norm`` only) a bare ``BatchNormalization(center=use_bias)``,
+# so Keras' defaults momentum 0.99, epsilon 1e-3, scale=True -> ``Activation``
+# over ``substitute_exact(activation)`` (D-277): the exact callable for
+# ``"gelu"`` / ``"leaky_relu"``, the string itself for any other name. The
+# stem is a layer of the functional encoder graph, reached through
+# ``vae.get_layer("encoder_stem")``.
+_VAE_FILTERS = 8
+_VAE_KERNEL_REG = 1e-4
+
+
+def _vae_original(
+    use_batch_norm: bool, use_bias: bool, activation, identity_activation: bool = False
+) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=_VAE_FILTERS,
+        kernel_size=3,
+        strides=1,
+        padding="same",
+        use_bias=use_bias,
+        kernel_initializer="he_normal",
+        kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
+        name="encoder_stem_conv",
+    )
+    norm = (
+        keras.layers.BatchNormalization(
+            momentum=0.99, epsilon=1e-3, center=use_bias, name="encoder_stem_bn"
+        )
+        if use_batch_norm
+        else None
+    )
+    act = keras.layers.Activation(activation, name="encoder_stem_activation")
+
+    def forward(x, training):
+        x = conv(x)
+        if norm is not None:
+            x = norm(x, training=training)
+        return act(x)
+
+    sublayers = {"conv1": conv}
+    if norm is not None:
+        sublayers["norm1"] = norm
+    if not identity_activation:
+        sublayers["activation1"] = act
+    return Original(sublayers=sublayers, forward=forward)
+
+
+def _vae_model(use_batch_norm: bool, use_bias: bool, activation) -> VAE:
+    return VAE(
+        latent_dim=8,
+        input_shape=(32, 32, 3),
+        depths=2,
+        steps_per_depth=1,
+        filters=[_VAE_FILTERS, 16],
+        kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
+        use_batch_norm=use_batch_norm,
+        use_bias=use_bias,
+        activation=activation,
+    )
+
+
+def _vae_stem_of(model: VAE) -> ConvStem:
+    return model.get_layer("encoder_stem")
+
+
+def _vae_case(
+    case_id: str,
+    use_batch_norm: bool,
+    use_bias: bool,
+    make_activation: Callable[[], object],
+    make_original_activation: Callable[[], object],
+    identity_activation: bool = False,
+) -> StemCase:
+    """One case; both activations are zero-argument factories so a Layer-instance
+    activation is fresh for the model and for the original."""
+    return StemCase(
+        case_id=case_id,
+        make_model=lambda: _vae_model(use_batch_norm, use_bias, make_activation()),
+        make_original=lambda: _vae_original(
+            use_batch_norm, use_bias, make_original_activation(), identity_activation
+        ),
+        input_shape=(32, 32, 3),
+        expected_output_shape=(32, 32, _VAE_FILTERS),
+        stem_of=_vae_stem_of,
+    )
+
+
+VAE_BN_BIAS = _vae_case(
+    "vae-leaky-relu-bn-bias", True, True, lambda: "leaky_relu", lambda: exact_leaky_relu
+)
+VAE_BN_NOBIAS = _vae_case(
+    "vae-leaky-relu-bn-no-bias", True, False, lambda: "leaky_relu", lambda: exact_leaky_relu
+)
+VAE_NOBN_BIAS = _vae_case(
+    "vae-leaky-relu-no-bn-bias", False, True, lambda: "leaky_relu", lambda: exact_leaky_relu
+)
+VAE_NOBN_NOBIAS = _vae_case(
+    "vae-leaky-relu-no-bn-no-bias",
+    False,
+    False,
+    lambda: "leaky_relu",
+    lambda: exact_leaky_relu,
+)
+VAE_GELU = _vae_case(
+    "vae-gelu-bn-bias", True, True, lambda: "gelu", lambda: exact_gelu
+)
+VAE_RELU_STRING = _vae_case(
+    "vae-relu-string-bn-bias", True, True, lambda: "relu", lambda: "relu"
+)
+VAE_LEAKY_RELU_INSTANCE = _vae_case(
+    "vae-leaky-relu-instance",
+    True,
+    True,
+    lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+    lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+)
+VAE_LINEAR = _vae_case(
+    "vae-linear",
+    True,
+    True,
+    lambda: "linear",
+    lambda: "linear",
+    identity_activation=True,
+)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1058,6 +1194,14 @@ CASES = [
     SQUEEZENET_V1_STRIDE1_SAME,
     SQUEEZENET_V2,
     SQUEEZENET_V2_NOPOOL,
+    VAE_BN_BIAS,
+    VAE_BN_NOBIAS,
+    VAE_NOBN_BIAS,
+    VAE_NOBN_NOBIAS,
+    VAE_GELU,
+    VAE_RELU_STRING,
+    VAE_LEAKY_RELU_INSTANCE,
+    VAE_LINEAR,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1091,7 +1235,17 @@ BUILT_STEM_ROWS = [
     ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
     ("squeezenet-v1", lambda: _squeezenet_v1_model("1.0"), (64, 64, 3)),
     ("squeezenodule-v2", lambda: _squeezenet_v2_model("v2"), (64, 64, 1)),
+    (
+        "vae-encoder",
+        lambda: _vae_model(True, True, "leaky_relu"),
+        (32, 32, 3),
+        _vae_stem_of,
+    ),
 ]
+
+
+def _model_stem(model) -> ConvStem:
+    return model.stem
 
 
 # ---------------------------------------------------------------------
@@ -1103,7 +1257,7 @@ BUILT_STEM_ROWS = [
 def test_the_model_stem_replicates_the_original(case):
     """The stem a model builds equals the pre-migration stem, weight for weight."""
     model = case.make_model()
-    assert_stem_matches_original(case, model.stem)
+    assert_stem_matches_original(case, case.stem_of(model))
 
 
 def test_the_imagenet_stem_pool_geometry_is_stride_2_same():
@@ -1258,11 +1412,11 @@ def test_control_a_correct_stem_survives_the_same_harness():
 
 
 @pytest.mark.parametrize(
-    "make_model,input_shape",
-    [(row[1], row[2]) for row in BUILT_STEM_ROWS],
+    "make_model,input_shape,stem_of",
+    [(row[1], row[2], row[3] if len(row) > 3 else _model_stem) for row in BUILT_STEM_ROWS],
     ids=[row[0] for row in BUILT_STEM_ROWS],
 )
-def test_every_migrated_model_builds_its_stem(make_model, input_shape):
+def test_every_migrated_model_builds_its_stem(make_model, input_shape, stem_of):
     """After a forward, ``model.stem`` and every sub-layer of it are built.
 
     HEAD's ResNet, ConvNeXt and RAD ran their stems through aliases of the
@@ -1271,14 +1425,28 @@ def test_every_migrated_model_builds_its_stem(make_model, input_shape):
     """
     model = make_model()
     model(np.zeros((1,) + tuple(input_shape), "float32"), training=False)
-    assert model.stem.built is True, "model.stem was never built: call() bypasses it"
+    stem = stem_of(model)
+    assert stem.built is True, "model.stem was never built: call() bypasses it"
     unbuilt = [
         layer.name
-        for layer in model.stem._flatten_layers(include_self=False)
+        for layer in stem._flatten_layers(include_self=False)
         if not layer.built
     ]
     assert unbuilt == [], f"unbuilt sub-layers of the stem: {unbuilt}"
-    assert len(model.stem.weights) > 0
+    assert len(stem.weights) > 0
+
+
+@pytest.mark.parametrize(
+    "name,exact", [("leaky_relu", exact_leaky_relu), ("gelu", exact_gelu)]
+)
+def test_the_vae_stem_activation_is_the_exact_form(name, exact):
+    """D-277 at the VAE call site: the stem runs ``exact_leaky_relu`` /
+    ``exact_gelu``, not the stock kernel. The two are bit-identical at float32,
+    so no value comparison can see a dropped ``substitute_exact``; the layer's
+    own function is what is checked.
+    """
+    stem = _vae_stem_of(_vae_model(True, True, name))
+    assert stem.activation1.activation is exact
 
 
 # ---------------------------------------------------------------------
