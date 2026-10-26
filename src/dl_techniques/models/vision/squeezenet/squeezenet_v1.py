@@ -39,6 +39,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.logger import logger
 from .spatial_guard import validate_spatial_extent
 from .caffe_reference_init import (
@@ -466,7 +467,7 @@ class SqueezeNetV1(keras.Model):
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        self.stem_layers = []
+        self.stem: Optional[ConvStem] = None
         self.fire_modules = []
         self.pool_layers = []
         self.bypass_layers = []
@@ -497,35 +498,38 @@ class SqueezeNetV1(keras.Model):
         return x
 
     def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the initial convolution and its pooling.
+        """Build the initial convolution and its pooling as one ``ConvStem``.
+
+        The stem is ``ConvStem`` ``stem``: ``stem_conv1`` (ReLU as the separate
+        ``stem_act1`` layer, no normalization) and, when pool index 1 is
+        present, ``stem_pool``. The pool is also appended to ``pool_layers``.
 
         :param x: The model's input tensor.
         :type x: keras.KerasTensor
         :return: Tensor after conv1 and, when pool index 1 is present, the pool.
         :rtype: keras.KerasTensor
         """
-        conv1 = keras.layers.Conv2D(
+        self.stem = ConvStem(
             filters=self.conv1_filters,
             kernel_size=self.conv1_kernel,
             strides=self.conv1_stride,
-            activation='relu',
             padding='same' if self.conv1_stride == 1 else 'valid',
-            kernel_regularizer=self.kernel_regularizer,
+            use_bias=True,
+            num_convs=1,
+            normalization_type=None,
+            activation_type='relu',
+            use_pooling=1 in self.pool_indices,
+            pool_size=3,
+            pool_strides=2,
+            pool_padding='valid',
             kernel_initializer=self.STEM_INITIALIZER,
-            name='conv1'
+            kernel_regularizer=self.kernel_regularizer,
+            name='stem'
         )
-        x = conv1(x)
-        self.stem_layers.append(conv1)
+        x = self.stem(x)
 
-        if 1 in self.pool_indices:
-            maxpool1 = keras.layers.MaxPooling2D(
-                pool_size=3,
-                strides=2,
-                padding='valid',
-                name='maxpool1'
-            )
-            x = maxpool1(x)
-            self.pool_layers.append(maxpool1)
+        if self.stem.pool is not None:
+            self.pool_layers.append(self.stem.pool)
 
         return x
 

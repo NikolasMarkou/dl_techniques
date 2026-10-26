@@ -338,7 +338,7 @@ The models and both Fire-module layers are registered, so no `custom_objects` ar
 
 **Initializers.** `STEM_INITIALIZER` and `HEAD_INITIALIZER` are different fillers on purpose. `HEAD_INITIALIZER` is stored as a serialized config dict and copied at each call site, because one shared seedless `Initializer` instance replays its draw.
 
-**Fire numbering.** Modules are named `fire2` through `fire9`, matching the paper; the stem convolution is `conv1` and the head convolution is `conv10`.
+**Fire numbering.** Modules are named `fire2` through `fire9`, matching the paper; the stem is one `ConvStem` named `stem` (convolution `stem_conv1`, ReLU `stem_act1`, no normalization, and the first max-pool `stem_pool` when the variant pools after conv1; the 3D stem of `SqueezeNoduleNetV2` stays an inline `Conv3D` named `conv1` and `MaxPooling3D` named `maxpool1`) and the head convolution is `conv10`.
 
 ---
 

@@ -38,6 +38,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.logger import logger
 from .spatial_guard import validate_spatial_extent
 from .caffe_reference_init import (
@@ -449,7 +450,8 @@ class SqueezeNoduleNetV2(keras.Model):
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        self.stem_layers = []
+        # Set by _build_stem in 2D; stays None in 3D (D-004).
+        self.stem: Optional[ConvStem] = None
         self.fire_modules = []
         self.pool_layers = []
         self.head_layers = []
@@ -481,19 +483,58 @@ class SqueezeNoduleNetV2(keras.Model):
     def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Build the initial convolution and its pooling.
 
+        In 2D the stem is one ``ConvStem`` named ``stem``: ``stem_conv1`` (ReLU
+        as the separate ``stem_act1`` layer, no normalization) and, when pool
+        index 1 is present, ``stem_pool``. In 3D it is a ``Conv3D`` named
+        ``conv1`` and a ``MaxPooling3D`` named ``maxpool1``, built inline. The
+        pool is also appended to ``pool_layers``.
+
         :param x: The model's input tensor.
         :type x: keras.KerasTensor
         :return: Tensor after conv1 and, when pool index 1 is present, the pool.
         :rtype: keras.KerasTensor
         """
         if self.use_3d:
-            Conv = keras.layers.Conv3D
-            MaxPool = keras.layers.MaxPooling3D
-        else:
-            Conv = keras.layers.Conv2D
-            MaxPool = keras.layers.MaxPooling2D
+            return self._build_stem_3d(x)
 
-        conv1 = Conv(
+        self.stem = ConvStem(
+            filters=self.conv1_filters,
+            kernel_size=self.conv1_kernel,
+            strides=self.conv1_stride,
+            padding='same' if self.conv1_stride == 1 else 'valid',
+            use_bias=True,
+            num_convs=1,
+            normalization_type=None,
+            activation_type='relu',
+            use_pooling=1 in self.pool_indices,
+            pool_size=3,
+            pool_strides=2,
+            pool_padding='valid',
+            kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
+            name='stem'
+        )
+        x = self.stem(x)
+
+        if self.stem.pool is not None:
+            self.pool_layers.append(self.stem.pool)
+
+        return x
+
+    def _build_stem_3d(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the 3D stem: ``Conv3D`` with a fused ReLU, then ``MaxPooling3D``.
+
+        :param x: The model's input tensor.
+        :type x: keras.KerasTensor
+        :return: Tensor after conv1 and, when pool index 1 is present, the pool.
+        :rtype: keras.KerasTensor
+        """
+        # DECISION plan-2026-10-26T125959-7af851e5/D-004: ConvStem is 2D only,
+        # so the 3D stem stays hand-rolled here. Do NOT add a `rank` option to
+        # ConvStem to absorb it: that buys 2 of this model's 5 rank-dependent
+        # sites (stem conv, stem pool, Fire-loop pool, 3D Fire, head GAP3D) for
+        # one caller. See decisions.md.
+        x = keras.layers.Conv3D(
             filters=self.conv1_filters,
             kernel_size=self.conv1_kernel,
             strides=self.conv1_stride,
@@ -502,12 +543,10 @@ class SqueezeNoduleNetV2(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             kernel_initializer=self.STEM_INITIALIZER,
             name='conv1'
-        )
-        x = conv1(x)
-        self.stem_layers.append(conv1)
+        )(x)
 
         if 1 in self.pool_indices:
-            maxpool1 = MaxPool(
+            maxpool1 = keras.layers.MaxPooling3D(
                 pool_size=3,
                 strides=2,
                 padding='valid',

@@ -34,7 +34,13 @@ How to add a case (one per original variant, later steps extend the table):
   keyed by the ``ConvStem`` attribute the layer corresponds to (``conv1``,
   ``norm1``, ``activation1``, ``conv2``, ``norm2``, ``activation2``, ``pool``;
   omit a role the original had no layer for) and ``forward(x, training)``
-  chaining them exactly as the original ``call()`` did.
+  chaining them exactly as the original ``call()`` did. An activation the
+  original FUSED into its conv (``Conv2D(activation="relu")``, no layer of its
+  own, no weights) is declared in ``Original.fused`` (``("activation1",)``)
+  instead of ``sublayers``: the role-set check then expects ``ConvStem`` to
+  carry a weightless layer in that role and nothing else, and the comparison
+  stays at ``rtol=0, atol=0`` because the conv, then the same ReLU, is the same
+  op sequence. Every other case must still list every role the stem carries.
 * Write a ``_<model>_model()`` factory returning a built-able model whose
   ``.stem`` is the ``ConvStem`` under test.
 * Append ONE ``StemCase`` to ``CASES`` and, when the model has a ``stem``
@@ -73,6 +79,8 @@ from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
 from dl_techniques.models.vision.resnet.model import ResNet
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from tests.numerics import true_float32_matmul
 
 
@@ -103,10 +111,14 @@ class Original:
         means the original had no such layer.
     :param forward: ``forward(x, training)`` chaining the layers exactly as the
         original ``call()`` did.
+    :param fused: Roles the original had NO layer for because the activation
+        was fused into its conv; ``ConvStem`` must carry a weightless layer in
+        each of them.
     """
 
     sublayers: Dict[str, keras.layers.Layer]
     forward: Callable[[object, Optional[bool]], object]
+    fused: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -195,10 +207,18 @@ def assert_stem_matches_original(
         stem.build(x.shape)
 
     stem_layers = _stem_sublayers(stem)
-    assert set(stem_layers) == set(original.sublayers), (
+    expected_roles = set(original.sublayers) | set(original.fused)
+    assert set(stem_layers) == expected_roles, (
         f"{case.case_id}: the stem's sub-layer roles {sorted(stem_layers)} differ "
-        f"from the original's {sorted(original.sublayers)}"
+        f"from the original's {sorted(expected_roles)}"
     )
+    for role in original.fused:
+        assert role not in original.sublayers, (
+            f"{case.case_id}: {role} is declared both fused and a sub-layer"
+        )
+        assert stem_layers[role].get_weights() == [], (
+            f"{case.case_id}: the fused role {role} carries weights"
+        )
     for role, source in original.sublayers.items():
         source_weights = source.get_weights()
         target = stem_layers[role]
@@ -862,6 +882,145 @@ MOBILENET_V4 = StemCase(
     expected_output_shape=(16, 16, _MOBILENET_V4_STEM_FILTERS),
 )
 
+# ---------------------------------------------------------------------
+# SqueezeNet V1 and SqueezeNoduleNet V2 (2D path)
+# ---------------------------------------------------------------------
+
+# Original: the files at HEAD, which were never migrated
+# (``models/vision/squeezenet/squeezenet_v1.py`` and ``squeezenet_v2.py``,
+# ``_build_stem``). ``Conv2D(conv1_filters, conv1_kernel, strides=conv1_stride,
+# activation="relu", padding="same" if conv1_stride == 1 else "valid",
+# kernel_regularizer, kernel_initializer="lecun_uniform")`` with the default
+# bias, NO normalization, then (pool index 1 only) ``MaxPooling2D(3, strides=2,
+# padding="valid")``. The ReLU is FUSED into the conv (declared in
+# ``Original.fused``); ``ConvStem`` runs the same ReLU as a layer of its own
+# after the same conv, so the values are identical and the comparison stays at
+# ``rtol=0, atol=0``.
+
+_SQUEEZE_KERNEL_REG = 1e-4
+
+
+def _squeezenet_original(
+    filters: int, kernel: int, stride: int, pool: bool
+) -> Original:
+    """The pre-migration SqueezeNet V1 / V2 (2D) stem, as literals."""
+    conv = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=kernel,
+        strides=stride,
+        activation="relu",
+        padding="same" if stride == 1 else "valid",
+        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
+        kernel_initializer="lecun_uniform",
+        name="conv1",
+    )
+    maxpool = (
+        keras.layers.MaxPooling2D(
+            pool_size=3, strides=2, padding="valid", name="maxpool1"
+        )
+        if pool
+        else None
+    )
+
+    def forward(x, training):
+        x = conv(x)
+        return x if maxpool is None else maxpool(x)
+
+    sublayers = {"conv1": conv}
+    if maxpool is not None:
+        sublayers["pool"] = maxpool
+    return Original(sublayers=sublayers, forward=forward, fused=("activation1",))
+
+
+def _squeezenet_v1_model(variant: str, pool_indices=None) -> SqueezeNetV1:
+    config = dict(SqueezeNetV1.MODEL_VARIANTS[variant])
+    if pool_indices is not None:
+        config["pool_indices"] = pool_indices
+    return SqueezeNetV1(
+        num_classes=4,
+        variant_config=config,
+        include_top=False,
+        input_shape=(64, 64, 3),
+        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
+    )
+
+
+def _squeezenet_v2_model(variant: str, pool_indices=None) -> SqueezeNoduleNetV2:
+    config = dict(SqueezeNoduleNetV2.MODEL_VARIANTS[variant])
+    if pool_indices is not None:
+        config["pool_indices"] = pool_indices
+    return SqueezeNoduleNetV2(
+        num_classes=4,
+        variant_config=config,
+        include_top=False,
+        input_shape=(64, 64, 1),
+        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
+    )
+
+
+# 64 px: V1.0 conv k7/s2 valid -> 29, pool -> 14; V1.1 conv k3/s2 valid -> 31,
+# pool -> 15; no pool keeps 29 / 31.
+SQUEEZENET_V1_0 = StemCase(
+    case_id="squeezenet-v1.0-pool",
+    make_model=lambda: _squeezenet_v1_model("1.0"),
+    make_original=lambda: _squeezenet_original(96, 7, 2, True),
+    input_shape=(64, 64, 3),
+    expected_output_shape=(14, 14, 96),
+)
+SQUEEZENET_V1_0_NOPOOL = StemCase(
+    case_id="squeezenet-v1.0-no-pool",
+    make_model=lambda: _squeezenet_v1_model("1.0", [4, 8]),
+    make_original=lambda: _squeezenet_original(96, 7, 2, False),
+    input_shape=(64, 64, 3),
+    expected_output_shape=(29, 29, 96),
+)
+SQUEEZENET_V1_1 = StemCase(
+    case_id="squeezenet-v1.1-pool",
+    make_model=lambda: _squeezenet_v1_model("1.1"),
+    make_original=lambda: _squeezenet_original(64, 3, 2, True),
+    input_shape=(64, 64, 3),
+    expected_output_shape=(15, 15, 64),
+)
+SQUEEZENET_V1_1_NOPOOL = StemCase(
+    case_id="squeezenet-v1.1-no-pool",
+    make_model=lambda: _squeezenet_v1_model("1.1", [3, 5]),
+    make_original=lambda: _squeezenet_original(64, 3, 2, False),
+    input_shape=(64, 64, 3),
+    expected_output_shape=(31, 31, 64),
+)
+# Stride 1 takes the ``same`` branch, which no shipped variant does.
+SQUEEZENET_V1_STRIDE1_SAME = StemCase(
+    case_id="squeezenet-v1-stride1-same-pool",
+    make_model=lambda: SqueezeNetV1(
+        num_classes=4,
+        variant_config={
+            **SqueezeNetV1.MODEL_VARIANTS["1.1"],
+            "conv1_stride": 1,
+            "pool_indices": [1, 3, 5],
+        },
+        include_top=False,
+        input_shape=(64, 64, 3),
+        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
+    ),
+    make_original=lambda: _squeezenet_original(64, 3, 1, True),
+    input_shape=(64, 64, 3),
+    expected_output_shape=(31, 31, 64),
+)
+SQUEEZENET_V2 = StemCase(
+    case_id="squeezenodule-v2-2d-pool",
+    make_model=lambda: _squeezenet_v2_model("v2"),
+    make_original=lambda: _squeezenet_original(96, 7, 2, True),
+    input_shape=(64, 64, 1),
+    expected_output_shape=(14, 14, 96),
+)
+SQUEEZENET_V2_NOPOOL = StemCase(
+    case_id="squeezenodule-v2-2d-no-pool",
+    make_model=lambda: _squeezenet_v2_model("v1", [4, 8]),
+    make_original=lambda: _squeezenet_original(96, 7, 2, False),
+    input_shape=(64, 64, 1),
+    expected_output_shape=(29, 29, 96),
+)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -892,6 +1051,13 @@ CASES = [
     RAD_SAME,
     MOBILENET_V3,
     MOBILENET_V4,
+    SQUEEZENET_V1_0,
+    SQUEEZENET_V1_0_NOPOOL,
+    SQUEEZENET_V1_1,
+    SQUEEZENET_V1_1_NOPOOL,
+    SQUEEZENET_V1_STRIDE1_SAME,
+    SQUEEZENET_V2,
+    SQUEEZENET_V2_NOPOOL,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -923,6 +1089,8 @@ BUILT_STEM_ROWS = [
     ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
     ("mobilenet-v3", _mobilenet_v3_model, (32, 32, 3)),
     ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
+    ("squeezenet-v1", lambda: _squeezenet_v1_model("1.0"), (64, 64, 3)),
+    ("squeezenodule-v2", lambda: _squeezenet_v2_model("v2"), (64, 64, 1)),
 ]
 
 
