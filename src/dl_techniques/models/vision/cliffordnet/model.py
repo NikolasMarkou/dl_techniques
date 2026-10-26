@@ -315,8 +315,9 @@ class CliffordNet(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # A real bool only: `bool(...)` would accept `CliffordNet(10, 64, ...)`
-        # style misbinding (64, [1, 1]) that the old second slot let through.
+        # A bool or numpy.bool_ only: plain `bool(...)` coercion would accept the
+        # `CliffordNet(10, 64, ...)` style misbinding (64, [1, 1]) that the old
+        # second slot let through.
         include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(

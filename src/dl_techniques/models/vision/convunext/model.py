@@ -113,8 +113,9 @@ class ConvUNextStem(keras.layers.Layer):
         (e.g. ``LeakyReLU(0.1)``). Defaults to ``'gelu'``. Pass ``'linear'`` for a
         stem with no activation. The inner :class:`ConvStem` rebuilds a Layer
         instance from its config, so the Layer must be unbuilt (hold no weights)
-        and serializable, i.e. its class must be locatable by name (registered
-        with ``keras.saving.register_keras_serializable``). A built Layer that
+        and serializable, i.e. its class must be locatable by name (a Keras
+        built-in such as ``PReLU``, or a class registered with
+        ``keras.saving.register_keras_serializable``). A built Layer that
         already holds weights, or a class Keras cannot locate, raises
         ``ValueError`` at construction.
     :type activation: str or callable or keras.layers.Layer

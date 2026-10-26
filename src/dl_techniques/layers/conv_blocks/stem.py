@@ -539,6 +539,7 @@ class ConvStem(keras.layers.Layer):
                 "conv2_filters": self.conv2_filters,
                 "normalization_type": self.normalization_type,
                 "normalization_kwargs": self.normalization_kwargs,
+                # DECISION plan-2026-10-26T125959-7af851e5/D-020: the raw utils serializer, so an exact (D-277) callable is written as the function and reloads exact; `activations.common.serialize_activation` would write it back as the stock string.
                 "activation_type": serialize_activation(self.activation_type),
                 "activation_kwargs": self.activation_kwargs,
                 "final_activation": self.final_activation,

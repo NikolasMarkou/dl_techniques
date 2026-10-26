@@ -241,8 +241,8 @@ class HierarchicalCliffordNet(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # A real bool only: `bool(...)` would accept `(10, [1, 1])` style
-        # misbinding that the old second slot let through.
+        # A bool or numpy.bool_ only: plain `bool(...)` coercion would accept the
+        # `(10, [1, 1])` style misbinding that the old second slot let through.
         include_top = coerce_include_top(include_top)
         depths = list(stage_depths) if stage_depths is not None else list(_DEFAULT_STAGE_DEPTHS)
         if include_top and num_classes <= 0:
