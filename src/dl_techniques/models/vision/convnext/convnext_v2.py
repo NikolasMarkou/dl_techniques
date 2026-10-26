@@ -418,9 +418,6 @@ class ConvNeXtV2(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem",
         )
-        # Keep aliases so existing references to stem_conv / stem_norm keep working.
-        self.stem_conv = self.stem.conv1
-        self.stem_norm = self.stem.norm1
 
     def _build_downsample_layer(self, stage_idx: int) -> None:
         """Build and assign the LayerNorm + strided convolution before a stage.
@@ -570,8 +567,7 @@ class ConvNeXtV2(keras.Model):
             ``(batch_size, H', W', dims[-1])``.
         :rtype: keras.KerasTensor
         """
-        x = self.stem_conv(inputs)
-        x = self.stem_norm(x)
+        x = self.stem(inputs, training=training)
 
         for stage_idx, stage_blocks in enumerate(self.stages_list):
             if stage_idx > 0:
@@ -861,8 +857,7 @@ class ConvNeXtV2(keras.Model):
         current_shape = input_shape
 
         # 1. Stem
-        current_shape = self.stem_conv.compute_output_shape(current_shape)
-        current_shape = self.stem_norm.compute_output_shape(current_shape)
+        current_shape = self.stem.compute_output_shape(current_shape)
 
         # 2. Stages
         for i in range(len(self.depths)):

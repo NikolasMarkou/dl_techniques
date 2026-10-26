@@ -60,12 +60,15 @@ from dl_techniques.layers.activations.exact_activations import (
 )
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
 from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+from dl_techniques.models.vision.rad_convnet.model import RADConvNet
 from dl_techniques.models.vision.resnet.model import ResNet
 from tests.numerics import true_float32_matmul
 
@@ -659,6 +662,113 @@ CONVUNEXT_BATCH_NORM = _convunext_case(
     True,
 )
 
+# ---------------------------------------------------------------------
+# ConvNeXt V1, ConvNeXt V2 and RADConvNet
+# ---------------------------------------------------------------------
+
+# Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/convnext/convnext_v1.py``
+# (``_build_stem``), ``convnext_v2.py`` and ``rad_convnet/model.py``. A Conv2D
+# patchify (kernel = stride = ``strides``; padding ``"same"`` at stride 1 and
+# ``"valid"`` above it, the D-125 rule) followed by a ``LayerNormalization``
+# with epsilon 1e-6, ``center=use_bias``, ``scale=True``. No activation, no
+# pool. The ConvNeXt convs also took the model's ``kernel_regularizer``; RAD's
+# took none. LayerNormalization ignores ``training``, so the original calling
+# it without one is not a difference.
+
+_CONVNEXT_DIMS = [8, 16]
+_CONVNEXT_KERNEL_REG = 1e-4
+
+
+def _convnext_family_original(
+    strides: int, use_bias: bool, regularized: bool
+) -> Original:
+    """The pre-migration ConvNeXt / RAD patchify stem, as literals."""
+    conv = keras.layers.Conv2D(
+        filters=_CONVNEXT_DIMS[0],
+        kernel_size=strides,
+        strides=strides,
+        padding="same" if strides == 1 else "valid",
+        use_bias=use_bias,
+        kernel_initializer={
+            "class_name": "TruncatedNormal",
+            "config": {"mean": 0.0, "stddev": 0.02},
+        },
+        kernel_regularizer=(
+            keras.regularizers.L2(_CONVNEXT_KERNEL_REG) if regularized else None
+        ),
+        name="stem_conv",
+    )
+    norm = keras.layers.LayerNormalization(
+        epsilon=1e-6, center=use_bias, scale=True, name="stem_norm"
+    )
+
+    def forward(x, training):
+        return norm(conv(x))
+
+    return Original(sublayers={"conv1": conv, "norm1": norm}, forward=forward)
+
+
+def _convnext_family_model(
+    model_class, strides: int, use_bias: bool
+) -> keras.Model:
+    kwargs = dict(
+        depths=[1, 1],
+        dims=_CONVNEXT_DIMS,
+        num_classes=4,
+        include_top=False,
+        strides=strides,
+        use_bias=use_bias,
+    )
+    if model_class is not RADConvNet:
+        kwargs["kernel_regularizer"] = keras.regularizers.L2(_CONVNEXT_KERNEL_REG)
+    return model_class(**kwargs)
+
+
+def _convnext_family_case(
+    case_id: str,
+    model_class,
+    strides: int,
+    use_bias: bool,
+    spatial: int,
+    output_spatial: int,
+) -> StemCase:
+    regularized = model_class is not RADConvNet
+    return StemCase(
+        case_id=case_id,
+        make_model=lambda: _convnext_family_model(model_class, strides, use_bias),
+        make_original=lambda: _convnext_family_original(
+            strides, use_bias, regularized
+        ),
+        input_shape=(spatial, spatial, 3),
+        expected_output_shape=(output_spatial, output_spatial, _CONVNEXT_DIMS[0]),
+    )
+
+
+# Stride 4, valid; divisible input 32 -> 8, and 30 -> 7 where "same" would give 8.
+CONVNEXT_V1_VALID = _convnext_family_case(
+    "convnext-v1-stride4-valid", ConvNeXtV1, 4, True, 32, 8
+)
+CONVNEXT_V1_VALID_NONDIVISIBLE = _convnext_family_case(
+    "convnext-v1-stride4-valid-nondivisible", ConvNeXtV1, 4, True, 30, 7
+)
+CONVNEXT_V1_SAME_NOBIAS = _convnext_family_case(
+    "convnext-v1-stride1-same-no-bias", ConvNeXtV1, 1, False, 8, 8
+)
+CONVNEXT_V2_VALID = _convnext_family_case(
+    "convnext-v2-stride4-valid", ConvNeXtV2, 4, True, 32, 8
+)
+CONVNEXT_V2_VALID_NONDIVISIBLE_NOBIAS = _convnext_family_case(
+    "convnext-v2-stride4-valid-nondivisible-no-bias", ConvNeXtV2, 4, False, 30, 7
+)
+CONVNEXT_V2_SAME = _convnext_family_case(
+    "convnext-v2-stride1-same", ConvNeXtV2, 1, True, 8, 8
+)
+RAD_VALID = _convnext_family_case("rad-stride4-valid", RADConvNet, 4, True, 32, 8)
+RAD_VALID_NONDIVISIBLE_NOBIAS = _convnext_family_case(
+    "rad-stride4-valid-nondivisible-no-bias", RADConvNet, 4, False, 30, 7
+)
+RAD_SAME = _convnext_family_case("rad-stride1-same", RADConvNet, 1, True, 8, 8)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -678,6 +788,15 @@ CASES = [
     CONVUNEXT_LEAKY_RELU_INSTANCE,
     CONVUNEXT_LINEAR,
     CONVUNEXT_BATCH_NORM,
+    CONVNEXT_V1_VALID,
+    CONVNEXT_V1_VALID_NONDIVISIBLE,
+    CONVNEXT_V1_SAME_NOBIAS,
+    CONVNEXT_V2_VALID,
+    CONVNEXT_V2_VALID_NONDIVISIBLE_NOBIAS,
+    CONVNEXT_V2_SAME,
+    RAD_VALID,
+    RAD_VALID_NONDIVISIBLE_NOBIAS,
+    RAD_SAME,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -696,6 +815,17 @@ BUILT_STEM_ROWS = [
         lambda: _convunext_model("global_response_norm", "gelu", False),
         (16, 16, 3),
     ),
+    (
+        "convnext-v1",
+        lambda: _convnext_family_model(ConvNeXtV1, 4, True),
+        (32, 32, 3),
+    ),
+    (
+        "convnext-v2",
+        lambda: _convnext_family_model(ConvNeXtV2, 4, True),
+        (32, 32, 3),
+    ),
+    ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
 ]
 
 

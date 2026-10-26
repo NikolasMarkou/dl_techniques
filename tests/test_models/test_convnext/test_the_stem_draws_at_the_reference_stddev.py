@@ -21,7 +21,7 @@ _REFERENCE_STDDEV = 0.02
 
 
 def _convs(model):
-    yield "stem_conv", model.stem_conv
+    yield "stem_conv", model.stem.conv1
     for norm_layer, conv_layer in model.downsample_layers_list:
         yield conv_layer.name, conv_layer
 

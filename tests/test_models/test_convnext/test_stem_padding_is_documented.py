@@ -28,12 +28,12 @@ class TestStemPadding:
     def test_stride_gt_1_uses_valid(self, cls):
         model = cls(strides=4, **TINY)
         model.build((None, 30, 30, 3))
-        assert model.stem_conv.padding == "valid"
+        assert model.stem.conv1.padding == "valid"
 
     def test_stride_1_uses_same(self, cls):
         model = cls(strides=1, **TINY)
         model.build((None, 30, 30, 3))
-        assert model.stem_conv.padding == "same"
+        assert model.stem.conv1.padding == "same"
 
     def test_the_two_paddings_agree_on_a_divisible_input(self, cls):
         """Why the rule is harmless where it is exercised: 32 is divisible by 4."""

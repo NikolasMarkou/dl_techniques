@@ -46,7 +46,8 @@ class RADConvNet(keras.Model):
     projects. Height and width should divide by ``strides * 2 ** (stages - 1)``,
     since the stem convolution uses valid padding for any stride above 1.
 
-    Architecture:
+    Architecture (``stem`` is a :class:`ConvStem`, so ``stem.conv1`` and
+    ``stem.norm1`` are its layers):
 
     .. code-block:: text
 
@@ -54,12 +55,12 @@ class RADConvNet(keras.Model):
                  │
                  ▼
         ┌───────────────────────┐
-        │ stem_conv  S x S / S  │
+        │ stem.conv1  S x S / S │
         └───────────────────────┘
                  │
                  ▼
         ┌───────────────────────┐
-        │ stem_norm             │
+        │ stem.norm1            │
         └───────────────────────┘
                  │  [B, H/S, W/S, dims[0]]
                  ▼
@@ -297,9 +298,6 @@ class RADConvNet(keras.Model):
             kernel_initializer=self.STEM_INITIALIZER,
             name="stem",
         )
-        # Keep aliases so existing references to stem_conv / stem_norm keep working.
-        self.stem_conv = self.stem.conv1
-        self.stem_norm = self.stem.norm1
 
     def _build_downsample_layer(self, stage_idx: int) -> None:
         """Build the LayerNorm + strided-conv downsample feeding ``stage_idx``.
@@ -407,13 +405,12 @@ class RADConvNet(keras.Model):
         :param inputs: ``(batch_size, height, width, channels)`` input.
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode. Reaches the
-            block dropout only.
+            block dropout and the stem, whose LayerNorm ignores it.
         :type training: Optional[bool]
         :return: Output tensor; shape per the class docstring.
         :rtype: keras.KerasTensor
         """
-        x = self.stem_conv(inputs)
-        x = self.stem_norm(x)
+        x = self.stem(inputs, training=training)
 
         for stage_idx, stage_blocks in enumerate(self.stages_list):
             if stage_idx > 0:
@@ -450,8 +447,7 @@ class RADConvNet(keras.Model):
         :rtype: tuple
         """
         current_shape = input_shape
-        current_shape = self.stem_conv.compute_output_shape(current_shape)
-        current_shape = self.stem_norm.compute_output_shape(current_shape)
+        current_shape = self.stem.compute_output_shape(current_shape)
 
         for stage_idx in range(len(self.depths)):
             if stage_idx > 0:
