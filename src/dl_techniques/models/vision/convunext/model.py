@@ -108,10 +108,16 @@ class ConvUNextStem(keras.layers.Layer):
     :type filters: int
     :param kernel_size: Spatial size of the convolution kernel. Defaults to 7.
     :type kernel_size: int or tuple of 2 ints
-    :param activation: Activation applied after the normalization. May be a string
-        or a ``keras.layers.Layer`` instance (e.g. ``LeakyReLU(0.1)``). Defaults to
-        ``'gelu'``. Pass ``'linear'`` for a stem with no activation.
-    :type activation: str or keras.layers.Layer
+    :param activation: Activation applied after the normalization. May be a string,
+        a callable registered with Keras, or a ``keras.layers.Layer`` instance
+        (e.g. ``LeakyReLU(0.1)``). Defaults to ``'gelu'``. Pass ``'linear'`` for a
+        stem with no activation. The inner :class:`ConvStem` rebuilds a Layer
+        instance from its config, so the Layer must be unbuilt (hold no weights)
+        and serializable, i.e. its class must be locatable by name (registered
+        with ``keras.saving.register_keras_serializable``). A built Layer that
+        already holds weights, or a class Keras cannot locate, raises
+        ``ValueError`` at construction.
+    :type activation: str or callable or keras.layers.Layer
     :param use_bias: Whether the stem convolution allocates a bias vector. Defaults
         to ``True``. Bias-free / Miyasawa denoisers pass ``False``, since degree-1
         homogeneity requires a zero additive offset.
@@ -126,7 +132,11 @@ class ConvUNextStem(keras.layers.Layer):
     :type kernel_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for the convolution kernel.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
-    :param kwargs: Additional arguments forwarded to ``keras.layers.Layer``.
+    :param kwargs: Additional arguments forwarded to ``keras.layers.Layer``. A
+        ``dtype`` policy given here is passed on to the inner :class:`ConvStem`,
+        so the convolution, normalization and activation compute in it too.
+    :raises ValueError: If ``activation`` is a built Layer holding weights or a
+        Layer whose class Keras cannot locate.
     """
 
     def __init__(
@@ -163,6 +173,7 @@ class ConvUNextStem(keras.layers.Layer):
             use_pooling=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            dtype=self.dtype_policy,
             name='stem',
         )
 
