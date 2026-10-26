@@ -36,7 +36,7 @@ References:
 """
 
 import keras
-from typing import List, Tuple, Optional, Dict, Any, Sequence
+from typing import Tuple, Optional, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -232,7 +232,7 @@ class MobileNetV4(keras.Model):
 
         self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        self._build_stem()
+        self.stem = self._build_stem()
 
         self.stages = []
         for stage_idx in range(len(self.depths)):
@@ -251,9 +251,7 @@ class MobileNetV4(keras.Model):
         :param training: Passed to batch norm and dropout.
         :return: Logits, or the 4-D feature map if `include_top=False`.
         """
-        x = self.stem_conv(x)
-        x = self.stem_bn(x, training=training)
-        x = self.stem_activation(x)
+        x = self.stem(x, training=training)
 
         for stage_layers in self.stages:
             for layer in stage_layers:
@@ -264,9 +262,12 @@ class MobileNetV4(keras.Model):
 
         return x
 
-    def _build_stem(self):
-        """Build the stem's conv, batch norm, and activation layers via :class:`ConvStem`."""
-        self.stem = ConvStem(
+    def _build_stem(self) -> ConvStem:
+        """Build the stem: conv, batch norm and ReLU in one :class:`ConvStem`.
+
+        :return: The unbuilt stem, named ``stem``.
+        """
+        return ConvStem(
             filters=self.actual_dims[0],
             kernel_size=self.STEM_KERNEL_SIZE,
             strides=self.STEM_STRIDE,
@@ -467,9 +468,7 @@ class MobileNetV4(keras.Model):
         current_shape = input_shape
 
         # Stem
-        current_shape = self.stem_conv.compute_output_shape(current_shape)
-        current_shape = self.stem_bn.compute_output_shape(current_shape)
-        current_shape = self.stem_activation.compute_output_shape(current_shape)
+        current_shape = self.stem.compute_output_shape(current_shape)
 
         # Stages
         for stage_layers in self.stages:

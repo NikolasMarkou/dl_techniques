@@ -93,7 +93,7 @@ class TestMobileNetV3:
 
         # Check stem convolution
         expected_stem_filters = make_divisible(16 * multiplier)
-        assert model.stem_conv.filters == expected_stem_filters
+        assert model.stem.conv1.filters == expected_stem_filters
 
         # Check a specific block's output channels (e.g., first block of Large)
         expected_block0_out = make_divisible(16 * multiplier)

@@ -54,6 +54,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.activations import create_activation_layer
+from dl_techniques.layers.activations.hard_swish import HardSwish
 from dl_techniques.layers.activations.exact_activations import (
     exact_gelu,
     exact_leaky_relu,
@@ -68,6 +69,8 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
 from dl_techniques.models.vision.resnet.model import ResNet
 from tests.numerics import true_float32_matmul
@@ -769,6 +772,96 @@ RAD_VALID_NONDIVISIBLE_NOBIAS = _convnext_family_case(
 )
 RAD_SAME = _convnext_family_case("rad-stride1-same", RADConvNet, 1, True, 8, 8)
 
+# ---------------------------------------------------------------------
+# MobileNetV3 and MobileNetV4
+# ---------------------------------------------------------------------
+
+# Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/mobilenet/mobilenet_v3.py``
+# (``__init__``) and ``mobilenet_v4.py`` (``_build_stem``). A 3x3 stride-2
+# ``same`` bias-free Conv2D with the model's L2 kernel regularizer, then
+# ``BatchNormalization(momentum=0.99, epsilon=1e-3)`` (TF Model Garden's
+# MobileNet backbone, D-111 of plan-2026-08-22T035419-a11304c8), then
+# ``HardSwish`` (V3) or ``ReLU`` (V4); no pool. The momentum and epsilon are
+# written as literals here, not read from ``mobilenet.common``. The V3 stem is
+# 16 channels at every width; the V4 stem is ``dims[0]``. Each activation was a
+# separate layer in the original, and is one in ``ConvStem``, so the op
+# sequence is identical and the comparison stays at ``rtol=0, atol=0``.
+
+_MOBILENET_KERNEL_REG = 1e-4
+_MOBILENET_V4_STEM_FILTERS = 24
+
+
+def _mobilenet_original(
+    filters: int, kernel_initializer, activation_layer
+) -> Original:
+    """The pre-migration MobileNetV3 / V4 stem, as literals."""
+    conv = keras.layers.Conv2D(
+        filters,
+        kernel_size=3,
+        strides=2,
+        padding="same",
+        use_bias=False,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
+        name="stem_conv",
+    )
+    norm = keras.layers.BatchNormalization(
+        momentum=0.99, epsilon=1e-3, name="stem_bn"
+    )
+
+    def forward(x, training):
+        x = conv(x)
+        x = norm(x, training=training)
+        return activation_layer(x)
+
+    return Original(
+        sublayers={"conv1": conv, "norm1": norm, "activation1": activation_layer},
+        forward=forward,
+    )
+
+
+def _mobilenet_v3_model() -> MobileNetV3:
+    return MobileNetV3(
+        variant="small",
+        num_classes=4,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        weight_decay=_MOBILENET_KERNEL_REG,
+    )
+
+
+def _mobilenet_v4_model() -> MobileNetV4:
+    return MobileNetV4(
+        num_classes=4,
+        depths=[1, 1],
+        dims=[_MOBILENET_V4_STEM_FILTERS, 32],
+        block_types=["IB", "IB"],
+        strides=[1, 2],
+        include_top=False,
+        input_shape=(32, 32, 3),
+        weight_decay=_MOBILENET_KERNEL_REG,
+    )
+
+
+MOBILENET_V3 = StemCase(
+    case_id="mobilenet-v3-hard-swish",
+    make_model=_mobilenet_v3_model,
+    make_original=lambda: _mobilenet_original(
+        16, "glorot_uniform", HardSwish(name="stem_hard_swish")
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, 16),
+)
+MOBILENET_V4 = StemCase(
+    case_id="mobilenet-v4-relu",
+    make_model=_mobilenet_v4_model,
+    make_original=lambda: _mobilenet_original(
+        _MOBILENET_V4_STEM_FILTERS, "he_normal", keras.layers.ReLU(name="stem_relu")
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, _MOBILENET_V4_STEM_FILTERS),
+)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -797,6 +890,8 @@ CASES = [
     RAD_VALID,
     RAD_VALID_NONDIVISIBLE_NOBIAS,
     RAD_SAME,
+    MOBILENET_V3,
+    MOBILENET_V4,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -826,6 +921,8 @@ BUILT_STEM_ROWS = [
         (32, 32, 3),
     ),
     ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
+    ("mobilenet-v3", _mobilenet_v3_model, (32, 32, 3)),
+    ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
 ]
 
 
@@ -1014,6 +1111,42 @@ def test_every_migrated_model_builds_its_stem(make_model, input_shape):
     ]
     assert unbuilt == [], f"unbuilt sub-layers of the stem: {unbuilt}"
     assert len(model.stem.weights) > 0
+
+
+# ---------------------------------------------------------------------
+# MobileNet V3 / V4 report the shape they run
+# ---------------------------------------------------------------------
+
+_MOBILENET_MODELS = [
+    ("mobilenet-v3", _mobilenet_v3_model),
+    ("mobilenet-v4", _mobilenet_v4_model),
+]
+
+
+@pytest.mark.parametrize(
+    "make_model",
+    [m for _, m in _MOBILENET_MODELS],
+    ids=[i for i, _ in _MOBILENET_MODELS],
+)
+def test_a_mobilenet_reports_the_shape_it_runs(make_model):
+    """``compute_output_shape`` and a symbolic call agree with the eager forward.
+
+    HEAD's MobileNetV3 and V4 read ``stem_conv`` / ``stem_bn`` /
+    ``stem_activation`` in ``compute_output_shape`` after the stem became
+    ``self.stem``; V4's ``call`` read them too. Keras uses a model's
+    ``compute_output_shape`` for a symbolic call, so both paths raised
+    ``AttributeError`` while every test that only ran the eager V3 forward
+    stayed green.
+    """
+    model = make_model()
+    batch = np.zeros((1, 32, 32, 3), "float32")
+    eager = model(batch, training=False)
+
+    reported = model.compute_output_shape((None, 32, 32, 3))
+    assert tuple(reported) == (None,) + tuple(eager.shape[1:])
+
+    symbolic = model(keras.Input(shape=(32, 32, 3)))
+    assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
 
 
 # ---------------------------------------------------------------------

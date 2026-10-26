@@ -234,7 +234,6 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name='stem',
         )
-        # Keep no aliases — call() uses self.stem directly.
 
         self.blocks = []
         in_channels = first_filter
@@ -432,9 +431,7 @@ class MobileNetV3(keras.Model):
         current_shape = input_shape
 
         # Stem
-        current_shape = self.stem_conv.compute_output_shape(current_shape)
-        current_shape = self.stem_bn.compute_output_shape(current_shape)
-        current_shape = self.stem_activation.compute_output_shape(current_shape)
+        current_shape = self.stem.compute_output_shape(current_shape)
 
         # Blocks
         for block in self.blocks:
