@@ -172,6 +172,8 @@ Final Capsules
 -   **Purpose**: A custom loss function designed for capsule lengths.
 -   **Functionality**: It penalizes the model if the correct class's capsule is too short (length < 0.9) or if any incorrect class's capsule is too long (length > 0.1). This enforces a clear margin between the "winning" capsule and all others.
 
+![](capsnet_forward_architecture.png)
+
 ---
 
 ## 5. Quick Start Guide

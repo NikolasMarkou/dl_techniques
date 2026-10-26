@@ -119,11 +119,13 @@ class CBAMNet(keras.Model):
 
     :param num_classes: Number of output classes. Only used if `include_top` is True. Must be positive.
     :type num_classes: int
-    :param dims: Channel dimensions for each stage; each entry creates one Conv-BN-CBAM-Pool stage. Must be non-empty with all positive values. Defaults to ``[64, 128]``.
+    :param dims: Channel dimensions for each stage; each entry creates one Conv-BN-CBAM-Pool stage.
+        Must be non-empty with all positive values. Defaults to ``[64, 128]``.
     :type dims: Optional[List[int]]
     :param attention_ratio: Reduction ratio for the channel-attention MLP in each CBAM block. Must be positive.
     :type attention_ratio: int
-    :param attention_kernel_size: Kernel size for the spatial-attention convolution in each CBAM block. Checked here for positivity; oddness is left to ``CBAM``.
+    :param attention_kernel_size: Kernel size for the spatial-attention convolution in each CBAM block.
+        Checked here for positivity; oddness is left to ``CBAM``.
     :type attention_kernel_size: int
     :param kernel_initializer: Initializer for the stage Conv2D kernels and
         the head's classifier kernel.
@@ -133,20 +135,26 @@ class CBAMNet(keras.Model):
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param include_top: Whether to include the classification head. If False, returns the final stage's feature maps.
     :type include_top: bool
-    :param input_shape: Input shape excluding the batch dimension, e.g. ``(height, width, channels)``. Recorded for serialization and used as the shape of ``from_variant``'s warm-up call; it does not build the model, which is built on the first real call.
+    :param input_shape: Input shape excluding the batch dimension, e.g. ``(height, width, channels)``.
+        Recorded for serialization and used as the shape of ``from_variant``'s warm-up call;
+        it does not build the model, which is built on the first real call.
     :type input_shape: Optional[Tuple[int, ...]]
     :param kwargs: Additional keyword arguments for `keras.Model` (e.g. `name`).
     :ivar stages: One list of layers per stage (Conv2D, BatchNormalization, CBAM, MaxPooling2D).
     :vartype stages: List[List[keras.layers.Layer]]
     :ivar head: ``[classification_head]``, the one ``ClassificationHead``. Empty if `include_top` is False.
     :vartype head: List[keras.layers.Layer]
-    :raises ValueError: If `num_classes` is not positive when `include_top` is True, if `dims` is empty or non-positive, if `attention_ratio` is not positive, or if `attention_kernel_size` is not positive.
+    :raises ValueError: If `num_classes` is not positive when `include_top` is True,
+        if `dims` is empty or non-positive,
+        if `attention_ratio` is not positive,
+        or if `attention_kernel_size` is not positive.
 
     Input shape:
         4D tensor, shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        2D logits tensor ``(batch_size, num_classes)`` if `include_top` is True, otherwise 4D tensor ``(batch_size, H', W', dims[-1])``.
+        2D logits tensor ``(batch_size, num_classes)``
+        if `include_top` is True, otherwise 4D tensor ``(batch_size, H', W', dims[-1])``.
 
     Example:
         .. code-block:: python
