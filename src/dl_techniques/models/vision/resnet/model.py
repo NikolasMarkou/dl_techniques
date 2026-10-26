@@ -50,8 +50,6 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
 from dl_techniques.layers.conv_blocks.stem import ConvStem
@@ -388,15 +386,12 @@ class ResNet(keras.Model):
             use_pooling=_use_pooling,
             pool_type="max",
             pool_size=3,
+            pool_strides=2,
+            pool_padding="same",
             kernel_initializer="he_normal",
             kernel_regularizer=self.kernel_regularizer,
             name="stem",
         )
-        # Keep aliases so existing references to stem_conv / stem_bn / stem_act / stem_pool keep working.
-        self.stem_conv = self.stem.conv1
-        self.stem_bn = self.stem.norm1
-        self.stem_act = self.stem.activation1
-        self.stem_pool = self.stem.pool
 
     def _build_stage(self, stage_idx: int) -> None:
         """Build one residual stage's blocks.
@@ -522,11 +517,7 @@ class ResNet(keras.Model):
             with deep supervision, the logits list
             `[final_output, stage3, stage2, stage1]`.
         """
-        x = self.stem_conv(inputs)
-        x = self.stem_bn(x, training=training)
-        x = self.stem_act(x)
-        if self.stem_pool is not None:
-            x = self.stem_pool(x)
+        x = self.stem(inputs, training=training)
 
         stage_features = []
         for stage_blocks in self.stages:

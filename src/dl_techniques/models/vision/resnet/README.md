@@ -368,9 +368,9 @@ and for long runs mixup or cutout. Weight decay belongs in the optimizer **or** 
 
 ## 11. Fine-Tuning Strategies
 
-**Route 1 (recommended): staged unfreezing.** Layer names are `stem_conv`/`stem_bn`/`stem_act`,
-`stageN_blockM`, `global_avg_pool` and `classifier`, so grouping `model.layers` by prefix is a
-one-liner. Freeze the early groups, train, then unfreeze and re-compile at a lower learning
+**Route 1 (recommended): staged unfreezing.** `model.layers` is `stem` (one `ConvStem` layer whose
+sub-layers are `stem_conv1`/`stem_norm1`/`stem_act1`/`stem_pool`), `stageN_blockM` and
+`classification_head`, so grouping `model.layers` by prefix is a one-liner. Freeze the early groups, train, then unfreeze and re-compile at a lower learning
 rate. Section 8 Example 1 runs this.
 
 **Route 2: two optimizers over disjoint variable sets** in a custom training loop. This

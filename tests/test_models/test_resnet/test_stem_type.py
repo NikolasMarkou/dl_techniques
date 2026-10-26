@@ -40,7 +40,7 @@ the stem geometry:
   stride (2, 2)``
 - ``test_from_variant_forwards_the_stem_type``:: ``assert (7, 7) == (3, 3)``
 
-Injection 2, ``self.stem_pool`` built for BOTH stems (only the conv made
+Injection 2, ``self.stem.pool`` built for BOTH stems (only the conv made
 conditional) -> **4 failed, 3 passed**:
 
 - ``test_the_cifar_stem_has_no_pooling_layer_at_all``::
@@ -142,6 +142,12 @@ def _resnet18(stem_type=None, **kwargs) -> ResNet:
     )
 
 
+_PRE_KNOB_STEM_PATHS = (
+    ("stem/stem_conv1/", "stem_conv/"),
+    ("stem/stem_norm1/", "stem_bn/"),
+)
+
+
 def _weight_shape_signature(model: ResNet) -> tuple:
     """(name, shape) per weight, captured AFTER a forward pass.
 
@@ -161,6 +167,15 @@ def _weight_shape_signature(model: ResNet) -> tuple:
     def normalize_name(path: str) -> str:
         # Remove the model instance name prefix
         name = path.split("/", 1)[-1]
+        # The stem is a ConvStem layer since 20b48aba6, so its weights live at
+        # `stem/stem_conv1/...` and `stem/stem_norm1/...` where the pre-knob
+        # model had `stem_conv/...` and `stem_bn/...`. Only these two prefixes
+        # are renamed back: the golden pins the weight tree's SHAPES and its
+        # layout below the stem, and the stem's own path is a naming change
+        # (plan-2026-10-26-7af851e5 A-12), not a structural one. Measured: with
+        # this mapping the signature digest equals the golden unchanged.
+        for nested, flat in _PRE_KNOB_STEM_PATHS:
+            name = name.replace(nested, flat, 1)
         # Normalize layer name suffixes like `_1`, `_2`, `_1_`, `_2_` to empty string
         # This handles Keras auto-naming for layers created multiple times
         # Apply repeatedly to handle cases like `_2_dense` -> `_dense` -> `dense`
@@ -238,8 +253,8 @@ def test_the_imagenet_stem_reproduces_the_pre_knob_model_exactly(
     assert signature_digest == PRE_KNOB_WEIGHT_SIGNATURE_SHA256, (
         f"the default weight-shape signature no longer matches the pre-knob "
         f"model: {signature_digest} != {PRE_KNOB_WEIGHT_SIGNATURE_SHA256}. "
-        f"stem_conv is {default_model.stem_conv.kernel_size} stride "
-        f"{default_model.stem_conv.strides}; pre-knob it was (7, 7) stride "
+        f"stem_conv is {default_model.stem.conv1.kernel_size} stride "
+        f"{default_model.stem.conv1.strides}; pre-knob it was (7, 7) stride "
         f"(2, 2)."
     )
 
@@ -298,13 +313,13 @@ def test_the_cifar_stem_conv_is_3x3_stride_1():
     """The stem convolution itself, not only its downstream shape."""
     model = _resnet18("cifar")
     assert (
-        model.stem_conv.kernel_size == (3, 3) and model.stem_conv.strides == (1, 1)
+        model.stem.conv1.kernel_size == (3, 3) and model.stem.conv1.strides == (1, 1)
     ), (
         f"the cifar stem conv must be 3x3 stride 1, got kernel "
-        f"{model.stem_conv.kernel_size[0]} stride {model.stem_conv.strides}"
+        f"{model.stem.conv1.kernel_size[0]} stride {model.stem.conv1.strides}"
     )
     # D-041: BOTH stems take their width from filters_per_stage[0].
-    assert model.stem_conv.filters == model.filters_per_stage[0]
+    assert model.stem.conv1.filters == model.filters_per_stage[0]
 
 
 # --- (c) direct layout assertion, not shape parity --------------------------
@@ -321,9 +336,9 @@ def test_the_cifar_stem_has_no_pooling_layer_at_all():
     cifar = _resnet18("cifar")
     cifar(_images(), training=False)
 
-    assert cifar.stem_pool is None, (
+    assert cifar.stem.pool is None, (
         f"stem_type='cifar' must not build a stem_pool at all; found "
-        f"{cifar.stem_pool}"
+        f"{cifar.stem.pool}"
     )
     tracked = [layer.name for layer in cifar._flatten_layers(include_self=False)]
     assert "stem_pool" not in tracked, (
@@ -334,7 +349,7 @@ def test_the_cifar_stem_has_no_pooling_layer_at_all():
     # above are not satisfied by a model that has no sub-layers at all.
     imagenet = _resnet18("imagenet")
     imagenet(_images(), training=False)
-    assert imagenet.stem_pool is not None
+    assert imagenet.stem.pool is not None
     assert "stem_pool" in [
         layer.name for layer in imagenet._flatten_layers(include_self=False)
     ]
@@ -359,7 +374,7 @@ def test_the_stem_type_survives_a_keras_round_trip(tmp_path):
         f"stem_type did not survive get_config(); the reloaded model reports "
         f"{loaded.stem_type!r}"
     )
-    assert loaded.stem_pool is None
+    assert loaded.stem.pool is None
 
     after = keras.ops.convert_to_numpy(loaded(images, training=False))
     # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant, test_round_trip.py:41)
@@ -378,8 +393,8 @@ def test_from_variant_forwards_the_stem_type():
         "resnet18", num_classes=10, input_shape=INPUT_SHAPE, stem_type="cifar"
     )
     assert model.stem_type == "cifar"
-    assert model.stem_pool is None
-    assert model.stem_conv.kernel_size == (3, 3)
+    assert model.stem.pool is None
+    assert model.stem.conv1.kernel_size == (3, 3)
 
     default_variant = ResNet.from_variant(
         "resnet18", num_classes=10, input_shape=INPUT_SHAPE

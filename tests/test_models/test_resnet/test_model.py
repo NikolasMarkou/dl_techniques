@@ -80,9 +80,9 @@ class TestResNetNormKwargsDefault:
         assert model.normalization_kwargs == {"momentum": 0.99}
 
     def test_default_off_stem_bn_factory_call(self):
-        """stem_bn was created with no extra kwargs — get_config('name') == 'stem_bn'."""
+        """The stem norm was created with no extra kwargs — its name is 'stem_norm1'."""
         model = _small_resnet18()
-        assert model.stem_bn.name == "stem_bn"
+        assert model.stem.norm1.name == "stem_norm1"
 
     def test_default_off_blocks_receive_the_resolved_kwargs(self):
         """Every block gets the SAME resolved dict the stem does — the
@@ -121,8 +121,8 @@ class TestResNetNormKwargsRmsNoScale:
             normalization_type="rms_norm",
             normalization_kwargs={"use_scale": False},
         )
-        assert getattr(model.stem_bn, "use_scale", None) is False
-        assert getattr(model.stem_bn, "gamma", None) is None
+        assert getattr(model.stem.norm1, "use_scale", None) is False
+        assert getattr(model.stem.norm1, "gamma", None) is None
 
     def test_basic_block_internal_norms_use_scale_false(self):
         model = _small_resnet18(

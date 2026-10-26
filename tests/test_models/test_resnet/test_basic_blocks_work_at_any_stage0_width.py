@@ -69,8 +69,8 @@ def test_the_stem_emits_the_requested_stage0_width(block_type, stage0):
     property a "fix" that merely forced `use_projection=True` would NOT have.
     """
     model = _model(block_type, stage0)
-    assert model.stem_conv.filters == stage0, (
-        f"stem emits {model.stem_conv.filters} channels for "
+    assert model.stem.conv1.filters == stage0, (
+        f"stem emits {model.stem.conv1.filters} channels for "
         f"filters_per_stage[0]={stage0}"
     )
 
@@ -91,7 +91,7 @@ class TestShippedVariantsAreUnaffected:
         model = ResNet.from_variant(variant, num_classes=3,
                                     input_shape=INPUT_SHAPE)
         assert model.filters_per_stage[0] == 64
-        assert model.stem_conv.filters == 64, (
+        assert model.stem.conv1.filters == 64, (
             "a shipped variant's stem width has moved; every existing "
             "checkpoint's stem kernel shape depends on this"
         )

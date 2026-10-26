@@ -131,9 +131,9 @@ def test_the_stem_still_honours_the_requested_stage0_width(stage0, stem_type):
     regression that fired only when the supervision heads exist.
     """
     model = _model(stage0, stem_type)
-    assert model.stem_conv.filters == stage0, (
+    assert model.stem.conv1.filters == stage0, (
         f"stage-0 width {stage0} requested, stem emits "
-        f"{model.stem_conv.filters} -- the pre-D-041 literal is back and the "
+        f"{model.stem.conv1.filters} -- the pre-D-041 literal is back and the "
         "identity shortcut cannot hold"
     )
 
