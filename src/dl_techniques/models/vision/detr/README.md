@@ -95,6 +95,10 @@ Output dictionary:
 | `pred_boxes` | `(B, num_queries, 4)` | sigmoid, so `[0, 1]`. Nothing here interprets the four numbers; the paper's convention is `cxcywh` and your loss decides |
 | `aux_outputs` | list of `num_decoder_layers - 1` dicts | present only when `aux_loss=True` |
 
+![DETR](detr_model_architecture.png)
+
+![DETR Transformer](detr_transformer_encoder_decoder.png)
+
 ## 5. Quick Start Guide
 
 `create_detr` builds the paper's configuration: a `keras.applications.ResNet50` backbone with

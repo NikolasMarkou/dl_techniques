@@ -322,20 +322,20 @@ class DETR(models.Model):
         │  frozen)     │                 │
         └──────┬───────┘                 │
                ▼                         ▼ (nearest-downsample to feature grid)
-        ┌──────────────┐         ┌───────────────┐
+        ┌──────────────┐         ┌────────────────┐
         │ 1x1 Conv     │         │ keep mask [B,S]│
         │ → hidden_dim │         └───────┬────────┘
         └──────┬───────┘                 │
                ├─────────────────────────┤
                ▼                         ▼
         ┌────────────────────────────────────┐
-        │ pos_embed: PositionEmbeddingSine2D  │  (computed on the projected
-        │ (on the projected feature map)      │   feature map, not the image)
-        └──────────────────┬───────────────────┘
+        │ pos_embed: PositionEmbeddingSine2D │  (computed on the projected
+        │ (on the projected feature map)     │   feature map, not the image)
+        └──────────────────┬─────────────────┘
                            ▼
         ┌────────────────────────────────────┐
-        │ DetrTransformer                     │
-        └──────────────────┬───────────────────┘
+        │ DetrTransformer                    │
+        └──────────────────┬─────────────────┘
                            ▼
               per-decoder-layer outputs
                     │              │
