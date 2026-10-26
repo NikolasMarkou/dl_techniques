@@ -45,6 +45,7 @@ from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
@@ -149,44 +150,35 @@ class ConvUNextStem(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # The sub-layers need the input shape, so build() creates them.
-        self.conv = None
-        self.norm = None
-        self.activation_layer = None
+        # The ConvStem sub-layer is created in build() once the input shape is known.
+        self._conv_stem: Optional[ConvStem] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the stem sub-layers.
+        """Build the stem sub-layers via :class:`ConvStem`.
 
         :param input_shape: Shape of the input tensor ``(batch, H, W, C)``.
         :type input_shape: tuple of int or None
         """
-        self.conv = keras.layers.Conv2D(
+        _activation = substitute_exact(self.activation_name)
+        self._conv_stem = ConvStem(
             filters=self.filters,
             kernel_size=self.kernel_size,
+            strides=1,
             padding='same',
             use_bias=self.use_bias,
+            num_convs=1,
+            normalization_type=self.stem_normalization,
+            activation_type=_activation,
+            use_pooling=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name='stem_conv'
+            name='stem',
         )
-
-        # The factory keeps both arms expressible from one string argument.
-        self.norm = create_normalization_layer(
-            self.stem_normalization,
-            name='stem_norm'
-        )
-
-        # Explicit builds, because lazy auto-build drops sub-layer state on reload.
-        self.conv.build(input_shape)
-        conv_output_shape = self.conv.compute_output_shape(input_shape)
-        self.norm.build(conv_output_shape)
-
-        # Normalization keeps the shape, so the activation takes conv_output_shape.
-        self.activation_layer = keras.layers.Activation(
-            substitute_exact(self.activation_name), name='stem_activation'
-        )  # D-277: float64-exact, bit-identical to stock at float32
-        self.activation_layer.build(conv_output_shape)
-
+        self._conv_stem.build(input_shape)
+        # Keep aliases for external references.
+        self.conv = self._conv_stem.conv1
+        self.norm = self._conv_stem.norm1
+        self.activation_layer = self._conv_stem.activation1
         super().build(input_shape)
 
     def call(
@@ -198,16 +190,13 @@ class ConvUNextStem(keras.layers.Layer):
 
         :param inputs: Input tensor of shape ``(batch, H, W, C)``.
         :type inputs: keras.KerasTensor
-        :param training: Accepted for API symmetry. None of the three sub-layers
+        :param training: Accepted for API symmetry. None of the sub-layers
             receives it, and none of them behaves differently in training.
         :type training: bool or None
         :return: Output tensor of shape ``(batch, H, W, filters)``.
         :rtype: keras.KerasTensor
         """
-        x = self.conv(inputs)
-        x = self.norm(x)
-        x = self.activation_layer(x)
-        return x
+        return self._conv_stem(inputs, training=training)
 
     def compute_output_shape(
             self,

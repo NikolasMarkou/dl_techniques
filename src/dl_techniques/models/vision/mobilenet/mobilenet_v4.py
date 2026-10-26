@@ -45,6 +45,7 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,
@@ -231,7 +232,7 @@ class MobileNetV4(keras.Model):
 
         self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        self.stem_conv, self.stem_bn, self.stem_activation = self._build_stem()
+        self._build_stem()
 
         self.stages = []
         for stage_idx in range(len(self.depths)):
@@ -264,24 +265,25 @@ class MobileNetV4(keras.Model):
         return x
 
     def _build_stem(self):
-        """Build the stem's conv, batch norm, and activation layers."""
-        stem_conv = keras.layers.Conv2D(
+        """Build the stem's conv, batch norm, and activation layers via :class:`ConvStem`."""
+        self.stem = ConvStem(
             filters=self.actual_dims[0],
             kernel_size=self.STEM_KERNEL_SIZE,
             strides=self.STEM_STRIDE,
             padding='same',
             use_bias=False,
+            num_convs=1,
+            normalization_type='batch_norm',
+            normalization_kwargs={
+                'momentum': REFERENCE_BN_MOMENTUM,
+                'epsilon': REFERENCE_BN_EPSILON,
+            },
+            activation_type='relu',
+            use_pooling=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="stem_conv"
+            name='stem',
         )
-        stem_bn = keras.layers.BatchNormalization(
-            momentum=REFERENCE_BN_MOMENTUM,
-            epsilon=REFERENCE_BN_EPSILON,
-            name="stem_bn",
-        )
-        stem_activation = keras.layers.ReLU(name="stem_relu")
-        return stem_conv, stem_bn, stem_activation
 
     def _build_stage(self, stage_idx: int):
         """Build the UIB blocks, and optional Mobile MQA, for one stage.

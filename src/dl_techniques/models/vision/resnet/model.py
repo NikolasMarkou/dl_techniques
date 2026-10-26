@@ -54,6 +54,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.model_build import materialize_sublayers
@@ -363,7 +364,7 @@ class ResNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the initial convolution stem.
+        """Build the initial convolution stem via :class:`ConvStem`.
 
         Both stem variants take their width from `filters_per_stage[0]`,
         not a literal 64, so a `basic`-block model can run at any stage-0
@@ -373,31 +374,29 @@ class ResNet(keras.Model):
         # A basic block's stage-0 shortcut is unconditionally identity, so a mismatched stem width raised a forward-pass error 2 frames deep. See decisions.md.
         # DECISION plan-2026-08-23T203721-009b7ccf/D-019: stem_type='cifar' must stay a literal single-conv/no-pool alternative, never derived from input_shape.
         # An input-shape-derived stride would silently change the weight tree of every small-input checkpoint; 'imagenet' stays the bit-identical default. See decisions.md (this is a different plan's D-019 than _build_supervision_heads').
-        self.stem_conv = keras.layers.Conv2D(
+        _use_pooling = self.stem_type == "imagenet"
+        self.stem = ConvStem(
             filters=self.filters_per_stage[0],
             kernel_size=7 if self.stem_type == "imagenet" else 3,
             strides=2 if self.stem_type == "imagenet" else 1,
             padding="same",
             use_bias=False,
+            num_convs=1,
+            normalization_type=self.normalization_type,
+            normalization_kwargs=dict(self.normalization_kwargs),
+            activation_type=self.activation_type,
+            use_pooling=_use_pooling,
+            pool_type="max",
+            pool_size=3,
             kernel_initializer="he_normal",
             kernel_regularizer=self.kernel_regularizer,
-            name="stem_conv"
+            name="stem",
         )
-        self.stem_bn = create_normalization_layer(
-            self.normalization_type,
-            name="stem_bn",
-            **self.normalization_kwargs,
-        )
-        self.stem_act = create_activation_layer(
-            self.activation_type,
-            name="stem_act"
-        )
-        self.stem_pool = keras.layers.MaxPooling2D(
-            pool_size=3,
-            strides=2,
-            padding="same",
-            name="stem_pool"
-        ) if self.stem_type == "imagenet" else None
+        # Keep aliases so existing references to stem_conv / stem_bn / stem_act / stem_pool keep working.
+        self.stem_conv = self.stem.conv1
+        self.stem_bn = self.stem.norm1
+        self.stem_act = self.stem.activation1
+        self.stem_pool = self.stem.pool
 
     def _build_stage(self, stage_idx: int) -> None:
         """Build one residual stage's blocks.

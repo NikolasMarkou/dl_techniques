@@ -49,6 +49,7 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.layers.activations.hard_swish import HardSwish
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
@@ -215,22 +216,25 @@ class MobileNetV3(keras.Model):
 
         # Keras Applications' stem is Conv2D(16) at every alpha.
         first_filter = 16
-        self.stem_conv = keras.layers.Conv2D(
-            first_filter,
+        self.stem = ConvStem(
+            filters=first_filter,
             kernel_size=3,
             strides=2,
             padding='same',
             use_bias=False,
+            num_convs=1,
+            normalization_type='batch_norm',
+            normalization_kwargs={
+                'momentum': REFERENCE_BN_MOMENTUM,
+                'epsilon': REFERENCE_BN_EPSILON,
+            },
+            activation_type='hard_swish',
+            use_pooling=False,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
-            name="stem_conv"
+            name='stem',
         )
-        self.stem_bn = keras.layers.BatchNormalization(
-            momentum=REFERENCE_BN_MOMENTUM,
-            epsilon=REFERENCE_BN_EPSILON,
-            name="stem_bn",
-        )
-        self.stem_activation = HardSwish(name="stem_hard_swish")
+        # Keep no aliases — call() uses self.stem directly.
 
         self.blocks = []
         in_channels = first_filter
@@ -348,9 +352,7 @@ class MobileNetV3(keras.Model):
         :param training: Passed to batch norm and dropout.
         :return: Logits, or the 4-D feature map if `include_top=False`.
         """
-        x = self.stem_conv(x)
-        x = self.stem_bn(x, training=training)
-        x = self.stem_activation(x)
+        x = self.stem(x, training=training)
 
         for block in self.blocks:
             x = block(x, training=training)

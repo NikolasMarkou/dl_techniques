@@ -47,6 +47,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -290,7 +291,7 @@ class CliffordNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the patch-embedding layers for the configured ``patch_size``.
+        """Build the patch-embedding layers via :class:`ConvStem`.
 
         Sizes 1, 2 and 4 get their own stems and anything else falls back to a
         single conv whose kernel and stride both equal ``patch_size``. See the
@@ -299,83 +300,85 @@ class CliffordNet(keras.Model):
         :return: Nothing.
         :rtype: None
         """
-        _conv_kw: Dict[str, Any] = dict(
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-        )
-
         if self.patch_size == 1:
-            self.stem_conv1 = keras.layers.Conv2D(
+            # Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
+            self.stem = ConvStem(
                 filters=self.channels // 2,
+                conv2_filters=self.channels,
                 kernel_size=3,
                 strides=1,
                 padding="same",
                 use_bias=False,
-                name="stem_conv1",
-                **_conv_kw,
-            )
-            self.stem_bn1 = keras.layers.BatchNormalization(
-                name="stem_bn1", momentum=_STEM_BN_MOMENTUM
-            )
-            self.stem_conv2 = keras.layers.Conv2D(
-                filters=self.channels,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=False,
-                name="stem_conv2",
-                **_conv_kw,
+                num_convs=2,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                activation_type="silu",
+                final_activation=False,
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
         elif self.patch_size == 2:
-            self.stem_conv = keras.layers.Conv2D(
+            # Conv(D, stride=2) → BN(momentum=0.9)
+            self.stem = ConvStem(
                 filters=self.channels,
                 kernel_size=3,
                 strides=2,
                 padding="same",
                 use_bias=self.use_bias,
-                name="stem_conv",
-                **_conv_kw,
+                num_convs=1,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                activation_type="linear",
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
         elif self.patch_size == 4:
-            # Two stride-2 convs reach 4x, rather than one stride-4 kernel.
-            self.stem_conv1 = keras.layers.Conv2D(
+            # Two stride-2 convs: Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
+            self.stem = ConvStem(
                 filters=self.channels // 2,
+                conv2_filters=self.channels,
                 kernel_size=3,
                 strides=2,
                 padding="same",
                 use_bias=False,
-                name="stem_conv1",
-                **_conv_kw,
-            )
-            self.stem_bn1 = keras.layers.BatchNormalization(
-                name="stem_bn1", momentum=_STEM_BN_MOMENTUM
-            )
-            self.stem_conv2 = keras.layers.Conv2D(
-                filters=self.channels,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=False,
-                name="stem_conv2",
-                **_conv_kw,
+                num_convs=2,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                activation_type="silu",
+                final_activation=False,
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
         else:
-            self.stem_conv = keras.layers.Conv2D(
+            # Single conv: Conv(D, patch_size, stride=patch_size) → BN(momentum=0.9)
+            self.stem = ConvStem(
                 filters=self.channels,
                 kernel_size=self.patch_size,
                 strides=self.patch_size,
                 padding="same",
                 use_bias=self.use_bias,
-                name="stem_conv",
-                **_conv_kw,
+                num_convs=1,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                activation_type="linear",
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
 
-        # Every stem variant ends here, matching GeometricStem.norm.
-        self.stem_norm = keras.layers.BatchNormalization(
-            name="stem_norm", momentum=_STEM_BN_MOMENTUM
-        )
+        # Keep aliases so existing references to stem_conv / stem_bn / stem_conv2 / stem_norm keep working.
+        self.stem_conv1 = self.stem.conv1
+        self.stem_conv2 = self.stem.conv2
+        self.stem_conv = self.stem.conv1
+        self.stem_bn1 = self.stem.norm1
+        self.stem_norm = self.stem.norm2 if self.stem.norm2 is not None else self.stem.norm1
 
     def _build_blocks(self) -> None:
         """Build the block list, pairing each block with its drop-path gate.
@@ -478,24 +481,13 @@ class CliffordNet(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool],
     ) -> keras.KerasTensor:
-        """Apply the patch embedding stem.
-
-        The two-conv stems (``patch_size`` 1 and 4) put a batch norm and a SiLU
-        between their convolutions; the others go straight to ``stem_norm``.
+        """Apply the patch embedding stem via :class:`ConvStem`.
 
         :param inputs: Raw image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode (affects BatchNorm).
         :return: Embedded feature map ``(B, h, w, channels)``.
         """
-        if self.patch_size in (1, 4):
-            x = keras.activations.silu(
-                self.stem_bn1(self.stem_conv1(inputs), training=training)
-            )
-            x = self.stem_conv2(x)
-        else:
-            x = self.stem_conv(inputs)
-
-        return self.stem_norm(x, training=training)
+        return self.stem(inputs, training=training)
 
     def call(
         self,

@@ -58,6 +58,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -278,32 +279,55 @@ class HierarchicalCliffordNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the stem for the configured ``patch_size``, emitting ``stage_dims[0]``.
+        """Build the stem via :class:`ConvStem`, emitting ``stage_dims[0]``.
 
         :return: Nothing.
         :rtype: None
         """
         width = self.stage_dims[0]
         if self.patch_size == 1:
-            self.stem_conv1 = keras.layers.Conv2D(
-                filters=width // 2, kernel_size=3, strides=1, padding="same",
-                use_bias=False, name="stem_conv1", **self._conv_kwargs(),
-            )
-            self.stem_bn1 = keras.layers.BatchNormalization(
-                name="stem_bn1", momentum=_BN_MOMENTUM
-            )
-            self.stem_conv2 = keras.layers.Conv2D(
-                filters=width, kernel_size=3, strides=1, padding="same",
-                use_bias=False, name="stem_conv2", **self._conv_kwargs(),
+            # Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
+            self.stem = ConvStem(
+                filters=width // 2,
+                conv2_filters=width,
+                kernel_size=3,
+                strides=1,
+                padding="same",
+                use_bias=False,
+                num_convs=2,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _BN_MOMENTUM},
+                activation_type="silu",
+                final_activation=False,
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
         else:
-            self.stem_conv = keras.layers.Conv2D(
-                filters=width, kernel_size=3, strides=2, padding="same",
-                use_bias=self.use_bias, name="stem_conv", **self._conv_kwargs(),
+            # Conv(D, stride=2) → BN(momentum=0.9)
+            self.stem = ConvStem(
+                filters=width,
+                kernel_size=3,
+                strides=2,
+                padding="same",
+                use_bias=self.use_bias,
+                num_convs=1,
+                normalization_type="batch_norm",
+                normalization_kwargs={"momentum": _BN_MOMENTUM},
+                activation_type="linear",
+                use_pooling=False,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
-        self.stem_norm = keras.layers.BatchNormalization(
-            name="stem_norm", momentum=_BN_MOMENTUM
-        )
+
+        # Keep aliases so existing references keep working.
+        self.stem_conv1 = self.stem.conv1
+        self.stem_conv2 = self.stem.conv2
+        self.stem_conv = self.stem.conv1
+        self.stem_bn1 = self.stem.norm1
+        self.stem_norm = self.stem.norm2 if self.stem.norm2 is not None else self.stem.norm1
 
     def _build_blocks(self) -> None:
         """Build every block with its drop-path gate, in one flat list.
@@ -435,20 +459,13 @@ class HierarchicalCliffordNet(keras.Model):
     def _apply_stem(
         self, inputs: keras.KerasTensor, training: Optional[bool]
     ) -> keras.KerasTensor:
-        """Apply the stem.
+        """Apply the stem via :class:`ConvStem`.
 
         :param inputs: Raw image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode (batch norm).
         :return: Embedded feature map ``(B, H/p, W/p, stage_dims[0])``.
         """
-        if self.patch_size == 1:
-            x = keras.activations.silu(
-                self.stem_bn1(self.stem_conv1(inputs), training=training)
-            )
-            x = self.stem_conv2(x)
-        else:
-            x = self.stem_conv(inputs)
-        return self.stem_norm(x, training=training)
+        return self.stem(inputs, training=training)
 
     def _downsample(
         self, index: int, x: keras.KerasTensor, training: Optional[bool]

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -125,13 +126,22 @@ class UcaEncoder(keras.layers.Layer):
         self.use_bias = use_bias
         self.embed_dim = dims[-1]
 
-        self.stem = keras.layers.Conv2D(
-            filters=dims[0], kernel_size=4, strides=4, padding="valid",
-            use_bias=use_bias, name="stem",
+        self.stem = ConvStem(
+            filters=dims[0],
+            kernel_size=4,
+            strides=4,
+            padding="valid",
+            use_bias=use_bias,
+            num_convs=1,
+            normalization_type=normalization_type,
+            normalization_kwargs={"epsilon": norm_epsilon},
+            activation_type="linear",
+            use_pooling=False,
+            name="stem",
         )
-        self.stem_norm = create_normalization_layer(
-            normalization_type, epsilon=norm_epsilon, name="stem_norm"
-        )
+        # Keep aliases so existing references to stem_conv / stem_norm keep working.
+        self.stem_conv = self.stem.conv1
+        self.stem_norm = self.stem.norm1
 
         self.merges: List[keras.layers.Layer] = []
         self.merge_norms: List[keras.layers.Layer] = []
@@ -224,7 +234,7 @@ class UcaEncoder(keras.layers.Layer):
         shape: Tuple[Optional[int], ...] = input_shape
         self.stem.build(shape)
         shape = self.stem.compute_output_shape(shape)
-        self.stem_norm.build(shape)
+        # stem_norm is an alias for stem.norm1, already built by ConvStem.build().
         for s in range(len(self.stage_dims)):
             if s > 0:
                 self.merges[s - 1].build(shape)

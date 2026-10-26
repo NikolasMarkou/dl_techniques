@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.rad_conv import RADConv2D
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -273,23 +274,32 @@ class RADConvNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the patchify stem: strided conv + LayerNorm.
+        """Build the patchify stem via :class:`ConvStem`: strided conv + LayerNorm.
 
         Padding is valid for any stride above 1, so the stem divides the input
         rather than padding it.
         """
-        self.stem_conv = keras.layers.Conv2D(
+        self.stem = ConvStem(
             filters=self.dims[0],
             kernel_size=self.strides,
             strides=self.strides,
             padding="same" if self.strides == 1 else "valid",
             use_bias=self.use_bias,
+            num_convs=1,
+            normalization_type="layer_norm",
+            normalization_kwargs={
+                "epsilon": self.LAYERNORM_EPSILON,
+                "center": self.use_bias,
+                "scale": True,
+            },
+            activation_type="linear",
+            use_pooling=False,
             kernel_initializer=self.STEM_INITIALIZER,
-            name="stem_conv",
+            name="stem",
         )
-        self.stem_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON, center=self.use_bias, scale=True, name="stem_norm"
-        )
+        # Keep aliases so existing references to stem_conv / stem_norm keep working.
+        self.stem_conv = self.stem.conv1
+        self.stem_norm = self.stem.norm1
 
     def _build_downsample_layer(self, stage_idx: int) -> None:
         """Build the LayerNorm + strided-conv downsample feeding ``stage_idx``.

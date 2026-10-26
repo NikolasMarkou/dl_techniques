@@ -37,6 +37,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.regularization.stochastic_gradient import StochasticGradient
 from dl_techniques.utils.activation_serialization import (
@@ -390,32 +391,36 @@ class ConvNeXtV2(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build and assign the patchify stem.
+        """Build and assign the patchify stem via :class:`ConvStem`.
 
         A ``strides x strides`` convolution at stride ``strides`` followed by
         LayerNorm. The padding rule is deliberately NOT the downsample layers'
         unconditional ``"same"``; see the D-125 anchor in the body.
         """
-        stem_kernel_size = self.strides
-        stem_stride = self.strides
-        self.stem_conv = keras.layers.Conv2D(
+        self.stem = ConvStem(
             filters=self.dims[0],
-            kernel_size=stem_kernel_size,
-            strides=stem_stride,
+            kernel_size=self.strides,
+            strides=self.strides,
             # DECISION plan-2026-08-19T163559-499b6f0e/D-125: not the unconditional
             # "same" the downsample layers use — "same" here would silently shift the spatial geometry of checkpoints trained at a non-divisible input size. See decisions.md.
-            padding="same" if stem_stride == 1 else "valid",
+            padding="same" if self.strides == 1 else "valid",
             use_bias=self.use_bias,
+            num_convs=1,
+            normalization_type="layer_norm",
+            normalization_kwargs={
+                "epsilon": self.LAYERNORM_EPSILON,
+                "center": self.use_bias,
+                "scale": True,
+            },
+            activation_type="linear",
+            use_pooling=False,
             kernel_initializer=self.STEM_INITIALIZER,
             kernel_regularizer=self.kernel_regularizer,
-            name="stem_conv"
+            name="stem",
         )
-        self.stem_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON,
-            center=self.use_bias,
-            scale=True,
-            name="stem_norm"
-        )
+        # Keep aliases so existing references to stem_conv / stem_norm keep working.
+        self.stem_conv = self.stem.conv1
+        self.stem_norm = self.stem.norm1
 
     def _build_downsample_layer(self, stage_idx: int) -> None:
         """Build and assign the LayerNorm + strided convolution before a stage.
