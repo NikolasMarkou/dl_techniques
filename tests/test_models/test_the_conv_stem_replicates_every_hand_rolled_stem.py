@@ -54,14 +54,23 @@ Planted controls prove the harness can see each defect class it exists for:
 a wrong pool, a wrong epsilon and a norm applied twice are each handed to the
 SAME comparison and the comparison must FAIL.
 
-Three guards cover what the weight transplant cannot see (D-014):
+Four guards cover what the weight transplant cannot see (D-014, D-020):
 
 * ``assert_stem_settings_match_original``: the transplant overwrites every
   weight, so a dropped or wrong kernel/bias initializer is invisible to it. The
   serialized initializers (``seed`` ignored, so D-005's independent ``conv2``
   draw is not flagged) and regularizers of each original conv are compared with
-  the stem's. A case whose model has a non-default initializer knob is built
-  with a non-default value, or a dropped one would fall back to an equal default.
+  the stem's. That comparison is only as sharp as the value the model is built
+  with: a model whose knob default equals ConvStem's (MobileNetV3's
+  ``glorot_uniform``) would pass with a dropped passthrough.
+* ``INITIALIZER_AUDIT`` and ``assert_initializer_audit``: one row per model
+  class saying how its initializer reaches the stem (a knob built with a value
+  that is neither the model's default nor ConvStem's, a hardcoded literal, a
+  knob the stem does not read, or no knob at all) with the reason where nothing
+  can be made non-default. The audit is checked against each model's real
+  constructor signature, so a model that gains or loses a knob forces the table
+  to change. What it does NOT cover: normalization gamma/beta/moving-statistic
+  initializers and norm regularizers (no migrated model sets a non-default one).
 * ``test_every_migrated_model_applies_its_stem_exactly_once``: the stem is
   compared in isolation, so a model that applies it (or a layer of it) again in
   its own ``call`` is invisible; the calls of each stem layer in one forward are
@@ -70,6 +79,7 @@ Three guards cover what the weight transplant cannot see (D-014):
 """
 
 import contextlib
+import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Optional, Tuple
 
@@ -691,6 +701,9 @@ UCA_ENCODER_NOBIAS = StemCase(
 _CONVUNEXT_FILTERS = 16
 _CONVUNEXT_KERNEL = 5
 _CONVUNEXT_KERNEL_REG = 1e-4
+#: Not ConvUNextStem's default (``he_normal``) and not ConvStem's
+#: (``glorot_uniform``): the original took the layer's ``kernel_initializer``.
+_CONVUNEXT_KERNEL_INIT = "he_uniform"
 
 
 def _convunext_original(
@@ -701,7 +714,7 @@ def _convunext_original(
         kernel_size=_CONVUNEXT_KERNEL,
         padding="same",
         use_bias=use_bias,
-        kernel_initializer="he_normal",
+        kernel_initializer=_CONVUNEXT_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
         name="stem_conv",
     )
@@ -729,6 +742,7 @@ def _convunext_model(
         activation=activation,
         use_bias=use_bias,
         stem_normalization=norm_type,
+        kernel_initializer=_CONVUNEXT_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
     )
 
@@ -932,6 +946,13 @@ RAD_SAME = _convnext_family_case("rad-stride1-same", RADConvNet, 1, True, 8, 8)
 
 _MOBILENET_KERNEL_REG = 1e-4
 _MOBILENET_V4_STEM_FILTERS = 24
+#: The models' ``kernel_initializer`` knobs, each built with a value that is
+#: neither the model's default (V3 ``glorot_uniform``, V4 ``he_normal``) nor
+#: ConvStem's (``glorot_uniform``): V3's default IS ConvStem's, so with it a
+#: stem that dropped the argument was indistinguishable from a correct one
+#: (pass-2 WARNING 1, reproduced with a real mutation).
+_MOBILENET_V3_KERNEL_INIT = "he_uniform"
+_MOBILENET_V4_KERNEL_INIT = "lecun_normal"
 
 
 def _mobilenet_original(
@@ -970,6 +991,7 @@ def _mobilenet_v3_model() -> MobileNetV3:
         include_top=False,
         input_shape=(32, 32, 3),
         weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_initializer=_MOBILENET_V3_KERNEL_INIT,
     )
 
 
@@ -983,6 +1005,7 @@ def _mobilenet_v4_model() -> MobileNetV4:
         include_top=False,
         input_shape=(32, 32, 3),
         weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_initializer=_MOBILENET_V4_KERNEL_INIT,
     )
 
 
@@ -990,7 +1013,7 @@ MOBILENET_V3 = StemCase(
     case_id="mobilenet-v3-hard-swish",
     make_model=_mobilenet_v3_model,
     make_original=lambda: _mobilenet_original(
-        16, "glorot_uniform", HardSwish(name="stem_hard_swish")
+        16, _MOBILENET_V3_KERNEL_INIT, HardSwish(name="stem_hard_swish")
     ),
     input_shape=(32, 32, 3),
     expected_output_shape=(16, 16, 16),
@@ -999,7 +1022,9 @@ MOBILENET_V4 = StemCase(
     case_id="mobilenet-v4-relu",
     make_model=_mobilenet_v4_model,
     make_original=lambda: _mobilenet_original(
-        _MOBILENET_V4_STEM_FILTERS, "he_normal", keras.layers.ReLU(name="stem_relu")
+        _MOBILENET_V4_STEM_FILTERS,
+        _MOBILENET_V4_KERNEL_INIT,
+        keras.layers.ReLU(name="stem_relu"),
     ),
     input_shape=(32, 32, 3),
     expected_output_shape=(16, 16, _MOBILENET_V4_STEM_FILTERS),
@@ -1021,6 +1046,11 @@ MOBILENET_V4 = StemCase(
 # ``rtol=0, atol=0``.
 
 _SQUEEZE_KERNEL_REG = 1e-4
+#: The models' ``kernel_initializer`` knob initializes the Fire blocks only; the
+#: stem uses ``STEM_INITIALIZER`` (``lecun_uniform``). The models are built with
+#: a knob value that differs from both, so a stem that started reading the knob
+#: is seen.
+_SQUEEZE_BLOCK_KERNEL_INIT = "he_uniform"
 
 
 def _squeezenet_original(
@@ -1064,6 +1094,7 @@ def _squeezenet_v1_model(variant: str, pool_indices=None) -> SqueezeNetV1:
         variant_config=config,
         include_top=False,
         input_shape=(64, 64, 3),
+        kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
     )
 
@@ -1077,6 +1108,7 @@ def _squeezenet_v2_model(variant: str, pool_indices=None) -> SqueezeNoduleNetV2:
         variant_config=config,
         include_top=False,
         input_shape=(64, 64, 1),
+        kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
     )
 
@@ -1123,6 +1155,7 @@ SQUEEZENET_V1_STRIDE1_SAME = StemCase(
         },
         include_top=False,
         input_shape=(64, 64, 3),
+        kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
     ),
     make_original=lambda: _squeezenet_original(64, 3, 1, True),
@@ -1159,6 +1192,8 @@ SQUEEZENET_V2_NOPOOL = StemCase(
 # ``vae.get_layer("encoder_stem")``.
 _VAE_FILTERS = 8
 _VAE_KERNEL_REG = 1e-4
+#: Not the VAE's default (``he_normal``) and not ConvStem's (``glorot_uniform``).
+_VAE_KERNEL_INIT = "lecun_normal"
 
 
 def _vae_original(
@@ -1170,7 +1205,7 @@ def _vae_original(
         strides=1,
         padding="same",
         use_bias=use_bias,
-        kernel_initializer="he_normal",
+        kernel_initializer=_VAE_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
         name="encoder_stem_conv",
     )
@@ -1204,6 +1239,7 @@ def _vae_model(use_batch_norm: bool, use_bias: bool, activation) -> VAE:
         depths=2,
         steps_per_depth=1,
         filters=[_VAE_FILTERS, 16],
+        kernel_initializer=_VAE_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
         use_batch_norm=use_batch_norm,
         use_bias=use_bias,
@@ -1440,6 +1476,153 @@ def _model_stem(model) -> ConvStem:
 
 
 # ---------------------------------------------------------------------
+# Initializer audit: how each model's initializer knob reaches its stem
+# ---------------------------------------------------------------------
+
+# D-020 (pass-2 WARNING 1). ``assert_stem_settings_match_original`` compares the
+# stem's initializer with the original's, so it can only see a dropped
+# passthrough when the model is built with a value ConvStem would NOT fall back
+# to. MobileNetV3's knob defaults to ``glorot_uniform``, which is ConvStem's own
+# default: built at its default, a stem without ``kernel_initializer=`` passed
+# the check. Statuses:
+#
+# * ``knob``: the model has a ``kernel_initializer`` constructor parameter that
+#   reaches the stem. The harness builds it with a value that differs from the
+#   parameter's default AND from ConvStem's default, and the original literal is
+#   that value. (Models with a ``bias_initializer`` parameter: the same.)
+# * ``knob-not-forwarded``: the parameter exists but the stem deliberately does
+#   not read it (the stem has its own constant). The model is built with a
+#   different knob value, and the stem must keep the constant.
+# * ``hardcoded``: no parameter; the stem call writes a literal that is not
+#   ConvStem's default. The original literal is the expectation.
+# * ``default-no-knob``: no parameter, and the original used the Keras default,
+#   which IS ConvStem's default, so nothing can be made non-default. The reason
+#   is the model has no initializer to forward.
+INITIALIZER_AUDIT = {
+    "ResNet": ("hardcoded", "he_normal literal in the stem call"),
+    "CliffordNet": (
+        "knob",
+        "kernel TruncatedNormal(0.02), bias Constant(0.25), L2 kernel and bias",
+    ),
+    "HierarchicalCliffordNet": (
+        "knob",
+        "kernel TruncatedNormal(0.02), bias Constant(0.25), L2 kernel and bias",
+    ),
+    "UcaEncoder": (
+        "default-no-knob",
+        "no initializer or regularizer parameter; the original Conv2D took "
+        "Keras' glorot_uniform, which is ConvStem's default",
+    ),
+    "ConvUNextStem": ("knob", "he_uniform (default he_normal)"),
+    "ConvNeXtV1": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
+    "ConvNeXtV2": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
+    "RADConvNet": ("hardcoded", "STEM_INITIALIZER 'truncated_normal'"),
+    "MobileNetV3": ("knob", "he_uniform (default glorot_uniform = ConvStem's)"),
+    "MobileNetV4": ("knob", "lecun_normal (default he_normal)"),
+    "SqueezeNetV1": (
+        "knob-not-forwarded",
+        "knob he_uniform reaches the Fire blocks; the stem keeps lecun_uniform",
+    ),
+    "SqueezeNoduleNetV2": (
+        "knob-not-forwarded",
+        "knob he_uniform reaches the Fire blocks; the stem keeps lecun_uniform",
+    ),
+    "VAE": ("knob", "lecun_normal (default he_normal)"),
+    "CliffordRBFProtoNet": (
+        "default-no-knob",
+        "no initializer parameter; the original Conv2D took Keras' "
+        "glorot_uniform / zeros, which are ConvStem's defaults",
+    ),
+}
+
+_REGULARIZER_KNOBS = {
+    "kernel_regularizer": ("kernel_regularizer", "weight_decay"),
+    "bias_regularizer": ("bias_regularizer",),
+}
+
+
+def _knob_default(cls, knob: str) -> dict:
+    """The seed-free signature of ``cls.__init__``'s default for ``knob``."""
+    default = inspect.signature(cls.__init__).parameters[knob].default
+    return _initializer_signature(keras.initializers.get(default))
+
+
+def assert_initializer_audit(
+    case: StemCase, model=None, audit: Optional[dict] = None
+) -> None:
+    """Assert the case's model is built so a dropped initializer is visible.
+
+    Interface contract: raises ``AssertionError`` naming the case and the rule
+    on any violation (never another type). ``model`` defaults to a fresh
+    ``case.make_model()``; ``audit`` defaults to ``INITIALIZER_AUDIT``. Builds
+    nothing beyond the model and mutates nothing.
+    """
+    audit = INITIALIZER_AUDIT if audit is None else audit
+    model = case.make_model() if model is None else model
+    name = type(model).__name__
+    assert name in audit, f"{case.case_id}: {name} has no INITIALIZER_AUDIT row"
+    status, _ = audit[name]
+    params = inspect.signature(type(model).__init__).parameters
+    has_knob = "kernel_initializer" in params
+    assert has_knob == (status in ("knob", "knob-not-forwarded")), (
+        f"{case.case_id}: the audit says {name} is {status!r} but its constructor "
+        f"{'has' if has_knob else 'has no'} kernel_initializer parameter"
+    )
+
+    want = _conv_settings(case.make_original().sublayers["conv1"])
+    stem_default = {
+        knob: _knob_default(ConvStem, knob)
+        for knob in ("kernel_initializer", "bias_initializer")
+    }
+
+    if status == "hardcoded":
+        assert want["kernel_initializer"] != stem_default["kernel_initializer"], (
+            f"{case.case_id}: a hardcoded initializer equal to ConvStem's default "
+            f"({want['kernel_initializer']['class_name']}) is invisible when dropped"
+        )
+    elif status == "default-no-knob":
+        assert want["kernel_initializer"] == stem_default["kernel_initializer"]
+    else:
+        value = _initializer_signature(
+            keras.initializers.get(model.kernel_initializer)
+        )
+        assert value != _knob_default(type(model), "kernel_initializer"), (
+            f"{case.case_id}: built with {name}'s own default kernel_initializer"
+        )
+        assert value != stem_default["kernel_initializer"], (
+            f"{case.case_id}: built with ConvStem's default kernel_initializer "
+            f"({value['class_name']}); a stem that dropped the argument would pass"
+        )
+        if status == "knob":
+            assert want["kernel_initializer"] == value, (
+                f"{case.case_id}: the original literal "
+                f"{want['kernel_initializer']['class_name']} is not the knob value "
+                f"{value['class_name']}"
+            )
+        else:
+            assert want["kernel_initializer"] != value, (
+                f"{case.case_id}: the knob value reaches a stem the audit says "
+                f"does not read it"
+            )
+            assert want["kernel_initializer"] != stem_default["kernel_initializer"]
+
+    if "bias_initializer" in params:
+        value = _initializer_signature(
+            keras.initializers.get(model.bias_initializer)
+        )
+        assert value != _knob_default(type(model), "bias_initializer")
+        assert value != stem_default["bias_initializer"], (
+            f"{case.case_id}: built with ConvStem's default bias_initializer"
+        )
+        assert want["bias_initializer"] == value
+    else:
+        assert want["bias_initializer"] == stem_default["bias_initializer"], (
+            f"{case.case_id}: {name} has no bias_initializer parameter yet the "
+            f"original used {want['bias_initializer']['class_name']}"
+        )
+
+
+# ---------------------------------------------------------------------
 # The comparison on every real case
 # ---------------------------------------------------------------------
 
@@ -1449,6 +1632,46 @@ def test_the_model_stem_replicates_the_original(case):
     """The stem a model builds equals the pre-migration stem, weight for weight."""
     model = case.make_model()
     assert_stem_matches_original(case, case.stem_of(model))
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c.case_id for c in CASES])
+def test_every_case_is_built_so_a_dropped_initializer_is_visible(case):
+    """The case's model is built with a non-default initializer (see the audit)."""
+    assert_initializer_audit(case)
+
+
+def test_the_initializer_audit_has_no_stale_row():
+    """Every audit row names a model class some case builds, and every model
+    class a case builds has a row."""
+    built = {type(case.make_model()).__name__ for case in CASES}
+    assert built == set(INITIALIZER_AUDIT), (
+        f"built but not audited: {sorted(built - set(INITIALIZER_AUDIT))}; "
+        f"audited but never built: {sorted(set(INITIALIZER_AUDIT) - built)}"
+    )
+
+
+def test_a_model_with_a_regularizer_knob_is_built_regularized_in_some_case():
+    """A model exposing a kernel/bias regularizer knob has a case whose original
+    carries one, or a dropped passthrough would fall back to ``None``."""
+    regularized = {}
+    exposed = {}
+    for case in CASES:
+        model = case.make_model()
+        name = type(model).__name__
+        params = inspect.signature(type(model).__init__).parameters
+        want = _conv_settings(case.make_original().sublayers["conv1"])
+        for setting, knobs in _REGULARIZER_KNOBS.items():
+            if any(knob in params for knob in knobs):
+                exposed.setdefault(setting, set()).add(name)
+                if want[setting] is not None:
+                    regularized.setdefault(setting, set()).add(name)
+    for setting, names in exposed.items():
+        missing = names - regularized.get(setting, set())
+        assert not missing, (
+            f"{sorted(missing)} expose a {setting} knob but no case builds them "
+            f"with a non-None one"
+        )
+    assert exposed["kernel_regularizer"] and exposed["bias_regularizer"]
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.case_id for c in CASES])
@@ -1554,7 +1777,7 @@ def test_a_two_conv_stem_hands_both_convs_the_model_bias_settings(make_model):
 
 def _stem_from_config(case: StemCase, **overrides) -> ConvStem:
     """A ConvStem built from the model's own stem config with ``overrides``."""
-    config = case.make_model().stem.get_config()
+    config = case.stem_of(case.make_model()).get_config()
     norm_kwargs = dict(config["normalization_kwargs"])
     norm_kwargs.update(overrides.pop("normalization_kwargs", {}))
     config.update(overrides)
@@ -1621,6 +1844,12 @@ def test_control_the_harness_sees_a_norm_applied_twice():
             "kernel_regularizer",
         ),
         (RESNET_IMAGENET, {"kernel_regularizer": None}, "kernel_regularizer"),
+        # The pass-2 mutant: MobileNetV3's stem call without kernel_initializer
+        # falls back to ConvStem's glorot_uniform. At the model's own default
+        # (also glorot_uniform) this was indistinguishable.
+        (MOBILENET_V3, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        (MOBILENET_V4, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        (VAE_BN_BIAS, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
     ],
     ids=[
         "kernel-initializer-class",
@@ -1628,6 +1857,9 @@ def test_control_the_harness_sees_a_norm_applied_twice():
         "bias-initializer",
         "kernel-regularizer-strength",
         "kernel-regularizer-dropped",
+        "mobilenet-v3-initializer-dropped",
+        "mobilenet-v4-initializer-dropped",
+        "vae-initializer-dropped",
     ],
 )
 def test_control_the_settings_check_sees_a_wrong_initializer_or_regularizer(
@@ -1644,6 +1876,40 @@ def test_control_the_settings_check_sees_a_wrong_initializer_or_regularizer(
         # Every weight is overwritten, so the transplant comparison is blind to
         # an initializer. (It does see a regularizer, through the loss.)
         assert_stem_matches_original(case, stem)
+
+
+def _mobilenet_v3_at_its_default_initializer() -> MobileNetV3:
+    return MobileNetV3(
+        variant="small",
+        num_classes=4,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        weight_decay=_MOBILENET_KERNEL_REG,
+    )
+
+
+def test_control_the_audit_sees_a_model_built_at_convstems_default():
+    """The pass-2 case: MobileNetV3 at its own default initializer, which is
+    ConvStem's. The audit must refuse it."""
+    with pytest.raises(AssertionError, match="own default kernel_initializer"):
+        assert_initializer_audit(
+            MOBILENET_V3, model=_mobilenet_v3_at_its_default_initializer()
+        )
+
+
+def test_control_the_audit_sees_a_wrong_table_row():
+    """A row that contradicts the constructor (a knob called hardcoded, and a
+    hardcoded model called a knob) must fail."""
+    lie = {**INITIALIZER_AUDIT, "MobileNetV4": ("hardcoded", "wrong")}
+    with pytest.raises(AssertionError, match="has kernel_initializer parameter"):
+        assert_initializer_audit(MOBILENET_V4, audit=lie)
+    lie = {**INITIALIZER_AUDIT, "ResNet": ("knob", "wrong")}
+    with pytest.raises(AssertionError, match="has no kernel_initializer parameter"):
+        assert_initializer_audit(RESNET_CIFAR, audit=lie)
+    with pytest.raises(AssertionError, match="no INITIALIZER_AUDIT row"):
+        assert_initializer_audit(
+            MOBILENET_V4, audit={k: v for k, v in INITIALIZER_AUDIT.items() if k != "MobileNetV4"}
+        )
 
 
 def test_control_a_correct_stem_survives_the_settings_check():
