@@ -146,6 +146,7 @@ class ViT(keras.Model):
             ▼                        ▼
         include_top=True        include_top=False
             │                        │
+            ▼                        ▼
         ┌───────────────┐   ┌────────────────────────────┐
         │ x_norm[:, 0]  │   │ pooling='cls'  → x[:, 0]   │
         │ [Dropout]     │   │ pooling='mean' → mean over │

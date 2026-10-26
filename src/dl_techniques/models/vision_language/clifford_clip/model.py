@@ -138,7 +138,7 @@ class CliffordCLIP(keras.Model):
                  │  L2 normalize                │  L2 normalize
                  ▼                              ▼
           image_features [B, E]          text_features [B, E]
-                 └───────────► logits ◄──────────────┘
+                 └───────────► logits ◄─────────┘
                                  │  * exp(logit_scale), capped
                                  ▼
                 logits_per_image, logits_per_text  [B, B]
