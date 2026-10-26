@@ -500,8 +500,12 @@ class TestGetConfig:
     def test_the_activation_serializes_to_the_documented_form(self):
         assert ConvStem(filters=4, activation_type="relu").get_config()[
             "activation_type"] == "relu"
-        assert ConvStem(filters=4, activation_type=exact_gelu).get_config()[
-            "activation_type"] == "gelu"
+        # An exact callable is written as the registered function, NOT as the
+        # stock name (review concern 7; see TestAnExactActivationSurvives...).
+        exact_config = ConvStem(filters=4, activation_type=exact_gelu).get_config()[
+            "activation_type"]
+        assert exact_config["class_name"] == "function"
+        assert exact_config["config"].endswith(">exact_gelu")
         assert ConvStem(filters=4, activation_type=None).get_config()[
             "activation_type"] is None
         layer_config = ConvStem(
@@ -705,3 +709,215 @@ class TestTheTwoConvsDrawIndependently:
         replayed, compared = replayed_pairs(model)
         assert compared == 1
         assert len(replayed) == 1, replayed
+
+
+# ---------------------------------------------------------------------
+# A per-layer dtype policy reaches every sub-layer (review concern 6)
+# ---------------------------------------------------------------------
+
+def _every_sublayer(stem):
+    """``(attribute, layer)`` for each sub-layer a fully configured stem owns."""
+    names = ("conv1", "norm1", "activation1", "conv2", "norm2", "activation2", "pool")
+    return [(name, getattr(stem, name)) for name in names]
+
+
+class TestAPerLayerDtypePolicyReachesEverySubLayer:
+    """``ConvStem(dtype=...)`` is a per-layer policy, not the global one.
+
+    Measured before the fix: ``ConvStem(4, dtype="mixed_float16")`` reported
+    ``compute_dtype`` float16 while ``conv1``, ``norm1``, the activation and the
+    pool computed in float32, so the output was float32 (and ``dtype="float64"``
+    behaved the same way). ``TestDtypePolicy`` sets the GLOBAL policy, which every
+    sub-layer reads by default, so it cannot see this. ``float32`` is the control:
+    it is the ambient policy, so it passes with or without the fix and shows the
+    assertions are not rejecting everything.
+    """
+
+    @staticmethod
+    def _stem(policy, **kwargs):
+        return ConvStem(filters=6, num_convs=2, use_pooling=True, pool_size=3,
+                        pool_strides=2, pool_padding="same", dtype=policy,
+                        name=f"per_layer_{policy}", **kwargs)
+
+    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
+    def test_every_sublayer_follows_the_stems_policy(self, policy):
+        stem = self._stem(policy)
+        for attribute, layer in _every_sublayer(stem):
+            assert layer is not None, attribute
+            assert layer.compute_dtype == stem.compute_dtype, (
+                f"{attribute}: compute {layer.compute_dtype} != stem "
+                f"{stem.compute_dtype} under dtype={policy!r}")
+            assert layer.variable_dtype == stem.variable_dtype, attribute
+
+    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
+    def test_the_output_is_in_the_stems_compute_dtype(self, policy, rng):
+        stem = self._stem(policy)
+        out = stem(_x(rng, (B, 8, 8, 4)), training=False)
+        assert keras.backend.standardize_dtype(out.dtype) == stem.compute_dtype
+        assert np.isfinite(_np(out).astype("float64")).all()
+
+    @pytest.mark.parametrize("activation, kwargs", [
+        ("mish", {}),
+        ("relu", {"negative_slope": 0.25}),
+        ("tanh", {}),
+        (exact_gelu, {}),
+    ], ids=["registry_key", "registry_key_with_kwargs", "keras_name", "callable"])
+    def test_every_activation_form_follows_the_policy(self, activation, kwargs):
+        stem = self._stem("mixed_float16", activation_type=activation,
+                          activation_kwargs=kwargs)
+        assert stem.activation1.compute_dtype == "float16"
+        assert stem.activation2.compute_dtype == "float16"
+
+    def test_a_non_default_norm_type_follows_the_policy(self):
+        stem = self._stem("float64", normalization_type="rms_norm")
+        assert stem.norm1.compute_dtype == "float64"
+        assert stem.norm2.compute_dtype == "float64"
+
+    def test_an_explicit_dtype_in_the_norm_kwargs_wins(self):
+        stem = self._stem("mixed_float16", normalization_kwargs={"dtype": "float32"})
+        assert stem.norm1.compute_dtype == "float32"
+        assert stem.conv1.compute_dtype == "float16"
+
+    def test_the_policy_survives_a_config_round_trip(self):
+        stem = self._stem("mixed_float16")
+        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
+        for attribute, layer in _every_sublayer(rebuilt):
+            assert layer.compute_dtype == "float16", attribute
+
+
+# ---------------------------------------------------------------------
+# An exact activation callable survives the config round trip (review concern 7)
+# ---------------------------------------------------------------------
+
+@pytest.fixture
+def float64_policy():
+    """Set the GLOBAL float64 policy for one test and ALWAYS restore it.
+
+    The exact and stock leaky ReLU differ only at float64 (D-277: TensorFlow
+    builds the stock slope constant in float32), so the comparison has to run
+    there. Same capture / restore-in-``finally`` shape as ``tests/test_layers/
+    conftest.py::dtype_policy``, scoped to the one policy this class needs.
+    """
+    previous = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy("float64")
+    try:
+        yield "float64"
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+        assert keras.mixed_precision.global_policy().name == previous
+
+
+class TestAnExactActivationSurvivesTheConfigRoundTrip:
+    """``substitute_exact("leaky_relu")`` is a CALLABLE, and ConvStem keeps it one.
+
+    Measured before the fix: ``get_config`` wrote the exact form as the string
+    ``"leaky_relu"``, and ``from_config`` then built the stock
+    ``Activation("leaky_relu")``, so a reloaded float64 stem differed from the
+    original by ``max|delta| = 2.97e-08``. A string in ``activation_type`` means
+    the stock form (``stem.py`` docstring), so the exact form is written as the
+    registered function it is, and reloads as that same function object.
+    """
+
+    @staticmethod
+    def _stem(activation, name):
+        return ConvStem(filters=6, normalization_type=None,
+                        activation_type=activation, name=name)
+
+    @staticmethod
+    def _data():
+        # Negative-heavy: the two forms differ only where the slope applies.
+        return np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
+
+    def test_the_reloaded_stem_computes_the_exact_form_at_float64(self, float64_policy):
+        from dl_techniques.layers.activations.exact_activations import substitute_exact
+        stem = self._stem(substitute_exact("leaky_relu"), "exact_rt")
+        data = self._data()
+        stem.build(data.shape)
+        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
+        rebuilt.build(data.shape)
+        rebuilt.set_weights(stem.get_weights())
+        assert stem.conv1.compute_dtype == "float64"
+        np.testing.assert_allclose(
+            _np(rebuilt(data)), _np(stem(data)), rtol=0.0, atol=0.0)
+
+    def test_the_stock_string_stays_stock_and_differs_from_the_exact_form(
+            self, float64_policy):
+        """Two-armed control: the instrument sees the 2.97e-08 gap at all.
+
+        Without this arm the round-trip test above could pass vacuously on a
+        policy under which the two forms are bit-identical (float32).
+        """
+        from dl_techniques.layers.activations.exact_activations import substitute_exact
+        data = self._data()
+        exact = self._stem(substitute_exact("leaky_relu"), "exact_ctl")
+        stock = self._stem("leaky_relu", "stock_ctl")
+        exact.build(data.shape)
+        stock.build(data.shape)
+        stock.set_weights(exact.get_weights())
+        assert stock.get_config()["activation_type"] == "leaky_relu"
+        reloaded = ConvStem.from_config(json.loads(json.dumps(stock.get_config())))
+        reloaded.build(data.shape)
+        reloaded.set_weights(exact.get_weights())
+        np.testing.assert_allclose(
+            _np(reloaded(data)), _np(stock(data)), rtol=0.0, atol=0.0)
+        gap = float(np.max(np.abs(_np(stock(data)) - _np(exact(data)))))
+        assert gap > 1e-9, f"stock and exact leaky_relu agree to {gap:.2e}; vacuous"
+
+    @pytest.mark.parametrize("name", ["leaky_relu", "gelu"])
+    def test_the_config_holds_the_registered_function_not_the_stock_name(self, name):
+        from dl_techniques.layers.activations.exact_activations import (
+            EXACT_ACTIVATIONS, substitute_exact)
+        spec = self._stem(substitute_exact(name), "cfg_exact").get_config()[
+            "activation_type"]
+        assert isinstance(spec, dict) and spec["class_name"] == "function", spec
+        restored = ConvStem.from_config(json.loads(json.dumps(
+            self._stem(substitute_exact(name), "cfg_exact").get_config())))
+        assert restored.activation_type is EXACT_ACTIVATIONS[name]
+
+
+# ---------------------------------------------------------------------
+# A Layer activation must be one the stem can clone (review concern 8)
+# ---------------------------------------------------------------------
+
+def _unlocatable_activation():
+    """A custom activation Layer Keras cannot locate by name.
+
+    Defined inside a function on purpose: Keras resolves a serialized class by
+    ``module`` + ``class_name``, so a module-level class IS found again (it is
+    importable) and would not exercise the failure. A function-local class is
+    neither registered nor an attribute of its module.
+    """
+
+    class UnlocatableActivation(keras.layers.Layer):
+        def call(self, inputs):
+            return keras.ops.relu(inputs)
+
+    return UnlocatableActivation()
+
+
+class TestALayerActivationMustBeCloneable:
+    """The stem stores a Layer activation as its config and rebuilds it per site.
+
+    Measured before the fix: a Layer Keras cannot locate by name raised
+    ``TypeError: Could not locate class`` from deep inside ``keras.layers.
+    deserialize``, and a built Layer holding weights was cloned fresh with its
+    weights silently dropped. Both are now a ``ValueError`` at construction that
+    names the problem. A locatable, unbuilt Layer still works
+    (``TestActivationForms``).
+    """
+
+    def test_an_unlocatable_layer_is_refused_by_name(self):
+        with pytest.raises(ValueError, match="UnlocatableActivation") as caught:
+            ConvStem(filters=4, activation_type=_unlocatable_activation())
+        assert "registered" in str(caught.value)
+
+    def test_a_layer_holding_weights_is_refused(self):
+        trained = keras.layers.PReLU()
+        trained.build((None, 4))
+        assert trained.weights, "control: the PReLU holds an alpha weight"
+        with pytest.raises(ValueError, match="PReLU.*weights"):
+            ConvStem(filters=4, activation_type=trained)
+
+    def test_a_registered_unbuilt_layer_is_still_accepted(self):
+        stem = ConvStem(filters=4, activation_type=keras.layers.PReLU())
+        assert isinstance(stem.activation1, keras.layers.PReLU)

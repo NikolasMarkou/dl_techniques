@@ -50,8 +50,24 @@ Scope and conventions:
   builds the stock Keras form, not the exact form that
   :func:`dl_techniques.layers.activations.common.resolve_activation` returns
   (D-277). A caller that wants the exact form passes a callable, for example
-  ``substitute_exact("leaky_relu")``; ``get_config`` writes it back as the
-  string.
+  ``substitute_exact("leaky_relu")``. ``get_config`` writes that callable as
+  the registered function it is (not as the string, which would reload as the
+  stock form: 2.97e-08 apart at float64), so a config round trip keeps the
+  computation exactly. A callable that is not registered with Keras cannot be
+  written back and fails at ``get_config`` time, as it does for any layer.
+* An activation given as a ``keras.layers.Layer`` is stored as its config and
+  rebuilt at every activation site. The stem therefore refuses, with a
+  ``ValueError`` at construction, a Layer it cannot clone: one whose class
+  Keras cannot locate by name (register it with
+  ``keras.saving.register_keras_serializable``), and one that already holds
+  weights (a clone would start fresh and drop them silently). A caller with
+  either passes a registered, unbuilt Layer, a string or a callable.
+* The stem's dtype policy (``ConvStem(dtype=...)``, not only the global one) is
+  passed to the convolutions, the normalization, the activation and the pool,
+  so the whole stem computes in ``compute_dtype``. A ``dtype`` stated
+  explicitly in ``normalization_kwargs`` / ``activation_kwargs`` wins for that
+  sub-layer, and a Layer-instance activation keeps the policy it was created
+  with.
 """
 
 from __future__ import annotations
@@ -61,10 +77,10 @@ from typing import Any, Callable, Dict, Literal, Optional, Tuple, Union
 import keras
 
 from ..norms import create_normalization_layer
-from ..activations import resolve_activation_layer
-from ..activations.common import activation_spec, serialize_activation
-from ..activations.factory import ACTIVATION_REGISTRY
+from ..activations.common import activation_spec
+from ..activations.factory import ACTIVATION_REGISTRY, create_activation_layer
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.activation_serialization import serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -86,8 +102,19 @@ def _canonical_activation(activation: Any) -> Any:
     :param activation: String, ``None``, callable, Layer instance, or a dict
         (serialized function or serialized Layer).
     :return: The canonical value described above.
+    :raises ValueError: If a Layer instance already holds weights: the stem
+        rebuilds it from its config at each site, so those weights would be
+        dropped without a word.
     """
     if isinstance(activation, keras.layers.Layer):
+        if activation.weights:
+            raise ValueError(
+                f"activation_type is a {type(activation).__name__} that already "
+                f"holds weights ({[w.path for w in activation.weights]}); the stem "
+                "rebuilds an activation Layer from its config at every site, so "
+                "those weights would be dropped. Pass an unbuilt Layer, a "
+                "string or a callable."
+            )
         return keras.saving.serialize_keras_object(activation)
     if isinstance(activation, dict) and activation.get("class_name") != "function":
         return dict(activation)
@@ -139,7 +166,10 @@ class ConvStem(keras.layers.Layer):
         activation name (``'relu6'``, ``'tanh'``), a callable, a
         ``keras.layers.Layer`` instance, or ``None``. ``'linear'`` and ``None``
         build no activation layer. A Layer instance is cloned at each
-        activation site, so two sites never share one set of weights.
+        activation site, so two sites never share one set of weights; it must
+        therefore be registered with Keras (or otherwise locatable by name) and
+        hold no weights yet. A callable is serialized as the registered
+        function it is, so ``substitute_exact("leaky_relu")`` reloads exactly.
     :type activation_type: str or Callable or keras.layers.Layer or None
     :param activation_kwargs: Extra keyword arguments for the activation
         layer. Only a registry key accepts them: ``resolve_activation_layer``
@@ -179,7 +209,9 @@ class ConvStem(keras.layers.Layer):
         ``num_convs`` is not 1 or 2, ``padding`` / ``pool_type`` /
         ``pool_padding`` is invalid, ``normalization_kwargs`` is given with no
         normalization, or ``activation_kwargs`` is given for an activation
-        that is not a registry key.
+        that is not a registry key, or ``activation_type`` is a Layer that
+        already holds weights or that Keras cannot locate by name (the message
+        names the class).
     """
 
     def __init__(
@@ -267,7 +299,6 @@ class ConvStem(keras.layers.Layer):
         # -----------------------------------------------------------------
         # First convolution
         # -----------------------------------------------------------------
-        conv1_name = f"{self.name}_conv1" if self.name else "conv1"
         self.conv1 = keras.layers.Conv2D(
             filters=filters,
             kernel_size=kernel_size,
@@ -278,7 +309,8 @@ class ConvStem(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
-            name=conv1_name,
+            dtype=self.dtype_policy,
+            name=f"{self.name}_conv1",
         )
         self.norm1: Optional[keras.layers.Layer] = self._make_norm("norm1")
         self.activation1: Optional[keras.layers.Layer] = self._make_activation("act1")
@@ -291,7 +323,6 @@ class ConvStem(keras.layers.Layer):
         self.activation2: Optional[keras.layers.Layer] = None
 
         if num_convs == 2:
-            conv2_name = f"{self.name}_conv2" if self.name else "conv2"
             # DECISION plan-2026-10-26T125959-7af851e5/D-005
             # conv2 gets CLONES of the kernel and bias initializers. Do NOT hand
             # it self.kernel_initializer: a seedless initializer instance
@@ -313,7 +344,8 @@ class ConvStem(keras.layers.Layer):
                 bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
-                name=conv2_name,
+                dtype=self.dtype_policy,
+                name=f"{self.name}_conv2",
             )
             self.norm2 = self._make_norm("norm2")
             if final_activation:
@@ -324,7 +356,6 @@ class ConvStem(keras.layers.Layer):
         # -----------------------------------------------------------------
         self.pool: Optional[keras.layers.Layer] = None
         if use_pooling:
-            pool_name = f"{self.name}_pool" if self.name else "pool"
             pool_cls = (
                 keras.layers.MaxPooling2D
                 if pool_type == "max"
@@ -334,34 +365,65 @@ class ConvStem(keras.layers.Layer):
                 pool_size=pool_size,
                 strides=pool_strides,
                 padding=pool_padding,
-                name=pool_name,
+                dtype=self.dtype_policy,
+                name=f"{self.name}_pool",
             )
 
     def _make_norm(self, suffix: str) -> Optional[keras.layers.Layer]:
-        """Build one normalization layer, or ``None`` when there is none."""
+        """Build one normalization layer, or ``None`` when there is none.
+
+        Every one of the 19 factory types accepts ``dtype`` (measured), so the
+        stem's policy is passed; an explicit ``dtype`` in
+        ``normalization_kwargs`` wins.
+        """
         if self.normalization_type is None:
             return None
         return create_normalization_layer(
             self.normalization_type,
-            name=f"{self.name}_{suffix}" if self.name else suffix,
-            **self.normalization_kwargs,
+            name=f"{self.name}_{suffix}",
+            **{"dtype": self.dtype_policy, **self.normalization_kwargs},
         )
 
     def _make_activation(self, suffix: str) -> Optional[keras.layers.Layer]:
         """Build one activation layer, or ``None`` for ``'linear'`` / ``None``.
 
         A serialized Layer is deserialized afresh at every site, so two sites
-        never share one instance (and one set of weights).
+        never share one instance (and one set of weights); it keeps its own
+        dtype policy.
+
+        ``resolve_activation_layer`` is not used: its Keras-name fallback is
+        ``keras.layers.Activation(spec, name=name)`` and drops every other
+        keyword, ``dtype`` included, so the stem would lose its policy there.
+        The two branches below are that function's dispatch with ``dtype``
+        added.
+
+        :raises ValueError: If the serialized Layer cannot be deserialized
+            (an unregistered class: Keras raises ``TypeError`` from deep inside
+            ``keras.layers.deserialize``).
         """
         spec = self.activation_type
         if spec is None or (isinstance(spec, str) and spec == "linear"):
             return None
-        name = f"{self.name}_{suffix}" if self.name else suffix
+        name = f"{self.name}_{suffix}"
         if isinstance(spec, dict):
             layer_config = dict(spec)
             layer_config["config"] = {**spec["config"], "name": name}
-            return keras.layers.deserialize(layer_config)
-        return resolve_activation_layer(spec, name=name, **self.activation_kwargs)
+            try:
+                return keras.layers.deserialize(layer_config)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"activation_type is a {spec.get('class_name')} Layer that "
+                    "the stem cannot clone: it rebuilds an activation Layer from "
+                    "its config at every site, which needs a class registered "
+                    "with keras.saving.register_keras_serializable (or "
+                    "otherwise locatable by name). Register it, or pass a "
+                    f"string or a callable. Keras said: {error}"
+                ) from error
+        if isinstance(spec, str) and spec in ACTIVATION_REGISTRY:
+            return create_activation_layer(
+                spec, name=name, **{"dtype": self.dtype_policy, **self.activation_kwargs}
+            )
+        return keras.layers.Activation(spec, name=name, dtype=self.dtype_policy)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build each sub-layer explicitly, in forward order.
