@@ -196,9 +196,15 @@ class BandLogitNorm(keras.layers.Layer):
         # Creating the sublayer here is the Keras 3 pattern: construction does not
         # need the input shape. build() builds it against the L2-length shape.
         # See the class docstring for why that (..., 1) input makes it inert.
+        # dtype=self.dtype_policy: without it the sublayer reads the GLOBAL policy,
+        # not this layer's, and a per-layer dtype="float64" / "mixed_float16" makes
+        # call() multiply a float64 / float16 tensor by a float32 scale (Mul dtype
+        # mismatch). Guard: tests/test_layers/test_norms/
+        # test_an_inner_layer_follows_the_owners_dtype.py
         self.norm = keras.layers.LayerNormalization(
             axis=-1,
             epsilon=self.epsilon,
+            dtype=self.dtype_policy,
             name=f"{self.name}_layer_norm",
         )
 

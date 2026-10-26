@@ -60,7 +60,10 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 from dl_techniques.layers.conv_blocks.stem import ConvStem
-from dl_techniques.models.vision.cliffordnet.model import DEFAULT_INPUT_SHAPE
+from dl_techniques.models.vision.cliffordnet.model import (
+    DEFAULT_INPUT_SHAPE,
+    coerce_include_top,
+)
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -188,7 +191,8 @@ class HierarchicalCliffordNet(keras.Model):
         ``False`` there is no head, ``classification_head`` is ``None`` and
         the model returns the last stage's feature map
         ``(B, h, w, stage_dims[-1])`` instead of logits. Must be a real
-        ``bool`` (``[1, 1]`` raises ``TypeError``); it is the last named
+        ``bool`` or ``numpy.bool_`` (stored as a Python ``bool``; ``[1, 1]``
+        raises ``TypeError``); it is the last named
         parameter, after ``head_config_overrides``, so it cannot capture a
         positional ``stage_depths``. Defaults to ``True``.
     :param kwargs: Passed to :class:`keras.Model`.
@@ -239,11 +243,7 @@ class HierarchicalCliffordNet(keras.Model):
 
         # A real bool only: `bool(...)` would accept `(10, [1, 1])` style
         # misbinding that the old second slot let through.
-        if not isinstance(include_top, bool):
-            raise TypeError(
-                f"include_top must be a bool, got {include_top!r} "
-                f"({type(include_top).__name__})"
-            )
+        include_top = coerce_include_top(include_top)
         depths = list(stage_depths) if stage_depths is not None else list(_DEFAULT_STAGE_DEPTHS)
         if include_top and num_classes <= 0:
             raise ValueError(

@@ -50,11 +50,24 @@ Scope and conventions:
   builds the stock Keras form, not the exact form that
   :func:`dl_techniques.layers.activations.common.resolve_activation` returns
   (D-277). A caller that wants the exact form passes a callable, for example
-  ``substitute_exact("leaky_relu")``. ``get_config`` writes that callable as
-  the registered function it is (not as the string, which would reload as the
-  stock form: 2.97e-08 apart at float64), so a config round trip keeps the
-  computation exactly. A callable that is not registered with Keras cannot be
-  written back and fails at ``get_config`` time, as it does for any layer.
+  ``substitute_exact("leaky_relu")``. ``get_config`` writes a callable that is
+  registered with Keras (the ``substitute_exact`` forms are) as the registered
+  function it is, not as the string, which would reload as the stock form
+  (2.97e-08 apart at float64), so a config round trip keeps the computation
+  exactly. That promise covers the registered forms only:
+
+  * A Keras built-in callable such as ``keras.activations.gelu`` is written as
+    the string (``"gelu"``) and reloads as the registry layer, ``GELU`` in place
+    of ``Activation``; the reload is 5.0e-09 away at float64 (``relu`` and
+    ``silu`` reload bit-identical).
+  * A callable registered nowhere is NOT refused by ``get_config``. Measured
+    with a module-level function: ``get_config`` succeeds and writes
+    ``{'module': 'builtins', 'class_name': 'function', 'config': 'myact', ...}``;
+    the failure comes at reload, where ``ConvStem.from_config`` and
+    ``keras.models.load_model`` raise ``TypeError`` ("Could not interpret
+    activation function identifier: myact"). Register the function with
+    ``keras.saving.register_keras_serializable``, or reload inside a
+    ``keras.saving.custom_object_scope``.
 * An activation given as a ``keras.layers.Layer`` is stored as its config and
   rebuilt at every activation site. The stem therefore refuses, with a
   ``ValueError`` at construction, a Layer it cannot clone: one whose class
@@ -168,12 +181,19 @@ class ConvStem(keras.layers.Layer):
         build no activation layer. A Layer instance is cloned at each
         activation site, so two sites never share one set of weights; it must
         therefore be registered with Keras (or otherwise locatable by name) and
-        hold no weights yet. A callable is serialized as the registered
-        function it is, so ``substitute_exact("leaky_relu")`` reloads exactly.
+        hold no weights yet. A callable registered with Keras (the
+        ``substitute_exact(...)`` forms) is serialized as the registered
+        function it is and reloads exactly; a Keras built-in such as
+        ``keras.activations.gelu`` is written as its string and reloads as the
+        registry layer; an unregistered callable fails at reload, not at
+        ``get_config`` (see the module docstring).
     :type activation_type: str or Callable or keras.layers.Layer or None
     :param activation_kwargs: Extra keyword arguments for the activation
-        layer. Only a registry key accepts them: ``resolve_activation_layer``
-        drops them silently otherwise, so any other activation raises.
+        layer, forwarded to the registry layer's constructor. Only an
+        ``ACTIVATION_REGISTRY`` key can receive them: the other forms (a plain
+        Keras name wrapped in ``keras.layers.Activation``, a callable, a Layer
+        instance) have no constructor to pass them to, so the stem raises
+        instead of dropping them silently.
     :type activation_kwargs: dict or None
     :param final_activation: Whether the second convolution of a two-conv stem
         is followed by an activation.
@@ -374,7 +394,12 @@ class ConvStem(keras.layers.Layer):
 
         Every one of the 19 factory types accepts ``dtype`` (measured), so the
         stem's policy is passed; an explicit ``dtype`` in
-        ``normalization_kwargs`` wins.
+        ``normalization_kwargs`` wins. Accepting it is not the same as
+        computing in it: a norm that builds an inner layer must hand it the same
+        policy (``BandLogitNorm`` did not, and crashed under a per-layer float64
+        or ``mixed_float16``). ``tests/test_layers/test_conv_blocks/test_stem.py``
+        sweeps every shape-preserving factory type at both policies and checks
+        each sub-layer's compute dtype.
         """
         if self.normalization_type is None:
             return None
@@ -397,9 +422,11 @@ class ConvStem(keras.layers.Layer):
         The two branches below are that function's dispatch with ``dtype``
         added.
 
-        :raises ValueError: If the serialized Layer cannot be deserialized
-            (an unregistered class: Keras raises ``TypeError`` from deep inside
-            ``keras.layers.deserialize``).
+        :raises ValueError: If Keras cannot locate the serialized Layer's class
+            by name (Keras raises ``TypeError: Could not locate class`` from
+            deep inside ``keras.layers.deserialize``; that one case is
+            relabelled). Any other error from rebuilding a registered Layer
+            propagates unchanged.
         """
         spec = self.activation_type
         if spec is None or (isinstance(spec, str) and spec == "linear"):
@@ -410,7 +437,13 @@ class ConvStem(keras.layers.Layer):
             layer_config["config"] = {**spec["config"], "name": name}
             try:
                 return keras.layers.deserialize(layer_config)
-            except (TypeError, ValueError) as error:
+            except TypeError as error:
+                if "Could not locate class" not in str(error):
+                    # A registered Layer whose own config does not rebuild
+                    # (a stray config key, a failing from_config) keeps its
+                    # own message: relabelling it "register it" would send the
+                    # caller to fix the wrong thing.
+                    raise
                 raise ValueError(
                     f"activation_type is a {spec.get('class_name')} Layer that "
                     "the stem cannot clone: it rebuilds an activation Layer from "

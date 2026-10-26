@@ -117,7 +117,9 @@ copied and the checkpoint's `classification_head` is left unused.
 **`include_top` is the last named constructor parameter.** It follows
 `head_config_overrides`, so `CliffordNet(10, 64)` binds `64` to `channels` and
 `HierarchicalCliffordNet(10, [1, 1])` binds the list to `stage_depths`. It must
-be a real `bool`; anything else (`64`, `[1, 1]`, `1`, `None`) raises `TypeError`.
+be a real `bool` or a `numpy.bool_` (stored as a Python `bool`); anything else
+(`64`, `[1, 1]`, `1`, `None`) raises `TypeError`, naming the value and its
+module-qualified type.
 
 **`from_variant(..., input_shape=...)` builds the model.** The constructor
 builds nothing and the weight loader refuses an unbuilt model. When `input_shape`

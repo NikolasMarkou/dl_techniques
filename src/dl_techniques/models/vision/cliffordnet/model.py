@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import keras
+import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -78,6 +79,34 @@ _STEM_BN_EPSILON = 1e-3
 # imports it from here). Every patch size accepts it (patch 4 leaves 8x8, the
 # hierarchical stride chain 4x4), and the weights do not depend on it.
 DEFAULT_INPUT_SHAPE = (32, 32, 3)
+
+
+def coerce_include_top(include_top: Any) -> bool:
+    """Return ``include_top`` as a Python ``bool``, refusing anything else.
+
+    Shared by :class:`CliffordNet` and ``HierarchicalCliffordNet`` (which imports
+    it from here, like :data:`DEFAULT_INPUT_SHAPE`), so the two cannot drift.
+
+    Interface contract: ``bool`` and ``numpy.bool_`` are accepted (the type every
+    comparison on an array yields) and coerced, so ``get_config`` stays
+    JSON-serializable. Everything else is refused, including ``0``/``1``, a
+    0-d array and ``None``: ``include_top`` was once the second positional
+    parameter, and ``bool(...)`` would have let a misbound ``CliffordNet(10, 64)``
+    through. The message prints the repr and the module-qualified type, because
+    ``type(np.False_).__name__`` is ``"bool"`` under numpy 2 and a bare name
+    would contradict the refusal.
+
+    :param include_top: The value passed as ``include_top``.
+    :return: ``bool(include_top)``.
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
+    """
+    if not isinstance(include_top, (bool, np.bool_)):
+        kind = type(include_top)
+        raise TypeError(
+            f"include_top must be a bool or numpy.bool_, got {include_top!r} "
+            f"of type {kind.__module__}.{kind.__qualname__}"
+        )
+    return bool(include_top)
 
 # ---------------------------------------------------------------------
 
@@ -246,8 +275,8 @@ class CliffordNet(keras.Model):
     :param include_top: Whether to build the classification head. When
         ``False`` there is no head, ``classification_head`` is ``None`` and
         the model returns the final feature map ``(B, H/p, W/p, channels)``
-        instead of logits. Must be a real ``bool`` (``64`` or ``[1, 1]``
-        raises ``TypeError``); it is the last named parameter, after
+        instead of logits. Must be a real ``bool`` or ``numpy.bool_`` (stored as
+        a Python ``bool``; ``64`` or ``[1, 1]`` raises ``TypeError``); it is the last named parameter, after
         ``head_config_overrides``, so it cannot capture a positional
         ``channels``. Defaults to ``True``.
     :param kwargs: Passed to :class:`keras.Model`.
@@ -288,11 +317,7 @@ class CliffordNet(keras.Model):
 
         # A real bool only: `bool(...)` would accept `CliffordNet(10, 64, ...)`
         # style misbinding (64, [1, 1]) that the old second slot let through.
-        if not isinstance(include_top, bool):
-            raise TypeError(
-                f"include_top must be a bool, got {include_top!r} "
-                f"({type(include_top).__name__})"
-            )
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"

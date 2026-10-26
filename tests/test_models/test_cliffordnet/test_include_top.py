@@ -20,6 +20,7 @@ number pasted out of a run. The input is non-square and not a multiple of any
 patch size, so an axis mix-up or a floor/ceil mix-up changes the answer.
 """
 
+import json
 import math
 import os
 
@@ -899,3 +900,92 @@ class TestIncludeTopIsNotASecondPositionalArgument:
         assert HierarchicalCliffordNet(
             10, include_top=flag
         ).include_top is flag
+
+
+# ---------------------------------------------------------------------
+# numpy.bool_ (review pass 2, NOTE 8)
+# ---------------------------------------------------------------------
+
+
+def _both(flag, **overrides):
+    """Both models, built with ``include_top=flag`` and a fixed name."""
+    clifford = CliffordNet(
+        num_classes=10, channels=8, depth=1, include_top=flag,
+        name="numpy_flag_clifford", **overrides)
+    hierarchical = HierarchicalCliffordNet(
+        num_classes=10, stage_depths=[1], stage_dims=[8], include_top=flag,
+        name="numpy_flag_hierarchical", **overrides)
+    return clifford, hierarchical
+
+
+class TestIncludeTopAcceptsANumpyBool:
+    """``numpy.bool_`` is a real boolean, produced by every comparison on an array.
+
+    Measured on the committed code: ``CliffordNet(10, depth=1, channels=8,
+    include_top=np.bool_(False))`` raised "include_top must be a bool, got
+    np.False_ (bool)": under numpy 2 ``type(np.False_).__name__`` is ``'bool'``,
+    so the message contradicted itself. The accepted value is coerced to a
+    Python ``bool`` so ``get_config`` stays JSON-serializable.
+    """
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_a_numpy_bool_builds_the_same_model_as_the_python_bool(self, flag):
+        for numpy_model, python_model in zip(
+                _both(np.bool_(flag)), _both(flag)):
+            assert numpy_model.include_top is flag
+            assert numpy_model.get_config() == python_model.get_config()
+            assert (numpy_model.classification_head is None) is (not flag)
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_the_config_stores_a_python_bool(self, flag):
+        for model in _both(np.bool_(flag)):
+            stored = model.get_config()["include_top"]
+            assert type(stored) is bool and stored is flag
+            json.dumps(model.get_config())  # a numpy bool would raise here
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_a_numpy_bool_model_round_trips_its_config(self, flag):
+        for model in _both(np.bool_(flag)):
+            clone = type(model).from_config(model.get_config())
+            assert clone.include_top is flag
+
+    @pytest.mark.parametrize(
+        "bad",
+        [64, [1, 1], 0, 1, "yes", None, np.int64(1), np.array(True)],
+        ids=["64", "list", "0", "1", "yes", "None", "np.int64", "0-d array"],
+    )
+    def test_everything_else_is_still_refused_and_named_unambiguously(self, bad):
+        """The refusal prints the repr AND the qualified type of the value.
+
+        ``np.int64(1)`` and a 0-d ``np.array(True)`` guard against loosening
+        the check to ``bool(...)``: only a ``bool`` or ``numpy.bool_`` passes.
+        """
+        kind = type(bad)
+        qualified = f"{kind.__module__}.{kind.__qualname__}"
+        constructors = (
+            lambda: CliffordNet(num_classes=10, channels=8, depth=1,
+                                include_top=bad),
+            lambda: HierarchicalCliffordNet(
+                num_classes=10, stage_depths=[1], stage_dims=[8],
+                include_top=bad),
+        )
+        for construct in constructors:
+            with pytest.raises(TypeError) as caught:
+                construct()
+            message = str(caught.value)
+            assert "include_top" in message
+            assert repr(bad) in message
+            assert qualified in message, (qualified, message)
+
+    def test_the_message_does_not_call_a_numpy_bool_a_bool_it_refuses(self):
+        """The old contradiction: "got np.False_ (bool)" on a refused value.
+
+        No ``bool`` or ``numpy.bool_`` is refused any more, so the message can
+        never print a ``bool`` type for a value it rejected; the qualified name
+        of a refused numpy scalar is its own (``numpy.int64``), not ``bool``.
+        """
+        with pytest.raises(TypeError) as caught:
+            CliffordNet(num_classes=10, channels=8, depth=1,
+                        include_top=np.int64(1))
+        assert "numpy.int64" in str(caught.value)
+        assert "(bool)" not in str(caught.value)

@@ -23,6 +23,8 @@ import tensorflow as tf
 
 from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.stem import ConvStem
+from dl_techniques.layers.norms.factory import (
+    _TYPE_TO_CLASS, create_normalization_layer)
 from tests.norm_epsilon_oracle import collect_norm_epsilons
 
 from ...test_models.initializer_replay_oracle import replayed_pairs
@@ -921,3 +923,222 @@ class TestALayerActivationMustBeCloneable:
     def test_a_registered_unbuilt_layer_is_still_accepted(self):
         stem = ConvStem(filters=4, activation_type=keras.layers.PReLU())
         assert isinstance(stem.activation1, keras.layers.PReLU)
+
+
+# ---------------------------------------------------------------------
+# Every normalization type the stem can build, at every policy (review pass 2, NOTE 4)
+# ---------------------------------------------------------------------
+
+# Types the stem cannot use. The stem needs its norm to preserve the shape of
+# its input (module docstring); these three REDUCE the normalized axis away
+# (norms/factory.py, "Three types are not shape-preserving"). The census test
+# below measures each one on a rank-4 input, so a listed type that became
+# shape-preserving fails there instead of staying excluded unnoticed.
+_NORMS_THE_STEM_CANNOT_BUILD = {
+    "decoupled_max_logit":
+        "returns a 3-tuple (score, MaxCosine, MaxNorm), each (B, H, W): the "
+        "channel axis is reduced away",
+    "dml_plus_focal":
+        "returns one (B, H, W) tensor: the channel axis is reduced away",
+    "dml_plus_center":
+        "returns a 2-tuple, (B, H, W) and (B, H, W, 1): the channel axis is "
+        "reduced away",
+}
+
+# Extra constructor arguments a swept type needs beyond its name. EMPTY by
+# measurement (2026-10-26): all 16 swept types build from the name alone. The
+# only registry types with a required constructor argument are the two
+# ``dml_plus_*`` ones (``model_type``, which the factory forces), and both are
+# in the exclusion table above. A new type that needs an argument fails
+# ``test_the_table_supplies_every_required_argument`` until it is listed here.
+_NORM_EXTRA_KWARGS = {}
+
+_SWEPT_NORMS = sorted(set(_TYPE_TO_CLASS) - set(_NORMS_THE_STEM_CANNOT_BUILD))
+
+
+class TestEveryNormTypeTheStemCanBuild:
+    """``ConvStem(dtype=...)`` with each factory norm, at float32 / mixed / float64.
+
+    Measured before the fix (CPU, ``ConvStem(8, num_convs=2, dtype=policy)``):
+    ``band_logit_norm`` raised ``InvalidArgumentError`` (Mul dtype mismatch) at
+    ``float64`` and ``mixed_float16``, and ``adaptive_band_rms`` /
+    ``zero_centered_adaptive_band_rms_norm`` ran but built their inner ``Dense``
+    at float32. The other 14 swept types were already correct. The earlier
+    per-layer test covered ``rms_norm`` only, so it could not see any of them.
+    ``float32`` is the control: it is the ambient policy and passes with or
+    without the fix.
+    """
+
+    def test_the_sweep_covers_the_registry_and_is_not_vacuous(self):
+        assert set(_NORMS_THE_STEM_CANNOT_BUILD) <= set(_TYPE_TO_CLASS)
+        assert set(_SWEPT_NORMS) | set(_NORMS_THE_STEM_CANNOT_BUILD) == set(
+            _TYPE_TO_CLASS)
+        assert not set(_SWEPT_NORMS) & set(_NORMS_THE_STEM_CANNOT_BUILD)
+        # Derived from the registry, but pinned: a registry change must be read
+        # against the exclusion table instead of being swept (or skipped) blind.
+        assert len(_SWEPT_NORMS) == 16, _SWEPT_NORMS
+        assert set(_NORM_EXTRA_KWARGS) <= set(_SWEPT_NORMS)
+
+    @pytest.mark.parametrize("norm_type", sorted(_NORMS_THE_STEM_CANNOT_BUILD))
+    def test_each_excluded_type_really_leaves_the_shape_contract(self, norm_type):
+        """The exclusion is measured, not asserted by name."""
+        assert _NORMS_THE_STEM_CANNOT_BUILD[norm_type]
+        out = create_normalization_layer(norm_type)(
+            np.ones((B, 8, 8, 4), "float32"))
+        if isinstance(out, (tuple, list)):
+            return
+        assert tuple(out.shape) != (B, 8, 8, 4), (
+            f"{norm_type} now preserves the shape: sweep it instead")
+
+    @pytest.mark.parametrize("norm_type", _SWEPT_NORMS)
+    def test_the_table_supplies_every_required_argument(self, norm_type):
+        parameters = inspect.signature(_TYPE_TO_CLASS[norm_type].__init__).parameters
+        required = {
+            name for name, parameter in parameters.items()
+            if name != "self" and parameter.default is parameter.empty
+            and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD,
+                                   parameter.KEYWORD_ONLY)}
+        assert required <= set(_NORM_EXTRA_KWARGS.get(norm_type, {})), (
+            f"{norm_type} needs {required}: add it to _NORM_EXTRA_KWARGS")
+
+    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
+    @pytest.mark.parametrize("norm_type", _SWEPT_NORMS)
+    def test_the_stem_computes_in_its_policy(self, norm_type, policy, rng):
+        stem = ConvStem(
+            filters=6, num_convs=2, use_pooling=True, pool_size=3,
+            pool_strides=2, pool_padding="same", normalization_type=norm_type,
+            dtype=policy, name=f"sweep_{norm_type}_{policy}",
+            normalization_kwargs=dict(_NORM_EXTRA_KWARGS.get(norm_type, {})))
+        x = _x(rng, (B, 8, 8, 4))
+        out = stem(x, training=False)
+        assert not isinstance(out, (tuple, list)), type(out)
+        assert tuple(out.shape) == tuple(stem.compute_output_shape(x.shape))
+        assert keras.backend.standardize_dtype(out.dtype) == stem.compute_dtype
+        assert np.isfinite(_np(out).astype("float64")).all()
+        # Every layer under the stem, nested ones included: an inner layer a
+        # norm builds for itself is one of them.
+        walked = list(stem._flatten_layers(include_self=False))
+        assert len(walked) >= 7, [layer.name for layer in walked]
+        for layer in walked:
+            assert (layer.compute_dtype, layer.variable_dtype) == (
+                stem.compute_dtype, stem.variable_dtype), (
+                f"{layer.name} ({type(layer).__name__}): compute "
+                f"{layer.compute_dtype} / variable {layer.variable_dtype} under "
+                f"ConvStem(dtype={policy!r}, normalization_type={norm_type!r})")
+
+
+# ---------------------------------------------------------------------
+# What a config round trip does to each kind of callable (review pass 2, NOTES 5, 6)
+# ---------------------------------------------------------------------
+
+def an_unregistered_activation(x):
+    """Module level on purpose, and registered with nobody."""
+    return keras.ops.relu(x) * 2.0
+
+
+class TestWhatAConfigRoundTripDoesToACallable:
+    """Measured 2026-10-26 (CPU, keras 3.8); the ``stem.py`` docstring states it."""
+
+    def test_an_unregistered_callable_fails_at_reload_not_at_get_config(self):
+        stem = ConvStem(filters=4, normalization_type=None,
+                        activation_type=an_unregistered_activation)
+        config = stem.get_config()  # does not raise
+        assert config["activation_type"]["config"] == "an_unregistered_activation"
+        assert config["activation_type"]["class_name"] == "function"
+        reloadable = json.loads(json.dumps(config))
+        with pytest.raises(TypeError, match="an_unregistered_activation"):
+            ConvStem.from_config(reloadable)
+
+    def test_an_unregistered_callable_fails_in_load_model_too(self, tmp_path):
+        stem = ConvStem(filters=4, normalization_type=None,
+                        activation_type=an_unregistered_activation, name="unreg")
+        inputs = keras.Input((8, 8, 3))
+        path = str(tmp_path / "unregistered.keras")
+        keras.Model(inputs, stem(inputs)).save(path)
+        with pytest.raises(TypeError, match="an_unregistered_activation"):
+            keras.models.load_model(path)
+
+    def test_a_keras_builtin_is_written_as_its_string_and_reloads_as_a_layer(
+            self, float64_policy):
+        data = np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
+        stem = ConvStem(filters=6, normalization_type=None,
+                        activation_type=keras.activations.gelu, name="builtin")
+        stem.build(data.shape)
+        assert stem.get_config()["activation_type"] == "gelu"
+        assert type(stem.activation1) is keras.layers.Activation
+        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
+        rebuilt.build(data.shape)
+        rebuilt.set_weights(stem.get_weights())
+        # The type changes with the string: Activation -> the registry GELU.
+        assert type(rebuilt.activation1).__name__ == "GELU"
+        assert type(rebuilt.activation1) is not type(stem.activation1)
+        delta = float(np.max(np.abs(_np(rebuilt(data)) - _np(stem(data)))))
+        # Measured 5.023e-09 (float64, this data); the reviewer's 5.0e-09 matches.
+        assert delta == pytest.approx(5.0e-09, rel=0.1), delta
+
+    def test_the_gap_is_gelus_alone_relu_reloads_exactly(self, float64_policy):
+        """Control: the instrument reads 0.0 where the string and the callable agree."""
+        data = np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
+        stem = ConvStem(filters=6, normalization_type=None,
+                        activation_type=keras.activations.relu, name="builtin_relu")
+        stem.build(data.shape)
+        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
+        rebuilt.build(data.shape)
+        rebuilt.set_weights(stem.get_weights())
+        assert type(rebuilt.activation1) is keras.layers.ReLU
+        np.testing.assert_allclose(
+            _np(rebuilt(data)), _np(stem(data)), rtol=0.0, atol=0.0)
+
+
+# ---------------------------------------------------------------------
+# A registered Layer that fails for its OWN reason keeps its own message (NOTE 9)
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable(package="test_stem_layer_activation")
+class ActivationWithAStrayConfigKey(keras.layers.Layer):
+    """Registered, but ``get_config`` emits a key ``__init__`` rejects."""
+
+    def call(self, inputs):
+        return keras.ops.relu(inputs)
+
+    def get_config(self):
+        return {**super().get_config(), "a_stray_config_key": 1}
+
+
+@keras.saving.register_keras_serializable(package="test_stem_layer_activation")
+class ActivationWhoseFromConfigFails(keras.layers.Layer):
+    """Registered, but ``from_config`` raises its own ``ValueError``."""
+
+    def call(self, inputs):
+        return keras.ops.relu(inputs)
+
+    @classmethod
+    def from_config(cls, config):
+        raise ValueError("this activation refuses its own config: sentinel-7731")
+
+
+class TestARegisteredLayerKeepsItsOwnError:
+    """Only Keras' "Could not locate class" is relabelled by the stem.
+
+    Measured before the fix: every ``TypeError`` / ``ValueError`` from
+    ``keras.layers.deserialize`` became "cannot clone ... Register it", so a
+    registered Layer with a bad config key told the caller to register a class
+    that was registered already. ``TestALayerActivationMustBeCloneable`` keeps
+    the other direction: an unlocatable class IS relabelled.
+    """
+
+    def test_a_stray_config_key_keeps_its_own_typeerror(self):
+        with pytest.raises(TypeError, match="a_stray_config_key") as caught:
+            ConvStem(filters=4, activation_type=ActivationWithAStrayConfigKey())
+        assert "cannot clone" not in str(caught.value)
+
+    def test_a_failing_from_config_keeps_its_own_message(self):
+        with pytest.raises(ValueError, match="sentinel-7731") as caught:
+            ConvStem(filters=4, activation_type=ActivationWhoseFromConfigFails())
+        assert "cannot clone" not in str(caught.value)
+
+    def test_both_layers_are_registered_so_the_error_is_not_a_locate_failure(self):
+        """Control: Keras CAN locate both classes, so neither is the relabelled case."""
+        for cls in (ActivationWithAStrayConfigKey, ActivationWhoseFromConfigFails):
+            assert keras.saving.get_registered_object(
+                keras.saving.get_registered_name(cls)) is cls

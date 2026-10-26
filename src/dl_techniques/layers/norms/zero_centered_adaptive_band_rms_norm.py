@@ -463,6 +463,9 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
             kernel_initializer=self.band_initializer,
             kernel_regularizer=self.band_regularizer,
             use_bias=True,
+            # The owner's policy, not the global one: a per-layer
+            # dtype="float64" would otherwise build this Dense at float32.
+            dtype=self.dtype_policy,
             name="band_dense",
         )
         # Aggregated log-RMS is always shape (batch, 1).
