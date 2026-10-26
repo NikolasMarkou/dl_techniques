@@ -12,7 +12,13 @@ which registry key it will ask for. Measured at Step 15 of
 dynamic, 47 literal.** Plan-2026-10-23T190557-972a9ac5 step 10 (D-030) moved the
 TopoLM block's two norms (now one ``_make_norm`` call site) and the model's final
 norm from literal ``'layer_norm'`` to the ``normalization_type`` knob: **200 sites
-in 101 files, 155 dynamic, 45 literal.**
+in 101 files, 155 dynamic, 45 literal.** Plan-2026-10-26T125959-7af851e5 step 1
+re-derived it after two moves that had left the pins stale: the vision-head
+refactor moved ``heads/vision/factory.py``'s site into ``heads/vision/classification.py``,
+and the stems of ConvUNext, ResNet and UcaEncoder are now built by ``ConvStem``
+(``conv_blocks/stem.py``, one dynamic site in ``_make_norm``, shared by both of the
+stem's norms), so ``convunext`` and ``resnet`` lose their site and ``uca_encoder``
+loses ``stem_norm``: **198 sites in 100 files, 153 dynamic, 45 literal.**
 
 The population was first pinned by two ``<=`` ceilings (D-201 of
 ``plan-2026-08-22T035419-a11304c8``: 151 dynamic, 180 total, 2026-09-04). A
@@ -54,7 +60,9 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: ``{path relative to src/: (dynamic sites, literal sites)}``. Re-derived at
 #: Step 15 of plan-2026-10-14T062616-81938e81 (D-253): 200 sites, 100 files,
 #: 153 dynamic, 47 literal; then D-030 of plan-2026-10-23T190557-972a9ac5 (TopoLM's
-#: ``normalization_type`` knob): 200 sites, 101 files, 155 dynamic, 45 literal.
+#: ``normalization_type`` knob): 200 sites, 101 files, 155 dynamic, 45 literal;
+#: then step 1 of plan-2026-10-26T125959-7af851e5 (``ConvStem``, the vision-head
+#: move): 198 sites, 100 files, 153 dynamic, 45 literal.
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
@@ -76,6 +84,7 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/conv_blocks/conv_block.py": (1, 0),
     "dl_techniques/layers/conv_blocks/depthwise_separable_block.py": (2, 0),
     "dl_techniques/layers/conv_blocks/gabor_depthwise_separable_block.py": (1, 0),
+    "dl_techniques/layers/conv_blocks/stem.py": (1, 0),
     "dl_techniques/layers/conv_blocks/universal_inverted_bottleneck.py": (1, 0),
     "dl_techniques/layers/dense_block.py": (1, 0),
     "dl_techniques/layers/eomt_mask.py": (2, 0),
@@ -89,7 +98,7 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/graphs/graph_neural_network.py": (0, 2),
     "dl_techniques/layers/graphs/relational_graph_transformer_blocks.py": (2, 0),
     "dl_techniques/layers/heads/nlp/factory.py": (1, 0),
-    "dl_techniques/layers/heads/vision/factory.py": (1, 0),
+    "dl_techniques/layers/heads/vision/classification.py": (1, 0),
     "dl_techniques/layers/heads/vlm/factory.py": (1, 3),
     "dl_techniques/layers/moe/experts.py": (2, 0),
     "dl_techniques/layers/moe/gating.py": (1, 0),
@@ -126,7 +135,6 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/time_series/xlstm/forecaster.py": (1, 0),
     "dl_techniques/models/time_series/xlstm/model.py": (1, 0),
     "dl_techniques/models/vision/alexnet/model.py": (0, 1),
-    "dl_techniques/models/vision/convunext/model.py": (1, 0),
     "dl_techniques/models/vision/dasiamrpn/model.py": (0, 1),
     "dl_techniques/models/vision/deepsort/appearance.py": (0, 3),
     "dl_techniques/models/vision/dino/dino_v1.py": (3, 0),
@@ -136,8 +144,7 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/vision/image_restoration/darkir/model.py": (0, 4),
     "dl_techniques/models/vision/image_restoration/pw_fnet/model.py": (2, 0),
     "dl_techniques/models/vision/mambalct/model.py": (0, 1),
-    "dl_techniques/models/vision/mambalct/uca_encoder.py": (3, 0),
-    "dl_techniques/models/vision/resnet/model.py": (1, 0),
+    "dl_techniques/models/vision/mambalct/uca_encoder.py": (2, 0),
     "dl_techniques/models/vision/siamfc/model.py": (0, 1),
     "dl_techniques/models/vision/super_resolution/pft_sr/blocks.py": (0, 2),
     "dl_techniques/models/vision/super_resolution/pft_sr/model.py": (0, 2),
@@ -163,7 +170,10 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
 #: The six dynamic sites D-253 ruled real constructor knobs (D-122 item 4), and the
 #: two D-030 of plan-2026-10-23T190557-972a9ac5 added: ``TopoLMBlock._make_norm``,
 #: the one call that builds both block norms (so the name it passes is the
-#: ``name`` parameter), and ``TopoLM.final_norm``:
+#: ``name`` parameter), and ``TopoLM.final_norm``; and ``ConvStem._make_norm`` of
+#: plan-2026-10-26T125959-7af851e5 step 1, which builds ``norm1`` and ``norm2`` in
+#: one call (the name it passes is built from the ``suffix`` parameter). The
+#: ``UcaEncoder`` ``stem_norm`` row is gone: that encoder's stem is now a ``ConvStem``.
 #: ``(file relative to src/, class, the attribute the norm is assigned to)``.
 #: Each class documents ``normalization_type`` (``:param``), takes it in
 #: ``__init__`` and returns it from ``get_config``; a literal type there would
@@ -174,11 +184,11 @@ RULED_DYNAMIC_KNOBS: Tuple[Tuple[str, str, str], ...] = (
     ("dl_techniques/layers/ssm/context_mamba.py", "ContextMambaLayer", "norm"),
     ("dl_techniques/models/probabilistic/neural_hmm/encoders.py",
      "NeuralHMMEncoder", "output_norm"),
-    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "stem_norm"),
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "final_norm"),
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "merge_norm_"),
     ("dl_techniques/models/language/topolm/components.py", "TopoLMBlock", "name"),
     ("dl_techniques/models/language/topolm/model.py", "TopoLM", "final_norm"),
+    ("dl_techniques/layers/conv_blocks/stem.py", "ConvStem", "suffix"),
 )
 
 
@@ -249,7 +259,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (155, 45, 101), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (153, 45, 100), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

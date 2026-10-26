@@ -1,8 +1,7 @@
 """Convolutional building blocks.
 
-``conv_blocks`` re-exports ``ConvStem``; the remaining blocks are imported
-directly from their modules (see ``layers/AGENTS.md`` for the
-"exports nothing" policy this package follows).
+``conv_blocks`` re-exports ``ConvStem`` only; every other block is imported
+from its own module, e.g. ``dl_techniques.layers.conv_blocks.conv_block``.
 """
 
 from .stem import ConvStem
