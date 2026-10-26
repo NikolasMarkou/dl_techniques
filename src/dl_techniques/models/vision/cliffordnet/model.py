@@ -16,6 +16,7 @@ stochastic-depth gate sit in this model's `call`. The head pools before it
 normalizes. No pretrained weights are distributed, so `pretrained=True` raises
 `NotImplementedError`; pass a local `.keras` path instead. The model returns
 logits: compile with ``SparseCategoricalCrossentropy(from_logits=True)``.
+With ``include_top=False`` it returns the final feature map instead.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -130,6 +131,10 @@ class CliffordNet(keras.Model):
     ``classifier``. ``call`` returns that classifier's output, the logits, as
     one tensor. The model's initializers and regularizers reach the head.
 
+    With ``include_top=False`` the pooling, layer norm, dropout and dense layers
+    of the diagram are not built and ``call`` returns the ``[B, H/p, W/p, D]``
+    map the blocks produce, not a pooled vector.
+
     Block wiring:
 
     .. code-block:: text
@@ -197,7 +202,13 @@ class CliffordNet(keras.Model):
     Every preset uses ``ctx_mode='diff'``, ``layer_scale_init=1e-5`` and
     ``TruncatedNormal(0.02)`` kernels.
 
-    :param num_classes: Number of output classes. Must be positive.
+    :param num_classes: Number of output classes. Must be positive when
+        ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
+        headless. Defaults to ``1000``.
+    :param include_top: Whether to build the classification head. When
+        ``False`` there is no head, ``classification_head`` is ``None`` and
+        the model returns the final feature map ``(B, H/p, W/p, channels)``
+        instead of logits. Defaults to ``True``.
     :param channels: Feature dimensionality ``D`` (constant throughout). Must
         be positive.
     :param depth: Number of CliffordNet blocks ``L``. Must be positive.
@@ -232,9 +243,9 @@ class CliffordNet(keras.Model):
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passed to :class:`keras.Model`.
 
-    :raises ValueError: If ``num_classes``, ``channels``, ``depth`` or
-        ``patch_size`` is not positive, or ``head_config_overrides`` names a
-        reserved key.
+    :raises ValueError: If ``num_classes`` is not positive while
+        ``include_top`` is true, if ``channels``, ``depth`` or ``patch_size``
+        is not positive, or if ``head_config_overrides`` names a reserved key.
     """
 
     # The head's pooled LayerNorm. The reference's ``nn.LayerNorm(embed_dim)``
@@ -243,7 +254,8 @@ class CliffordNet(keras.Model):
 
     def __init__(
         self,
-        num_classes: int,
+        num_classes: int = 1000,
+        include_top: bool = True,
         channels: int = 128,
         depth: int = 12,
         patch_size: int = 2,
@@ -264,8 +276,10 @@ class CliffordNet(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be positive, got {num_classes}")
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if depth <= 0:
@@ -274,6 +288,7 @@ class CliffordNet(keras.Model):
             raise ValueError(f"patch_size must be positive, got {patch_size}")
 
         self.num_classes = num_classes
+        self.include_top = include_top
         self.channels = channels
         self.depth = depth
         self.patch_size = patch_size
@@ -294,13 +309,17 @@ class CliffordNet(keras.Model):
 
         self._build_stem()
         self._build_blocks()
-        self._build_head()
+        if self.include_top:
+            self._build_head()
+        else:
+            # Always defined, so `model.classification_head` is safe to read.
+            self.classification_head = None
 
         logger.info(
             f"Created CliffordNet (channels={channels}, depth={depth}, "
             f"patch_size={patch_size}, shifts={self.shifts}, "
             f"cli_mode={cli_mode}, ctx_mode={ctx_mode}, "
-            f"use_global_context={use_global_context})"
+            f"use_global_context={use_global_context}, include_top={include_top})"
         )
 
     def _build_stem(self) -> None:
@@ -477,7 +496,8 @@ class CliffordNet(keras.Model):
 
         :param inputs: Image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode.
-        :return: Logits ``(B, num_classes)``, no softmax.
+        :return: Logits ``(B, num_classes)``, no softmax, when ``include_top``;
+            otherwise the final feature map ``(B, h, w, channels)``.
         """
         x = self._apply_stem(inputs, training=training)
 
@@ -486,7 +506,9 @@ class CliffordNet(keras.Model):
                 block_info["block"](x, training=training), training=training
             )
 
-        return self.classification_head(x, training=training)["logits"]
+        if self.include_top:
+            return self.classification_head(x, training=training)["logits"]
+        return x
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -494,9 +516,13 @@ class CliffordNet(keras.Model):
         """Compute output shape.
 
         :param input_shape: ``(B, H, W, C_in)``
-        :return: ``(B, num_classes)``
+        :return: ``(B, num_classes)`` when ``include_top``; otherwise the
+            stem's output shape ``(B, h, w, channels)``, since the blocks
+            preserve it.
         """
-        return (input_shape[0], self.num_classes)
+        if self.include_top:
+            return (input_shape[0], self.num_classes)
+        return tuple(self.stem.compute_output_shape(input_shape))
 
     def load_pretrained_weights(
         self,
@@ -578,6 +604,7 @@ class CliffordNet(keras.Model):
         config.update(
             {
                 "num_classes": self.num_classes,
+                "include_top": self.include_top,
                 "channels": self.channels,
                 "depth": self.depth,
                 "patch_size": self.patch_size,
@@ -635,7 +662,9 @@ class CliffordNet(keras.Model):
         logger.info(f"  use_global_context  : {self.use_global_context}")
         logger.info(f"  stochastic_depth    : {self.stochastic_depth_rate}")
         logger.info(f"  dropout_rate        : {self.dropout_rate}")
-        logger.info(f"  num_classes         : {self.num_classes}")
+        logger.info(f"  include_top         : {self.include_top}")
+        if self.include_top:
+            logger.info(f"  num_classes         : {self.num_classes}")
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
@@ -743,7 +772,7 @@ class CliffordNet(keras.Model):
     def from_variant(
         cls,
         variant: str,
-        num_classes: int,
+        num_classes: int = 1000,
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "cifar100",
         cache_dir: Optional[str] = None,
@@ -752,13 +781,14 @@ class CliffordNet(keras.Model):
         """Create a :class:`CliffordNet` from a predefined variant.
 
         :param variant: A key of :attr:`MODEL_VARIANTS` (see the class docstring table).
-        :param num_classes: Number of output classes.
+        :param num_classes: Number of output classes. Ignored when
+            ``include_top=False`` is passed in ``kwargs``.
         :param pretrained: A local path to a ``.keras`` weights file. ``True``
             attempts a download, which always raises ``NotImplementedError``
             since no checkpoints are hosted.
         :param weights_dataset: Dataset key for pretrained weights. The
             classifier-skip decision compares ``num_classes`` against 100
-            whatever this says.
+            whatever this says, and only when the model has a head.
         :param cache_dir: Directory to cache downloaded weights.
         :param kwargs: Override any variant default.
         :return: Configured :class:`CliffordNet` instance.
@@ -821,7 +851,7 @@ class CliffordNet(keras.Model):
             # The hosted checkpoints would be CIFAR-100, so a different head
             # width means the classifier cannot be transferred.
             pretrained_classes = 100
-            if num_classes != pretrained_classes:
+            if kwargs.get("include_top", True) and num_classes != pretrained_classes:
                 skip_mismatch = True
                 logger.info(
                     f"num_classes ({num_classes}) differs from pretrained "
@@ -843,7 +873,7 @@ class CliffordNet(keras.Model):
         return model
 
     @classmethod
-    def nano(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
+    def nano(cls, num_classes: int = 1000, **kwargs: Any) -> "CliffordNet":
         """Create CliffordNet-Nano.
 
         ``channels=128``, ``depth=12``, ``shifts=[1, 2]``, differential
@@ -856,7 +886,7 @@ class CliffordNet(keras.Model):
         return cls.from_variant("nano", num_classes=num_classes, **kwargs)
 
     @classmethod
-    def lite(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
+    def lite(cls, num_classes: int = 1000, **kwargs: Any) -> "CliffordNet":
         """Create CliffordNet-Lite.
 
         ``channels=128``, ``depth=12``, ``shifts=[1, 2, 4, 8, 16]``,
@@ -869,7 +899,7 @@ class CliffordNet(keras.Model):
         return cls.from_variant("lite", num_classes=num_classes, **kwargs)
 
     @classmethod
-    def lite_g(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
+    def lite_g(cls, num_classes: int = 1000, **kwargs: Any) -> "CliffordNet":
         """Create CliffordNet-Lite with the gFFN-G branch.
 
         Same widths and shifts as ``lite``, plus the global-average-pool

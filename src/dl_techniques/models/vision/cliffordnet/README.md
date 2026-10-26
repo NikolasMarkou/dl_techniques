@@ -103,6 +103,17 @@ change breaks archives: a `.keras` file saved before it does not load, and is
 not supported. `head_config_preset`, which nothing read, is gone; passing it
 raises `ValueError`.
 
+**`include_top=False` returns the feature map.** `CliffordNet(include_top=True)`
+is the default and is the model described above. With `include_top=False` the
+head is not built, `model.classification_head` is `None`, and `call` returns the
+block stack's output `(B, ceil(H / p), ceil(W / p), channels)` with `p =
+patch_size`: the map itself, not a pooled vector (pool it yourself for an
+embedding). `num_classes` is then ignored, so `0` is accepted; it defaults to
+`1000` as for ResNet. A headed checkpoint loads into a headless model through
+`load_pretrained_weights` (on a built model): the trunk layers (`stem`, `clifford_block_*`) are
+copied and the checkpoint's `classification_head` is left unused. Only the
+`CliffordNet` class has the switch so far.
+
 ### Variants
 
 | Variant | Channels | Depth | Patch | Shifts | cli_mode | Params (paper) | Params (100 classes) |
@@ -357,6 +368,10 @@ model.compile(
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
+
+# Backbone only: the final feature map (B, H/p, W/p, channels), no head.
+backbone = CliffordNet.nano(include_top=False)
+features = backbone(images)
 ```
 
 ### CliffordCLIP (Vision-Language)
