@@ -53,10 +53,25 @@ How to add a case (one per original variant, later steps extend the table):
 Planted controls prove the harness can see each defect class it exists for:
 a wrong pool, a wrong epsilon and a norm applied twice are each handed to the
 SAME comparison and the comparison must FAIL.
+
+Three guards cover what the weight transplant cannot see (D-014):
+
+* ``assert_stem_settings_match_original``: the transplant overwrites every
+  weight, so a dropped or wrong kernel/bias initializer is invisible to it. The
+  serialized initializers (``seed`` ignored, so D-005's independent ``conv2``
+  draw is not flagged) and regularizers of each original conv are compared with
+  the stem's. A case whose model has a non-default initializer knob is built
+  with a non-default value, or a dropped one would fall back to an equal default.
+* ``test_every_migrated_model_applies_its_stem_exactly_once``: the stem is
+  compared in isolation, so a model that applies it (or a layer of it) again in
+  its own ``call`` is invisible; the calls of each stem layer in one forward are
+  counted.
+* ``check_training_none``: ``training=None`` is compared as well as False/True.
 """
 
+import contextlib
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Iterator, Optional, Tuple
 
 import keras
 import numpy as np
@@ -185,6 +200,7 @@ def assert_stem_matches_original(
     stem: ConvStem,
     forward: Callable = _default_forward,
     seed: int = 0,
+    check_training_none: bool = False,
 ) -> None:
     """Assert ``forward(stem, ...)`` reproduces the original stem exactly.
 
@@ -198,6 +214,16 @@ def assert_stem_matches_original(
     :param forward: ``forward(stem, x, training)``; defaults to ``stem(x)``.
         A control that applies a layer twice passes its own.
     :param seed: Seed of the weights and the input.
+    :param check_training_none: Also compare ``training=None``, after the
+        inference comparison and before any ``training=True`` pass moves the
+        BN statistics. Keras 3's ``BatchNormalization.call`` takes its batch
+        statistics branch only on ``if training and self.trainable``, so ``None``
+        is the INFERENCE path (moving statistics), not "unspecified, pick one":
+        a top-level call has no enclosing call context to inherit a flag from,
+        and ``Layer.__call__`` leaves ``None`` as ``None``. A stem that turns
+        ``None`` into ``True`` (or a norm given a different default) would
+        change a model's output for every caller that omits ``training``, and
+        neither ``False`` nor ``True`` can see it.
     """
     rng = np.random.default_rng(seed)
     x = rng.standard_normal((BATCH,) + tuple(case.input_shape)).astype("float32")
@@ -258,6 +284,13 @@ def assert_stem_matches_original(
         original.sublayers.values()
     ), f"{case.case_id}: the regularization loss differs from the original"
 
+    if check_training_none:
+        _compare(
+            "training=None output",
+            forward(stem, x, None),
+            original.forward(x, None),
+        )
+
     # Training: batch statistics, and the moving statistics move.
     want = original.forward(x, True)
     got = forward(stem, x, True)
@@ -271,6 +304,67 @@ def assert_stem_matches_original(
                 f"{case.case_id}: {role} weight {index} differs from the original "
                 f"after a training=True pass, max|delta| = {diff:.6e}"
             )
+
+
+def _initializer_signature(initializer) -> dict:
+    """The serialized initializer WITHOUT its ``seed``: class and parameters.
+
+    The seed is a draw detail, not a configuration: a seedless initializer gets
+    a fresh default seed per instance, and D-005 deliberately gives the second
+    conv of a two-conv stem its own clone (same class and parameters, other
+    seed). Comparing the seed would flag that on purpose and nothing else.
+    """
+    serialized = keras.initializers.serialize(initializer)
+    config = dict(serialized["config"])
+    config.pop("seed", None)
+    return {**serialized, "config": config}
+
+
+def _conv_settings(conv: keras.layers.Conv2D) -> dict:
+    """Kernel/bias initializer (seed-free) and regularizer of one conv."""
+    return {
+        "kernel_initializer": _initializer_signature(conv.kernel_initializer),
+        "bias_initializer": _initializer_signature(conv.bias_initializer),
+        "kernel_regularizer": keras.regularizers.serialize(conv.kernel_regularizer),
+        "bias_regularizer": keras.regularizers.serialize(conv.bias_regularizer),
+    }
+
+
+def assert_stem_settings_match_original(case: StemCase, stem: ConvStem) -> None:
+    """Assert each stem conv draws and regularizes like the original conv.
+
+    ``assert_stem_matches_original`` transplants every weight, so a dropped or
+    wrong ``kernel_initializer`` / ``bias_initializer`` is invisible to it (and
+    so is a regularizer on a bias-free conv). This compares the serialized
+    kernel and bias initializer (class and parameters, ``seed`` ignored) and the
+    kernel and bias regularizer of every ORIGINAL conv with the stem conv of the
+    same role. Where the original relied on Keras' default (``glorot_uniform`` /
+    ``zeros``) that default is the expectation, because the original is a real
+    ``Conv2D``.
+
+    Interface contract: raises ``AssertionError`` naming the case, the role and
+    the setting on any difference. Builds nothing and mutates nothing: the
+    settings are constructor attributes.
+    """
+    original = case.make_original()
+    stem_layers = _stem_sublayers(stem)
+    compared = 0
+    for role, source in original.sublayers.items():
+        if not isinstance(source, keras.layers.Conv2D):
+            continue
+        target = stem_layers[role]
+        assert isinstance(target, keras.layers.Conv2D), (
+            f"{case.case_id}: {role} is a {type(target).__name__}, "
+            f"the original a Conv2D"
+        )
+        want, got = _conv_settings(source), _conv_settings(target)
+        for setting in want:
+            assert got[setting] == want[setting], (
+                f"{case.case_id}: {role} {setting} is {got[setting]}, "
+                f"the original used {want[setting]}"
+            )
+        compared += 1
+    assert compared >= 1, f"{case.case_id}: the original has no Conv2D to compare"
 
 
 # ---------------------------------------------------------------------
@@ -366,6 +460,11 @@ RESNET_CIFAR = StemCase(
 _CLIFFORD_KERNEL_REG = 1e-4
 _CLIFFORD_BIAS_REG = 3e-5
 _CLIFFORD_BIAS_INIT = 0.25
+#: The model's own ``kernel_initializer``. Every pre-migration stem conv took
+#: the model's (default ``glorot_uniform``), so a non-default one is passed to
+#: the models below: with the default, a stem that dropped it and fell back to
+#: ConvStem's own ``glorot_uniform`` default would be indistinguishable.
+_CLIFFORD_KERNEL_INIT_STDDEV = 0.02
 
 
 def _clifford_family_original(
@@ -380,7 +479,9 @@ def _clifford_family_original(
             strides=conv_strides,
             padding="same",
             use_bias=bias,
-            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            kernel_initializer=keras.initializers.TruncatedNormal(
+                stddev=_CLIFFORD_KERNEL_INIT_STDDEV
+            ),
             bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
             kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
             bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
@@ -434,6 +535,9 @@ def _clifford_model(patch_size: int, use_bias: bool = True) -> CliffordNet:
         patch_size=patch_size,
         use_bias=use_bias,
         kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+        kernel_initializer=keras.initializers.TruncatedNormal(
+            stddev=_CLIFFORD_KERNEL_INIT_STDDEV
+        ),
         bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
         bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
     )
@@ -447,6 +551,9 @@ def _hierarchical_model(patch_size: int, use_bias: bool = True):
         patch_size=patch_size,
         use_bias=use_bias,
         kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+        kernel_initializer=keras.initializers.TruncatedNormal(
+            stddev=_CLIFFORD_KERNEL_INIT_STDDEV
+        ),
         bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
         bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
     )
@@ -708,8 +815,18 @@ _CONVNEXT_DIMS = [8, 16]
 _CONVNEXT_KERNEL_REG = 1e-4
 
 
+#: ConvNeXt V1/V2: ``STEM_INITIALIZER`` was this dict (the reference's
+#: ``trunc_normal_(std=.02)``). RADConvNet's was the bare string
+#: ``"truncated_normal"``, Keras' default stddev 0.05.
+_CONVNEXT_STEM_INITIALIZER = {
+    "class_name": "TruncatedNormal",
+    "config": {"mean": 0.0, "stddev": 0.02},
+}
+_RAD_STEM_INITIALIZER = "truncated_normal"
+
+
 def _convnext_family_original(
-    strides: int, use_bias: bool, regularized: bool
+    strides: int, use_bias: bool, regularized: bool, kernel_initializer
 ) -> Original:
     """The pre-migration ConvNeXt / RAD patchify stem, as literals."""
     conv = keras.layers.Conv2D(
@@ -718,10 +835,7 @@ def _convnext_family_original(
         strides=strides,
         padding="same" if strides == 1 else "valid",
         use_bias=use_bias,
-        kernel_initializer={
-            "class_name": "TruncatedNormal",
-            "config": {"mean": 0.0, "stddev": 0.02},
-        },
+        kernel_initializer=kernel_initializer,
         kernel_regularizer=(
             keras.regularizers.L2(_CONVNEXT_KERNEL_REG) if regularized else None
         ),
@@ -766,7 +880,10 @@ def _convnext_family_case(
         case_id=case_id,
         make_model=lambda: _convnext_family_model(model_class, strides, use_bias),
         make_original=lambda: _convnext_family_original(
-            strides, use_bias, regularized
+            strides,
+            use_bias,
+            regularized,
+            _CONVNEXT_STEM_INITIALIZER if regularized else _RAD_STEM_INITIALIZER,
         ),
         input_shape=(spatial, spatial, 3),
         expected_output_shape=(output_spatial, output_spatial, _CONVNEXT_DIMS[0]),
@@ -1334,6 +1451,18 @@ def test_the_model_stem_replicates_the_original(case):
     assert_stem_matches_original(case, case.stem_of(model))
 
 
+@pytest.mark.parametrize("case", CASES, ids=[c.case_id for c in CASES])
+def test_the_model_stem_draws_and_regularizes_like_the_original(case):
+    """Initializers and regularizers of every stem conv equal the original's.
+
+    The test above overwrites every weight with the original's, so it cannot see
+    which initializer the stem would have drawn them with. D-005's independent
+    draw for ``conv2`` is a seed difference only and is ignored here.
+    """
+    model = case.make_model()
+    assert_stem_settings_match_original(case, case.stem_of(model))
+
+
 def test_the_imagenet_stem_pool_geometry_is_stride_2_same():
     """Stated outright, not only through values: 3x3, stride 2, ``same``, 224 -> 56."""
     model = RESNET_IMAGENET.make_model()
@@ -1471,6 +1600,63 @@ def test_control_the_harness_sees_a_norm_applied_twice():
         )
 
 
+@pytest.mark.parametrize(
+    "case,override,setting",
+    [
+        # he_normal where the original drew glorot_uniform (UcaEncoder's conv
+        # has no initializer argument: the Keras default).
+        (UCA_ENCODER, {"kernel_initializer": "he_normal"}, "kernel_initializer"),
+        # Same class, other parameter: the original is TruncatedNormal(0.02).
+        (
+            CLIFFORD_P2,
+            {"kernel_initializer": keras.initializers.TruncatedNormal(stddev=0.2)},
+            "kernel_initializer",
+        ),
+        # The original took Constant(0.25); the stem default is zeros.
+        (CLIFFORD_P2, {"bias_initializer": "zeros"}, "bias_initializer"),
+        # Regularizer of another strength, and a dropped one.
+        (
+            RESNET_IMAGENET,
+            {"kernel_regularizer": keras.regularizers.L2(1e-3)},
+            "kernel_regularizer",
+        ),
+        (RESNET_IMAGENET, {"kernel_regularizer": None}, "kernel_regularizer"),
+    ],
+    ids=[
+        "kernel-initializer-class",
+        "kernel-initializer-parameter",
+        "bias-initializer",
+        "kernel-regularizer-strength",
+        "kernel-regularizer-dropped",
+    ],
+)
+def test_control_the_settings_check_sees_a_wrong_initializer_or_regularizer(
+    case, override, setting
+):
+    """A stem built with a wrong setting must fail the settings comparison,
+    naming the setting. The weight-transplant comparison passes on the stems with
+    a wrong initializer (it never reads one), which is the gap this closes.
+    """
+    stem = _stem_from_config(case, **override)
+    with pytest.raises(AssertionError, match=setting):
+        assert_stem_settings_match_original(case, stem)
+    if "initializer" in setting:
+        # Every weight is overwritten, so the transplant comparison is blind to
+        # an initializer. (It does see a regularizer, through the loss.)
+        assert_stem_matches_original(case, stem)
+
+
+def test_control_a_correct_stem_survives_the_settings_check():
+    """Anti-vacuity twin: a stem rebuilt from the model's own config passes, and
+    so does the two-conv stem whose conv2 holds a clone with another seed."""
+    assert_stem_settings_match_original(
+        RESNET_IMAGENET, _stem_from_config(RESNET_IMAGENET)
+    )
+    stem = CLIFFORD_P1.make_model().stem
+    assert stem.conv1.kernel_initializer is not stem.conv2.kernel_initializer
+    assert_stem_settings_match_original(CLIFFORD_P1, stem)
+
+
 def test_control_a_correct_stem_survives_the_same_harness():
     """Anti-vacuity twin: the controls above fail for their defect, not because
     the harness rejects everything. A stem rebuilt from the model's own config
@@ -1478,6 +1664,109 @@ def test_control_a_correct_stem_survives_the_same_harness():
     """
     stem = _stem_from_config(RESNET_IMAGENET)
     assert_stem_matches_original(RESNET_IMAGENET, stem)
+
+
+# ---------------------------------------------------------------------
+# training=None
+# ---------------------------------------------------------------------
+
+# What ``training=None`` means in Keras 3 (measured on 3.8.0): a top-level call
+# has no enclosing call context to inherit a flag from, so ``Layer.__call__``
+# leaves ``None`` as ``None`` and ``BatchNormalization.call`` evaluates
+# ``if training and self.trainable``: ``None`` is falsy, so the layer normalizes
+# with its MOVING statistics, exactly as ``training=False`` does, and updates
+# nothing. It is not "unspecified": a model that omits ``training`` runs every BN
+# of its stem in inference. The comparison is only meaningful if the arm differs
+# from the others, so ``test_training_none_is_inference_for_batch_norm`` pins
+# that on the original (None == False != True once the statistics are random),
+# and ``test_control_the_harness_sees_none_treated_as_training`` hands the arm a
+# stem that turns ``None`` into ``True``, which passes the False and True arms
+# and must fail only this one. LayerNorm, GRN and conv-only stems ignore
+# ``training``; they stay in the set because a stem that special-cased ``None``
+# anywhere would still change the output.
+
+_TRAINING_NONE_BATCH_NORM = [
+    RESNET_IMAGENET,
+    CLIFFORD_P1,
+    MOBILENET_V3,
+    VAE_BN_BIAS,
+    CONVUNEXT_BATCH_NORM,
+]
+_TRAINING_NONE_OTHER = [
+    UCA_ENCODER,
+    CONVNEXT_V1_VALID,
+    CONVUNEXT_GELU_LAYERNORM,
+    CONVUNEXT_GELU_GRN_NOBIAS,
+    SQUEEZENET_V1_1,
+]
+_TRAINING_NONE_CASES = _TRAINING_NONE_BATCH_NORM + _TRAINING_NONE_OTHER
+
+
+@pytest.mark.parametrize(
+    "case", _TRAINING_NONE_CASES, ids=[c.case_id for c in _TRAINING_NONE_CASES]
+)
+def test_the_model_stem_replicates_the_original_at_training_none(case):
+    """``training=None`` equals the original's, exactly, with random BN statistics
+    (the False and True arms run in the same call)."""
+    model = case.make_model()
+    assert_stem_matches_original(
+        case, case.stem_of(model), check_training_none=True
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _TRAINING_NONE_BATCH_NORM,
+    ids=[c.case_id for c in _TRAINING_NONE_BATCH_NORM],
+)
+def test_training_none_is_inference_for_batch_norm(case):
+    """On the original with random statistics: None == False and None != True,
+    so the ``training=None`` arm is the inference arm and not a copy of the
+    training one (the premise of the comment above, measured)."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((BATCH,) + tuple(case.input_shape)).astype("float32")
+    original = case.make_original()
+    original.forward(x, False)
+    for layer in original.sublayers.values():
+        _randomize(layer, rng)
+    out_none = _np(original.forward(x, None))
+    out_false = _np(original.forward(x, False))
+    out_true = _np(original.forward(x, True))  # last: it moves the statistics
+    assert np.array_equal(out_none, out_false), f"{case.case_id}: None != False"
+    assert float(np.max(np.abs(out_none - out_true))) > 1e-3, (
+        f"{case.case_id}: training=True equals None, the arm cannot tell them apart"
+    )
+
+
+def _none_treated_as_training(stem: ConvStem, x, training):
+    """The planted defect: a stem (or model) that turns an omitted ``training``
+    into ``True``. Identical to ``stem(x, training=training)`` for False/True."""
+    return stem(x, training=True if training is None else training)
+
+
+def test_control_the_harness_sees_none_treated_as_training():
+    """Passes the False and True arms (same output there), fails ``None``."""
+    model = RESNET_IMAGENET.make_model()
+    assert_stem_matches_original(RESNET_IMAGENET, model.stem, forward=_none_treated_as_training)
+    with pytest.raises(AssertionError, match=r"training=None output differs"):
+        assert_stem_matches_original(
+            RESNET_IMAGENET,
+            RESNET_IMAGENET.make_model().stem,
+            forward=_none_treated_as_training,
+            check_training_none=True,
+        )
+
+
+def test_control_the_none_arm_sees_a_wrong_epsilon():
+    """The existing wrong-epsilon control, run through the ``None`` arm as well:
+    the stem fails the whole comparison with the arm switched on."""
+    stem = _stem_from_config(
+        RESNET_IMAGENET, normalization_kwargs={"epsilon": 1e-3}
+    )
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            RESNET_IMAGENET, stem, check_training_none=True
+        )
 
 
 # ---------------------------------------------------------------------
@@ -1508,6 +1797,114 @@ def test_every_migrated_model_builds_its_stem(make_model, input_shape, stem_of):
     ]
     assert unbuilt == [], f"unbuilt sub-layers of the stem: {unbuilt}"
     assert len(stem.weights) > 0
+
+
+# ---------------------------------------------------------------------
+# The model applies its stem exactly once
+# ---------------------------------------------------------------------
+
+# The harness compares a stem in isolation, so a model that applies the stem (or
+# one of its layers) again in its own ``call`` is invisible to it. HEAD's
+# UcaEncoder did exactly that: ConvStem already ran conv -> norm, and ``call()``
+# still ran ``self.stem_norm(x)`` after it. The counter is the pattern of
+# ``test_mambalct.py`` (wrap ``layer.call``), made restoring.
+
+
+@contextlib.contextmanager
+def _counting_calls(layers: Dict[str, keras.layers.Layer]) -> Iterator[Dict[str, int]]:
+    """Count the executions of ``layer.call`` for each labelled layer.
+
+    Interface contract: yields ``{label: calls}``, updated live while the block
+    runs; on exit (also on error) every wrapper is removed, so the layer is
+    exactly as before (``"call" not in vars(layer)`` is asserted). A layer must
+    not already carry an instance-level ``call``. Counts executions of the Python
+    ``call`` body, so it is meaningful for an eager forward, not for a traced one.
+    """
+    counts = {label: 0 for label in layers}
+
+    def install(label: str, layer: keras.layers.Layer) -> None:
+        original_call = layer.call
+
+        def counting_call(*args, **kwargs):  # type: ignore[no-untyped-def]
+            counts[label] += 1
+            return original_call(*args, **kwargs)
+
+        layer.call = counting_call
+
+    for label, layer in layers.items():
+        assert "call" not in vars(layer), f"{label} is already wrapped"
+        install(label, layer)
+    try:
+        yield counts
+    finally:
+        for label, layer in layers.items():
+            if "call" in vars(layer):
+                del layer.call
+            assert "call" not in vars(layer), f"{label}: wrapper left installed"
+
+
+def _stem_call_sites(stem: ConvStem) -> Dict[str, keras.layers.Layer]:
+    """The stem and every sub-layer it carries, by label."""
+    sites = {"stem": stem}
+    sites.update({f"stem.{role}": layer for role, layer in _stem_sublayers(stem).items()})
+    return sites
+
+
+@pytest.mark.parametrize(
+    "make_model,input_shape,stem_of",
+    [(row[1], row[2], row[3] if len(row) > 3 else _model_stem) for row in BUILT_STEM_ROWS],
+    ids=[row[0] for row in BUILT_STEM_ROWS],
+)
+def test_every_migrated_model_applies_its_stem_exactly_once(
+    make_model, input_shape, stem_of
+):
+    """One forward runs ``ConvStem.call`` and each of its layers exactly once,
+    at ``training`` False and True (a branch on ``training`` could hide a second
+    application)."""
+    model = make_model()
+    batch = np.zeros((1,) + tuple(input_shape), "float32")
+    model(batch, training=False)  # build: counts below are of a built model
+    sites = _stem_call_sites(stem_of(model))
+    for training in (False, True):
+        with _counting_calls(sites) as counts:
+            model(batch, training=training)
+        assert counts == {label: 1 for label in sites}, (
+            f"training={training}: calls per stem layer in one forward {counts}; "
+            f"each must be 1 (the model applies the stem once)"
+        )
+
+
+class _AppliesItsStem(keras.layers.Layer):
+    """A planted model: applies a shape-preserving ConvStem ``times`` times."""
+
+    def __init__(self, times: int, **kwargs):
+        super().__init__(**kwargs)
+        self.times = times
+        self.stem = ConvStem(filters=3, normalization_type="layer_norm")
+
+    def call(self, inputs, training=None):
+        x = inputs
+        for _ in range(self.times):
+            x = self.stem(x, training=training)
+        return x
+
+
+def test_control_the_counter_reads_two_when_a_model_applies_its_stem_twice():
+    """The counter is not blind: 1 for a single application, 2 for a double one,
+    and the wrappers are gone afterwards."""
+    batch = np.zeros((1, 8, 8, 3), "float32")
+    readings = {}
+    for times in (1, 2):
+        model = _AppliesItsStem(times)
+        model(batch, training=False)
+        sites = _stem_call_sites(model.stem)
+        with _counting_calls(sites) as counts:
+            model(batch, training=False)
+        readings[times] = dict(counts)
+        assert all("call" not in vars(layer) for layer in sites.values())
+    assert set(readings[1].values()) == {1}, readings[1]
+    assert set(readings[2].values()) == {2}, readings[2]
+    assert set(readings[2]) == {"stem", "stem.conv1", "stem.norm1", "stem.activation1"}
 
 
 @pytest.mark.parametrize(
