@@ -62,7 +62,7 @@ with ``bool(...)``), not an activation object; its key merely ends in
 import ast
 import os
 import re
-from typing import Dict, List
+from typing import List
 
 import pytest
 

@@ -386,6 +386,7 @@ class ResNet(keras.Model):
             use_pooling=_use_pooling,
             pool_type="max",
             pool_size=3,
+            # DECISION plan-2026-10-26T125959-7af851e5/D-019: the pre-migration ResNet pooled with Keras defaults (stride 2, "same"); ConvStem's own defaults (stride = pool_size, "valid") would repeat the drift silently, so state both. Do not drop these arguments. See decisions.md.
             pool_strides=2,
             pool_padding="same",
             kernel_initializer="he_normal",

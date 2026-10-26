@@ -689,9 +689,9 @@ class SqueezeNetV1(keras.Model):
             # Without the pop, `**kwargs` swallows `weights` and returns a random
             # model.
             raise NotImplementedError(
-                f"No pretrained SqueezeNet weights are distributed with dl_techniques. "
-                f"Train from scratch, or load a local checkpoint with "
-                f"keras.models.load_model()."
+                "No pretrained SqueezeNet weights are distributed with dl_techniques. "
+                "Train from scratch, or load a local checkpoint with "
+                "keras.models.load_model()."
             )
 
         variant_config = cls.MODEL_VARIANTS[variant]
@@ -772,12 +772,7 @@ class SqueezeNetV1(keras.Model):
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
 
-        # Kernel-weight count per Fire module, which the line below does not read.
-        total_params = sum(
-            fire['s1x1'] + fire['e1x1'] * 1 + fire['e3x3'] * 9
-            for fire in self.fire_configs
-        )
-        logger.info(f"  - Estimated parameter reduction: ~50x vs AlexNet")
+        logger.info("  - Estimated parameter reduction: ~50x vs AlexNet")
 
 # ---------------------------------------------------------------------
 

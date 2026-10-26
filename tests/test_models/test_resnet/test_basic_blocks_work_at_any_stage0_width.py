@@ -22,9 +22,7 @@ and named neither `filters_per_stage` nor 64.
 See decisions.md D-041 (plan-2026-08-19T163559-499b6f0e).
 """
 
-import hashlib
 
-import keras
 import numpy as np
 import pytest
 

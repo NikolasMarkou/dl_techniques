@@ -25,7 +25,6 @@ plan):
    does not raise.
 """
 
-import keras
 import numpy as np
 
 from dl_techniques.models.vision.resnet.model import ResNet

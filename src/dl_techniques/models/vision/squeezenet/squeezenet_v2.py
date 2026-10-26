@@ -742,9 +742,9 @@ class SqueezeNoduleNetV2(keras.Model):
             # Without the pop, `**kwargs` swallows `weights` and returns a random
             # model.
             raise NotImplementedError(
-                f"No pretrained SqueezeNodule-Net weights are distributed with dl_techniques. "
-                f"Train from scratch, or load a local checkpoint with "
-                f"keras.models.load_model()."
+                "No pretrained SqueezeNodule-Net weights are distributed with dl_techniques. "
+                "Train from scratch, or load a local checkpoint with "
+                "keras.models.load_model()."
             )
 
         variant_config = cls.MODEL_VARIANTS[variant]

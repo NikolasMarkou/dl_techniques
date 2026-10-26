@@ -33,7 +33,10 @@ specific things about the instrument are not obvious:
 
 1.  **``w.path.split("/", 1)[-1]`` is NOT a relative path after a reload.** The
     donor's weights are ``res_net/stem_conv/kernel``; the RELOADED model's are
-    ``stem_conv/kernel`` -- the top-level model name is absent. Splitting on the
+    ``stem_conv/kernel`` -- the top-level model name is absent. (That is the
+    path as measured at the time. ResNet's stem is a ``ConvStem`` now, so the
+    same donor weight is ``res_net/stem/stem_conv1/kernel``; the reasoning below
+    does not depend on the layer names.) Splitting on the
     first ``/`` therefore strips the model name on one side and the first real
     layer name on the other, and the comparison silently pairs nothing. The
     first version of this sweep read "``accunet``: 680 of 680 weights missing
