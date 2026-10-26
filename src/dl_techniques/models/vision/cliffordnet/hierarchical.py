@@ -73,6 +73,15 @@ _DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 # Keras momentum 0.9 is torch momentum 0.1, the reference's BatchNorm default.
 _BN_MOMENTUM = 0.9
 
+# DECISION plan-2026-10-26T125959-7af851e5/D-007: the stem's BatchNormalization
+# epsilon is 1e-3, the Keras default these layers had before the stem moved onto
+# ConvStem. It is the PRE-MIGRATION value, not a published reference (no paper
+# citation was found). The norm factory's own default is 1e-6, so leaving it
+# unstated moved every stem BN by 1000x with no shape symptom. The downsamplers
+# below still use the bare Keras default. Guard:
+# tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
+_STEM_BN_EPSILON = 1e-3
+
 # Stage widths when ``stage_dims`` is not given: doubling from this width.
 _BASE_WIDTH = 32
 _DEFAULT_STAGE_DEPTHS = (3, 4, 5)
@@ -131,9 +140,11 @@ class HierarchicalCliffordNet(keras.Model):
         logits [B, num_classes]
 
     Stems: ``patch_size=1`` is a 3x3 convolution to ``D_0 // 2``, batch norm,
-    SiLU, then a 3x3 convolution to ``D_0``; ``patch_size=2`` is one 3x3
-    convolution with stride 2. Both end in a batch norm. The convolutions of the
-    two-conv stem are bias-free.
+    SiLU, then a 3x3 convolution to ``D_0``, then a second batch norm;
+    ``patch_size=2`` is one 3x3 convolution with stride 2 and a batch norm. The
+    stem is one :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named
+    ``stem`` whose batch norms use momentum 0.9 and epsilon 1e-3. The
+    convolutions of the two-conv stem are bias-free.
 
     Variants:
 
@@ -269,7 +280,7 @@ class HierarchicalCliffordNet(keras.Model):
     def _conv_kwargs(self) -> Dict[str, Any]:
         """Initializers and regularizers shared by every convolution.
 
-        :return: Keyword arguments for ``keras.layers.Conv2D``.
+        :return: Keyword arguments for ``keras.layers.Conv2D`` and ``ConvStem``.
         """
         return dict(
             kernel_initializer=self.kernel_initializer,
@@ -285,8 +296,9 @@ class HierarchicalCliffordNet(keras.Model):
         :rtype: None
         """
         width = self.stage_dims[0]
+        norm_kwargs = {"momentum": _BN_MOMENTUM, "epsilon": _STEM_BN_EPSILON}
         if self.patch_size == 1:
-            # Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
+            # Conv(D/2) -> BN -> SiLU -> Conv(D) -> BN, both convs bias-free.
             self.stem = ConvStem(
                 filters=width // 2,
                 conv2_filters=width,
@@ -296,16 +308,15 @@ class HierarchicalCliffordNet(keras.Model):
                 use_bias=False,
                 num_convs=2,
                 normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _BN_MOMENTUM},
+                normalization_kwargs=norm_kwargs,
                 activation_type="silu",
                 final_activation=False,
                 use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
                 name="stem",
+                **self._conv_kwargs(),
             )
         else:
-            # Conv(D, stride=2) → BN(momentum=0.9)
+            # Conv(D, stride=2) -> BN
             self.stem = ConvStem(
                 filters=width,
                 kernel_size=3,
@@ -314,20 +325,12 @@ class HierarchicalCliffordNet(keras.Model):
                 use_bias=self.use_bias,
                 num_convs=1,
                 normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _BN_MOMENTUM},
+                normalization_kwargs=norm_kwargs,
                 activation_type="linear",
                 use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
                 name="stem",
+                **self._conv_kwargs(),
             )
-
-        # Keep aliases so existing references keep working.
-        self.stem_conv1 = self.stem.conv1
-        self.stem_conv2 = self.stem.conv2
-        self.stem_conv = self.stem.conv1
-        self.stem_bn1 = self.stem.norm1
-        self.stem_norm = self.stem.norm2 if self.stem.norm2 is not None else self.stem.norm1
 
     def _build_blocks(self) -> None:
         """Build every block with its drop-path gate, in one flat list.

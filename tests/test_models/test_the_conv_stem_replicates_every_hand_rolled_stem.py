@@ -56,6 +56,10 @@ import pytest
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.vision.cliffordnet.hierarchical import (
+    HierarchicalCliffordNet,
+)
+from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.resnet.model import ResNet
 from tests.numerics import true_float32_matmul
 
@@ -303,13 +307,188 @@ RESNET_CIFAR = StemCase(
     expected_output_shape=(32, 32, 64),
 )
 
+# ---------------------------------------------------------------------
+# CliffordNet and HierarchicalCliffordNet
+# ---------------------------------------------------------------------
+
+# Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/cliffordnet/model.py``
+# (``_build_stem`` / ``_apply_stem``) and ``.../hierarchical.py``. Every conv took
+# the model's kernel/bias initializer and regularizer; the BatchNormalization
+# layers were bare ``keras.layers.BatchNormalization(momentum=0.9)``, so their
+# epsilon was the Keras default 1e-3 (D-007 of plan-2026-10-26T125959-7af851e5:
+# the pre-migration value, no paper reference was found). The two-conv stems
+# (CliffordNet patch 1 and 4, hierarchical patch 1) are bias-free, run
+# conv -> BN -> functional silu -> conv and then the shared ``stem_norm`` BN;
+# the single-conv stems run conv (bias per ``use_bias``) -> ``stem_norm`` BN.
+# The functional ``keras.activations.silu`` is represented here by a
+# parameterless ``Activation`` layer over the same op, which fills the
+# ``activation1`` role the ConvStem has.
+
+#: Non-default conv knobs the models are built with, so a dropped one is seen.
+_CLIFFORD_KERNEL_REG = 1e-4
+_CLIFFORD_BIAS_REG = 3e-5
+_CLIFFORD_BIAS_INIT = 0.25
+
+
+def _clifford_family_original(
+    width: int, kernel: int, strides: int, two_conv: bool, use_bias: bool
+) -> Original:
+    """The pre-migration CliffordNet / Hierarchical stem, as literals."""
+
+    def conv(filters: int, conv_strides: int, bias: bool, name: str):
+        return keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=kernel,
+            strides=conv_strides,
+            padding="same",
+            use_bias=bias,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
+            kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+            bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
+            name=name,
+        )
+
+    def bn(name: str):
+        return keras.layers.BatchNormalization(
+            momentum=0.9, epsilon=1e-3, name=name
+        )
+
+    if two_conv:
+        conv1 = conv(width // 2, strides, False, "stem_conv1")
+        bn1 = bn("stem_bn1")
+        silu = keras.layers.Activation(keras.activations.silu, name="stem_silu")
+        conv2 = conv(width, strides, False, "stem_conv2")
+        norm = bn("stem_norm")
+
+        def forward(x, training):
+            x = silu(bn1(conv1(x), training=training))
+            x = conv2(x)
+            return norm(x, training=training)
+
+        return Original(
+            sublayers={
+                "conv1": conv1,
+                "norm1": bn1,
+                "activation1": silu,
+                "conv2": conv2,
+                "norm2": norm,
+            },
+            forward=forward,
+        )
+
+    stem_conv = conv(width, strides, use_bias, "stem_conv")
+    norm = bn("stem_norm")
+
+    def forward_single(x, training):
+        return norm(stem_conv(x), training=training)
+
+    return Original(
+        sublayers={"conv1": stem_conv, "norm1": norm}, forward=forward_single
+    )
+
+
+def _clifford_model(patch_size: int, use_bias: bool = True) -> CliffordNet:
+    return CliffordNet(
+        num_classes=10,
+        channels=16,
+        depth=1,
+        patch_size=patch_size,
+        use_bias=use_bias,
+        kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+        bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
+        bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
+    )
+
+
+def _hierarchical_model(patch_size: int, use_bias: bool = True):
+    return HierarchicalCliffordNet(
+        num_classes=10,
+        stage_depths=[1, 1],
+        stage_dims=[16, 32],
+        patch_size=patch_size,
+        use_bias=use_bias,
+        kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+        bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
+        bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
+    )
+
+
+CLIFFORD_P1 = StemCase(
+    case_id="cliffordnet-patch1",
+    make_model=lambda: _clifford_model(1),
+    make_original=lambda: _clifford_family_original(16, 3, 1, True, False),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(16, 16, 16),
+)
+CLIFFORD_P2 = StemCase(
+    case_id="cliffordnet-patch2",
+    make_model=lambda: _clifford_model(2),
+    make_original=lambda: _clifford_family_original(16, 3, 2, False, True),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(8, 8, 16),
+)
+CLIFFORD_P4 = StemCase(
+    case_id="cliffordnet-patch4",
+    make_model=lambda: _clifford_model(4),
+    make_original=lambda: _clifford_family_original(16, 3, 2, True, False),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(4, 4, 16),
+)
+# The "other" branch: one conv whose kernel and stride both equal patch_size,
+# 16 -> ceil(16 / 3) = 6 under ``same`` padding.
+CLIFFORD_OTHER = StemCase(
+    case_id="cliffordnet-patch3-kernel-eq-stride",
+    make_model=lambda: _clifford_model(3),
+    make_original=lambda: _clifford_family_original(16, 3, 3, False, True),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(6, 6, 16),
+)
+CLIFFORD_P2_NOBIAS = StemCase(
+    case_id="cliffordnet-patch2-no-bias",
+    make_model=lambda: _clifford_model(2, use_bias=False),
+    make_original=lambda: _clifford_family_original(16, 3, 2, False, False),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(8, 8, 16),
+)
+HIER_P1 = StemCase(
+    case_id="hierarchical-patch1",
+    make_model=lambda: _hierarchical_model(1),
+    make_original=lambda: _clifford_family_original(16, 3, 1, True, False),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(16, 16, 16),
+)
+HIER_P2 = StemCase(
+    case_id="hierarchical-patch2",
+    make_model=lambda: _hierarchical_model(2),
+    make_original=lambda: _clifford_family_original(16, 3, 2, False, True),
+    input_shape=(16, 16, 3),
+    expected_output_shape=(8, 8, 16),
+)
+
 #: One row per original variant. Later steps append here.
-CASES = [RESNET_IMAGENET, RESNET_CIFAR]
+CASES = [
+    RESNET_IMAGENET,
+    RESNET_CIFAR,
+    CLIFFORD_P1,
+    CLIFFORD_P2,
+    CLIFFORD_P4,
+    CLIFFORD_OTHER,
+    CLIFFORD_P2_NOBIAS,
+    HIER_P1,
+    HIER_P2,
+]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
 BUILT_STEM_ROWS = [
     ("resnet-imagenet", lambda: _resnet_model("imagenet", (64, 64, 3)), (64, 64, 3)),
     ("resnet-cifar", lambda: _resnet_model("cifar", (32, 32, 3)), (32, 32, 3)),
+    ("cliffordnet-patch1", lambda: _clifford_model(1), (16, 16, 3)),
+    ("cliffordnet-patch2", lambda: _clifford_model(2), (16, 16, 3)),
+    ("cliffordnet-patch4", lambda: _clifford_model(4), (16, 16, 3)),
+    ("cliffordnet-patch3", lambda: _clifford_model(3), (16, 16, 3)),
+    ("hierarchical-patch1", lambda: _hierarchical_model(1), (16, 16, 3)),
+    ("hierarchical-patch2", lambda: _hierarchical_model(2), (16, 16, 3)),
 ]
 
 
@@ -351,6 +530,62 @@ def test_the_cifar_stem_has_no_pool_and_keeps_the_resolution():
         32,
         64,
     )
+
+
+# ---------------------------------------------------------------------
+# CliffordNet family: the model's bias initializer / regularizer reach the stem
+# ---------------------------------------------------------------------
+
+# The weight transplant of ``assert_stem_matches_original`` overwrites every
+# bias, so an initializer dropped on the way to the stem convs is invisible to
+# it (the regularization loss does see a dropped regularizer, on a stem that
+# has a bias). These read the freshly built weights and the conv attributes.
+
+_SINGLE_CONV_MODELS = [
+    ("cliffordnet-patch2", lambda: _clifford_model(2)),
+    ("cliffordnet-patch3", lambda: _clifford_model(3)),
+    ("hierarchical-patch2", lambda: _hierarchical_model(2)),
+]
+_TWO_CONV_MODELS = [
+    ("cliffordnet-patch1", lambda: _clifford_model(1)),
+    ("cliffordnet-patch4", lambda: _clifford_model(4)),
+    ("hierarchical-patch1", lambda: _hierarchical_model(1)),
+]
+
+
+@pytest.mark.parametrize(
+    "make_model", [m for _, m in _SINGLE_CONV_MODELS], ids=[i for i, _ in _SINGLE_CONV_MODELS]
+)
+def test_a_single_conv_stem_gets_the_model_bias_initializer_and_regularizer(make_model):
+    """The stem conv bias starts at the model's ``bias_initializer`` and carries
+    its ``bias_regularizer``: 0.25 everywhere, and a bias penalty in ``losses``."""
+    model = make_model()
+    model.stem.build((None, 16, 16, 3))
+    bias = _np(model.stem.conv1.bias)
+    np.testing.assert_array_equal(
+        bias, np.full_like(bias, _CLIFFORD_BIAS_INIT)
+    )
+    assert model.stem.conv1.bias_regularizer is not None
+    expected = _CLIFFORD_BIAS_REG * float(np.sum(bias**2))
+    bias_penalty = float(_np(model.stem.conv1.bias_regularizer(model.stem.conv1.bias)))
+    assert bias_penalty == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "make_model", [m for _, m in _TWO_CONV_MODELS], ids=[i for i, _ in _TWO_CONV_MODELS]
+)
+def test_a_two_conv_stem_hands_both_convs_the_model_bias_settings(make_model):
+    """The two-conv stems are bias-free, so no bias weight exists to read; the
+    settings are still the model's on BOTH convs (the original passed them)."""
+    model = make_model()
+    stem = model.stem
+    for conv in (stem.conv1, stem.conv2):
+        assert conv.use_bias is False
+        init = conv.bias_initializer
+        assert isinstance(init, keras.initializers.Constant)
+        assert float(init.value) == _CLIFFORD_BIAS_INIT
+        assert conv.bias_regularizer is not None
+        assert float(conv.bias_regularizer.l2) == pytest.approx(_CLIFFORD_BIAS_REG)
 
 
 # ---------------------------------------------------------------------

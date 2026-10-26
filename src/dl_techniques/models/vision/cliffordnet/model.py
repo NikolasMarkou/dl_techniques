@@ -64,6 +64,14 @@ _DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 # decisions.md.
 _STEM_BN_MOMENTUM = 0.9
 
+# DECISION plan-2026-10-26T125959-7af851e5/D-007: the stem's BatchNormalization
+# epsilon is 1e-3, the Keras default these layers had before the stem moved onto
+# ConvStem. It is the PRE-MIGRATION value, not a published reference (no paper
+# citation was found). The norm factory's own default is 1e-6, so leaving it
+# unstated moved every stem BN by 1000x with no shape symptom. Guard:
+# tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
+_STEM_BN_EPSILON = 1e-3
+
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.cliffordnet.model")
@@ -153,8 +161,13 @@ class CliffordNet(keras.Model):
         4            conv3 D/2 /2, bn, silu, conv3 D /2, bn     4
         other p      conv p D stride p, bn                      p
 
-    The two-conv stems are always bias-free; the single-conv stems follow
-    ``use_bias``. Every variant ends in the shared ``stem_norm`` batch norm.
+    The stem is one :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem`
+    named ``stem`` (``stem_conv1``, ``stem_norm1``, ``stem_act1`` and, for the
+    two-conv variants, ``stem_conv2``, ``stem_norm2``). Every convolution is
+    followed by its own batch norm (momentum 0.9, epsilon 1e-3), so the
+    two-conv stems hold two and the single-conv stems one; the SiLU sits only
+    between the two convolutions. The two-conv stems are always bias-free; the
+    single-conv stems follow ``use_bias``.
 
     Variants:
 
@@ -300,85 +313,51 @@ class CliffordNet(keras.Model):
         :return: Nothing.
         :rtype: None
         """
-        if self.patch_size == 1:
-            # Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
+        norm_kwargs = {"momentum": _STEM_BN_MOMENTUM, "epsilon": _STEM_BN_EPSILON}
+        conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+        )
+
+        if self.patch_size in (1, 4):
+            # Conv(D/2) -> BN -> SiLU -> Conv(D) -> BN, both convs bias-free;
+            # patch 4 reaches its stride with two stride-2 convs.
             self.stem = ConvStem(
                 filters=self.channels // 2,
                 conv2_filters=self.channels,
                 kernel_size=3,
-                strides=1,
+                strides=1 if self.patch_size == 1 else 2,
                 padding="same",
                 use_bias=False,
                 num_convs=2,
                 normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                normalization_kwargs=norm_kwargs,
                 activation_type="silu",
                 final_activation=False,
                 use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
                 name="stem",
-            )
-        elif self.patch_size == 2:
-            # Conv(D, stride=2) → BN(momentum=0.9)
-            self.stem = ConvStem(
-                filters=self.channels,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=self.use_bias,
-                num_convs=1,
-                normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
-                activation_type="linear",
-                use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="stem",
-            )
-        elif self.patch_size == 4:
-            # Two stride-2 convs: Conv(D/2) → BN(momentum=0.9) → SiLU → Conv(D) → BN(momentum=0.9)
-            self.stem = ConvStem(
-                filters=self.channels // 2,
-                conv2_filters=self.channels,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=False,
-                num_convs=2,
-                normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
-                activation_type="silu",
-                final_activation=False,
-                use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="stem",
+                **conv_kwargs,
             )
         else:
-            # Single conv: Conv(D, patch_size, stride=patch_size) → BN(momentum=0.9)
+            # Conv(D, kernel=stride=patch_size) -> BN; patch 2 is the same
+            # layout with kernel 3 and stride 2.
+            is_patch2 = self.patch_size == 2
             self.stem = ConvStem(
                 filters=self.channels,
-                kernel_size=self.patch_size,
-                strides=self.patch_size,
+                kernel_size=3 if is_patch2 else self.patch_size,
+                strides=2 if is_patch2 else self.patch_size,
                 padding="same",
                 use_bias=self.use_bias,
                 num_convs=1,
                 normalization_type="batch_norm",
-                normalization_kwargs={"momentum": _STEM_BN_MOMENTUM},
+                normalization_kwargs=norm_kwargs,
                 activation_type="linear",
                 use_pooling=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
                 name="stem",
+                **conv_kwargs,
             )
-
-        # Keep aliases so existing references to stem_conv / stem_bn / stem_conv2 / stem_norm keep working.
-        self.stem_conv1 = self.stem.conv1
-        self.stem_conv2 = self.stem.conv2
-        self.stem_conv = self.stem.conv1
-        self.stem_bn1 = self.stem.norm1
-        self.stem_norm = self.stem.norm2 if self.stem.norm2 is not None else self.stem.norm1
 
     def _build_blocks(self) -> None:
         """Build the block list, pairing each block with its drop-path gate.

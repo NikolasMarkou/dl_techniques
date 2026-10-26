@@ -54,7 +54,7 @@ The standard isotropic backbone. Replaces both attention and FFN with a single C
 
 ```
 Input (B, H, W, C)
-  --> Patch stem Conv2D + BN
+  --> Patch stem (ConvStem: Conv2D + BN per conv)
   --> L x CliffordNetBlock     isotropic; channels constant throughout
   --> GlobalAveragePool
   --> LayerNorm --> [Dropout] --> Dense(num_classes)
@@ -62,6 +62,28 @@ Input (B, H, W, C)
 ```
 
 Each `CliffordNetBlock` contains no FFN. The dual-stream detail/context pipeline followed by a sparse Clifford geometric product is the entire non-linear interaction.
+
+**Patch stem.** One `ConvStem` (`dl_techniques/layers/conv_blocks/stem.py`) named
+`stem`, chosen by `patch_size`, with every convolution followed by its own batch
+norm (momentum 0.9, epsilon 1e-3; the layers are `stem_conv1`, `stem_norm1`,
+`stem_act1`, `stem_conv2`, `stem_norm2`):
+
+| `patch_size` | Layers | Bias |
+|:------------:|:-------|:-----|
+| 1 | conv3 `D/2` stride 1, BN, SiLU, conv3 `D`, BN | none |
+| 2 | conv3 `D` stride 2, BN | `use_bias` |
+| 4 | conv3 `D/2` stride 2, BN, SiLU, conv3 `D` stride 2, BN | none |
+| any other `p` | conv `p` `D` stride `p`, BN | `use_bias` |
+
+The model's `kernel_initializer`, `bias_initializer`, `kernel_regularizer` and
+`bias_regularizer` reach the stem convolutions (a bias-free convolution has no
+bias to initialise or regularise). The epsilon 1e-3 is the Keras default the
+stem had before it moved onto `ConvStem`, kept as that pre-migration value; no
+paper value for it was found (the norm factory's own default is 1e-6). In the
+two-conv stems the second convolution draws its initial kernel independently of
+the first. The stem's weights live under `stem/...`, so `.keras` archives saved
+before the stem moved onto `ConvStem` (`stem_conv/...`) do not load. The
+hierarchical model's stem is the same layer for patch 1 and 2.
 
 The head is the reference implementation's (`ParaMind2025/CAN` `model.py`:
 `x.mean(dim=[-2, -1])`, `nn.LayerNorm(embed_dim)`, `nn.Linear(embed_dim,
