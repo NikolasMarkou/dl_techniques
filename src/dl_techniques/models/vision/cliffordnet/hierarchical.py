@@ -21,7 +21,8 @@ stage. As in :class:`CliffordNet`, the blocks return only their gamma-scaled
 update, so the residual add and the stochastic-depth gate sit in this model's
 forward pass, and the head pools, normalizes, then applies one linear layer. The
 model returns logits: compile with
-``SparseCategoricalCrossentropy(from_logits=True)``.
+``SparseCategoricalCrossentropy(from_logits=True)``. With ``include_top=False`` it
+returns the last stage's feature map instead.
 
 Not ported from the authors' class, on purpose: ``embed_dim`` apart from
 ``stage_dims[0]`` (the stem emits ``stage_dims[0]`` channels directly), the
@@ -59,6 +60,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 from dl_techniques.layers.conv_blocks.stem import ConvStem
+from dl_techniques.models.vision.cliffordnet.model import _DEFAULT_INPUT_SHAPE
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -139,6 +141,10 @@ class HierarchicalCliffordNet(keras.Model):
               ▼
         logits [B, num_classes]
 
+    With ``include_top=False`` the pooling, layer norm, dropout and dense layers
+    of the diagram are not built and ``call`` returns the ``[B, h, w, D_last]``
+    map of the last stage, not a pooled vector.
+
     Stems: ``patch_size=1`` is a 3x3 convolution to ``D_0 // 2``, batch norm,
     SiLU, then a 3x3 convolution to ``D_0``, then a second batch norm;
     ``patch_size=2`` is one 3x3 convolution with stride 2 and a batch norm. The
@@ -153,7 +159,13 @@ class HierarchicalCliffordNet(keras.Model):
         variant    stage_depths  stage_dims    patch  shifts  cli_mode
         hier_345   3, 4, 5       32, 64, 128   1      1, 2    full
 
-    :param num_classes: Number of output classes. Must be positive.
+    :param num_classes: Number of output classes. Must be positive when
+        ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
+        headless. Defaults to ``1000``.
+    :param include_top: Whether to build the classification head. When
+        ``False`` there is no head, ``classification_head`` is ``None`` and
+        the model returns the last stage's feature map
+        ``(B, h, w, stage_dims[-1])`` instead of logits. Defaults to ``True``.
     :param stage_depths: Blocks per stage, one entry per stage; each must be
         positive. Defaults to ``[3, 4, 5]``.
     :param stage_dims: Width of each stage, same length as ``stage_depths``; each
@@ -176,8 +188,9 @@ class HierarchicalCliffordNet(keras.Model):
     :param kernel_regularizer: Optional kernel regularizer.
     :param bias_regularizer: Optional bias regularizer.
     :param head_config_overrides: Optional overrides merged into the head config.
-    :raises ValueError: If an argument is out of range, ``stage_dims`` and
-        ``stage_depths`` differ in length, or ``cli_mode`` is unknown.
+    :raises ValueError: If an argument is out of range (``num_classes`` only
+        while ``include_top`` is true), ``stage_dims`` and ``stage_depths``
+        differ in length, or ``cli_mode`` is unknown.
     """
 
     # The head's pooled LayerNorm, torch's nn.LayerNorm default eps.
@@ -198,7 +211,8 @@ class HierarchicalCliffordNet(keras.Model):
 
     def __init__(
         self,
-        num_classes: int,
+        num_classes: int = 1000,
+        include_top: bool = True,
         stage_depths: Optional[List[int]] = None,
         stage_dims: Optional[List[int]] = None,
         patch_size: int = 1,
@@ -219,8 +233,10 @@ class HierarchicalCliffordNet(keras.Model):
         super().__init__(**kwargs)
 
         depths = list(stage_depths) if stage_depths is not None else list(_DEFAULT_STAGE_DEPTHS)
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be positive, got {num_classes}")
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
         if not depths:
             raise ValueError("stage_depths must not be empty")
         if any(d <= 0 for d in depths):
@@ -247,6 +263,7 @@ class HierarchicalCliffordNet(keras.Model):
             )
 
         self.num_classes = num_classes
+        self.include_top = include_top
         self.stage_depths = depths
         self.stage_dims = dims
         self.patch_size = patch_size
@@ -269,12 +286,16 @@ class HierarchicalCliffordNet(keras.Model):
         self._build_stem()
         self._build_blocks()
         self._build_downsamplers()
-        self._build_head()
+        if self.include_top:
+            self._build_head()
+        else:
+            # Always defined, so `model.classification_head` is safe to read.
+            self.classification_head = None
 
         logger.info(
             f"Created HierarchicalCliffordNet (stage_depths={depths}, "
             f"stage_dims={dims}, patch_size={patch_size}, shifts={self.shifts}, "
-            f"cli_mode={cli_mode}, ctx_mode={ctx_mode})"
+            f"cli_mode={cli_mode}, ctx_mode={ctx_mode}, include_top={include_top})"
         )
 
     def _conv_kwargs(self) -> Dict[str, Any]:
@@ -520,10 +541,13 @@ class HierarchicalCliffordNet(keras.Model):
 
         :param inputs: Image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode.
-        :return: Logits ``(B, num_classes)``, no softmax.
+        :return: Logits ``(B, num_classes)``, no softmax, when ``include_top``;
+            otherwise the last stage's feature map ``(B, h, w, stage_dims[-1])``.
         """
         last = self.extract_stage_features(inputs, training=training)[-1]
-        return self.classification_head(last, training=training)["logits"]
+        if self.include_top:
+            return self.classification_head(last, training=training)["logits"]
+        return last
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -531,9 +555,18 @@ class HierarchicalCliffordNet(keras.Model):
         """Compute the output shape.
 
         :param input_shape: ``(B, H, W, C_in)``.
-        :return: ``(B, num_classes)``.
+        :return: ``(B, num_classes)`` when ``include_top``; otherwise the last
+            stage's map ``(B, h, w, stage_dims[-1])``: the stem's output shape,
+            then ``ceil(size / 2)`` per downsampler (a 'same' stride-2
+            depthwise convolution), an unknown size staying unknown.
         """
-        return (input_shape[0], self.num_classes)
+        if self.include_top:
+            return (input_shape[0], self.num_classes)
+        batch, height, width, _ = tuple(self.stem.compute_output_shape(input_shape))
+        for _ in self.downsamplers:
+            height = None if height is None else -(-height // 2)
+            width = None if width is None else -(-width // 2)
+        return (batch, height, width, self.stage_dims[-1])
 
     def load_pretrained_weights(
         self, weights_path: str, skip_mismatch: bool = True
@@ -570,16 +603,23 @@ class HierarchicalCliffordNet(keras.Model):
     def from_variant(
         cls,
         variant: str,
-        num_classes: int,
+        num_classes: int = 1000,
         pretrained: Union[bool, str] = False,
+        input_shape: Optional[Tuple[int, ...]] = None,
         **kwargs: Any,
     ) -> "HierarchicalCliffordNet":
         """Create a :class:`HierarchicalCliffordNet` from a predefined variant.
 
         :param variant: A key of :attr:`MODEL_VARIANTS`.
-        :param num_classes: Number of output classes.
+        :param num_classes: Number of output classes. Ignored when
+            ``include_top=False`` is passed in ``kwargs``.
         :param pretrained: A local path to a ``.keras`` weights file. ``True``
             raises, since no checkpoints are hosted.
+        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at
+            before ``pretrained`` weights are transferred (the loader refuses
+            an unbuilt model; the constructor builds nothing). Used only with a
+            ``pretrained`` path; defaults to ``(32, 32, 3)``. Weight shapes do
+            not depend on ``H`` and ``W``, only on ``C_in``.
         :param kwargs: Override any variant default.
         :return: Configured instance.
         :raises ValueError: If ``variant`` is not recognised.
@@ -604,6 +644,8 @@ class HierarchicalCliffordNet(keras.Model):
         model = cls(num_classes=num_classes, **config)
 
         if isinstance(pretrained, str):
+            if not model.built:
+                model.build((None,) + tuple(input_shape or _DEFAULT_INPUT_SHAPE))
             model.load_pretrained_weights(weights_path=pretrained)
         return model
 
@@ -616,6 +658,7 @@ class HierarchicalCliffordNet(keras.Model):
         config.update(
             {
                 "num_classes": self.num_classes,
+                "include_top": self.include_top,
                 "stage_depths": self.stage_depths,
                 "stage_dims": self.stage_dims,
                 "patch_size": self.patch_size,

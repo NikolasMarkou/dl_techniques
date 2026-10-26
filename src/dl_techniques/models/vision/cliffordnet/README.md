@@ -111,8 +111,16 @@ patch_size`: the map itself, not a pooled vector (pool it yourself for an
 embedding). `num_classes` is then ignored, so `0` is accepted; it defaults to
 `1000` as for ResNet. A headed checkpoint loads into a headless model through
 `load_pretrained_weights` (on a built model): the trunk layers (`stem`, `clifford_block_*`) are
-copied and the checkpoint's `classification_head` is left unused. Only the
-`CliffordNet` class has the switch so far.
+copied and the checkpoint's `classification_head` is left unused.
+`HierarchicalCliffordNet` has the same switch (see below).
+
+**`from_variant(..., pretrained=<path>)` builds before it loads.** The constructor
+builds nothing and the weight loader refuses an unbuilt model, so `from_variant`
+builds the model at `input_shape=(H, W, C_in)` (unbatched, default `(32, 32, 3)`;
+only `C_in` matters, weight shapes do not depend on `H` and `W`) and then
+transfers the weights. `input_shape` is ignored when no `pretrained` path is
+given, and the model then stays unbuilt. Both `CliffordNet` and
+`HierarchicalCliffordNet` take it.
 
 ### Variants
 
@@ -181,7 +189,25 @@ hierarchical model has none).
 from dl_techniques.models.vision.cliffordnet import HierarchicalCliffordNet
 model = HierarchicalCliffordNet.from_variant("hier_345", num_classes=100)
 features = model.extract_stage_features(images)   # one feature map per stage
+
+# Backbone only: the last stage's map (B, h, w, stage_dims[-1]), no head.
+backbone = HierarchicalCliffordNet.from_variant("hier_345", include_top=False)
+last_stage = backbone(images)
+
+# A headed checkpoint into a headless model; builds at input_shape first.
+backbone = HierarchicalCliffordNet.from_variant(
+    "hier_345", include_top=False, pretrained="path/to/weights.keras",
+    input_shape=(32, 32, 3),
+)
 ```
+
+`include_top=False` builds no head, sets `model.classification_head` to `None`
+and returns the last stage's feature map, `ceil(size / 2)` per downsampler after
+the stem, not a pooled vector. `num_classes` is then ignored (`0` is accepted) and
+defaults to `1000`; `create_hierarchical_cliffordnet` keeps its default of `100`.
+The headed default is unchanged (the 767,476 pin holds). A headed checkpoint
+loads into a headless model: the trunk (`stem`, `stage*_block_*`,
+`downsample_*`) is copied and the checkpoint's `classification_head` is unused.
 
 The two-hidden-block head this replaced read 1,502,948 / 2,682,596 / 3,470,564,
 which round to 1.5M and 2.7M, not the paper's figures.

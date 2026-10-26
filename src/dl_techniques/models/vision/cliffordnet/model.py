@@ -73,6 +73,12 @@ _STEM_BN_MOMENTUM = 0.9
 # tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
 _STEM_BN_EPSILON = 1e-3
 
+# Unbatched probe shape `from_variant` builds at before a pretrained load when
+# the caller gives no `input_shape` (also used by HierarchicalCliffordNet). Every
+# patch size accepts it (patch 4 leaves 8x8, the hierarchical stride chain 4x4),
+# and the weights do not depend on it.
+_DEFAULT_INPUT_SHAPE = (32, 32, 3)
+
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.cliffordnet.model")
@@ -776,6 +782,7 @@ class CliffordNet(keras.Model):
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "cifar100",
         cache_dir: Optional[str] = None,
+        input_shape: Optional[Tuple[int, ...]] = None,
         **kwargs: Any,
     ) -> "CliffordNet":
         """Create a :class:`CliffordNet` from a predefined variant.
@@ -790,6 +797,11 @@ class CliffordNet(keras.Model):
             classifier-skip decision compares ``num_classes`` against 100
             whatever this says, and only when the model has a head.
         :param cache_dir: Directory to cache downloaded weights.
+        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at
+            before the weights are transferred (the loader refuses an unbuilt
+            model and the constructor builds nothing). Used only when weights
+            are loaded; defaults to ``(32, 32, 3)``. Weight shapes do not depend
+            on ``H`` and ``W``, only on ``C_in``.
         :param kwargs: Override any variant default.
         :return: Configured :class:`CliffordNet` instance.
         :raises ValueError: If ``variant`` is not recognised.
@@ -862,6 +874,10 @@ class CliffordNet(keras.Model):
 
         if load_weights_path:
             try:
+                if not model.built:
+                    model.build(
+                        (None,) + tuple(input_shape or _DEFAULT_INPUT_SHAPE)
+                    )
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
                     skip_mismatch=skip_mismatch

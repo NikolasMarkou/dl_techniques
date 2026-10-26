@@ -157,6 +157,13 @@ def _cliffordnet(**knobs) -> keras.Model:
                        patch_size=2, shifts=[1, 2], **knobs)
 
 
+def _hierarchical_cliffordnet(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.cliffordnet import HierarchicalCliffordNet
+    return HierarchicalCliffordNet(
+        num_classes=NUM_CLASSES, stage_depths=[1, 1], stage_dims=[8, 16],
+        patch_size=2, shifts=[1, 2], **knobs)
+
+
 def _beit(**knobs) -> keras.Model:
     # use_mean_pooling=True (the default): the local mean-pooling head.
     from dl_techniques.models.vision.beit import create_beit_classifier
@@ -233,6 +240,7 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ViT": (_vit, (32, 48, 3)),
     "ViTHMLP": (_vit_hmlp, (32, 48, 3)),
     "CliffordNet": (_cliffordnet, (32, 48, 3)),
+    "HierarchicalCliffordNet": (_hierarchical_cliffordnet, (32, 48, 3)),
     "BeitForImageClassification": (_beit, (32, 48, 3)),
     "BeitForImageClassification_cls": (_beit_cls, (32, 48, 3)),
     "SwinTransformer": (_swin, (64, 96, 3)),
@@ -446,6 +454,9 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     # CliffordNet: ParaMind2025/CAN model.py, x.mean(dim=[-2, -1]) ->
     # nn.LayerNorm(embed_dim) -> nn.Linear(embed_dim, num_classes).
     "CliffordNet": {"pooled_norm", "classifier"},
+    # HierarchicalCliffordNet: the same head on the last stage's map
+    # (ParaMind2025/CAN model_hier.py: mean -> nn.LayerNorm -> nn.Linear).
+    "HierarchicalCliffordNet": {"pooled_norm", "classifier"},
     # BEiT: microsoft/unilm beit/modeling_finetune.py. Mean path:
     # fc_norm(t[:, 1:].mean(1)) -> head; here head_norm and head_classifier.
     "BeitForImageClassification": {"head_norm", "head_classifier"},
@@ -538,7 +549,7 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
     if subject == "AlexNet":
         assert [b.units for b in head.dense_blocks] == [4096, 4096]
         assert [b.dropout_rate for b in head.dense_blocks] == [0.5, 0.5]
-    if subject == "CliffordNet":
+    if subject in ("CliffordNet", "HierarchicalCliffordNet"):
         assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
         # torch nn.LayerNorm's default eps, not the 1e-6 of the blocks.
         assert head.pooled_norm.epsilon == pytest.approx(1e-5)
@@ -603,6 +614,12 @@ KNOBS: Dict[str, Dict[str, object]] = {
                     "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
                     "bias_initializer": keras.initializers.Constant(0.5)},
+    "HierarchicalCliffordNet": {
+        "kernel_regularizer": keras.regularizers.L2(_L2),
+        "bias_regularizer": keras.regularizers.L2(_L2),
+        "dropout_rate": 0.3,
+        "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
+        "bias_initializer": keras.initializers.Constant(0.5)},
     # BEiT takes no initializer or regularizer knob of its own: the head draws
     # from TruncatedNormal(backbone.initializer_range), so that is the knob.
     "BeitForImageClassification": {"dropout_rate": 0.3, "initializer_range": 0.05},
@@ -636,7 +653,8 @@ KNOBS: Dict[str, Dict[str, object]] = {
 
 #: Where each class's ``dropout_rate`` must land in its reference head.
 CLASSIFIER_DROPOUT = {"MobileNetV1", "MobileNetV2", "ViT", "ViTHMLP",
-                      "CliffordNet", "BeitForImageClassification_cls", "FastVLM"}
+                      "CliffordNet", "HierarchicalCliffordNet",
+                      "BeitForImageClassification_cls", "FastVLM"}
 BLOCK_DROPOUT = {"MobileNetV3", "MobileNetV4"}
 
 
