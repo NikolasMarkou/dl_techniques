@@ -226,7 +226,7 @@ deliberately not guarded.
 for sn in ('global_response_norm', 'layer_norm'):
     m = create_convunext(input_shape=(32, 32, 1), depth=2, initial_filters=8,
                          stem_normalization=sn)
-    print(sn, '->', type(m.get_layer('encoder_level_0_stem').norm).__name__)
+    print(sn, '->', type(m.get_layer('encoder_level_0_stem').stem.norm1).__name__)
 # global_response_norm -> GlobalResponseNormalization
 # layer_norm -> LayerNormalization
 ```

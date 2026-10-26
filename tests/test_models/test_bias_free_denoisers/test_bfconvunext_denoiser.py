@@ -95,8 +95,8 @@ class TestConvUNextStem:
         )
         stem = model.get_layer('encoder_level_0_stem')
         assert isinstance(stem, ConvUNextStem)
-        assert stem.conv.use_bias is False
-        assert stem.conv.bias is None
+        assert stem.stem.conv1.use_bias is False
+        assert stem.stem.conv1.bias is None
         assert not [w for w in stem.weights if w.path.endswith('bias')]
 
     def test_build_creates_weights(self, stem_config, sample_input) -> None:

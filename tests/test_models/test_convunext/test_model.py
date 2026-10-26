@@ -326,22 +326,22 @@ class TestMergedConvUNextStemKnobs:
         stem = ConvUNextStem(filters=8, use_bias=True)
         stem(sample_input_small)
 
-        assert stem.conv.use_bias is True
-        assert stem.conv.bias is not None
+        assert stem.stem.conv1.use_bias is True
+        assert stem.stem.conv1.bias is not None
         n_bias_weights = sum(
-            1 for w in stem.conv.weights if w.path.endswith('bias')
+            1 for w in stem.stem.conv1.weights if w.path.endswith('bias')
         )
         assert n_bias_weights == 1, (
             f"use_bias=True stem allocated {n_bias_weights} bias weights"
         )
-        assert int(np.prod(stem.conv.bias.shape)) == 8
+        assert int(np.prod(stem.stem.conv1.bias.shape)) == 8
 
         # Control: the bias-free arm allocates none.
         stem_bf = ConvUNextStem(filters=8, use_bias=False)
         stem_bf(sample_input_small)
-        assert stem_bf.conv.use_bias is False
-        assert stem_bf.conv.bias is None
-        assert not any(w.path.endswith('bias') for w in stem_bf.conv.weights)
+        assert stem_bf.stem.conv1.use_bias is False
+        assert stem_bf.stem.conv1.bias is None
+        assert not any(w.path.endswith('bias') for w in stem_bf.stem.conv1.weights)
 
     def test_stem_normalization_layernorm_selects_layer_norm(
         self,
@@ -350,13 +350,13 @@ class TestMergedConvUNextStemKnobs:
         """`stem_normalization` must select the normalization CLASS actually built."""
         stem_ln = ConvUNextStem(filters=8, stem_normalization='layer_norm')
         stem_ln(sample_input_small)
-        assert type(stem_ln.norm) is keras.layers.LayerNormalization
+        assert type(stem_ln.stem.norm1) is keras.layers.LayerNormalization
 
         # The default is the bias-free / ConvNeXt-V2 choice, a different class.
         stem_default = ConvUNextStem(filters=8)
         stem_default(sample_input_small)
-        assert type(stem_default.norm) is GlobalResponseNormalization
-        assert type(stem_default.norm) is not type(stem_ln.norm)
+        assert type(stem_default.stem.norm1) is GlobalResponseNormalization
+        assert type(stem_default.stem.norm1) is not type(stem_ln.stem.norm1)
 
     def test_stem_config_round_trip_at_non_default_knob_values(
         self,
@@ -388,10 +388,10 @@ class TestMergedConvUNextStemKnobs:
 
         loaded_stem = loaded_model.get_layer('stem_under_test')
         assert loaded_stem.use_bias is False
-        assert loaded_stem.conv.use_bias is False
-        assert loaded_stem.conv.bias is None
+        assert loaded_stem.stem.conv1.use_bias is False
+        assert loaded_stem.stem.conv1.bias is None
         assert loaded_stem.stem_normalization == 'layer_norm'
-        assert type(loaded_stem.norm) is keras.layers.LayerNormalization
+        assert type(loaded_stem.stem.norm1) is keras.layers.LayerNormalization
 
         loaded_output = loaded_model(sample_input_small, training=False)
         np.testing.assert_allclose(
@@ -2101,10 +2101,10 @@ class TestEdgeCases:
         """
         model = create_convunext(**_cfg(stem_normalization='layer_norm'))
         stem = model.get_layer(name='encoder_level_0_stem')
-        assert type(stem.norm) is keras.layers.LayerNormalization
+        assert type(stem.stem.norm1) is keras.layers.LayerNormalization
 
         default = create_convunext(**_cfg())
-        assert type(default.get_layer(name='encoder_level_0_stem').norm) is \
+        assert type(default.get_layer(name='encoder_level_0_stem').stem.norm1) is \
             GlobalResponseNormalization
 
     def test_gabor_stem_replaces_the_convunext_stem(self) -> None:

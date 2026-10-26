@@ -46,7 +46,6 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.conv_blocks.stem import ConvStem
-from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
@@ -150,17 +149,9 @@ class ConvUNextStem(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # The ConvStem sub-layer is created in build() once the input shape is known.
-        self._conv_stem: Optional[ConvStem] = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the stem sub-layers via :class:`ConvStem`.
-
-        :param input_shape: Shape of the input tensor ``(batch, H, W, C)``.
-        :type input_shape: tuple of int or None
-        """
-        _activation = substitute_exact(self.activation_name)
-        self._conv_stem = ConvStem(
+        # D-277: the exact gelu / leaky_relu are bit-identical to stock at float32.
+        # ConvStem resolves a string as written, so the substitution happens here.
+        self.stem = ConvStem(
             filters=self.filters,
             kernel_size=self.kernel_size,
             strides=1,
@@ -168,17 +159,20 @@ class ConvUNextStem(keras.layers.Layer):
             use_bias=self.use_bias,
             num_convs=1,
             normalization_type=self.stem_normalization,
-            activation_type=_activation,
+            activation_type=substitute_exact(self.activation_name),
             use_pooling=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='stem',
         )
-        self._conv_stem.build(input_shape)
-        # Keep aliases for external references.
-        self.conv = self._conv_stem.conv1
-        self.norm = self._conv_stem.norm1
-        self.activation_layer = self._conv_stem.activation1
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the inner :class:`ConvStem`.
+
+        :param input_shape: Shape of the input tensor ``(batch, H, W, C)``.
+        :type input_shape: tuple of int or None
+        """
+        self.stem.build(input_shape)
         super().build(input_shape)
 
     def call(
@@ -190,13 +184,14 @@ class ConvUNextStem(keras.layers.Layer):
 
         :param inputs: Input tensor of shape ``(batch, H, W, C)``.
         :type inputs: keras.KerasTensor
-        :param training: Accepted for API symmetry. None of the sub-layers
-            receives it, and none of them behaves differently in training.
+        :param training: Forwarded to the inner :class:`ConvStem`, which hands it
+            to the normalization. The default GRN and layer norm do not behave
+            differently in training; a ``'batch_norm'`` stem does.
         :type training: bool or None
         :return: Output tensor of shape ``(batch, H, W, filters)``.
         :rtype: keras.KerasTensor
         """
-        return self._conv_stem(inputs, training=training)
+        return self.stem(inputs, training=training)
 
     def compute_output_shape(
             self,
@@ -1769,7 +1764,7 @@ def create_convunext(
                 name=model_name
             )
 
-        logger.info(f"Created single-output ConvUNext model")
+        logger.info("Created single-output ConvUNext model")
 
     logger.info(f"Created ConvUNext model '{model_name}' with depth {depth}")
     logger.info(f"ConvNeXt version: {convnext_version.upper()}")

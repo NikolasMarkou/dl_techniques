@@ -54,8 +54,13 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.activations import create_activation_layer
+from dl_techniques.layers.activations.exact_activations import (
+    exact_gelu,
+    exact_leaky_relu,
+)
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.vision.convunext.model import ConvUNextStem
 from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
@@ -525,6 +530,135 @@ UCA_ENCODER_NOBIAS = StemCase(
     expected_output_shape=(4, 4, 16),
 )
 
+# ---------------------------------------------------------------------
+# ConvUNextStem
+# ---------------------------------------------------------------------
+
+# Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/convunext/model.py``
+# ``ConvUNextStem.build``: ``Conv2D(filters, kernel, padding "same", use_bias,
+# he_normal, kernel regularizer, name="stem_conv")`` -> ``create_normalization_layer(
+# stem_normalization, name="stem_norm")`` (no kwargs, epsilon 1e-6) ->
+# ``keras.layers.Activation(substitute_exact(activation))`` which is ALWAYS built,
+# even for ``"linear"``. ``call()`` ran ``self.norm(x)`` without ``training``; Keras 3
+# hands a child called without ``training`` the training flag of the enclosing
+# call (measured: the moving mean of a BatchNormalization moved under
+# ``outer(x, training=True)``), so ``training=training`` below is what the
+# original ran. The exact forms (D-277) are the library's ``exact_gelu`` /
+# ``exact_leaky_relu`` callables that ``substitute_exact`` returns for the
+# strings ``"gelu"`` / ``"leaky_relu"``. A ``"linear"`` original carries an
+# identity ``Activation`` with no weights: it stays in ``forward`` but, as
+# ConvStem builds no layer for ``"linear"``, it is left out of ``sublayers``
+# (the role-set comparison then pins that ConvStem really has none).
+_CONVUNEXT_FILTERS = 16
+_CONVUNEXT_KERNEL = 5
+_CONVUNEXT_KERNEL_REG = 1e-4
+
+
+def _convunext_original(
+    norm_type: str, activation, use_bias: bool, identity_activation: bool = False
+) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=_CONVUNEXT_FILTERS,
+        kernel_size=_CONVUNEXT_KERNEL,
+        padding="same",
+        use_bias=use_bias,
+        kernel_initializer="he_normal",
+        kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
+        name="stem_conv",
+    )
+    norm = create_normalization_layer(norm_type, name="stem_norm")
+    act = keras.layers.Activation(activation, name="stem_activation")
+
+    def forward(x, training):
+        x = conv(x)
+        x = norm(x, training=training)
+        return act(x)
+
+    sublayers = {"conv1": conv, "norm1": norm}
+    if not identity_activation:
+        sublayers["activation1"] = act
+    return Original(sublayers=sublayers, forward=forward)
+
+
+def _convunext_model(
+    norm_type: str, activation, use_bias: bool
+) -> ConvUNextStem:
+    """The layer under test: its ``.stem`` is the ``ConvStem``."""
+    return ConvUNextStem(
+        filters=_CONVUNEXT_FILTERS,
+        kernel_size=_CONVUNEXT_KERNEL,
+        activation=activation,
+        use_bias=use_bias,
+        stem_normalization=norm_type,
+        kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
+    )
+
+
+def _convunext_case(
+    case_id: str,
+    norm_type: str,
+    make_activation: Callable[[], object],
+    make_original_activation: Callable[[], object],
+    use_bias: bool,
+    identity_activation: bool = False,
+) -> StemCase:
+    """One case; both activations are zero-argument factories so a Layer-instance
+    activation is fresh for the model and for the original."""
+    return StemCase(
+        case_id=case_id,
+        make_model=lambda: _convunext_model(norm_type, make_activation(), use_bias),
+        make_original=lambda: _convunext_original(
+            norm_type, make_original_activation(), use_bias, identity_activation
+        ),
+        input_shape=(16, 16, 3),
+        expected_output_shape=(16, 16, _CONVUNEXT_FILTERS),
+    )
+
+
+CONVUNEXT_GELU_GRN_NOBIAS = _convunext_case(
+    "convunext-gelu-grn-no-bias",
+    "global_response_norm",
+    lambda: "gelu",
+    lambda: exact_gelu,
+    False,
+)
+CONVUNEXT_GELU_LAYERNORM = _convunext_case(
+    "convunext-gelu-layer-norm-bias",
+    "layer_norm",
+    lambda: "gelu",
+    lambda: exact_gelu,
+    True,
+)
+CONVUNEXT_LEAKY_RELU_STRING = _convunext_case(
+    "convunext-leaky-relu-string",
+    "layer_norm",
+    lambda: "leaky_relu",
+    lambda: exact_leaky_relu,
+    True,
+)
+CONVUNEXT_LEAKY_RELU_INSTANCE = _convunext_case(
+    "convunext-leaky-relu-instance",
+    "global_response_norm",
+    lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+    lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+    False,
+)
+CONVUNEXT_LINEAR = _convunext_case(
+    "convunext-linear",
+    "layer_norm",
+    lambda: "linear",
+    lambda: "linear",
+    True,
+    identity_activation=True,
+)
+CONVUNEXT_BATCH_NORM = _convunext_case(
+    "convunext-batch-norm",
+    "batch_norm",
+    lambda: "gelu",
+    lambda: exact_gelu,
+    True,
+)
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -538,6 +672,12 @@ CASES = [
     HIER_P2,
     UCA_ENCODER,
     UCA_ENCODER_NOBIAS,
+    CONVUNEXT_GELU_GRN_NOBIAS,
+    CONVUNEXT_GELU_LAYERNORM,
+    CONVUNEXT_LEAKY_RELU_STRING,
+    CONVUNEXT_LEAKY_RELU_INSTANCE,
+    CONVUNEXT_LINEAR,
+    CONVUNEXT_BATCH_NORM,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -551,6 +691,11 @@ BUILT_STEM_ROWS = [
     ("hierarchical-patch1", lambda: _hierarchical_model(1), (16, 16, 3)),
     ("hierarchical-patch2", lambda: _hierarchical_model(2), (16, 16, 3)),
     ("uca-encoder", _uca_model, (16, 16, 3)),
+    (
+        "convunext-stem",
+        lambda: _convunext_model("global_response_norm", "gelu", False),
+        (16, 16, 3),
+    ),
 ]
 
 
@@ -739,3 +884,34 @@ def test_every_migrated_model_builds_its_stem(make_model, input_shape):
     ]
     assert unbuilt == [], f"unbuilt sub-layers of the stem: {unbuilt}"
     assert len(model.stem.weights) > 0
+
+
+# ---------------------------------------------------------------------
+# ConvUNextStem owns its ConvStem from __init__
+# ---------------------------------------------------------------------
+
+#: Attributes ConvUNextStem exposed as aliases (or held privately) before the
+#: ConvStem became a plain sub-layer; none may come back.
+_CONVUNEXT_REMOVED_ATTRIBUTES = ("_conv_stem", "conv", "norm", "activation_layer")
+
+
+def test_convunext_stem_creates_its_conv_stem_in_init():
+    """``stem.stem`` is a ``ConvStem`` the moment the layer is constructed, is
+    unbuilt until the layer is, and no alias of a sub-layer exists at any time.
+
+    HEAD created the ConvStem inside ``build()`` and set ``conv`` / ``norm`` /
+    ``activation_layer`` aliases there, so before the first call the stem had
+    no sub-layers at all and the Keras layer tree was empty.
+    """
+    layer = _convunext_model("global_response_norm", "gelu", False)
+    assert isinstance(layer.stem, ConvStem)
+    assert layer.stem.name == "stem"
+    assert layer.stem.built is False
+    assert layer.stem in list(layer._flatten_layers(include_self=False))
+    for name in _CONVUNEXT_REMOVED_ATTRIBUTES:
+        assert not hasattr(layer, name), f"alias {name!r} exists before build"
+
+    layer(np.zeros((1, 16, 16, 3), "float32"), training=False)
+    assert layer.stem.built is True
+    for name in _CONVUNEXT_REMOVED_ATTRIBUTES:
+        assert not hasattr(layer, name), f"alias {name!r} exists after build"
