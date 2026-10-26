@@ -60,7 +60,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 from dl_techniques.layers.conv_blocks.stem import ConvStem
-from dl_techniques.models.vision.cliffordnet.model import _DEFAULT_INPUT_SHAPE
+from dl_techniques.models.vision.cliffordnet.model import DEFAULT_INPUT_SHAPE
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -162,10 +162,6 @@ class HierarchicalCliffordNet(keras.Model):
     :param num_classes: Number of output classes. Must be positive when
         ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
         headless. Defaults to ``1000``.
-    :param include_top: Whether to build the classification head. When
-        ``False`` there is no head, ``classification_head`` is ``None`` and
-        the model returns the last stage's feature map
-        ``(B, h, w, stage_dims[-1])`` instead of logits. Defaults to ``True``.
     :param stage_depths: Blocks per stage, one entry per stage; each must be
         positive. Defaults to ``[3, 4, 5]``.
     :param stage_dims: Width of each stage, same length as ``stage_depths``; each
@@ -188,6 +184,15 @@ class HierarchicalCliffordNet(keras.Model):
     :param kernel_regularizer: Optional kernel regularizer.
     :param bias_regularizer: Optional bias regularizer.
     :param head_config_overrides: Optional overrides merged into the head config.
+    :param include_top: Whether to build the classification head. When
+        ``False`` there is no head, ``classification_head`` is ``None`` and
+        the model returns the last stage's feature map
+        ``(B, h, w, stage_dims[-1])`` instead of logits. Must be a real
+        ``bool`` (``[1, 1]`` raises ``TypeError``); it is the last named
+        parameter, after ``head_config_overrides``, so it cannot capture a
+        positional ``stage_depths``. Defaults to ``True``.
+    :param kwargs: Passed to :class:`keras.Model`.
+    :raises TypeError: If ``include_top`` is not a ``bool``.
     :raises ValueError: If an argument is out of range (``num_classes`` only
         while ``include_top`` is true), ``stage_dims`` and ``stage_depths``
         differ in length, or ``cli_mode`` is unknown.
@@ -212,7 +217,6 @@ class HierarchicalCliffordNet(keras.Model):
     def __init__(
         self,
         num_classes: int = 1000,
-        include_top: bool = True,
         stage_depths: Optional[List[int]] = None,
         stage_dims: Optional[List[int]] = None,
         patch_size: int = 1,
@@ -228,10 +232,18 @@ class HierarchicalCliffordNet(keras.Model):
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
+        include_top: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
+        # A real bool only: `bool(...)` would accept `(10, [1, 1])` style
+        # misbinding that the old second slot let through.
+        if not isinstance(include_top, bool):
+            raise TypeError(
+                f"include_top must be a bool, got {include_top!r} "
+                f"({type(include_top).__name__})"
+            )
         depths = list(stage_depths) if stage_depths is not None else list(_DEFAULT_STAGE_DEPTHS)
         if include_top and num_classes <= 0:
             raise ValueError(
@@ -615,11 +627,13 @@ class HierarchicalCliffordNet(keras.Model):
             ``include_top=False`` is passed in ``kwargs``.
         :param pretrained: A local path to a ``.keras`` weights file. ``True``
             raises, since no checkpoints are hosted.
-        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at
-            before ``pretrained`` weights are transferred (the loader refuses
-            an unbuilt model; the constructor builds nothing). Used only with a
-            ``pretrained`` path; defaults to ``(32, 32, 3)``. Weight shapes do
-            not depend on ``H`` and ``W``, only on ``C_in``.
+        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at.
+            When given the model is always returned built, with or without
+            ``pretrained``, as for ResNet. When ``None`` the model is built
+            only if ``pretrained`` weights are loaded (the loader refuses an
+            unbuilt model), at :data:`DEFAULT_INPUT_SHAPE` ``(32, 32, 3)``, and
+            otherwise stays unbuilt. Weight shapes do not depend on ``H`` and
+            ``W``, only on ``C_in``.
         :param kwargs: Override any variant default.
         :return: Configured instance.
         :raises ValueError: If ``variant`` is not recognised.
@@ -643,9 +657,10 @@ class HierarchicalCliffordNet(keras.Model):
         logger.info(f"Creating HierarchicalCliffordNet-{variant}")
         model = cls(num_classes=num_classes, **config)
 
+        if input_shape is not None or isinstance(pretrained, str):
+            model.build((None,) + tuple(input_shape or DEFAULT_INPUT_SHAPE))
+
         if isinstance(pretrained, str):
-            if not model.built:
-                model.build((None,) + tuple(input_shape or _DEFAULT_INPUT_SHAPE))
             model.load_pretrained_weights(weights_path=pretrained)
         return model
 

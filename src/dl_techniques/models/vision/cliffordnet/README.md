@@ -114,13 +114,20 @@ embedding). `num_classes` is then ignored, so `0` is accepted; it defaults to
 copied and the checkpoint's `classification_head` is left unused.
 `HierarchicalCliffordNet` has the same switch (see below).
 
-**`from_variant(..., pretrained=<path>)` builds before it loads.** The constructor
-builds nothing and the weight loader refuses an unbuilt model, so `from_variant`
-builds the model at `input_shape=(H, W, C_in)` (unbatched, default `(32, 32, 3)`;
-only `C_in` matters, weight shapes do not depend on `H` and `W`) and then
-transfers the weights. `input_shape` is ignored when no `pretrained` path is
-given, and the model then stays unbuilt. Both `CliffordNet` and
-`HierarchicalCliffordNet` take it.
+**`include_top` is the last named constructor parameter.** It follows
+`head_config_overrides`, so `CliffordNet(10, 64)` binds `64` to `channels` and
+`HierarchicalCliffordNet(10, [1, 1])` binds the list to `stage_depths`. It must
+be a real `bool`; anything else (`64`, `[1, 1]`, `1`, `None`) raises `TypeError`.
+
+**`from_variant(..., input_shape=...)` builds the model.** The constructor
+builds nothing and the weight loader refuses an unbuilt model. When `input_shape`
+`(H, W, C_in)` (unbatched) is given, `from_variant` always returns the model
+built at it, with or without `pretrained`, as ResNet does. With
+`pretrained=<path>` and no `input_shape` it builds at `DEFAULT_INPUT_SHAPE`,
+`(32, 32, 3)` (a public constant of `cliffordnet/model.py`, also used by
+`hierarchical.py`; only `C_in` matters, weight shapes do not depend on `H` and
+`W`) and then transfers the weights. With neither, the model stays unbuilt.
+Both `CliffordNet` and `HierarchicalCliffordNet` take it.
 
 ### Variants
 

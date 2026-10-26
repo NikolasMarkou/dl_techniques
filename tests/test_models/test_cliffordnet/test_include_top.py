@@ -131,10 +131,14 @@ class TestHeadlessOutput:
         feature_map = headless(x, training=False)
         logits = _np(headed(x, training=False))
         # Recompute the logits from the headless map through the headed head.
+        # The operation sequence is the same one, so the difference is exactly
+        # zero: measured on CPU (2026-10-26, iter-1 step 4.1) max|diff| = 0.0
+        # for input seeds 3, 4 and 5 (max|logit| 2.3 to 2.9). A tolerance would
+        # hide a real change of the head's input, so none is allowed.
         recomputed = _np(
             headed.classification_head(feature_map, training=False)["logits"]
         )
-        np.testing.assert_allclose(recomputed, logits, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(recomputed, logits, rtol=0, atol=0.0)
 
 
 class TestNoHeadWhenHeadless:
@@ -276,8 +280,10 @@ class TestHeadedToHeadlessTransfer:
         recomputed = _np(
             headed.classification_head(feature_map, training=False)["logits"]
         )
+        # Same operation sequence on identical weights: measured on CPU
+        # (2026-10-26, iter-1 step 4.1) max|diff| = 0.0, so the bound is zero.
         np.testing.assert_allclose(
-            recomputed, _np(headed(x, training=False)), rtol=0, atol=1e-6
+            recomputed, _np(headed(x, training=False)), rtol=0, atol=0.0
         )
 
     @pytest.mark.parametrize(
@@ -461,11 +467,36 @@ class TestFromVariantBuildsBeforeLoading:
             rtol=0, atol=0,
         )
 
-    def test_without_pretrained_the_model_stays_unbuilt(self):
-        model = CliffordNet.from_variant(
-            "nano", input_shape=(H, W, C_IN), **self.VARIANT_KWARGS
-        )
+    def test_without_pretrained_or_input_shape_the_model_stays_unbuilt(self):
+        model = CliffordNet.from_variant("nano", **self.VARIANT_KWARGS)
         assert not model.built
+
+    @pytest.mark.parametrize("include_top", [True, False])
+    def test_input_shape_builds_the_model_without_pretrained(self, include_top):
+        """``input_shape`` always reaches the model, as it does for ResNet."""
+        model = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, include_top=include_top,
+            input_shape=(H, W, C_IN), **self.VARIANT_KWARGS,
+        )
+        assert model.built
+        assert model.weights, "built but holds no weights"
+        expected = (
+            (BATCH, NUM_CLASSES) if include_top
+            else _expected_feature_shape(model.patch_size)
+        )
+        assert tuple(
+            model.compute_output_shape((BATCH, H, W, C_IN))
+        ) == expected
+        assert tuple(_np(model(_x(23), training=False)).shape) == expected
+
+    def test_the_probe_shape_constant_is_public_and_shared(self):
+        import dl_techniques.models.vision.cliffordnet.hierarchical as hier
+        import dl_techniques.models.vision.cliffordnet.model as module
+
+        assert module.DEFAULT_INPUT_SHAPE == (32, 32, 3)
+        assert hier.DEFAULT_INPUT_SHAPE is module.DEFAULT_INPUT_SHAPE
+        assert not hasattr(module, "_DEFAULT_INPUT_SHAPE")
+        assert not hasattr(hier, "_DEFAULT_INPUT_SHAPE")
 
     @pytest.mark.parametrize("patch", PATCHES)
     def test_the_default_probe_shape_is_valid_for_every_patch_size(
@@ -738,12 +769,31 @@ class TestHierarchicalHeadedToHeadlessTransfer:
             rtol=0, atol=0,
         )
 
-    def test_without_pretrained_the_model_stays_unbuilt(self):
+    def test_without_pretrained_or_input_shape_the_model_stays_unbuilt(self):
         model = HierarchicalCliffordNet.from_variant(
-            "hier_345", num_classes=NUM_CLASSES, input_shape=(H, W, C_IN),
+            "hier_345", num_classes=NUM_CLASSES,
             stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS),
         )
         assert not model.built
+
+    @pytest.mark.parametrize("include_top", [True, False])
+    def test_input_shape_builds_the_model_without_pretrained(self, include_top):
+        """``input_shape`` always reaches the model, as it does for ResNet."""
+        model = HierarchicalCliffordNet.from_variant(
+            "hier_345", num_classes=NUM_CLASSES, include_top=include_top,
+            input_shape=(H, W, C_IN),
+            stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS),
+        )
+        assert model.built
+        assert model.weights, "built but holds no weights"
+        expected = (
+            (BATCH, NUM_CLASSES) if include_top
+            else _hier_expected_shape(H, W, model.patch_size)
+        )
+        assert tuple(
+            model.compute_output_shape((BATCH, H, W, C_IN))
+        ) == expected
+        assert tuple(_np(model(_x(24), training=False)).shape) == expected
 
 
 class TestHierarchicalNumClasses:
@@ -799,3 +849,53 @@ class TestHierarchicalDefaultIsUnchanged:
         model = _hmodel()
         clone = HierarchicalCliffordNet.from_config(model.get_config())
         assert clone.get_config() == model.get_config()
+
+
+# ---------------------------------------------------------------------
+# Positional argument order (review concern 1)
+# ---------------------------------------------------------------------
+
+
+class TestIncludeTopIsNotASecondPositionalArgument:
+    """``include_top`` once sat second, so ``CliffordNet(10, 64)`` bound 64 to it.
+
+    Measured on the committed code: ``CliffordNet(10, 64)`` built with
+    ``include_top=64, channels=128`` and ``HierarchicalCliffordNet(10, [1, 1])``
+    with ``include_top=[1, 1]`` and the default stage depths, with no error.
+    Every pre-existing parameter keeps its original positional slot and
+    ``include_top`` follows them all, and it must be a real ``bool``.
+    """
+
+    def test_the_second_positional_argument_is_channels(self):
+        model = CliffordNet(10, 64)
+        assert model.channels == 64
+        assert model.include_top is True
+
+    def test_the_second_positional_argument_is_stage_depths(self):
+        model = HierarchicalCliffordNet(10, [1, 1])
+        assert model.stage_depths == [1, 1]
+        assert model.include_top is True
+
+    @pytest.mark.parametrize("bad", [64, [1, 1], 1, 0, "yes", None])
+    def test_a_non_bool_include_top_is_refused(self, bad):
+        with pytest.raises(TypeError, match="include_top"):
+            CliffordNet(num_classes=10, channels=8, depth=1, include_top=bad)
+
+    @pytest.mark.parametrize("bad", [64, [1, 1], 1, 0, "yes", None])
+    def test_a_non_bool_include_top_is_refused_hierarchical(self, bad):
+        with pytest.raises(TypeError, match="include_top"):
+            HierarchicalCliffordNet(
+                num_classes=10, stage_depths=[1], stage_dims=[8],
+                include_top=bad,
+            )
+
+    def test_the_refusal_names_the_offending_value(self):
+        with pytest.raises(TypeError, match=r"\[1, 1\]"):
+            HierarchicalCliffordNet(10, include_top=[1, 1])
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_a_real_bool_is_accepted_by_keyword(self, flag):
+        assert CliffordNet(10, depth=1, include_top=flag).include_top is flag
+        assert HierarchicalCliffordNet(
+            10, include_top=flag
+        ).include_top is flag

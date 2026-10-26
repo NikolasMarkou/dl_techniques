@@ -74,10 +74,10 @@ _STEM_BN_MOMENTUM = 0.9
 _STEM_BN_EPSILON = 1e-3
 
 # Unbatched probe shape `from_variant` builds at before a pretrained load when
-# the caller gives no `input_shape` (also used by HierarchicalCliffordNet). Every
-# patch size accepts it (patch 4 leaves 8x8, the hierarchical stride chain 4x4),
-# and the weights do not depend on it.
-_DEFAULT_INPUT_SHAPE = (32, 32, 3)
+# the caller gives no `input_shape` (shared with HierarchicalCliffordNet, which
+# imports it from here). Every patch size accepts it (patch 4 leaves 8x8, the
+# hierarchical stride chain 4x4), and the weights do not depend on it.
+DEFAULT_INPUT_SHAPE = (32, 32, 3)
 
 # ---------------------------------------------------------------------
 
@@ -211,10 +211,6 @@ class CliffordNet(keras.Model):
     :param num_classes: Number of output classes. Must be positive when
         ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
         headless. Defaults to ``1000``.
-    :param include_top: Whether to build the classification head. When
-        ``False`` there is no head, ``classification_head`` is ``None`` and
-        the model returns the final feature map ``(B, H/p, W/p, channels)``
-        instead of logits. Defaults to ``True``.
     :param channels: Feature dimensionality ``D`` (constant throughout). Must
         be positive.
     :param depth: Number of CliffordNet blocks ``L``. Must be positive.
@@ -247,8 +243,16 @@ class CliffordNet(keras.Model):
         ``num_classes`` and ``task_type`` are refused with ``ValueError``.
         Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
+    :param include_top: Whether to build the classification head. When
+        ``False`` there is no head, ``classification_head`` is ``None`` and
+        the model returns the final feature map ``(B, H/p, W/p, channels)``
+        instead of logits. Must be a real ``bool`` (``64`` or ``[1, 1]``
+        raises ``TypeError``); it is the last named parameter, after
+        ``head_config_overrides``, so it cannot capture a positional
+        ``channels``. Defaults to ``True``.
     :param kwargs: Passed to :class:`keras.Model`.
 
+    :raises TypeError: If ``include_top`` is not a ``bool``.
     :raises ValueError: If ``num_classes`` is not positive while
         ``include_top`` is true, if ``channels``, ``depth`` or ``patch_size``
         is not positive, or if ``head_config_overrides`` names a reserved key.
@@ -261,7 +265,6 @@ class CliffordNet(keras.Model):
     def __init__(
         self,
         num_classes: int = 1000,
-        include_top: bool = True,
         channels: int = 128,
         depth: int = 12,
         patch_size: int = 2,
@@ -278,10 +281,18 @@ class CliffordNet(keras.Model):
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
+        include_top: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
+        # A real bool only: `bool(...)` would accept `CliffordNet(10, 64, ...)`
+        # style misbinding (64, [1, 1]) that the old second slot let through.
+        if not isinstance(include_top, bool):
+            raise TypeError(
+                f"include_top must be a bool, got {include_top!r} "
+                f"({type(include_top).__name__})"
+            )
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
@@ -797,11 +808,13 @@ class CliffordNet(keras.Model):
             classifier-skip decision compares ``num_classes`` against 100
             whatever this says, and only when the model has a head.
         :param cache_dir: Directory to cache downloaded weights.
-        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at
-            before the weights are transferred (the loader refuses an unbuilt
-            model and the constructor builds nothing). Used only when weights
-            are loaded; defaults to ``(32, 32, 3)``. Weight shapes do not depend
-            on ``H`` and ``W``, only on ``C_in``.
+        :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at.
+            When given the model is always returned built, with or without
+            ``pretrained``, as for ResNet. When ``None`` the model is built
+            only if weights are loaded (the loader refuses an unbuilt model),
+            at :data:`DEFAULT_INPUT_SHAPE` ``(32, 32, 3)``, and otherwise stays
+            unbuilt. Weight shapes do not depend on ``H`` and ``W``, only on
+            ``C_in``.
         :param kwargs: Override any variant default.
         :return: Configured :class:`CliffordNet` instance.
         :raises ValueError: If ``variant`` is not recognised.
@@ -872,12 +885,11 @@ class CliffordNet(keras.Model):
 
         model = cls(num_classes=num_classes, **defaults)
 
+        if input_shape is not None or load_weights_path:
+            model.build((None,) + tuple(input_shape or DEFAULT_INPUT_SHAPE))
+
         if load_weights_path:
             try:
-                if not model.built:
-                    model.build(
-                        (None,) + tuple(input_shape or _DEFAULT_INPUT_SHAPE)
-                    )
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
                     skip_mismatch=skip_mismatch
