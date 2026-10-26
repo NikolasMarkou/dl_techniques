@@ -428,6 +428,7 @@ class ConvStem(keras.layers.Layer):
             relabelled). Any other error from rebuilding a registered Layer
             propagates unchanged.
         """
+        # DECISION plan-2026-10-26T125959-7af851e5/D-020: ConvStem owns its activation dispatch, so a per-layer dtype reaches the activation and an exact form survives the config round trip; supersedes D-003 for this path. Do not swap back to resolve_activation_layer.
         spec = self.activation_type
         if spec is None or (isinstance(spec, str) and spec == "linear"):
             return None
