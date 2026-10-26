@@ -307,6 +307,10 @@ fine_tune_model = create_convnext_v2(
 `input_shape` may be left at its default `(None, None, 3)`; the pre-load build then materializes
 weights at `PRETRAINED_BUILD_SPATIAL` (224) and the model stays fully convolutional.
 
+A `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem`
+(its weights were `stem_conv/...` and `stem_norm/...`), does not load: `keras.models.load_model`
+raises `ValueError`, and no legacy shim exists.
+
 ---
 
 ## 10. Performance Optimization

@@ -190,7 +190,7 @@ Constructor arguments reachable through `**kwargs`:
 
 ### 6.3 Pretrained weights
 
-None are distributed. Passing `weights=<anything>` to either factory (or to `from_variant`) raises `NotImplementedError` rather than quietly returning a random model. To reuse a local checkpoint, build the architecture and `keras.models.load_model()` the file.
+None are distributed. Passing `weights=<anything>` to either factory (or to `from_variant`) raises `NotImplementedError` rather than quietly returning a random model. To reuse a local checkpoint, build the architecture and `keras.models.load_model()` the file. A `SqueezeNetV1` or `SqueezeNoduleNetV2` (2D) `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem` (its convolution was `conv1`), does not load: `keras.models.load_model` raises `ValueError`, and no legacy shim exists.
 
 ---
 

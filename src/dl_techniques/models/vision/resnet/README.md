@@ -342,6 +342,10 @@ head; freeze the stem and early stages and fine-tune the rest at `1e-4`; or unfr
 everything at `1e-5`. Each needs a re-`compile()`. Section 8 Example 1 runs the first two end
 to end. No accuracy benefit is quoted here, for the same reason as in § 6.
 
+A `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem`
+(its weights were `stem_conv/...` and `stem_bn/...`), does not load: `keras.models.load_model`
+raises `ValueError`, and no legacy shim exists.
+
 ## 10. Training from Scratch
 
 ```python
@@ -369,7 +373,8 @@ and for long runs mixup or cutout. Weight decay belongs in the optimizer **or** 
 ## 11. Fine-Tuning Strategies
 
 **Route 1 (recommended): staged unfreezing.** `model.layers` is `stem` (one `ConvStem` layer whose
-sub-layers are `stem_conv1`/`stem_norm1`/`stem_act1`/`stem_pool`), `stageN_blockM` and
+sub-layers are `stem_conv1`/`stem_norm1`/`stem_act1` and, for `stem_type='imagenet'` only,
+`stem_pool`), `stageN_blockM` and
 `classification_head`, so grouping `model.layers` by prefix is a one-liner. Freeze the early groups, train, then unfreeze and re-compile at a lower learning
 rate. Section 8 Example 1 runs this.
 

@@ -282,6 +282,10 @@ fine_tune_model = keras.Model(inputs, outputs)
 The weight-slice copy above works only because the headless model is a strict prefix of the full
 one; check `len(backbone.get_weights())` against your own checkpoint before relying on it.
 
+A `MobileNetV3` or `MobileNetV4` `.keras` file saved before 2026-10-26, when the stem moved onto
+one `ConvStem` named `stem` (its weights were `stem_conv/...` and `stem_bn/...`), does not load:
+`keras.models.load_model` raises `ValueError`, and no legacy shim exists.
+
 ---
 
 ## 10. Performance Optimization
