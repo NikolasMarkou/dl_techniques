@@ -44,10 +44,6 @@ References:
       and the constructor defaults.
 """
 
-# DECISION plan-2026-08-24T074054-247151fd/D-012: this module is Sphinx/reST
-# throughout, a named exception to the repo's usual "match the file" rule.
-# Do not convert it back to Google style. See decisions.md.
-
 import keras
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 

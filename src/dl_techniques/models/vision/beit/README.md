@@ -136,6 +136,8 @@ scalar edge length the Swin-family types take; `BeitModel` computes it for you.
 explicitly at every normalization site; copy-pasting a generic ViT block here would silently change
 the architecture.
 
+![BEIT](beit_trunk_architecture.png)
+
 ## 5. Quick Start Guide
 
 ```python
