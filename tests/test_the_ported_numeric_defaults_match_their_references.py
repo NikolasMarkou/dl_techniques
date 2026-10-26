@@ -256,7 +256,7 @@ REFERENCE_PINS: List[Tuple[str, Callable[[], Any], Any, Any, str]] = [
         _TORCHVISION_BN,
     ),
     (
-        "cliffordnet/model.py _STEM_BN_MOMENTUM (stem_bn1 x2, stem_norm)",
+        "cliffordnet/model.py _STEM_BN_MOMENTUM (stem_norm1, stem_norm2)",
         _cliffordnet_stem_momentum,
         0.9,
         _KERAS_BN_MOMENTUM_DEFAULT,
