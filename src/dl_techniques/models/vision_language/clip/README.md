@@ -8,7 +8,7 @@ A Keras 3 implementation of **CLIP (Contrastive Language-Image Pre-training)**: 
 
 This is a **modernized** CLIP, not a weight-compatible port. Both towers are built from this repo's `TransformerLayer` with grouped-query attention, RMSNorm, SwiGLU and rotary position embeddings, and neither tower carries a learned positional table. No pretrained weights are distributed.
 
-A Clifford-algebra variant sharing the contrastive objective but not the tower internals, `CliffordCLIP`, lives in the sibling package `dl_techniques.models.vision_language.clifford_clip` — see its own `README.md` there, not this one.
+![CLIP](clip_original.webp)
 
 ---
 
@@ -46,8 +46,10 @@ The consequence is that a single pre-trained CLIP serves an unbounded number of 
 ```
 Image batch (B, 224, 224, 3) ──► Vision tower ──► project ──► L2 norm ──► (B, D)
                                                                             │
+                                                                            ▼
 Text batch  (B, 77) ────────────► Text tower ───► project ──► L2 norm ──► (B, D)
                                                                             │
+                                                                            ▼
                      logits = clip_scale * image_features @ text_features^T
                      ──► logits_per_image (B, B), logits_per_text (B, B)
 ```
@@ -90,6 +92,8 @@ Neither tower has a learned positional embedding. Position enters only as **RoPE
 ### 4.5 `call` is partial by design
 
 Passing only `image` or only `text` returns just that tower's features and **omits the logits keys entirely**, so encoding a caption bank for retrieval does not require fabricating a dummy image batch. The output dict's shape is therefore input-dependent, and any consumer indexing it must account for that.
+
+![Clip Dual Tower Architecture](clip_dual_tower_architecture.png)
 
 ---
 
