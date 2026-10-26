@@ -84,17 +84,21 @@ def test_no_model_spells_out_the_four_step_sequence() -> None:
     assert not offenders, offenders
 
 
-def test_the_helper_census_is_twenty_two_sites() -> None:
+def test_the_helper_census_is_twenty_three_sites() -> None:
     """The count is the census at the migration (19), plus FFTNet's detection
     and segmentation heads (iteration 2 step 6.6, D-210: they used to call
     ``create_vision_head`` with four override keys read by hand and the rest
     dropped in silence), plus FFTNet's classification head (step 10.1,
-    D-229: a hand-built ``Sequential`` until the class took its heads); a new
-    consumer raises it, and must be added here on purpose rather than by a
-    fifth copy of the sequence."""
+    D-229: a hand-built ``Sequential`` until the class took its heads), plus
+    ``HierarchicalCliffordNet``'s classification head (one site in
+    ``vision/cliffordnet/hierarchical.py``: the pin said 22 and was red until
+    plan-2026-10-26T125959-7af851e5 iter-1 step 5.2 re-derived it as 23 by this
+    test's own method); a new consumer raises it, and must be added here on
+    purpose rather than by a fifth copy of the sequence."""
     calls = {str(p.relative_to(MODELS_ROOT)): len(re.findall(
         r"\bbuild_model_vision_head\(", p.read_text())) for p in _model_sources()}
     calls = {k: v for k, v in calls.items() if v}
-    assert sum(calls.values()) == 22, calls
+    assert sum(calls.values()) == 23, calls
     assert calls["vision/resnet/model.py"] == 2
     assert calls["vision/fftnet/model.py"] == 3
+    assert calls.get("vision/cliffordnet/hierarchical.py", 0) == 1, calls
