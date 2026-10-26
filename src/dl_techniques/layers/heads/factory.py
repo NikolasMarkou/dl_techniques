@@ -143,6 +143,7 @@ def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
         return create_nlp_head(*args, **kwargs)
     elif domain == 'vision':
         return create_vision_head(*args, **kwargs)
-    # The only remaining valid domain is 'vlm'.
-    else:
+    elif domain == 'vlm':
         return create_vlm_head(*args, **kwargs)
+    else:
+        raise ValueError(f"Unknown domain '{domain}'")
