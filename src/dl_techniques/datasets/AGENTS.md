@@ -44,7 +44,7 @@ Data loading, generation, and preprocessing utilities for various domains.
     `FileNotFoundError` when the devkit is absent; train never needs it. The
     file list is cached under `<root>/.index/`. Finite dataset, no `repeat()`.
     `augment_color` adds brightness/contrast/saturation/hue on [0, 1] pixels.
-    Used by `train_resnet` and `train_vit`.
+    Used through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet`.
     Tested by `tests/test_datasets/test_imagenet2012.py`. TensorFlow and
     SciPy at module scope.
   - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes

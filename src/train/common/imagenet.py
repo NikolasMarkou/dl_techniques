@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+import tensorflow as tf
 
 from dl_techniques.datasets.vision.imagenet2012 import (
     IMAGENET2012_DEFAULT_ROOT,
@@ -56,9 +57,9 @@ def load_imagenet_splits(
         image_size: int,
         batch_size: int,
         seed: int,
-        num_parallel_calls: int,
         augment: bool,
         augment_color: bool = False,
+        num_parallel_calls: int = tf.data.AUTOTUNE,
         num_classes: Optional[int] = None,
 ) -> Tuple[ImageNet2012Data, ImageNet2012Data]:
     """Build the ``(train, val)`` pair every ImageNet trainer feeds to ``fit``.
@@ -72,9 +73,9 @@ def load_imagenet_splits(
         image_size: Square output side.
         batch_size: Batch size of both splits.
         seed: Seed of the train shuffle and augmentation.
-        num_parallel_calls: Parallel decode calls.
         augment: Random-resized-crop and flip on train.
         augment_color: Brightness, contrast, saturation and hue on train.
+        num_parallel_calls: Parallel decode calls (default: autotuned).
         num_classes: When given, the number of class folders under ``train/``
             must equal it.
 

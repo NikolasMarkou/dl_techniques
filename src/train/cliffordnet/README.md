@@ -78,7 +78,10 @@ actually uses.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--dataset` | `cifar100` | `cifar10` or `cifar100`. |
+| `--dataset` | `cifar100` | `cifar10`, `cifar100` or `imagenet` (the extracted ImageNet-1k, via `train.common.imagenet`). |
+| `--imagenet-root` / `--devkit-dir` | `/media/arxwn/data0_4tb/datasets/imagenet2012` / `<root>/devkit` | `--dataset imagenet` only. The devkit labels val. |
+| `--image-size` | `224` | Used by `--dataset imagenet`; the CIFAR sets keep 32. |
+| `--eval-samples` | `2000` | `--dataset imagenet` only (refused otherwise): the first N val images feed the end-of-run figures, the model analysis and the save/reload check. Validation during training and the final evaluation use all 50,000. |
 | `--variant` | `nano` | A preset (list above) or `custom`. |
 | `--epochs` | `200` | |
 | `--batch-size` | `128` | |
@@ -95,7 +98,7 @@ actually uses.
 | `--stochastic-depth-rate` | `0.3` (`0.4` for `cn_64_5`) | Maximum DropPath, linearly ramped over depth. |
 | `--dropout-rate` | `0.0` | |
 | `--label-smoothing` | `0.0` | Opt-in, `a` in `[0, 1)`, anything else is a parser error. `0.0` keeps the stock `SparseCategoricalCrossentropy(from_logits=True)`; above 0 the loss is `train.convnext.common.SmoothedSparseCategoricalCrossentropy`, so `loss` and `val_loss` include the smoothing and are not comparable with unsmoothed runs (accuracy is unchanged in meaning). |
-| `--random-erasing-prob` | `0.25` | |
+| `--random-erasing-prob` | `0.25` | CIFAR only; refused with `--dataset imagenet`, which uses random-resized-crop and flip, no AutoAugment and no random erasing. |
 | `--epoch-analysis-every` | `0` | Standard analysis schedule, 0 = off: the data-free weight/spectral analyzer runs before training (`epoch_000`), after epoch 1, then at N, 2N, ... into `<run>/epoch_analysis/epoch_NNN/`. |
 | `--gpu` | none | |
 
