@@ -27,7 +27,7 @@ SqueezeNet V1 and V2) and asks each the same questions:
     checkpoint whose trunk does not fit (another variant, block type or stem patch,
     chosen so that SOME layers still match by name) makes ``from_variant(pretrained=path)``
     raise ``ValueError`` naming the unrestored layers, instead of loading the layers that
-    fit and returning (plan-2026-10-26T125959-7af851e5 D-040).
+    fit and returning (D-040, ``utils/weight_transfer.py``).
 ``headless_attribute_is_none`` and ``headless_model_has_no_head_weights``
     ``include_top=False`` leaves ``classification_head`` defined as ``None`` and
     builds no head weight; a toy model that leaks its head into the headless build
@@ -42,6 +42,15 @@ SqueezeNet V1 and V2) and asks each the same questions:
 ``config_round_trip``
     ``get_config()`` is JSON-safe with an ``Initializer`` instance given, and
     ``from_config`` rebuilds a model with the same config.
+``config_fidelity``
+    Idempotence is not fidelity: a ``get_config`` that silently drops an argument
+    rebuilds a model with the default, and the rebuilt config still equals the
+    original's. So every classifier is built with a NON-DEFAULT value for each
+    constructor argument it exposes (:data:`PROBES`; a meta test keeps the table
+    complete and non-default), and ``get_config`` must report exactly what was
+    given, ``from_config`` must leave its dict alone, and the rebuilt model must
+    report the same config and own the same weights. A toy class that drops a key,
+    rewrites a value or mutates the dict proves the check can fail.
 ``invalid_values_name_the_value``
     A bad argument raises ``ValueError`` naming the argument as a word and the
     value, not the sub-layer's own spelling of it.
@@ -50,13 +59,19 @@ SqueezeNet V1 and V2) and asks each the same questions:
     two kernels that carry one random draw, built with the default and with a
     seedless ``Initializer`` instance; an arm that compares no pair fails too.
 ``layer_names_follow_the_table``
-    Every governed layer name follows the naming table (``stem``, ``block_{i}``,
-    ``stage{S}_block{B}``, ``downsample_{i}_*``, ``classification_head``); the
-    rule is a function of a list of names, so planted bad names prove it fails.
+    Every governed layer name follows the naming table (``stem``; a flat block
+    ``block_{i}`` counted from 0 with its ``block_{i}_drop_path``; a staged block
+    ``stage{S}_block{B}`` counted from 1, with ``stage{S}_mqa``;
+    ``downsample_{i}_{norm,conv,depthwise,pointwise}``; ``classification_head``);
+    the rule is a function of a list of names, so planted bad names prove it fails.
+    For the finished families (:data:`FAMILY_CHILD_NAMES`) the rule is also
+    positive: every layer the model owns directly and that holds a weight must
+    match the family's own table, so a spelling the deny-list never heard of (a
+    block called ``uib1_1``) is caught too.
 ``mobilenet_default_has_no_l2_losses``
     ``kernel_regularizer`` defaults to ``None``: ``model.losses == []``.
 
-The H15 and name rows also cover the models that are not classifiers (VAE, the
+The no-replayed-draw and name rows also cover the models that are not classifiers (VAE, the
 RBF pair, UcaEncoder, CapsNet, and the stem sites that are not migrated yet).
 SqueezeNet is a functional model: it is exempt from the build-parity and the
 unbuilt ``compute_output_shape`` rows because it is built in ``__init__``.
@@ -73,6 +88,7 @@ same type), so the migration that fixes or changes a row edits its ledger line i
 the same commit. An empty ledger means the contract is complete.
 """
 
+import copy
 import functools
 import importlib
 import inspect
@@ -250,7 +266,7 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         head_attribute=False, functional=True, sizes={_NON_SQUARE: (48, 64)}),
 )
 CLASSIFIER_KEYS = tuple(c.key for c in CLASSIFIERS)
-#: SqueezeNet is a functional model, built in ``__init__`` (E-2): it has no unbuilt
+#: SqueezeNet is a functional model, built in ``__init__`` (the census's E-2 exemption): it has no unbuilt
 #: state to compare and no head attribute, so those rows are not generated for it.
 BUILT_LATER_KEYS = tuple(c.key for c in CLASSIFIERS if not c.functional)
 HEAD_ATTRIBUTE_KEYS = tuple(c.key for c in CLASSIFIERS if c.head_attribute)
@@ -258,6 +274,129 @@ HEAD_ATTRIBUTE_KEYS = tuple(c.key for c in CLASSIFIERS if c.head_attribute)
 
 def classifier(key: str) -> Classifier:
     return next(c for c in CLASSIFIERS if c.key == key)
+
+
+# ---------------------------------------------------------------------------
+# The probes: a NON-DEFAULT value for every constructor argument of every classifier
+# ---------------------------------------------------------------------------
+
+
+def _he(seed: int) -> keras.initializers.Initializer:
+    """A seeded instance, so its serialized form is the same every time it is built."""
+    return keras.initializers.HeNormal(seed=seed)
+
+
+def _l2() -> keras.regularizers.Regularizer:
+    return keras.regularizers.L2(1e-3)
+
+
+def _bias_init() -> keras.initializers.Initializer:
+    return keras.initializers.RandomNormal(stddev=0.01, seed=4)
+
+
+def _squeezenet_table(module: str, name: str, variant: str) -> Dict[str, Any]:
+    cls = getattr(importlib.import_module(module), name)
+    return copy.deepcopy(cls.MODEL_VARIANTS[variant])
+
+
+_NO_BIAS_HEAD = {"classifier_use_bias": False}
+
+#: ``key -> builder of the constructor keywords`` the fidelity row builds the model with.
+#: Every keyword differs from the constructor's default; together they cover every
+#: argument the constructor takes (``test_every_constructor_argument_has_a_probe_value``).
+#: A builder, not a dict, so each row gets fresh regularizer and initializer objects.
+PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
+    "resnet": lambda: dict(
+        num_classes=7, blocks_per_stage=[1, 1], filters_per_stage=[8, 16],
+        block_type="basic", kernel_regularizer=_l2(), kernel_initializer=_he(3),
+        normalization_type="layer_norm", normalization_kwargs={"epsilon": 1e-3},
+        activation_type="gelu", enable_deep_supervision=True, input_shape=(32, 48, 3),
+        stem_type="cifar", head_config_overrides={"classifier_dropout_rate": 0.1}),
+    "cliffordnet": lambda: dict(
+        num_classes=7, channels=16, depth=2, patch_size=4, shifts=[1, 3], cli_mode="wedge",
+        ctx_mode="abs", use_global_context=True, layer_scale_init=1e-4,
+        stochastic_depth_rate=0.3, dropout_rate=0.4, use_bias=False,
+        kernel_initializer=_he(3), bias_initializer=_bias_init(),
+        kernel_regularizer=_l2(), bias_regularizer=keras.regularizers.L1(1e-4),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "hierarchical": lambda: dict(
+        num_classes=7, stage_depths=[1, 1], stage_dims=[8, 16], patch_size=2, shifts=[1, 3],
+        cli_mode="inner", ctx_mode="abs", layer_scale_init=1e-4, stochastic_depth_rate=0.3,
+        dropout_rate=0.4, use_bias=False, kernel_initializer=_he(3),
+        bias_initializer=_bias_init(), kernel_regularizer=_l2(),
+        bias_regularizer=keras.regularizers.L1(1e-4), head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "mobilenet_v1": lambda: dict(
+        num_classes=7, width_multiplier=0.25, dropout_rate=0.3, weight_decay=1e-4,
+        kernel_initializer=_he(3), input_shape=(32, 48, 3),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "mobilenet_v2": lambda: dict(
+        num_classes=7, width_multiplier=0.35, dropout_rate=0.3, weight_decay=1e-4,
+        kernel_initializer=_he(3), input_shape=(32, 48, 3),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "mobilenet_v3": lambda: dict(
+        num_classes=7, variant="small", width_multiplier=0.5, dropout_rate=0.35,
+        weight_decay=1e-4, kernel_initializer=_he(3), input_shape=(32, 48, 3),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "mobilenet_v4": lambda: dict(
+        num_classes=7, depths=[1, 1], dims=[16, 32], block_types=["IB", "ExtraDW"],
+        strides=[1, 2], width_multiplier=0.5, use_attention=True, attention_stages=[1],
+        dropout_rate=0.35, weight_decay=1e-4, kernel_initializer=_he(3),
+        input_shape=(64, 96, 3), head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "convnext_v1": lambda: dict(
+        num_classes=7, depths=[1, 1], dims=[8, 16], drop_path_rate=0.2,
+        stochastic_mode="gradient", kernel_size=5, activation="relu", use_bias=False,
+        kernel_regularizer=_l2(), dropout_rate=0.1, spatial_dropout_rate=0.05, strides=2,
+        use_gamma=False, use_softorthonormal_regularizer=True, input_shape=(32, 48, 3),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "convnext_v2": lambda: dict(
+        num_classes=7, depths=[1, 1], dims=[8, 16], drop_path_rate=0.2,
+        stochastic_mode="gradient", kernel_size=5, activation="relu", use_bias=False,
+        kernel_regularizer=_l2(), dropout_rate=0.1, spatial_dropout_rate=0.05, strides=2,
+        use_gamma=False, use_softorthonormal_regularizer=True, input_shape=(32, 48, 3),
+        head_config_overrides=dict(_NO_BIAS_HEAD)),
+    "rad_convnet": lambda: dict(
+        num_classes=7, depths=[1, 1], dims=[8, 16], rad_kernel_size=5, rad_groups=2,
+        mlp_ratio=2, activation="relu", use_bias=False, dropout_rate=0.1, strides=2,
+        input_shape=(32, 48, 3)),
+    "squeezenet_v1": lambda: dict(
+        num_classes=7,
+        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.0"),
+        use_bypass="simple", dropout_rate=0.25, kernel_regularizer=_l2(),
+        kernel_initializer=_he(3), input_shape=(48, 64, 3)),
+    "squeezenet_v2": lambda: dict(
+        num_classes=7,
+        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2"),
+        dropout_rate=0.25, kernel_regularizer=_l2(), kernel_initializer=_he(3),
+        input_shape=(48, 64, 3)),
+}
+#: A second probe for an argument the first cannot carry (SqueezeNet V2's 3-D model needs
+#: a volume of at least 35 voxels per axis).
+EXTRA_PROBES: Dict[str, Tuple[Callable[[], Dict[str, Any]], ...]] = {
+    "squeezenet_v2": (lambda: dict(use_3d=True, input_shape=(36, 36, 36, 1)),),
+}
+#: The smallest architecture of each classifier; the headless probe is this plus
+#: ``include_top=False``, which the headed probe cannot carry.
+ARCH: Dict[str, Dict[str, Any]] = {
+    "resnet": dict(blocks_per_stage=[1, 1], filters_per_stage=[8, 16], block_type="basic"),
+    "cliffordnet": dict(channels=16, depth=2),
+    "hierarchical": dict(stage_depths=[1, 1], stage_dims=[8, 16]),
+    "mobilenet_v1": dict(width_multiplier=0.25),
+    "mobilenet_v2": dict(width_multiplier=0.35),
+    "mobilenet_v3": dict(variant="small", width_multiplier=0.5),
+    "mobilenet_v4": dict(depths=[1, 1], dims=[16, 32], block_types=["IB", "ExtraDW"],
+                         strides=[1, 2]),
+    "convnext_v1": dict(depths=[1, 1], dims=[8, 16]),
+    "convnext_v2": dict(depths=[1, 1], dims=[8, 16]),
+    "rad_convnet": dict(depths=[1, 1], dims=[8, 16], strides=2),
+    "squeezenet_v1": dict(input_shape=(48, 64, 3)),
+    "squeezenet_v2": dict(input_shape=(48, 64, 3)),
+}
+
+
+def fidelity_probes(key: str) -> List[Dict[str, Any]]:
+    """Every constructor-keyword dict the fidelity row builds ``key`` with."""
+    return [PROBES[key](), *(extra() for extra in EXTRA_PROBES.get(key, ())),
+            {**ARCH[key], "include_top": False}]
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +796,28 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
         'is not a table spelling'),
+    ("config_fidelity", "convnext_v1"): Open(
+        AssertionError,
+        "the ConvNeXt migration",
+        "from_config rewrote the dict it was given",
+        'from_config rewrote the dict it was given'),
+    ("config_fidelity", "convnext_v2"): Open(
+        AssertionError,
+        "the ConvNeXt migration",
+        "from_config rewrote the dict it was given",
+        'from_config rewrote the dict it was given'),
+    ("config_fidelity", "squeezenet_v1"): Open(
+        AssertionError,
+        "the SqueezeNet migration",
+        "from_config rewrote the dict it was given, and the rebuilt model reports "
+        "another kernel_initializer",
+        'from_config rewrote the dict it was given'),
+    ("config_fidelity", "squeezenet_v2"): Open(
+        AssertionError,
+        "the SqueezeNet migration",
+        "from_config rewrote the dict it was given, and the rebuilt model reports "
+        "another kernel_initializer",
+        'from_config rewrote the dict it was given'),
 }
 
 
@@ -1008,6 +1169,160 @@ def test_get_config_is_json_safe_and_from_config_rebuilds_the_model(key: str) ->
     assert _config_equal(json.loads(text), rebuilt.get_config())
 
 
+def _spec(value: Any) -> Any:
+    """``value`` as ``get_config`` reports it: initializers and regularizers serialized."""
+    if isinstance(value, keras.initializers.Initializer):
+        return keras.initializers.serialize(value)
+    if isinstance(value, keras.regularizers.Regularizer):
+        return keras.regularizers.serialize(value)
+    return value
+
+
+def _json(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def _weight_layout(model: keras.Model) -> List[Tuple[str, Tuple[int, ...]]]:
+    return [(relative_path(model, w), tuple(w.shape)) for w in model.weights]
+
+
+def config_fidelity_problems(cls: type, kwargs: Dict[str, Any],
+                             input_shape: Tuple[int, ...]) -> List[str]:
+    """What is wrong with how ``cls`` reports and rebuilds the model ``cls(**kwargs)``.
+
+    Interface contract: ``kwargs`` is a complete constructor call (the arguments the
+    caller GAVE, objects included); ``input_shape`` is one unbatched input the model can
+    run, used to materialize the weights of the original and the rebuilt model. Returns
+    a list of problems, empty when ``get_config`` is JSON-safe and reports every given
+    argument as it was given (an initializer or regularizer as its serialized form),
+    ``from_config`` leaves the dict it receives alone, and the rebuilt model reports the
+    same config and owns the same weights. Raises what the constructor, ``json.dumps``
+    or the forward pass raises.
+    """
+    model = cls(**kwargs)
+    given = _json({name: _spec(value) for name, value in kwargs.items()})
+    config = _json(model.get_config())
+    problems = []
+    for name, want in given.items():
+        if name not in config:
+            problems.append(f"get_config writes no key for `{name}`")
+        elif config[name] != want:
+            problems.append(f"get_config reports {name}={config[name]!r} for the argument "
+                            f"given as {want!r}")
+    handed = copy.deepcopy(config)
+    rebuilt = cls.from_config(handed)
+    if handed != config:
+        problems.append("from_config rewrote the dict it was given")
+    again = _json(rebuilt.get_config())
+    if again != config:
+        changed = sorted(name for name in {*config, *again} if config.get(name) != again.get(name))
+        problems.append(f"the rebuilt model reports other values for {changed}")
+    inputs = np.zeros((1, *input_shape), dtype="float32")
+    model(inputs, training=False)
+    rebuilt(inputs, training=False)
+    if _weight_layout(rebuilt) != _weight_layout(model):
+        problems.append("the rebuilt model owns other weights than the original")
+    return problems
+
+
+@pytest.mark.parametrize("key", _rows("config_fidelity", CLASSIFIER_KEYS))
+@ledgered("config_fidelity")
+def test_get_config_reproduces_every_constructor_argument(key: str) -> None:
+    c = classifier(key)
+    problems = []
+    for kwargs in fidelity_probes(key):
+        problems += config_fidelity_problems(
+            c.cls, {"num_classes": NUM_CLASSES, **kwargs}, kwargs.get("input_shape", c.input_shape))
+    assert not problems, sorted(set(problems))
+
+
+@pytest.mark.parametrize("key", CLASSIFIER_KEYS)
+def test_every_constructor_argument_has_a_probe_value_that_is_not_its_default(key: str) -> None:
+    """The probe table is complete and each value differs from the default it replaces."""
+    c = classifier(key)
+    parameters = {name: p for name, p in inspect.signature(c.cls.__init__).parameters.items()
+                  if name != "self" and p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)}
+    probes = fidelity_probes(key)
+    given = set().union(*probes)
+    assert set(parameters) <= given, f"no probe value for {sorted(set(parameters) - given)}"
+    assert given <= set(parameters), f"probe keys that are no argument: {sorted(given - set(parameters))}"
+    same = [name for probe in probes for name, value in probe.items()
+            if _json(_spec(value)) == _json(_spec(parameters[name].default))]
+    assert not same, f"a probe value equals the default of {sorted(set(same))}"
+
+
+class _ConfigToy(PublicAutoName, keras.Model):
+    """A one-layer model with a faithful ``get_config``; the subclasses break it one way each."""
+
+    def __init__(self, num_classes: int = 3, rate: float = 0.0,
+                 kernel_initializer: Any = "he_normal", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.rate = rate
+        self.kernel_initializer = keras.initializers.serialize(
+            keras.initializers.get(kernel_initializer))
+        self.dense = keras.layers.Dense(
+            num_classes, kernel_initializer=self.kernel_initializer, name="dense")
+
+    def call(self, inputs: Any, training: Any = None) -> Any:
+        return self.dense(inputs)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = {"num_classes": self.num_classes, "rate": self.rate,
+                  "kernel_initializer": self.kernel_initializer}
+        return {**super().get_config(), **config}
+
+
+class LossyConfigToy(_ConfigToy):
+    """Drops ``rate``: the rebuilt model silently has the default."""
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        del config["rate"]
+        return config
+
+
+class LyingConfigToy(_ConfigToy):
+    """Reports another ``rate`` than it was given."""
+
+    def get_config(self) -> Dict[str, Any]:
+        return {**super().get_config(), "rate": self.rate + 0.5}
+
+
+class ForgetfulConfigToy(_ConfigToy):
+    """Reports ``rate`` truthfully but rebuilds without it."""
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ForgetfulConfigToy":
+        config = dict(config)
+        config.pop("rate")
+        return cls(**config)
+
+
+def test_the_fidelity_check_passes_a_faithful_model_and_fails_each_flaw() -> None:
+    kwargs = dict(num_classes=4, rate=0.3, kernel_initializer=_he(3))
+    assert config_fidelity_problems(_ConfigToy, kwargs, (5,)) == []
+    expected = {
+        LossyConfigToy: "get_config writes no key for `rate`",
+        LyingConfigToy: "get_config reports rate=0.8 for the argument given as 0.3",
+        ForgetfulConfigToy: "the rebuilt model reports other values for ['rate']",
+    }
+    for toy, problem in expected.items():
+        assert problem in config_fidelity_problems(toy, kwargs, (5,)), toy.__name__
+
+
+def test_the_fidelity_check_sees_a_from_config_that_rewrites_its_dict() -> None:
+    class PoppingConfigToy(_ConfigToy):
+        @classmethod
+        def from_config(cls, config: Dict[str, Any]) -> "PoppingConfigToy":
+            config.pop("trainable")
+            return cls(**config)
+
+    kwargs = dict(num_classes=4, rate=0.3, kernel_initializer=_he(3))
+    assert "from_config rewrote the dict it was given" in config_fidelity_problems(
+        PoppingConfigToy, kwargs, (5,))
+
+
 def names_the_value(message: str, argument: str, value: Any) -> bool:
     """Whether ``message`` spells ``argument`` as a word (``classifier_dropout_rate``
     does not spell ``dropout_rate``) and prints ``value``."""
@@ -1052,7 +1367,7 @@ def test_a_default_mobilenet_adds_no_regularization_loss(key: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# H15: no live initializer instance reaches two sites
+# No live initializer instance reaches two sites
 # ---------------------------------------------------------------------------
 
 
@@ -1299,7 +1614,7 @@ def test_no_two_kernels_replay_one_draw(key: str, arm: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# H16: layer names follow the naming table
+# Layer names follow the naming table
 # ---------------------------------------------------------------------------
 
 #: A layer name the table governs starts with one of these concept words; the
@@ -1307,7 +1622,8 @@ def test_no_two_kernels_replay_one_draw(key: str, arm: str) -> None:
 _GOVERNED = re.compile(
     r"^(?:clifford_)?(?:block|drop_path|merge|merge_norm|cpe|conv_block)_\d"
     r"|^stage_?\d|^downsample_|^(?:gap|head_norm)$|^(?:legacy_)?(?:conv|bn|relu)_\d+$")
-#: ... and must then read exactly like one of these (N-2 to N-4, N-6).
+#: ... and must then read exactly like one of these (a flat or staged block with its
+#: drop path, the CapsNet trunk, a downsampler, and the stem's inner layers).
 _CANONICAL = re.compile(
     r"block_\d+(?:_drop_path)?"
     r"|conv_block_\d+(?:_(?:conv|norm|act)[12]|_pool)?"
@@ -1413,6 +1729,89 @@ def test_the_layer_names_follow_the_naming_table(key: str) -> None:
     assert not violations, sorted(set(violations))
 
 
+#: The finished families, each with the one pattern every layer the model OWNS (a direct
+#: child that holds a weight, at any depth below it) must match. The deny-list above only
+#: reads names it has heard of; this table is positive, so a spelling nobody anticipated
+#: (``uib1_1`` for a MobileNetV4 block) fails here. Deeper names belong to the layers
+#: themselves (``stem_conv1``, ``dw_conv``, ``classifier``) and are not read.
+FAMILY_CHILD_NAMES: Dict[str, str] = {
+    "resnet": r"stem|stage[1-9]\d*_block[1-9]\d*|classification_head|supervision_head_\d+",
+    "cliffordnet": r"stem|block_\d+|classification_head",
+    "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*|downsample_\d+_(?:depthwise|norm|pointwise)"
+                     r"|classification_head"),
+    "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|classification_head",
+    "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
+}
+
+
+def weighted_children(model: keras.Model) -> List[str]:
+    """The names of the layers ``model`` owns directly that hold at least one weight.
+
+    Interface contract: a weight path reads ``<model>/<child>/.../<variable>``; the
+    child is its second segment. A weight sitting on the model itself has no child and
+    is skipped. Returns the distinct names, sorted.
+    """
+    return sorted({parts[1] for w in model.weights if len(parts := w.path.split("/")) > 2})
+
+
+def child_name_violations(key: str, children: Sequence[str]) -> List[str]:
+    """The ``children`` that the family ``key`` does not name by its table."""
+    pattern = re.compile(FAMILY_CHILD_NAMES[key])
+    return [f"`{name}` is not a {key} layer name" for name in children
+            if not pattern.fullmatch(name)]
+
+
+def _hybrid_v4() -> keras.Model:
+    c = classifier("mobilenet_v4")
+    model = c.cls.from_variant("hybrid_medium", num_classes=NUM_CLASSES, input_shape=(128, 128, 3))
+    model(_images(128, 128, 3))
+    return model
+
+
+#: The builds that between them create every kind of direct child a family has: the head and
+#: the headless build, the deep-supervision heads, the attention stages, a second stem.
+FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
+    "resnet": (lambda: _built(classifier("resnet")),
+               lambda: _built(classifier("resnet"), enable_deep_supervision=True),
+               lambda: _built(classifier("resnet"), include_top=False)),
+    "cliffordnet": (lambda: _built(classifier("cliffordnet")),
+                    lambda: _built(classifier("cliffordnet"), patch_size=1)),
+    "hierarchical": (lambda: _built(classifier("hierarchical")),
+                     lambda: _built(classifier("hierarchical"), include_top=False)),
+    "mobilenet_v3": (lambda: _built(classifier("mobilenet_v3")),),
+    "mobilenet_v4": (lambda: _built(classifier("mobilenet_v4")), _hybrid_v4),
+}
+
+
+def test_every_finished_family_has_a_name_table_and_builds() -> None:
+    assert set(FAMILY_CHILD_NAMES) == set(FAMILY_BUILDS) <= set(CLASSIFIER_KEYS)
+
+
+@pytest.mark.parametrize("key", sorted(FAMILY_CHILD_NAMES))
+def test_a_finished_family_owns_only_the_layer_names_of_its_table(key: str) -> None:
+    for build in FAMILY_BUILDS[key]:
+        children = weighted_children(build())
+        assert children, "control: the model owns no weighted layer"
+        assert child_name_violations(key, children) == []
+
+
+def test_the_positive_name_rule_sees_a_spelling_the_deny_list_does_not_know() -> None:
+    clean = ["stem", "stage1_block1", "stage1_mqa", "classification_head"]
+    assert child_name_violations("mobilenet_v4", clean) == []
+    for planted in ("uib1_1", "stage0_block1", "stage1_block0", "block_0", "head"):
+        assert child_name_violations("mobilenet_v4", [*clean, planted]), planted
+    # the deny-list reads none of them as governed, which is why the table exists
+    assert name_violations(["uib1_1", "head"]) == []
+    assert child_name_violations("cliffordnet", ["stem", "block_0", "stage1_block1"])
+    assert child_name_violations("resnet", ["stem", "supervision_head_0", "block_0"])
+
+
+def test_weighted_children_reads_the_second_path_segment() -> None:
+    model = _ToyHeaded(head_name="classification_head")
+    model(np.ones((2, 5), dtype="float32"))
+    assert weighted_children(model) == ["body", "classification_head"]
+
+
 # ---------------------------------------------------------------------------
 # The ledger names only rows that exist
 # ---------------------------------------------------------------------------
@@ -1425,7 +1824,8 @@ def _all_row_names() -> set:
         "pretrained_true_names_the_variant", "missing_path_raises_file_not_found",
         "local_path_round_trip_headed", "local_path_round_trip_headless",
         "headless_attribute_is_none", "headless_model_has_no_head_weights",
-        "explicit_build_equals_lazy", "explicit_build_equals_lazy_headless", "config_round_trip"]
+        "explicit_build_equals_lazy", "explicit_build_equals_lazy_headless", "config_round_trip",
+        "config_fidelity"]
     for c in CLASSIFIERS:
         rows |= {(rule, c.key) for rule in classifier_rules}
         rows |= {(_row_name("compute_output_shape", [size, head]), c.key)

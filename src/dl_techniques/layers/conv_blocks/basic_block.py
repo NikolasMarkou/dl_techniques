@@ -71,8 +71,10 @@ class BasicBlock(keras.layers.Layer):
     :param kernel_initializer: Initializer of every convolution kernel, including
         the shortcut projection. A name or a serialized config is handed to each
         convolution, which draws from it independently; an ``Initializer`` instance
-        is stored as its serialized config, so no two kernels replay one draw.
-        Defaults to ``'he_normal'``.
+        is stored as its serialized config. A name, a dict or a seedless instance
+        gives every convolution its own draw; an instance or dict carrying an
+        explicit ``seed`` reuses that seed at every convolution by contract, so
+        same-shaped kernels start equal. Defaults to ``'he_normal'``.
     :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Additional keyword arguments for Layer.
     :type kwargs: Any

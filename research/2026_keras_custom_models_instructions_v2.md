@@ -616,16 +616,20 @@ name, with the test suite pinning the wrong values.
 ### 5.4 Pretrained Weights
 
 ```
-load_pretrained_weights(path)   →  local path; dummy forward first if needed
-_download_weights(variant)      →  raises NotImplementedError, naming the variant
-                                    and showing the local-path alternative
+load_pretrained_weights(path)   →  delegates to utils.weight_transfer.load_pretrained_checkpoint
+                                    (builds the model first if needed)
+from_variant(..., pretrained=)  →  pretrained_path_or_raise(pretrained, label): a path loads
+                                    through load_pretrained_weights, True raises
+                                    NotImplementedError naming the variant and showing the
+                                    local-path alternative
 ```
 
 | Rule | Reason |
 |---|---|
 | No `by_name` on `Model.load_weights` | Keras 3 removed it. Where it survived as a supposed no-op, every call actually **raised**, and the enclosing `except` turned it into a warning and continued with random weights |
 | Never a placeholder URL table + `try/except` that warns and continues | `pretrained=True` then silently returns an untrained model |
-| Never swallow a load failure into a warning | a local-path load that restores nothing must raise |
+| Never swallow a load failure into a warning | a local-path load that restores nothing, or leaves a layer outside the classifier head unrestored, must raise |
+| No `_download_weights`, `weights_dataset` or `cache_dir` | nothing is hosted: a download branch is the placeholder-URL pattern above under another name |
 
 **Measured:** nine packages in one codebase shipped the warn-and-continue pattern simultaneously,
 and the documented alternative was broken too.

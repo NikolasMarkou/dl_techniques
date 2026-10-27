@@ -480,7 +480,7 @@ class TestMobileNetV4:
             )
 
         # Invalid block type
-        with pytest.raises(ValueError, match="Invalid block type"):
+        with pytest.raises(ValueError, match=r"block_types\[1\] must be one of"):
             MobileNetV4(
                 depths=[1, 2],
                 dims=[16, 24],
@@ -490,7 +490,7 @@ class TestMobileNetV4:
             )
 
         # Invalid attention stage index
-        with pytest.raises(ValueError, match="Attention stage index.*out of range"):
+        with pytest.raises(ValueError, match="attention_stages entries must be in"):
             MobileNetV4(
                 depths=[1, 2],
                 dims=[16, 24],
@@ -737,7 +737,11 @@ class TestMobileNetV4HouseShape:
         ({"num_classes": 0}, "num_classes must be positive when include_top=True, got 0"),
         ({"block_types": ["IB", "Bogus"], "depths": [1, 1], "dims": [16, 24],
           "strides": [1, 2]},
-         "Invalid block type 'Bogus'. Must be one of ['ConvNext', 'ExtraDW', 'FFN', 'IB']"),
+         "block_types[1] must be one of ['ConvNext', 'ExtraDW', 'FFN', 'IB'], got 'Bogus'"),
+        ({"use_attention": True, "attention_stages": [9]},
+         "attention_stages entries must be in [0, 6], got 9"),
+        ({"width_multiplier": 0.01},
+         "width_multiplier=0.01 truncates a width of dims=[16, 24, 40, 80, 112, 192, 320] to 0"),
     ])
     def test_an_invalid_value_is_refused_naming_the_argument_and_the_value(
             self, kwargs, message):

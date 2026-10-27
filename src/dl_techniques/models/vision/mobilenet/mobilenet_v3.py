@@ -65,10 +65,8 @@ from dl_techniques.models.vision.mobilenet.common import (
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.initializers.clone import clone_initializer, initializer_spec
 
-# ---------------------------------------------------------------------
-# MobileNetV3 Model
 # ---------------------------------------------------------------------
 
 
@@ -108,7 +106,12 @@ class MobileNetV3(keras.Model):
     :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
     :param weight_decay: L2 regularization factor, the head's included.
     :param kernel_initializer: Weight initialization strategy, the head's
-        included.
+        included: a name, a serialized config dict or an `Initializer` instance.
+        Each site draws from its own clone of it, so a name, a dict or a seedless
+        instance gives every kernel its own draw; an instance or dict carrying
+        an explicit `seed` reuses that seed at every site by contract, so
+        same-shaped kernels start equal (`HeNormal(seed=7)` ties 903 of 1431
+        kernel pairs at `small`). `get_config` reports its serialized spec.
     :param include_top: Whether to include the classification head.
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
@@ -120,6 +123,10 @@ class MobileNetV3(keras.Model):
         `num_classes` is not positive with a head, `width_multiplier` is not
         positive, `dropout_rate` is outside `[0, 1)`, or `input_shape` is not
         3-D.
+    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
+        `Initializer` instance.
+    :raises NotImplementedError: If `kernel_initializer` is an `Initializer`
+        instance that cannot serialize itself.
 
     Input shape:
         4-D tensor `(batch_size, height, width, channels)`.
@@ -131,11 +138,10 @@ class MobileNetV3(keras.Model):
 
     Example::
 
-        model = MobileNetV3(num_classes=1000, variant="large")
-        small = MobileNetV3(num_classes=10, variant="small", input_shape=(32, 32, 3))
+        model = MobileNetV3.from_variant("large", num_classes=1000)
+        small = MobileNetV3.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "large": {"variant": "large"},
         "small": {"variant": "small"},
@@ -224,7 +230,9 @@ class MobileNetV3(keras.Model):
                 f"dropout_rate must be in [0, 1), got {dropout_rate}"
             )
 
-        if input_shape and len(input_shape) != 3:
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
         self.num_classes = num_classes
@@ -232,11 +240,13 @@ class MobileNetV3(keras.Model):
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
+        # DECISION plan-2026-10-26T125959-7af851e5/D-039: keep the caller's Initializer and hand a clone of it to each site; compute the spec only to refuse a bad initializer here and to report it in get_config. Do NOT store the spec and hand it to the sites, as MobileNetV4 does.
+        # A stored spec re-draws every kernel from a fresh default seed, so a seeded V3 kernel would no longer equal the base's (0 of 54 small and 0 of 64 large kernels stay equal); the clone keeps the seeded draw unchanged. See decisions.md.
+        self._kernel_initializer_spec = initializer_spec(kernel_initializer)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
-        self.input_shape_config = input_shape or (224, 224, 3)
+        self.input_shape_config = input_shape
 
-        # Head configuration
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         if variant == "large":
@@ -411,14 +421,14 @@ class MobileNetV3(keras.Model):
         materialize_sublayers(self, input_shape)
         super().build(input_shape)
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Run the stem, inverted residual blocks, last conv, and optional head.
 
-        :param x: Input images, shape `(B, H, W, C)`.
+        :param inputs: Input images, shape `(B, H, W, C)`.
         :param training: Passed to batch norm and dropout.
         :return: Logits, or the 4-D feature map if `include_top=False`.
         """
-        x = self.stem(x, training=training)
+        x = self.stem(inputs, training=training)
 
         for block in self.blocks:
             x = block(x, training=training)
@@ -537,19 +547,19 @@ class MobileNetV3(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        config = super().get_config()
-        config.update({
+        config = {
             "num_classes": self.num_classes,
             "variant": self.variant,
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
             "weight_decay": self.weight_decay,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_initializer": self._kernel_initializer_spec,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
             "head_config_overrides": self._head_config_overrides,
-        })
-        return config
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     def summary(self, **kwargs):
         """Print the model summary; an unbuilt model is materialized first."""

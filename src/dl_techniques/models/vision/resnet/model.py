@@ -21,13 +21,18 @@ kind, and the model returns the logits list
 `[final_output, stage3, stage2, stage1]` (deepest head first).
 
 Every convolution kernel draws from `he_normal` unless `kernel_initializer`
-names another; each convolution gets its own draw from that spec, so two
-kernels never replay one sample. BatchNorm momentum defaults to `0.9` (Keras
+names another; each convolution resolves its own initializer from that spec,
+so two kernels do not replay one sample when it is a name, a config dict or a
+seedless instance. A seeded `Initializer` instance (or a dict with an explicit
+`seed`) reuses its seed at every site by contract, so same-shaped kernels start
+equal (`HeNormal(seed=7)` ties 190 of 210 kernel pairs at `resnet18`).
+BatchNorm momentum defaults to `0.9` (Keras
 convention) to match torchvision's `momentum=0.1`
 (`keras_momentum = 1 - torch_momentum`), a training-only constant that does
 not affect the `training=False` forward pass. No pretrained weights ship with
 this package; `pretrained=True` raises `NotImplementedError`. Local
-checkpoints load by path, skipping shape-mismatched layers by name.
+checkpoints load by path; every layer outside the classification head must
+be restored, and only a head of another `num_classes` is skipped.
 
 References:
     - He et al., 2015. Deep Residual Learning for Image Recognition.
@@ -70,8 +75,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.resnet.model")
 class ResNet(keras.Model):
-    """
-    Deep residual network with configurable blocks and optional deep supervision.
+    """Deep residual network with configurable blocks and optional deep supervision.
 
     Implements the ResNet family, in which each block learns a residual
     ``F(x)`` added to an identity shortcut (``y = F(x) + x``) so that depth does
@@ -156,14 +160,18 @@ class ResNet(keras.Model):
     :type block_type: Literal['basic', 'bottleneck']
     :param kernel_regularizer: Optional regularizer applied to every convolution
         kernel of the stem and the blocks, and to the classifier kernel of the
-        main and every supervision head.
+        main and every supervision head. A regularizer, its serialized config or
+        a name.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kernel_initializer: Initializer of every convolution kernel in the stem
         and the blocks (the classifier heads keep the head's own initializer). A
         name or a serialized config is handed to each convolution, which draws
         from it independently; an ``Initializer`` instance is stored as its
-        serialized config, so no two kernels replay one draw. Defaults to
-        ``'he_normal'``.
+        serialized config. A seedless instance, name or dict gives every
+        convolution its own draw; an instance or dict carrying an explicit
+        ``seed`` reuses that seed at every site by contract, so same-shaped
+        kernels start equal (``HeNormal(seed=7)`` ties 190 of 210 kernel pairs
+        at ``resnet18``). Defaults to ``'he_normal'``.
     :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param normalization_type: Normalization layer identifier passed to
         ``create_normalization_layer``. Defaults to ``'batch_norm'``.
@@ -229,16 +237,17 @@ class ResNet(keras.Model):
           ``[final_output, stage3, stage2, stage1]`` (reversed, matching the
           BFUNet output convention). Inference typically uses index 0 alone.
 
-    Example:
-        >>> # ResNet-50 for ImageNet
-        >>> model = ResNet.from_variant("resnet50", num_classes=1000)
-        >>>
-        >>> # Deep supervision for training
-        >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
-        >>>
-        >>> # Feature extractor from a local checkpoint
-        >>> model = ResNet.from_variant("resnet34", pretrained="/path/to.keras",
-        ...                             include_top=False)
+    Example::
+
+        # ResNet-50 for ImageNet
+        model = ResNet.from_variant("resnet50", num_classes=1000)
+
+        # Deep supervision for training
+        model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
+
+        # Feature extractor from a local checkpoint
+        model = ResNet.from_variant("resnet34", pretrained="/path/to.keras",
+                                    include_top=False)
 
     Note:
         No pretrained ResNet weights are distributed with ``dl_techniques``.
@@ -329,7 +338,7 @@ class ResNet(keras.Model):
         self.filters_per_stage = filters_per_stage
         self.block_type = block_type
         self.stem_type = stem_type
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem and to every block; never keep the caller's Initializer instance.
         # A seedless instance given to two layers replays one random draw at both, and an instance in get_config is not JSON-safe. See decisions.md.
         self.kernel_initializer = initializer_spec(kernel_initializer)
@@ -676,8 +685,7 @@ class ResNet(keras.Model):
             "filters_per_stage": self.filters_per_stage,
             "block_type": self.block_type,
             "stem_type": self.stem_type,
-            "kernel_regularizer": keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "kernel_initializer": self.kernel_initializer,
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
@@ -689,15 +697,6 @@ class ResNet(keras.Model):
         }
         base_config = super().get_config()
         return {**base_config, **config}
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ResNet":
-        """Create a model from its `get_config()` output."""
-        if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        return cls(**config)
 
 
 # ---------------------------------------------------------------------

@@ -380,3 +380,44 @@ def test_an_instance_is_stored_as_json_safe_spec(argument):
     assert isinstance(stored, (str, dict)), type(stored)
     assert json.loads(json.dumps(model.get_config()))[argument] == stored
     assert HierarchicalCliffordNet.from_config(model.get_config()).get_config() == model.get_config()
+
+
+class TestHierarchicalBiasFreeClassifier:
+    """A model-wide bias initializer next to a bias-free classifier (see CliffordNet's twin).
+
+    ``ClassificationHead`` refuses a non-default bias argument when no ``Dense``
+    of the head has a bias; the model leaves its own bias arguments out of the head
+    config in that case and keeps them for the trunk.
+    """
+
+    BIAS = dict(
+        bias_initializer=keras.initializers.RandomNormal(stddev=0.01, seed=3),
+        bias_regularizer=keras.regularizers.L2(1e-3),
+    )
+
+    def _model(self, **overrides):
+        model = HierarchicalCliffordNet(
+            **{**TINY, "num_classes": 3}, **self.BIAS, head_config_overrides=overrides)
+        model.build((None, 16, 16, 3))
+        return model
+
+    def test_a_bias_free_classifier_builds_and_has_no_bias_weight(self):
+        model = self._model(classifier_use_bias=False)
+        paths = [w.path for w in model.weights if "classification_head" in w.path]
+        assert any(p.endswith("classifier/kernel") for p in paths), paths
+        assert not any(p.endswith("classifier/bias") for p in paths), paths
+
+    def test_the_trunk_keeps_the_model_wide_bias_arguments(self):
+        model = self._model(classifier_use_bias=False)
+        pointwise = model.downsamplers[0]["pointwise"]
+        assert isinstance(pointwise.bias_initializer, keras.initializers.RandomNormal)
+        assert isinstance(pointwise.bias_regularizer, keras.regularizers.L2)
+
+    def test_a_hidden_block_with_a_bias_still_reads_them(self):
+        model = self._model(classifier_use_bias=False, block_dims=(8,))
+        assert isinstance(model.classification_head.bias_initializer,
+                          keras.initializers.RandomNormal)
+
+    def test_a_bias_argument_the_overrides_carry_is_still_refused(self):
+        with pytest.raises(ValueError, match="no layer reads"):
+            self._model(classifier_use_bias=False, bias_regularizer="l2")

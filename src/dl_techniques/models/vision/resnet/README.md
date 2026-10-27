@@ -194,7 +194,7 @@ accept these.
 | `normalization_kwargs` | `None` | forwarded to every norm; `batch_norm` gets `momentum=0.9` unless you override it |
 | `activation_type` | `'relu'` | activation factory key |
 | `kernel_regularizer` | `None` | applied to every convolution |
-| `kernel_initializer` | `'he_normal'` | name, config dict or `Initializer` for every convolution kernel (stem and blocks); each convolution draws independently, and an instance is stored as its config |
+| `kernel_initializer` | `'he_normal'` | name, config dict or `Initializer` for every convolution kernel (stem and blocks); each convolution draws independently, and an instance is stored as its config. A name, a dict or a seedless instance gives every kernel its own draw; an instance or dict carrying an explicit `seed` reuses that seed at every convolution by contract (`HeNormal(seed=7)` ties 190 of 210 kernel pairs at `resnet18`) |
 | `head_config_overrides` | `None` | dict merged into every `ClassificationHead` config, e.g. `{'block_dims': (512,), 'dropout_rate': 0.2}`; `name`, `num_classes`, `task_type` raise `ValueError` |
 
 `from_variant` / `create_resnet` additionally take `pretrained` (§ 9). `compute_output_shape`

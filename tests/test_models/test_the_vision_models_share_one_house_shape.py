@@ -39,7 +39,8 @@ The rules
 ``h9_factory_is_one_delegating_return``
     Every ``create_*`` factory has the signature ``(variant, num_classes=1000,
     input_shape=None, pretrained=False, **kwargs)`` and is one ``return
-    Class.from_variant(..., **kwargs)``.
+    Class.from_variant(..., **kwargs)`` that forwards every parameter the
+    factory takes, ``**kwargs`` included.
 ``h10_*``
     ``num_classes`` is the first constructor parameter and ``**kwargs`` the
     last; ``include_top``, ``input_shape`` and ``head_config_overrides`` come in
@@ -51,6 +52,22 @@ The rules
     ``get_config`` starts from ``super().get_config()`` and writes a key for
     every constructor argument; a ``from_config`` that only copies the dict and
     calls ``cls(**config)`` is deleted.
+``h11_get_config_has_the_reference_form``
+    There is one way to build the dict: ``config = {...}``, then ``base_config =
+    super().get_config()`` and ``return {**base_config, **config}``.
+``h2_call_takes_inputs``
+    The forward method names its input argument ``inputs``.
+``h10_block_container_names``
+    A list of blocks built in ``__init__`` or a ``_build_*`` method is
+    ``self.blocks`` (a flat sequence) or ``self.stages`` (one entry per stage);
+    ``blocks_list``, ``stage_blocks`` and the like are one concept under several
+    names.
+``h15_initializer_storage``
+    A model stores its initializers as specs (``initializer_spec(...)``, a
+    string or a dict literal), never ``keras.initializers.get(...)`` or the
+    caller's raw argument, because a stored instance reaches several layers and
+    replays one draw. A model may be exempt by naming a decision
+    (:data:`EXEMPTIONS`, ``D-039``).
 ``anchors``
     Every ``# DECISION <plan>/D-NNN`` token that exists today is still in its
     file; for the two families that move code between files it is still in the
@@ -139,6 +156,13 @@ EXEMPTIONS: Dict[str, str] = {
         "keeps its custom ``train_step`` and ``test_step``, ``num_classes`` has "
         "no default, and ``save_model`` / ``load_model`` stay."
     ),
+    "D-039": (
+        "MobileNetV3 keeps the caller's ``Initializer`` and hands each site a clone "
+        "(``clone_initializer``); it computes ``initializer_spec`` once, only to refuse "
+        "a bad initializer at construction and to feed ``get_config``. A stored spec "
+        "would re-draw every seeded kernel (0 of 54 small and 0 of 64 large kernels "
+        "would stay equal to the base revision's)."
+    ),
     "not-a-traced-model": (
         "Rule h5 describes a subclassed model whose ``call`` is traced by "
         "``materialize_sublayers``. ConvUNextStem builds its one ConvStem, "
@@ -197,6 +221,10 @@ CLASS_RULES = (
     "h10_one_name_per_concept",
     "h11_get_config_covers_the_constructor",
     "h11_from_config_does_real_work",
+    "h11_get_config_has_the_reference_form",
+    "h2_call_takes_inputs",
+    "h10_block_container_names",
+    "h15_initializer_storage",
 )
 _ALL = frozenset(CLASS_RULES)
 _NO_HEAD_ATTRIBUTE = _ALL - {"h3_headless_attribute"}
@@ -268,7 +296,9 @@ SUBJECTS: Tuple[Subject, ...] = (
     _subject("mobilenet_v2", "mobilenet_v2", "MobileNetV2", head_attribute=_HEAD,
              classifier=True, required_params=_INIT_AND_REG),
     _subject("mobilenet_v3", "mobilenet_v3", "MobileNetV3", head_attribute=_HEAD,
-             classifier=True, required_params=_INIT_AND_REG),
+             classifier=True, required_params=_INIT_AND_REG,
+             waived={"h15_initializer_storage": "D-039"},
+             rules=_ALL - {"h15_initializer_storage"}),
     _subject("mobilenet_v4", "mobilenet_v4", "MobileNetV4", head_attribute=_HEAD,
              classifier=True, required_params=_INIT_AND_REG),
     _subject("convnext_v1", "convnext_v1", "ConvNeXtV1", head_attribute=_HEAD,
@@ -485,6 +515,13 @@ def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violatio
                     out.append(f"{fn.name}: `{name}` does not default to {value!r}")
         if not _is_delegating_return(fn, module.classes):
             out.append(f"{fn.name} is not one `return Class.from_variant(..., **kwargs)`")
+        else:
+            forwarded = {n.id for n in ast.walk(_body_without_docstring(fn)[0].value)
+                         if isinstance(n, ast.Name)}
+            taken = names + ([fn.args.kwarg.arg] if fn.args.kwarg else [])
+            unsent = [p for p in taken if p not in forwarded]
+            if unsent:
+                out.append(f"{fn.name} does not forward {unsent} to `from_variant`")
     return out
 
 
@@ -762,10 +799,106 @@ def h11_from_config_does_real_work(members: Sequence[Member], subject: Subject) 
     return []
 
 
+def _is_name_pair_dict(node: Optional[ast.AST]) -> bool:
+    """``{**base_config, **config}``: a dict of exactly two splatted names."""
+    return (isinstance(node, ast.Dict) and node.keys == [None, None]
+            and [getattr(v, "id", None) for v in node.values] == ["base_config", "config"])
+
+
+def h11_get_config_has_the_reference_form(members: Sequence[Member], subject: Subject) -> Violations:
+    fn = _def(members, "get_config")
+    if fn is None:
+        return []
+    body = _body_without_docstring(fn)
+    out = []
+    base_assigned = any(
+        isinstance(s, ast.Assign) and any(getattr(t, "id", None) == "base_config" for t in s.targets)
+        and _calls_super_get_config(s)
+        for s in body)
+    if not base_assigned:
+        out.append("`get_config` does not bind `base_config = super().get_config()`")
+    if not body or not (isinstance(body[-1], ast.Return) and _is_name_pair_dict(body[-1].value)):
+        out.append("`get_config` does not end in `return {**base_config, **config}`")
+    return out
+
+
+def h2_call_takes_inputs(members: Sequence[Member], subject: Subject) -> Violations:
+    call = _def(members, "call")
+    if call is None or len(call.args.args) < 2:
+        return []
+    name = call.args.args[1].arg
+    return [] if name == "inputs" else [f"`call` names its input `{name}`, expected `inputs`"]
+
+
+_CONTAINER_CONCEPTS = (("block", "blocks"), ("stage", "stages"))
+
+
+def _container_attributes(members: Sequence[Member]) -> List[str]:
+    """Names of the ``self.<attr>`` lists a constructor or a ``_build_*`` method creates."""
+    names = []
+    for kind, name, fn in members:
+        if kind != "def" or not (name == "__init__" or name.startswith("_build_")):
+            continue
+        for node in _walk_own(fn):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(
+                    node.value, (ast.List, ast.ListComp)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                names += [t.attr for t in targets if isinstance(t, ast.Attribute)
+                          and isinstance(t.value, ast.Name) and t.value.id == "self"]
+    return names
+
+
+def h10_block_container_names(members: Sequence[Member], subject: Subject) -> Violations:
+    out = []
+    for attr in _container_attributes(members):
+        for word, canonical in _CONTAINER_CONCEPTS:
+            if word in attr and attr != canonical:
+                out.append(f"the {word} container `self.{attr}` should be `self.{canonical}`")
+                break
+    return out
+
+
+def _is_a_spec(value: ast.AST) -> bool:
+    """Whether ``value`` stores an initializer as a spec: ``initializer_spec(...)``, a string, a dict."""
+    if isinstance(value, ast.Call):
+        func = value.func
+        return (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")) == "initializer_spec"
+    if isinstance(value, ast.Constant):
+        return value.value is None or isinstance(value.value, str)
+    if isinstance(value, ast.Dict):
+        return True
+    if isinstance(value, ast.IfExp):
+        return _is_a_spec(value.body) and _is_a_spec(value.orelse)
+    return False
+
+
+def _initializer_assignments(init: ast.FunctionDef) -> List[Tuple[str, ast.AST]]:
+    found = []
+    for node in _walk_own(init):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            found += [(t.attr, node.value) for t in targets if isinstance(t, ast.Attribute)
+                      and isinstance(t.value, ast.Name) and t.value.id == "self"
+                      and "initializer" in t.attr]
+    return found
+
+
+def h15_initializer_storage(members: Sequence[Member], subject: Subject) -> Violations:
+    init = _def(members, "__init__")
+    if init is None:
+        return []
+    return [f"`self.{attr}` stores `{ast.unparse(value)}`, not an `initializer_spec(...)`"
+            for attr, value in _initializer_assignments(init) if not _is_a_spec(value)]
+
+
+_NO_CALL = "no call (or no input argument) to inspect"
+_NO_CONTAINER = "no list of blocks or stages is built"
+_NO_INITIALIZER = "__init__ stores no initializer attribute"
+
 _NEEDS_INIT = frozenset({
     "h3_one_init_log", "h3_headless_attribute", "h10_num_classes_first_kwargs_last",
     "h10_trailing_parameter_order", "h10_stored_attribute_names", "h10_one_name_per_concept",
-    "h11_get_config_covers_the_constructor"})
+    "h11_get_config_covers_the_constructor", "h15_initializer_storage"})
 
 
 def precondition_absent(members: Sequence[Member], subject: Subject, rule: str) -> Optional[str]:
@@ -797,6 +930,18 @@ def precondition_absent(members: Sequence[Member], subject: Subject, rule: str) 
         return "no method the rule reads"
     if rule == "h11_from_config_does_real_work" and _def(members, "from_config") is None:
         return "no from_config defined (rule only bites a defined one)"
+    if rule == "h11_get_config_has_the_reference_form" and _def(members, "get_config") is None:
+        return "no get_config defined"
+    if rule == "h2_call_takes_inputs":
+        call = _def(members, "call")
+        if call is None or len(call.args.args) < 2:
+            return _NO_CALL
+    if rule == "h10_block_container_names" and not _container_attributes(members):
+        return _NO_CONTAINER
+    if rule == "h15_initializer_storage":
+        init = _def(members, "__init__")
+        if init is not None and not _initializer_assignments(init):
+            return _NO_INITIALIZER
     return None
 
 
@@ -813,6 +958,10 @@ CLASS_RULE_FUNCTIONS: Dict[str, Callable[[Sequence[Member], Subject], Violations
     "h10_one_name_per_concept": h10_one_name_per_concept,
     "h11_get_config_covers_the_constructor": h11_get_config_covers_the_constructor,
     "h11_from_config_does_real_work": h11_from_config_does_real_work,
+    "h11_get_config_has_the_reference_form": h11_get_config_has_the_reference_form,
+    "h2_call_takes_inputs": h2_call_takes_inputs,
+    "h10_block_container_names": h10_block_container_names,
+    "h15_initializer_storage": h15_initializer_storage,
 }
 
 # ---------------------------------------------------------------------------
@@ -921,7 +1070,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
     "src/dl_techniques/models/vision/cliffordnet/model.py": {
         "plan-2026-08-23T091307-9a110062/D-480": 1,
         "plan-2026-10-26T125959-7af851e5/D-007": 1,
-        "plan-2026-10-26T125959-7af851e5/D-031": 2,
+        "plan-2026-10-26T125959-7af851e5/D-023": 3,
+        "plan-2026-10-26T125959-7af851e5/D-031": 1,
         "plan_2026-05-11_0090b0b8/D-001": 2,
     },
     "src/dl_techniques/models/vision/convnext/convnext_v1.py": {
@@ -987,6 +1137,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-14T233721-d4f9beb2/D-069": 1,
         "plan-2026-08-22T035419-a11304c8/D-203": 1,
         "plan-2026-10-14T062616-81938e81/D-232": 1,
+        "plan-2026-10-26T125959-7af851e5/D-039": 1,
     },
     "src/dl_techniques/models/vision/mobilenet/mobilenet_v4.py": {
         "plan-2026-08-14T183218-f4c612aa/D-011": 1,
@@ -1458,6 +1609,130 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
+    ('h10_block_container_names', 'mobilenet_v1'): Open(
+        'the MobileNet V1 and V2 migration',
+        '1 violation(s): the block container `self.depthwise_blocks` should be '
+        '`self.blocks`',
+        ('the block container `self.depthwise_blocks` should be `self.blocks`',)),
+    ('h15_initializer_storage', 'mobilenet_v1'): Open(
+        'the MobileNet V1 and V2 migration',
+        '1 violation(s): `self.kernel_initializer` stores '
+        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores '
+         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'mobilenet_v2'): Open(
+        'the MobileNet V1 and V2 migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'mobilenet_v2'): Open(
+        'the MobileNet V1 and V2 migration',
+        '1 violation(s): `self.kernel_initializer` stores '
+        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores '
+         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
+    ('h10_block_container_names', 'convnext_v1'): Open(
+        'the ConvNeXt migration',
+        '1 violation(s): the stage container `self.stages_list` should be '
+        '`self.stages`',
+        ('the stage container `self.stages_list` should be `self.stages`',)),
+    ('h10_block_container_names', 'convnext_v2'): Open(
+        'the ConvNeXt migration',
+        '1 violation(s): the stage container `self.stages_list` should be '
+        '`self.stages`',
+        ('the stage container `self.stages_list` should be `self.stages`',)),
+    ('h10_block_container_names', 'rad_convnet'): Open(
+        'the RADConvNet migration',
+        '1 violation(s): the stage container `self.stages_list` should be '
+        '`self.stages`',
+        ('the stage container `self.stages_list` should be `self.stages`',)),
+    ('h11_get_config_has_the_reference_form', 'squeezenet_v1'): Open(
+        'the SqueezeNet migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'squeezenet_v1'): Open(
+        'the SqueezeNet migration',
+        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
+        'an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
+         '`initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'squeezenet_v2'): Open(
+        'the SqueezeNet migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'squeezenet_v2'): Open(
+        'the SqueezeNet migration',
+        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
+        'an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
+         '`initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'convunext_stem'): Open(
+        'the ConvUNext and VAE migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'convunext_stem'): Open(
+        'the ConvUNext and VAE migration',
+        '1 violation(s): `self.kernel_initializer` stores '
+        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores '
+         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'vae'): Open(
+        'the ConvUNext and VAE migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'vae'): Open(
+        'the ConvUNext and VAE migration',
+        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
+        'an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
+         '`initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'uca_encoder'): Open(
+        'the RBFProtoNet and UcaEncoder migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h11_get_config_has_the_reference_form', 'capsnet'): Open(
+        'the CapsNet migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'capsnet'): Open(
+        'the CapsNet migration',
+        '1 violation(s): `self.kernel_initializer` stores '
+        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores '
+         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
+    ('h11_get_config_has_the_reference_form', 'capsnet_v2'): Open(
+        'the CapsNet migration',
+        '2 violation(s): `get_config` does not bind `base_config = '
+        'super().get_config()`; `get_config` does not end in `return {**base_config, '
+        '**config}`',
+        ('`get_config` does not bind `base_config = super().get_config()`',
+         '`get_config` does not end in `return {**base_config, **config}`')),
+    ('h15_initializer_storage', 'capsnet_v2'): Open(
+        'the CapsNet migration',
+        '1 violation(s): `self.kernel_initializer` stores '
+        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
+        ('`self.kernel_initializer` stores '
+         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
 }
 
 
@@ -1676,6 +1951,7 @@ class Toy(keras.Model):
         self.input_shape_config = input_shape
         self._head_config_overrides = head_config_overrides
         self.classification_head = None
+        self.blocks = []
         self._build_stem()
         logger.info("built")
 
@@ -1699,16 +1975,16 @@ class Toy(keras.Model):
         return cls(**kwargs)
 
     def get_config(self):
-        config = super().get_config()
-        config.update({
+        config = {
             "num_classes": self.num_classes,
             "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
             "head_config_overrides": self._head_config_overrides,
-        })
-        return config
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     @classmethod
     def from_config(cls, config):
@@ -1759,6 +2035,10 @@ PLANTED: Dict[str, Dict[str, str]] = {
             "    return Toy.from_variant(variant,", "    model = Toy.from_variant(variant,").replace(
             "pretrained=pretrained, **kwargs)\n", "pretrained=pretrained, **kwargs)\n    return model\n"),
         "an input_shape default": _plant("input_shape=None, pretrained", "input_shape=(8, 8, 3), pretrained"),
+        "a factory that ignores its arguments": _plant(
+            "    return Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
+            "                            pretrained=pretrained, **kwargs)\n",
+            '    return Toy.from_variant("a", **kwargs)\n'),
     },
     "h2_member_order": {
         "MODEL_VARIANTS after another constant": _plant(
@@ -1814,12 +2094,34 @@ PLANTED: Dict[str, Dict[str, str]] = {
     "h11_get_config_covers_the_constructor": {
         "an argument with no config key": _plant(
             '            "head_config_overrides": self._head_config_overrides,\n', ""),
-        "no super().get_config()": _plant("config = super().get_config()", "config = {}"),
+        "no super().get_config()": _plant("base_config = super().get_config()", "base_config = {}"),
     },
     "h11_from_config_does_real_work": {
         "a from_config that only calls cls(**config)": _plant(
             '        config["kernel_regularizer"] = keras.regularizers.deserialize(config["kernel_regularizer"])\n',
             ""),
+    },
+    "h11_get_config_has_the_reference_form": {
+        "a config built with update()": _plant(
+            "        base_config = super().get_config()\n        return {**base_config, **config}\n",
+            "        config.update(super().get_config())\n        return config\n"),
+        "base_config merged the other way round": _plant(
+            "{**base_config, **config}", "{**config, **base_config}"),
+    },
+    "h2_call_takes_inputs": {
+        "call names its input x": _plant(
+            "    def call(self, inputs, training=None):\n        return self.stem(inputs)\n",
+            "    def call(self, x, training=None):\n        return self.stem(x)\n"),
+    },
+    "h10_block_container_names": {
+        "blocks_list for blocks": _plant("self.blocks = []", "self.blocks_list = []"),
+        "stage_blocks for stages": _plant("self.blocks = []", "self.stage_blocks = []"),
+    },
+    "h15_initializer_storage": {
+        "keras.initializers.get stored": _plant(
+            "initializer_spec(kernel_initializer)", "keras.initializers.get(kernel_initializer)"),
+        "the raw argument stored": _plant(
+            "initializer_spec(kernel_initializer)", "kernel_initializer"),
     },
 }
 
@@ -2117,9 +2419,14 @@ VACUOUS: Dict[Tuple[str, str], str] = {
         "convunext_stem", "vae", "rbf_protonet", "clifford_rbf_protonet", "uca_encoder",
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
-        "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
+        "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
         "mobilenet_v4", "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
+    **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
+    **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},
+    **{("h15_initializer_storage", key): _NO_INITIALIZER for key in (
+        "convnext_v1", "convnext_v2", "rad_convnet", "rbf_protonet", "clifford_rbf_protonet",
+        "uca_encoder")},
 }
 
 
@@ -2149,6 +2456,12 @@ def test_the_precondition_detector_sees_each_absent_thing() -> None:
     no_builder = _plant("        self._build_stem()\n", "", _plant(
         "    def _build_stem(self):\n        self.stem = keras.layers.Dense(1)\n\n", "", TOY))
     assert reasons(no_builder, _TOY_SUBJECT) == {"h3_builders_assign": _NO_BUILDERS}
+    assert reasons(_plant(_CALL, ""), _TOY_SUBJECT) == {"h2_call_takes_inputs": _NO_CALL}
+    assert reasons(_plant("        self.blocks = []\n", ""), _TOY_SUBJECT) == {
+        "h10_block_container_names": _NO_CONTAINER}
+    no_initializer = _plant(
+        "        self.kernel_initializer = initializer_spec(kernel_initializer)\n", "")
+    assert reasons(no_initializer, _TOY_SUBJECT) == {"h15_initializer_storage": _NO_INITIALIZER}
     not_a_classifier = Subject("toy", "toy", "Toy", _ALL, head_attribute="classification_head",
                                classifier=False)
     assert reasons(TOY, not_a_classifier) == {"h10_trailing_parameter_order": _NOT_A_CLASSIFIER}
