@@ -24,7 +24,7 @@ Typical use::
     )
     logger.info(report.summary_string())
 
-Two functions live here, and they are not interchangeable:
+Three loaders live here, and they are not interchangeable:
 
 * :func:`load_weights_from_checkpoint` — partial, name-matched transfer between
   two *different* architectures. A zero-layer result is a legitimate outcome, so
@@ -32,6 +32,10 @@ Two functions live here, and they are not interchangeable:
 * :func:`load_weights_or_raise` — whole-file ``.keras`` restore into the *same*
   architecture. A load that restores nothing is always a defect there, so it
   raises.
+* :func:`load_pretrained_checkpoint` — a model's own ``pretrained=<path>`` load:
+  builds the model if it is not built, transfers through
+  :func:`load_weights_from_checkpoint` (a headless model takes a headed
+  checkpoint) and raises when the transfer fails or restores no layer.
 
 :func:`load_weights_from_checkpoint` reports by default; pass ``allow_unloaded``
 to make it complete-or-raise instead (every target layer loads and every
@@ -693,6 +697,70 @@ def load_backbone_from_checkpoint(
         allow_unloaded=tuple(tops) if headed or change is not None else (),
         vocab_change=change,
     )
+
+
+def load_pretrained_checkpoint(
+    model: keras.Model,
+    weights_path: str,
+    build_shape: Sequence[Optional[int]],
+    skip_mismatch: bool = True,
+) -> TransferReport:
+    """Load a local ``.keras`` checkpoint into *model*, refusing a load that restores nothing.
+
+    Interface contract (the shared body for a model's
+    ``load_pretrained_weights``): builds *model* at ``(1, *build_shape)`` only
+    when it is not built yet, then transfers layer by layer through
+    :func:`load_weights_from_checkpoint` with no skipped prefix, so a headless
+    model takes a headed checkpoint (the checkpoint's head is reported as
+    unused) and the reverse leaves the new head at its initialization. The
+    model is never rebuilt: a built model keeps its variables.
+
+    A partial load is a report, not an error: with ``skip_mismatch=True`` a
+    layer whose shapes differ stays at its initialization and is listed in the
+    returned report, so a caller that needs a total restore reads
+    ``report.shape_mismatch`` and ``report.missing_in_source``.
+
+    :param model: The receiving model, built or not.
+    :param weights_path: Path to a ``.keras`` checkpoint.
+    :param build_shape: The input shape without the batch axis, used only when
+        *model* is not built.
+    :param skip_mismatch: ``True`` (default) records a shape mismatch and moves
+        on; ``False`` makes it an error (the transfer's ``strict``).
+    :returns: The :class:`TransferReport` of the transfer.
+    :raises FileNotFoundError: *weights_path* does not exist.
+    :raises ValueError: the build or the transfer failed (chained to the
+        original error), or no layer was restored.
+    """
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+    try:
+        if not model.built:
+            model.build((1, *build_shape))
+        logger.info(f"Loading pretrained weights from {weights_path}")
+        report = load_weights_from_checkpoint(
+            target=model,
+            ckpt_path=weights_path,
+            skip_prefixes=(),
+            strict=not skip_mismatch,
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load weights from {weights_path}: {e}"
+        ) from e
+
+    # DECISION plan-2026-10-26T125959-7af851e5/D-023: raise here, in the models'
+    # loader. Do NOT move this check into `load_weights_from_checkpoint`: the D-070
+    # anchor above keeps that function reporting, and a same-named checkpoint whose
+    # every shape differs returns an empty report there. A model that logged a
+    # successful load and then trained from random weights is the defect.
+    if report.num_loaded == 0:
+        raise ValueError(
+            f"Loading {weights_path} restored no layer of this model. "
+            f"{report.summary_string()}"
+        )
+    logger.info(f"Loaded {report.num_loaded} layers from {weights_path}")
+    return report
 
 
 def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]:

@@ -1,7 +1,9 @@
 """Per-site initializer cloning.
 
 Provides :func:`clone_initializer`, which returns an independent copy of an
-initializer so that two weights do not start out as the same random numbers.
+initializer so that two weights do not start out as the same random numbers, and
+:func:`initializer_spec`, which turns an initializer instance into the JSON-safe
+spec a model stores and hands to every one of its sites.
 
 A single ``keras.initializers.Initializer`` instance reused across several
 weights **replays the same underlying sample at every later site**. That is
@@ -94,7 +96,7 @@ from typing import Any, Optional, Union
 
 # ---------------------------------------------------------------------
 
-__all__ = ["clone_initializer"]
+__all__ = ["clone_initializer", "initializer_spec"]
 
 # ---------------------------------------------------------------------
 
@@ -174,5 +176,63 @@ def clone_initializer(
         return resolved.__class__.from_config(resolved.get_config())
     except Exception:  # noqa: BLE001 -- a custom initializer may not round trip
         return copy.deepcopy(resolved)
+
+
+# ---------------------------------------------------------------------
+
+def initializer_spec(
+        initializer: Union[str, dict, keras.initializers.Initializer],
+) -> Union[str, dict]:
+    """Return the JSON-safe spec a model stores and hands to each of its sites.
+
+    A model that keeps the caller's ``Initializer`` instance and passes it to
+    two layers replays one sample at both (module docstring). A string or dict
+    spec has no state of its own: each layer resolves a fresh instance from it.
+    The spec of a seedless instance carries ``seed: None``, so two layers given
+    the spec draw independently; the spec of a seeded instance keeps its seed
+    and replays by contract (the first exemption in the module docstring).
+
+    **Dispatch:**
+
+    .. code-block:: text
+
+        initializer
+             │
+             ├── str or dict ────────► returned unchanged (the same object)
+             │
+             ├── Initializer ────────► keras.initializers.serialize(initializer)
+             │
+             └── anything else ──────► TypeError naming the type
+
+    :param initializer: An initializer name, a serialized config dict, or an
+        ``Initializer`` instance.
+    :type initializer: str or dict or keras.initializers.Initializer
+    :return: The argument itself for a ``str`` or ``dict``; the serialized dict
+        for an instance.
+    :rtype: str or dict
+    :raises TypeError: For any other argument, ``None`` included; the message
+        names the type. A caller with an optional initializer decides what
+        ``None`` means before calling.
+
+    Example::
+
+        self.kernel_initializer = initializer_spec(kernel_initializer)
+        self.stem = ConvStem(..., kernel_initializer=self.kernel_initializer)
+        self.head = keras.layers.Dense(
+            units, kernel_initializer=self.kernel_initializer)
+    """
+    # DECISION plan-2026-10-26T125959-7af851e5/D-033: serialize an instance once,
+    # here, and hand the spec to every site. Do NOT store the instance and pass it
+    # on: a seedless instance shared by two layers replays one sample at both
+    # (measured by tests/test_initializers/test_clone_initializer.py), and an
+    # instance in `get_config()` is not JSON-safe.
+    if isinstance(initializer, (str, dict)):
+        return initializer
+    if isinstance(initializer, keras.initializers.Initializer):
+        return keras.initializers.serialize(initializer)
+    raise TypeError(
+        "initializer must be a str, a dict or a keras Initializer instance; "
+        f"got {type(initializer).__name__}."
+    )
 
 # ---------------------------------------------------------------------
