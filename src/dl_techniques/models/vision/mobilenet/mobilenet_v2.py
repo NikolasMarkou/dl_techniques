@@ -64,7 +64,7 @@ from dl_techniques.initializers.clone import clone_initializer, initializer_spec
 
 # Constructor-config keys a checkpoint may differ on without being another architecture:
 # they leave the weight layout and the computed function alone (the initializer, the
-# dropout rate, the weight decay, the input size). `load_pretrained_checkpoint` compares
+# dropout rate, the regularizer, the input size). `load_pretrained_checkpoint` compares
 # every other key the checkpoint and the model both hold, so a changed width multiplier
 # is refused even when every weight shape still fits.
 _NON_STRUCTURAL_CONFIG_KEYS = (
@@ -72,7 +72,7 @@ _NON_STRUCTURAL_CONFIG_KEYS = (
     "input_shape",
     "kernel_initializer",
     "dropout_rate",
-    "weight_decay",
+    "kernel_regularizer",
 )
 
 # ---------------------------------------------------------------------
@@ -111,8 +111,11 @@ class MobileNetV2(keras.Model):
         where it must be positive.
     :param width_multiplier: Channel-count multiplier (alpha). Must be positive.
     :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
-    :param weight_decay: L2 regularization factor for conv and dense layers,
-        the classifier included.
+    :param kernel_regularizer: Optional regularizer applied to the standard
+        convolution kernels and the classifier kernel (the depthwise kernels
+        carry none): a regularizer, its serialized config or a name. `None`
+        (the default) adds no loss, so the optimizer's decoupled weight decay is
+        the only decay.
     :param kernel_initializer: Weight initialization strategy, the
         classifier's included: a name, a serialized config dict or an
         `Initializer` instance. Each site draws from its own clone of it, so a
@@ -170,7 +173,7 @@ class MobileNetV2(keras.Model):
             num_classes: int = 1000,
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
-            weight_decay: float = 4e-5,
+            kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
@@ -198,14 +201,13 @@ class MobileNetV2(keras.Model):
         self.num_classes = num_classes
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
-        self.weight_decay = weight_decay
         # DECISION plan-2026-10-26T125959-7af851e5/D-039: keep the caller's Initializer and hand a clone of it to each site; compute the spec only to refuse a bad initializer here and to report it in get_config. Do NOT store the spec and hand it to the sites, as MobileNetV4 does.
         # A stored spec re-draws every kernel from a fresh default seed, so a seeded V2 kernel would no longer equal the base's (0 of 53 kernels at `small` stay equal); the clone keeps the seeded draw unchanged. See decisions.md.
         self._kernel_initializer_spec = initializer_spec(kernel_initializer)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
         self.input_shape_config = input_shape
-        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._head_config_overrides = plain_head_config_overrides(
             head_config_overrides, "MobileNetV2"
@@ -477,7 +479,7 @@ class MobileNetV2(keras.Model):
             "num_classes": self.num_classes,
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
-            "weight_decay": self.weight_decay,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "kernel_initializer": self._kernel_initializer_spec,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,

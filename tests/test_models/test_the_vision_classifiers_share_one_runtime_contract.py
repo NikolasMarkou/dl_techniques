@@ -330,21 +330,21 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
         bias_initializer=_bias_init(), kernel_regularizer=_l2(),
         bias_regularizer=keras.regularizers.L1(1e-4), head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v1": lambda: dict(
-        num_classes=7, width_multiplier=0.25, dropout_rate=0.3, weight_decay=1e-4,
+        num_classes=7, width_multiplier=0.25, dropout_rate=0.3, kernel_regularizer=_l2(),
         kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v2": lambda: dict(
-        num_classes=7, width_multiplier=0.35, dropout_rate=0.3, weight_decay=1e-4,
+        num_classes=7, width_multiplier=0.35, dropout_rate=0.3, kernel_regularizer=_l2(),
         kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v3": lambda: dict(
         num_classes=7, variant="small", width_multiplier=0.5, dropout_rate=0.35,
-        weight_decay=1e-4, kernel_initializer=_he(3), input_shape=(32, 48, 3),
+        kernel_regularizer=_l2(), kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v4": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[16, 32], block_types=["IB", "ExtraDW"],
         strides=[1, 2], width_multiplier=0.5, use_attention=True, attention_stages=[1],
-        dropout_rate=0.35, weight_decay=1e-4, kernel_initializer=_he(3),
+        dropout_rate=0.35, kernel_regularizer=_l2(), kernel_initializer=_he(3),
         input_shape=(64, 96, 3), head_config_overrides=dict(_NO_BIAS_HEAD)),
     "convnext_v1": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[8, 16], drop_path_rate=0.2,
@@ -569,26 +569,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the SqueezeNet migration",
         "use_bypass='bogus' was accepted",
         "use_bypass='bogus' was accepted"),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '28 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '36 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v3"): Open(
-        AssertionError,
-        "the MobileNet kernel_regularizer rename",
-        '43 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v4"): Open(
-        AssertionError,
-        "the MobileNet kernel_regularizer rename",
-        '27 regularization losses by default',
-        'regularization losses by default'),
     ("no_replayed_draw::instance", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",

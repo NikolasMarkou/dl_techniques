@@ -834,8 +834,11 @@ def load_pretrained_checkpoint(
       different context mode). When the archive holds a config of *model*'s own
       class, every constructor-config key present on BOTH sides and outside
       *ignore_config_keys* must be equal. A key one side does not have is unknown,
-      not a difference: configs change between revisions (arguments removed,
-      renamed or added), and an old checkpoint must keep loading. An archive
+      not a difference: the comparison skips it, so an argument added since the
+      archive was written still loads. An argument the class has REMOVED or
+      renamed fails earlier, when Keras rebuilds the archive's model from its own
+      config: the load raises ``ValueError`` naming it before any comparison
+      (MobileNet's ``weight_decay``, now ``kernel_regularizer``). An archive
       without a config of that class (a functional wrapper around the model, a
       checkpoint written by other code) is checked by layers only.
 

@@ -1023,7 +1023,7 @@ def _mobilenet_v1_model() -> MobileNetV1:
         width_multiplier=_MOBILENET_ALPHA,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V1_KERNEL_INIT,
     )
 
@@ -1034,7 +1034,7 @@ def _mobilenet_v2_model() -> MobileNetV2:
         width_multiplier=_MOBILENET_ALPHA,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V2_KERNEL_INIT,
     )
 
@@ -1045,7 +1045,7 @@ def _mobilenet_v3_model() -> MobileNetV3:
         num_classes=4,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V3_KERNEL_INIT,
     )
 
@@ -1059,7 +1059,7 @@ def _mobilenet_v4_model() -> MobileNetV4:
         strides=[1, 2],
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V4_KERNEL_INIT,
     )
 
@@ -1620,7 +1620,7 @@ INITIALIZER_AUDIT = {
 }
 
 _REGULARIZER_KNOBS = {
-    "kernel_regularizer": ("kernel_regularizer", "weight_decay"),
+    "kernel_regularizer": ("kernel_regularizer",),
     "bias_regularizer": ("bias_regularizer",),
 }
 
@@ -1999,7 +1999,7 @@ def _mobilenet_v3_at_its_default_initializer() -> MobileNetV3:
         num_classes=4,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
     )
 
 

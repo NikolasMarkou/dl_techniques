@@ -73,7 +73,7 @@ from dl_techniques.initializers.clone import clone_initializer, initializer_spec
 
 # Constructor-config keys a checkpoint may differ on without being another architecture:
 # they leave the weight layout and the computed function alone (the initializer, the
-# dropout rate, the weight decay, the input size). `load_pretrained_checkpoint` compares
+# dropout rate, the regularizer, the input size). `load_pretrained_checkpoint` compares
 # every other key the checkpoint and the model both hold, so a changed variant or width
 # multiplier is refused even when every weight shape still fits.
 _NON_STRUCTURAL_CONFIG_KEYS = (
@@ -81,7 +81,7 @@ _NON_STRUCTURAL_CONFIG_KEYS = (
     "input_shape",
     "kernel_initializer",
     "dropout_rate",
-    "weight_decay",
+    "kernel_regularizer",
 )
 
 # ---------------------------------------------------------------------
@@ -125,8 +125,12 @@ class MobileNetV3(keras.Model):
     :type width_multiplier: float
     :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
     :type dropout_rate: float
-    :param weight_decay: L2 regularization factor, the head's included.
-    :type weight_decay: float
+    :param kernel_regularizer: Optional regularizer applied to the standard
+        convolution kernels and the head's kernels (the depthwise kernels carry
+        none): a regularizer, its serialized config or a name. `None` (the
+        default) adds no loss, so the optimizer's decoupled weight decay is the
+        only decay.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kernel_initializer: Weight initialization strategy, the head's
         included: a name, a serialized config dict or an `Initializer` instance.
         Each site draws from its own clone of it, so a name, a dict or a seedless
@@ -225,7 +229,7 @@ class MobileNetV3(keras.Model):
             variant: Literal["large", "small"] = "large",
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
-            weight_decay: float = 1e-5,
+            kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "glorot_uniform",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
@@ -264,7 +268,6 @@ class MobileNetV3(keras.Model):
         self.variant = variant
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
-        self.weight_decay = weight_decay
         # DECISION plan-2026-10-26T125959-7af851e5/D-039: keep the caller's Initializer and hand a clone of it to each site; compute the spec only to refuse a bad initializer here and to report it in get_config. Do NOT store the spec and hand it to the sites, as MobileNetV4 does.
         # A stored spec re-draws every kernel from a fresh default seed, so a seeded V3 kernel would no longer equal the base's (0 of 54 small and 0 of 64 large kernels stay equal); the clone keeps the seeded draw unchanged. See decisions.md.
         self._kernel_initializer_spec = initializer_spec(kernel_initializer)
@@ -283,7 +286,7 @@ class MobileNetV3(keras.Model):
             self.block_configs = self.SMALL_CONFIG
             last_point = 1024
 
-        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # The head's hidden width ("last point"): widened only above
         # width_multiplier 1.0, as Keras Applications MobileNetV3 does.
@@ -588,7 +591,7 @@ class MobileNetV3(keras.Model):
             "variant": self.variant,
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
-            "weight_decay": self.weight_decay,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "kernel_initializer": self._kernel_initializer_spec,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,

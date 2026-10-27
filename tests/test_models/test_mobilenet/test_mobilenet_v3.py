@@ -53,7 +53,7 @@ class TestMobileNetV3:
             'variant': 'large',
             'width_multiplier': 1.0,
             'dropout_rate': 0.1,
-            'weight_decay': 1e-5,
+            'kernel_regularizer': keras.regularizers.L2(1e-5),
             'input_shape': (32, 32, 3),
             'include_top': True
         }
@@ -66,7 +66,7 @@ class TestMobileNetV3:
             'variant': 'small',
             'width_multiplier': 0.75,
             'dropout_rate': 0.1,
-            'weight_decay': 1e-5,
+            'kernel_regularizer': keras.regularizers.L2(1e-5),
             'input_shape': (64, 64, 3),
             'include_top': True
         }
@@ -207,7 +207,7 @@ class TestMobileNetV3:
 
         required_keys = [
             'num_classes', 'variant', 'width_multiplier', 'dropout_rate',
-            'weight_decay', 'kernel_initializer', 'include_top', 'input_shape'
+            'kernel_regularizer', 'kernel_initializer', 'include_top', 'input_shape'
         ]
 
         for key in required_keys:
@@ -707,6 +707,69 @@ class TestMobileNetV3PretrainedTrunk:
         assert dst
         for p, value in dst.items():
             np.testing.assert_array_equal(value, src[p], err_msg=p)
+
+
+class TestMobileNetV3KernelRegularizer:
+    """``kernel_regularizer`` replaced ``weight_decay``.
+
+    The old keyword was an L2 factor that defaulted to a positive value, so a
+    default model carried an L2 loss on every kernel on top of the decoupled
+    weight decay of the optimizer that trains it (the trainer's AdamW): the
+    decay was applied twice. The new argument is a regularizer, ``None`` by
+    default.
+    """
+
+    def test_the_old_keyword_is_refused(self):
+        with pytest.raises(ValueError, match="weight_decay"):
+            MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3), weight_decay=1e-4)
+
+    def test_a_default_model_adds_no_regularization_loss(self):
+        model = MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3))
+        model(np.zeros((1, 32, 32, 3), "float32"))
+        assert model.kernel_regularizer is None
+        assert model.losses == []
+
+    def test_a_regularizer_reaches_every_kernel(self):
+        """One loss per regularized kernel (43 at this size: every kernel but the 11 depthwise ones)."""
+        given = keras.regularizers.L2(1e-3)
+        model = MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3), kernel_regularizer=given)
+        model(np.zeros((1, 32, 32, 3), "float32"))
+        assert model.kernel_regularizer is given
+        assert model.stem.conv1.kernel_regularizer is given
+        assert len(model.losses) == 43
+
+    @pytest.mark.parametrize("given", [
+        keras.regularizers.L2(1e-3),
+        keras.regularizers.L1L2(l1=1e-4, l2=1e-3),
+        {"class_name": "L2", "config": {"l2": 0.002}},
+        None,
+    ], ids=["l2", "l1l2", "dict", "none"])
+    def test_get_config_reports_a_json_safe_regularizer_that_rebuilds_the_model(self, given):
+        model = MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3), kernel_regularizer=given)
+        config = json.loads(json.dumps(model.get_config()))
+        assert "weight_decay" not in config
+        assert config["kernel_regularizer"] == json.loads(json.dumps(
+            keras.regularizers.serialize(keras.regularizers.get(given))))
+        rebuilt = MobileNetV3.from_config(copy.deepcopy(config))
+        assert json.loads(json.dumps(rebuilt.get_config()))["kernel_regularizer"] == (
+            config["kernel_regularizer"])
+
+    def test_a_checkpoint_saved_with_another_regularizer_still_loads(self, tmp_path):
+        """The regularizer leaves the weight layout and the function alone, so the
+        checkpoint's configuration comparison skips it (`_NON_STRUCTURAL_CONFIG_KEYS`)."""
+        donor = MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3), kernel_regularizer=keras.regularizers.L2(1e-3))
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(str(tmp_path), "donor.keras")
+        donor.save(path)
+        receiver = MobileNetV3(variant="small", width_multiplier=0.5, input_shape=(32, 32, 3))
+        assert receiver.kernel_regularizer is None
+
+        receiver.load_pretrained_weights(path)
+
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(receiver.stem.conv1.kernel),
+            keras.ops.convert_to_numpy(donor.stem.conv1.kernel),
+        )
 
 
 if __name__ == "__main__":

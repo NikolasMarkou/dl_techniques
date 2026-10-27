@@ -590,16 +590,16 @@ KNOBS: Dict[str, Dict[str, object]] = {
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "AlexNet": {"kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
                 "bias_initializer": keras.initializers.Constant(0.5)},
-    # MobileNet: ``weight_decay`` is the family's L2 knob; ``dropout_rate`` is
+    # MobileNet: ``kernel_regularizer`` is the family's L2 knob; ``dropout_rate`` is
     # the dropout before the classifier (V1/V2) or after the hidden block
     # (V3/V4).
-    "MobileNetV1": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV1": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV2": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV2": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV3": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV3": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV4": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV4": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "ViT": {"kernel_regularizer": keras.regularizers.L2(_L2),
             "bias_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
@@ -666,7 +666,7 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
     head = _head_layer(model)
     classifier = _classifier(model)
     knobs = KNOBS[subject]
-    if "kernel_regularizer" in knobs or "weight_decay" in knobs:
+    if "kernel_regularizer" in knobs:
         assert isinstance(classifier.kernel_regularizer, keras.regularizers.L2), (
             f"{subject}: the model's kernel L2 did not reach the classifier"
         )

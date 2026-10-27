@@ -1377,30 +1377,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h10_one_name_per_concept", "mobilenet_v1"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h10_one_name_per_concept", "mobilenet_v2"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h10_one_name_per_concept", "mobilenet_v3"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h10_one_name_per_concept", "mobilenet_v4"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
     ("h2_member_order", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "

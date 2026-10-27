@@ -1397,7 +1397,11 @@ class TestAPretrainedLoadRefusesAnotherArchitecture:
     def test_a_key_missing_from_the_model_is_unknown_not_different(
         self, tmp_path, monkeypatch
     ):
-        """A checkpoint of a newer revision holds arguments the model no longer has."""
+        """The comparison skips a recorded key the model has no argument for.
+
+        The recorded config is replaced here, so Keras still rebuilds the archived
+        model from the real one; the next test writes the key into the archive.
+        """
         ckpt = _save(_tiny(), tmp_path)
         recorded = read_checkpoint_config(ckpt)
         recorded["config"]["argument_removed_since"] = "x"
@@ -1406,6 +1410,22 @@ class TestAPretrainedLoadRefusesAnotherArchitecture:
         report = load_pretrained_checkpoint(_tiny(), ckpt, _BUILD_SHAPE)
 
         assert report.num_loaded == 3
+
+    def test_an_argument_the_class_no_longer_takes_fails_the_load_naming_it(self, tmp_path):
+        """A real archive that records a removed argument never reaches the comparison.
+
+        Keras rebuilds the archived model from its own config first, so the load
+        raises ``ValueError`` naming the argument (MobileNet's ``weight_decay``
+        became ``kernel_regularizer``). The control is the same archive without it.
+        """
+        ckpt = _save(_tiny(), tmp_path)
+        assert load_pretrained_checkpoint(_tiny(), ckpt, _BUILD_SHAPE).num_loaded == 3, "control"
+
+        _rewrite_archive_config(ckpt, lambda c: c["config"].update(argument_removed_since="x"))
+        target = _tiny()
+
+        with pytest.raises(ValueError, match="argument_removed_since"):
+            load_pretrained_checkpoint(target, ckpt, _BUILD_SHAPE)
 
     def test_a_graph_model_is_checked_by_layers_only(self, tmp_path):
         """A Sequential config lists its layers, whose generated names differ per build."""
