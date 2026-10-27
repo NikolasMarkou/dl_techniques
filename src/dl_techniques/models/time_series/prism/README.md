@@ -81,13 +81,13 @@ Input:  context   (B, context_len, num_features)
          │      node: Haar DWT +    │
          │      stats + router MLP  │
          │      + weighted recon    │
-         │      -> stitch (crossfade)│
-         │  - residual + LN + dropout│
+         │     -> stitch (crossfade)│
+         │ - residual + LN + dropout│
          └────────────┬─────────────┘
                       ▼            (B, context_len, hidden_dim)
          ┌──────────────────────────┐
          │ DLinear-style projector  │
-         │  transpose -> Dense(F_out)
+         │ transpose -> Dense(F_out)│
          │  -> transpose            │
          └────────────┬─────────────┘
                       ▼            (B, F_out, hidden_dim)
@@ -104,6 +104,8 @@ Input:  context   (B, context_len, num_features)
 ```
 
 The `(B * forecast_len, hidden_dim)` collapse before the head is deliberate: it makes the head fully time-shared and keeps its parameter count at `O(hidden_dim * num_features * num_quantiles)` regardless of `forecast_len`.
+
+![PRISM architecture](prism_architecture_v2.png)
 
 ---
 
