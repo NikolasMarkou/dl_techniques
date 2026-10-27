@@ -231,3 +231,18 @@ def test_real_train_census():
         IMAGENET2012_DEFAULT_ROOT, "train", data.class_names
     )
     assert len(full) == 1_281_167
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(os.path.join(IMAGENET2012_DEFAULT_ROOT, "devkit", "meta.mat")),
+    reason="real ImageNet devkit not on this machine",
+)
+def test_real_val_labels_are_fifty_per_class():
+    classes = m._list_classes(os.path.join(IMAGENET2012_DEFAULT_ROOT, "train"))
+    files = m._load_or_build_index(IMAGENET2012_DEFAULT_ROOT, "val", classes)
+    labels = m._read_val_labels(
+        os.path.join(IMAGENET2012_DEFAULT_ROOT, "devkit"), classes, files
+    )
+    assert len(files) == 50_000
+    assert np.bincount(labels, minlength=1000).tolist() == [50] * 1000
+    assert classes[labels[0]] == "n01751748"  # val image #1 is a sea snake
