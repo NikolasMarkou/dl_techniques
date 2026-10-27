@@ -339,6 +339,8 @@ Keep local: model creation and compilation, domain-specific losses, custom argpa
 normalized to `[0, 1]`). For anything else write local
 loading — do NOT force it through `load_dataset()`.
 
+ImageNet-1k from the extracted `train/<wnid>/` + `val/` layout: `dl_techniques.datasets.vision.imagenet2012.load_imagenet2012` (`train_resnet` and `train_vit` use it through `--imagenet-root` / `--devkit-dir`; val labels need the ILSVRC2012 devkit). `train.common.make_imagenet_filesystem_dataset` remains for `alexnet`.
+
 ## Scripts that don't use `train.common` callbacks (and why)
 
 | Script | Reason |

@@ -35,7 +35,8 @@ a ``.JPEG`` name and the CMYK JPEGs decode (measured on the real files; in
 this TF build ``tf.io.decode_jpeg`` accepts the PNG too).
 
 Training augmentation is a random-resized crop (area 0.08-1, aspect 3/4-4/3)
-plus a horizontal flip.  Evaluation resizes the shorter side to
+plus a horizontal flip, and optionally (``augment_color``) random brightness,
+contrast, saturation and hue.  Evaluation resizes the shorter side to
 ``image_size / 0.875`` and center-crops.  The returned dataset is finite and
 does not repeat: Keras ``fit`` re-iterates it (reshuffling) every epoch.
 """
@@ -88,6 +89,10 @@ class ImageNet2012Config:
 
     # Training only
     augment: bool = True
+    # Random brightness (+-0.2), contrast (0.8-1.2), saturation (0.8-1.2) and
+    # hue (+-0.1), applied on [0, 1] pixels after the crop and flip.  Only
+    # takes effect together with ``augment``.
+    augment_color: bool = False
     shuffle: bool = True
 
     seed: int = 0
@@ -320,6 +325,20 @@ def _center_crop(image: tf.Tensor, size: int) -> tf.Tensor:
     return tf.image.resize_with_crop_or_pad(image, size, size)
 
 
+def _color_jitter(image: tf.Tensor, seed: tf.Tensor) -> tf.Tensor:
+    """Brightness, contrast, saturation, hue on a 0..255 image; returns 0..255.
+
+    The ops work on [0, 1] pixels, so a brightness delta of 0.2 is 20% of the
+    range (applied to 0..255 values it would be a no-op).
+    """
+    image = image / 255.0
+    image = tf.image.stateless_random_brightness(image, 0.2, seed=seed + 2)
+    image = tf.image.stateless_random_contrast(image, 0.8, 1.2, seed=seed + 3)
+    image = tf.image.stateless_random_saturation(image, 0.8, 1.2, seed=seed + 4)
+    image = tf.image.stateless_random_hue(image, 0.1, seed=seed + 5)
+    return tf.clip_by_value(image, 0.0, 1.0) * 255.0
+
+
 def _normalize(image: tf.Tensor, mode: str) -> tf.Tensor:
     if mode == "none":
         return image
@@ -355,6 +374,8 @@ def _make_dataset(
             image = _random_resized_crop(_decode(path), size, seed)
             flip = tf.random.stateless_uniform([], seed=seed + 1) < 0.5
             image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
+            if cfg.augment_color:
+                image = _color_jitter(image, seed)
             return _normalize(image, mode), label
     else:
         def load(path, label):

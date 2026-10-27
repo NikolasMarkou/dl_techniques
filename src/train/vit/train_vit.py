@@ -32,9 +32,14 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, EpochMetricsPlotCallback
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
+from dl_techniques.datasets.vision.imagenet2012 import (
+    IMAGENET2012_DEFAULT_ROOT,
+    ImageNet2012Config,
+    load_imagenet2012,
+)
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -57,8 +62,8 @@ class TrainingConfig:
 
     # Data
     dataset: str = "cifar10"  # cifar10 | cifar100 | imagenet
-    train_data_dir: Optional[str] = None  # only used for imagenet
-    val_data_dir: Optional[str] = None
+    imagenet_root: str = IMAGENET2012_DEFAULT_ROOT  # only used for imagenet
+    devkit_dir: Optional[str] = None  # default: <imagenet_root>/devkit (val labels)
     image_size: int = 32  # 32 for CIFAR, 224 for ImageNet
     batch_size: int = 128
 
@@ -95,7 +100,6 @@ class TrainingConfig:
     validation_steps: Optional[int] = None
 
     # Data pipeline
-    cache_dataset: bool = False
     prefetch_buffer: int = tf.data.AUTOTUNE
     num_parallel_calls: int = tf.data.AUTOTUNE
 
@@ -127,15 +131,10 @@ class TrainingConfig:
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
         if self.dataset == "imagenet":
-            if not self.train_data_dir or not Path(self.train_data_dir).exists():
+            if not Path(self.imagenet_root).exists():
                 raise ValueError(
-                    f"--train-data-dir is required for --dataset imagenet "
-                    f"(got: {self.train_data_dir!r})"
-                )
-            if not self.val_data_dir or not Path(self.val_data_dir).exists():
-                raise ValueError(
-                    f"--val-data-dir is required for --dataset imagenet "
-                    f"(got: {self.val_data_dir!r})"
+                    f"--imagenet-root does not exist for --dataset imagenet "
+                    f"(got: {self.imagenet_root!r})"
                 )
 
 
@@ -315,11 +314,10 @@ def create_cifar_dataset(
 # IMAGENET DATA PIPELINE
 # =============================================================================
 
-# The ImageNet class-subdir tf.data pipeline now lives in
-# train.common.make_imagenet_filesystem_dataset. ViT uses the default
-# augment_color=False (no colour augmentations); IMAGENET_MEAN/STD
-# normalization and the unconditional clip_by_value(0,255) are applied inside
-# the helper. See plan_2026-06-02_35651564/D-001.
+# The ImageNet tf.data pipeline now lives in
+# dl_techniques.datasets.vision.imagenet2012.load_imagenet2012. ViT uses the
+# default augment_color=False (no colour augmentations); ImageNet mean/std
+# normalization is applied inside the loader.
 
 
 # =============================================================================
@@ -400,40 +398,27 @@ def train_vit(
         # invariants (file-based, no in-memory pre-normalization).
         _assert_train_val_distribution_match(train_ds, val_ds)
     elif config.dataset == "imagenet":
-        train_ds = make_imagenet_filesystem_dataset(
-            config.train_data_dir,
-            config.image_size,
-            config.batch_size,
-            is_training=True,
+        loader_kwargs = dict(
+            root=config.imagenet_root,
+            devkit_dir=config.devkit_dir,
+            image_size=config.image_size,
+            batch_size=config.batch_size,
             augment=config.augment_data,
-            augment_color=False,
+            seed=config.seed,
             num_parallel_calls=config.num_parallel_calls,
-            cache_val=config.cache_dataset,
-            prefetch_buffer=config.prefetch_buffer,
         )
-        val_ds = make_imagenet_filesystem_dataset(
-            config.val_data_dir,
-            config.image_size,
-            config.batch_size,
-            is_training=False,
-            augment=config.augment_data,
-            augment_color=False,
-            num_parallel_calls=config.num_parallel_calls,
-            cache_val=config.cache_dataset,
-            prefetch_buffer=config.prefetch_buffer,
+        train_data = load_imagenet2012(
+            "train", ImageNet2012Config(drop_remainder=True, **loader_kwargs)
         )
-        train_dir = Path(config.train_data_dir)
-        num_train_images = sum(
-            len(list((train_dir / cd).glob("*.JPEG")))
-            for cd in train_dir.iterdir() if cd.is_dir()
-        )
-        steps_per_epoch = num_train_images // config.batch_size
-        val_dir = Path(config.val_data_dir)
-        num_val_images = sum(
-            len(list((val_dir / cd).glob("*.JPEG")))
-            for cd in val_dir.iterdir() if cd.is_dir()
-        )
-        val_steps = max(1, num_val_images // config.batch_size)
+        val_data = load_imagenet2012("val", ImageNet2012Config(**loader_kwargs))
+        if train_data.num_classes != config.num_classes:
+            raise ValueError(
+                f"num_classes={config.num_classes} but {config.imagenet_root} "
+                f"has {train_data.num_classes} classes"
+            )
+        train_ds, val_ds = train_data.dataset, val_data.dataset
+        steps_per_epoch = train_data.steps_per_epoch
+        val_steps = config.validation_steps
         input_shape = (config.image_size, config.image_size, 3)
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset}")
@@ -545,10 +530,12 @@ def parse_arguments() -> argparse.Namespace:
     # Data
     parser.add_argument("--dataset", type=str, default="cifar10",
                         choices=["cifar10", "cifar100", "imagenet"])
-    parser.add_argument("--train-data-dir", type=str, default=None,
-                        help="Required only when --dataset imagenet")
-    parser.add_argument("--val-data-dir", type=str, default=None,
-                        help="Required only when --dataset imagenet")
+    parser.add_argument("--imagenet-root", type=str, default=IMAGENET2012_DEFAULT_ROOT,
+                        help="Used only when --dataset imagenet: folder holding "
+                             "train/ and val/ (extracted ILSVRC2012 images)")
+    parser.add_argument("--devkit-dir", type=str, default=None,
+                        help="Used only when --dataset imagenet: ILSVRC2012 devkit "
+                             "folder (default: <imagenet-root>/devkit)")
     parser.add_argument("--image-size", type=int, default=None,
                         help="Auto: 32 for CIFAR, 224 for ImageNet")
 
@@ -630,8 +617,8 @@ def main() -> None:
 
     config = TrainingConfig(
         dataset=ds,
-        train_data_dir=args.train_data_dir,
-        val_data_dir=args.val_data_dir,
+        imagenet_root=args.imagenet_root,
+        devkit_dir=args.devkit_dir,
         image_size=image_size,
         batch_size=args.batch_size,
         model_variant=args.variant,

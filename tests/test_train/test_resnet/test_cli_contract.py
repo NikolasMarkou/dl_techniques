@@ -29,7 +29,7 @@ What each guard pins, and why it is not satisfied-by-construction:
 
 ``test_help_exits_zero_without_reaching_anything_expensive``
     ``--help`` must exit having called NOTHING expensive. Sentinels are
-    installed over ``setup_gpu``, ``create_resnet``, ``make_imagenet_filesystem_dataset``
+    installed over ``setup_gpu``, ``create_resnet``, ``load_imagenet2012``
     and ``train_resnet_imagenet``; each raises on contact and each is asserted to
     have been called ZERO times. Moving ``parse_arguments()`` below any of them
     fails by the named ``--help reached ...`` message, not by the exit code -- so
@@ -86,8 +86,8 @@ from train.resnet.train_resnet import TrainingConfig
 # reach. The one deliberate omission is ``gpu`` -- see the module docstring and
 # ``test_gpu_reaches_the_trainer_not_the_config``.
 DEST_TO_FIELD: Dict[str, str] = {
-    "train_data_dir": "train_data_dir",
-    "val_data_dir": "val_data_dir",
+    "imagenet_root": "imagenet_root",
+    "devkit_dir": "devkit_dir",
     "image_size": "image_size",
     "variant": "model_variant",
     "num_classes": "num_classes",
@@ -122,7 +122,6 @@ FIELDS_WITH_NO_FLAG: Tuple[str, ...] = (
     "gradient_clipping",
     "momentum",
     "validation_steps",
-    "cache_dataset",
 )
 
 # Every value differs from the dataclass default -- mechanically asserted below.
@@ -195,7 +194,7 @@ class _Sentinel:
 EXPENSIVE = (
     "setup_gpu",
     "create_resnet",
-    "make_imagenet_filesystem_dataset",
+    "load_imagenet2012",
     "train_resnet_imagenet",
 )
 
@@ -225,17 +224,15 @@ def _install_sentinels(
 def _argv(tmp_path: Path) -> List[str]:
     """A full argv exercising every flag, with real directories under ``tmp_path``.
 
-    ``TrainingConfig.__post_init__`` raises unless both data directories exist,
-    so they are created here. Nothing outside ``tmp_path`` is touched.
+    ``TrainingConfig.__post_init__`` raises unless the ImageNet root exists, so
+    it is created here. Nothing outside ``tmp_path`` is touched.
     """
-    train_dir = tmp_path / "imagenet_train"
-    val_dir = tmp_path / "imagenet_val"
-    train_dir.mkdir()
-    val_dir.mkdir()
+    root = tmp_path / "imagenet"
+    root.mkdir()
     return [
         "train_resnet.py",
-        "--train-data-dir", str(train_dir),
-        "--val-data-dir", str(val_dir),
+        "--imagenet-root", str(root),
+        "--devkit-dir", str(tmp_path / "devkit"),
         "--image-size", str(EXPECTED["image_size"]),
         "--variant", EXPECTED["model_variant"],
         "--num-classes", str(EXPECTED["num_classes"]),
@@ -381,11 +378,11 @@ def test_every_cli_value_reaches_the_config(
 def test_the_data_directory_flags_reach_the_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The two required path flags, checked against the tmp paths argv used."""
+    """The path flags, checked against the tmp paths argv used."""
     config, _ = _run_main(monkeypatch, tmp_path)
 
-    assert config.train_data_dir == str(tmp_path / "imagenet_train")
-    assert config.val_data_dir == str(tmp_path / "imagenet_val")
+    assert config.imagenet_root == str(tmp_path / "imagenet")
+    assert config.devkit_dir == str(tmp_path / "devkit")
     assert config.output_dir == str(tmp_path / "run_output"), (
         "--output-dir never reached TrainingConfig.output_dir; a run would write "
         "into the default 'results' tree instead of where it was told to"
@@ -464,19 +461,17 @@ def test_help_exits_zero_without_reaching_anything_expensive(
     )
 
 
-def test_missing_required_flags_exit_two_without_side_effects(
-    monkeypatch: pytest.MonkeyPatch
+def test_a_missing_imagenet_root_is_refused_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``--train-data-dir``/``--val-data-dir`` are required; argparse must say so."""
+    """``--imagenet-root`` must exist; the config says so before anything runs."""
     sentinels = _install_sentinels(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["train_resnet.py"])
+    monkeypatch.setattr(
+        sys, "argv", ["train_resnet.py", "--imagenet-root", str(tmp_path / "absent")]
+    )
 
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(ValueError, match="ImageNet root does not exist"):
         train_resnet.main()
 
-    assert excinfo.value.code == 2, (
-        f"a bare argv exited {excinfo.value.code!r}; argparse reports a missing "
-        f"required argument with exit code 2"
-    )
     reached = {name: s.calls for name, s in sentinels.items() if s.calls}
     assert reached == {}, f"a rejected argv still performed side effects: {reached}"

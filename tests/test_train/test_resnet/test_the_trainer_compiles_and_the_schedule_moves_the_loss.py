@@ -109,16 +109,11 @@ def _batch(num_outputs: int):
 
 
 def _ds_config(schedule_type: str, tmp_path) -> TrainingConfig:
-    """A valid ``TrainingConfig``. ``__post_init__`` requires the data dirs to
-    EXIST, so they are created under ``tmp_path``; nothing outside it is
-    touched and repo-root ``results/`` is never involved."""
-    train_dir = tmp_path / "imagenet_train"
-    val_dir = tmp_path / "imagenet_val"
-    train_dir.mkdir(exist_ok=True)
-    val_dir.mkdir(exist_ok=True)
+    """A valid ``TrainingConfig``. ``__post_init__`` requires the ImageNet root
+    to EXIST, so ``tmp_path`` stands in for it; nothing outside it is touched
+    and repo-root ``results/`` is never involved."""
     return TrainingConfig(
-        train_data_dir=str(train_dir),
-        val_data_dir=str(val_dir),
+        imagenet_root=str(tmp_path),
         output_dir=str(tmp_path / "run_output"),
         experiment_name="guard",
         epochs=FROZEN_EPOCHS,

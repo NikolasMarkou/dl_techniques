@@ -43,6 +43,8 @@ Data loading, generation, and preprocessing utilities for various domains.
     `ILSVRC id -> wnid -> index`, the ids are NOT sorted-wnid order) and raise
     `FileNotFoundError` when the devkit is absent; train never needs it. The
     file list is cached under `<root>/.index/`. Finite dataset, no `repeat()`.
+    `augment_color` adds brightness/contrast/saturation/hue on [0, 1] pixels.
+    Used by `train_resnet` and `train_vit`.
     Tested by `tests/test_datasets/test_imagenet2012.py`. TensorFlow and
     SciPy at module scope.
   - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes

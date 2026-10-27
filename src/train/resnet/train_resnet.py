@@ -22,12 +22,17 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.datasets.vision.imagenet2012 import (
+    IMAGENET2012_DEFAULT_ROOT,
+    ImageNet2012Config,
+    load_imagenet2012,
+)
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -51,8 +56,8 @@ class TrainingConfig:
     """Configuration for ResNet ImageNet training."""
 
     # Data
-    train_data_dir: str = "/path/to/imagenet/train"
-    val_data_dir: str = "/path/to/imagenet/val"
+    imagenet_root: str = IMAGENET2012_DEFAULT_ROOT
+    devkit_dir: Optional[str] = None  # default: <imagenet_root>/devkit (val labels)
     image_size: int = 224
     batch_size: int = 256
 
@@ -86,8 +91,6 @@ class TrainingConfig:
     validation_steps: Optional[int] = None
 
     # Data Pipeline
-    cache_dataset: bool = False
-    prefetch_buffer: int = tf.data.AUTOTUNE
     num_parallel_calls: int = tf.data.AUTOTUNE
 
     # Output
@@ -105,21 +108,18 @@ class TrainingConfig:
             raise ValueError("Invalid image_size: must be positive")
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
-        if not Path(self.train_data_dir).exists():
-            raise ValueError(f"Training directory does not exist: {self.train_data_dir}")
-        if not Path(self.val_data_dir).exists():
-            raise ValueError(f"Validation directory does not exist: {self.val_data_dir}")
+        if not Path(self.imagenet_root).exists():
+            raise ValueError(f"ImageNet root does not exist: {self.imagenet_root}")
 
 
 # =============================================================================
 # IMAGENET DATA PIPELINE
 # =============================================================================
 
-# The ImageNet class-subdir tf.data pipeline (decode/resize/augment/normalize)
-# now lives in train.common.make_imagenet_filesystem_dataset. ResNet opts into
-# the 4 colour augmentations via augment_color=True; the IMAGENET_MEAN/STD
-# normalization and the unconditional clip_by_value(0,255) are applied inside
-# the helper. See plan_2026-06-02_35651564/D-001.
+# The ImageNet tf.data pipeline (decode/crop/augment/normalize) lives in
+# dl_techniques.datasets.vision.imagenet2012.load_imagenet2012. ResNet opts
+# into the 4 colour augmentations via augment_color=True; ImageNet mean/std
+# normalization is applied inside the loader.
 
 
 # =============================================================================
@@ -337,35 +337,27 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
-    train_dataset = make_imagenet_filesystem_dataset(
-        config.train_data_dir,
-        config.image_size,
-        config.batch_size,
-        is_training=True,
+    loader_kwargs = dict(
+        root=config.imagenet_root,
+        devkit_dir=config.devkit_dir,
+        image_size=config.image_size,
+        batch_size=config.batch_size,
         augment=config.augment_data,
         augment_color=True,
+        seed=config.seed,
         num_parallel_calls=config.num_parallel_calls,
-        cache_val=config.cache_dataset,
-        prefetch_buffer=config.prefetch_buffer,
     )
-    val_dataset = make_imagenet_filesystem_dataset(
-        config.val_data_dir,
-        config.image_size,
-        config.batch_size,
-        is_training=False,
-        augment=config.augment_data,
-        augment_color=True,
-        num_parallel_calls=config.num_parallel_calls,
-        cache_val=config.cache_dataset,
-        prefetch_buffer=config.prefetch_buffer,
+    train_data = load_imagenet2012(
+        "train", ImageNet2012Config(drop_remainder=True, **loader_kwargs)
     )
-
-    train_dir = Path(config.train_data_dir)
-    num_train_images = sum(
-        len(list((train_dir / cd).glob("*.JPEG")))
-        for cd in train_dir.iterdir() if cd.is_dir()
-    )
-    steps_per_epoch = num_train_images // config.batch_size
+    val_data = load_imagenet2012("val", ImageNet2012Config(**loader_kwargs))
+    if train_data.num_classes != config.num_classes:
+        raise ValueError(
+            f"num_classes={config.num_classes} but {config.imagenet_root} has "
+            f"{train_data.num_classes} classes"
+        )
+    train_dataset, val_dataset = train_data.dataset, val_data.dataset
+    steps_per_epoch = train_data.steps_per_epoch
     logger.info(f"Steps per epoch: {steps_per_epoch}")
 
     # Model
@@ -412,19 +404,10 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         config, num_outputs, loss_weight_vars=compile_spec['loss_weights']
     )
 
-    val_steps = config.validation_steps
-    if val_steps is None:
-        val_dir = Path(config.val_data_dir)
-        num_val_images = sum(
-            len(list((val_dir / cd).glob("*.JPEG")))
-            for cd in val_dir.iterdir() if cd.is_dir()
-        )
-        val_steps = num_val_images // config.batch_size
-
     start_time = time.time()
     history = model.fit(
         train_dataset, epochs=config.epochs, steps_per_epoch=steps_per_epoch,
-        validation_data=val_dataset, validation_steps=val_steps,
+        validation_data=val_dataset, validation_steps=config.validation_steps,
         callbacks=callbacks, verbose=1
     )
     logger.info(f"Training completed in {(time.time() - start_time) / 3600:.2f} hours")
@@ -454,8 +437,11 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--train-data-dir', type=str, required=True)
-    parser.add_argument('--val-data-dir', type=str, required=True)
+    parser.add_argument('--imagenet-root', type=str, default=IMAGENET2012_DEFAULT_ROOT,
+                        help='Folder holding train/ and val/ (extracted ILSVRC2012 images)')
+    parser.add_argument('--devkit-dir', type=str, default=None,
+                        help='ILSVRC2012 devkit folder with meta.mat and the val ground truth '
+                             '(default: <imagenet-root>/devkit)')
     parser.add_argument('--image-size', type=int, default=224)
 
     parser.add_argument('--variant', type=str, default='resnet50',
@@ -502,7 +488,7 @@ def main() -> None:
     args = parse_arguments()
 
     config = TrainingConfig(
-        train_data_dir=args.train_data_dir, val_data_dir=args.val_data_dir,
+        imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
         image_size=args.image_size, batch_size=args.batch_size,
         model_variant=args.variant, num_classes=args.num_classes,
         pretrained=args.pretrained,

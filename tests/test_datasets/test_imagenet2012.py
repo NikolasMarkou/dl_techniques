@@ -89,6 +89,14 @@ class TestTrain:
         assert y.dtype == tf.int32
         assert data.steps_per_epoch == 3 and sum(1 for _ in data.dataset) == 3
 
+    def test_cardinality_is_known_and_equals_steps_per_epoch(self, root):
+        # An unknown cardinality makes Keras log a phantom zero batch per epoch.
+        for kw in (dict(), dict(augment_color=True), dict(drop_remainder=True)):
+            for split in ("train", "val"):
+                data = load_imagenet2012(split, _cfg(root, batch_size=5, **kw))
+                n = int(tf.data.experimental.cardinality(data.dataset).numpy())
+                assert n == data.steps_per_epoch == sum(1 for _ in data.dataset)
+
     def test_drop_remainder(self, root):
         data = load_imagenet2012("train", _cfg(root, batch_size=5, drop_remainder=True))
         assert data.steps_per_epoch == 2 and sum(1 for _ in data.dataset) == 2
@@ -115,6 +123,27 @@ class TestTrain:
     def test_train_works_without_devkit(self, root):
         cfg = _cfg(root, devkit_dir=os.path.join(root, "nope"))
         assert load_imagenet2012("train", cfg).num_samples == 3 * PER_CLASS
+
+
+class TestColorAugmentation:
+    def test_color_changes_pixels_but_not_geometry_and_is_reproducible(self, root):
+        base = dict(shuffle=False, augment=True, normalize="unit", seed=5)
+        plain, _ = _all(load_imagenet2012("train", _cfg(root, **base)))
+        col1, _ = _all(load_imagenet2012("train", _cfg(root, augment_color=True, **base)))
+        col2, _ = _all(load_imagenet2012("train", _cfg(root, augment_color=True, **base)))
+        assert plain.shape == col1.shape
+        assert not np.array_equal(plain, col1), "augment_color changed nothing"
+        np.testing.assert_array_equal(col1, col2)
+        assert col1.min() >= 0.0 and col1.max() <= 1.0
+
+    def test_color_is_ignored_for_val_and_without_augment(self, root):
+        val_a, _ = _all(load_imagenet2012("val", _cfg(root)))
+        val_b, _ = _all(load_imagenet2012("val", _cfg(root, augment_color=True)))
+        np.testing.assert_array_equal(val_a, val_b)
+        off = dict(shuffle=False, augment=False)
+        a, _ = _all(load_imagenet2012("train", _cfg(root, **off)))
+        b, _ = _all(load_imagenet2012("train", _cfg(root, augment_color=True, **off)))
+        np.testing.assert_array_equal(a, b)
 
 
 class TestNormalize:
