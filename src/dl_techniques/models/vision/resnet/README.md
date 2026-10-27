@@ -353,8 +353,8 @@ archive and the model hold, except the ones that leave the weight layout and the
 alone (`num_classes`, `include_top`, `head_config_overrides`, initializers, regularizers, dropout
 and stochastic-depth rates), must be equal. A `relu` checkpoint into `activation_type="gelu"`, or an
 `imagenet` stem into a `cifar` one, restores every shape and is refused, naming the argument and
-both values. An argument that only one side holds is not compared, so an archive written by an
-earlier revision still loads, and an archive without a configuration of the model's class (a
+both values. An argument that only one side holds is not compared, so the comparison alone never refuses an archive written by an
+earlier revision (the archive still has to deserialize: a constructor that no longer accepts one of its recorded arguments refuses it before the loader runs), and an archive without a configuration of the model's class (a
 functional wrapper) is checked layer by layer only.
 
 Once you have a checkpoint the three usual strategies apply: freeze everything and train a new
