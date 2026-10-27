@@ -92,7 +92,7 @@ class TestConformalPredictionSetLayer:
         layer(np.zeros((1, 3), dtype="float32"))
         layer.calibrate(float("inf"))
         assert float(keras.ops.convert_to_numpy(layer.tau)) == 2.0
-        with pytest.raises(ValueError, match="NaN"):
+        with pytest.raises(ValueError, match="non-negative, got nan"):
             layer.calibrate(float("nan"))
 
     def test_logits_must_be_rank_2(self) -> None:
@@ -174,3 +174,92 @@ class TestAttach:
         d = keras.layers.Dense(3)(inp)
         with pytest.raises(ValueError, match="single-output"):
             attach_conformal_sets(keras.Model(inp, [d, d]), 0.9, (4,))
+
+
+# ---------------------------------------------------------------------
+# v2 guide section 16.1 / 16.3 arms: validation, dtype, XLA, shapes, round trip on values
+# ---------------------------------------------------------------------
+
+import tensorflow as tf  # noqa: E402
+
+
+class TestV2Arms:
+
+    def test_a_negative_tau_is_refused_at_construction_and_calibration(self) -> None:
+        with pytest.raises(ValueError, match="tau must be non-negative, got -0.1"):
+            ConformalPredictionSetLayer(tau_init=-0.1)
+        layer = ConformalPredictionSetLayer()
+        layer(np.zeros((1, 3), dtype="float32"))
+        with pytest.raises(ValueError, match="tau must be non-negative, got -0.5"):
+            layer.calibrate(-0.5)
+
+    def test_dtype_arms_agree_with_the_float32_control(self, dtype_policy) -> None:
+        rng = np.random.default_rng(3)
+        logits = (rng.normal(size=(64, 12)) * 3).astype("float32")
+        layer = ConformalPredictionSetLayer(tau_init=0.8)
+        probs, in_set = layer(logits)
+        probs, in_set = keras.ops.convert_to_numpy(probs), keras.ops.convert_to_numpy(in_set)
+        assert np.isfinite(probs).all() and set(np.unique(in_set)) <= {0.0, 1.0}
+        # The numpy rule on the same logits is the control for every policy. Under
+        # mixed_float16 the logits reach the layer rounded to float16, which can move a
+        # label across the threshold: demand >= 99% agreement, exact at float32/float64.
+        want = predict_sets(logits, 0.8, randomized=False)
+        agreement = np.mean(in_set.astype(bool) == want)
+        assert agreement >= (1.0 if dtype_policy == "float32" else 0.99), agreement
+
+    def test_xla_matches_eager(self) -> None:
+        rng = np.random.default_rng(4)
+        logits = (rng.normal(size=(32, 10)) * 3).astype("float32")
+        layer = ConformalPredictionSetLayer(tau_init=0.85)
+        eager = [keras.ops.convert_to_numpy(t) for t in layer(logits)]
+        fn = tf.function(lambda t: layer(t), jit_compile=True)
+        for a, b in zip(eager, fn(tf.constant(logits))):
+            np.testing.assert_allclose(a, b.numpy(), rtol=0, atol=1e-6)
+
+    @pytest.mark.parametrize("batch, classes", [(1, 2), (1, 5), (3, 2)])
+    def test_degenerate_batch_and_class_counts(self, batch, classes) -> None:
+        layer = ConformalPredictionSetLayer(tau_init=0.99)
+        logits = np.random.default_rng(0).normal(size=(batch, classes)).astype("float32")
+        probs, in_set = layer(logits)
+        assert tuple(in_set.shape) == (batch, classes)
+        assert np.isfinite(keras.ops.convert_to_numpy(probs)).all()
+
+    def test_a_single_class_is_refused(self) -> None:
+        # softmax over one class is always 1: the set is trivially everything.
+        with pytest.raises(ValueError, match="at least 2 classes, got 1"):
+            ConformalPredictionSetLayer()(np.zeros((3, 1), dtype="float32"))
+
+    def test_a_trace_with_an_unknown_batch_matches_the_static_one(self) -> None:
+        layer = ConformalPredictionSetLayer(tau_init=0.85)
+        logits = (np.random.default_rng(5).normal(size=(7, 9)) * 3).astype("float32")
+        static = keras.ops.convert_to_numpy(layer(logits)[1])
+        fn = tf.function(lambda t: layer(t)[1], input_signature=[tf.TensorSpec([None, 9], tf.float32)])
+        np.testing.assert_array_equal(fn(tf.constant(logits)).numpy(), static)
+
+    def test_weights_are_identical_before_the_reloaded_model_is_called(self, tmp_path) -> None:
+        inp = keras.Input(shape=(10,))
+        model = keras.Model(inp, ConformalPredictionSetLayer()(inp))
+        layer = next(l for l in model.layers if isinstance(l, ConformalPredictionSetLayer))
+        layer.calibrate(CAL_TAU)
+        path = tmp_path / "w.keras"
+        model.save(path)
+        loaded = keras.models.load_model(
+            path, custom_objects={"ConformalPredictionSetLayer": ConformalPredictionSetLayer}
+        )
+        rel = next(l for l in loaded.layers if isinstance(l, ConformalPredictionSetLayer))
+        for a, b in zip(layer.weights, rel.weights):
+            assert a.path.split("/")[-1] == b.path.split("/")[-1]
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b)
+            )
+        x = np.random.default_rng(6).normal(size=(5, 10)).astype("float32") * 3
+        for a, b in zip(model(x, training=False), loaded(x, training=False)):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b)
+            )
+
+    def test_the_layer_has_exactly_one_weight_and_it_is_frozen(self) -> None:
+        layer = ConformalPredictionSetLayer(name="cps")
+        layer(np.zeros((2, 4), dtype="float32"))
+        assert [w.path for w in layer.weights] == ["cps/conformal_tau"]
+        assert layer.trainable_weights == [] and layer.weights[0].trainable is False

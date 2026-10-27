@@ -93,20 +93,25 @@ class ConformalPredictionSetLayer(keras.layers.Layer):
     @staticmethod
     def _clamp(tau: float) -> float:
         tau = float(tau)
-        if tau != tau:
-            raise ValueError(f"tau must not be NaN, got {tau}")
+        if tau != tau or tau < 0.0:
+            raise ValueError(f"tau must be non-negative, got {tau}")
         return min(tau, _TAU_KEEPS_EVERY_LABEL)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the non-trainable scalar threshold weight.
 
         :param input_shape: Shape of the incoming logits, ``(batch, num_classes)``.
-        :raises ValueError: If the logits are not rank 2.
+        :raises ValueError: If the logits are not rank 2 or have fewer than 2 classes.
         """
         if len(input_shape) != 2:
             raise ValueError(
                 f"ConformalPredictionSetLayer takes (batch, num_classes) logits, "
                 f"got shape {tuple(input_shape)}"
+            )
+        if input_shape[-1] is not None and input_shape[-1] < 2:
+            raise ValueError(
+                f"ConformalPredictionSetLayer needs at least 2 classes, got "
+                f"{input_shape[-1]}"
             )
         self.tau = self.add_weight(
             name="conformal_tau",
@@ -114,6 +119,9 @@ class ConformalPredictionSetLayer(keras.layers.Layer):
             initializer=keras.initializers.Constant(self.tau_init),
             trainable=False,
             dtype="float32",
+            # The comparison runs in float32 whatever the policy: under mixed_float16 an
+            # autocast tau would be rounded to float16 and meet a float32 cumsum.
+            autocast=False,
         )
         super().build(input_shape)
 
@@ -147,7 +155,7 @@ class ConformalPredictionSetLayer(keras.layers.Layer):
         target ``alpha``) is stored as a value that keeps every label.
 
         :param tau: The fitted threshold.
-        :raises ValueError: If ``tau`` is NaN.
+        :raises ValueError: If ``tau`` is NaN or negative.
         """
         value = self._clamp(tau)
         self.tau.assign(value)
