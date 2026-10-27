@@ -434,7 +434,7 @@ class Mamba2(keras.Model):
         Additive only: ``d_model`` is not renamed or removed, and this is not
         a constructor argument, so ``get_config``/``from_config`` are
         unaffected. See
-        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.lm_pretraining.clm.CausalLanguageModel``,
         whose ``__init__`` requires a ``hidden_size`` attribute on any
         backbone built with ``skip_head=False``.
 

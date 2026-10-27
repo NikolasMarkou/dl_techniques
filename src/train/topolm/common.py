@@ -108,7 +108,7 @@ from dl_techniques.metrics.topographic_selectivity import (
     fdr_across_layers,
     grow_clusters,
 )
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     CausalLanguageModel,
 )
 from dl_techniques.models.language.topolm import (

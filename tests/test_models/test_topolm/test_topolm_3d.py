@@ -38,7 +38,7 @@ from dl_techniques.models.language.topolm import (
     grid_shape_of,
     validate_variant,
 )
-from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining import CausalLanguageModel
 from dl_techniques.layers.heads.nlp import TASK_HEAD_NAME
 from dl_techniques.models.language.topolm.config import (
     DEFAULT_RADIUS,

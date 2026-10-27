@@ -49,7 +49,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.masked_language_model.mlm")
+@register_dl_technique("dl_techniques.models.lm_pretraining.mlm")
 class MaskedLanguageModel(keras.Model):
     """Pre-train any compatible encoder with masked language modeling.
 

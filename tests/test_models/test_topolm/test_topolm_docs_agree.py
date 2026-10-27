@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining import CausalLanguageModel
 from dl_techniques.models.language.topolm import create_topolm
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]

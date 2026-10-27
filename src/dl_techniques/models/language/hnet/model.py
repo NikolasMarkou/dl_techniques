@@ -647,7 +647,7 @@ class HNet(RecordedBuildShapeMixin, keras.Model):
         a constructor argument, so ``get_config``/``from_config`` are
         unaffected. Mirrors ``Mamba2Model.hidden_size``'s alias of
         ``d_model``. Non-blocking for
-        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.lm_pretraining.clm.CausalLanguageModel``,
         whose ``__init__`` only requires ``hidden_size`` when built with
         ``skip_head=False`` -- a headless HNet already bakes its own logits head, so
         it is wrapped with ``skip_head=True`` -- but adds attribute-surface

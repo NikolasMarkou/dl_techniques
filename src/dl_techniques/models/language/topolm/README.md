@@ -202,7 +202,7 @@ tied matmul(token emb.T)  |  lm_head Dense
 ```
 
 Both leaves come back together, so
-[`CausalLanguageModel`](../../common/masked_language_model/) and the standard CLM
+[`CausalLanguageModel`](../../common/lm_pretraining/) and the standard CLM
 data wrapper work unchanged. No `None` is echoed into the output dict, so
 `predict({"input_ids": ...})` does not trip Keras' nested-structure check.
 
@@ -464,7 +464,7 @@ The auxiliary term arrives through `add_loss`, not a custom `train_step`, so sto
 task loss** at validation time. A training head therefore needs:
 
 ```python
-from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining import CausalLanguageModel
 
 head = CausalLanguageModel(
     backbone=create_topolm("paper"),

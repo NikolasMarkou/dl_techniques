@@ -28,7 +28,7 @@ from unittest import mock
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.models.language.mamba import Mamba, create_mamba
 from dl_techniques.layers.ssm.selective_ssm import MambaLayer
-from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining import CausalLanguageModel
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,

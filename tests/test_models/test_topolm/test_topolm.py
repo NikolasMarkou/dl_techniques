@@ -1028,7 +1028,7 @@ class TestGradients:
 
 
 def _build_head(backbone, aggregate):
-    from dl_techniques.models.common.masked_language_model import (
+    from dl_techniques.models.common.lm_pretraining import (
         CausalLanguageModel,
     )
 

@@ -257,7 +257,7 @@ This section is the reuse inventory. Every entry was read at HEAD; paths are imp
 - `dl_techniques.models.language.ptrm.PTRM` (`src/dl_techniques/models/language/ptrm/model.py` + `inference.py` + `factory.py`): identical trunk to TRM, K parallel stochastic rollouts with Gaussian noise in `z_L`, select by `q_halt`. This is the width-axis precedent for EqR breadth + ERM tempering; energy selection replaces `q_halt` selection.
 - `dl_techniques.models.vision.lewm.LeWM` (`src/dl_techniques/models/vision/lewm/model.py` + `config.py`, `embedder.py`, `predictor.py`, `projector.py`): JEPA-style world model, `add_loss`-only training (`fit` with `loss=None`), SIGReg anti-collapse (`dl_techniques.regularizers.sigreg`). EBRM anchoring / anti-collapse should look at SIGReg first.
 - `dl_techniques.models.common.power_sampling` (`src/dl_techniques/models/common/power_sampling/` with `config.py`, `sampler.py`, `forward.py`, `ops.py`, `protocols.py`): model-agnostic inference-time sampling for causal LMs. Natural home for best-of-N + energy rerank + tempered sampler wrappers.
-- `dl_techniques.models.common.masked_language_model` (`src/dl_techniques/models/common/masked_language_model/clm.py`, `mlm.py`): `CausalLanguageModel` / `MaskedLanguageModel` wrappers, `aggregate_backbone_losses` flag for `add_loss` backbones (TopoLM precedent). EBT language training will need the same flag pattern.
+- `dl_techniques.models.common.lm_pretraining` (`src/dl_techniques/models/common/lm_pretraining/clm.py`, `mlm.py`): `CausalLanguageModel` / `MaskedLanguageModel` wrappers, `aggregate_backbone_losses` flag for `add_loss` backbones (TopoLM precedent). EBT language training will need the same flag pattern.
 
 ### 4.3 Losses, regularizers, optimizers, metrics (compose first)
 

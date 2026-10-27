@@ -1,7 +1,7 @@
 """Contract for ``dl_techniques.utils.tied_embeddings.tied_embedding_logits``.
 
 The shared helper backing the weight-tied LM-head sites in ``models/``
-(``gpt2``, ``hnet``, ``wave_field``, ``zamba2``, ``masked_language_model``,
+(``gpt2``, ``hnet``, ``wave_field``, ``zamba2``, ``lm_pretraining``,
 and -- as of the D-005 completion-fix -- ``language/cliffordlm/model.py`` and
 ``vision_language/nano_vlm``). See ``plans/plan-2026-09-12T123331-28fd855f``'s
 ``decisions.md`` D-002 (why this helper exists), D-003 (the CRITICAL
@@ -287,7 +287,7 @@ class TestRealModelForwardPass:
     def test_clm_tied_branch_returns_float32_under_mixed_float16(
         self, restore_global_policy
     ):
-        from dl_techniques.models.common.masked_language_model.clm import (
+        from dl_techniques.models.common.lm_pretraining.clm import (
             CausalLanguageModel,
         )
 
@@ -296,7 +296,7 @@ class TestRealModelForwardPass:
         class _MockCausalBackbone(PublicAutoName, keras.Model):
             """Minimal causal-shaped backbone exposing `hidden_size` and a
             `last_hidden_state` output, matching the repo's own
-            `tests/test_models/test_masked_language_model/test_clm.py`
+            `tests/test_models/test_lm_pretraining/test_clm.py`
             `MockCausalBackbone` construction quirk: the embedding must be
             built (reachable) before `CausalLanguageModel.build`'s
             tie-resolution looks for it."""

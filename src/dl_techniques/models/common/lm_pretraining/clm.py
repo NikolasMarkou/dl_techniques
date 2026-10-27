@@ -70,7 +70,7 @@ from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.masked_language_model.clm")
+@register_dl_technique("dl_techniques.models.lm_pretraining.clm")
 class CausalLanguageModel(keras.Model):
     """Pre-train a causal backbone with next-token prediction.
 

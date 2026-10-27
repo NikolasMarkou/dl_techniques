@@ -55,7 +55,7 @@ from train.common.nlp import (
 from train.common.clm_pretrain import create_clm_loss_fn
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
-from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -195,7 +195,7 @@ def load_finetune_datasets(
 
     # `preprocess_clm_dataset` already yields pre-shifted `(input_ids, labels)`
     # pairs -- exactly the `pre_shifted=True` contract `CausalLanguageModel`
-    # expects (see `masked_language_model/clm.py` module docstring). No label
+    # expects (see `lm_pretraining/clm.py` module docstring). No label
     # wrapping is applied: a `CausalLanguageModel`'s `call()` returns a plain
     # logits tensor (`skip_head=True, output_key="logits"` only names which
     # key to pull OUT of the backbone's own dict output; `CausalLanguageModel`

@@ -29,7 +29,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     CausalLanguageModel,
     MaskedLanguageModel,
 )

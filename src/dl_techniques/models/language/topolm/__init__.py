@@ -35,7 +35,7 @@ backbone's own ``add_loss`` contribution into the scalar it backpropagates:
 
 .. code-block:: python
 
-    from dl_techniques.models.common.masked_language_model import CausalLanguageModel
+    from dl_techniques.models.common.lm_pretraining import CausalLanguageModel
 
     head = CausalLanguageModel(
         backbone=topographic,

@@ -148,7 +148,7 @@ FIXED = {
     "latent_gmm_registration": 26,
     "lewm": 188,
     "mamba": 22,
-    "masked_language_model": 23,
+    "lm_pretraining": 23,
     # RE-MEASURED 2026-10-21 (plan-2026-10-14T062616-81938e81 step 15.2,
     # D-255): 267 -> 262. 6cb295f1d (step 10.3.1, D-233) stopped MobileNetV2's
     # t=1 first stage from building an expansion conv (kernel + 4 BatchNorm

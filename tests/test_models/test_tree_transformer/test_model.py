@@ -698,7 +698,7 @@ class TestTreeTransformerIter1Fixes:
 
     def test_mlm_wrapper_compatibility(self):
         """MaskedLanguageModel accepts a TreeTransformer encoder and forwards correctly."""
-        from dl_techniques.models.common.masked_language_model.mlm import (
+        from dl_techniques.models.common.lm_pretraining.mlm import (
             MaskedLanguageModel,
         )
         encoder = TreeTransformer.from_variant(
@@ -763,7 +763,7 @@ class TestTreeTransformerIter1Fixes:
 
     def test_model_fit_one_step_smoke(self):
         """1-step fit smoke on MaskedLanguageModel(TreeTransformer)."""
-        from dl_techniques.models.common.masked_language_model.mlm import (
+        from dl_techniques.models.common.lm_pretraining.mlm import (
             MaskedLanguageModel,
         )
         encoder = TreeTransformer.from_variant(

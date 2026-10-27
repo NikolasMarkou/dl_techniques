@@ -91,7 +91,7 @@ AUTONAME_STEMS = {
     # is not a plain `<stem>_<n>` -- the stem below matches the common prefix.
     "fractalnet": ("conv_block",),
     "latent_gmm_registration": ("dense",),
-    "masked_language_model": ("bert",),
+    "lm_pretraining": ("bert",),
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
 }
 

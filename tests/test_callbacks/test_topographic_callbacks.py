@@ -263,7 +263,7 @@ class _TappedModel(keras.Model):
 
 
 def _head(backbone, aggregate, vocab_size=16):
-    from dl_techniques.models.common.masked_language_model import (
+    from dl_techniques.models.common.lm_pretraining import (
         CausalLanguageModel,
     )
 

@@ -21,7 +21,7 @@ from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
 from dl_techniques.datasets.cardinality import state_counted_length
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
 )

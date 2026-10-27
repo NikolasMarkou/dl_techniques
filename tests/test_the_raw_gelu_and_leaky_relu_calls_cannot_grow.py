@@ -92,7 +92,7 @@ MIGRATED_CLEAN = (
     "src/dl_techniques/layers/hierarchical_mlp_stem.py",
     "src/dl_techniques/layers/modality_projection.py",
     "src/dl_techniques/layers/structured_linear/crystal_multihead_projection.py",
-    "src/dl_techniques/models/common/masked_language_model/mlm.py",
+    "src/dl_techniques/models/common/lm_pretraining/mlm.py",
     "src/dl_techniques/models/language/wave_field/model.py",
     "src/dl_techniques/models/vision/convunext/model.py",
     "src/dl_techniques/models/vision/fastvit/model.py",
