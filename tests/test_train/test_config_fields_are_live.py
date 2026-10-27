@@ -102,7 +102,6 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/gpt2/finetune.py", "FinetuneConfig"),
     ("train/wave_field/pretrain.py", "TrainingConfig"),
     ("train/language/colbert/common.py", "TrainingConfig"),
-    ("train/embeddings_experimental/config.py", "ExperimentConfig"),
     ("train/bit_diffusion/train_bit_diffusion.py", "TrainingConfig"),
     ("train/dit/train_dit.py", "TrainingConfig"),
     ("train/doc_res/common.py", "DocResTrainingConfig"),

@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **110 leaf packages** grouped into **13 family directories**.
+Complete model architectures — **106 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (110 of 110 have the file; 107 are non-empty, and `vision/metaformer/`, `vision/video_jepa/` and `vision/vit_siglip/` ship an empty one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (106 of 106 have the file; 103 are non-empty, and `vision/metaformer/`, `vision/video_jepa/` and `vision/vit_siglip/` ship an empty one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -27,7 +27,7 @@ that share layers. The family `__init__.py` files carry a docstring listing thei
 nothing else. `time_series/` is the single exception; it predates this layout, has 9 children
 rather than 51, and its consumers rely on the re-exports.
 
-## The 13 families
+## The 12 families
 
 Counts are **leaf counts**, which for `vision` and `vision_language` are larger than the
 direct-child count, because those two nest one level further. Re-derive with the `find` in
@@ -39,7 +39,6 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`language/`](language/) | 20 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 9 | forecasting, probabilistic and point |
-| [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 4 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
@@ -48,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`probabilistic/`](probabilistic/) | 1 | latent-variable models with exact, tractable inference |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **110** | |
+| **Sum** | **106** | |
 
 ### `vision/` (51)
 
@@ -185,10 +184,6 @@ image-patch input modality now matches its filing.)
 | `point_cloud/latent_gmm_registration/` | latent GMM registration |
 | `probabilistic/neural_hmm/` | Neural Hidden Markov Model: exact forward-algorithm likelihood, Viterbi and posteriors over neural transitions and emissions; generative or CRF. A sequence model, not a forecaster, so not under `time_series/` |
 | `tabular/tabm/` | TabM |
-| `embeddings_experimental/shared/` | the study skeleton and block registry — not an architecture |
-| `embeddings_experimental/ascii_bert/` | ASCII-vocabulary BERT, the study's transformer baseline |
-| `embeddings_experimental/ascii_clifford_bert/` | same skeleton, attention-free Clifford mixing |
-| `embeddings_experimental/ascii_convnext_bert/` | same skeleton, ConvNeXt V1 convolutional mixing |
 
 ## Second-level nesting
 

@@ -1,14 +1,13 @@
 """Tests for :mod:`dl_techniques.losses.infonce_loss`.
 
 The load-bearing artifact in this file is :func:`_reference_simcse_loss`: a **verbatim,
-op-for-op transcription** of the trainer-private ``SimCSELoss.call`` body at
-``src/train/embeddings_experimental/train_embeddings.py:260-281`` (read 2026-08-30).
+op-for-op transcription** of the former trainer-private ``SimCSELoss.call`` body
+(read 2026-08-30; that trainer has since been removed).
 
-It is transcribed from *that* file and never from
+It is transcribed from *that* body and never from
 :class:`dl_techniques.losses.infonce_loss.SymmetricInfoNCELoss`. That independence is the
 whole point: an oracle copied from the implementation it grades passes forever and proves
-nothing. The trainer module is deliberately **not imported** -- importing it pulls in the
-tensorflow-heavy study pipeline, and a live training run is executing against that file.
+nothing.
 """
 
 import keras
@@ -25,7 +24,7 @@ from dl_techniques.losses.infonce_loss import SymmetricInfoNCELoss
 def _reference_simcse_loss(y_pred, temperature):
     """The reference ``SimCSELoss.call`` body, transcribed op-for-op.
 
-    Source: ``src/train/embeddings_experimental/train_embeddings.py:260-281``.
+    Source: the former trainer-private ``SimCSELoss.call`` (removed).
 
     :param y_pred: Stacked views, ``(batch, 2, embed_dim)``.
     :param temperature: Softmax temperature over the cosine similarities.
@@ -71,11 +70,10 @@ def _l2_normalized_views(batch: int, dim: int, seed: int) -> np.ndarray:
 @pytest.mark.parametrize("batch", [2, 4, 8, 64])
 @pytest.mark.parametrize("seed", [0, 1, 7])
 def test_the_loss_reproduces_the_reference_simcse_loss(batch, seed):
-    """The reduced loss equals the trainer's scalar ``SimCSELoss`` value.
+    """The reduced loss equals the reference scalar ``SimCSELoss`` value.
 
     A failure here means the library loss is **not** a drop-in replacement for
-    ``train_embeddings.py``'s local ``SimCSELoss``, and the deferred trainer swap would
-    silently change the in-flight study's numbers. Do NOT loosen the tolerance to make
+    the reference ``SimCSELoss`` it was derived from. Do NOT loosen the tolerance to make
     this pass -- diagnose the divergence.
     """
     y_pred = _l2_normalized_views(batch=batch, dim=256, seed=seed)

@@ -94,7 +94,6 @@ def child_visible_devices(
     Interface contract (callers: ``vae/run_sampler_comparison.py``,
     ``logic/multiseed_sweep.py``, ``mothnet/multiseed_sweep.py``,
     ``convnext/run_stochastic_comparison.py``, ``rms_variants_train/sweep.py``,
-    ``embeddings_experimental/sweep.py``,
     ``bfunet/run_gabor_depthwise_depth_sweep.sh``): :func:`gpu_or_default`
     picks the index, and
     :func:`visible_device_for` resolves it against ``visible`` (the launcher's

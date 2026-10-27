@@ -5,8 +5,7 @@ Guard for plan-2026-10-14T062616-81938e81 step 13.7 (a) (D-116). Step 13.6
 ``CUDA_VISIBLE_DEVICES``, but six scripts kept their own write. Measured at
 b50fd4e80:
 
-- ``rms_variants_train/sweep.py``, ``embeddings_experimental/sweep.py``,
-  ``vae/run_sampler_comparison.py`` and ``convnext/run_stochastic_comparison.py``
+- ``rms_variants_train/sweep.py``, ``vae/run_sampler_comparison.py`` and ``convnext/run_stochastic_comparison.py``
   gave each child ``CUDA_VISIBLE_DEVICES=str(--gpu)``, so
   ``CUDA_VISIBLE_DEVICES=1 ... --gpu 0`` trained every child on physical GPU 0.
 - The VAE launcher also passed its own ``--gpu`` (default 1) to a child whose
@@ -130,28 +129,6 @@ def test_the_rms_sweep_refuses_an_index_outside_the_visible_list(
     with pytest.raises(ValueError, match=VAR):
         sweep.main()
     assert seen == [], "a cell launched before the selection was checked"
-
-
-@pytest.mark.parametrize("visible, gpu, expected", [
-    ("1", "0", "1"),
-    ("1,0", "1", "0"),
-    (None, "0", "0"),
-])
-def test_the_embeddings_sweep_child_gets_the_resolved_device(
-        monkeypatch, tmp_path, visible, gpu, expected):
-    from train.embeddings_experimental import sweep
-
-    _set_visible(monkeypatch, visible)
-    # A parent backend is replaced, not inherited (the old text pin's intent).
-    monkeypatch.setenv("MPLBACKEND", "TkAgg")
-    seen = _capture_launch(monkeypatch, sweep)
-    with pytest.raises(_Stop):
-        sweep.main([
-            "--models", "ascii_bert", "--variants", "tiny", "--pooling", "mean",
-            "--seeds", "0", "--sweep-root", str(tmp_path), "--gpu", gpu,
-        ])
-    assert seen[0][1][VAR] == expected
-    assert seen[0][1]["MPLBACKEND"] == "Agg"
 
 
 # ---------------------------------------------------------------------------
@@ -495,20 +472,6 @@ def test_the_rms_sweep_without_gpu_flag_keeps_the_export(
         "--out-dir", str(tmp_path)])
     with pytest.raises(_Stop):
         sweep.main()
-    assert seen[0][1][VAR] == expected
-
-
-@pytest.mark.parametrize("visible, expected", _NO_FLAG)
-def test_the_embeddings_sweep_without_gpu_flag_keeps_the_export(
-        monkeypatch, tmp_path, visible, expected):
-    from train.embeddings_experimental import sweep
-
-    _set_visible(monkeypatch, visible)
-    seen = _capture_launch(monkeypatch, sweep)
-    with pytest.raises(_Stop):
-        sweep.main([
-            "--models", "ascii_bert", "--variants", "tiny", "--pooling", "mean",
-            "--seeds", "0", "--sweep-root", str(tmp_path)])
     assert seen[0][1][VAR] == expected
 
 

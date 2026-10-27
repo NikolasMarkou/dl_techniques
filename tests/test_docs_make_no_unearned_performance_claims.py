@@ -295,7 +295,6 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # A README that advertises a working `pretrained=True` it does not have
         # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
         # not by this pin; this one only tracks WHO is in the conversation.
-        "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
         "bert", "bias_free_denoisers",
         # bit_diffusion: README "Usage" names `pretrained=True` only to say
         # `create_ditxa` and `create_shared_token_decoder` raise (added at

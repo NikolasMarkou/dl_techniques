@@ -72,8 +72,7 @@ _NUM_VAL_SAMPLES = 500
 
 #: Characters of a failed run's stderr kept in its result record. A named
 #: length, not a negative slice literal, which the mask-sentinel census reads
-#: as a sentinel-sized constant (``src/train/embeddings_experimental/sweep.py``
-#: does the same).
+#: as a sentinel-sized constant.
 STDERR_TAIL_CHARS = 2000
 
 

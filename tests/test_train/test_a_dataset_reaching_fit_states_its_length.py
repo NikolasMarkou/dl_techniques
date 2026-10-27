@@ -73,7 +73,6 @@ STATED: Dict[str, str] = {
     # --- step 12.10: a packed stream, counted by one pass when finite ---
     "src/dl_techniques/datasets/byte_lm.py::build_byte_clm_dataset": "counted",
     "src/train/common/nlp.py::preprocess_clm_packed_dataset": "counted",
-    "src/train/embeddings_experimental/data.py::build_packed_mlm_dataset": "counted",
     # --- step 12.10: a never-ending generator states INFINITE ---
     "src/dl_techniques/datasets/bdd100k_video.py::bdd100k_video_dataset": "infinite",
     "src/train/common/timeseries.py::WindowedTimeSeriesProcessor.prepare_datasets": "infinite",
@@ -357,13 +356,6 @@ def test_the_packed_token_stream_states_its_counted_length():
         _texts(12), encoding_name="gpt2", chunk_length=6, batch_size=2,
         eot_token_id=50256, repeat=True)
     assert int(infinite.cardinality()) == INFINITE
-
-
-def test_the_packed_character_stream_states_its_counted_length():
-    from train.embeddings_experimental.data import build_packed_mlm_dataset
-
-    finite = build_packed_mlm_dataset(_texts(12), seq_len=8, batch_size=2, training=False)
-    assert int(finite.cardinality()) == _passes_to(finite) > 0
 
 
 def test_the_fraud_subgraphs_state_their_batch_count():

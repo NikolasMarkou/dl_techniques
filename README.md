@@ -374,7 +374,7 @@ The repository is organized for clarity, maintainability, and ease of contributi
 ```
 dl_techniques/
 ├── src/dl_techniques/         # THE LIBRARY — 13 subpackages
-│   ├── models/                # 102 leaf model packages in 12 FAMILY directories
+│   ├── models/                # 102 leaf model packages in 11 FAMILY directories
 │   │   ├── vision/            # 50 — resnet, convnext, vit, dino, swin_transformer, beit,
 │   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, alexnet,
 │   │   │                      #      and the nested image_restoration/, super_resolution/, keypoints/
@@ -389,7 +389,6 @@ dl_techniques/
 │   │   ├── common/            # 2 — power_sampling, masked_language_model
 │   │   ├── memory/            # 1 — som
 │   │   ├── point_cloud/       # 1 — latent_gmm_registration
-│   │   ├── embeddings_experimental/  # 4 — ascii_bert, ascii_clifford_bert, ascii_convnext_bert, shared
 │   │   └── tabular/           # 1 — tabm
 │   ├── layers/                # ~375 modules — ~200 in 21 themed subpackages,
 │   │   │                      # ~75 loose at the top level

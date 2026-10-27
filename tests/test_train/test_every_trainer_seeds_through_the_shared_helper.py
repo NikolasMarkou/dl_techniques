@@ -72,11 +72,6 @@ NOT_TRAINING: Dict[str, str] = {
     "train.doc_res.prepare_doc_res_data": "data preparation",
     "train.doc_scanner.prepare_doc_scanner_data": "data preparation",
     "train.doc_scanner.stage_uvdoc_samples": "data staging",
-    "train.embeddings_experimental.evaluate_embeddings": (
-        "evaluates frozen embeddings; its one fit is sklearn's GridSearchCV probe, "
-        "seeded through random_state=cfg.seed"),
-    "train.embeddings_experimental.report": "aggregates finished cells",
-    "train.embeddings_experimental.sweep": "launches seeded cells as subprocesses",
     "train.head_comparison.analyze_heads": "analyses finished runs",
     "train.hnet.infer_hnet": "generates from a saved model",
     "train.hnet.prepare_hnet_data": "data preparation",
@@ -114,7 +109,7 @@ NOT_TRAINING: Dict[str, str] = {
 }
 
 #: Entry points with a train call that are nonetheless not training (also in NOT_TRAINING).
-NOT_TRAINING_DESPITE_A_TRAIN_CALL = ("train.embeddings_experimental.evaluate_embeddings",)
+NOT_TRAINING_DESPITE_A_TRAIN_CALL: Tuple[str, ...] = ()
 
 #: Trainers that loop over ``--seeds`` and call ``set_seeds`` once per seed.
 MULTI_SEED: Tuple[str, ...] = (

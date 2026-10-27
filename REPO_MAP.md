@@ -51,7 +51,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 | Subpackage | Role |
 |---|---|
 | **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. `adapters/` holds `LoRAAdapter` and `GatedAdapter`; `statistics/` holds `LocalSupportGate`, the gate half of Local Support Learning. |
-| **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `probabilistic`, `tabular`, `embeddings_experimental`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/AGENTS.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
+| **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `probabilistic`, `tabular`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/AGENTS.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
 | `losses/` | Loss families, one module each; `losses/any_loss.py` holds the single dict-based loss registry. |
 | `utils/` | Cross-cutting helpers — `utils/logger.py` (mandatory central logging), `utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. |
 | `datasets/` | Dataset loaders and synthetic generators, with `arc`, `document_rectification`, `document_restoration`, `graphs`, `time_series` and `vision` subtrees. The two `document_*` ones are distinct and easy to conflate: `document_restoration` feeds `models/vision/image_restoration/doc_res/` (task-spec driven), `document_rectification` feeds `doc_scanner/` (a synthetic warped-page generator plus a UVDoc reader, both emitting a dense backward map). |
@@ -221,11 +221,10 @@ research harness (numbered experiment scripts plus its own `PAPER.md`), and
 Every other family init is a docstring and nothing else, so always import from the leaf
 package (`dl_techniques.models.vision.resnet.model`), never from a family.
 
-**4. Three leaf packages have no same-named test directory, and all three are covered.**
+**4. Two leaf packages have no same-named test directory, and both are covered.**
 `vision/lewm` is tested by the loose file `tests/test_models/test_lewm.py`;
 `vision_language/sam/sam1` by `tests/test_models/test_sam/`, a directory name that predates
-the `sam1` spelling (`sam2` and `sam3` do have same-named directories); and
-`embeddings_experimental/shared` by `tests/test_models/test_embeddings_shared/`.
+the `sam1` spelling (`sam2` and `sam3` do have same-named directories).
 
 **5. `vision_language/sam/` exports nothing on purpose.** Re-exporting the class `SAM2`
 there binds the name `SAM2` at the family level and shadows the `sam2/` subpackage; that
@@ -362,8 +361,6 @@ Named exceptions to the `tests/test_<x>/` rule:
   directory. Any directory-to-directory comparison reports `lewm` as untested. It is not.
 - **`vision_language/sam/sam1/` is tested by `tests/test_models/test_sam/`**, a directory
   name that predates the `sam1` spelling.
-- **`embeddings_experimental/shared/` is tested by
-  `tests/test_models/test_embeddings_shared/`.**
 
 **`src/dl_techniques/visualization/` used to be a named exception here** — the map claimed it had
 "no test directory at all" and that "no test module anywhere imports it". That was true when

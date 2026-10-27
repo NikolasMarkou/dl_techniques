@@ -49,10 +49,7 @@ reshape for InfoNCE turned out to be simpler than either path the plan
 text named: encode the query and its positive document through the SAME
 tower (`Qwen3EmbeddingModel`) as `view_a`/`view_b`, stack them, and let
 InfoNCE's own in-batch-negative mechanism supply the negatives from the
-OTHER groups already present in the batch -- exactly the shape
-`src/train/embeddings_experimental/train_embeddings.py`'s `SimCSEModel`
-already uses for its own two-dropout-view case (found by grep: it is the
-only OTHER caller of this loss in the repository). The synthetic generator
+OTHER groups already present in the batch. The synthetic generator
 still produces explicit negatives (cloning ColBERT's group shape as this
 plan's Step 7 bullet directs), but they are consumed only by the
 synthetic-separation CHECK (:func:`embed_texts` used by that test), never
@@ -560,9 +557,7 @@ def build_embedding_datasets(
         Each dataset yields `(inputs, dummy_label)` where `inputs` is a dict
         with keys `query_input_ids`/`query_attention_mask`/
         `doc_input_ids`/`doc_attention_mask`, and `dummy_label` is
-        `zeros(batch,)` (`SymmetricInfoNCELoss` ignores `y_true` entirely,
-        matching `train.embeddings_experimental.train_embeddings`'s own
-        `with_dummy_targets` convention for the same loss).
+        `zeros(batch,)` (`SymmetricInfoNCELoss` ignores `y_true` entirely).
     """
     query_tokenizer = create_tokenizer(
         encoding_name=config.encoding_name, max_length=config.query_maxlen,
@@ -618,15 +613,13 @@ def build_embedding_datasets(
 class Qwen3EmbeddingTowerPair(keras.Model):
     """Encodes a (query, positive-document) pair through ONE shared tower.
 
-    Mirrors `src/train/embeddings_experimental/train_embeddings.py`'s
-    `SimCSEModel`: a single tower, two views, stacked `(batch, 2, dim)` so
+    A single tower, two views, stacked `(batch, 2, dim)` so
     `compile(loss=SymmetricInfoNCELoss(...))` + stock `fit()` needs no
-    custom `train_step`. The only structural difference from `SimCSEModel`
-    is that the two views come from DISTINCT texts (query vs. its positive
-    document) rather than two dropout passes of the identical text -- this
-    is the standard bi-encoder in-batch-negatives training shape (as used
-    e.g. by sentence-transformers' MultipleNegativesRankingLoss), not a
-    misuse of a SimCSE-flavored loss.
+    custom `train_step`. The two views come from DISTINCT texts (query vs.
+    its positive document) rather than two dropout passes of the identical
+    text -- this is the standard bi-encoder in-batch-negatives training shape
+    (as used e.g. by sentence-transformers' MultipleNegativesRankingLoss),
+    not a misuse of a SimCSE-flavored loss.
 
     :param embedding_model: The shared `Qwen3EmbeddingModel` tower.
     :param kwargs: Forwarded to the base `Model` class.
@@ -685,8 +678,7 @@ def build_embedding_model(
 
     .. note::
 
-        `jit_compile=False` is set deliberately, matching
-        `train.embeddings_experimental.train_embeddings`'s own measured note:
+        `jit_compile=False` is set deliberately (measured):
         two forward passes of one batch feeding a symmetric cross-entropy
         fails to XLA-compile on this TF 2.18 build
         (`FAILED_PRECONDITION: Can not combine dim orders and
