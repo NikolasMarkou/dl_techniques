@@ -4261,11 +4261,9 @@ _CREATE_DELEGATION_WAIVERS = {
     # (a) Duplicated `pretrained`/`weights` validation. `from_variant` owns the
     # pretrained contract (D-003: 45/45 sites raise NotImplementedError), so the
     # copy in the factory is the duplicated validation R-051 names by name.
-    ("models/vision/mobilenet/mobilenet_v1.py", "create_mobilenetv1"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    # `models/vision/mobilenet/mobilenet_v2.py::create_mobilenetv2`, `mobilenet_v3.py::create_mobilenetv3` and
-    # `mobilenet_v4.py::create_mobilenetv4` were more of these and are gone the same way as the squeezenet
-    # pair: the `if pretrained: raise` moved into `from_variant` (through `pretrained_path_or_raise`) and each
-    # factory is one delegating return.
+    # `models/vision/mobilenet/mobilenet_v1.py::create_mobilenetv1` to `mobilenet_v4.py::create_mobilenetv4` were
+    # more of these and are gone the same way as the squeezenet pair: the `if pretrained: raise` moved into
+    # `from_variant` (through `pretrained_path_or_raise`) and each factory is one delegating return.
     ("models/vision/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     # The two `models/vision/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
     # D-129). Their recorded reason -- "duplicated from from_variant" -- was

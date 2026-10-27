@@ -17,7 +17,11 @@ Test Categories:
 - Performance benchmarks
 """
 
+import copy
+import inspect
+import json
 import pytest
+import re
 import tempfile
 import os
 import numpy as np
@@ -28,7 +32,9 @@ import tensorflow as tf
 
 from tests.numerics import reassociation_atol
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1, create_mobilenetv1
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
 
 
 class TestMobileNetV1:
@@ -78,7 +84,7 @@ class TestMobileNetV1:
         assert model.num_classes == default_config['num_classes']
         assert model.width_multiplier == default_config['width_multiplier']
         assert model.include_top == default_config['include_top']
-        assert model._input_shape == default_config['input_shape']
+        assert model.input_shape_config == default_config['input_shape']
 
     def test_width_multiplier_scaling(self):
         """Test width multiplier correctly scales filter dimensions."""
@@ -87,13 +93,13 @@ class TestMobileNetV1:
 
         model = MobileNetV1(width_multiplier=multiplier, input_shape=(32, 32, 3))
         expected_filters = int(base_filters * multiplier)
-        assert model.initial_conv.filters == expected_filters
+        assert model.stem.conv1.filters == expected_filters
 
         # Check a later block
         # Block 1 in ARCHITECTURE has 64 filters
         base_filters_block1 = 64
         expected_filters_block1 = int(base_filters_block1 * multiplier)
-        assert model.depthwise_blocks[0].pointwise_conv.filters == expected_filters_block1
+        assert model.blocks[0].pointwise_conv.filters == expected_filters_block1
 
     def test_model_building_on_call(self, default_config, sample_inputs):
         """Test that model builds correctly on first call."""
@@ -215,7 +221,7 @@ class TestMobileNetV1:
         )
         assert model.num_classes == 10
         assert model.width_multiplier == 0.75
-        assert model._input_shape == (32, 32, 3)
+        assert model.input_shape_config == (32, 32, 3)
 
     # ============================================================================
     # Forward Pass and Output Shape Tests
@@ -392,6 +398,274 @@ class TestMobileNetV1:
             f"every predicted row sums to 1 within {atol:.2e}: {rows}")
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
         np.testing.assert_allclose(probs.sum(axis=1), np.ones(10), rtol=0, atol=atol)
+
+
+    def test_a_mobilenet_reports_the_shape_it_runs(self):
+        """``compute_output_shape`` and a symbolic call agree with the eager forward.
+
+        The stem is ``self.stem`` (a ``ConvStem``); ``compute_output_shape``
+        must read it and not the sub-layers it used to alias. Keras uses a
+        model's ``compute_output_shape`` for a symbolic call, so a stale read
+        raises ``AttributeError`` on both paths while every test that only runs
+        the eager forward stays green.
+        """
+        model = MobileNetV1(num_classes=4, include_top=False, input_shape=(32, 32, 3))
+        batch = np.zeros((1, 32, 32, 3), "float32")
+        eager = model(batch, training=False)
+
+        reported = model.compute_output_shape((None, 32, 32, 3))
+        assert tuple(reported) == (None,) + tuple(eager.shape[1:])
+
+        symbolic = model(keras.Input(shape=(32, 32, 3)))
+        assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
+
+
+class TestMobileNetV1HouseShape:
+    """The constructor, ``from_variant`` and ``build`` contract of the house shape."""
+
+    @pytest.mark.parametrize("variant,count", [
+        ("small", 1_342_536),
+        ("pico", 475_544),
+    ])
+    def test_an_explicit_build_creates_every_weight(self, variant, count):
+        """``build`` materializes what ``call`` runs.
+
+        The model used to inherit Keras' ``build``, which marked it built with
+        0 weights and a warning.
+        """
+        model = MobileNetV1.from_variant(variant, num_classes=1000)
+        model.build((None, 64, 64, 3))
+        assert model.count_params() == count
+
+    def test_an_explicit_build_of_a_headless_model_creates_no_head_weight(self):
+        model = MobileNetV1.from_variant("pico", include_top=False)
+        model.build((None, 64, 64, 3))
+        assert model.count_params() > 0
+        assert not [w.path for w in model.weights if "classification_head" in w.path]
+
+    def test_an_override_does_not_poison_the_variant_table(self):
+        before = copy.deepcopy(MobileNetV1.MODEL_VARIANTS)
+        MobileNetV1.from_variant("small", width_multiplier=0.25, dropout_rate=0.3)
+        assert MobileNetV1.MODEL_VARIANTS == before
+
+    @pytest.mark.parametrize("variant,given", [("small", 0.25), ("pico", 0.5), ("large", 0.75)])
+    def test_a_width_multiplier_replaces_the_variants_own_value(self, variant, given):
+        """The README says a passed width overrides the variant's; it used to multiply it."""
+        model = MobileNetV1.from_variant(variant, width_multiplier=given, input_shape=(32, 32, 3))
+        assert model.width_multiplier == given
+
+    def test_the_variants_own_width_applies_when_none_is_given(self):
+        model = MobileNetV1.from_variant("small", input_shape=(32, 32, 3))
+        assert model.width_multiplier == 0.5
+
+    def test_an_unknown_variant_lists_the_variants_it_knows(self):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV1.from_variant("huge")
+        assert "Unknown variant 'huge'. Available variants: " in str(caught.value)
+        assert "'pico'" in str(caught.value)
+
+    @pytest.mark.parametrize("kwargs,message", [
+        ({"width_multiplier": 0.0}, "width_multiplier must be positive, got 0.0"),
+        ({"width_multiplier": -1.0}, "width_multiplier must be positive, got -1.0"),
+        ({"dropout_rate": 1.0}, "dropout_rate must be in [0, 1), got 1.0"),
+        ({"dropout_rate": 2.0}, "dropout_rate must be in [0, 1), got 2.0"),
+        ({"dropout_rate": -0.1}, "dropout_rate must be in [0, 1), got -0.1"),
+        ({"num_classes": 0}, "num_classes must be positive when include_top=True, got 0"),
+    ])
+    def test_an_invalid_value_is_refused_naming_the_argument_and_the_value(
+            self, kwargs, message):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV1(input_shape=(32, 32, 3), **kwargs)
+        # The argument is a whole word: a sub-layer's `classifier_dropout_rate` is not the model's.
+        assert re.search(rf"(?<![A-Za-z0-9_]){re.escape(message)}", str(caught.value)), str(caught.value)
+
+    def test_a_headless_model_needs_no_class_count(self):
+        model = MobileNetV1(num_classes=0, include_top=False, input_shape=(32, 32, 3))
+        assert model.classification_head is None
+
+    @pytest.mark.parametrize("shape", [(), (32, 32), (32, 32, 3, 1)])
+    def test_an_input_shape_that_is_not_3d_is_refused(self, shape):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV1(input_shape=shape)
+        assert f"input_shape must be 3D, got {shape}" in str(caught.value), str(caught.value)
+
+    def test_the_input_shape_defaults_to_the_imagenet_shape(self):
+        assert MobileNetV1(input_shape=None).input_shape_config == (224, 224, 3)
+        assert MobileNetV1.from_variant("small").input_shape_config == (224, 224, 3)
+
+    def test_forward_takes_its_input_as_inputs(self):
+        """The forward method names its input argument ``inputs``, as every classifier does."""
+        assert list(inspect.signature(MobileNetV1.call).parameters) == [
+            "self", "inputs", "training"]
+
+    def test_the_stem_is_one_named_conv_stem_that_truncates_its_width(self):
+        """V1 truncates (``int(32 * 0.6) = 19``); V2 to V4 round to a multiple of 8 (24)."""
+        model = MobileNetV1(width_multiplier=0.6, input_shape=(32, 32, 3))
+        assert model.stem.name == "stem"
+        assert model.stem.conv1.filters == 19
+        assert model.stem.act1.max_value is None
+
+    def test_the_blocks_are_named_from_zero_like_every_flat_block_list(self):
+        """``block_{i}`` counts from 0, as in MobileNetV3 and CliffordNet; the block's own
+        layers take the same index (``conv_dw_{i}``)."""
+        model = MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3))
+        assert [b.name for b in model.blocks] == [f"block_{i}" for i in range(13)]
+        assert [b.block_id for b in model.blocks] == list(range(13))
+        model.build((None, 32, 32, 3))
+        paths = {w.path.split("/", 1)[1] for w in model.weights}
+        assert any(p.startswith("block_0/conv_dw_0/") for p in paths), sorted(paths)[:6]
+
+
+class _NoRoundTrip(keras.initializers.Initializer):
+    """A custom initializer that cannot describe itself, so it cannot be saved."""
+
+    def __call__(self, shape, dtype=None, **kwargs):
+        return keras.initializers.HeNormal(seed=1)(shape, dtype=dtype)
+
+    def get_config(self):
+        raise NotImplementedError("this initializer is not serializable")
+
+
+class TestMobileNetV1Initializer:
+    """The initializer is kept as an instance and cloned per site; its spec is validated once.
+
+    MobileNetV4 stores the spec and hands it to the sites. V1 hands each site a
+    clone of the caller's instance instead (decision D-039, anchored in
+    ``mobilenet_v1.py``), because a stored spec would move every seeded kernel.
+    The spec is still computed in ``__init__``: to refuse a bad initializer at
+    construction and to feed ``get_config``.
+    """
+
+    def test_an_initializer_that_cannot_serialize_is_refused_at_construction(self):
+        with pytest.raises(NotImplementedError, match="not serializable"):
+            MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3),
+                        kernel_initializer=_NoRoundTrip())
+
+    @pytest.mark.parametrize("bad", [3, None, ["he_normal"]])
+    def test_a_value_that_is_not_an_initializer_is_refused_naming_its_type(self, bad):
+        with pytest.raises(TypeError) as caught:
+            MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3), kernel_initializer=bad)
+        assert type(bad).__name__ in str(caught.value), str(caught.value)
+
+    @pytest.mark.parametrize("given", [
+        "he_normal",
+        {"class_name": "HeNormal", "config": {"seed": 5}},
+        keras.initializers.HeNormal(seed=3),
+        keras.initializers.GlorotUniform(),
+    ], ids=["name", "dict", "seeded-instance", "seedless-instance"])
+    def test_get_config_reports_a_json_safe_spec_that_rebuilds_the_model(self, given):
+        model = MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3),
+                            kernel_initializer=given)
+        config = json.loads(json.dumps(model.get_config()))
+        spec = config["kernel_initializer"]
+        assert isinstance(spec, (str, dict))
+        if not isinstance(given, keras.initializers.Initializer):
+            assert spec == given
+        elif given.seed is not None:
+            assert spec == json.loads(json.dumps(keras.initializers.serialize(given)))
+        rebuilt = MobileNetV1.from_config(copy.deepcopy(config))
+        assert json.loads(json.dumps(rebuilt.get_config()))["kernel_initializer"] == spec
+
+    def test_the_model_keeps_an_instance_and_hands_each_site_a_clone(self):
+        """Do not 'align' V1 with V4: a stored spec re-draws every seeded kernel."""
+        given = keras.initializers.HeNormal(seed=3)
+        model = MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3),
+                            kernel_initializer=given)
+        assert isinstance(model.kernel_initializer, keras.initializers.Initializer)
+        assert model.stem.conv1.kernel_initializer is not given
+        assert model.blocks[0].depthwise_conv.depthwise_initializer is not given
+
+    def test_a_seeded_instance_draws_what_a_clone_of_it_draws(self):
+        """The stem kernel of a seeded model is the draw of a clone of the caller's instance."""
+        given = keras.initializers.HeNormal(seed=3)
+        model = MobileNetV1(width_multiplier=0.25, input_shape=(32, 32, 3),
+                            kernel_initializer=given)
+        model.build((None, 32, 32, 3))
+        kernel = keras.ops.convert_to_numpy(model.stem.conv1.kernel)
+        want = keras.ops.convert_to_numpy(clone_initializer(given)(kernel.shape))
+        np.testing.assert_array_equal(kernel, want)
+
+
+class TestMobileNetV1PretrainedTrunk:
+    """A pretrained load restores every layer outside the head.
+
+    Only ``classification_head`` may differ. A trunk of another width used to
+    load the layers that happened to fit, report the rest and return normally.
+    """
+
+    @staticmethod
+    def _saved(tmp_path, variant, **kwargs):
+        donor = MobileNetV1.from_variant(
+            variant, num_classes=10, input_shape=(32, 32, 3), **kwargs
+        )
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(str(tmp_path), "donor.keras")
+        donor.save(path)
+        return donor, path
+
+    @staticmethod
+    def _by_path(model):
+        return {w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)
+                for w in model.weights}
+
+    def test_a_checkpoint_of_another_width_is_refused(self, tmp_path):
+        _, path = self._saved(tmp_path, "pico")
+
+        with pytest.raises(ValueError) as caught:
+            MobileNetV1.from_variant(
+                "small", num_classes=10, input_shape=(32, 32, 3), pretrained=path
+            )
+
+        assert "width_multiplier: checkpoint 0.25, model 0.5" in str(caught.value), str(caught.value)
+
+        # With the configuration comparison off, the layer rule refuses it by itself.
+        receiver = MobileNetV1.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+        with pytest.raises(ValueError) as by_layers:
+            load_pretrained_checkpoint(
+                receiver, path, (32, 32, 3), ignore_config_keys=tuple(receiver.get_config())
+            )
+        assert "shape_mismatch" in str(by_layers.value), str(by_layers.value)
+
+    def test_a_refused_load_writes_nothing(self, tmp_path):
+        _, path = self._saved(tmp_path, "pico")
+        receiver = MobileNetV1.from_variant(
+            "small", num_classes=10, input_shape=(32, 32, 3)
+        )
+        before = [keras.ops.convert_to_numpy(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError):
+            receiver.load_pretrained_weights(path)
+
+        for a, w in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, keras.ops.convert_to_numpy(w))
+
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
+        donor, path = self._saved(tmp_path, "pico")
+
+        loaded = MobileNetV1.from_variant(
+            "pico", num_classes=3, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(loaded)
+        trunk = {p: v for p, v in dst.items() if not p.startswith("classification_head")}
+        assert trunk
+        for p, value in trunk.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
+        heads = {p: v for p, v in dst.items() if p.startswith("classification_head")}
+        assert heads and any(v.shape != src[p].shape for p, v in heads.items())
+
+    def test_a_headless_model_loads_from_a_headed_checkpoint(self, tmp_path):
+        donor, path = self._saved(tmp_path, "pico")
+
+        headless = MobileNetV1.from_variant(
+            "pico", include_top=False, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(headless)
+        assert dst
+        for p, value in dst.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
+
 
 
 if __name__ == "__main__":

@@ -103,6 +103,7 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
 from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
@@ -1016,6 +1017,17 @@ def _mobilenet_original(
     )
 
 
+def _mobilenet_v1_model() -> MobileNetV1:
+    return MobileNetV1(
+        num_classes=4,
+        width_multiplier=_MOBILENET_ALPHA,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_initializer=_MOBILENET_V1_KERNEL_INIT,
+    )
+
+
 def _mobilenet_v2_model() -> MobileNetV2:
     return MobileNetV2(
         num_classes=4,
@@ -1052,6 +1064,17 @@ def _mobilenet_v4_model() -> MobileNetV4:
     )
 
 
+MOBILENET_V1 = StemCase(
+    case_id="mobilenet-v1-relu",
+    make_model=_mobilenet_v1_model,
+    make_original=lambda: _mobilenet_original(
+        _MOBILENET_V1_STEM_FILTERS,
+        _MOBILENET_V1_KERNEL_INIT,
+        keras.layers.ReLU(name="conv1_relu"),
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, _MOBILENET_V1_STEM_FILTERS),
+)
 MOBILENET_V2 = StemCase(
     case_id="mobilenet-v2-relu6",
     make_model=_mobilenet_v2_model,
@@ -1461,6 +1484,7 @@ CASES = [
     RAD_VALID,
     RAD_VALID_NONDIVISIBLE_NOBIAS,
     RAD_SAME,
+    MOBILENET_V1,
     MOBILENET_V2,
     MOBILENET_V3,
     MOBILENET_V4,
@@ -1513,6 +1537,7 @@ BUILT_STEM_ROWS = [
         (32, 32, 3),
     ),
     ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
+    ("mobilenet-v1", _mobilenet_v1_model, (32, 32, 3)),
     ("mobilenet-v2", _mobilenet_v2_model, (32, 32, 3)),
     ("mobilenet-v3", _mobilenet_v3_model, (32, 32, 3)),
     ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
@@ -1574,6 +1599,7 @@ INITIALIZER_AUDIT = {
     "ConvNeXtV1": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "ConvNeXtV2": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "RADConvNet": ("hardcoded", "STEM_INITIALIZER 'truncated_normal'"),
+    "MobileNetV1": ("knob", "he_uniform (default he_normal)"),
     "MobileNetV2": ("knob", "lecun_normal (default he_normal)"),
     "MobileNetV3": ("knob", "he_uniform (default glorot_uniform = ConvStem's)"),
     "MobileNetV4": ("knob", "lecun_normal (default he_normal)"),
@@ -1882,6 +1908,17 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         )
 
 
+def test_the_guard_the_harness_sees_the_other_models_width_rule():
+    """V1 truncates ``32 * 0.6`` to 19; a stem rounded to a multiple of 8 (24) must fail.
+
+    The transplant of the original's 19-wide kernel into a 24-wide conv is refused by Keras
+    before any output is compared.
+    """
+    stem = _stem_from_config(MOBILENET_V1, filters=_MOBILENET_V2_STEM_FILTERS)
+    with pytest.raises(ValueError, match="not compatible with provided weight shape"):
+        assert_stem_matches_original(MOBILENET_V1, stem)
+
+
 def test_the_guard_the_harness_sees_a_dropped_relu6_clip():
     """ReLU with no ``max_value=6`` against V2's clipped stem must fail the comparison."""
     stem = _stem_from_config(MOBILENET_V2, activation_kwargs={})
@@ -1921,6 +1958,7 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         # The pass-2 mutant: MobileNetV3's stem call without kernel_initializer
         # falls back to ConvStem's glorot_uniform. At the model's own default
         # (also glorot_uniform) this was indistinguishable.
+        (MOBILENET_V1, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V2, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V3, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V4, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
@@ -1932,6 +1970,7 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         "bias-initializer",
         "kernel-regularizer-strength",
         "kernel-regularizer-dropped",
+        "mobilenet-v1-initializer-dropped",
         "mobilenet-v2-initializer-dropped",
         "mobilenet-v3-initializer-dropped",
         "mobilenet-v4-initializer-dropped",
