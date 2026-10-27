@@ -1,15 +1,10 @@
 """
-Test suite for the ResNet model with focus on the step-4
-``normalization_kwargs`` plumbing introduced by
-plan_2026-05-18_6776f8ba (D-003).
+Test suite for the ResNet model.
 
-Scope (intentionally narrow — adjacent ResNet tests did not previously
-exist; this file is the new floor for the bit-exact preservation
-invariant in Pre-Mortem #2 of the rms_variants_train Phase 3 refinement
-plan):
+Scope:
 
-1. Default-off plumbing (`normalization_kwargs=None`) resolves to `{}`
-   for every normalization type EXCEPT `batch_norm`, where
+1. Default-off `normalization_kwargs` plumbing (`normalization_kwargs=None`)
+   resolves to `{}` for every normalization type EXCEPT `batch_norm`, where
    plan-2026-08-23T091307-9a110062/D-480 injects the reference
    `momentum=0.9` (torchvision `BatchNorm2d`'s `momentum=0.1`; the two
    frameworks define momentum oppositely, `keras = 1 - torch`). That
@@ -23,13 +18,25 @@ plan):
    contract is preserved.
 4. End-to-end forward pass with a non-`batch_norm` normalization type
    does not raise.
+5. `compute_output_shape` equals the forward shape on an unbuilt model,
+   `classification_head` is defined when headless, `from_variant` takes one
+   contract, a local checkpoint loads through the shared loader, and
+   `kernel_initializer` reaches every convolution without replaying a draw.
 """
 
-import numpy as np
+import inspect
+import json
+import os
 
-from dl_techniques.models.vision.resnet.model import ResNet
+import keras
+import numpy as np
+import pytest
+
+from dl_techniques.models.vision.resnet.model import ResNet, create_resnet
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
+
+from ..initializer_replay_oracle import replayed_pairs
 
 
 # ---------------------------------------------------------------------
@@ -235,8 +242,189 @@ class TestBlockNormKwargsDirect:
         assert blk.normalization_kwargs == {}
 
 
+# ---------------------------------------------------------------------
+# compute_output_shape, the headless attribute, from_variant
+# ---------------------------------------------------------------------
+
+
+def _tiny(**overrides):
+    """A two-stage ResNet small enough to build in well under a second."""
+    cfg = dict(
+        num_classes=5,
+        blocks_per_stage=[1, 1],
+        filters_per_stage=[8, 16],
+        block_type="basic",
+        input_shape=(32, 32, 3),
+    )
+    cfg.update(overrides)
+    return ResNet(**cfg)
+
+
+def _forward_shape(model, side):
+    """The shape `call` produces for a `side` x `side` image, batch axis None."""
+    out = model(np.zeros((1, side, side, 3), "float32"), training=False)
+    if isinstance(out, list):
+        return [(None, *tuple(o.shape)[1:]) for o in out]
+    return (None, *tuple(out.shape)[1:])
+
+
+class TestResNetComputeOutputShape:
+    @pytest.mark.parametrize("stem_type", ["imagenet", "cifar"])
+    @pytest.mark.parametrize("block_type", ["basic", "bottleneck"])
+    @pytest.mark.parametrize("size", [32, 33, None])
+    @pytest.mark.parametrize("include_top", [True, False])
+    def test_it_equals_the_forward_shape_on_an_unbuilt_model(
+        self, stem_type, block_type, size, include_top
+    ):
+        model = _tiny(stem_type=stem_type, block_type=block_type, include_top=include_top)
+        got = model.compute_output_shape((None, size, size, 3))
+        assert not model.built, "compute_output_shape built the model"
+
+        want = _forward_shape(model, 32 if size is None else size)
+        if size is None and not include_top:
+            want = want[:1] + (None, None) + want[3:]
+        assert tuple(got) == want
+
+    def test_the_batch_axis_is_passed_through(self):
+        assert _tiny().compute_output_shape((4, 32, 32, 3)) == (4, 5)
+        assert _tiny(include_top=False).compute_output_shape((4, 32, 32, 3))[0] == 4
+
+    def test_deep_supervision_reports_one_shape_per_head(self):
+        model = _tiny(
+            blocks_per_stage=[1, 1, 1],
+            filters_per_stage=[8, 16, 32],
+            enable_deep_supervision=True,
+        )
+        got = model.compute_output_shape((None, 33, 33, 3))
+        want = _forward_shape(model, 33)
+        assert isinstance(got, list) and len(got) == 3
+        assert [tuple(s) for s in got] == want
+
+
+class TestResNetHeadlessAttribute:
+    def test_a_headless_model_defines_its_head_as_none(self):
+        model = _tiny(include_top=False)
+        assert hasattr(model, "classification_head")
+        assert model.classification_head is None
+
+    def test_a_headed_model_holds_its_head(self):
+        assert _tiny().classification_head is not None
+
+
+class TestResNetFromVariant:
+    def test_an_unknown_variant_lists_the_keys(self):
+        with pytest.raises(ValueError, match="Unknown variant 'nope'") as raised:
+            ResNet.from_variant("nope")
+        assert all(key in str(raised.value) for key in ResNet.MODEL_VARIANTS)
+
+    @pytest.mark.parametrize("build", [ResNet.from_variant, create_resnet])
+    def test_pretrained_true_names_the_variant(self, build):
+        with pytest.raises(NotImplementedError, match="variant 'resnet34'"):
+            build("resnet34", pretrained=True)
+
+    def test_a_missing_checkpoint_raises_before_the_model_is_built(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            ResNet.from_variant("resnet18", pretrained=str(tmp_path / "absent.keras"))
+
+    @pytest.mark.parametrize("build", [ResNet.from_variant, create_resnet])
+    def test_the_signature_is_the_house_contract(self, build):
+        assert list(inspect.signature(build).parameters) == [
+            "variant", "num_classes", "input_shape", "pretrained", "kwargs"
+        ]
+        assert inspect.signature(build).parameters["input_shape"].default is None
+
+    @pytest.mark.parametrize(
+        "knob", ["weights_dataset", "weights_input_shape", "cache_dir"]
+    )
+    def test_a_removed_download_knob_is_refused(self, knob):
+        with pytest.raises(ValueError, match=knob):
+            ResNet.from_variant("resnet18", **{knob: "imagenet"})
+
+    def test_an_override_reaches_the_model_and_leaves_the_preset_alone(self):
+        before = {k: dict(v) for k, v in ResNet.MODEL_VARIANTS.items()}
+        model = ResNet.from_variant(
+            "resnet18", num_classes=5, blocks_per_stage=[1, 1, 1, 1], input_shape=(32, 32, 3)
+        )
+        assert model.blocks_per_stage == [1, 1, 1, 1]
+        assert ResNet.MODEL_VARIANTS == before
+
+    def test_the_unused_input_attributes_and_the_download_stub_are_gone(self):
+        model = _tiny()
+        for name in ("input_height", "input_width", "input_channels"):
+            assert not hasattr(model, name)
+        assert not hasattr(ResNet, "_download_weights")
+
+
+class TestResNetPretrainedLoad:
+    def test_a_checkpoint_of_the_same_architecture_loads_its_tensors(self, tmp_path):
+        donor = _tiny()
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(tmp_path, "donor.keras")
+        donor.save(path)
+
+        receiver = ResNet.from_variant(
+            "resnet18", num_classes=5, pretrained=path,
+            blocks_per_stage=[1, 1], filters_per_stage=[8, 16], block_type="basic",
+            input_shape=(32, 32, 3),
+        )
+        for a, b in zip(donor.weights, receiver.weights):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_a_checkpoint_that_restores_no_layer_raises(self, tmp_path):
+        donor = _tiny()
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(tmp_path, "donor.keras")
+        donor.save(path)
+
+        receiver = _tiny(filters_per_stage=[16, 32], num_classes=7)
+        with pytest.raises(ValueError, match="restored no layer"):
+            receiver.load_pretrained_weights(path)
+
+
+class TestResNetKernelInitializer:
+    @staticmethod
+    def _convs(model):
+        return [l for l in model._flatten_layers() if isinstance(l, keras.layers.Conv2D)]
+
+    @pytest.mark.parametrize("block_type, n_convs", [("basic", 6), ("bottleneck", 9)])
+    def test_the_default_is_he_normal_at_every_convolution(self, block_type, n_convs):
+        model = _tiny(block_type=block_type)
+        model.build((None, 32, 32, 3))
+        convs = self._convs(model)
+        assert len(convs) == n_convs
+        assert all(isinstance(c.kernel_initializer, keras.initializers.HeNormal) for c in convs)
+        assert model.get_config()["kernel_initializer"] == "he_normal"
+
+    @pytest.mark.parametrize("block_type, n_convs", [("basic", 6), ("bottleneck", 9)])
+    def test_the_knob_reaches_the_stem_and_every_block_convolution(self, block_type, n_convs):
+        model = _tiny(block_type=block_type, kernel_initializer="lecun_normal")
+        model.build((None, 32, 32, 3))
+        convs = self._convs(model)
+        assert len(convs) == n_convs
+        assert all(isinstance(c.kernel_initializer, keras.initializers.LecunNormal) for c in convs)
+
+    @pytest.mark.parametrize("block_type", ["basic", "bottleneck"])
+    def test_an_initializer_instance_replays_no_draw_and_the_config_is_json_safe(self, block_type):
+        model = _tiny(block_type=block_type, kernel_initializer=keras.initializers.HeNormal())
+        json.dumps(model.get_config())
+        model.build((None, 32, 32, 3))
+        pairs, compared = replayed_pairs(model)
+        assert compared > 0
+        assert pairs == [], f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
+
+    def test_the_config_round_trips_an_initializer_instance(self):
+        model = _tiny(kernel_initializer=keras.initializers.LecunNormal())
+        config = model.get_config()
+        rebuilt = ResNet.from_config(json.loads(json.dumps(config)))
+        assert json.loads(json.dumps(rebuilt.get_config())) == json.loads(json.dumps(config))
+
+    def test_an_unknown_initializer_name_is_refused_by_name(self):
+        with pytest.raises(ValueError, match="no_such_init"):
+            _tiny(kernel_initializer="no_such_init")
+
+
 if __name__ == "__main__":
-    import pytest, sys
+    import sys
 
     sys.exit(pytest.main([__file__, "-vvv"]))
 
@@ -255,7 +443,7 @@ class TestReadmeQuotesNoAccuracy:
     Every one of those was the published paper's number (or, for the CIFAR block, no
     number at all — no such run exists) presented as though it described this
     implementation. NO pretrained weights exist for any architecture in this repo:
-    `_download_weights` raises `NotImplementedError` by design. A prose claim is only
+    `from_variant(pretrained=True)` raises `NotImplementedError` by design. A prose claim is only
     testable by executing something, so this test executes the refusal and then reads
     the file.
     """

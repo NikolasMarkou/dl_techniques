@@ -1092,17 +1092,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "resnet"): Open(
-        "the ResNet migration",
-        "2 violation(s): create_resnet('variant', 'num_classes', 'input_shape', 'pretrained', "
-        "'weights_dataset', 'weights_input_shape', 'cache_dir', 'head_config_overrides') is not "
-        "('variant', 'num_classes', 'input_shape', 'pretrained'); create_resnet: `input_shape` "
-        'does not default to None',
-        ("create_resnet('variant', 'num_classes', 'input_shape', "
-         "'pretrained', 'weights_dataset', 'weights_input_shape', "
-         "'cache_dir', 'head_config_overrides') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_resnet: `input_shape` does not default to None')),
     ("h9_factory_is_one_delegating_return", "cliffordnet"): Open(
         "the CliffordNet migration",
         "3 violation(s): create_cliffordnet('variant', 'num_classes', 'pretrained', "
@@ -1268,15 +1257,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h3_headless_attribute", "resnet"): Open(
-        "the ResNet migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h10_one_name_per_concept", "resnet"): Open(
-        "the ResNet migration",
-        '1 violation(s): constructor has no `kernel_initializer` argument',
-        ('constructor has no `kernel_initializer` argument',)),
     ("h2_member_order", "cliffordnet"): Open(
         "the CliffordNet migration",
         "3 violation(s): class constants after the first method: ['MODEL_VARIANTS']; "

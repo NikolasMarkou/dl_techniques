@@ -387,6 +387,12 @@ def assert_stem_settings_match_original(case: StemCase, stem: ConvStem) -> None:
 # factory with momentum 0.9 -> factory ReLU -> MaxPooling2D(3, strides=2,
 # padding="same") for the imagenet stem only).
 
+#: ``ResNet``'s ``kernel_initializer`` knob, built with a value that is neither
+#: its default (``he_normal``) nor ConvStem's (``glorot_uniform``), so a stem that
+#: dropped the argument is visible. The original's literal ``he_normal`` becomes
+#: this value, the one place the knob is expected to reach.
+_RESNET_KERNEL_INIT = "lecun_normal"
+
 
 def _resnet_original(stem_type: str) -> Original:
     imagenet = stem_type == "imagenet"
@@ -396,7 +402,7 @@ def _resnet_original(stem_type: str) -> Original:
         strides=2 if imagenet else 1,
         padding="same",
         use_bias=False,
-        kernel_initializer="he_normal",
+        kernel_initializer=_RESNET_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(1e-4),
         name="stem_conv",
     )
@@ -432,6 +438,7 @@ def _resnet_model(stem_type: str, input_shape=(64, 64, 3)) -> ResNet:
         include_top=False,
         stem_type=stem_type,
         kernel_regularizer=keras.regularizers.L2(1e-4),
+        kernel_initializer=_RESNET_KERNEL_INIT,
     )
 
 
@@ -1500,7 +1507,7 @@ def _model_stem(model) -> ConvStem:
 #   which IS ConvStem's default, so nothing can be made non-default. The reason
 #   is the model has no initializer to forward.
 INITIALIZER_AUDIT = {
-    "ResNet": ("hardcoded", "he_normal literal in the stem call"),
+    "ResNet": ("knob", "lecun_normal (default he_normal)"),
     "CliffordNet": (
         "knob",
         "kernel TruncatedNormal(0.02), bias Constant(0.25), L2 kernel and bias",
@@ -1905,9 +1912,9 @@ def test_the_guard_the_audit_sees_a_wrong_table_row():
     lie = {**INITIALIZER_AUDIT, "MobileNetV4": ("hardcoded", "wrong")}
     with pytest.raises(AssertionError, match="has kernel_initializer parameter"):
         assert_initializer_audit(MOBILENET_V4, audit=lie)
-    lie = {**INITIALIZER_AUDIT, "ResNet": ("knob", "wrong")}
+    lie = {**INITIALIZER_AUDIT, "UcaEncoder": ("knob", "wrong")}
     with pytest.raises(AssertionError, match="has no kernel_initializer parameter"):
-        assert_initializer_audit(RESNET_CIFAR, audit=lie)
+        assert_initializer_audit(UCA_ENCODER, audit=lie)
     with pytest.raises(AssertionError, match="no INITIALIZER_AUDIT row"):
         assert_initializer_audit(
             MOBILENET_V4, audit={k: v for k, v in INITIALIZER_AUDIT.items() if k != "MobileNetV4"}

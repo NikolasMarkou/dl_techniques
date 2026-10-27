@@ -152,7 +152,7 @@ class TestCapsNetV2:
         warning and returned an untrained backbone — so a caller asking for a
         pretrained stem silently got random weights. Do not reinstate that.
         """
-        with pytest.raises(NotImplementedError, match="No pretrained ResNet weights"):
+        with pytest.raises(NotImplementedError, match="ResNet variant 'resnet18' weights"):
             create_capsnet_v2_pretrained(
                 backbone="resnet18",
                 num_classes=10,

@@ -9,7 +9,7 @@ This is the ResNet-18/34 residual unit.
 """
 
 import keras
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from ..norms import create_normalization_layer
 from ..activations import create_activation_layer
+from dl_techniques.initializers.clone import clone_initializer, initializer_spec
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -67,6 +68,12 @@ class BasicBlock(keras.layers.Layer):
     :type normalization_type: str
     :param activation_type: Type of activation function. Defaults to ``'relu'``.
     :type activation_type: str
+    :param kernel_initializer: Initializer of every convolution kernel, including
+        the shortcut projection. A name or a serialized config is handed to each
+        convolution, which draws from it independently; an ``Initializer`` instance
+        is stored as its serialized config, so no two kernels replay one draw.
+        Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Additional keyword arguments for Layer.
     :type kwargs: Any
     """
@@ -80,6 +87,7 @@ class BasicBlock(keras.layers.Layer):
             normalization_type: str = "batch_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
             **kwargs: Any
     ) -> None:
         """Initialize BasicBlock with specified parameters."""
@@ -101,6 +109,7 @@ class BasicBlock(keras.layers.Layer):
         # this byte-identical to the pre-plumbing factory call. See decisions.md.
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
+        self.kernel_initializer = initializer_spec(kernel_initializer)
 
         # Create sub-layers in __init__
         # First convolution
@@ -110,7 +119,7 @@ class BasicBlock(keras.layers.Layer):
             strides=stride,
             padding="same",
             use_bias=False,
-            kernel_initializer="he_normal",
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=kernel_regularizer,
             name=f"{self.name}_conv1"
         )
@@ -131,7 +140,7 @@ class BasicBlock(keras.layers.Layer):
             strides=1,
             padding="same",
             use_bias=False,
-            kernel_initializer="he_normal",
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=kernel_regularizer,
             name=f"{self.name}_conv2"
         )
@@ -149,7 +158,7 @@ class BasicBlock(keras.layers.Layer):
                 strides=stride,
                 padding="same",
                 use_bias=False,
-                kernel_initializer="he_normal",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=kernel_regularizer,
                 name=f"{self.name}_shortcut_conv"
             )
@@ -247,6 +256,7 @@ class BasicBlock(keras.layers.Layer):
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
+            "kernel_initializer": self.kernel_initializer,
         })
         return config
 

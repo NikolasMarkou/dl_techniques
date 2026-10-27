@@ -187,6 +187,10 @@ def test_no_doc_uses_unverifiable_maturity_puffery():
 # `detr` is NOT an offender and must not be "fixed": its backbone is
 # `keras.applications.ResNet50(weights="imagenet")`, a real download that really
 # works, which is why the rule keys on the phrase, not on the package.
+
+# Since 2026-10-27 `ResNet._download_weights` no longer exists: `from_variant`
+# refuses `pretrained=True` through `pretrained_path_or_raise`. The rule is
+# unchanged, because it keys on the README's wording and never on that symbol.
 DISCLAIMER_RE = re.compile(
     # `[#>*\s]*` absorbs a line-wrap through a code comment or a blockquote:
     # `masked_autoencoder` wraps as "raises\n# `NotImplementedError`".

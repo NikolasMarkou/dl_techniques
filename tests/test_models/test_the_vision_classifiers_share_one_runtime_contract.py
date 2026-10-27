@@ -535,11 +535,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("headless_attribute_is_none", "resnet"): Open(
-        AssertionError,
-        "the ResNet migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
     ("headless_attribute_is_none", "convnext_v1"): Open(
         AssertionError,
         "the ConvNeXt migration",
@@ -585,41 +580,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
-    ("compute_output_shape::odd::headed", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("compute_output_shape::odd::headless", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("compute_output_shape::non_square::headed", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("compute_output_shape::non_square::headless", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("compute_output_shape::unknown::headed", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("compute_output_shape::unknown::headless", "resnet"): Open(
-        NotImplementedError,
-        "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape',
-        'does not have a `compute_output_shape` method implemented'),
-    ("config_round_trip", "resnet"): Open(
-        ValueError,
-        "the ResNet migration",
-        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob",
-        "Unrecognized keyword arguments passed to ResNet: {'kernel_initializer'"),
     ("config_round_trip", "mobilenet_v4"): Open(
         TypeError,
         "the MobileNet V3 and V4 migration",
@@ -691,11 +651,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         '27 regularization losses by default',
         'regularization losses by default'),
-    ("no_replayed_draw::instance", "resnet"): Open(
-        ValueError,
-        "the ResNet migration",
-        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob",
-        "Unrecognized keyword arguments passed to ResNet: {'kernel_initializer'"),
     ("no_replayed_draw::default", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
