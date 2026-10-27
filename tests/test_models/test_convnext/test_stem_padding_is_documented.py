@@ -47,8 +47,8 @@ class TestStemPadding:
         model.build((None, 32, 32, 3))
         downsamples = [
             sub
-            for group in model.downsample_layers_list
-            for sub in (group if isinstance(group, (list, tuple)) else [group])
+            for downsampler in model.downsamplers
+            for sub in downsampler.values()
             if getattr(sub, "padding", None) is not None
         ]
         assert downsamples, "no downsample conv found; the sweep stopped seeing them"

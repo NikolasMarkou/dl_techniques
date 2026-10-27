@@ -426,16 +426,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("documented_override_is_accepted", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'",
-        "got multiple values for keyword argument 'depths'"),
-    ("documented_override_is_accepted", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'",
-        "got multiple values for keyword argument 'depths'"),
     ("pretrained_true_names_the_variant", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -454,18 +444,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
         'NotImplementedError',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("missing_path_raises_file_not_found", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
     ("missing_path_raises_file_not_found", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -484,18 +462,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headed", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headed", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -514,18 +480,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headless", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headless", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -544,16 +498,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("headless_attribute_is_none", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
-    ("headless_attribute_is_none", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
     ("headless_attribute_is_none", "rad_convnet"): Open(
         AssertionError,
         "the RADConvNet migration",
@@ -644,18 +588,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "rad_convnet"): Open(
         AssertionError,
         "the RADConvNet migration",
@@ -682,16 +614,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
         'is not a table spelling'),
-    ("config_fidelity", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        "from_config rewrote the dict it was given",
-        'from_config rewrote the dict it was given'),
-    ("config_fidelity", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        "from_config rewrote the dict it was given",
-        'from_config rewrote the dict it was given'),
     ("config_fidelity", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",
@@ -886,6 +808,8 @@ MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "mobilenet_v2": ("small", {"width_multiplier": 0.5}),
     "mobilenet_v3": ("large", {}),
     "mobilenet_v4": ("hybrid_medium", {}),
+    "convnext_v1": ("tiny", {"depths": [1], "dims": [16]}),
+    "convnext_v2": ("tiny", {"depths": [1], "dims": [16]}),
 }
 MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
 
@@ -940,6 +864,8 @@ SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
     "mobilenet_v2": ({"width_multiplier": 0.36}, "width_multiplier"),
     "mobilenet_v3": ({"width_multiplier": 0.51}, "width_multiplier"),
     "mobilenet_v4": ({"strides": [1, 1, 2, 2, 1, 2, 1]}, "strides"),
+    "convnext_v1": ({"activation": "relu"}, "activation"),
+    "convnext_v2": ({"activation": "relu"}, "activation"),
 }
 SAME_SHAPE_KEYS = tuple(SAME_SHAPE_DONORS)
 
@@ -1694,6 +1620,8 @@ def test_the_layer_names_follow_the_naming_table(key: str) -> None:
 #: spelling nobody anticipated (``uib1_1`` for a MobileNetV4 block, ``dp0`` for a drop path)
 #: fails here. Deeper names belong to the layers themselves (``stem_conv1``, ``dw_conv``,
 #: ``classifier``) and are not read.
+_CONVNEXT_CHILDREN = (r"stem|stage[1-9]\d*_block[1-9]\d*(?:_drop_path)?"
+                      r"|downsample_\d+_(?:norm|conv)|classification_head")
 FAMILY_CHILD_NAMES: Dict[str, str] = {
     "resnet": r"stem|stage[1-9]\d*_block[1-9]\d*|classification_head|supervision_head_\d+",
     "cliffordnet": r"stem|block_\d+(?:_drop_path)?|classification_head",
@@ -1703,6 +1631,8 @@ FAMILY_CHILD_NAMES: Dict[str, str] = {
     "mobilenet_v2": r"stem|block_\d+|conv_last|conv_last_bn|conv_last_relu6|classification_head",
     "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|last_hard_swish|classification_head",
     "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
+    "convnext_v1": _CONVNEXT_CHILDREN,
+    "convnext_v2": _CONVNEXT_CHILDREN,
 }
 
 
@@ -1747,6 +1677,13 @@ FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
                      lambda: _built(classifier("mobilenet_v2"), include_top=False)),
     "mobilenet_v3": (lambda: _built(classifier("mobilenet_v3")),),
     "mobilenet_v4": (lambda: _built(classifier("mobilenet_v4")), _hybrid_v4),
+    # A drop path exists only for a block with a non-zero rate, so one build has them.
+    "convnext_v1": (lambda: _built(classifier("convnext_v1"), drop_path_rate=0.2),
+                    lambda: _built(classifier("convnext_v1"), drop_path_rate=0.2,
+                                   stochastic_mode="gradient", include_top=False)),
+    "convnext_v2": (lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2),
+                    lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2,
+                                   stochastic_mode="gradient", include_top=False)),
 }
 
 

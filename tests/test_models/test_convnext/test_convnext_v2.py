@@ -12,7 +12,7 @@ import tensorflow as tf
 import keras
 import tempfile
 import os
-from typing import Tuple, List
+from typing import Tuple
 
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
@@ -546,8 +546,8 @@ class TestConvNeXtV2:
             # Shape and parameter count are the two quantities the nested-sublayer
             # weight-loss trap is documented to PRESERVE while restoring fresh kernels
             # (SYSTEM.md framework behaviour 1), and `ConvNeXtV2` has exactly that
-            # container shape: `self.stages_list` is `List[List[Dict[str, Layer]]]` and
-            # `self.downsample_layers_list` is `List[List[Layer]]`. So they cannot be the
+            # container shape: `self.stages` is `List[List[Dict[str, Layer]]]` and
+            # `self.downsamplers` is `List[Dict[str, Layer]]`. So they cannot be the
             # whole assertion — the VALUE comparison below is.
             assert original_outputs.shape == loaded_outputs.shape
             assert loaded_model.count_params() == model.count_params()
@@ -694,7 +694,7 @@ class TestConvNeXtV2:
         warning and returned an untrained model — so a caller asking for
         pretrained weights silently got random ones. Do not reinstate that.
         """
-        with pytest.raises(NotImplementedError, match="No pretrained ConvNeXt V2 weights"):
+        with pytest.raises(NotImplementedError, match="Pretrained ConvNeXtV2 variant 'base' weights are not distributed"):
             create_convnext_v2(
                 variant="base",
                 num_classes=num_classes,

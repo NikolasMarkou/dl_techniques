@@ -1282,34 +1282,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
-        "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
-        "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
-        ' create_convnext_v1: `input_shape` does not default to None; create_convnext_v1 is not '
-        'one `return Class.from_variant(..., **kwargs)`',
-        ("create_convnext_v1('variant', 'num_classes', 'input_shape', "
-         "'pretrained', 'weights_dataset', 'weights_input_shape', "
-         "'cache_dir', 'head_config_overrides') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_convnext_v1: `input_shape` does not default to None',
-         'create_convnext_v1 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        "3 violation(s): create_convnext_v2('variant', 'num_classes', 'input_shape', "
-        "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
-        "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
-        ' create_convnext_v2: `input_shape` does not default to None; create_convnext_v2 is not '
-        'one `return Class.from_variant(..., **kwargs)`',
-        ("create_convnext_v2('variant', 'num_classes', 'input_shape', "
-         "'pretrained', 'weights_dataset', 'weights_input_shape', "
-         "'cache_dir', 'head_config_overrides') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_convnext_v2: `input_shape` does not default to None',
-         'create_convnext_v2 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h1_module_header", "convnext_common"): Open(
         "the ConvNeXt migration",
         '1 violation(s): models/vision/convnext/common.py does not exist yet',
@@ -1377,66 +1349,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h2_member_order", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`',
-        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
-         '`compute_output_shape` comes after `from_variant`')),
-    ("h3_one_init_log", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
-        ('__init__ writes 2 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self.input_shape`',)),
-    ("h2_member_order", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`',
-        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
-         '`compute_output_shape` comes after `from_variant`')),
-    ("h3_one_init_log", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
-        ('__init__ writes 2 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self.input_shape`',)),
     ("h2_member_order", "rad_convnet"): Open(
         "the RADConvNet migration",
         '1 violation(s): `from_variant` comes after `from_config`',
@@ -1554,16 +1466,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h10_block_container_names', 'convnext_v1'): Open(
-        'the ConvNeXt migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
-    ('h10_block_container_names', 'convnext_v2'): Open(
-        'the ConvNeXt migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
     ('h10_block_container_names', 'rad_convnet'): Open(
         'the RADConvNet migration',
         '1 violation(s): the stage container `self.stages_list` should be '
@@ -2349,7 +2251,7 @@ VACUOUS: Dict[Tuple[str, str], str] = {
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
-        "mobilenet_v4", "uca_encoder")},
+        "mobilenet_v4", "convnext_v1", "convnext_v2", "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},

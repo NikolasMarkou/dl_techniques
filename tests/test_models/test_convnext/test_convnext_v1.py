@@ -12,7 +12,7 @@ import tensorflow as tf
 import keras
 import tempfile
 import os
-from typing import Tuple, List
+from typing import Tuple
 
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
@@ -522,8 +522,8 @@ class TestConvNeXtV1:
             # Shape and parameter count are necessary but NOT sufficient: they are
             # exactly the two quantities the nested-sublayer weight-loss trap preserves
             # while restoring freshly initialized kernels (SYSTEM.md framework behaviour
-            # 1). `ConvNeXtV1` stores `self.stages_list` as `List[List[Dict[str, Layer]]]`
-            # and `self.downsample_layers_list` as `List[List[Layer]]`, so it has exactly
+            # 1). `ConvNeXtV1` stores `self.stages` as `List[List[Dict[str, Layer]]]`
+            # and `self.downsamplers` as `List[Dict[str, Layer]]`, so it has exactly
             # the container shape that trap is documented for. The VALUE comparison below
             # is the assertion that would fire.
             assert original_outputs.shape == loaded_outputs.shape
@@ -558,16 +558,16 @@ class TestConvNeXtV1:
 
         **Why the trap does not bite here, corrected 2026-08-17 (step 41.1).** The
         original wording credited this to `ConvNeXtV1`'s "code shape", i.e. implied
-        that `stages_list` being `List[List[Dict[str, Layer]]]` is safe. It is not.
-        The result is explained by `convnext_v1.py`'s explicit `build()`, which runs a
-        dummy forward pass over the whole tree and so materializes every nested
+        that `stages` being `List[List[Dict[str, Layer]]]` is safe. It is not.
+        The result is explained by `ConvNeXtV1`'s explicit `build()`, which traces
+        `call` over the whole tree and so materializes every nested
         sublayer — the documented REMEDY for the trap, not evidence of immunity. This
         probe also constructs with a concrete `input_shape`, so the lazy-build path is
         never exercised at all. Read the negative result as "the remedy is in place",
         and expect the trap to return the moment `ConvNeXtV1.build` is removed or
         narrowed.
 
-        The sabotage below is scoped to the weights under `stages_list` for the same
+        The sabotage below is scoped to the weights under `stages` for the same
         reason: the failure it stands in for reinitializes the NESTED sublayers'
         kernels, not every weight in the model. A guard proven only against a
         whole-model scramble is not proven against the partial perturbation it exists
@@ -591,7 +591,7 @@ class TestConvNeXtV1:
             model.save(model_path)
             loaded_model = keras.models.load_model(model_path)
 
-            # A second load, then only the weights UNDER `stages_list` overwritten —
+            # A second load, then only the weights UNDER `stages` overwritten —
             # the observable signature of "restored the graph, reinitialized the
             # nested sublayers' kernels". Scoped deliberately: the trap does not
             # touch the stem, the head or the final norm, so scrambling those too
@@ -603,7 +603,7 @@ class TestConvNeXtV1:
                 if "stage" in v.path or "block" in v.path
             ]
             assert nested, (
-                "no weights matched the stages_list scope; this sabotage would "
+                "no weights matched the stages scope; this sabotage would "
                 "be a no-op and the test would prove nothing"
             )
             assert len(nested) < len(sabotaged.weights), (
@@ -749,7 +749,7 @@ class TestConvNeXtV1:
         warning and returned an untrained model — so a caller asking for
         pretrained weights silently got random ones. Do not reinstate that.
         """
-        with pytest.raises(NotImplementedError, match="No pretrained ConvNeXt V1 weights"):
+        with pytest.raises(NotImplementedError, match="Pretrained ConvNeXtV1 variant 'base' weights are not distributed"):
             create_convnext_v1(
                 variant="base",
                 num_classes=num_classes,

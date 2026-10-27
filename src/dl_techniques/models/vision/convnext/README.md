@@ -184,8 +184,8 @@ All four names are exported from `dl_techniques.models.vision.convnext`.
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
-| **`ConvNextV1Block`** | `dl_techniques.layers.convnext_v1_block` | The core block of the V1 architecture. |
-| **`ConvNextV2Block`** | `dl_techniques.layers.convnext_v2_block` | The V1 block plus GRN. |
+| **`ConvNextV1Block`** | `dl_techniques.layers.conv_blocks.convnext_v1_block` | The core block of the V1 architecture. |
+| **`ConvNextV2Block`** | `dl_techniques.layers.conv_blocks.convnext_v2_block` | The V1 block plus GRN. |
 
 ### 6.3 Factory signature
 
@@ -193,19 +193,19 @@ All four names are exported from `dl_techniques.models.vision.convnext`.
 create_convnext_v1(  # identical signature for create_convnext_v2
     variant="tiny",
     num_classes=1000,
-    input_shape=(None, None, 3),
-    pretrained=False,
-    weights_dataset="imagenet",
-    weights_input_shape=None,
-    cache_dir=None,
-    **kwargs,          # forwarded to the model, e.g. include_top, drop_path_rate
+    input_shape=None,  # None resolves to (None, None, 3)
+    pretrained=False,  # a local .keras path; True raises NotImplementedError
+    **kwargs,          # forwarded to ConvNeXtV1.from_variant, e.g. include_top, drop_path_rate
 )
 ```
 
+`ConvNeXtV1.from_variant(variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs)`
+takes the same arguments. A keyword in `**kwargs` replaces the variant's own value, so
+`from_variant("tiny", depths=[1, 1, 1, 1], dims=[8, 16, 32, 64])` builds a small four-stage model.
 Constructor arguments reachable through `**kwargs` include `depths`, `dims`, `drop_path_rate`,
 `stochastic_mode`, `kernel_size`, `activation`, `use_bias`, `kernel_regularizer`, `dropout_rate`,
-`spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer` and
-`include_top`.
+`spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer`, `include_top` and
+`head_config_overrides`. With `include_top=False` the `classification_head` attribute is `None`.
 
 ---
 
@@ -290,8 +290,18 @@ print(f"Pico model params: {pico_model.count_params():,}")
 
 No pretrained weights are distributed with this package, and none are downloadable. Setting the
 `pretrained` argument to `True` raises `NotImplementedError` rather than silently returning random
-weights; pass a path to a local `.keras` checkpoint instead. The loader tolerates a different classifier width and a different
-input resolution: mismatching weights are skipped and reported.
+weights; pass a path to a local `.keras` checkpoint instead. The loader (`load_pretrained_checkpoint`) takes
+a different classifier width (`num_classes`), a headless target, and a different input resolution
+(the model is fully convolutional): only the `classification_head` layers may differ in shape or be
+absent, a head left at its initialization is named in a warning, and every other layer must be
+restored. A checkpoint written by this class whose configuration differs in an argument that is not
+listed below raises `ValueError` naming the argument and both values (measured for `depths`/`dims`,
+`kernel_size`, `strides`, `activation`, `stochastic_mode`, `use_gamma` and `use_bias`), even when every
+weight shape would fit (`activation`, `stochastic_mode`). A checkpoint written by other code is
+checked by its layers alone: a layer outside the head that cannot be restored raises, naming it.
+`kernel_regularizer`, `dropout_rate`, `spatial_dropout_rate`, `drop_path_rate`,
+`use_softorthonormal_regularizer`, `input_shape` and `num_classes` may differ (measured). A load that
+restores no layer at all also raises.
 
 ```python
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
