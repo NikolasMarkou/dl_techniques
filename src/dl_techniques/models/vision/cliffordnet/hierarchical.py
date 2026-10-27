@@ -45,8 +45,6 @@ References:
       (https://arxiv.org/abs/1603.09382)
 """
 
-from __future__ import annotations
-
 import copy
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -188,7 +186,9 @@ class HierarchicalCliffordNet(keras.Model):
     :param kernel_initializer: Initializer of every kernel: a name, a config dict
         or an ``Initializer`` instance. It is stored as a name or config dict (an
         instance is serialized) and that spec is handed to every layer, so each
-        layer draws its own kernel.
+        layer draws its own kernel when the spec is a name, a dict or a seedless
+        instance. An instance or dict carrying an explicit ``seed`` reuses that
+        seed at every layer by contract, so same-shaped kernels start equal.
     :param bias_initializer: Initializer of every bias; stored and handed out like
         ``kernel_initializer``.
     :param kernel_regularizer: Optional kernel regularizer.
@@ -363,7 +363,7 @@ class HierarchicalCliffordNet(keras.Model):
         drop_rates = linear_drop_path_rates(total, self.stochastic_depth_rate)
         conv_kw = self._conv_kwargs()
 
-        self.blocks_list: List[Dict[str, Any]] = []
+        self.blocks: List[Dict[str, Any]] = []
         index = 0
         for stage, (depth, width) in enumerate(zip(self.stage_depths, self.stage_dims)):
             for j in range(depth):
@@ -382,7 +382,7 @@ class HierarchicalCliffordNet(keras.Model):
                     drop_path_rate=drop_rates[index],
                     name=f"{name}_drop_path",
                 )
-                self.blocks_list.append(
+                self.blocks.append(
                     {"stage": stage, "block": block, "drop_path": drop_path}
                 )
                 index += 1
@@ -444,6 +444,7 @@ class HierarchicalCliffordNet(keras.Model):
             clifford_head_config(
                 num_classes=self.num_classes,
                 dropout_rate=self.dropout_rate,
+                head_config_overrides=self._head_config_overrides,
                 **self._conv_kwargs(),
             ),
             self._head_config_overrides,
@@ -456,7 +457,7 @@ class HierarchicalCliffordNet(keras.Model):
         :return: One list per stage, in order.
         """
         grouped: List[List[Dict[str, Any]]] = [[] for _ in self.stage_depths]
-        for entry in self.blocks_list:
+        for entry in self.blocks:
             grouped[entry["stage"]].append(entry)
         return grouped
 
@@ -537,17 +538,18 @@ class HierarchicalCliffordNet(keras.Model):
 
         :param input_shape: ``(B, H, W, C_in)``.
         :return: ``(B, num_classes)`` when ``include_top``; otherwise the last
-            stage's map ``(B, h, w, stage_dims[-1])``: the stem's output shape,
-            then ``ceil(size / 2)`` per downsampler (a 'same' stride-2
-            depthwise convolution), an unknown size staying unknown.
+            stage's map ``(B, h, w, stage_dims[-1])``: the stem's output shape
+            chained through each downsampler's own ``compute_output_shape``, an
+            unknown size staying unknown.
         """
         if self.include_top:
             return (input_shape[0], self.num_classes)
-        batch, height, width, _ = tuple(self.stem.compute_output_shape(input_shape))
-        for _ in self.downsamplers:
-            height = None if height is None else -(-height // 2)
-            width = None if width is None else -(-width // 2)
-        return (batch, height, width, self.stage_dims[-1])
+        shape = tuple(self.stem.compute_output_shape(input_shape))
+        for entry in self.downsamplers:
+            shape = entry["depthwise"].compute_output_shape(shape)
+            if entry["pointwise"] is not None:
+                shape = entry["pointwise"].compute_output_shape(shape)
+        return tuple(shape)
 
     def load_pretrained_weights(
         self, weights_path: str, skip_mismatch: bool = True
@@ -645,33 +647,27 @@ class HierarchicalCliffordNet(keras.Model):
 
         :return: Dictionary with every constructor argument.
         """
-        config = super().get_config()
-        config.update(
-            {
-                "num_classes": self.num_classes,
-                "include_top": self.include_top,
-                "stage_depths": self.stage_depths,
-                "stage_dims": self.stage_dims,
-                "patch_size": self.patch_size,
-                "shifts": self.shifts,
-                "cli_mode": self.cli_mode,
-                "ctx_mode": self.ctx_mode,
-                "layer_scale_init": self.layer_scale_init,
-                "stochastic_depth_rate": self.stochastic_depth_rate,
-                "dropout_rate": self.dropout_rate,
-                "use_bias": self.use_bias,
-                "kernel_initializer": self.kernel_initializer,
-                "bias_initializer": self.bias_initializer,
-                "kernel_regularizer": keras.regularizers.serialize(
-                    self.kernel_regularizer
-                ),
-                "bias_regularizer": keras.regularizers.serialize(
-                    self.bias_regularizer
-                ),
-                "head_config_overrides": self._head_config_overrides,
-            }
-        )
-        return config
+        config = {
+            "num_classes": self.num_classes,
+            "include_top": self.include_top,
+            "stage_depths": self.stage_depths,
+            "stage_dims": self.stage_dims,
+            "patch_size": self.patch_size,
+            "shifts": self.shifts,
+            "cli_mode": self.cli_mode,
+            "ctx_mode": self.ctx_mode,
+            "layer_scale_init": self.layer_scale_init,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
+            "dropout_rate": self.dropout_rate,
+            "use_bias": self.use_bias,
+            "kernel_initializer": self.kernel_initializer,
+            "bias_initializer": self.bias_initializer,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "head_config_overrides": self._head_config_overrides,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
 
 def create_hierarchical_cliffordnet(

@@ -340,9 +340,8 @@ def test_every_model_package_has_a_roundtrip_subject():
     # superpoint, power_sampling -- are now reached, while the 11 family
     # containers are excluded).
     #
-    # 88 as of 2026-09-04: nine packages landed since -- ascii_bert,
-    # ascii_clifford_bert, ascii_convnext_bert, bit_diffusion, colbert, dit,
-    # ets, levjepa and shared (embeddings_experimental's leaf base package).
+    # 88 as of 2026-09-04: nine packages landed since -- bit_diffusion, colbert,
+    # dit, ets, levjepa and four since removed.
     #
     # 89 as of 2026-09-08: `doc_res` landed under
     # `models/vision/image_restoration/`. It joined with a REAL subject
@@ -365,7 +364,10 @@ def test_every_model_package_has_a_roundtrip_subject():
     # `cliffordlm` leaf under `models/language/` (CliffordNetLM moved out of
     # `vision/cliffordnet/`), with a real subject (`_b_cliffordlm`). Re-derived
     # with the command above.
-    assert len(on_disk) == 110, f"expected 110 packages, found {len(on_disk)}"
+    #
+    # 106 as of 2026-10-27: the `embeddings_experimental` family (ascii_bert,
+    # ascii_clifford_bert, ascii_convnext_bert, shared) was removed.
+    assert len(on_disk) == 106, f"expected 106 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

@@ -1,6 +1,6 @@
 # Models Package
 
-Model architectures, grouped into 13 families under `src/dl_techniques/models/`.
+Model architectures, grouped into 12 families under `src/dl_techniques/models/`.
 `src/dl_techniques/models/README.md` is the catalogue: every family, every leaf package,
 one line each. This file is the authoring contract.
 
@@ -16,7 +16,7 @@ one line each. This file is the authoring contract.
 
 ## Layout
 
-Families: `common` `embeddings_experimental` `general_purpose` `graph` `language` `memory`
+Families: `common` `general_purpose` `graph` `language` `memory`
 `neural_computer` `point_cloud` `probabilistic` `tabular` `time_series` `vision` `vision_language`.
 
 A **leaf package** is a directory with an `__init__.py` and no `__init__.py`-bearing child.
@@ -26,10 +26,11 @@ wrong test. Re-derive any count with the command beside it; never quote one from
 
 ```bash
 find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 124 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 372 .py
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 380 .py
 ```
 
-Both re-derived 2026-10-14 by running exactly those two commands, after
+Both re-derived 2026-10-27 by running exactly those two commands, after the
+`embeddings_experimental` family (5 packages) was removed. Previously re-derived 2026-10-14, after
 `time_series/neural_hmm/loss.py` was deleted (-1 `.py`, no package change); the readings
 just before the deletion were **124 / 373**, so 3 packages and 13 files had arrived since
 2026-10-05 from other work that never re-ran the commands. Re-derived 2026-10-05
@@ -81,8 +82,8 @@ class ResNet(keras.Model):
 even though the class lives at
 `src/dl_techniques/models/vision/resnet/model.py`.
 
-The `package` string is the defining module's dotted path with the **13 family directories**
-(`common`, `embeddings_experimental`, `general_purpose`, `graph`, `language`, `memory`,
+The `package` string is the defining module's dotted path with the **12 family directories**
+(`common`, `general_purpose`, `graph`, `language`, `memory`,
 `neural_computer`, `point_cloud`, `probabilistic`, `tabular`, `time_series`, `vision`, `vision_language`) and the
 **4 subfamily containers** (`image_restoration`, `keypoints`, `super_resolution`, `sam`) removed.
 A family is a filing decision, not a namespace: it has been reshuffled before, and a key derived
@@ -166,6 +167,13 @@ universal law — see "When it does not apply".
   `@keras.saving.register_keras_serializable()`); explicit `__init__` args, no
   mutable defaults; validate config early; `build()` creates sublayers; `get_config()` round
   trips every constructor arg; `from_config()` only when it does measured real work.
+- **Names inside the class** — the forward method's input is `inputs`; a flat list of blocks is
+  `self.blocks` and a list of stages is `self.stages`; `get_config` is `config = {...}` plus
+  `return {**super().get_config(), **config}`; an initializer argument is stored as
+  `initializer_spec(...)` (a string or a dict), not as the caller's instance. A seeded instance, or
+  a dict with an explicit `seed`, is the one case where two same-shaped kernels start equal, by
+  contract. `tests/test_models/test_the_vision_models_share_one_house_shape.py` reads all of these
+  from source.
 - **Variant tables** — `MODEL_VARIANTS` is the public-name registry a caller passes;
   `SCALE_CONFIGS` (where present) holds the hyperparameters. Some packages carry both.
 - **Pretrained weights** — if none are distributed, `pretrained=True` must raise

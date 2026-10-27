@@ -157,3 +157,62 @@ class TestCliffordNetInitializers:
         assert json.loads(json.dumps(model.get_config()))[argument] == stored
         clone = CliffordNet.from_config(model.get_config())
         assert clone.get_config() == model.get_config()
+
+
+class TestCliffordNetBiasFreeClassifier:
+    """A model-wide bias initializer or regularizer next to a bias-free classifier.
+
+    ``ClassificationHead`` refuses a non-default bias argument when none of its
+    ``Dense`` layers has a bias. The model's own ``bias_initializer`` also governs
+    the trunk, so the model leaves the two bias arguments out of the head config
+    when the overrides leave the head without any bias. The head is untouched.
+    """
+
+    BIAS = dict(
+        bias_initializer=keras.initializers.RandomNormal(stddev=0.01, seed=3),
+        bias_regularizer=keras.regularizers.L2(1e-3),
+    )
+
+    def _model(self, **overrides):
+        model = CliffordNet(
+            num_classes=3, channels=8, depth=1, patch_size=2, **self.BIAS,
+            head_config_overrides=overrides,
+        )
+        model.build((None, 16, 16, 3))
+        return model
+
+    def test_a_bias_free_classifier_builds_and_has_no_bias_weight(self):
+        model = self._model(classifier_use_bias=False)
+        paths = [w.path for w in model.weights if "classification_head" in w.path]
+        assert any(p.endswith("classifier/kernel") for p in paths), paths
+        assert not any(p.endswith("classifier/bias") for p in paths), paths
+
+    def test_the_trunk_keeps_the_model_wide_bias_arguments(self):
+        model = self._model(classifier_use_bias=False)
+        assert isinstance(model.stem.conv1.bias_initializer, keras.initializers.RandomNormal)
+        assert isinstance(model.stem.conv1.bias_regularizer, keras.regularizers.L2)
+        config = json.loads(json.dumps(model.get_config()))
+        assert config["bias_initializer"]["class_name"] == "RandomNormal"
+        assert config["bias_regularizer"]["class_name"] == "L2"
+
+    def test_a_hidden_block_with_a_bias_still_reads_them(self):
+        model = self._model(classifier_use_bias=False, block_dims=(8,))
+        assert isinstance(model.classification_head.bias_initializer,
+                          keras.initializers.RandomNormal)
+
+    def test_a_bias_free_hidden_block_leaves_the_head_without_any_bias(self):
+        model = self._model(classifier_use_bias=False, block_dims=(8,), block_use_bias=False)
+        assert model.classification_head.bias_initializer is None
+
+    def test_a_bias_argument_the_overrides_carry_is_still_refused(self):
+        with pytest.raises(ValueError, match="no layer reads"):
+            self._model(classifier_use_bias=False, bias_initializer="ones")
+
+    def test_the_default_head_still_receives_the_bias_arguments(self):
+        from dl_techniques.models.vision.cliffordnet.model import clifford_head_config
+
+        args = dict(num_classes=3, dropout_rate=0.0, kernel_initializer="he_normal",
+                    kernel_regularizer=None, **{k: v for k, v in self.BIAS.items()})
+        assert {"bias_initializer", "bias_regularizer"} <= set(clifford_head_config(**args))
+        bias_free = clifford_head_config(**args, head_config_overrides={"classifier_use_bias": False})
+        assert not {"bias_initializer", "bias_regularizer"} & set(bias_free)

@@ -152,12 +152,24 @@ transfers the weights. With neither, the model stays unbuilt until its first cal
 **Initializers are stored as specs.** `kernel_initializer` and `bias_initializer` may be a
 name, a config dict or an `Initializer` instance; the model stores a name or a config dict (an
 instance is serialized, so `get_config()` is JSON-safe) and hands that spec to the stem, to
-every block and to the head, so each layer draws its own kernel. Before, one instance reached
-all of them and replayed one random draw (666 of 1891 kernel pairs at `nano`, 820 of 2211 at
+every block and to the head, so each layer draws its own kernel when the spec is a name, a dict
+or a seedless instance. An instance or dict carrying an explicit `seed` reuses that seed at every
+layer by contract, so same-shaped kernels start equal (`seed=7` ties 28 of 66 kernel pairs of a
+depth-2, 16-channel model). Before, one instance reached all of them and replayed one random draw (666 of 1891 kernel pairs at `nano`, 820 of 2211 at
 `hier_345`), and the presets' `TruncatedNormal(0.02)` was created at import time with a seed
 fixed then. Trained weights compute the same function; only the random starting weights
 differ. `dropout_rate` and `stochastic_depth_rate` must lie in `[0, 1)` and the model says so
 itself, naming its own argument.
+
+**The list of blocks is `model.blocks`** on both models (it was `model.blocks_list`): the one
+name for a flat list of blocks across the vision models, `model.stages` being the name for a list
+of stages. Layer names and weight paths did not move. Measured on 2026-10-27: archives that a
+build with `blocks_list` saved (14 subjects: the four patch sizes headed and headless,
+`nano`, `hier_345` and the two Hierarchical patch sizes) load with `keras.models.load_model` into the
+renamed code with outputs equal at `atol=0`, `training=False` and `training=True`.
+A model-wide `bias_initializer` or `bias_regularizer` next to
+`head_config_overrides={"classifier_use_bias": False}` builds: the model leaves its bias arguments
+out of the head config when no `Dense` of the head has a bias, and keeps them for the trunk.
 
 **Layer names and old archives.** Blocks are `block_{i}` and `block_{i}_drop_path` (0-based),
 hierarchical blocks are `stage{S}_block{B}` and `stage{S}_block{B}_drop_path` (both 1-based) and

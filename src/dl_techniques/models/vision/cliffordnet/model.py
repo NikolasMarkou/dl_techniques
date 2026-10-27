@@ -20,9 +20,12 @@ logits: compile with ``SparseCategoricalCrossentropy(from_logits=True)``.
 With ``include_top=False`` it returns the final feature map instead.
 
 Every initializer is stored as a spec (a name or a config dict) and that spec,
-never a live instance, is handed to the stem, each block and the head, so no two
-layers replay one random draw and the preset initializer carries no seed fixed at
-import time.
+never a live instance, is handed to the stem, each block and the head, so a name,
+a dict or a seedless instance gives every layer its own random draw and the
+preset initializer carries no seed fixed at import time. A seeded `Initializer`
+instance (or a dict with an explicit `seed`) reuses its seed at every site by
+contract, so same-shaped kernels start equal (`TruncatedNormal(seed=7)` ties 28
+of 66 kernel pairs of a depth-2 model).
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -38,8 +41,6 @@ References:
     - Huang et al., 2016. Deep Networks with Stochastic Depth.
       (https://arxiv.org/abs/1603.09382)
 """
-
-from __future__ import annotations
 
 import copy
 import keras
@@ -226,6 +227,24 @@ def build_clifford_stem(
     )
 
 
+def _head_reads_a_bias(head_config: Dict[str, Any]) -> bool:
+    """Whether some ``Dense`` of the head built from ``head_config`` has a bias.
+
+    Mirrors the rule ``ClassificationHead`` applies before it accepts a bias
+    initializer or regularizer: the classifier has a bias (``classifier_use_bias``,
+    default true), or a hidden block has one (``block_use_bias``, default true,
+    with ``block_dims`` not ``()``; ``None`` is the head's non-empty default).
+
+    :param head_config: The head configuration, overrides merged in.
+    :return: ``True`` when a bias initializer or regularizer would be read.
+    """
+    block_dims = head_config.get("block_dims")
+    has_blocks = block_dims is None or len(block_dims) > 0
+    return bool(head_config.get("classifier_use_bias", True)) or (
+        bool(head_config.get("block_use_bias", True)) and has_blocks
+    )
+
+
 def clifford_head_config(
     num_classes: int,
     dropout_rate: float,
@@ -233,6 +252,7 @@ def clifford_head_config(
     bias_initializer: Union[str, Dict[str, Any]],
     kernel_regularizer: Optional[keras.regularizers.Regularizer],
     bias_regularizer: Optional[keras.regularizers.Regularizer],
+    head_config_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the head configuration shared by :class:`CliffordNet` and ``HierarchicalCliffordNet``.
 
@@ -245,15 +265,26 @@ def clifford_head_config(
     one linear ``classifier``, named ``classification_head``. Every call returns a
     fresh dict. Each model builds the head itself, so each owns its head.
 
+    The model-wide ``bias_initializer`` and ``bias_regularizer`` also govern the
+    trunk, so a caller may set them while turning the classifier's bias off
+    (``head_config_overrides={"classifier_use_bias": False}``). ``ClassificationHead``
+    refuses a non-default bias argument when none of its ``Dense`` layers has a
+    bias, so when the overrides leave the head without any bias, the two bias
+    arguments are left out of the returned config and the head keeps its own
+    defaults. A bias argument the overrides carry themselves is the caller's and
+    still reaches the head.
+
     :param num_classes: Width of the classifier.
     :param dropout_rate: Dropout before the classifier; 0 builds no Dropout.
     :param kernel_initializer: Kernel initializer spec of the classifier.
     :param bias_initializer: Bias initializer spec of the classifier.
     :param kernel_regularizer: Kernel regularizer of the classifier.
     :param bias_regularizer: Bias regularizer of the classifier.
+    :param head_config_overrides: The model's ``head_config_overrides``, read only
+        to decide whether the head has a bias; they are not merged here.
     :return: The head configuration.
     """
-    return {
+    config = {
         'num_classes': num_classes,
         'use_global_pooling': True,
         'pooling_type': 'avg',
@@ -276,6 +307,9 @@ def clifford_head_config(
         # head differed, and by-name weight transfer could not match it.
         'name': 'classification_head',
     }
+    if not _head_reads_a_bias({**config, **(head_config_overrides or {})}):
+        del config['bias_initializer'], config['bias_regularizer']
+    return config
 
 # ---------------------------------------------------------------------
 
@@ -429,9 +463,12 @@ class CliffordNet(keras.Model):
         the head's classifier: a name, a config dict or an ``Initializer``
         instance. It is stored as a name or config dict (an instance is
         serialized) and that spec is handed to every layer, so each layer draws
-        its own kernel. Defaults to Keras' ``glorot_uniform``, while every
-        ``MODEL_VARIANTS`` entry overrides it with ``TruncatedNormal(0.02)`` to
-        match the reference.
+        its own kernel when the spec is a name, a dict or a seedless instance. An
+        instance or dict carrying an explicit ``seed`` reuses that seed at every
+        layer by contract, so same-shaped kernels start equal (``seed=7`` ties 28
+        of 66 kernel pairs of a depth-2 model). Defaults to Keras'
+        ``glorot_uniform``, while every ``MODEL_VARIANTS`` entry overrides it with
+        ``TruncatedNormal(0.02)`` to match the reference.
     :param bias_initializer: Bias initializer, the classifier's included; stored
         and handed out like ``kernel_initializer``.
     :param kernel_regularizer: Kernel regularizer, the classifier's included.
@@ -685,7 +722,7 @@ class CliffordNet(keras.Model):
             bias_regularizer=self.bias_regularizer,
         )
 
-        self.blocks_list: List[Dict[str, Any]] = []
+        self.blocks: List[Dict[str, Any]] = []
         for i in range(self.depth):
             block = CliffordNetBlock(
                 name=f"block_{i}",
@@ -697,7 +734,7 @@ class CliffordNet(keras.Model):
                 drop_path_rate=drop_rates[i],
                 name=f"block_{i}_drop_path",
             )
-            self.blocks_list.append({"block": block, "drop_path": drop_path})
+            self.blocks.append({"block": block, "drop_path": drop_path})
 
     def _build_head(self) -> None:
         """Build the reference classifier head from :func:`clifford_head_config`.
@@ -715,6 +752,7 @@ class CliffordNet(keras.Model):
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
+                head_config_overrides=self._head_config_overrides,
             ),
             self._head_config_overrides,
         )
@@ -745,7 +783,7 @@ class CliffordNet(keras.Model):
         """
         x = self.stem(inputs, training=training)
 
-        for block_info in self.blocks_list:
+        for block_info in self.blocks:
             x = x + block_info["drop_path"](
                 block_info["block"](x, training=training), training=training
             )
@@ -840,13 +878,19 @@ class CliffordNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-10-26T125959-7af851e5/D-031: the download branch, `_download_weights` and the `except` clause around it are gone. `pretrained=True` raises inside `pretrained_path_or_raise` and nothing degrades to random init; the two D-001 notes below are kept verbatim.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-023: (2026-10-27) the download branch, `_download_weights` and the `except` clause around it are gone. `pretrained=True` raises inside `pretrained_path_or_raise` and nothing degrades to random init; the two D-001 notes below are kept verbatim, each with a dated note under it.
         # DECISION plan_2026-05-11_0090b0b8/D-001: raise rather than return a
         # random-init model; NotImplementedError is outside from_variant's except
         # clause, so it reaches the caller. See decisions.md.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-023
+        # 2026-10-27: no `except` clause remains here, so the note above holds
+        # trivially: nothing catches `NotImplementedError`.
         # DECISION plan_2026-05-11_0090b0b8/D-001: only transport errors
         # degrade to random init here; do not widen this to
         # NotImplementedError. See decisions.md.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-023
+        # 2026-10-27: no transport error can occur any more, because nothing is
+        # downloaded; a missing local path raises `FileNotFoundError` instead.
         weights_path = pretrained_path_or_raise(
             pretrained, f"{cls.__name__} variant '{variant}'"
         )
@@ -871,34 +915,28 @@ class CliffordNet(keras.Model):
 
         :return: Dictionary with all constructor arguments.
         """
-        config = super().get_config()
-        config.update(
-            {
-                "num_classes": self.num_classes,
-                "include_top": self.include_top,
-                "channels": self.channels,
-                "depth": self.depth,
-                "patch_size": self.patch_size,
-                "shifts": self.shifts,
-                "cli_mode": self.cli_mode,
-                "ctx_mode": self.ctx_mode,
-                "use_global_context": self.use_global_context,
-                "layer_scale_init": self.layer_scale_init,
-                "stochastic_depth_rate": self.stochastic_depth_rate,
-                "dropout_rate": self.dropout_rate,
-                "use_bias": self.use_bias,
-                "kernel_initializer": self.kernel_initializer,
-                "bias_initializer": self.bias_initializer,
-                "kernel_regularizer": keras.regularizers.serialize(
-                    self.kernel_regularizer
-                ),
-                "bias_regularizer": keras.regularizers.serialize(
-                    self.bias_regularizer
-                ),
-                "head_config_overrides": self._head_config_overrides,
-            }
-        )
-        return config
+        config = {
+            "num_classes": self.num_classes,
+            "include_top": self.include_top,
+            "channels": self.channels,
+            "depth": self.depth,
+            "patch_size": self.patch_size,
+            "shifts": self.shifts,
+            "cli_mode": self.cli_mode,
+            "ctx_mode": self.ctx_mode,
+            "use_global_context": self.use_global_context,
+            "layer_scale_init": self.layer_scale_init,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
+            "dropout_rate": self.dropout_rate,
+            "use_bias": self.use_bias,
+            "kernel_initializer": self.kernel_initializer,
+            "bias_initializer": self.bias_initializer,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "head_config_overrides": self._head_config_overrides,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
 
 def create_cliffordnet(

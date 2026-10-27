@@ -36,9 +36,8 @@ import tensorflow as tf
 def state_counted_length(dataset: tf.data.Dataset) -> tf.data.Dataset:
     """Count a finite dataset once and state the count as its cardinality.
 
-    Interface contract (callers: ``train.common.nlp.preprocess_clm_packed_dataset``,
-    :func:`dl_techniques.datasets.byte_lm.build_byte_clm_dataset` and
-    ``train.embeddings_experimental.data.build_packed_mlm_dataset``, each on
+    Interface contract (callers: ``train.common.nlp.preprocess_clm_packed_dataset``
+    and :func:`dl_techniques.datasets.byte_lm.build_byte_clm_dataset`, each on
     its non-repeating path): ``dataset`` must be FINITE and yield the same
     NUMBER of elements on every pass (shuffles are fine; a draw that changes the
     count is not, the assertion then raises mid-epoch). Returns ``dataset``

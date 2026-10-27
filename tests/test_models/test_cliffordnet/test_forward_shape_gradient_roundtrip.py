@@ -8,7 +8,7 @@ real data, no output-shape assertion, no gradient-flow test, no
 
 The round-trip is the reason this file exists in this shape. ``CliffordNet``
 stores its blocks as ``List[Dict[str, Layer]]``
-(``self.blocks_list.append({"block": ..., "drop_path": ...})``), and a ``dict``
+(``self.blocks.append({"block": ..., "drop_path": ...})``), and a ``dict``
 inside a ``list`` is not directly Keras-trackable — if the saver's container
 traversal skips it, the restored model has weights that match in **count, path
 AND shape** while being freshly initialized. Every cheap round-trip assertion
@@ -151,7 +151,7 @@ class TestCliffordNetGradientFlow:
 
         block_weights = [
             w
-            for info in model.blocks_list
+            for info in model.blocks
             for w in info["block"].trainable_weights
         ]
         assert block_weights, "the blocks hold no trainable weights at all"
@@ -228,7 +228,7 @@ class TestCliffordNetRoundTrip:
         model.save(path)
         loaded = keras.models.load_model(path)
 
-        for i, (a, b) in enumerate(zip(model.blocks_list, loaded.blocks_list)):
+        for i, (a, b) in enumerate(zip(model.blocks, loaded.blocks)):
             aw = {w.path: _np(w) for w in a["block"].weights}
             bw = {w.path: _np(w) for w in b["block"].weights}
             assert aw, f"block {i} holds no weights"

@@ -276,7 +276,7 @@ test.
 a scalar probability, respectively -- so wrapping either in `CausalLanguageModel` would be the
 wrong tool. The embedding tower trains via a `Qwen3EmbeddingTowerPair` wrapper (query + positive
 document through the same tower as two views, stacked and compiled with the repo's existing
-`SymmetricInfoNCELoss` + stock `fit()`, cloning `SimCSEModel`'s proven shape -- D-013). The
+`SymmetricInfoNCELoss` + stock `fit()` -- D-013). The
 reranker compiles with plain `BinaryCrossentropy` against synthetic 0/1 relevance labels. Both
 use stock `compile()`/`fit()`, no custom `train_step`, and both are held to a "wiring result,
 never a retrieval-quality claim" bar shared with `src/train/language/colbert/`'s own trainers.

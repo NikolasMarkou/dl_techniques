@@ -18,6 +18,7 @@ Test Categories:
 """
 
 import copy
+import json
 import pytest
 import tempfile
 import os
@@ -530,11 +531,99 @@ class TestMobileNetV3HouseShape:
         model = MobileNetV3(num_classes=0, include_top=False, input_shape=(32, 32, 3))
         assert model.classification_head is None
 
+    @pytest.mark.parametrize("shape", [(), (32, 32), (32, 32, 3, 1)])
+    def test_an_input_shape_that_is_not_3d_is_refused(self, shape):
+        """An empty tuple is refused, not silently replaced by the ImageNet shape."""
+        with pytest.raises(ValueError) as caught:
+            MobileNetV3(input_shape=shape)
+        assert f"input_shape must be 3D, got {shape}" in str(caught.value), str(caught.value)
+
+    def test_the_input_shape_defaults_to_the_imagenet_shape(self):
+        assert MobileNetV3(input_shape=None).input_shape_config == (224, 224, 3)
+        assert MobileNetV3.from_variant("small").input_shape_config == (224, 224, 3)
+
+    def test_forward_takes_its_input_as_inputs(self):
+        """The forward method names its input argument ``inputs``, as every classifier does."""
+        import inspect
+        assert list(inspect.signature(MobileNetV3.call).parameters) == [
+            "self", "inputs", "training"]
+
     def test_the_last_block_is_three_named_layers(self):
         model = MobileNetV3(variant="small", input_shape=(32, 32, 3))
         assert [model.last_conv.name, model.last_bn.name, model.last_activation.name] == [
             "last_conv", "last_bn", "last_hard_swish"]
         assert model.last_conv.filters == 576
+
+
+class _NoRoundTrip(keras.initializers.Initializer):
+    """A custom initializer that cannot describe itself, so it cannot be saved."""
+
+    def __call__(self, shape, dtype=None, **kwargs):
+        return keras.initializers.HeNormal(seed=1)(shape, dtype=dtype)
+
+    def get_config(self):
+        raise NotImplementedError("this initializer is not serializable")
+
+
+class TestMobileNetV3Initializer:
+    """The initializer is kept as an instance and cloned per site; its spec is validated once.
+
+    MobileNetV4 stores the spec and hands it to the sites. V3 hands each site a
+    clone of the caller's instance instead (decision D-039, anchored in
+    ``mobilenet_v3.py``), because a stored spec would move every seeded kernel.
+    The spec is still computed in ``__init__``: to refuse a bad initializer at
+    construction and to feed ``get_config``.
+    """
+
+    def test_an_initializer_that_cannot_serialize_is_refused_at_construction(self):
+        with pytest.raises(NotImplementedError, match="not serializable"):
+            MobileNetV3(variant="small", input_shape=(32, 32, 3),
+                        kernel_initializer=_NoRoundTrip())
+
+    @pytest.mark.parametrize("bad", [3, None, ["he_normal"]])
+    def test_a_value_that_is_not_an_initializer_is_refused_naming_its_type(self, bad):
+        with pytest.raises(TypeError) as caught:
+            MobileNetV3(variant="small", input_shape=(32, 32, 3), kernel_initializer=bad)
+        assert type(bad).__name__ in str(caught.value), str(caught.value)
+
+    @pytest.mark.parametrize("given", [
+        "he_normal",
+        {"class_name": "HeNormal", "config": {"seed": 5}},
+        keras.initializers.HeNormal(seed=3),
+        keras.initializers.GlorotUniform(),
+    ], ids=["name", "dict", "seeded-instance", "seedless-instance"])
+    def test_get_config_reports_a_json_safe_spec_that_rebuilds_the_model(self, given):
+        model = MobileNetV3(variant="small", width_multiplier=0.5,
+                            input_shape=(32, 32, 3), kernel_initializer=given)
+        config = json.loads(json.dumps(model.get_config()))
+        spec = config["kernel_initializer"]
+        assert isinstance(spec, (str, dict))
+        if not isinstance(given, keras.initializers.Initializer):
+            assert spec == given
+        elif given.seed is not None:
+            assert spec == json.loads(json.dumps(keras.initializers.serialize(given)))
+        rebuilt = MobileNetV3.from_config(copy.deepcopy(config))
+        assert json.loads(json.dumps(rebuilt.get_config()))["kernel_initializer"] == spec
+
+    def test_the_model_keeps_an_instance_and_hands_each_site_a_clone(self):
+        """Do not 'align' V3 with V4: a stored spec re-draws every seeded kernel."""
+        given = keras.initializers.HeNormal(seed=3)
+        model = MobileNetV3(variant="small", width_multiplier=0.5,
+                            input_shape=(32, 32, 3), kernel_initializer=given)
+        assert isinstance(model.kernel_initializer, keras.initializers.Initializer)
+        assert model.stem.conv1.kernel_initializer is not given
+        assert model.last_conv.kernel_initializer is not given
+
+    def test_a_seeded_instance_draws_what_a_clone_of_it_draws(self):
+        """The stem kernel of a seeded model is the draw of a clone of the caller's instance."""
+        from dl_techniques.initializers.clone import clone_initializer
+        given = keras.initializers.HeNormal(seed=3)
+        model = MobileNetV3(variant="small", width_multiplier=0.5,
+                            input_shape=(32, 32, 3), kernel_initializer=given)
+        model.build((None, 32, 32, 3))
+        kernel = keras.ops.convert_to_numpy(model.stem.conv1.kernel)
+        want = keras.ops.convert_to_numpy(clone_initializer(given)(kernel.shape))
+        np.testing.assert_array_equal(kernel, want)
 
 
 class TestMobileNetV3PretrainedTrunk:

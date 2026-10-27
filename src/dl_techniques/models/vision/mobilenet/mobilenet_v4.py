@@ -20,7 +20,10 @@ stack for spatial ordering, and its `num_heads=8` default means a stage
 width not divisible by 8 raises at construction. `width_multiplier` scales
 `dims` by plain truncation, with no round-to-multiple-of-8 rule. Every
 convolution kernel draws from `kernel_initializer` through its own copy of
-the stored spec, so no two kernels replay one sample. No pretrained
+the stored spec, so a name, a dict or a seedless instance gives every kernel
+its own sample; a seeded instance (or a dict with an explicit `seed`) reuses
+its seed at every site by contract (`HeNormal(seed=7)` ties 351 of 861 kernel
+pairs at `small`). No pretrained
 checkpoints ship with this package; `pretrained=True` raises
 `NotImplementedError`, and a local `.keras` path loads by layer.
 
@@ -105,7 +108,8 @@ class MobileNetV4(keras.Model):
     :param kernel_initializer: Weight initialization strategy, the head's
         included: a name, a serialized config dict, or an `Initializer`
         instance. It is stored as its serialized spec and every layer draws
-        from its own copy of it.
+        from its own copy of it, so each kernel has its own draw unless the spec
+        carries an explicit `seed`, which every site then reuses by contract.
     :param include_top: Whether to include the classification head.
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
@@ -116,8 +120,8 @@ class MobileNetV4(keras.Model):
     :raises ValueError: If `depths`, `dims`, `block_types`, or `strides` have
         different lengths, an invalid block type is given, an attention
         stage index is out of range, `num_classes` is not positive with a
-        head, `width_multiplier` is not positive, `dropout_rate` is outside
-        `[0, 1)`, or `input_shape` is not 3-D.
+        head, `width_multiplier` is not positive or truncates a stage width to
+        0, `dropout_rate` is outside `[0, 1)`, or `input_shape` is not 3-D.
     :raises TypeError: If `kernel_initializer` is not a string, a dict or an
         `Initializer` instance.
 
@@ -136,7 +140,6 @@ class MobileNetV4(keras.Model):
         shallow = MobileNetV4.from_variant("small", depths=[1, 1, 1, 1, 1, 1, 1])
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "small": {
             "depths": [1, 1, 2, 3, 2, 2, 1],
@@ -177,7 +180,6 @@ class MobileNetV4(keras.Model):
         },
     }
 
-    # Architecture constants
     STEM_KERNEL_SIZE = 3
     STEM_STRIDE = 2
     HEAD_HIDDEN_DIM = 1280
@@ -208,11 +210,11 @@ class MobileNetV4(keras.Model):
             )
 
         valid_block_types = ("ConvNext", "ExtraDW", "FFN", "IB")
-        for block_type in block_types:
+        for stage_idx, block_type in enumerate(block_types):
             if block_type not in valid_block_types:
                 raise ValueError(
-                    f"Invalid block type '{block_type}'. "
-                    f"Must be one of {list(valid_block_types)}"
+                    f"block_types[{stage_idx}] must be one of "
+                    f"{list(valid_block_types)}, got '{block_type}'"
                 )
 
         stage_configs = [depths, dims, block_types, strides]
@@ -229,13 +231,19 @@ class MobileNetV4(keras.Model):
             for stage_idx in attention_stages:
                 if not (0 <= stage_idx <= max_stage_idx):
                     raise ValueError(
-                        f"Attention stage index {stage_idx} out of range. "
-                        f"Must be in [0, {max_stage_idx}]"
+                        f"attention_stages entries must be in [0, {max_stage_idx}], "
+                        f"got {stage_idx}"
                     )
 
         if width_multiplier <= 0:
             raise ValueError(
                 f"width_multiplier must be positive, got {width_multiplier}"
+            )
+
+        if any(int(dim * width_multiplier) <= 0 for dim in dims):
+            raise ValueError(
+                f"width_multiplier={width_multiplier} truncates a width of "
+                f"dims={list(dims)} to 0; every stage width must stay positive"
             )
 
         if not 0.0 <= dropout_rate < 1.0:
@@ -268,7 +276,6 @@ class MobileNetV4(keras.Model):
         self.include_top = include_top
         self.input_shape_config = input_shape
 
-        # Head configuration
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.actual_dims = [int(dim * width_multiplier) for dim in dims]
@@ -413,14 +420,14 @@ class MobileNetV4(keras.Model):
         materialize_sublayers(self, input_shape)
         super().build(input_shape)
 
-    def call(self, x, training=None):
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Run the stem, stages, and optional head.
 
-        :param x: Input images, shape `(B, H, W, C)`.
+        :param inputs: Input images, shape `(B, H, W, C)`.
         :param training: Passed to batch norm and dropout.
         :return: Logits, or the 4-D feature map if `include_top=False`.
         """
-        x = self.stem(x, training=training)
+        x = self.stem(inputs, training=training)
 
         for stage_layers in self.stages:
             for layer in stage_layers:

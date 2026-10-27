@@ -24,6 +24,7 @@ Scope:
    `kernel_initializer` reaches every convolution without replaying a draw.
 """
 
+import copy
 import inspect
 import json
 import os
@@ -120,7 +121,7 @@ class TestResNetNormKwargsRmsNoScale:
     """When `normalization_kwargs={'use_scale': False}` is passed AND the
     `normalization_type` supports the kwarg (RMSNorm), every norm layer
     in the model honors it — stem + all in-block norms. This is the
-    contract Step 5 of the plan exercises in E2 `param_matched` mode."""
+    contract the norm-variants sweep relies on in its `param_matched` mode."""
 
     def test_stem_uses_scale_false(self):
         model = _small_resnet18(
@@ -209,7 +210,7 @@ class TestResNetNormKwargsSerialization:
 
 class TestBlockNormKwargsDirect:
     """Direct tests of BasicBlock / BottleneckBlock — same plumbing,
-    addressed via the block surface (the plan E2 trainer reaches it
+    addressed via the block surface (the norm-variants sweep reaches it
     via the ResNet model, but other dl_techniques models also use these
     blocks directly)."""
 
@@ -389,7 +390,7 @@ class TestResNetPretrainedLoad:
         return donor, path
 
     def test_a_resnet50_checkpoint_does_not_load_into_resnet18(self, tmp_path):
-        """The R1 reproduction: it used to restore the stem alone and return."""
+        """It used to restore the stem alone, report the rest and return."""
         donor = ResNet.from_variant("resnet50", num_classes=10, input_shape=(32, 32, 3))
         donor.build((None, 32, 32, 3))
         path = os.path.join(tmp_path, "resnet50.keras")
@@ -492,6 +493,35 @@ class TestResNetKernelInitializer:
         with pytest.raises(ValueError, match="no_such_init"):
             _tiny(kernel_initializer="no_such_init")
 
+    def test_a_seeded_instance_reuses_its_seed_at_every_site_by_contract(self):
+        """The documented exception to 'no two kernels replay one draw'.
+
+        A seeded ``Initializer`` instance is serialized with its seed, and every
+        convolution resolves that spec: same-shaped kernels start equal. The
+        docstrings say so; this test pins the statement they make.
+        """
+        model = _tiny(kernel_initializer=keras.initializers.HeNormal(seed=7))
+        model.build((None, 32, 32, 3))
+        pairs, compared = replayed_pairs(model)
+        assert compared > 0
+        assert pairs, "a seeded instance is documented to tie same-shaped kernels"
+
+
+class TestResNetFromConfig:
+    """``from_config`` is the inherited one: ``__init__`` accepts a serialized regularizer."""
+
+    def test_a_serialized_regularizer_is_rebuilt_and_the_dict_is_left_alone(self):
+        model = _tiny(kernel_regularizer=keras.regularizers.L2(1e-3))
+        config = json.loads(json.dumps(model.get_config()))
+        before = copy.deepcopy(config)
+        rebuilt = ResNet.from_config(config)
+        assert config == before, "from_config rewrote the dict it was given"
+        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+        assert float(rebuilt.kernel_regularizer.l2) == pytest.approx(1e-3)
+
+    def test_the_class_defines_no_from_config_of_its_own(self):
+        assert "from_config" not in vars(ResNet)
+
 
 if __name__ == "__main__":
     import sys
@@ -500,7 +530,7 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------
-# The README's accuracy claims (C-5)
+# The README's accuracy claims
 # ---------------------------------------------------------------------
 
 
