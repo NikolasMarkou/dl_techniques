@@ -459,6 +459,30 @@ class TestMobileNetV3:
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
         np.testing.assert_allclose(probs.sum(axis=1), np.ones(10), rtol=0, atol=atol)
 
+    def test_a_mobilenet_reports_the_shape_it_runs(self):
+        """``compute_output_shape`` and a symbolic call agree with the eager forward.
+
+        The stem is ``self.stem`` (a ``ConvStem``); ``compute_output_shape``
+        must read it and not the sub-layers it used to alias. Keras uses a
+        model's ``compute_output_shape`` for a symbolic call, so a stale read
+        raises ``AttributeError`` on both paths while every test that only runs
+        the eager forward stays green.
+        """
+        model = MobileNetV3(
+            variant="small",
+            num_classes=4,
+            include_top=False,
+            input_shape=(32, 32, 3),
+        )
+        batch = np.zeros((1, 32, 32, 3), "float32")
+        eager = model(batch, training=False)
+
+        reported = model.compute_output_shape((None, 32, 32, 3))
+        assert tuple(reported) == (None,) + tuple(eager.shape[1:])
+
+        symbolic = model(keras.Input(shape=(32, 32, 3)))
+        assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

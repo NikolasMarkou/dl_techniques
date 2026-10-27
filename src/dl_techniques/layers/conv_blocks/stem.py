@@ -337,6 +337,11 @@ class ConvStem(keras.layers.Layer):
             # seed, not a regression. Guard:
             # tests/test_layers/test_conv_blocks/test_stem.py
             # (TestTheTwoConvsDrawIndependently, with a planted control).
+            # DECISION plan-2026-10-26T125959-7af851e5/D-031
+            # 2026-10-27: test_stem.py was split by claim, so that guard now
+            # lives in
+            # tests/test_layers/test_conv_blocks/test_the_two_convs_of_a_stem_draw_independently.py
+            # (same class name, same planted control).
             self.conv2 = self._make_conv(
                 "conv2",
                 self.conv2_filters,
@@ -404,9 +409,10 @@ class ConvStem(keras.layers.Layer):
         ``normalization_kwargs`` wins. Accepting it is not the same as
         computing in it: a norm that builds an inner layer must hand it the same
         policy (``BandLogitNorm`` did not, and crashed under a per-layer float64
-        or ``mixed_float16``). ``tests/test_layers/test_conv_blocks/test_stem.py``
-        sweeps every shape-preserving factory type at both policies and checks
-        each sub-layer's compute dtype.
+        or ``mixed_float16``).
+        ``tests/test_layers/test_conv_blocks/test_the_stem_follows_its_own_dtype_policy.py``
+        sweeps every shape-preserving factory type at float32,
+        ``mixed_float16`` and float64 and checks each sub-layer's compute dtype.
         """
         if self.normalization_type is None:
             return None

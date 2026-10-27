@@ -56,9 +56,12 @@ import pytest
 import keras
 import tensorflow as tf
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from tests.test_layers.test_conv_blocks.stem_instruments import unlocatable_activation
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
@@ -303,6 +306,76 @@ class TestConvUNextStem:
             output = stem(sample_input_small)
 
             assert output.shape == (2, 64, 64, 32)
+
+    def test_convunext_stem_creates_its_conv_stem_in_init(self) -> None:
+        """``stem.stem`` is a ``ConvStem`` the moment the layer is constructed, is
+        unbuilt until the layer is, and no alias of a sub-layer exists at any time.
+
+        An earlier version created the ConvStem inside ``build()`` and set
+        ``conv`` / ``norm`` / ``activation_layer`` aliases there, so before the
+        first call the stem had no sub-layers at all and the Keras layer tree
+        was empty.
+        """
+        removed_aliases = ("_conv_stem", "conv", "norm", "activation_layer")
+        layer = ConvUNextStem(
+            filters=16, kernel_size=5, activation="gelu", use_bias=False,
+            stem_normalization="global_response_norm")
+        assert isinstance(layer.stem, ConvStem)
+        assert layer.stem.name == "stem"
+        assert layer.stem.built is False
+        assert layer.stem in list(layer._flatten_layers(include_self=False))
+        for name in removed_aliases:
+            assert not hasattr(layer, name), f"alias {name!r} exists before build"
+
+        layer(np.zeros((1, 16, 16, 3), "float32"), training=False)
+        assert layer.stem.built is True
+        for name in removed_aliases:
+            assert not hasattr(layer, name), f"alias {name!r} exists after build"
+
+
+class TestConvUNextStemActivationArgument:
+    """What ``ConvUNextStem`` documents about its ``activation`` argument.
+
+    It is handed to ``ConvStem``, whose rules apply unchanged: a string, a
+    callable, or a Layer that is unbuilt (holds no weights) and whose class
+    Keras can locate; a built Layer or an unlocatable class is a ``ValueError``
+    at construction. The messages were measured through ``ConvUNextStem``, not
+    only through ``ConvStem``.
+    """
+
+    @staticmethod
+    def _input() -> np.ndarray:
+        return np.random.default_rng(0).standard_normal((2, 8, 8, 3)).astype("float32")
+
+    def test_a_built_layer_holding_weights_is_refused(self) -> None:
+        built = keras.layers.PReLU()
+        built.build((None, 4))
+        assert built.weights, "control: the PReLU holds an alpha weight"
+        with pytest.raises(ValueError, match="PReLU.*already holds weights"):
+            ConvUNextStem(filters=4, activation=built)
+
+    def test_a_layer_whose_class_cannot_be_located_is_refused_by_name(self) -> None:
+        with pytest.raises(
+                ValueError, match="UnlocatableActivation.*cannot clone") as caught:
+            ConvUNextStem(filters=4, activation=unlocatable_activation())
+        assert "register" in str(caught.value)
+
+    def test_a_registered_unbuilt_layer_is_accepted_and_rebuilt_per_site(self) -> None:
+        """Control for the two refusals: the same PReLU, unbuilt, is fine."""
+        outer = ConvUNextStem(filters=4, activation=keras.layers.PReLU())
+        assert isinstance(outer.stem.act1, keras.layers.PReLU)
+        out = outer(self._input(), training=False)
+        assert tuple(out.shape) == (2, 8, 8, 4)
+
+    def test_a_registered_callable_activation_is_accepted(self) -> None:
+        outer = ConvUNextStem(filters=4, activation=exact_gelu)
+        assert isinstance(outer.stem.act1, keras.layers.Activation)
+        assert tuple(outer(self._input(), training=False).shape) == (2, 8, 8, 4)
+
+    @pytest.mark.parametrize("activation", ["gelu", "relu", "linear"])
+    def test_a_string_activation_is_accepted(self, activation: str) -> None:
+        outer = ConvUNextStem(filters=4, activation=activation)
+        assert tuple(outer(self._input(), training=False).shape) == (2, 8, 8, 4)
 
 
 class TestMergedConvUNextStemKnobs:

@@ -1,5 +1,5 @@
 """
-Guard for B6: the RMS/band norm family must compute its internal statistics at
+Guard: the RMS/band norm family must compute its internal statistics at
 no LESS precision than the active dtype policy.
 
 Six layers hardcode ``ops.cast(inputs, "float32")`` in ``call()``. Under a
@@ -39,30 +39,12 @@ from dl_techniques.layers.norms.zero_centered_adaptive_band_rms_norm import (
 # Distinguishable in float64, all four collapse onto 1e8 in float32.
 PROBE = np.array([[1e8, 1e8 + 1.0, 1e8 + 2.0, 1e8 + 3.0]], dtype=np.float64)
 
+# The ``float64_policy`` fixture (global policy AND ``floatx``) is owned by
+# ``tests/test_layers/conftest.py``.
+
 # Absolute tolerance against the float64 reference. The pre-fix miss was
 # 1.5e-8, so this bound carries ~4 orders of margin.
 FLOAT64_ATOL = 1e-12
-
-
-@pytest.fixture()
-def float64_policy():
-    """Activate a process-global float64 policy and restore it unconditionally.
-
-    ``set_floatx`` and ``set_global_policy`` are PROCESS-GLOBAL. Leaking either
-    of them would silently change the measurements of every test that runs
-    afterwards in the same process, so both are captured before and restored in
-    a ``finally``. ``set_global_policy("float64")`` alone is not sufficient for
-    a functional graph - ``set_floatx`` is also required.
-    """
-    original_floatx = keras.backend.floatx()
-    original_policy = keras.mixed_precision.global_policy().name
-    try:
-        keras.backend.set_floatx("float64")
-        keras.mixed_precision.set_global_policy("float64")
-        yield
-    finally:
-        keras.mixed_precision.set_global_policy(original_policy)
-        keras.backend.set_floatx(original_floatx)
 
 
 def _reference(
