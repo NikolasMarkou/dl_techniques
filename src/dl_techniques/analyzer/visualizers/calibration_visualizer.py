@@ -290,8 +290,15 @@ class CalibrationVisualizer(BaseVisualizer):
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):
             mean_conf = df[df['Model'] == model]['Confidence'].mean()
-            # Position text annotation within the plot area for better visibility
-            ax.text(i, ax.get_ylim()[1] * ANNOTATION_Y_POSITION_FACTOR, f'{mean_conf:.3f}',
+            # Position text annotation within the plot area for better visibility.
+            # DECISION: y is a fraction of the axes height (x stays in data units),
+            # NOT `ylim[1] * factor`. When every confidence is saturated near 1.0 the
+            # y-range is ~1e-6, a data-coordinate label at 0.98 sits tens of thousands
+            # of axes-heights outside the axes, `bbox_inches='tight'` grows the canvas
+            # to include it, and Agg allocates a ~37 GB buffer (measured: 4215 x
+            # 18,346,848 px, OOM-killed trainer). Do NOT restore the data-coordinate form.
+            ax.text(i, ANNOTATION_Y_POSITION_FACTOR, f'{mean_conf:.3f}',
+                    transform=ax.get_xaxis_transform(),
                     ha='center', va='top', fontsize=ANNOTATION_FONT_SIZE,
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
                              alpha=ALPHA_ANNOTATION_BOX))
