@@ -251,8 +251,10 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
               strides=2, input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16], "strides": 2},
         override={"depths": [1, 1], "dims": [8, 16], "strides": 2},
-        head_markers=("classification_head", "head_norm", "classifier"), knob=False,
-        invalid=(({"num_classes": 0}, "num_classes", 0),), sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"num_classes": 0}, "num_classes", 0),
+                 ({"dropout_rate": 2.0}, "dropout_rate", 2.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "squeezenet_v1", f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.1",
         (48, 64, 3),
@@ -361,7 +363,7 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
     "rad_convnet": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[8, 16], rad_kernel_size=5, rad_groups=2,
         mlp_ratio=2, activation="relu", use_bias=False, dropout_rate=0.1, strides=2,
-        input_shape=(32, 48, 3)),
+        input_shape=(32, 48, 3), head_config_overrides={"classifier_dropout_rate": 0.1}),
     "squeezenet_v1": lambda: dict(
         num_classes=7,
         variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.0"),
@@ -426,12 +428,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("pretrained_true_names_the_variant", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("pretrained_true_names_the_variant", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
@@ -444,12 +440,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
         'NotImplementedError',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("missing_path_raises_file_not_found", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
@@ -462,12 +452,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("local_path_round_trip_headed", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
@@ -480,12 +464,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("local_path_round_trip_headless", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
@@ -498,16 +476,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("headless_attribute_is_none", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
-    ("invalid_values_name_the_value::num_classes=0", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        'num_classes=0 was accepted',
-        'num_classes=0 was accepted'),
     ("invalid_values_name_the_value::use_bypass=bogus", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",
@@ -588,12 +556,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        '13 violation(s): stage0_block0_rad_conv, stage0_block0_norm, stage0_block0_expand, '
-        'stage0_block0_reduce, ...',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "clifford_rbf_protonet"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
@@ -810,6 +772,7 @@ MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "mobilenet_v4": ("hybrid_medium", {}),
     "convnext_v1": ("tiny", {"depths": [1], "dims": [16]}),
     "convnext_v2": ("tiny", {"depths": [1], "dims": [16]}),
+    "rad_convnet": ("tiny", {"depths": [1], "dims": [16]}),
 }
 MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
 
@@ -866,6 +829,7 @@ SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
     "mobilenet_v4": ({"strides": [1, 1, 2, 2, 1, 2, 1]}, "strides"),
     "convnext_v1": ({"activation": "relu"}, "activation"),
     "convnext_v2": ({"activation": "relu"}, "activation"),
+    "rad_convnet": ({"activation": "relu"}, "activation"),
 }
 SAME_SHAPE_KEYS = tuple(SAME_SHAPE_DONORS)
 
@@ -1633,6 +1597,9 @@ FAMILY_CHILD_NAMES: Dict[str, str] = {
     "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
     "convnext_v1": _CONVNEXT_CHILDREN,
     "convnext_v2": _CONVNEXT_CHILDREN,
+    "rad_convnet": (r"stem|mlp_activation|stage[1-9]\d*_block[1-9]\d*_"
+                    r"(?:rad_conv|norm|expand|reduce|dropout)"
+                    r"|downsample_\d+_(?:norm|conv)|classification_head"),
 }
 
 
@@ -1684,6 +1651,9 @@ FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
     "convnext_v2": (lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2),
                     lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2,
                                    stochastic_mode="gradient", include_top=False)),
+    # A dropout layer per block exists only with a non-zero rate.
+    "rad_convnet": (lambda: _built(classifier("rad_convnet"), dropout_rate=0.1),
+                    lambda: _built(classifier("rad_convnet"), include_top=False)),
 }
 
 

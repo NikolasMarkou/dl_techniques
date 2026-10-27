@@ -1289,17 +1289,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        "3 violation(s): create_rad_convnet('variant', 'num_classes', 'input_shape') is not "
-        "('variant', 'num_classes', 'input_shape', 'pretrained'); create_rad_convnet: "
-        '`input_shape` does not default to None; create_rad_convnet: `pretrained` does not '
-        'default to False',
-        ("create_rad_convnet('variant', 'num_classes', "
-         "'input_shape') is not ('variant', 'num_classes', 'input_shape', "
-         "'pretrained')",
-         'create_rad_convnet: `input_shape` does not default to None',
-         'create_rad_convnet: `pretrained` does not default to False')),
     ("h9_factory_is_one_delegating_return", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
         "3 violation(s): create_squeezenet_v1('variant', 'num_classes', 'input_shape', 'weights')"
@@ -1348,30 +1337,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h2_member_order", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): `from_variant` comes after `from_config`',
-        ('`from_variant` comes after `from_config`',)),
-    ("h3_headless_attribute", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h5_build_materializes", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`',
-        ('argument `activation` is stored as `self.activation_name`',)),
-    ("h11_from_config_does_real_work", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
-        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
     ("h3_one_init_log", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
         '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
@@ -1465,11 +1430,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h10_block_container_names', 'rad_convnet'): Open(
-        'the RADConvNet migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
     ('h11_get_config_has_the_reference_form', 'squeezenet_v1'): Open(
         'the SqueezeNet migration',
         '2 violation(s): `get_config` does not bind `base_config = '
@@ -2275,7 +2235,7 @@ VACUOUS: Dict[Tuple[str, str], str] = {
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
-        "mobilenet_v4", "convnext_v1", "convnext_v2", "uca_encoder")},
+        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},

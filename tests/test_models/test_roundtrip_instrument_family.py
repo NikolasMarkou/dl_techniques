@@ -198,10 +198,11 @@ NO_HEAD_MARKERS = {
     "zamba2": "task_head/",
     # plan-2026-10-14T062616-81938e81 step 12 Part C (D-079): AlexNet's
     # fc6-fc8 stack is the shared ClassificationHead, DeepSORT's top is its
-    # cosine classifier, RADConvNet's is a ConvNeXt-style LayerNorm + Dense.
+    # cosine classifier. RADConvNet's head, a ConvNeXt-style LayerNorm + Dense, is
+    # the shared ClassificationHead too.
     "alexnet": "classification_head/",
     "deepsort": "cosine_head/",
-    "rad_convnet": "classifier/",
+    "rad_convnet": "classification_head/",
 }
 
 

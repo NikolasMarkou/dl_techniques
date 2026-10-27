@@ -100,6 +100,12 @@ def _convnext_v2(**knobs) -> keras.Model:
                       input_shape=(32, 48, 3), **knobs)
 
 
+def _rad_convnet(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.rad_convnet import RADConvNet
+    return RADConvNet(num_classes=NUM_CLASSES, depths=[1, 1], dims=[8, 16], strides=2,
+                      input_shape=(32, 48, 3), **knobs)
+
+
 def _alexnet(**knobs) -> keras.Model:
     # Square: AlexNet's flatten width is 256 * extent ** 2 for ONE extent.
     # 67 is the smallest input above MIN_SPATIAL_EXTENT (55) that keeps the
@@ -231,6 +237,7 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
     "ConvNeXtV1": (_convnext_v1, (32, 48, 3)),
     "ConvNeXtV2": (_convnext_v2, (32, 48, 3)),
+    "RADConvNet": (_rad_convnet, (32, 48, 3)),
     "AlexNet": (_alexnet, (67, 67, 3)),
     "CBAMNet": (_cbam, (32, 48, 3)),
     "MobileNetV1": (_mobilenet_v1, (32, 48, 3)),
@@ -434,6 +441,9 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     "CBAMNet": {"classifier"},
     "ConvNeXtV1": {"pooled_norm", "classifier"},
     "ConvNeXtV2": {"pooled_norm", "classifier"},
+    # RADConvNet: a ConvNeXt-shaped model with the same head, self.head(self.norm(x.mean([-2, -1]))),
+    # as GAP + LayerNorm + FC (bias-free when the model is).
+    "RADConvNet": {"pooled_norm", "classifier"},
     "AlexNet": {"dense_block", "dense_block_1", "classifier"},
     # MobileNetV1: Howard et al. 2017 Table 1 (Avg Pool, FC, Softmax) as Keras
     # Applications builds it (dropout 1e-3, then the classifier).
@@ -543,7 +553,7 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
         # Small's last point is 1024; width_multiplier <= 1 does not narrow it.
         assert block.units == 1024
         assert block.activation_type == "hard_swish"
-    if subject.startswith("ConvNeXt"):
+    if subject.startswith("ConvNeXt") or subject == "RADConvNet":
         assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
         assert head.pooled_norm.epsilon == pytest.approx(1e-6)
     if subject == "AlexNet":
@@ -586,6 +596,8 @@ KNOBS: Dict[str, Dict[str, object]] = {
     "ResNet": {"kernel_regularizer": keras.regularizers.L2(_L2)},
     "ConvNeXtV1": {"kernel_regularizer": keras.regularizers.L2(_L2)},
     "ConvNeXtV2": {"kernel_regularizer": keras.regularizers.L2(_L2)},
+    # RADConvNet takes neither knob; its head draws from the "truncated_normal" string.
+    "RADConvNet": {},
     "CBAMNet": {"kernel_regularizer": keras.regularizers.L2(_L2),
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "AlexNet": {"kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
@@ -712,6 +724,12 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
         assert config["class_name"] == "TruncatedNormal", (subject, config)
         assert config["config"]["stddev"] == pytest.approx(0.02), (
             f"{subject}: the reference head draws at trunc_normal_(std=.02)"
+        )
+    if subject == "RADConvNet":
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "TruncatedNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.05), (
+            f"{subject}: the head keeps Keras' truncated_normal default, as it did before the shared head"
         )
     if subject == "FFTNet":
         config = keras.initializers.serialize(classifier.kernel_initializer)
