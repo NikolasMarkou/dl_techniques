@@ -180,6 +180,16 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 
 All four names are exported from `dl_techniques.models.vision.convnext`.
 
+`ConvNeXtV1` and `ConvNeXtV2` are two leaves over one private base class, `_ConvNeXtBase`
+(`convnext/common.py`). The two models differ in one layer, the block (`ConvNextV2Block` adds
+GRN), and in their variant tables, so the constructor, the builders, `call`, `build`,
+`compute_output_shape`, the pretrained loader, `from_variant`, `get_config` and `summary` are
+written once, in the base. A leaf file keeps its registration key, its class docstring,
+`MODEL_VARIANTS`, `BLOCK_CLASS` (the block layer class) and its `create_*` factory;
+`tests/test_models/test_convnext/test_the_two_convnext_models_share_one_base.py` fails when a
+leaf defines a method of its own. The base is not exported and is not instantiated: a new
+ConvNeXt variant of the architecture is a third leaf that sets those two attributes.
+
 ### 6.2 Core building blocks
 
 | Layer | Location | Purpose |
@@ -320,6 +330,22 @@ weights at `PRETRAINED_BUILD_SPATIAL` (224) and the model stays fully convolutio
 A `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem`
 (its weights were `stem_conv/...` and `stem_norm/...`), does not load: `keras.models.load_model`
 raises `ValueError`, and no legacy shim exists.
+
+An archive saved at the revision before the layer names moved (2026-10-27, `be92a74eb`) still
+loads: `keras.models.load_model`, `load_weights` and `from_variant(pretrained=<path>)` restore every
+tensor for V1 `tiny` and `cifar10` and V2 `tiny`, headed and headless (6 of 6 subjects), and the
+output is equal at `atol=0` in both `training=False` and `training=True` (measured). Only the
+`w.path` strings change, because archives load by tracked-layer order: `stage_{s}_block_{b}` is
+now `stage{S}_block{B}` (S and B count from 1, the drop path of a block is
+`stage{S}_block{B}_drop_path`), and `downsample_norm_{k}` and `downsample_conv_{k}` are
+`downsample_{k}_norm` and `downsample_{k}_conv` (k stays 0-based). 174 of the 182 weights of V1
+`tiny` move (the stem and the head do not), for example
+`stage_0_block_0/depthwise_conv/kernel` is `stage1_block1/depthwise_conv/kernel` and
+`downsample_conv_0/kernel` is `downsample_0_conv/kernel`. Code that selects weights by path must
+follow. The Python attributes `stages_list` and `downsample_layers_list` are now `stages` and
+`downsamplers` (a downsampler is a `{"norm", "conv"}` pair), `input_shape` is read from
+`input_shape_config`, and `weights_dataset`, `weights_input_shape` and `cache_dir` are gone from
+`from_variant` and the factories.
 
 ---
 

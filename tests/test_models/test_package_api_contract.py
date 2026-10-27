@@ -3739,13 +3739,60 @@ def _import_model_class(rel: str, class_name: str):
     return module, getattr(module, class_name, None)
 
 
+def _base_class_name(base: ast.expr) -> str:
+    """The name a class base is written with: ``Name.id`` or ``Attribute.attr``, else ``""``."""
+    if isinstance(base, ast.Name):
+        return base.id
+    return base.attr if isinstance(base, ast.Attribute) else ""
+
+
+def _from_variant_classes(roots, src_root):
+    """Classes that define or INHERIT ``from_variant``, resolved by base-class name.
+
+    Contract: returns ``(defining, inheriting)``, two sorted lists of
+    ``(relpath, class_name, lineno)`` over every module-level class under ``roots``.
+    ``defining`` holds the classes with their own ``def from_variant``; ``inheriting``
+    holds each class that has no ``from_variant`` of its own but lists, as a base, a class
+    of either list (to a fixed point, so a leaf of a leaf is found). Resolution is by NAME,
+    not by import: ``ConvNeXtV1(_ConvNeXtBase)`` is found because ``_ConvNeXtBase`` defines
+    the method; a name two classes share would link them, which no module under ``models/``
+    does today. The leaves matter because the method is the base's but the variant table,
+    and so the behaviour to probe, is the leaf's.
+    """
+    classes = []
+    for rel, tree in _iter_modules(roots, src_root):
+        classes += [(rel, node) for node in tree.body if isinstance(node, ast.ClassDef)]
+    defining = {
+        (rel, node.name, fn.lineno)
+        for rel, node in classes for fn in node.body
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == "from_variant"
+    }
+    known = {name for _rel, name, _l in defining}
+    own = {(rel, name) for rel, name, _l in defining}
+    inheriting = set()
+    grew = True
+    while grew:
+        grew = False
+        for rel, node in classes:
+            if (rel, node.name) in own or any(r == rel and n == node.name for r, n, _l in inheriting):
+                continue
+            if any(_base_class_name(base) in known for base in node.bases):
+                inheriting.add((rel, node.name, node.lineno))
+                known.add(node.name)
+                grew = True
+    return sorted(defining), sorted(inheriting)
+
+
 @_memo_default_roots
 def _sweep_from_variant_classes(roots=None, src_root=None):
-    """Every MODULE-LEVEL class under ``models/`` that defines ``from_variant``.
+    """Every MODULE-LEVEL class under ``models/`` that defines or inherits ``from_variant``.
 
     Contract: returns ``(sites, counts)`` where ``sites`` is a sorted list of
     ``(relpath, class_name, lineno)``. Module-level only: a ``from_variant`` on a
     nested class is not part of a package's public shape and is measured 0 today.
+    A class that only inherits the method is a site (see ``_from_variant_classes``), and a
+    PRIVATE definer (``_ConvNeXtBase``) that has at least one inheriting class is not: it is
+    an abstract body whose variant table is empty, probed through its leaves instead.
 
     This is the POPULATION, and the runtime arm below is checked against it --
     never against its own list of things it failed to reach, which is blind by
@@ -3753,18 +3800,15 @@ def _sweep_from_variant_classes(roots=None, src_root=None):
     """
     roots = (MODELS_DIR,) if roots is None else roots
     src_root = SRC_ROOT if src_root is None else src_root
-    sites = []
-    for rel, tree in _iter_modules(roots, src_root):
-        for cls in tree.body:
-            if not isinstance(cls, ast.ClassDef):
-                continue
-            for fn in cls.body:
-                if (
-                    isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and fn.name == "from_variant"
-                ):
-                    sites.append((rel, cls.name, fn.lineno))
-    sites.sort()
+    defining, inheriting = _from_variant_classes(roots, src_root)
+    inherited_names = set()
+    for rel, node in ((r, n) for r, tree in _iter_modules(roots, src_root)
+                      for n in tree.body if isinstance(n, ast.ClassDef)):
+        if any((rel, node.name) == (r, n) for r, n, _l in inheriting):
+            inherited_names.update(_base_class_name(base) for base in node.bases)
+    sites = sorted(
+        [site for site in defining if not (site[1].startswith("_") and site[1] in inherited_names)]
+        + inheriting)
     return sites, {"n_from_variant": len(sites)}
 
 
@@ -3962,6 +4006,36 @@ def _throwaway_module(**members) -> types.ModuleType:
     return module
 
 
+#: ``from_variant`` written once in a base class, the shape ConvNeXt V1 and V2 have
+#: (``convnext/common.py::_ConvNeXtBase``): the leaves carry only their variant table.
+_INJECTED_BASE_SRC = '''
+class _Base(keras.Model):
+    MODEL_VARIANTS = {}
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(f"Unknown variant '{variant}'. Available variants: {list(cls.MODEL_VARIANTS)}")
+        return cls(**kwargs)
+'''
+
+_INJECTED_LEAF_SRC = '''
+from .common import _Base
+
+
+class Leaf(_Base):
+    MODEL_VARIANTS = {"tiny": {}}
+
+
+class Unrelated(keras.Model):
+    pass
+
+
+def create_leaf(variant="tiny", **kwargs):
+    return Leaf.from_variant(variant, **kwargs)
+'''
+
+
 class TestFromVariantEnumeratesItsKeys:
     """``from_variant`` must reject an unknown variant by LISTING what is valid.
 
@@ -4065,6 +4139,34 @@ class TestFromVariantEnumeratesItsKeys:
         assert keys == ["base", "large", "tiny"], (keys, source)
         assert _probe_from_variant_enumeration(_InjectedEnumeratingRaise, module) == ""
 
+    def test_a_leaf_that_inherits_from_variant_is_a_site_and_its_private_base_is_not(self, tmp_path):
+        """A class that only inherits ``from_variant`` is probed, with its OWN variant table.
+
+        ``ConvNeXtV1`` and ``ConvNeXtV2`` define no ``from_variant``: the method is
+        ``_ConvNeXtBase``'s, whose table is empty, so probing the base would report an
+        unresolved table and probing nothing would leave both models unchecked. The leaves
+        are the sites; a private base that has an inheriting class is not.
+        """
+        roots, src_root = _write_package_fixture(
+            tmp_path, "", ("common.py", _INJECTED_BASE_SRC), ("model.py", _INJECTED_LEAF_SRC))
+        sites, counts = _sweep_from_variant_classes(roots, src_root)
+        assert {(rel, name) for rel, name, _ in sites} == {("models/injected/model.py", "Leaf")}, sites
+        assert counts["n_from_variant"] == 1, counts
+
+    def test_a_public_base_stays_a_site_beside_its_leaf(self, tmp_path):
+        roots, src_root = _write_package_fixture(
+            tmp_path, "",
+            ("common.py", _INJECTED_BASE_SRC.replace("_Base", "Base")),
+            ("model.py", _INJECTED_LEAF_SRC.replace("_Base", "Base")))
+        sites, _ = _sweep_from_variant_classes(roots, src_root)
+        assert {name for _rel, name, _ in sites} == {"Base", "Leaf"}, sites
+
+    def test_a_private_definer_with_no_leaf_stays_a_site(self, tmp_path):
+        """Dropping the base is conditional on a leaf existing: an orphan is still judged."""
+        roots, src_root = _write_package_fixture(tmp_path, "", ("common.py", _INJECTED_BASE_SRC))
+        sites, _ = _sweep_from_variant_classes(roots, src_root)
+        assert {name for _rel, name, _ in sites} == {"_Base"}, sites
+
 
 # ---------------------------------------------------------------------------
 # R-051: a module-level `create_<name>(variant=...)` delegates to `from_variant`
@@ -4113,7 +4215,9 @@ def _sweep_create_delegation(roots=None, src_root=None):
     * ``no-from_variant`` modules, which are excluded by scope rather than
       judged. Their §5.6 classification is Phase 3's (steps 9-16), and the exact
       16 excluded functions are pinned by name below so the exclusion cannot
-      grow silently.
+      grow silently. One exception: a factory in a module that defines no
+      ``from_variant`` but is a clean delegation to one (ConvNeXt's leaves inherit it
+      from ``_ConvNeXtBase`` in another file) is judged, never excluded.
     """
     roots = (MODELS_DIR,) if roots is None else roots
     src_root = SRC_ROOT if src_root is None else src_root
@@ -4146,9 +4250,6 @@ def _sweep_create_delegation(roots=None, src_root=None):
                 # decisions.md D-071.
                 sites.append((rel, fn.name, fn.lineno, "no-variant", ""))
                 continue
-            if not module_has_from_variant:
-                sites.append((rel, fn.name, fn.lineno, "no-from_variant", ""))
-                continue
             body = [
                 stmt
                 for stmt in fn.body
@@ -4159,6 +4260,16 @@ def _sweep_create_delegation(roots=None, src_root=None):
                 )
             ]
             verdict, detail = _classify_create_body(body)
+            if not module_has_from_variant and verdict != "delegates":
+                # No `from_variant` in this module. A factory that is a clean delegation to
+                # one defined elsewhere (ConvNeXt's leaves inherit it from `_ConvNeXtBase`)
+                # is judged and passes; anything else stays out of scope, so this widening
+                # never turns an exclusion into a new offender (tirex's extended factory
+                # subclasses a class with the method, builds it and runs a dummy forward
+                # pass). A leaf factory that later grows logic lands in the pinned exclusion
+                # set below, and that pin fails.
+                sites.append((rel, fn.name, fn.lineno, "no-from_variant", ""))
+                continue
             sites.append((rel, fn.name, fn.lineno, verdict, detail))
     sites.sort()
     counts = {
@@ -4459,6 +4570,22 @@ def create_injected_direct(variant="tiny", **kwargs):
 '''
 
 
+#: A variant factory that calls an inherited ``from_variant`` and then does more.
+_INJECTED_CREATE_NO_FROM_VARIANT_SRC = '''
+from .common import _Base
+
+
+class Injected(_Base):
+    pass
+
+
+def create_injected(variant="tiny", **kwargs):
+    model = Injected.from_variant(variant, **kwargs)
+    model(np.zeros((1, 4)))
+    return model
+'''
+
+
 class TestCreateFactoriesDelegateToFromVariant:
     """A module-level ``create_<name>(variant=...)`` must be a thin delegation.
 
@@ -4580,6 +4707,27 @@ class TestCreateFactoriesDelegateToFromVariant:
         assert counts["n_variant_factories"] == 2, "the fixture must still be reached"
         assert counts["n_delegates"] == 2, sites
         assert counts["n_logic"] == 0, sites
+
+    def test_a_factory_in_a_module_whose_class_inherits_from_variant_is_judged(self, tmp_path):
+        """``create_convnext_v1`` is a delegation although its module defines no ``from_variant``."""
+        roots, src_root = _write_package_fixture(
+            tmp_path, "", ("common.py", _INJECTED_BASE_SRC), ("model.py", _INJECTED_LEAF_SRC))
+        sites, _ = _sweep_create_delegation(roots, src_root)
+        assert {name: verdict for _r, name, _l, verdict, _d in sites} == {"create_leaf": "delegates"}, sites
+
+    def test_a_factory_with_logic_beside_an_inherited_from_variant_stays_out_of_scope(self, tmp_path):
+        """The widening only adds clean delegations; it never makes a new offender.
+
+        The extended TiRex factory subclasses a class with ``from_variant`` and runs a dummy
+        forward pass after calling it: it stays in the pinned exclusion, so the waiver table
+        is unchanged. A ConvNeXt leaf factory that grew logic would land in that exclusion
+        too, and ``test_the_scope_exclusion_is_exactly_the_pinned_set`` would name it.
+        """
+        roots, src_root = _write_package_fixture(
+            tmp_path, "", ("common.py", _INJECTED_BASE_SRC),
+            ("model.py", _INJECTED_CREATE_NO_FROM_VARIANT_SRC))
+        sites, _ = _sweep_create_delegation(roots, src_root)
+        assert {n: v for _r, n, _l, v, _d in sites} == {"create_injected": "no-from_variant"}, sites
 
     def test_no_create_factory_is_dropped_before_classification(self):
         """The widening itself: a no-``variant`` factory gets a VERDICT now.

@@ -189,6 +189,9 @@ class Module:
     factory_signature: Optional[Tuple[str, ...]] = None  # rule h9; None = no factory rule
     factory_exact: bool = True
     waived: Dict[str, str] = field(default_factory=dict)
+    #: ``(path, class)`` of the base class that holds ``from_variant`` when the module's own
+    #: classes do not, so rule h9 can check a positional factory call against its slots.
+    base: Optional[Tuple[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,7 @@ _ALL = frozenset(CLASS_RULES)
 _NO_HEAD_ATTRIBUTE = _ALL - {"h3_headless_attribute"}
 
 _MOBILENET = "models/vision/mobilenet"
+_CONVNEXT_BASE = (CONVNEXT_COMMON, "_ConvNeXtBase")
 _E4_FACTORY = {"h9_factory_is_one_delegating_return": "E-4"}
 _E7_FACTORY = {"h9_factory_is_one_delegating_return": "E-7"}
 
@@ -251,9 +255,9 @@ MODULES: Tuple[Module, ...] = (
            factory_signature=CANONICAL_FACTORY),
     Module("mobilenet_common", f"{_MOBILENET}/common.py", model_module=False),
     Module("convnext_v1", f"{VISION}/convnext/convnext_v1.py", ("ConvNeXtV1",),
-           factory_signature=CANONICAL_FACTORY),
+           factory_signature=CANONICAL_FACTORY, base=_CONVNEXT_BASE),
     Module("convnext_v2", f"{VISION}/convnext/convnext_v2.py", ("ConvNeXtV2",),
-           factory_signature=CANONICAL_FACTORY),
+           factory_signature=CANONICAL_FACTORY, base=_CONVNEXT_BASE),
     Module("convnext_common", CONVNEXT_COMMON, model_module=False),
     Module("rad_convnet", f"{VISION}/rad_convnet/model.py", ("RADConvNet",),
            factory_signature=CANONICAL_FACTORY),
@@ -277,7 +281,6 @@ _INIT_AND_REG = ("kernel_initializer", "kernel_regularizer")
 _E2 = {"h3_builders_assign": "E-2", "h3_headless_attribute": "E-2",
        "h5_build_materializes": "E-2"}
 _NOT_TRACED = {"h5_build_materializes": "not-a-traced-model"}
-_CONVNEXT_BASE = (CONVNEXT_COMMON, "_ConvNeXtBase")
 
 
 def _subject(key, module, cls, rules=_ALL, **kw) -> Subject:
@@ -497,8 +500,8 @@ def _is_delegating_return(fn: ast.FunctionDef, classes: Sequence[str]) -> bool:
 
 
 def _from_variant_slots(tree: ast.Module, classes: Sequence[str]) -> Optional[List[str]]:
-    """The positional parameter names of ``from_variant`` after ``cls`` in the module's own
-    classes, or ``None`` when the module defines none (the method lives in a base class)."""
+    """The positional parameter names of ``from_variant`` after ``cls`` in ``classes`` of ``tree``,
+    or ``None`` when they define none (the method lives in a base class)."""
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name in classes:
             for member in node.body:
@@ -549,6 +552,10 @@ def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violatio
             if unsent:
                 out.append(f"{fn.name} does not forward {unsent} to `from_variant`")
             slots = _from_variant_slots(ast.parse(source), module.classes)
+            if slots is None and module.base is not None:
+                base_text = _read(module.base[0])
+                if base_text is not None:
+                    slots = _from_variant_slots(ast.parse(base_text), (module.base[1],))
             misrouted = [p for p in names if p in forwarded
                          and not _routes_to_its_own_slot(_body_without_docstring(fn)[0].value, p, slots)]
             if misrouted:
@@ -1282,14 +1289,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h1_module_header", "convnext_common"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet',
-        ('models/vision/convnext/common.py does not exist yet',)),
-    ("no_from_keras_import", "convnext_common"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet',
-        ('models/vision/convnext/common.py does not exist yet',)),
     ("h9_factory_is_one_delegating_return", "rad_convnet"): Open(
         "the RADConvNet migration",
         "3 violation(s): create_rad_convnet('variant', 'num_classes', 'input_shape') is not "
@@ -2041,6 +2040,31 @@ def test_the_rows_read_the_base_file_through_one_accessor(tmp_path: Path, monkey
     (tmp_path / "toy_base.py").write_text(_plant("class Toy(keras.Model):", "class Renamed(keras.Model):"))
     with pytest.raises(AssertionError, match="_Base is not in toy_base.py"):
         base_source(subject)
+
+
+def test_the_factory_rule_reads_from_variant_in_the_base_class(tmp_path: Path, monkeypatch) -> None:
+    """A leaf module whose ``from_variant`` lives in its base is checked against the base's slots."""
+    this = sys.modules[__name__]
+    monkeypatch.setattr(this, "SRC", tmp_path)
+    (tmp_path / "toy_base.py").write_text(
+        "class _Base:\n"
+        "    @classmethod\n"
+        "    def from_variant(cls, variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs):\n"
+        "        pass\n")
+    module = Module("toy_leaf", "toy_leaf.py", ("Leaf",), factory_signature=CANONICAL_FACTORY,
+                    base=("toy_base.py", "_Base"))
+    clean = (
+        "class Leaf(_Base):\n    pass\n\n\n"
+        "def create_leaf(variant='a', num_classes=1000, input_shape=None, pretrained=False, **kwargs):\n"
+        "    return Leaf.from_variant(variant, num_classes, input_shape, pretrained, **kwargs)\n")
+    assert h9_factory_is_one_delegating_return(clean, module) == []
+    swapped = clean.replace("variant, num_classes, input_shape,", "variant, input_shape, num_classes,")
+    assert swapped != clean
+    found = h9_factory_is_one_delegating_return(swapped, module)
+    assert any("another name" in v for v in found), found
+    # Without a base the same positional call cannot be checked, and says so.
+    alone = Module("toy_leaf", "toy_leaf.py", ("Leaf",), factory_signature=CANONICAL_FACTORY)
+    assert h9_factory_is_one_delegating_return(clean, alone), "a positional call needs the method's own signature"
 
 
 def test_a_subject_without_a_base_has_no_base_source() -> None:
