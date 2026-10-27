@@ -410,8 +410,8 @@ class _ConvNeXtBase(keras.Model):
             or the final feature map `(batch_size, H', W', dims[-1])`
             (`include_top=False`).
         """
-        # (V1 and V2 share this method in `_ConvNeXtBase` since 2026-10-27, so "convnext_v2.py's body"
-        # in the anchor below is the same text.)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-037: V1 and V2 share this method in
+        # `_ConvNeXtBase`, so "convnext_v2.py's body" in the anchor below is the same text. See decisions.md.
         # DECISION plan-2026-08-19T163559-499b6f0e/D-069: this method exists because
         # ConvNeXtV2 implements it and ConvNeXtV1 previously raised NotImplementedError for the same call. Mirrors convnext_v2.py's body. See decisions.md.
         shape = self.stem.compute_output_shape(input_shape)
