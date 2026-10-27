@@ -33,7 +33,7 @@ from dl_techniques.models.vision.convunext.model import ConvUNextStem
 
 POLICIES = ["float32", "mixed_float16", "float64"]
 #: ``(attribute, ...)`` of the inner ConvStem a ConvUNextStem configures.
-SUBLAYERS = ("conv1", "norm1", "activation1")
+SUBLAYERS = ("conv1", "norm1", "act1")
 
 
 def _stem(policy: str, **kwargs) -> ConvUNextStem:
@@ -78,7 +78,7 @@ def test_the_exact_activation_forms_follow_the_policy(activation):
     """``substitute_exact`` turns these strings into the exact callables
     (D-277); the callable path of ``ConvStem`` must carry the policy too."""
     outer = _stem("float64", activation=activation)
-    assert outer.stem.activation1.compute_dtype == "float64"
+    assert outer.stem.act1.compute_dtype == "float64"
     out = outer(_x(), training=False)
     assert keras.backend.standardize_dtype(out.dtype) == "float64"
 
@@ -128,14 +128,14 @@ def test_a_layer_whose_class_cannot_be_located_is_refused_by_name():
 def test_a_registered_unbuilt_layer_is_accepted_and_rebuilt_per_site():
     """Control for the two refusals: the same PReLU, unbuilt, is fine."""
     outer = ConvUNextStem(filters=4, activation=keras.layers.PReLU())
-    assert isinstance(outer.stem.activation1, keras.layers.PReLU)
+    assert isinstance(outer.stem.act1, keras.layers.PReLU)
     out = outer(_x(), training=False)
     assert tuple(out.shape) == (2, 8, 8, 4)
 
 
 def test_a_registered_callable_activation_is_accepted():
     outer = ConvUNextStem(filters=4, activation=exact_gelu)
-    assert isinstance(outer.stem.activation1, keras.layers.Activation)
+    assert isinstance(outer.stem.act1, keras.layers.Activation)
     assert tuple(outer(_x(), training=False).shape) == (2, 8, 8, 4)
 
 

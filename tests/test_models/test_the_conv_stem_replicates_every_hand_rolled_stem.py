@@ -32,11 +32,11 @@ How to add a case (one per original variant, later steps extend the table):
 
 * Write ``_<model>_original(...)`` returning an ``Original``: ``sublayers``
   keyed by the ``ConvStem`` attribute the layer corresponds to (``conv1``,
-  ``norm1``, ``activation1``, ``conv2``, ``norm2``, ``activation2``, ``pool``;
+  ``norm1``, ``act1``, ``conv2``, ``norm2``, ``act2``, ``pool``;
   omit a role the original had no layer for) and ``forward(x, training)``
   chaining them exactly as the original ``call()`` did. An activation the
   original FUSED into its conv (``Conv2D(activation="relu")``, no layer of its
-  own, no weights) is declared in ``Original.fused`` (``("activation1",)``)
+  own, no weights) is declared in ``Original.fused`` (``("act1",)``)
   instead of ``sublayers``: the role-set check then expects ``ConvStem`` to
   carry a weightless layer in that role and nothing else, and the comparison
   stays at ``rtol=0, atol=0`` because the conv, then the same ReLU, is the same
@@ -111,6 +111,7 @@ from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
+from tests.layer_naming import PublicAutoName
 from tests.numerics import true_float32_matmul
 
 
@@ -125,7 +126,7 @@ def _true_float32():
 BATCH = 2
 
 #: Sub-layer attributes of ``ConvStem`` a case may supply, in forward order.
-ROLES = ("conv1", "norm1", "activation1", "conv2", "norm2", "activation2", "pool")
+ROLES = ("conv1", "norm1", "act1", "conv2", "norm2", "act2", "pool")
 
 
 # ---------------------------------------------------------------------
@@ -417,7 +418,7 @@ def _resnet_original(stem_type: str) -> Original:
             x = pool(x)
         return x
 
-    sublayers = {"conv1": conv, "norm1": norm, "activation1": act}
+    sublayers = {"conv1": conv, "norm1": norm, "act1": act}
     if pool is not None:
         sublayers["pool"] = pool
     return Original(sublayers=sublayers, forward=forward)
@@ -464,7 +465,7 @@ RESNET_CIFAR = StemCase(
 # the single-conv stems run conv (bias per ``use_bias``) -> ``stem_norm`` BN.
 # The functional ``keras.activations.silu`` is represented here by a
 # parameterless ``Activation`` layer over the same op, which fills the
-# ``activation1`` role the ConvStem has.
+# ``act1`` role the ConvStem has.
 
 #: Non-default conv knobs the models are built with, so a dropped one is seen.
 _CLIFFORD_KERNEL_REG = 1e-4
@@ -519,7 +520,7 @@ def _clifford_family_original(
             sublayers={
                 "conv1": conv1,
                 "norm1": bn1,
-                "activation1": silu,
+                "act1": silu,
                 "conv2": conv2,
                 "norm2": norm,
             },
@@ -728,7 +729,7 @@ def _convunext_original(
 
     sublayers = {"conv1": conv, "norm1": norm}
     if not identity_activation:
-        sublayers["activation1"] = act
+        sublayers["act1"] = act
     return Original(sublayers=sublayers, forward=forward)
 
 
@@ -979,7 +980,7 @@ def _mobilenet_original(
         return activation_layer(x)
 
     return Original(
-        sublayers={"conv1": conv, "norm1": norm, "activation1": activation_layer},
+        sublayers={"conv1": conv, "norm1": norm, "act1": activation_layer},
         forward=forward,
     )
 
@@ -1082,7 +1083,7 @@ def _squeezenet_original(
     sublayers = {"conv1": conv}
     if maxpool is not None:
         sublayers["pool"] = maxpool
-    return Original(sublayers=sublayers, forward=forward, fused=("activation1",))
+    return Original(sublayers=sublayers, forward=forward, fused=("act1",))
 
 
 def _squeezenet_v1_model(variant: str, pool_indices=None) -> SqueezeNetV1:
@@ -1228,7 +1229,7 @@ def _vae_original(
     if norm is not None:
         sublayers["norm1"] = norm
     if not identity_activation:
-        sublayers["activation1"] = act
+        sublayers["act1"] = act
     return Original(sublayers=sublayers, forward=forward)
 
 
@@ -1790,8 +1791,8 @@ def _norm_applied_twice(stem: ConvStem, x, training):
     x = stem.conv1(x)
     x = stem.norm1(x, training=training)
     x = stem.norm1(x, training=training)
-    if stem.activation1 is not None:
-        x = stem.activation1(x)
+    if stem.act1 is not None:
+        x = stem.act1(x)
     if stem.pool is not None:
         x = stem.pool(x)
     return x
@@ -2140,7 +2141,7 @@ def test_every_migrated_model_applies_its_stem_exactly_once(
         )
 
 
-class _AppliesItsStem(keras.layers.Layer):
+class _AppliesItsStem(PublicAutoName, keras.layers.Layer):
     """A planted model: applies a shape-preserving ConvStem ``times`` times."""
 
     def __init__(self, times: int, **kwargs):
@@ -2170,7 +2171,7 @@ def test_control_the_counter_reads_two_when_a_model_applies_its_stem_twice():
         assert all("call" not in vars(layer) for layer in sites.values())
     assert set(readings[1].values()) == {1}, readings[1]
     assert set(readings[2].values()) == {2}, readings[2]
-    assert set(readings[2]) == {"stem", "stem.conv1", "stem.norm1", "stem.activation1"}
+    assert set(readings[2]) == {"stem", "stem.conv1", "stem.norm1", "stem.act1"}
 
 
 @pytest.mark.parametrize(
@@ -2183,7 +2184,7 @@ def test_the_vae_stem_activation_is_the_exact_form(name, exact):
     own function is what is checked.
     """
     stem = _vae_stem_of(_vae_model(True, True, name))
-    assert stem.activation1.activation is exact
+    assert stem.act1.activation is exact
 
 
 # ---------------------------------------------------------------------

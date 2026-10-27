@@ -232,7 +232,7 @@ def test_the_census_sees_the_classes_it_was_written_for():
         "src/dl_techniques/layers/attention/tripse_attention.py::_SEWeights"
     ] == "default name 'se_weights'"
     assert population[
-        "src/dl_techniques/layers/heads/vision/factory.py::_DenseVectorHeadBase"
+        "src/dl_techniques/layers/heads/vision/dense_vector.py::_DenseVectorHeadBase"
     ] == "every construction names it"
     assert population[
         "tests/test_models/test_precision_arm_oracle.py::_HealthyModel"

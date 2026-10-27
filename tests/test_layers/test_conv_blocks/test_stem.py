@@ -117,18 +117,35 @@ class TestShapes:
         layer.build((B, 8, 8, 3))
         assert layer.conv1.name == "stem_conv1"
         assert layer.norm1.name == "stem_norm1"
-        assert layer.activation1.name == "stem_act1"
+        assert layer.act1.name == "stem_act1"
         assert layer.conv2.name == "stem_conv2"
         assert layer.norm2.name == "stem_norm2"
-        assert layer.activation2.name == "stem_act2"
+        assert layer.act2.name == "stem_act2"
         assert layer.pool.name == "stem_pool"
+
+    def test_a_stems_attributes_carry_the_names_of_its_layers(self):
+        # Every sub-layer attribute is named after itself under the stem's own
+        # name (``stem.act1`` is ``{name}_act1``), so a weight path and a Python
+        # attribute spell the same word. Two names are used so a hard-coded
+        # prefix cannot pass.
+        for stem_name in ("stem", "patch_embed"):
+            layer = ConvStem(filters=4, num_convs=2, use_pooling=True, name=stem_name)
+            roles = ("conv1", "norm1", "act1", "conv2", "norm2", "act2", "pool")
+            for role in roles:
+                sublayer = getattr(layer, role)
+                assert sublayer.name == f"{stem_name}_{role}", (stem_name, role)
+            held = {
+                attr for attr, value in vars(layer).items()
+                if isinstance(value, keras.layers.Layer)
+            }
+            assert held == set(roles), sorted(held ^ set(roles))
 
     def test_final_activation_false_builds_no_second_activation(self, rng):
         on = ConvStem(filters=6, num_convs=2, final_activation=True)
         off = ConvStem(filters=6, num_convs=2, final_activation=False)
-        assert on.activation2 is not None
-        assert off.activation2 is None
-        assert off.activation1 is not None
+        assert on.act2 is not None
+        assert off.act2 is None
+        assert off.act1 is not None
         x = _x(rng, (B, 8, 8, 3))
         assert float(np.min(_np(on(x)))) >= 0.0
         # No trailing ReLU: BN output of a random conv has negative entries.
@@ -413,7 +430,7 @@ class TestActivationForms:
     ])
     def test_string_names(self, name, reference, rng):
         layer, pre, out = self._run(name, rng)
-        assert layer.activation1 is not None
+        assert layer.act1 is not None
         np.testing.assert_allclose(out, reference(pre), rtol=0.0, atol=4 * EPS32)
 
     @pytest.mark.parametrize("name", ["gelu", "silu", "hard_swish"])
@@ -447,7 +464,7 @@ class TestActivationForms:
         """Two sites sharing one PReLU would share one ``alpha``."""
         layer = ConvStem(filters=6, num_convs=2, activation_type=keras.layers.PReLU())
         layer.build((B, 8, 8, 3))
-        assert layer.activation1 is not layer.activation2
+        assert layer.act1 is not layer.act2
         alphas = [w for w in layer.weights if "alpha" in w.path]
         assert len(alphas) == 2
 
@@ -455,7 +472,7 @@ class TestActivationForms:
     def test_linear_and_none_build_no_activation(self, activation, rng):
         layer = ConvStem(filters=6, num_convs=2, normalization_type=None,
                          activation_type=activation)
-        assert layer.activation1 is None and layer.activation2 is None
+        assert layer.act1 is None and layer.act2 is None
         x = _x(rng, (B, 8, 8, 3))
         out = _np(layer(x))
         np.testing.assert_allclose(
@@ -719,7 +736,7 @@ class TestTheTwoConvsDrawIndependently:
 
 def _every_sublayer(stem):
     """``(attribute, layer)`` for each sub-layer a fully configured stem owns."""
-    names = ("conv1", "norm1", "activation1", "conv2", "norm2", "activation2", "pool")
+    names = ("conv1", "norm1", "act1", "conv2", "norm2", "act2", "pool")
     return [(name, getattr(stem, name)) for name in names]
 
 
@@ -767,8 +784,8 @@ class TestAPerLayerDtypePolicyReachesEverySubLayer:
     def test_every_activation_form_follows_the_policy(self, activation, kwargs):
         stem = self._stem("mixed_float16", activation_type=activation,
                           activation_kwargs=kwargs)
-        assert stem.activation1.compute_dtype == "float16"
-        assert stem.activation2.compute_dtype == "float16"
+        assert stem.act1.compute_dtype == "float16"
+        assert stem.act2.compute_dtype == "float16"
 
     def test_a_non_default_norm_type_follows_the_policy(self):
         stem = self._stem("float64", normalization_type="rms_norm")
@@ -922,7 +939,7 @@ class TestALayerActivationMustBeCloneable:
 
     def test_a_registered_unbuilt_layer_is_still_accepted(self):
         stem = ConvStem(filters=4, activation_type=keras.layers.PReLU())
-        assert isinstance(stem.activation1, keras.layers.PReLU)
+        assert isinstance(stem.act1, keras.layers.PReLU)
 
 
 # ---------------------------------------------------------------------
@@ -1065,13 +1082,13 @@ class TestWhatAConfigRoundTripDoesToACallable:
                         activation_type=keras.activations.gelu, name="builtin")
         stem.build(data.shape)
         assert stem.get_config()["activation_type"] == "gelu"
-        assert type(stem.activation1) is keras.layers.Activation
+        assert type(stem.act1) is keras.layers.Activation
         rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
         rebuilt.build(data.shape)
         rebuilt.set_weights(stem.get_weights())
         # The type changes with the string: Activation -> the registry GELU.
-        assert type(rebuilt.activation1).__name__ == "GELU"
-        assert type(rebuilt.activation1) is not type(stem.activation1)
+        assert type(rebuilt.act1).__name__ == "GELU"
+        assert type(rebuilt.act1) is not type(stem.act1)
         delta = float(np.max(np.abs(_np(rebuilt(data)) - _np(stem(data)))))
         # Measured 5.023e-09 (float64, this data); the reviewer's 5.0e-09 matches.
         assert delta == pytest.approx(5.0e-09, rel=0.1), delta
@@ -1085,7 +1102,7 @@ class TestWhatAConfigRoundTripDoesToACallable:
         rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
         rebuilt.build(data.shape)
         rebuilt.set_weights(stem.get_weights())
-        assert type(rebuilt.activation1) is keras.layers.ReLU
+        assert type(rebuilt.act1) is keras.layers.ReLU
         np.testing.assert_allclose(
             _np(rebuilt(data)), _np(stem(data)), rtol=0.0, atol=0.0)
 
