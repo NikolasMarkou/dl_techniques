@@ -5,7 +5,7 @@
 subclasses read. It has no ``call``.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import keras
 
@@ -14,33 +14,22 @@ import keras
 # ---------------------------------------------------------------------
 
 from ...activations import ActivationType
-from ...conv_blocks.conv_block import ConvBlock
-from ...dense_block import DenseBlock
 from ...ffn.factory import create_ffn_layer, FFNType
 from ...attention import AttentionType
 from ...attention.factory import (
     create_attention_layer,
     assemble_attention_config,
 )
-from ...norms import create_normalization_layer, NormalizationType
-from dl_techniques.initializers import clone_initializer
-from dl_techniques.utils.tensors import is_power_of_two, is_single_shape
+from ...norms import NormalizationType
 from ..validation import positive_int, resolve_stage_knobs
-from .task_types import VisionTaskType, TaskConfiguration
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # registration decorator is imported above
 
-from .utils import (
-    STAGE_KNOB_DEFAULTS,
-    _drop_off_stage_knobs,
-    _UNRUNNABLE_ATTENTION_TYPES,
-    _SPATIAL_ATTENTION_TYPES,
-    _require_hidden_dim_at_least,
-)
+from .utils import STAGE_KNOB_DEFAULTS, _UNRUNNABLE_ATTENTION_TYPES, _SPATIAL_ATTENTION_TYPES
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.base")
 class BaseVisionHead(keras.layers.Layer):
     """
     Shared construction for the vision task heads.

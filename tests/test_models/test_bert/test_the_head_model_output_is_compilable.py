@@ -71,7 +71,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.layers.heads.nlp.factory import BaseNLPHead
+from dl_techniques.layers.heads.nlp import BaseNLPHead
 from dl_techniques.models.language.bert import BERT, create_bert
 
 BATCH_SIZE = 4

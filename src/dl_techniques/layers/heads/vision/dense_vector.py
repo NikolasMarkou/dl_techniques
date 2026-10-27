@@ -8,7 +8,6 @@ import keras
 # local imports
 # ---------------------------------------------------------------------
 
-from ...conv_blocks.conv_block import ConvBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 from .base import BaseVisionHead
 from .decoder import (
@@ -177,7 +176,7 @@ class _DenseVectorHeadBase(BaseVisionHead):
         )}
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.dense_vector")
 class SurfaceNormalsHead(_DenseVectorHeadBase):
     """
     A unit surface normal per pixel, at eight times the input resolution.
@@ -231,7 +230,7 @@ class SurfaceNormalsHead(_DenseVectorHeadBase):
     _UNIT_NORM = True
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.dense_vector")
 class OpticalFlowHead(_DenseVectorHeadBase):
     """
     A signed 2D displacement per pixel, at eight times the input resolution.

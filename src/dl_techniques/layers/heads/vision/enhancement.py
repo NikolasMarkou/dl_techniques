@@ -1,6 +1,6 @@
 """Enhancement head: a restored or upscaled image."""
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import keras
 
@@ -18,7 +18,7 @@ from .utils import (
 )
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.enhancement")
 class EnhancementHead(BaseVisionHead):
     """
     A restored or upscaled image, built from a feature map.
@@ -73,13 +73,12 @@ class EnhancementHead(BaseVisionHead):
     The class name is frozen. This class once lived inside
     ``create_enhancement_head`` as a closure-local registered class, and was
     lifted to module scope. Do NOT re-nest it there. Its decorator is now
-    ``@register_dl_technique("dl_techniques.layers.heads.vision.factory")``,
+    ``@register_dl_technique("dl_techniques.layers.heads.vision.enhancement")``,
     so ``get_registered_name`` resolves
-    ``dl_techniques.layers.heads.vision.factory>EnhancementHead``. The helper
-    also mints a legacy ``Custom>EnhancementHead`` alias. That alias is what a
-    checkpoint written before 2026-08-29 reads, and it was verified on
-    2026-08-29 to resolve to this same class. It is keyed on the bare class
-    name, so a rename would drop it and break those archives.
+    ``dl_techniques.layers.heads.vision.enhancement>EnhancementHead`` (it was
+    ``...vision.factory>EnhancementHead`` until 2026-10-27, when the key moved
+    to the defining module). The helper also mints a ``Custom>EnhancementHead``
+    alias keyed on the bare class name, so a rename would drop it.
 
     Input shape:
         ``(batch, height, width, channels)``.

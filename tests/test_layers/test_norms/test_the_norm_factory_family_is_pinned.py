@@ -12,7 +12,11 @@ which registry key it will ask for. Measured at Step 15 of
 dynamic, 47 literal.** Plan-2026-10-23T190557-972a9ac5 step 10 (D-030) moved the
 TopoLM block's two norms (now one ``_make_norm`` call site) and the model's final
 norm from literal ``'layer_norm'`` to the ``normalization_type`` knob: **200 sites
-in 101 files, 155 dynamic, 45 literal.** Plan-2026-10-26T125959-7af851e5 step 1
+in 101 files, 155 dynamic, 45 literal.** The split of ``heads/nlp/factory.py`` moved its one dynamic site into
+``heads/nlp/base.py`` (same count), and the split of ``heads/vlm/factory.py``
+(2026-10-27) turned that file's ``(1, 3)`` entry into two files,
+``image_text_matching.py`` ``(1, 0)`` and ``image_captioning.py`` ``(0, 3)``:
+**198 sites in 101 files, 153 dynamic, 45 literal.** Plan-2026-10-26T125959-7af851e5 step 1
 re-derived it after two moves that had left the pins stale: the vision-head
 refactor moved ``heads/vision/factory.py``'s site into ``heads/vision/classification.py``,
 and the stems of ConvUNext, ResNet and UcaEncoder are now built by ``ConvStem``
@@ -97,9 +101,10 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/geometric/clifford_rnn.py": (2, 0),
     "dl_techniques/layers/graphs/graph_neural_network.py": (0, 2),
     "dl_techniques/layers/graphs/relational_graph_transformer_blocks.py": (2, 0),
-    "dl_techniques/layers/heads/nlp/factory.py": (1, 0),
+    "dl_techniques/layers/heads/nlp/base.py": (1, 0),
     "dl_techniques/layers/heads/vision/classification.py": (1, 0),
-    "dl_techniques/layers/heads/vlm/factory.py": (1, 3),
+    "dl_techniques/layers/heads/vlm/image_captioning.py": (0, 3),
+    "dl_techniques/layers/heads/vlm/image_text_matching.py": (1, 0),
     "dl_techniques/layers/moe/experts.py": (2, 0),
     "dl_techniques/layers/moe/gating.py": (1, 0),
     "dl_techniques/layers/norms/factory.py": (1, 0),
@@ -259,7 +264,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (153, 45, 100), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (153, 45, 101), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

@@ -17,7 +17,7 @@ from .base import BaseVisionHead
 from .utils import _refuse_common_layers_call_never_runs, _validated_block_dims, _require_hidden_dim_at_least
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.classification")
 class ClassificationHead(BaseVisionHead):
     """
     One label for a whole image.

@@ -33,9 +33,10 @@ import inspect
 
 import pytest
 
-from dl_techniques.layers.heads.nlp import factory as nlp_factory
+from dl_techniques.layers.heads.nlp import dispatch as nlp_dispatch
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
-from dl_techniques.layers.heads.vlm import factory as vlm_factory
+from dl_techniques.layers.heads.vlm import dispatch as vlm_dispatch
+from dl_techniques.layers.heads.vlm import BaseVLMHead
 from dl_techniques.layers.heads.vlm.task_types import VLMTaskType
 
 
@@ -61,7 +62,7 @@ class TestNoSilentFallback:
     def test_nlp_dispatch_never_silently_substitutes(self, task_type):
         """Every NLPTaskType either has a real head, or raises. Never a silent default."""
         try:
-            head_class = nlp_factory.get_head_class(task_type)
+            head_class = nlp_dispatch.get_head_class(task_type)
         except ValueError:
             return  # unimplemented, and it says so -- this is the correct outcome
         assert _is_usable_head(head_class), (
@@ -77,10 +78,10 @@ class TestNoSilentFallback:
         so returning it defers a guaranteed NotImplementedError to first use.
         """
         try:
-            head_class = vlm_factory.get_head_class(task_type)
+            head_class = vlm_dispatch.get_head_class(task_type)
         except ValueError:
             return  # unimplemented, and it says so
-        assert head_class is not vlm_factory.BaseVLMHead, (
+        assert head_class is not BaseVLMHead, (
             f"VLM task '{task_type.name}' dispatched to the bare BaseVLMHead, which has "
             f"no call() method -- it raises NotImplementedError on first use. An "
             f"unimplemented task must RAISE at dispatch, not return an unusable object."
@@ -99,11 +100,11 @@ class TestNoSilentFallback:
         """The dispatch must not be uniformly raising -- that would also pass vacuously."""
         nlp_ok = [
             t for t in NLPTaskType
-            if not _raises(nlp_factory.get_head_class, t)
+            if not _raises(nlp_dispatch.get_head_class, t)
         ]
         vlm_ok = [
             t for t in VLMTaskType
-            if not _raises(vlm_factory.get_head_class, t)
+            if not _raises(vlm_dispatch.get_head_class, t)
         ]
         assert nlp_ok, "no NLP task resolves to a head -- the dispatch is broken"
         assert vlm_ok, "no VLM task resolves to a head -- the dispatch is broken"

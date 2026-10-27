@@ -339,7 +339,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
     :vartype lm_head: Optional[keras.layers.Dense]
     :ivar task_head: The task head named ``"task_head"``, or None when
         ``include_top`` is False.
-    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.base.BaseNLPHead]
     :raises ValueError: If the width cannot host the tapped grid, does not divide
         among the heads, or if any argument is out of range -- naming the offending
         value in each case; also if ``include_top=True`` comes without a

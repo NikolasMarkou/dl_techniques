@@ -394,7 +394,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # The class is PREFIXED because the bare name `ClassificationHead` is already registered in
-# this repo (`dl_techniques.layers.heads.vision.factory>ClassificationHead`), so its legacy
+# this repo (`dl_techniques.layers.heads.vision.classification>ClassificationHead`), so its legacy
 # `Custom>ClassificationHead` alias is taken and claiming it again raises AliasCollisionError.
 # Prefixing removes the duplicate at its source and lets BOTH classes keep a legacy alias.
 # (`legacy_alias=False` on both sides also silences the error, but it costs each of them its

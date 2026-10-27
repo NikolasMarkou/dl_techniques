@@ -37,9 +37,11 @@ from dl_techniques.layers.ffn.factory import (
     STRICT_DROPPED_KEY_MARKER,
     create_ffn_layer as _factory_create_ffn_layer,
 )
-from dl_techniques.layers.heads.vlm import factory as vlm_factory
-from dl_techniques.layers.heads.vlm.factory import (
+from dl_techniques.layers.heads.vlm import image_captioning as vlm_captioning
+from dl_techniques.layers.heads.vlm import image_text_matching as vlm_matching
+from dl_techniques.layers.heads.vlm.utils import (
     _accepted_constructor_kwargs,
+    _ffn_width_kwargs,
 )
 from dl_techniques.utils.tensors import is_single_shape
 from tests.numerics import reassociation_atol
@@ -262,7 +264,7 @@ class TestVLMForwardPass:
 
         NOT VACUOUS, RED-proved the same day: replacing `attention_mask=causal_mask`
         with `attention_mask=None` in `ImageCaptioningHead.call`
-        (`layers/heads/vlm/factory.py`) makes this assertion fail at
+        (`layers/heads/vlm/`) makes this assertion fail at
         max|diff| = 3.27e+00 (TF32 on) / 3.03e+00 (TF32 off), i.e. the defect
         signal is ~5 orders of magnitude above `atol`, against a noise floor of
         exactly zero.
@@ -1369,7 +1371,7 @@ class TestCaptioningFFNTypes:
 #
 # The honest reachable outcome and the reasons the rest stay closed live in ONE
 # home: the `ffn_type` docstring of `ImageCaptioningHead` in
-# `src/dl_techniques/layers/heads/vlm/factory.py`. It is not restated here.
+# `src/dl_techniques/layers/heads/vlm/`. It is not restated here.
 # ---------------------------------------------------------------------
 
 _WIDTH_PARAM_BY_FFN_TYPE = {
@@ -1552,14 +1554,17 @@ class TestFFNOutputWidthParamRouting:
         is ever re-hardcoded, the spy records one call instead of two.
         """
         calls = []
-        original = vlm_factory._ffn_width_kwargs
+        original = _ffn_width_kwargs
 
         def spy(ffn_type, width):
             result = original(ffn_type, width)
             calls.append((ffn_type, width, tuple(sorted(result.items()))))
             return result
 
-        vlm_factory._ffn_width_kwargs = spy
+        # Each site binds the helper by name in its own module, so the spy is
+        # installed there (a patch on `vlm.utils` would reach neither).
+        vlm_captioning._ffn_width_kwargs = spy
+        vlm_matching._ffn_width_kwargs = spy
         try:
             _cap_width_head("kan")
             cap_calls = list(calls)
@@ -1567,7 +1572,8 @@ class TestFFNOutputWidthParamRouting:
             _itm_width_head("kan")
             itm_calls = list(calls)
         finally:
-            vlm_factory._ffn_width_kwargs = original
+            vlm_captioning._ffn_width_kwargs = original
+            vlm_matching._ffn_width_kwargs = original
 
         assert cap_calls and itm_calls, (
             f"a site did not consult the shared width helper at all: "
@@ -1584,8 +1590,8 @@ class TestFFNOutputWidthParamRouting:
         to set. It stays closed on its own two hyperparameters (asserted above),
         so this checks the helper directly.
         """
-        assert vlm_factory._ffn_width_kwargs("mixer", _FAMILY_DIM) == {}
-        assert vlm_factory._ffn_width_kwargs("mlp", _FAMILY_DIM) == {
+        assert _ffn_width_kwargs("mixer", _FAMILY_DIM) == {}
+        assert _ffn_width_kwargs("mlp", _FAMILY_DIM) == {
             "output_dim": _FAMILY_DIM
         }
 
@@ -1610,19 +1616,19 @@ class TestSite1PostFusionWidthAssertion:
     def test_a_wrong_post_fusion_width_raises_naming_the_ffn_type(self) -> None:
         """RED proof: force a half-width FFN and require OUR error, not a
         downstream shape complaint (there is none — that is the whole point)."""
-        original = vlm_factory._ffn_width_kwargs
+        original = _ffn_width_kwargs
 
         def half_width(ffn_type, width):
             return {k: width // 2 for k in original(ffn_type, width)}
 
-        vlm_factory._ffn_width_kwargs = half_width
+        vlm_matching._ffn_width_kwargs = half_width
         try:
             with pytest.raises(ValueError) as excinfo:
                 head = _itm_width_head("mlp")
                 head({k: keras.ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
         finally:
-            vlm_factory._ffn_width_kwargs = original
+            vlm_matching._ffn_width_kwargs = original
         message = str(excinfo.value)
         assert "post-fusion FFN" in message, message
         assert "ffn_type='mlp'" in message, message
@@ -1650,7 +1656,7 @@ class TestSite1PostFusionWidthAssertion:
         the failing OP (`AddV2`, which both wordings name), and the deepest Python
         frame — eager execution raises at the line that ISSUED the op, and Keras's
         `traceback_utils` filters its own frames, so that frame is exactly
-        `heads/vlm/factory.py`'s `x + ffn_output`. A Python traceback is a property
+        `heads/vlm/image_captioning.py`'s `x + ffn_output`. A Python traceback is a property
         of the program, not of the kernel. Together these are STRICTER than the old
         text match, which would have accepted a shape error raised anywhere else as
         long as it happened to mention 48 and 96.
@@ -1658,7 +1664,7 @@ class TestSite1PostFusionWidthAssertion:
         DO NOT weaken this to a bare `pytest.raises(Exception)`: a guard that
         cannot tell its target from any other failure is close to vacuous.
         """
-        original = vlm_factory._ffn_width_kwargs
+        original = _ffn_width_kwargs
 
         # Precondition: the SAME head at the CORRECT width builds and forwards.
         # Without this, a generally-broken `_cap_width_head` would satisfy the
@@ -1670,14 +1676,14 @@ class TestSite1PostFusionWidthAssertion:
         def half_width(ffn_type, width):
             return {k: width // 2 for k in original(ffn_type, width)}
 
-        vlm_factory._ffn_width_kwargs = half_width
+        vlm_captioning._ffn_width_kwargs = half_width
         try:
             with pytest.raises(tf.errors.InvalidArgumentError) as excinfo:
                 head = _cap_width_head("mlp")
                 head({k: keras.ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
         finally:
-            vlm_factory._ffn_width_kwargs = original
+            vlm_captioning._ffn_width_kwargs = original
 
         message = str(excinfo.value)
         assert "AddV2" in message, (
@@ -1697,8 +1703,8 @@ class TestSite1PostFusionWidthAssertion:
         frame_file, frame_line, frame_func = frames[-1]
         source = linecache.getline(frame_file, frame_line).strip()
         assert os.path.abspath(frame_file) == os.path.abspath(
-            vlm_factory.__file__
-        ), f"raised in {frame_file}, not in the VLM factory: {frames}"
+            vlm_captioning.__file__
+        ), f"raised in {frame_file}, not in the captioning head module: {frames}"
         assert frame_func == "call", (
             f"raised in {frame_func!r}, not in `ImageCaptioningHead.call`: {frames}"
         )

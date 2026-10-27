@@ -132,7 +132,7 @@ def is_single_shape(shape: Any) -> bool:
     """Is this ONE shape, rather than a collection of shapes?
 
     Interface contract, shared by every layer that accepts "one shape or a
-    list of shapes" (``layers/heads/vlm/factory.py`` checks a fusion output
+    list of shapes" (``layers/heads/vlm/base.py`` checks a fusion output
     with it; ``layers/heads/vision/factory.py``'s ``SegmentationHead`` checks
     its ``build`` and ``compute_output_shape`` input with it):
 
@@ -150,7 +150,7 @@ def is_single_shape(shape: Any) -> bool:
     from JSON as a LIST of ints, which a list-means-several-shapes test reads
     as several one-int "shapes".
 
-    Moved here from ``layers/heads/vlm/factory.py`` (``_is_single_shape``),
+    Moved here from ``layers/heads/vlm/`` (``_is_single_shape``),
     where ``BaseVLMHead._build_fusion_stack`` used it to reject a per-modality
     fusion output before Keras surfaced it as ``ValueError: Invalid dtype:
     tuple``, when ``SegmentationHead`` needed the same rule.

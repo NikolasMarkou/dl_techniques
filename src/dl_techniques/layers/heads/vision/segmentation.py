@@ -1,6 +1,6 @@
 """Segmentation head: per-pixel class logits, upsampled toward input size."""
 
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import keras
 
@@ -16,7 +16,7 @@ from .base import BaseVisionHead
 from .utils import _require_hidden_dim_at_least
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.segmentation")
 class SegmentationHead(BaseVisionHead):
     """
     One map of per-pixel class logits, upsampled towards the input resolution.

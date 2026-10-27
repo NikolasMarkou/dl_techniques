@@ -208,7 +208,7 @@ class GPT2(RecordedBuildShapeMixin, keras.Model):
     :vartype lm_head: Optional[keras.layers.Dense]
     :ivar task_head: The task head named ``"task_head"``, or None when
         ``include_top`` is False.
-    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.base.BaseNLPHead]
 
     :raises ValueError: On an invalid size, dropout rate or harmonic setting, if
         ``include_top=True`` comes without a ``task_config``, or if a

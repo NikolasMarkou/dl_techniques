@@ -30,7 +30,7 @@ from dl_techniques.layers.heads.vlm import (
     VQAHead,
     create_vlm_head,
 )
-from dl_techniques.layers.heads.vlm import factory as vlm_factory
+from dl_techniques.layers.heads.vlm import dispatch as vlm_dispatch
 
 FOUR = {
     VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
@@ -44,21 +44,21 @@ README = (pathlib.Path(__file__).resolve().parents[3]
 
 
 def test_the_dispatch_table_holds_the_four_heads_and_nothing_else() -> None:
-    assert vlm_factory.VLM_HEAD_DISPATCH == FOUR
-    assert BaseVLMHead not in vlm_factory.VLM_HEAD_DISPATCH.values()
+    assert vlm_dispatch.VLM_HEAD_DISPATCH == FOUR
+    assert BaseVLMHead not in vlm_dispatch.VLM_HEAD_DISPATCH.values()
 
 
 @pytest.mark.parametrize("task", list(FOUR), ids=lambda t: t.value)
 def test_get_head_class_reads_the_table(task) -> None:
-    assert vlm_factory.get_head_class(task) is FOUR[task]
-    assert vlm_factory.get_head_class(task.value) is FOUR[task]
+    assert vlm_dispatch.get_head_class(task) is FOUR[task]
+    assert vlm_dispatch.get_head_class(task.value) is FOUR[task]
 
 
 @pytest.mark.parametrize("task", [t for t in VLMTaskType if t not in FOUR],
                          ids=lambda t: t.value)
 def test_every_other_task_type_raises_listing_the_four(task) -> None:
     with pytest.raises(ValueError, match=task.name) as info:
-        vlm_factory.get_head_class(task)
+        vlm_dispatch.get_head_class(task)
     for implemented in FOUR:
         assert implemented.name in str(info.value)
 

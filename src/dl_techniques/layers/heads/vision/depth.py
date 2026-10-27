@@ -8,7 +8,6 @@ import keras
 # local imports
 # ---------------------------------------------------------------------
 
-from ...conv_blocks.conv_block import ConvBlock
 from ..validation import positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
 from .base import BaseVisionHead
@@ -20,7 +19,7 @@ from .decoder import (
 from .utils import _refuse_dropout_no_layer_applies
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.depth")
 class DepthEstimationHead(BaseVisionHead):
     """
     A depth map, at eight times the input resolution.

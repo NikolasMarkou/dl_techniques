@@ -103,7 +103,7 @@ def test_an_unknown_task_name_is_refused(bad) -> None:
 # ---------------------------------------------------------------------
 
 def test_a_list_with_a_repeated_name_is_refused() -> None:
-    with pytest.raises(ValueError, match=r"[Dd]uplicate.*'itm'"):
+    with pytest.raises(ValueError, match=r"'itm'.*more than once"):
         create_multi_task_vlm_head([
             _config("itm"), _config("itm", VLMTaskType.VISUAL_GROUNDING)])
 

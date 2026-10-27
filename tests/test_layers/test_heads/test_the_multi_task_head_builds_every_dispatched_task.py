@@ -67,7 +67,7 @@ def _inputs(shape=SPATIAL) -> np.ndarray:
 def test_the_dispatched_set_is_ten_and_the_rest_raise() -> None:
     assert len(DISPATCHED) == 10 and len(UNDISPATCHED) == 27
     for task in UNDISPATCHED:
-        with pytest.raises(ValueError, match=task.value):
+        with pytest.raises(ValueError, match=task.name):
             create_vision_head(task, hidden_dim=HIDDEN_DIM)
 
 
@@ -85,7 +85,7 @@ def test_a_multi_task_head_builds_the_class_create_vision_head_builds(task) -> N
 
 @pytest.mark.parametrize("task", UNDISPATCHED[:3], ids=lambda t: t.value)
 def test_a_task_with_no_head_is_refused_naming_the_entry_and_the_task(task) -> None:
-    with pytest.raises(ValueError, match=rf"'pose'.*{task.value}|{task.value}.*'pose'"):
+    with pytest.raises(ValueError, match=rf"'pose'.*{task.name}|{task.name}.*'pose'"):
         MultiTaskHead({"pose": {"task_type": task, "hidden_dim": HIDDEN_DIM}},
                       use_task_specific_attention=False)
 
@@ -182,5 +182,5 @@ def test_every_dispatched_task_has_a_preset_that_builds_its_head(preset, task) -
 @pytest.mark.parametrize("preset", ["get_default_config", "get_efficient_config"])
 @pytest.mark.parametrize("task", UNDISPATCHED, ids=lambda t: t.value)
 def test_a_task_with_no_head_has_no_preset(preset, task) -> None:
-    with pytest.raises(ValueError, match=task.value):
+    with pytest.raises(ValueError, match=task.name):
         getattr(HeadConfiguration, preset)(task)

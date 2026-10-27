@@ -293,7 +293,7 @@ class FNet(RecordedBuildShapeMixin, keras.Model):
     :vartype final_norm: Optional[keras.layers.Layer]
     :ivar task_head: The task head named ``"task_head"``, or None when
         ``include_top`` is False.
-    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.base.BaseNLPHead]
 
     :raises ValueError: If invalid configuration parameters are provided,
         including ``include_top=True`` without a ``task_config``, and a

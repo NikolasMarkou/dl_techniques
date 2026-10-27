@@ -217,7 +217,7 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
     :vartype lm_head: Optional[keras.layers.Dense]
     :ivar task_head: The task head named ``"task_head"``, or None when
         ``include_top`` is False.
-    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.base.BaseNLPHead]
 
     :raises ValueError: If ``vocab_size``, ``hidden_size``, ``num_layers`` or
         ``num_heads`` is not positive, if ``hidden_size`` is not divisible by

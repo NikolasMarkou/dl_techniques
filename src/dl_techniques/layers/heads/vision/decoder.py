@@ -20,7 +20,6 @@ import keras
 # ---------------------------------------------------------------------
 
 from ...conv_blocks.conv_block import ConvBlock
-from ..validation import positive_int
 from .utils import _require_hidden_dim_at_least
 
 #: Doublings of the progressive decoder: three stride-2 transposed convs, so

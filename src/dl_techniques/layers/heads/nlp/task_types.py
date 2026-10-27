@@ -14,7 +14,7 @@ here:
 * :class:`CommonNLPTaskConfigurations` -- ten ready-made task sets, each
   naming only task types with a head.
 
-``nlp/factory.py`` reads these objects and builds the head the table names.
+``nlp/factory.py`` (through ``nlp/dispatch.py``) reads these objects and builds the head the table names.
 The types name tasks, not models, so heads on BERT, GPT and T5 all take the
 same config.
 """
@@ -377,8 +377,8 @@ class NLPTaskType(Enum):
 # DECISION plan-2026-10-14T062616-81938e81/D-064
 # The one table from task type to NLP head. get_head_class, NLPTaskConfig's
 # checks, get_output_types and model_head's generation set all read it. It
-# names head classes instead of holding them because nlp/factory.py imports
-# this module. Do NOT restate any part of it elsewhere, and do NOT add a row
+# names head classes instead of holding them because nlp/dispatch.py imports
+# this module (2026-10-27: was nlp/factory.py before the file was split). Do NOT restate any part of it elsewhere, and do NOT add a row
 # for a task type no head serves (13 have none; they raise). See decisions.md
 # D-064 (and D-052, D-059, the vision and VLM tables).
 NLP_HEAD_DISPATCH: Dict[NLPTaskType, str] = {

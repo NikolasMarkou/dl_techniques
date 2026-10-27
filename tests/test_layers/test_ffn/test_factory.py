@@ -1755,7 +1755,7 @@ def _b_relational_graph_transformer_blocks():
 
 
 def _b_heads_nlp_factory():
-    from dl_techniques.layers.heads.nlp.factory import (
+    from dl_techniques.layers.heads.nlp import (
         create_nlp_head, NLPTaskConfig, NLPTaskType,
     )
     cfg = NLPTaskConfig(
@@ -1777,11 +1777,26 @@ def _b_heads_vision_factory():
     return h.ffn
 
 
-def _b_heads_vlm_factory():
+def _b_heads_vlm_image_captioning():
     # Both VLM sites already carry their own dedicated 21-type grid in
     # tests/test_layers/test_heads/test_vlm.py (TestVLMFFNTypeGrid). Reached
     # here too so the derived file set stays fully covered.
-    from dl_techniques.layers.heads.vlm.factory import (
+    from dl_techniques.layers.heads.vlm import (
+        ImageCaptioningHead, VLMTaskConfig, VLMTaskType,
+    )
+    head = ImageCaptioningHead(
+        task_config=VLMTaskConfig(
+            name="cap", task_type=VLMTaskType.IMAGE_CAPTIONING,
+            hidden_size=16, vocab_size=11,
+        ),
+        num_layers=1,
+        num_heads=4,
+    )
+    return head.ffn_layers[0]
+
+
+def _b_heads_vlm_image_text_matching():
+    from dl_techniques.layers.heads.vlm import (
         ImageTextMatchingHead, VLMTaskConfig, VLMTaskType,
     )
     head = ImageTextMatchingHead(
@@ -2043,9 +2058,10 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/fusion/multimodal_fusion.py": _b_multimodal_fusion,
     "layers/graphs/relational_graph_transformer_blocks.py":
         _b_relational_graph_transformer_blocks,
-    "layers/heads/nlp/factory.py": _b_heads_nlp_factory,
-    "layers/heads/vision/factory.py": _b_heads_vision_factory,
-    "layers/heads/vlm/factory.py": _b_heads_vlm_factory,
+    "layers/heads/nlp/base.py": _b_heads_nlp_factory,
+    "layers/heads/vision/base.py": _b_heads_vision_factory,
+    "layers/heads/vlm/image_captioning.py": _b_heads_vlm_image_captioning,
+    "layers/heads/vlm/image_text_matching.py": _b_heads_vlm_image_text_matching,
     "layers/moe/experts.py": _b_moe_experts,
     "layers/time_series/mixed_sequential_block.py": _b_mixed_sequential_block,
     "layers/time_series/prism_blocks.py": _b_prism_blocks,
