@@ -216,7 +216,7 @@ legacy scalar ones); `from_config()` deserializes the two regularizers.
 | `large`  | 384,384,768,768 | 5,5,5,5 | 384 | 16 | 768 |
 
 `nano_g` is `nano` with the vision global-context branch switched on (mirrors
-`CliffordNet.lite_g`). Both towers share depth and channels at each scale so the
+the `lite_g` variant of `CliffordNet`). Both towers share depth and channels at each scale so the
 contrastive temperature update sees balanced gradient magnitudes; `nano` / `nano_g` match
 `CliffordNet` / `CliffordNetLM` `nano` (channels=128, depth=12, shifts=[1,2]) so the CLIP
 backbone can be ablated against the vanilla classifier / LM at matched capacity.

@@ -60,7 +60,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `bias_free_denoisers/` | bias-free denoiser models |
 | `capsnet/` | Capsule Networks |
 | `cbam/` | CBAM attention model |
-| `cliffordnet/` | CliffordNet, the attention-free Clifford geometric-product image classifier (the language model is `language/cliffordlm/`, the CLIP variant `vision_language/clifford_clip/`) |
+| `cliffordnet/` | CliffordNet, the attention-free Clifford geometric-product image classifier, and HierarchicalCliffordNet, the same block in stages at falling resolution (the language model is `language/cliffordlm/`, the CLIP variant `vision_language/clifford_clip/`) |
 | `convnext/` | ConvNeXt |
 | `convunext/` | ConvUNeXt — U-Net + ConvNeXt |
 | `coshnet/` | CoshNet |

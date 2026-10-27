@@ -1,18 +1,18 @@
 """``CliffordNet`` and ``HierarchicalCliffordNet`` with ``include_top=False``
 return the final feature map.
 
-Plan plan-2026-10-26T125959-7af851e5 step 4 (D-011): the switch mirrors ResNet
-and ConvNeXt. ``include_top=True`` (the default) is the model as it was, so the
-head recipe, the parameter pins in ``test_paper_v2_variants.py`` and the logits
-contract are untouched; ``include_top=False`` drops the head and returns the
-block stack's output ``(B, ceil(H/p), ceil(W/p), channels)``.
+The switch mirrors ResNet and ConvNeXt. ``include_top=True`` (the default) is the
+headed model, so the head recipe, the parameter pins in
+``test_paper_v2_variants.py`` and the logits contract do not depend on it;
+``include_top=False`` drops the head and returns the block stack's output
+``(B, ceil(H/p), ceil(W/p), channels)``. ``HierarchicalCliffordNet`` has the same
+switch; its headless output is the last stage's map, after
+``len(stage_depths) - 1`` stride-2 downsamplers.
 
-Step 5 gave ``HierarchicalCliffordNet`` the same switch (its headless output is
-the last stage's map, after ``len(stage_depths) - 1`` stride-2 downsamplers) and,
-by D-017, made ``from_variant(..., pretrained=<path>, input_shape=...)`` of BOTH
-models build the model before the weight transfer: ``from_variant`` builds
-nothing and the loader refuses an unbuilt target, so before this a checkpoint
-could not be loaded through ``from_variant`` at all, headed or not.
+``from_variant(..., pretrained=<path>, input_shape=...)`` of both models loads the
+checkpoint through the shared loader, which builds an unbuilt model at the
+default probe shape before the transfer, so a checkpoint loads through
+``from_variant`` headed or not, and a load that restores nothing raises.
 
 Every expectation below is derived from the model itself or from the geometry
 (``ceil(size / patch)`` for the 'same'-padded strided stems), never from a
@@ -82,6 +82,22 @@ def _perturb(model: CliffordNet, seed: int = 11) -> None:
         )
 
 
+def _spy_on_the_transfer(monkeypatch) -> list:
+    """Record the report of every layer-by-layer transfer the shared loader runs."""
+    import dl_techniques.utils.weight_transfer as weight_transfer
+
+    reports = []
+    real = weight_transfer.load_weights_from_checkpoint
+
+    def spy(*args, **kwargs):
+        report = real(*args, **kwargs)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(weight_transfer, "load_weights_from_checkpoint", spy)
+    return reports
+
+
 def _weights_by_path(model) -> dict:
     """Weights keyed by their path below the model name.
 
@@ -133,7 +149,7 @@ class TestHeadlessOutput:
         logits = _np(headed(x, training=False))
         # Recompute the logits from the headless map through the headed head.
         # The operation sequence is the same one, so the difference is exactly
-        # zero: measured on CPU (2026-10-26, iter-1 step 4.1) max|diff| = 0.0
+        # zero: measured on CPU max|diff| = 0.0
         # for input seeds 3, 4 and 5 (max|logit| 2.3 to 2.9). A tolerance would
         # hide a real change of the head's input, so none is allowed.
         recomputed = _np(
@@ -247,8 +263,8 @@ class TestHeadedToHeadlessTransfer:
             target=headless, ckpt_path=path, skip_prefixes=(), strict=True
         )
 
-        # The loader reports rather than raises on zero matches (Pre-Mortem 3),
-        # so the count is asserted, and it must cover every trunk layer.
+        # This loader reports rather than raises on zero matches, so the
+        # count is asserted, and it must cover every trunk layer.
         trunk_layers = [layer for layer in headless.layers if layer.weights]
         assert len(report.loaded) > 0
         assert len(report.loaded) == len(trunk_layers)
@@ -262,8 +278,8 @@ class TestHeadedToHeadlessTransfer:
             np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
 
         # A block kernel and the stem kernel, named, so a failure reads clearly.
-        for needle in ("stem_conv1", "clifford_block_0"):
-            hits = [p for p in dst if needle in p and p.endswith("kernel")]
+        for needle in ("stem/stem_conv1/", "block_0/"):
+            hits = [p for p in dst if p.startswith(needle) and p.endswith("kernel")]
             assert hits, f"no {needle} kernel among {sorted(dst)[:6]}"
             for p in hits:
                 np.testing.assert_allclose(dst[p], src[p], rtol=0, atol=0)
@@ -282,42 +298,37 @@ class TestHeadedToHeadlessTransfer:
             headed.classification_head(feature_map, training=False)["logits"]
         )
         # Same operation sequence on identical weights: measured on CPU
-        # (2026-10-26, iter-1 step 4.1) max|diff| = 0.0, so the bound is zero.
+        # max|diff| = 0.0, so the bound is zero.
         np.testing.assert_allclose(
             recomputed, _np(headed(x, training=False)), rtol=0, atol=0.0
         )
 
-    @pytest.mark.parametrize(
-        "kwargs, expect_skip",
-        [
-            # Headless: no classifier exists, so a class count that differs
-            # from the hosted 100 (here the default 1000) must not relax the
-            # loader.
-            ({"include_top": False}, False),
-            ({"include_top": False, "num_classes": 7}, False),
-            # Headed: a width that differs from the hosted 100 skips the
-            # classifier, as before.
-            ({"num_classes": 7}, True),
-            ({"num_classes": 100}, False),
-        ],
-    )
-    def test_from_variant_gates_the_classifier_skip_on_include_top(
-        self, monkeypatch, kwargs, expect_skip
+    @pytest.mark.parametrize("num_classes", [NUM_CLASSES, 3])
+    def test_from_variant_loads_a_checkpoint_of_another_class_count(
+        self, tmp_path, monkeypatch, num_classes
     ):
-        seen = {}
+        """The head of another width is skipped and the trunk still copies.
 
-        def record(self, weights_path, skip_mismatch=True):
-            seen["skip_mismatch"] = skip_mismatch
+        The transfer works per layer and skips a shape-mismatched one, whatever
+        class count the checkpoint was trained on, so ``from_variant`` has no
+        rule of its own about it.
+        """
+        reports = _spy_on_the_transfer(monkeypatch)
+        headed, path = self._checkpoint(tmp_path)
 
-        monkeypatch.setattr(CliffordNet, "load_pretrained_weights", record)
-        CliffordNet.from_variant(
-            "nano",
-            pretrained="unused.keras",
-            channels=CHANNELS,
-            depth=1,
-            **kwargs,
+        loaded = CliffordNet.from_variant(
+            "nano", num_classes=num_classes, pretrained=path,
+            channels=CHANNELS, depth=2,
         )
-        assert seen == {"skip_mismatch": expect_skip}
+
+        (report,) = reports
+        trunk = {p: v for p, v in _weights_by_path(loaded).items()
+                 if not p.startswith("classification_head")}
+        src = _weights_by_path(headed)
+        for path_, value in trunk.items():
+            np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
+        assert trunk, "the trunk holds no weights"
+        assert bool(report.shape_mismatch) == (num_classes != NUM_CLASSES)
 
 
 class TestNumClasses:
@@ -379,7 +390,7 @@ class TestDefaultIsUnchanged:
 
 
 class TestFromVariantBuildsBeforeLoading:
-    """D-017: ``from_variant(pretrained=<path>, input_shape=...)`` loads.
+    """``from_variant(pretrained=<path>, input_shape=...)`` loads.
 
     The checkpoint is a perturbed headed model, so every trunk tensor differs
     from a fresh initialisation: equality at ``rtol=0, atol=0`` proves the
@@ -390,17 +401,8 @@ class TestFromVariantBuildsBeforeLoading:
     VARIANT_KWARGS = dict(channels=CHANNELS, depth=2)
 
     @staticmethod
-    def _spy(monkeypatch, module):
-        reports = []
-        real = module.load_weights_from_checkpoint
-
-        def spy(*args, **kwargs):
-            report = real(*args, **kwargs)
-            reports.append(report)
-            return report
-
-        monkeypatch.setattr(module, "load_weights_from_checkpoint", spy)
-        return reports
+    def _spy(monkeypatch):
+        return _spy_on_the_transfer(monkeypatch)
 
     def _checkpoint(self, tmp_path):
         headed = CliffordNet.from_variant(
@@ -416,9 +418,7 @@ class TestFromVariantBuildsBeforeLoading:
     def test_headless_from_variant_loads_the_trunk(
         self, tmp_path, monkeypatch, input_shape
     ):
-        import dl_techniques.models.vision.cliffordnet.model as module
-
-        reports = self._spy(monkeypatch, module)
+        reports = self._spy(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
         extra = {} if input_shape is None else {"input_shape": input_shape}
 
@@ -441,9 +441,7 @@ class TestFromVariantBuildsBeforeLoading:
     def test_headed_from_variant_loads_the_head_too(
         self, tmp_path, monkeypatch
     ):
-        import dl_techniques.models.vision.cliffordnet.model as module
-
-        reports = self._spy(monkeypatch, module)
+        reports = self._spy(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
 
         loaded = CliffordNet.from_variant(
@@ -723,24 +721,14 @@ class TestHierarchicalHeadedToHeadlessTransfer:
         assert dst
         for path_, value in dst.items():
             np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
-        for needle in ("stem_conv1", "stage0_block_0", "downsample_0_depthwise"):
-            hits = [p for p in dst if needle in p and p.endswith("kernel")]
+        for needle in ("stem/stem_conv1/", "stage1_block1/", "downsample_0_depthwise/"):
+            hits = [p for p in dst if p.startswith(needle) and p.endswith("kernel")]
             assert hits, f"no {needle} kernel among {sorted(dst)[:6]}"
 
     def test_from_variant_builds_then_loads_headless_and_headed(
         self, tmp_path, monkeypatch
     ):
-        import dl_techniques.models.vision.cliffordnet.hierarchical as module
-
-        reports = []
-        real = module.load_weights_from_checkpoint
-
-        def spy(*args, **kwargs):
-            report = real(*args, **kwargs)
-            reports.append(report)
-            return report
-
-        monkeypatch.setattr(module, "load_weights_from_checkpoint", spy)
+        reports = _spy_on_the_transfer(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
         kwargs = dict(stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS))
         src = _weights_by_path(headed)
@@ -853,7 +841,7 @@ class TestHierarchicalDefaultIsUnchanged:
 
 
 # ---------------------------------------------------------------------
-# Positional argument order (review concern 1)
+# Positional argument order
 # ---------------------------------------------------------------------
 
 
@@ -903,7 +891,7 @@ class TestIncludeTopIsNotASecondPositionalArgument:
 
 
 # ---------------------------------------------------------------------
-# numpy.bool_ (review pass 2, NOTE 8)
+# numpy.bool_
 # ---------------------------------------------------------------------
 
 

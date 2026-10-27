@@ -15,7 +15,7 @@ by composing a custom stem, several stages of identical
 
 Variants
 --------
-- **V0_baseline_isotropic**   -- existing ``CliffordNet.nano`` (control).
+- **V0_baseline_isotropic**   -- the ``nano`` variant of ``CliffordNet`` (control).
 - **V1_3stage_strided_conv**  -- 3 stages 64-128-256, strided 3x3 conv.
 - **V2_3stage_avgpool**       -- 3 stages 64-128-256, AvgPool + 1x1 proj.
 - **V3_3stage_patch_merging** -- 3 stages 64-128-256, Swin patch-merge.
@@ -64,6 +64,7 @@ from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.models.vision.cliffordnet import CliffordNet
+from dl_techniques.models.vision.cliffordnet.model import LAYERNORM_EPSILON
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -110,7 +111,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         downsamplers=[],
         shifts=_DEFAULT_SHIFTS,
         description=(
-            "Existing CliffordNet.nano baseline: patch_size=2 stem, "
+            "The CliffordNet nano variant as baseline: patch_size=2 stem, "
             "12 isotropic blocks @ C=128, no in-backbone downsampling."
         ),
     ),
@@ -345,9 +346,10 @@ def build_variant(
     :return: A built Keras functional ``Model``.
     """
     if variant_name == "V0_baseline_isotropic":
-        # Reuse the existing CliffordNet.nano factory verbatim so the
+        # Reuse the existing CliffordNet "nano" variant verbatim so the
         # baseline is bitwise-comparable to the existing training script.
-        return CliffordNet.nano(
+        return CliffordNet.from_variant(
+            "nano",
             num_classes=num_classes,
             stochastic_depth_rate=stochastic_depth_rate,
             layer_scale_init=layer_scale_init,
@@ -417,7 +419,7 @@ def build_variant(
     # at the same epsilon as V0's, so the variants differ only in downsampling.
     x = keras.layers.GlobalAveragePooling2D(name="global_pool")(x)
     x = keras.layers.LayerNormalization(
-        epsilon=CliffordNet.LAYERNORM_EPSILON, name="head_norm"
+        epsilon=LAYERNORM_EPSILON, name="head_norm"
     )(x)
     if dropout_rate > 0.0:
         x = keras.layers.Dropout(dropout_rate, name="head_dropout")(x)

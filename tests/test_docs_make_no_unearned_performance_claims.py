@@ -306,6 +306,15 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # test_the_token_decoder.py) and by the behavioural arm of
         # test_package_api_contract.py. Both halves checked.
         "bit_diffusion",
+        # cliffordnet: README section 2 names `pretrained=True` only to say it
+        # raises `NotImplementedError` naming the variant; both
+        # `CliffordNet.from_variant` and `HierarchicalCliffordNet.from_variant`
+        # really do, through `pretrained_path_or_raise`, verified by EXECUTING
+        # both with `pretrained=True` (tests/test_models/test_cliffordnet/
+        # test_model.py and test_hierarchical.py) and by the runtime contract
+        # (test_the_vision_classifiers_share_one_runtime_contract.py). Both
+        # halves checked.
+        "cliffordnet",
         "colbert",
         # depth_anything: the one package whose `pretrained=True` WORKS (plan
         # -2026-10-14T062616-81938e81 step 1.7): it loads the official DINOv2

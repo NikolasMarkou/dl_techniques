@@ -1,4 +1,8 @@
-"""CliffordNet public API re-exports."""
+"""CliffordNet and HierarchicalCliffordNet public API re-exports.
+
+The four names are the two image classifiers and their factories; the stem, head-config and
+argument helpers they share live in ``cliffordnet.model`` and are not re-exported.
+"""
 from .model import CliffordNet, create_cliffordnet
 from .hierarchical import HierarchicalCliffordNet, create_hierarchical_cliffordnet
 
@@ -10,6 +14,9 @@ from .hierarchical import HierarchicalCliffordNet, create_hierarchical_cliffordn
 # sweep in tests/test_models/test_package_api_contract.py finds factories by walking package
 # exports, and its own comment calls an unexported factory a package defect. Do not move
 # them back behind a waiver there. See decisions.md D-002.
+
+# 2026-10-27: the surface is the four names in `__all__` below; the "exactly these 2 names" in the
+# first note above is the reduction the second note widened, kept as written.
 __all__ = [
     "CliffordNet",
     "create_cliffordnet",

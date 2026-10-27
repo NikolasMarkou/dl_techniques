@@ -276,18 +276,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("unknown_variant_lists_the_keys", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"',
-        'Available: ['),
-    ("unknown_variant_lists_the_keys", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"',
-        'Available: ['),
     ("unknown_variant_lists_the_keys", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
@@ -321,16 +309,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths'",
         "got multiple values for keyword argument 'depths'"),
-    ("pretrained_true_names_the_variant", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        'the NotImplementedError message does not name the variant',
-        'checkpoints are distributed'),
-    ("pretrained_true_names_the_variant", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        'the NotImplementedError message does not name the variant',
-        'checkpoints are distributed'),
     ("pretrained_true_names_the_variant", "mobilenet_v1"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
@@ -585,30 +563,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         'TypeError: Object of type HeNormal is not JSON serializable',
         'Object of type HeNormal is not JSON serializable'),
-    ("invalid_values_name_the_value::dropout_rate=2.0", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)",
-        'classifier_dropout_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::stochastic_depth_rate=-1.0", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        "the message reads \"drop_path_rate must be in [0, 1), got -1.0\" (a sub-layer's "
-        "argument, not the model's)",
-        'drop_path_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::dropout_rate=2.0", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)",
-        'classifier_dropout_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::stochastic_depth_rate=-1.0", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        "the message reads \"drop_path_rate must be in [0, 1), got -1.0\" (a sub-layer's "
-        "argument, not the model's)",
-        'drop_path_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
@@ -651,26 +605,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         '27 regularization losses by default',
         'regularization losses by default'),
-    ("no_replayed_draw::default", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '666 of 1891 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '666 of 1891 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::default", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '820 of 2211 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '820 of 2211 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "mobilenet_v4"): Open(
         AssertionError,
         "the MobileNet V3 and V4 migration",
@@ -751,18 +685,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "cliffordnet"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '4 violation(s): clifford_block_0, clifford_drop_path_0, clifford_block_1, '
-        'clifford_drop_path_1',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "hierarchical"): Open(
-        AssertionError,
-        "the CliffordNet migration",
-        '5 violation(s): stage0_block_0, stage0_drop_path_0, stage1_block_0, '
-        'stage1_drop_path_0, ...',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",

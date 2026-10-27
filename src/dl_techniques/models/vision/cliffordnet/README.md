@@ -23,11 +23,18 @@ Based on: **"CliffordNet: All You Need is Geometric Algebra"** (arXiv:2601.06793
 
 ## 1. Models
 
-This package holds `model.py` and `__init__.py`:
+This package holds `model.py`, `hierarchical.py` and `__init__.py`:
 
 | Model | Domain | File | Key Idea |
 |:------|:-------|:-----|:---------|
 | `CliffordNet` | Vision | `src/dl_techniques/models/vision/cliffordnet/model.py` | Attention-free backbone: geometric product replaces both attention and FFN |
+| `HierarchicalCliffordNet` | Vision | `src/dl_techniques/models/vision/cliffordnet/hierarchical.py` | The same block in stages at falling resolution, a stride-2 downsampler between them |
+
+`model.py` also holds what the two models share and `hierarchical.py` imports: the stem
+(`build_clifford_stem`), the head configuration (`clifford_head_config`), the rate and
+`include_top` checks (`validate_rates`, `coerce_include_top`), and the constants
+`DEFAULT_KERNEL_INITIALIZER`, `LAYERNORM_EPSILON`, `STEM_BN_MOMENTUM`, `STEM_BN_EPSILON` and
+`DEFAULT_INPUT_SHAPE`.
 
 A second family member lives in a sibling package and is documented here because it
 shares the same algebraic core:
@@ -37,7 +44,8 @@ shares the same algebraic core:
 | `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/vision_language/clifford_clip/model.py` | Dual-encoder contrastive model with Clifford-aware projection head |
 
 **Export surface.** `src/dl_techniques/models/vision/cliffordnet/__init__.py` exports exactly
-two names — `CliffordNet` and `create_cliffordnet`. That `__all__` is pinned by
+four names — `CliffordNet`, `create_cliffordnet`, `HierarchicalCliffordNet` and
+`create_hierarchical_cliffordnet`. That `__all__` is pinned by
 `tests/test_models/test_cliffordnet/test_model.py`.
 
 The causal language model `CliffordNetLM` is documented in [`language/cliffordlm/README.md`](../../language/cliffordlm/README.md).
@@ -89,7 +97,7 @@ The head is the reference implementation's (`ParaMind2025/CAN` `model.py`:
 `x.mean(dim=[-2, -1])`, `nn.LayerNorm(embed_dim)`, `nn.Linear(embed_dim,
 num_classes)`), built as the shared `ClassificationHead` with no hidden block: a
 `pooled_norm` LayerNorm at torch's default epsilon `1e-5`
-(`CliffordNet.LAYERNORM_EPSILON`), the dropout when `dropout_rate > 0`, and the
+(`LAYERNORM_EPSILON`, a module constant of `cliffordnet/model.py`), the dropout when `dropout_rate > 0`, and the
 linear `classifier`. The model's `kernel_initializer`, `bias_initializer`,
 `kernel_regularizer` and `bias_regularizer` reach the classifier, and
 `head_config_overrides` is merged into the head config (`name`, `num_classes` and
@@ -110,7 +118,7 @@ block stack's output `(B, ceil(H / p), ceil(W / p), channels)` with `p =
 patch_size`: the map itself, not a pooled vector (pool it yourself for an
 embedding). `num_classes` is then ignored, so `0` is accepted; it defaults to
 `1000` as for ResNet. A headed checkpoint loads into a headless model through
-`load_pretrained_weights` (on a built model): the trunk layers (`stem`, `clifford_block_*`) are
+`load_pretrained_weights` (on a built model): the trunk layers (`stem`, `block_*`) are
 copied and the checkpoint's `classification_head` is left unused.
 `HierarchicalCliffordNet` has the same switch (see below).
 
@@ -121,15 +129,47 @@ be a real `bool` or a `numpy.bool_` (stored as a Python `bool`); anything else
 (`64`, `[1, 1]`, `1`, `None`) raises `TypeError`, naming the value and its
 module-qualified type.
 
-**`from_variant(..., input_shape=...)` builds the model.** The constructor
-builds nothing and the weight loader refuses an unbuilt model. When `input_shape`
-`(H, W, C_in)` (unbatched) is given, `from_variant` always returns the model
-built at it, with or without `pretrained`, as ResNet does. With
-`pretrained=<path>` and no `input_shape` it builds at `DEFAULT_INPUT_SHAPE`,
-`(32, 32, 3)` (a public constant of `cliffordnet/model.py`, also used by
-`hierarchical.py`; only `C_in` matters, weight shapes do not depend on `H` and
-`W`) and then transfers the weights. With neither, the model stays unbuilt.
-Both `CliffordNet` and `HierarchicalCliffordNet` take it.
+**`from_variant(variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs)`
+is the one constructor path** (the same as ResNet's), for both models and for
+`create_cliffordnet` and `create_hierarchical_cliffordnet`, whose defaults are the same.
+An unknown variant raises `ValueError` listing the variants; `pretrained=True` raises
+`NotImplementedError` naming the variant (no weights are distributed); `pretrained=<path>`
+loads a local `.keras` file through the shared loader, which skips a layer whose shapes differ
+(a checkpoint with another `num_classes` loads its trunk and leaves the new head at its
+initialization), and raises when it restores no layer. There are no `nano()`, `lite()` or
+`lite_g()` shortcuts: use `from_variant("nano", ...)`.
+
+**`from_variant(..., input_shape=...)` builds the model.** The constructors take no
+`input_shape`, so when one `(H, W, C_in)` (unbatched) is given, `from_variant` returns the
+model built at it, with or without `pretrained`; ResNet, by contrast, only stores its
+`input_shape`. With `pretrained=<path>` and no `input_shape` the loader builds at
+`DEFAULT_INPUT_SHAPE`, `(32, 32, 3)` (a public constant of `cliffordnet/model.py`, also used by
+`hierarchical.py`; only `C_in` matters, weight shapes do not depend on `H` and `W`) and then
+transfers the weights. With neither, the model stays unbuilt until its first call or
+`build((None, H, W, C_in))`; `build` takes the batched shape only.
+
+**Initializers are stored as specs.** `kernel_initializer` and `bias_initializer` may be a
+name, a config dict or an `Initializer` instance; the model stores a name or a config dict (an
+instance is serialized, so `get_config()` is JSON-safe) and hands that spec to the stem, to
+every block and to the head, so each layer draws its own kernel. Before, one instance reached
+all of them and replayed one random draw (666 of 1891 kernel pairs at `nano`, 820 of 2211 at
+`hier_345`), and the presets' `TruncatedNormal(0.02)` was created at import time with a seed
+fixed then. Trained weights compute the same function; only the random starting weights
+differ. `dropout_rate` and `stochastic_depth_rate` must lie in `[0, 1)` and the model says so
+itself, naming its own argument.
+
+**Layer names and old archives.** Blocks are `block_{i}` and `block_{i}_drop_path` (0-based),
+hierarchical blocks are `stage{S}_block{B}` and `stage{S}_block{B}_drop_path` (both 1-based) and
+its downsamplers `downsample_{i}_depthwise`, `downsample_{i}_norm` and `downsample_{i}_pointwise`
+(`i` is 0-based). Before they were `clifford_block_{i}` and `clifford_drop_path_{i}`,
+`stage{s}_block_{j}` and `stage{s}_drop_path_{j}` (0-based, underscore) and `downsample_{i}_bn`.
+Only the `w.path` strings change; `.keras` archives load by the order of the tracked layers,
+which is unchanged. Measured by saving archives in a separate process from a checkout of
+`be92a74eb` and loading them into the current code: a `.keras` archive of every CliffordNet patch size 1 to 4 and the nano preset, and
+of every `HierarchicalCliffordNet` patch size 1 and 2 and `hier_345`, headed and headless (14
+archives), loads into the current code through `keras.models.load_model` and through
+`load_weights`, with outputs equal at `atol=0` in inference and in `training=True`. Archives
+saved before the stem moved onto `ConvStem` (`stem_conv/...`) still do not load.
 
 ### Variants
 
@@ -213,9 +253,9 @@ backbone = HierarchicalCliffordNet.from_variant(
 `include_top=False` builds no head, sets `model.classification_head` to `None`
 and returns the last stage's feature map, `ceil(size / 2)` per downsampler after
 the stem, not a pooled vector. `num_classes` is then ignored (`0` is accepted) and
-defaults to `1000`; `create_hierarchical_cliffordnet` keeps its default of `100`.
+defaults to `1000`, as does `create_hierarchical_cliffordnet`.
 The headed default is unchanged (the 767,476 pin holds). A headed checkpoint
-loads into a headless model: the trunk (`stem`, `stage*_block_*`,
+loads into a headless model: the trunk (`stem`, `stage*_block*`,
 `downsample_*`) is copied and the checkpoint's `classification_head` is unused.
 
 The two-hidden-block head this replaced read 1,502,948 / 2,682,596 / 3,470,564,
@@ -293,7 +333,7 @@ trainer's defaults; the GPT-2 token embedding alone is `50257 * text_channels`,
 6.4M at 128 channels). Measured 2026-10-20, after the two final projections
 became bias-free. The vision shifts per stage are in `CliffordCLIP.MODEL_VARIANTS`.
 
-`nano` and `nano_g` are depth/shift-aligned with `CliffordNet.nano` and with the `nano` variant of the Clifford language model in `language/cliffordlm/` on every shared axis (channels=128, depth=12, shifts=[1,2]) so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only, mirroring `CliffordNet.lite_g`; the text side stays `use_global_context=False` because the language model's variant ladder has no global-context entry.
+`nano` and `nano_g` are depth/shift-aligned with the `nano` variant of `CliffordNet` and with the `nano` variant of the Clifford language model in `language/cliffordlm/` on every shared axis (channels=128, depth=12, shifts=[1,2]) so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only, mirroring the `lite_g` variant of `CliffordNet`; the text side stays `use_global_context=False` because the language model's variant ladder has no global-context entry.
 
 Both towers also expose an optional pre-projection `head_dropout` gated on `dropout_rate > 0`, placed after `*_head_norm` and before the projection Dense -- the same hook `CliffordNet.head_dropout` (on the pooled vector) and the language model's `head_dropout` (on the `(B, L, D)` sequence) provide. `dropout_rate=0.0` skips the sublayer entirely.
 
@@ -391,9 +431,9 @@ The language model's own compliance row set is in [`language/cliffordlm/README.m
 import keras
 from dl_techniques.models.vision.cliffordnet import CliffordNet, create_cliffordnet
 
-model = CliffordNet.nano(num_classes=100)
-# or: CliffordNet.lite(num_classes=100)
-# or: CliffordNet.lite_g(num_classes=100)  # with global context
+model = CliffordNet.from_variant("nano", num_classes=100)
+# or: CliffordNet.from_variant("lite", num_classes=100)
+# or: CliffordNet.from_variant("lite_g", num_classes=100)  # with global context
 # or the module-level factory, which delegates to CliffordNet.from_variant:
 model = create_cliffordnet("lite", num_classes=100)
 
@@ -405,7 +445,7 @@ model.compile(
 )
 
 # Backbone only: the final feature map (B, H/p, W/p, channels), no head.
-backbone = CliffordNet.nano(include_top=False)
+backbone = CliffordNet.from_variant("nano", include_top=False)
 features = backbone(images)
 ```
 

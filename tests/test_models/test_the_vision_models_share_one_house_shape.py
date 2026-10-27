@@ -316,8 +316,9 @@ def module_rules(module: Module) -> Tuple[str, ...]:
 #: Families whose ``# DECISION`` tokens are compared over a file SET, because the
 #: family moves code between its files: ConvNeXt V1 and V2 become one base class
 #: (a token both leaves carry may be merged into one copy), and the Clifford pair
-#: shares builders (the comment in ``hierarchical.py`` that explains the stem's
-#: BatchNorm epsilon moves beside the constant it explains).
+#: shares builders (the stem's BatchNorm constants live in ``model.py`` while the
+#: epsilon note stays in ``hierarchical.py``, beside the downsampler norm that
+#: still uses the bare Keras epsilon).
 ANCHOR_SETS: Dict[str, Tuple[str, ...]] = {
     "convnext": (f"src/dl_techniques/{VISION}/convnext/convnext_v1.py",
                  f"src/dl_techniques/{VISION}/convnext/convnext_v2.py",
@@ -915,10 +916,12 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
     },
     "src/dl_techniques/models/vision/cliffordnet/hierarchical.py": {
         "plan-2026-10-26T125959-7af851e5/D-007": 1,
+        "plan-2026-10-26T125959-7af851e5/D-031": 1,
     },
     "src/dl_techniques/models/vision/cliffordnet/model.py": {
         "plan-2026-08-23T091307-9a110062/D-480": 1,
         "plan-2026-10-26T125959-7af851e5/D-007": 1,
+        "plan-2026-10-26T125959-7af851e5/D-031": 2,
         "plan_2026-05-11_0090b0b8/D-001": 2,
     },
     "src/dl_techniques/models/vision/convnext/convnext_v1.py": {
@@ -1092,28 +1095,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "cliffordnet"): Open(
-        "the CliffordNet migration",
-        "3 violation(s): create_cliffordnet('variant', 'num_classes', 'pretrained', "
-        "'weights_dataset', 'cache_dir') is not ('variant', 'num_classes', 'input_shape', "
-        "'pretrained'); create_cliffordnet: `num_classes` does not default to 1000; "
-        'create_cliffordnet: `input_shape` does not default to None',
-        ("create_cliffordnet('variant', 'num_classes', 'pretrained', "
-         "'weights_dataset', 'cache_dir') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_cliffordnet: `num_classes` does not default to 1000',
-         'create_cliffordnet: `input_shape` does not default to None')),
-    ("h9_factory_is_one_delegating_return", "hierarchical"): Open(
-        "the CliffordNet migration",
-        "3 violation(s): create_hierarchical_cliffordnet('variant', 'num_classes', 'pretrained') "
-        "is not ('variant', 'num_classes', 'input_shape', 'pretrained'); "
-        'create_hierarchical_cliffordnet: `num_classes` does not default to 1000; '
-        'create_hierarchical_cliffordnet: `input_shape` does not default to None',
-        ("create_hierarchical_cliffordnet('variant', 'num_classes', "
-         "'pretrained') is not ('variant', 'num_classes', 'input_shape', "
-         "'pretrained')",
-         'create_hierarchical_cliffordnet: `num_classes` does not default to 1000',
-         'create_hierarchical_cliffordnet: `input_shape` does not default to None')),
     ("h9_factory_is_one_delegating_return", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
         "2 violation(s): create_mobilenetv1('variant', 'num_classes', 'input_shape', "
@@ -1257,34 +1238,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h2_member_order", "cliffordnet"): Open(
-        "the CliffordNet migration",
-        "3 violation(s): class constants after the first method: ['MODEL_VARIANTS']; "
-        'MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is); `from_variant` '
-        'comes after `summary`',
-        ("class constants after the first method: ['MODEL_VARIANTS']",
-         'MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',
-         '`from_variant` comes after `summary`')),
-    ("h4_no_logging_outside_init", "cliffordnet"): Open(
-        "the CliffordNet migration",
-        '1 violation(s): `summary` writes 13 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "cliffordnet"): Open(
-        "the CliffordNet migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h2_member_order", "hierarchical"): Open(
-        "the CliffordNet migration",
-        '1 violation(s): MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',
-        ('MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',)),
-    ("h5_build_materializes", "hierarchical"): Open(
-        "the CliffordNet migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h2_member_order", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
         '1 violation(s): `compute_output_shape` comes after `get_config`',

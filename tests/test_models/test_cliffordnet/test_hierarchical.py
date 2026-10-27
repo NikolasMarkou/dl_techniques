@@ -1,6 +1,6 @@
 """HierarchicalCliffordNet: stages of CliffordNetBlock with a stride-2 downsampler between them.
 
-Guard for plan-2026-10-23T132722-77331e7a (D-001). Source of the architecture:
+Source of the architecture:
 github.com/ParaMind2025/CAN ``model_hier.py``, read through a fetch summary on
 2026-10-23 and not byte-checked: patch-1 stem, stages of CliffordNet blocks, a
 depthwise 3x3 stride-2 conv + BN + SiLU + 1x1 conv between stages, a linear
@@ -14,6 +14,8 @@ ramp is read off the blocks.
 """
 
 import copy
+import inspect
+import json
 
 import numpy as np
 import pytest
@@ -121,14 +123,14 @@ def _numpy_downsample(x, depthwise_kernel, bn, pointwise):
 def test_the_downsampler_is_depthwise_stride2_bn_silu_pointwise():
     model = _tiny()
     for index, entry in enumerate(model.downsamplers):
-        _randomize_bn(entry["bn"], seed=index)
+        _randomize_bn(entry["norm"], seed=index)
         entry["pointwise"].bias.assign(
             np.random.default_rng(10 + index).normal(size=entry["pointwise"].bias.shape[0]).astype("float32")
         )
     x = np.random.default_rng(3).normal(size=(2, 16, 16, 8)).astype("float32")
     entry = model.downsamplers[0]
     want = _numpy_downsample(
-        x, entry["depthwise"].kernel.numpy(), entry["bn"], entry["pointwise"]
+        x, entry["depthwise"].kernel.numpy(), entry["norm"], entry["pointwise"]
     )
     # On the CPU: a GPU convolution may run in TF32, whose rounding (about 1e-4)
     # would force a tolerance too loose to catch a missing SiLU or BN.
@@ -304,3 +306,77 @@ def test_the_preset_has_its_pinned_parameter_count():
 
 
 PINNED_HIER_345_PARAMS = 767_476
+
+
+# ---------------------------------------------------------------------
+# The house contract: signature, removed surface, rates, initializers
+# ---------------------------------------------------------------------
+
+
+def test_from_variant_takes_the_house_signature():
+    parameters = list(inspect.signature(HierarchicalCliffordNet.from_variant).parameters.values())
+    named = [p.name for p in parameters if p.kind is not p.VAR_KEYWORD]
+    assert named == ["variant", "num_classes", "input_shape", "pretrained"]
+    assert parameters[-1].kind is inspect.Parameter.VAR_KEYWORD
+
+
+@pytest.mark.parametrize("name", ["_apply_stem", "summary", "_download_weights"])
+def test_the_removed_members_are_gone(name):
+    assert name not in vars(HierarchicalCliffordNet), name
+
+
+def test_an_unknown_variant_lists_the_variants():
+    with pytest.raises(ValueError, match="Unknown variant 'nope'. Available variants: "):
+        HierarchicalCliffordNet.from_variant("nope")
+
+
+def test_pretrained_true_names_the_variant():
+    with pytest.raises(NotImplementedError, match="variant 'hier_345'"):
+        HierarchicalCliffordNet.from_variant("hier_345", pretrained=True)
+
+
+@pytest.mark.parametrize(
+    "knob, value",
+    [("dropout_rate", 2.0), ("dropout_rate", 1.0), ("dropout_rate", -0.1),
+     ("stochastic_depth_rate", -1.0), ("stochastic_depth_rate", 1.0)],
+)
+def test_a_rate_outside_zero_one_is_refused_with_the_models_own_name(knob, value):
+    with pytest.raises(ValueError) as raised:
+        HierarchicalCliffordNet(**{**TINY, knob: value})
+    message = str(raised.value)
+    assert f"{knob} must be in [0, 1), got {value}" in message
+    assert f"classifier_{knob}" not in message and f"drop_path_{knob}" not in message
+
+
+def _kernels(model):
+    return {w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)
+            for w in model.weights if w.path.endswith("/kernel")}
+
+
+def test_every_random_kernel_follows_the_seed():
+    """A kernel drawn by a module-level initializer at import is the same at any seed."""
+
+    def built(seed):
+        keras.utils.set_random_seed(seed)
+        return _kernels(HierarchicalCliffordNet.from_variant(
+            "hier_345", num_classes=5, input_shape=(16, 16, 3), stage_depths=[2, 1, 1]))
+
+    first, second = built(1), built(2)
+    assert first.keys() == second.keys() and len(first) > 10
+    fixed = sorted(path for path in first if np.array_equal(first[path], second[path]))
+    assert not fixed, f"{len(fixed)} of {len(first)} kernels ignore the seed: {fixed[:3]}"
+
+
+def test_the_preset_initializer_is_a_spec_not_an_instance():
+    for name, preset in HierarchicalCliffordNet.MODEL_VARIANTS.items():
+        assert isinstance(preset["kernel_initializer"], dict), name
+
+
+@pytest.mark.parametrize("argument", ["kernel_initializer", "bias_initializer"])
+def test_an_instance_is_stored_as_json_safe_spec(argument):
+    model = HierarchicalCliffordNet(
+        **{**TINY, argument: keras.initializers.RandomNormal(stddev=0.1)})
+    stored = getattr(model, argument)
+    assert isinstance(stored, (str, dict)), type(stored)
+    assert json.loads(json.dumps(model.get_config()))[argument] == stored
+    assert HierarchicalCliffordNet.from_config(model.get_config()).get_config() == model.get_config()
