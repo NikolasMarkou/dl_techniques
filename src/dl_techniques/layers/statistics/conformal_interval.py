@@ -54,7 +54,7 @@ class ConformalIntervalLayer(keras.layers.Layer):
        ``(mu_c - q, mu_c + q)``.
 
     The layer mirrors
-    :class:`~dl_techniques.layers.time_series.forecasting_layers.ConformalQuantileHead`
+    :class:`~dl_techniques.layers.statistics.conformal_quantile_head.ConformalQuantileHead`
     (non-trainable ``add_weight`` calibration score + a ``calibrate()`` method
     that ``.assign()``\\ s the fitted value outside ``call()``), differing only
     in that it wraps a pre-computed point estimate rather than learned quantiles
@@ -105,6 +105,13 @@ class ConformalIntervalLayer(keras.layers.Layer):
         # does not collide with the explicit trainable=False below.
         kwargs.pop("trainable", None)
         super().__init__(trainable=False, **kwargs)
+        if not q_init >= 0.0:  # also rejects NaN
+            raise ValueError(f"q_init must be non-negative, got {q_init}")
+        if not domain_min < domain_max:
+            raise ValueError(
+                f"domain_min must be below domain_max, got domain_min={domain_min}, "
+                f"domain_max={domain_max}"
+            )
         self.q_init = float(q_init)
         self.domain_min = float(domain_min)
         self.domain_max = float(domain_max)
@@ -123,7 +130,7 @@ class ConformalIntervalLayer(keras.layers.Layer):
             shape=(),
             initializer=keras.initializers.Constant(self.q_init),
             trainable=False,
-            dtype=self.compute_dtype,
+            dtype=self.variable_dtype,
         )
         super().build(input_shape)
 
@@ -159,8 +166,12 @@ class ConformalIntervalLayer(keras.layers.Layer):
         This method only ``.assign()``\\ s that fitted scalar into the
         non-trainable graph weight, outside ``call()``.
 
-        :param q_value: The fitted scalar conformal radius.
+        :param q_value: The fitted scalar conformal radius (non-negative; ``+inf`` is
+            allowed and means an unbounded interval).
+        :raises ValueError: If ``q_value`` is negative or NaN.
         """
+        if not q_value >= 0.0:  # also rejects NaN
+            raise ValueError(f"q_value must be non-negative, got {q_value}")
         self.q.assign(float(q_value))
         logger.info(f"ConformalIntervalLayer '{self.name}' calibrated q={float(q_value):.6g}")
 

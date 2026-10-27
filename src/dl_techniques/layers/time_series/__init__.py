@@ -79,7 +79,6 @@ from .deepar_blocks import (
 from .forecasting_layers import (
     NaiveResidual,
     ForecastabilityGate,
-    ConformalQuantileHead,
     create_manokhin_compliant_model
 )
 from .ema_layer import (
@@ -131,7 +130,6 @@ __all__ = [
     # Scientific & Signal Processing
     "NaiveResidual",
     "ForecastabilityGate",
-    "ConformalQuantileHead",
     "create_manokhin_compliant_model",
     "ExponentialMovingAverage",
     "EMASlopeFilter",
