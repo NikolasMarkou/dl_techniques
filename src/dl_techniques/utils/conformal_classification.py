@@ -15,7 +15,7 @@ every candidate label of that sample), which gives exact coverage. With
 ``randomized=False``, ``u = 1`` (inclusive mass): deterministic and still valid; its
 scores are the larger ones, so it calibrates to a larger ``tau`` and over-covers a
 little. The deterministic rule is the one the in-graph
-:class:`~dl_techniques.layers.statistics.conformal_prediction_set.ConformalPredictionSetLayer`
+:class:`~dl_techniques.layers.statistics.conformal.prediction_set.ConformalPredictionSet`
 runs, so the layer and :func:`predict_sets` agree exactly.
 
 The score of a label is non-decreasing in its sorted position, so the set is

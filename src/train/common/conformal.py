@@ -3,7 +3,7 @@
 After training, :func:`run_conformal` runs the model once over the labelled validation
 set, measures on random 50/50 splits whether the calibrated sets reach the target
 coverage, fits the final threshold on all of the validation set, and exports the
-classifier with a :class:`ConformalPredictionSetLayer` on top (``conformal_model.keras``,
+classifier with a :class:`ConformalPredictionSet` on top (``conformal_model.keras``,
 outputs ``(logits, probs, in_set)``) next to a ``conformal.json`` record. The score is
 the deterministic APS rule, the one the exported layer computes, so the reported
 numbers describe the exported model. The math is in
@@ -20,8 +20,8 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 
-from dl_techniques.layers.statistics.conformal_prediction_set import (
-    ConformalPredictionSetLayer,
+from dl_techniques.layers.statistics.conformal import (
+    ConformalPredictionSet,
     attach_conformal_sets,
 )
 from dl_techniques.utils.conformal_classification import (
@@ -157,5 +157,5 @@ def run_conformal(
 def load_conformal_model(path: Path) -> keras.Model:
     """Load a ``conformal_model.keras`` written by :func:`run_conformal`."""
     return keras.models.load_model(
-        path, custom_objects={"ConformalPredictionSetLayer": ConformalPredictionSetLayer}
+        path, custom_objects={"ConformalPredictionSet": ConformalPredictionSet}
     )

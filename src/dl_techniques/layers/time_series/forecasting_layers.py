@@ -9,7 +9,7 @@ architecture instead of leaving it to the loss function.
    learned weight.
 
 ``create_manokhin_compliant_model`` wires both, plus
-:class:`~dl_techniques.layers.statistics.conformal_quantile_head.ConformalQuantileHead`
+:class:`~dl_techniques.layers.statistics.conformal.quantile_head.ConformalQuantileHead`
 (which emits three quantiles and carries a conformal offset for calibrated
 intervals), into one model with two outputs.
 
@@ -26,7 +26,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.statistics.conformal_quantile_head import ConformalQuantileHead
+from dl_techniques.layers.statistics.conformal import ConformalQuantileHead
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

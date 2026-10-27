@@ -8,14 +8,14 @@ quantile (typically ``alpha/2``), the median and an upper quantile (typically
 calibration set measures how far the true values fall outside them, and a single scalar
 offset ``q_hat`` widens both bounds by that amount. ``call()`` never applies ``q_hat``;
 only :meth:`ConformalQuantileHead.predict_intervals` does, after
-:meth:`ConformalQuantileHead.calibrate` has fitted it with the finite-sample order
+:meth:`~ConformalLayer.calibrate` has fitted it with the finite-sample order
 statistic of the scores (the same rule as
 :func:`dl_techniques.utils.conformal_denoiser_intervals.conformal_quantile`).
 
 It is the learned-quantile sibling of
-:class:`~dl_techniques.layers.statistics.conformal_interval.ConformalIntervalLayer`,
+:class:`~dl_techniques.layers.statistics.conformal.interval.ConformalInterval`,
 which widens a point estimate by a fixed radius, and of
-:class:`~dl_techniques.layers.statistics.conformal_prediction_set.ConformalPredictionSetLayer`,
+:class:`~dl_techniques.layers.statistics.conformal.prediction_set.ConformalPredictionSet`,
 which turns classifier logits into a prediction set.
 
 References:
@@ -36,9 +36,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import initializer_spec
-from dl_techniques.utils.conformal_denoiser_intervals import conformal_quantile
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.logger import logger
+from .base import ConformalLayer
 
 # ---------------------------------------------------------------------
 
@@ -47,8 +46,8 @@ LOWER, MEDIAN, UPPER = 0, 1, 2
 NUM_QUANTILES = 3
 
 
-@register_dl_technique("dl_techniques.layers.statistics.conformal_quantile_head")
-class ConformalQuantileHead(keras.layers.Layer):
+@register_dl_technique("dl_techniques.layers.statistics.conformal.quantile_head")
+class ConformalQuantileHead(ConformalLayer):
     """Quantile output layer for Conformalized Quantile Regression (CQR).
 
     **Architecture Overview:**
@@ -77,7 +76,7 @@ class ConformalQuantileHead(keras.layers.Layer):
 
     .. code-block:: text
 
-        calibrate() writes the non-trainable scalar q_hat:
+        calibrate() (or set_q_hat()) writes the non-trainable scalar q_hat:
 
             q_hat = the ceil((n + 1)(1 - alpha))-th smallest score
                     (+inf when n is too small for alpha)
@@ -112,8 +111,9 @@ class ConformalQuantileHead(keras.layers.Layer):
     :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param q_hat_init: Initial conformal offset. Defaults to ``0.0`` (uncalibrated:
         the intervals are the raw learned quantiles). The real value is fitted by
-        :meth:`calibrate`; ``get_config`` stores the current one, so a config-only
-        reload keeps it.
+        :meth:`~ConformalLayer.calibrate` with scores
+        ``max(q_low - y, y - q_high)`` from a held-out set; ``get_config`` stores the
+        current one, so a config-only reload keeps it.
     :type q_hat_init: float
     :param kwargs: Additional keyword arguments for the Layer base class.
 
@@ -124,7 +124,7 @@ class ConformalQuantileHead(keras.layers.Layer):
         ``(batch, forecast_length, output_dim, 3)``.
 
     :raises ValueError: If ``forecast_length`` or ``output_dim`` is not positive, or
-        ``q_hat_init`` is NaN.
+        ``q_hat_init`` is negative or NaN.
     """
 
     def __init__(
@@ -136,20 +136,17 @@ class ConformalQuantileHead(keras.layers.Layer):
             q_hat_init: float = 0.0,
             **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(q_hat_init=q_hat_init, **kwargs)
 
         if forecast_length <= 0:
             raise ValueError(f"forecast_length must be positive, got {forecast_length}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if q_hat_init != q_hat_init:
-            raise ValueError(f"q_hat_init must not be NaN, got {q_hat_init}")
 
         self.forecast_length = forecast_length
         self.output_dim = output_dim
         self.kernel_initializer = initializer_spec(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.q_hat_init = float(q_hat_init)
 
         # One Dense for all quantiles: (Tf * output_dim * 3) outputs.
         self.projection = keras.layers.Dense(
@@ -158,9 +155,6 @@ class ConformalQuantileHead(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name="quantile_projection",
         )
-
-        # Created in build().
-        self.q_hat = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the projection and create the non-trainable offset weight.
@@ -174,13 +168,7 @@ class ConformalQuantileHead(keras.layers.Layer):
                 f"defined input_dim, got shape {tuple(input_shape)}"
             )
         self.projection.build(input_shape)
-        self.q_hat = self.add_weight(
-            name="conformal_q",
-            shape=(),
-            initializer=keras.initializers.Constant(self.q_hat_init),
-            trainable=False,
-            dtype=self.variable_dtype,
-        )
+        self.add_q_hat_weight()
         super().build(input_shape)
 
     def call(
@@ -200,29 +188,6 @@ class ConformalQuantileHead(keras.layers.Layer):
             x, (-1, self.forecast_length, self.output_dim, NUM_QUANTILES)
         )
 
-    def calibrate(self, calibration_scores: np.ndarray, alpha: float = 0.1) -> None:
-        """Fit ``q_hat`` from the held-out nonconformity scores.
-
-        Each score is ``max(q_low - y_true, y_true - q_high)`` on a calibration set the
-        model did not train on. ``q_hat`` is the ``ceil((n + 1)(1 - alpha))``-th
-        smallest score, the order statistic that gives coverage ``>= 1 - alpha``;
-        when ``n`` is too small for ``alpha`` it is ``+inf`` (unbounded intervals).
-        Runs in NumPy and writes a Keras weight, so it is not part of a traced graph.
-
-        :param calibration_scores: Scores with shape ``(n_calibration_samples,)``.
-        :param alpha: Miscoverage level in ``(0, 1)``. Defaults to 0.1 (90% coverage).
-        :raises ValueError: If the layer is not built, the scores are empty, or
-            ``alpha`` is outside ``(0, 1)``.
-        """
-        if self.q_hat is None:
-            raise ValueError(
-                f"ConformalQuantileHead '{self.name}' is not built: call the layer "
-                f"(or build it) before calibrate()"
-            )
-        q_value = conformal_quantile(np.asarray(calibration_scores), alpha)
-        self.q_hat.assign(q_value)
-        logger.info(f"ConformalQuantileHead '{self.name}' calibrated q_hat={q_value:.6g}")
-
     def predict_intervals(
             self,
             inputs: Union[keras.KerasTensor, np.ndarray],
@@ -231,7 +196,7 @@ class ConformalQuantileHead(keras.layers.Layer):
 
         Runs the layer with ``training=False`` (building it on first use), then widens
         the interval by ``q_hat``: ``lower - q_hat`` and ``upper + q_hat``. The median
-        is returned unchanged. Before :meth:`calibrate` ``q_hat`` is 0 and the bounds
+        is returned unchanged. Before :meth:`~ConformalLayer.calibrate` ``q_hat`` is 0 and the bounds
         are the raw learned quantiles.
 
         :param inputs: Encoded features ``(batch, input_dim)``.
@@ -239,8 +204,8 @@ class ConformalQuantileHead(keras.layers.Layer):
             Note the order: the median comes first.
         """
         preds = self(inputs, training=False)
-        # q_hat is a variable_dtype weight read outside call(), so it is not autocast:
-        # bring it to the output dtype (they differ under mixed_float16).
+        # q_hat is a variable_dtype weight (never autocast): bring it to the output
+        # dtype, which differs from it under mixed_float16.
         q_hat = keras.ops.cast(self.q_hat, preds.dtype)
         median = preds[..., MEDIAN]
         lower = preds[..., LOWER] - q_hat
@@ -255,19 +220,12 @@ class ConformalQuantileHead(keras.layers.Layer):
         return (input_shape[0], self.forecast_length, self.output_dim, NUM_QUANTILES)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the serialization config.
-
-        Stores the current calibrated ``q_hat`` as ``q_hat_init``, so a config-only
-        reload (``from_config`` / ``clone_model``) keeps the calibration even without
-        the ``.keras`` weights archive.
-        """
+        """Return the serialization config (``q_hat_init`` is the calibrated value)."""
         config = super().get_config()
         config.update({
             "forecast_length": self.forecast_length,
             "output_dim": self.output_dim,
             "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "q_hat_init": float(keras.ops.convert_to_numpy(self.q_hat))
-            if self.q_hat is not None else self.q_hat_init,
         })
         return config

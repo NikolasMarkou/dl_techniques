@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.statistics.conformal_quantile_head import ConformalQuantileHead
+from dl_techniques.layers.statistics.conformal import ConformalQuantileHead
 
 FL, OUT, DIM, B = 5, 3, 10, 4
 CAL_Q = 0.37
@@ -51,18 +51,19 @@ class TestConstruction:
         assert head.projection.built
         paths = sorted(w.path for w in head.weights)
         assert paths == [
-            "cqh/conformal_q",
+            "cqh/conformal_q_hat",
             "cqh/quantile_projection/bias",
             "cqh/quantile_projection/kernel",
         ]
-        assert [w.path.split("/")[-1] for w in head.non_trainable_weights] == ["conformal_q"]
+        assert [w.path.split("/")[-1] for w in head.non_trainable_weights] == ["conformal_q_hat"]
         assert head.q_hat.shape == ()
         assert head.projection.kernel.shape == (DIM, FL * OUT * 3)
 
     @pytest.mark.parametrize("kwargs, message", [
         (dict(forecast_length=0, output_dim=2), "forecast_length must be positive, got 0"),
         (dict(forecast_length=2, output_dim=-1), "output_dim must be positive, got -1"),
-        (dict(forecast_length=2, output_dim=2, q_hat_init=float("nan")), "q_hat_init must not be NaN"),
+        (dict(forecast_length=2, output_dim=2, q_hat_init=float("nan")), "q_hat_init must be non-negative, got nan"),
+        (dict(forecast_length=2, output_dim=2, q_hat_init=-1.0), "q_hat_init must be non-negative, got -1.0"),
     ])
     def test_arguments_are_validated_naming_the_value(self, kwargs, message):
         with pytest.raises(ValueError, match=message):

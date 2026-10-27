@@ -342,7 +342,7 @@ loading — do NOT force it through `load_dataset()`.
 
 ImageNet-1k from the extracted `train/<wnid>/` + `val/` layout: `dl_techniques.datasets.vision.imagenet2012.load_imagenet2012`, wired through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet` (`--imagenet-root` / `--devkit-dir`; val labels need the ILSVRC2012 devkit). `train.common.make_imagenet_filesystem_dataset` remains for `alexnet`.
 
-Conformal prediction sets for a trained classifier: `train.common.conformal` (`add_conformal_arguments`, `run_conformal`, `load_conformal_model`) runs one ordered pass over the labelled val set, checks coverage on random 50/50 splits, fits the exported threshold on all of val, and writes `conformal.json` plus `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. The math lives in `dl_techniques/utils/conformal_classification.py`; the deterministic APS rule it reports is the one `ConformalPredictionSetLayer` runs.
+Conformal prediction sets for a trained classifier: `train.common.conformal` (`add_conformal_arguments`, `run_conformal`, `load_conformal_model`) runs one ordered pass over the labelled val set, checks coverage on random 50/50 splits, fits the exported threshold on all of val, and writes `conformal.json` plus `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. The math lives in `dl_techniques/utils/conformal_classification.py`; the deterministic APS rule it reports is the one `ConformalPredictionSet` (`layers/statistics/conformal/`) runs.
 
 ## Scripts that don't use `train.common` callbacks (and why)
 

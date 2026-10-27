@@ -1,6 +1,6 @@
 """Tests for the forecasting_layers (NaiveResidual / ForecastabilityGate and the
 model builder; ConformalQuantileHead is tested in
-tests/test_layers/test_statistics/test_conformal_quantile_head.py).
+tests/test_layers/test_statistics/test_conformal/test_quantile_head.py).
 
 NaiveResidual and ForecastabilityGate take multiple positional tensor inputs,
 so their serialization is verified via a ``get_config`` -> ``from_config`` +

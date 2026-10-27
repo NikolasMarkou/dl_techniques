@@ -57,7 +57,7 @@ MIN_SOURCE_FILES = 7
 
 
 def _package_sources():
-    return sorted(p for p in PACKAGE_DIR.glob("*.py") if p.name != "__init__.py")
+    return sorted(p for p in PACKAGE_DIR.rglob("*.py") if p.name != "__init__.py")
 
 
 def _parse(path):

@@ -76,13 +76,13 @@ do not compete: several lags can be important at once.
 
 ### 5. Scientific forecasting and signal processing
 
-`ConformalQuantileHead` (conformalized quantile regression) lives in `layers/statistics/conformal_quantile_head.py` with the other conformal layers.
+`ConformalQuantileHead` (conformalized quantile regression) lives in `layers/statistics/conformal/quantile_head.py` with the other conformal layers.
 
 | Name | Description | Use case |
 |---|---|---|
 | `NaiveResidual` | Adds the network output on top of a random-walk baseline | Learning only what beats the naive forecast |
 | `ForecastabilityGate` | Learned per-sample blend of deep and naive forecasts | Preventing overfitting on noisy series |
-| `create_manokhin_compliant_model` | Builder wiring the two layers above and `layers.statistics.ConformalQuantileHead` into a model | Getting a compliant baseline in one call |
+| `create_manokhin_compliant_model` | Builder wiring the two layers above and `layers.statistics.conformal.ConformalQuantileHead` into a model | Getting a compliant baseline in one call |
 | `ExponentialMovingAverage` | EMA over the time axis | Smoothing a series |
 | `EMASlopeFilter` | EMA slope plus three 0/1 threshold signals | Generating trend-based trading signals |
 
