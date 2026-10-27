@@ -1,6 +1,6 @@
 """Classification head: one label for a whole image."""
 
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
 
 import keras
 
@@ -34,6 +34,8 @@ class ClassificationHead(BaseVisionHead):
     ``block_dims=(4096, 4096)`` with ``normalization_type=None`` is AlexNet's
     fc6/fc7. ``classifier_dropout_rate`` puts a dropout right before the
     classifier (MobileNetV2's ``Dropout(0.2)`` then ``Linear``).
+    ``classifier_use_bias=False`` builds the classifier without a bias, as a
+    reference head such as RADConvNet's does.
     ``normalization_kwargs`` reaches every norm the head builds (MobileNetV4's
     BatchNorm epsilon). ``block_use_bias=False`` drops the hidden Dense bias
     that a following BatchNorm would leave untrained. ``kernel_initializer``,
@@ -138,31 +140,39 @@ class ClassificationHead(BaseVisionHead):
         after the last block (or the pooled vector when there is none). 0
         (the default) builds no dropout.
     :type classifier_dropout_rate: float
+    :param classifier_use_bias: Whether the classifier ``Dense`` has a bias.
+        ``False`` builds a classifier with only a kernel.
+    :type classifier_use_bias: bool
     :param block_use_bias: Whether each hidden block's ``Dense`` has a bias.
         Set ``False`` when the blocks use ``batch_norm``: the norm subtracts
         the per-feature batch mean, so a bias before it receives an
-        identically-zero gradient and never trains. The classifier always
-        has a bias.
+        identically-zero gradient and never trains. The classifier's bias is
+        ``classifier_use_bias``.
     :type block_use_bias: bool
     :param kernel_initializer: Initializer for every ``Dense`` kernel in the
         head, the classifier included. Each ``Dense`` gets its own
         ``clone_initializer`` copy, so no two kernels replay one draw.
     :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param bias_initializer: Initializer for every ``Dense`` bias in the head.
+        When no ``Dense`` has a bias (``classifier_use_bias=False`` and no
+        hidden block with a bias) nothing reads it: a value other than the
+        default is refused and the head stores ``None``.
     :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for every ``Dense`` kernel in the
         head, the classifier included. ``None`` adds no loss.
     :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param bias_regularizer: Regularizer for every ``Dense`` bias in the head,
-        the classifier included. ``None`` adds no loss.
+        the classifier included. ``None`` adds no loss. Refused, like
+        ``bias_initializer``, when no ``Dense`` has a bias.
     :type bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :raises ValueError: If ``block_dims`` holds a width that is not a
         positive integer, ``classifier_dropout_rate`` is outside ``[0, 1)``,
         ``pooling_type`` is not ``'avg'``, ``'max'`` or ``'cls_token'``,
-        ``num_classes`` is not a positive integer, or ``hidden_dim < 2``
-        with the default ``block_dims``.
+        ``num_classes`` is not a positive integer, ``hidden_dim < 2``
+        with the default ``block_dims``, or a ``bias_initializer`` or
+        ``bias_regularizer`` is given while no ``Dense`` has a bias.
 
     :ivar pooling: Global pooling layer, built only when
         ``use_global_pooling`` is set.
@@ -176,7 +186,8 @@ class ClassificationHead(BaseVisionHead):
     :ivar classifier_dropout: Dropout before the classifier, built only when
         ``classifier_dropout_rate > 0``.
     :vartype classifier_dropout: keras.layers.Dropout
-    :ivar classifier: Output ``Dense(num_classes)``, linear (no activation).
+    :ivar classifier: Output ``Dense(num_classes)``, linear (no activation),
+        with a bias unless ``classifier_use_bias`` is ``False``.
     :vartype classifier: keras.layers.Dense
     """
 
@@ -193,6 +204,7 @@ class ClassificationHead(BaseVisionHead):
             pooled_normalization_type: Optional[NormalizationType] = None,
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             classifier_dropout_rate: float = 0.0,
+            classifier_use_bias: bool = True,
             block_use_bias: bool = True,
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'zeros',
@@ -219,6 +231,9 @@ class ClassificationHead(BaseVisionHead):
         :type normalization_kwargs: Optional[Dict[str, Any]]
         :param classifier_dropout_rate: Dropout on the classifier's input.
         :type classifier_dropout_rate: float
+        :param classifier_use_bias: Whether the classifier ``Dense`` has a
+            bias.
+        :type classifier_use_bias: bool
         :param block_use_bias: Whether each hidden block's ``Dense`` has a
             bias.
         :type block_use_bias: bool
@@ -237,7 +252,9 @@ class ClassificationHead(BaseVisionHead):
             ``classifier_dropout_rate`` is outside ``[0, 1)``,
             ``use_ffn`` is ``True``, ``num_classes`` is not a positive int,
             ``pooling_type`` is not one of ``_POOLING_TYPES``, or the default
-            blocks would get a width of 0 (``hidden_dim < 2``).
+            blocks would get a width of 0 (``hidden_dim < 2``), or a
+            ``bias_initializer`` or ``bias_regularizer`` is given while no
+            ``Dense`` has a bias.
         """
         _refuse_common_layers_call_never_runs(
             kwargs, type(self).__name__, ('use_ffn',))
@@ -267,13 +284,58 @@ class ClassificationHead(BaseVisionHead):
         self.pooled_normalization_type = pooled_normalization_type
         self.normalization_kwargs = dict(normalization_kwargs or {})
         self.classifier_dropout_rate = classifier_dropout_rate
+        self.classifier_use_bias = bool(classifier_use_bias)
         self.block_use_bias = bool(block_use_bias)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self._set_bias_arguments(bias_initializer, bias_regularizer)
 
         self._create_classification_layers()
+
+    def _set_bias_arguments(
+            self,
+            bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer],
+            bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]],
+    ) -> None:
+        """
+        Store ``bias_initializer`` and ``bias_regularizer``, or refuse them.
+
+        A ``Dense`` reads them only when it has a bias. When the classifier
+        has none and no hidden block has one, a non-default value is refused
+        and both are stored as ``None``, which round-trips. An explicit
+        ``'zeros'`` is the default, not a value, so it is accepted.
+
+        :param bias_initializer: The caller's bias initializer.
+        :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+        :param bias_regularizer: The caller's bias regularizer.
+        :type bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
+        :return: None.
+        :rtype: None
+        :raises ValueError: If no ``Dense`` has a bias and either argument
+            holds a non-default value.
+        """
+        initializer = keras.initializers.get(bias_initializer)
+        regularizer = keras.regularizers.get(bias_regularizer)
+        a_block_has_a_bias = self.block_use_bias and bool(self._resolved_block_dims())
+        if self.classifier_use_bias or a_block_has_a_bias:
+            self.bias_initializer = initializer
+            self.bias_regularizer = regularizer
+            return
+
+        given = []
+        if initializer is not None and not isinstance(
+                initializer, keras.initializers.Zeros):
+            given.append(f"bias_initializer={bias_initializer!r}")
+        if regularizer is not None:
+            given.append(f"bias_regularizer={bias_regularizer!r}")
+        if given:
+            raise ValueError(
+                f"{type(self).__name__} has no Dense with a bias "
+                f"(classifier_use_bias=False and no hidden block with a "
+                f"bias), so no layer reads {' or '.join(given)}."
+            )
+        self.bias_initializer = None
+        self.bias_regularizer = None
 
     def _resolved_block_dims(self) -> Tuple[int, ...]:
         """
@@ -364,6 +426,7 @@ class ClassificationHead(BaseVisionHead):
         # applied in call(), so 'logits' stays the pre-softmax score.
         self.classifier = keras.layers.Dense(
             units=self.num_classes,
+            use_bias=self.classifier_use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
@@ -507,7 +570,7 @@ class ClassificationHead(BaseVisionHead):
         :return: Config dict carrying ``num_classes``, ``use_global_pooling``,
             ``pooling_type``, ``block_dims``, ``pooled_normalization_type``,
             ``normalization_kwargs``, ``classifier_dropout_rate``,
-            ``block_use_bias`` and the
+            ``classifier_use_bias``, ``block_use_bias`` and the
             serialized initializers and regularizers, on top of the base
             configuration.
         :rtype: Dict[str, Any]
@@ -523,6 +586,7 @@ class ClassificationHead(BaseVisionHead):
             'pooled_normalization_type': self.pooled_normalization_type,
             'normalization_kwargs': dict(self.normalization_kwargs),
             'classifier_dropout_rate': self.classifier_dropout_rate,
+            'classifier_use_bias': self.classifier_use_bias,
             'block_use_bias': self.block_use_bias,
             'kernel_initializer': keras.initializers.serialize(
                 self.kernel_initializer),
