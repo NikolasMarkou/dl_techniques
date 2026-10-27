@@ -289,10 +289,6 @@ _EXEMPT = {
         ('_current_lr', 'return None', 'return float(keras.ops.convert_to_numpy(self.',
          'the learning rate for the dashboard; None when unreadable'),
     ],
-    'train/common/datasets.py': [
-        ('get_class_names', 'class_', "info = tfds.builder('imagenet2012').info",
-         'label names for figures; class_N when the TFDS metadata is unavailable'),
-    ],
     'train/common/image_text.py': [
         ('load_cc3m_local_split', ': tokenization cache read failed (', 'if os.path.exists(cache_npz) and os.path.exis',
          'a tokenization cache; a failed read recomputes the tokens'),
@@ -566,14 +562,18 @@ def test_the_census_counts_are_pinned():
 
     Optional 58 -> 59 at plan-2026-10-23T190557-972a9ac5 step 6.3: the same
     callback's closing-row handler (``_close_with_validation``), whose try body is
-    one append of a metrics row plus the curve redraw, run after ``fit`` has ended."""
+    one append of a metrics row plus the curve redraw, run after ``fit`` has ended.
+
+    Exempt 60 -> 59 and records 4 -> 3 when ``train.common.datasets`` lost its TFDS
+    ImageNet branch: the handler around ``tfds.builder('imagenet2012')`` in
+    ``get_class_names`` went with it."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
-    assert counts == {"raises": 8, "exits": 4, "records": 4,
-                      "optional": 59, "exempt": 60, None: 0}
+    assert counts == {"raises": 8, "exits": 4, "records": 3,
+                      "optional": 59, "exempt": 59, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 59
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 60
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 59
 
 
 _PLANTED = '''

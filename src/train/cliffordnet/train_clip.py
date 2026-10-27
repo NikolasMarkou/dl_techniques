@@ -814,7 +814,7 @@ def _run_pretrain_vision(
         num_classes = _CIFAR100_CLASSES
     else:
         (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
-            "cifar100", batch_size=batch_size,
+            "cifar100"
         )
     if num_classes != _CIFAR100_CLASSES:
         raise RuntimeError(

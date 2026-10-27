@@ -306,13 +306,13 @@ def create_base_argument_parser(
         description: Help text for the parser.
         default_dataset: Default dataset name.
         dataset_choices: Valid dataset names. Defaults to
-            ['mnist', 'cifar10', 'cifar100', 'imagenet'].
+            ['mnist', 'cifar10', 'cifar100'].
 
     Returns:
         ArgumentParser with common training arguments.
     """
     if dataset_choices is None:
-        dataset_choices = ['mnist', 'cifar10', 'cifar100', 'imagenet']
+        dataset_choices = ['mnist', 'cifar10', 'cifar100']
 
     parser = argparse.ArgumentParser(description=description)
 

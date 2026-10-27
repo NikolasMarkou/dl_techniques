@@ -3,7 +3,6 @@
 import keras
 import numpy as np
 import tensorflow as tf
-import tensorflow_datasets as tfds
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple, List, Optional, Sequence, Set
 
@@ -271,116 +270,16 @@ def collect_image_paths(
 
 # ---------------------------------------------------------------------
 
-def load_imagenet_dataset(
-        image_size: Tuple[int, int] = (224, 224),
-        batch_size: int = 32,
-        shuffle_buffer_size: int = 10000,
-        cache: bool = False,
-        data_dir: Optional[str] = None,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, Tuple[int, int, int], int]:
+def load_dataset(dataset_name: str) -> Tuple:
     """
-    Load ImageNet dataset using TensorFlow Datasets.
+    Load and preprocess an in-memory image dataset.
 
-    Parameters
-    ----------
-    image_size : Tuple[int, int]
-        Target image size (height, width).
-    batch_size : int
-        Batch size.
-    shuffle_buffer_size : int
-        Buffer size for shuffling.
-    cache : bool
-        Whether to cache the dataset in memory.
-    data_dir : Optional[str]
-        Directory to download/load data from.
-
-    Returns
-    -------
-    Tuple[tf.data.Dataset, tf.data.Dataset, Tuple[int, int, int], int]
-        Training dataset, validation dataset, input shape, number of classes.
-    """
-    logger.info("Loading ImageNet dataset from TensorFlow Datasets...")
-
-    train_ds, train_info = tfds.load(
-        "imagenet2012",
-        split="train",
-        with_info=True,
-        as_supervised=True,
-        data_dir=data_dir,
-    )
-
-    val_ds = tfds.load(
-        "imagenet2012",
-        split="validation",
-        as_supervised=True,
-        data_dir=data_dir,
-    )
-
-    num_classes = train_info.features['label'].num_classes
-    input_shape = (image_size[0], image_size[1], 3)
-
-    def preprocess_train(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Preprocess training image with data augmentation."""
-        image = tf.image.resize(image, (int(image_size[0] * 1.15), int(image_size[1] * 1.15)))
-        image = tf.image.random_crop(image, [image_size[0], image_size[1], 3])
-        image = tf.image.random_flip_left_right(image)
-        image = tf.cast(image, tf.float32) / 255.0
-        return image, label
-
-    def preprocess_val(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Preprocess validation image."""
-        image = tf.image.resize(image, (int(image_size[0] * 1.15), int(image_size[1] * 1.15)))
-        h, w = image_size
-        image = tf.image.crop_to_bounding_box(
-            image,
-            offset_height=(tf.shape(image)[0] - h) // 2,
-            offset_width=(tf.shape(image)[1] - w) // 2,
-            target_height=h,
-            target_width=w
-        )
-        image = tf.cast(image, tf.float32) / 255.0
-        return image, label
-
-    train_ds = train_ds.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
-    if cache:
-        train_ds = train_ds.cache()
-    train_ds = train_ds.shuffle(shuffle_buffer_size)
-    train_ds = train_ds.batch(batch_size)
-    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-
-    val_ds = val_ds.map(preprocess_val, num_parallel_calls=tf.data.AUTOTUNE)
-    if cache:
-        val_ds = val_ds.cache()
-    val_ds = val_ds.batch(batch_size)
-    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-
-    train_size = train_info.splits['train'].num_examples
-    val_size = train_info.splits['validation'].num_examples
-
-    logger.info(f"ImageNet dataset loaded: {train_size} train, {val_size} validation samples")
-    logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
-
-    return train_ds, val_ds, input_shape, num_classes
-
-
-# ---------------------------------------------------------------------
-
-def load_dataset(
-        dataset_name: str,
-        batch_size: int = 32,
-        image_size: Optional[Tuple[int, int]] = None,
-) -> Tuple:
-    """
-    Load and preprocess dataset.
+    ImageNet is not handled here: use ``train.common.imagenet``.
 
     Parameters
     ----------
     dataset_name : str
-        Name of the dataset ('mnist', 'cifar10', 'cifar100', 'imagenet').
-    batch_size : int
-        Batch size (used for ImageNet).
-    image_size : Optional[Tuple[int, int]]
-        Target image size for ImageNet.
+        Name of the dataset ('mnist', 'cifar10', 'cifar100').
 
     Returns
     -------
@@ -388,14 +287,6 @@ def load_dataset(
         Training data, test/validation data, input shape, number of classes.
     """
     logger.info(f"Loading {dataset_name} dataset...")
-
-    if dataset_name.lower() == 'imagenet':
-        if image_size is None:
-            image_size = (224, 224)
-        return load_imagenet_dataset(
-            image_size=image_size,
-            batch_size=batch_size,
-        )
 
     if dataset_name.lower() == 'mnist':
         (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
@@ -471,12 +362,6 @@ def get_class_names(dataset: str, num_classes: int) -> List[str]:
         if num_classes == len(CIFAR100_CLASS_NAMES):
             return list(CIFAR100_CLASS_NAMES)
         return [f'class_{i}' for i in range(num_classes)]
-    elif dataset.lower() == 'imagenet':
-        try:
-            info = tfds.builder('imagenet2012').info
-            return info.features['label'].names
-        except Exception:
-            return [f'class_{i}' for i in range(num_classes)]
     else:
         return [f'class_{i}' for i in range(num_classes)]
 
@@ -506,10 +391,10 @@ def get_class_names(dataset: str, num_classes: int) -> List[str]:
 # AFTER `.repeat()`. They moved here character-for-character with the code and
 # must NEVER be reordered, merged or "simplified"; they are not this plan's to
 # renumber either. The `import tensorflow_datasets as tfds` inside the
-# imagenette branch is likewise deliberate and stays LOCAL even though this
-# module already imports tfds at the top: it is part of the moved body, and
-# the move is behaviour-preserving by AST equality against the pre-move source
-# (verification.md, step 3).
+# imagenette branch is likewise deliberate and stays LOCAL (tfds pulls in a
+# heavy import chain and this module no longer imports it at the top): it is
+# part of the moved body, and the move is behaviour-preserving by AST equality
+# against the pre-move source (verification.md, step 3).
 # See decisions.md D-006.
 
 # Verified present offline at $TFDS_DATA_DIR (D-007): 9469 train / 3925 validation, 10 classes.

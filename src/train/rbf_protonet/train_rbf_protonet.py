@@ -209,7 +209,7 @@ def create_cifar100_dataset(
         train_ds, val_ds, steps_per_epoch, val_steps
     """
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        "cifar100", batch_size=config.batch_size,
+        "cifar100"
     )
     if num_classes != config.num_classes:
         raise ValueError(

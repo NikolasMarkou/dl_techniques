@@ -713,7 +713,7 @@ def train_all_variants(args: argparse.Namespace) -> None:
     logger.info(f"Run root: {run_root}")
 
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = (
-        load_dataset("cifar100", batch_size=args.batch_size)
+        load_dataset("cifar100")
     )
 
     # ---- Determine variants to run ----

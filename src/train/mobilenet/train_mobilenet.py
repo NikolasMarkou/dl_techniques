@@ -119,7 +119,7 @@ def train_model(args) -> None:
 
     # Load dataset
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        args.dataset, args.batch_size
+        args.dataset
     )
     class_names = get_class_names(args.dataset, num_classes)
     logger.info(f"Dataset loaded: {x_train.shape[0]} train, {x_test.shape[0]} test, "
