@@ -80,7 +80,7 @@ Four guards cover what the weight transplant cannot see (D-014, D-020):
 
 import contextlib
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, Iterator, Optional, Tuple
 
 import keras
@@ -103,6 +103,7 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
@@ -162,6 +163,10 @@ class StemCase:
     :param input_shape: ``(H, W, C)`` fed to the stem.
     :param expected_output_shape: ``(H', W', C')`` the ORIGINAL stem yields, so
         a geometry defect is named by its shape, not only by its values.
+    :param input_scale: Factor on the standard-normal input. A case whose
+        activation is clipped needs inputs large enough to reach the clip: with
+        the randomized weights below the activation input is about 0.3 standard
+        deviations wide, so a ReLU6 never clips and a plain ReLU passes for it.
     """
 
     case_id: str
@@ -170,6 +175,7 @@ class StemCase:
     input_shape: Tuple[int, int, int]
     expected_output_shape: Tuple[int, int, int]
     stem_of: Callable[[keras.Model], ConvStem] = lambda model: model.stem
+    input_scale: float = 1.0
 
 
 def _np(tensor) -> np.ndarray:
@@ -237,7 +243,9 @@ def assert_stem_matches_original(
         neither ``False`` nor ``True`` can see it.
     """
     rng = np.random.default_rng(seed)
-    x = rng.standard_normal((BATCH,) + tuple(case.input_shape)).astype("float32")
+    x = (
+        rng.standard_normal((BATCH,) + tuple(case.input_shape)) * case.input_scale
+    ).astype("float32")
 
     original = case.make_original()
     original.forward(x, False)  # builds the original sub-layers
@@ -938,19 +946,23 @@ RAD_VALID_NONDIVISIBLE_NOBIAS = _convnext_family_case(
 RAD_SAME = _convnext_family_case("rad-stride1-same", RADConvNet, 1, True, 8, 8)
 
 # ---------------------------------------------------------------------
-# MobileNetV3 and MobileNetV4
+# MobileNet V1 to V4
 # ---------------------------------------------------------------------
 
 # Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/mobilenet/mobilenet_v3.py``
-# (``__init__``) and ``mobilenet_v4.py`` (``_build_stem``). A 3x3 stride-2
+# (``__init__``) and ``mobilenet_v4.py`` (``_build_stem``); V1 and V2 are
+# ``git show 0a908d16e:src/dl_techniques/models/vision/mobilenet/mobilenet_v1.py``
+# (``_build_layers``) and ``mobilenet_v2.py`` (``_build_model_layers``). A 3x3 stride-2
 # ``same`` bias-free Conv2D with the model's L2 kernel regularizer, then
 # ``BatchNormalization(momentum=0.99, epsilon=1e-3)`` (TF Model Garden's
 # MobileNet backbone, D-111 of plan-2026-08-22T035419-a11304c8), then
-# ``HardSwish`` (V3) or ``ReLU`` (V4); no pool. The momentum and epsilon are
-# written as literals here, not read from ``mobilenet.common``. The V3 stem is
-# 16 channels at every width; the V4 stem is ``dims[0]``. Each activation was a
-# separate layer in the original, and is one in ``ConvStem``, so the op
-# sequence is identical and the comparison stays at ``rtol=0, atol=0``.
+# ``HardSwish`` (V3), ``ReLU`` (V1, V4) or ``ReLU(max_value=6)`` (V2); no pool.
+# The momentum and epsilon are written as literals here, not read from
+# ``mobilenet.common``. The V3 stem is 16 channels at every width, the V4 stem
+# is ``dims[0]``, the V1 stem is ``int(32 * alpha)`` and the V2 stem
+# ``make_divisible(32 * alpha)``. Each activation was a separate layer in the
+# original, and is one in ``ConvStem``, so the op sequence is identical and
+# the comparison stays at ``rtol=0, atol=0``.
 
 _MOBILENET_KERNEL_REG = 1e-4
 _MOBILENET_V4_STEM_FILTERS = 24
@@ -961,12 +973,24 @@ _MOBILENET_V4_STEM_FILTERS = 24
 #: (pass-2 WARNING 1, reproduced with a real mutation).
 _MOBILENET_V3_KERNEL_INIT = "he_uniform"
 _MOBILENET_V4_KERNEL_INIT = "lecun_normal"
+#: V1 and V2 default to ``he_normal``; these differ from it and from ConvStem's.
+_MOBILENET_V1_KERNEL_INIT = "he_uniform"
+_MOBILENET_V2_KERNEL_INIT = "lecun_normal"
+#: A width at which the two width rules disagree: V1 truncates ``32 * 0.6 = 19.2``
+#: to 19, V2 rounds it to a multiple of 8 (24), so a stem using the other model's
+#: rule is seen.
+_MOBILENET_ALPHA = 0.6
+_MOBILENET_V1_STEM_FILTERS = 19
+_MOBILENET_V2_STEM_FILTERS = 24
+#: V2's stem is clipped at 6; the activation input must reach it for the clip to
+#: be tested (see ``StemCase.input_scale``).
+_MOBILENET_V2_INPUT_SCALE = 50.0
 
 
 def _mobilenet_original(
     filters: int, kernel_initializer, activation_layer
 ) -> Original:
-    """The pre-migration MobileNetV3 / V4 stem, as literals."""
+    """The pre-migration MobileNet stem (V1 to V4), as literals."""
     conv = keras.layers.Conv2D(
         filters,
         kernel_size=3,
@@ -989,6 +1013,17 @@ def _mobilenet_original(
     return Original(
         sublayers={"conv1": conv, "norm1": norm, "act1": activation_layer},
         forward=forward,
+    )
+
+
+def _mobilenet_v2_model() -> MobileNetV2:
+    return MobileNetV2(
+        num_classes=4,
+        width_multiplier=_MOBILENET_ALPHA,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_initializer=_MOBILENET_V2_KERNEL_INIT,
     )
 
 
@@ -1017,6 +1052,18 @@ def _mobilenet_v4_model() -> MobileNetV4:
     )
 
 
+MOBILENET_V2 = StemCase(
+    case_id="mobilenet-v2-relu6",
+    make_model=_mobilenet_v2_model,
+    make_original=lambda: _mobilenet_original(
+        _MOBILENET_V2_STEM_FILTERS,
+        _MOBILENET_V2_KERNEL_INIT,
+        keras.layers.ReLU(max_value=6, name="conv1_relu6"),
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, _MOBILENET_V2_STEM_FILTERS),
+    input_scale=_MOBILENET_V2_INPUT_SCALE,
+)
 MOBILENET_V3 = StemCase(
     case_id="mobilenet-v3-hard-swish",
     make_model=_mobilenet_v3_model,
@@ -1414,6 +1461,7 @@ CASES = [
     RAD_VALID,
     RAD_VALID_NONDIVISIBLE_NOBIAS,
     RAD_SAME,
+    MOBILENET_V2,
     MOBILENET_V3,
     MOBILENET_V4,
     SQUEEZENET_V1_0,
@@ -1465,6 +1513,7 @@ BUILT_STEM_ROWS = [
         (32, 32, 3),
     ),
     ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
+    ("mobilenet-v2", _mobilenet_v2_model, (32, 32, 3)),
     ("mobilenet-v3", _mobilenet_v3_model, (32, 32, 3)),
     ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
     ("squeezenet-v1", lambda: _squeezenet_v1_model("1.0"), (64, 64, 3)),
@@ -1525,6 +1574,7 @@ INITIALIZER_AUDIT = {
     "ConvNeXtV1": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "ConvNeXtV2": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "RADConvNet": ("hardcoded", "STEM_INITIALIZER 'truncated_normal'"),
+    "MobileNetV2": ("knob", "lecun_normal (default he_normal)"),
     "MobileNetV3": ("knob", "he_uniform (default glorot_uniform = ConvStem's)"),
     "MobileNetV4": ("knob", "lecun_normal (default he_normal)"),
     "SqueezeNetV1": (
@@ -1832,6 +1882,21 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         )
 
 
+def test_the_guard_the_harness_sees_a_dropped_relu6_clip():
+    """ReLU with no ``max_value=6`` against V2's clipped stem must fail the comparison."""
+    stem = _stem_from_config(MOBILENET_V2, activation_kwargs={})
+    assert stem.act1.max_value is None
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(MOBILENET_V2, stem)
+
+
+def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
+    """At unit-scale inputs the activation input never reaches 6, so the same plain
+    ReLU stem passes: the case's ``input_scale`` is what makes the clip visible."""
+    stem = _stem_from_config(MOBILENET_V2, activation_kwargs={})
+    assert_stem_matches_original(replace(MOBILENET_V2, input_scale=1.0), stem)
+
+
 @pytest.mark.parametrize(
     "case,override,setting",
     [
@@ -1856,6 +1921,7 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         # The pass-2 mutant: MobileNetV3's stem call without kernel_initializer
         # falls back to ConvStem's glorot_uniform. At the model's own default
         # (also glorot_uniform) this was indistinguishable.
+        (MOBILENET_V2, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V3, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V4, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (VAE_BN_BIAS, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
@@ -1866,6 +1932,7 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         "bias-initializer",
         "kernel-regularizer-strength",
         "kernel-regularizer-dropped",
+        "mobilenet-v2-initializer-dropped",
         "mobilenet-v3-initializer-dropped",
         "mobilenet-v4-initializer-dropped",
         "vae-initializer-dropped",

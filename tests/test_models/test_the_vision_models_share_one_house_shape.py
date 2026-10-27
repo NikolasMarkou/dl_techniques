@@ -157,11 +157,11 @@ EXEMPTIONS: Dict[str, str] = {
         "no default, and ``save_model`` / ``load_model`` stay."
     ),
     "D-039": (
-        "MobileNetV3 keeps the caller's ``Initializer`` and hands each site a clone "
-        "(``clone_initializer``); it computes ``initializer_spec`` once, only to refuse "
-        "a bad initializer at construction and to feed ``get_config``. A stored spec "
-        "would re-draw every seeded kernel (0 of 54 small and 0 of 64 large kernels "
-        "would stay equal to the base revision's)."
+        "MobileNetV2 and MobileNetV3 keep the caller's ``Initializer`` and hand each site "
+        "a clone (``clone_initializer``); each computes ``initializer_spec`` once, only to "
+        "refuse a bad initializer at construction and to feed ``get_config``. A stored "
+        "spec would re-draw every seeded kernel (V2: 0 of 53 small kernels; V3: 0 of 54 "
+        "small and 0 of 64 large kernels would stay equal to the base revision's)."
     ),
     "not-a-traced-model": (
         "Rule h5 describes a subclassed model whose ``call`` is traced by "
@@ -294,7 +294,9 @@ SUBJECTS: Tuple[Subject, ...] = (
     _subject("mobilenet_v1", "mobilenet_v1", "MobileNetV1", head_attribute=_HEAD,
              classifier=True, required_params=_INIT_AND_REG),
     _subject("mobilenet_v2", "mobilenet_v2", "MobileNetV2", head_attribute=_HEAD,
-             classifier=True, required_params=_INIT_AND_REG),
+             classifier=True, required_params=_INIT_AND_REG,
+             waived={"h15_initializer_storage": "D-039"},
+             rules=_ALL - {"h15_initializer_storage"}),
     _subject("mobilenet_v3", "mobilenet_v3", "MobileNetV3", head_attribute=_HEAD,
              classifier=True, required_params=_INIT_AND_REG,
              waived={"h15_initializer_storage": "D-039"},
@@ -1158,6 +1160,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-14T233721-d4f9beb2/D-065": 1,
         "plan-2026-08-14T233721-d4f9beb2/D-069": 1,
         "plan-2026-08-22T035419-a11304c8/D-203": 1,
+        "plan-2026-10-26T125959-7af851e5/D-039": 1,
     },
     "src/dl_techniques/models/vision/mobilenet/mobilenet_v3.py": {
         "plan-2026-08-14T233721-d4f9beb2/D-065": 1,
@@ -1287,18 +1290,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
          "'input_shape', 'pretrained')",
          'create_mobilenetv1 is not one `return Class.from_variant(..., '
          '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        "2 violation(s): create_mobilenetv2('variant', 'num_classes', 'input_shape', "
-        "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
-        "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv2 is not one `return "
-        'Class.from_variant(..., **kwargs)`',
-        ("create_mobilenetv2('variant', 'num_classes', 'input_shape', "
-         "'width_multiplier', 'pretrained', "
-         "'head_config_overrides') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_mobilenetv2 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
@@ -1426,23 +1417,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         'constructor has no `kernel_regularizer` argument',
         ('constructor argument `weight_decay` should be `kernel_regularizer`',
          'constructor has no `kernel_regularizer` argument')),
-    ("h2_member_order", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`',
-        ('`compute_output_shape` comes after `get_config`',)),
-    ("h3_one_init_log", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `summary` writes 9 logger call(s)',
-        ('`summary` writes',)),
     ("h10_one_name_per_concept", "mobilenet_v2"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
@@ -1644,19 +1618,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         '`self.blocks`',
         ('the block container `self.depthwise_blocks` should be `self.blocks`',)),
     ('h15_initializer_storage', 'mobilenet_v1'): Open(
-        'the MobileNet V1 and V2 migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'mobilenet_v2'): Open(
-        'the MobileNet V1 and V2 migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'mobilenet_v2'): Open(
         'the MobileNet V1 and V2 migration',
         '1 violation(s): `self.kernel_initializer` stores '
         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',

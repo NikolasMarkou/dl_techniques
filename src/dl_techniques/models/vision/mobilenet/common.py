@@ -37,7 +37,7 @@ def reference_bn_kwargs() -> Dict[str, float]:
     is a different dict on every call, because a layer that stores its keyword
     dict (``ConvStem.normalization_kwargs``, the block's ``normalization_args``)
     must not see another layer's later edit. Callers: the stem, block and head
-    construction of ``MobileNetV3`` and ``MobileNetV4``; unpack it into a
+    construction of ``MobileNetV2``, ``MobileNetV3`` and ``MobileNetV4``; unpack it into a
     ``BatchNormalization`` or pass it as a layer's normalization keywords.
     """
     return {"momentum": REFERENCE_BN_MOMENTUM, "epsilon": REFERENCE_BN_EPSILON}

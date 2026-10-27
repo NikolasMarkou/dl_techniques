@@ -17,7 +17,8 @@ Keras Applications and torchvision build it, so `count_params()` equals
 `keras.applications.MobileNetV2` at each variant's `alpha`. The
 classifier is linear, so this model outputs logits: compile with
 `from_logits=True`. No pretrained checkpoints ship with this package;
-`pretrained=True` raises `NotImplementedError`.
+`pretrained=True` raises `NotImplementedError`, and a local `.keras` path
+loads by layer.
 
 References:
     - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
@@ -31,6 +32,7 @@ References:
       Bottleneck this module is built from.
 """
 
+import copy
 import keras
 from typing import Tuple, Optional, Dict, Any, Union
 
@@ -39,18 +41,39 @@ from typing import Tuple, Optional, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import (
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.tensors import make_divisible
+from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.models.vision.mobilenet.common import (
-    REFERENCE_BN_EPSILON,
-    REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
+    reference_bn_kwargs,
 )
-from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.initializers.clone import clone_initializer, initializer_spec
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the initializer, the
+# dropout rate, the weight decay, the input size). `load_pretrained_checkpoint` compares
+# every other key the checkpoint and the model both hold, so a changed width multiplier
+# is refused even when every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "dropout_rate",
+    "weight_decay",
+)
 
 # ---------------------------------------------------------------------
 
@@ -84,29 +107,45 @@ class MobileNetV2(keras.Model):
            v
         logits  [num_classes]
 
-    :param num_classes: Number of output classes.
-    :param width_multiplier: Channel-count multiplier (alpha).
-    :param dropout_rate: Dropout rate before the classifier.
+    :param num_classes: Number of output classes; used only if `include_top=True`,
+        where it must be positive.
+    :param width_multiplier: Channel-count multiplier (alpha). Must be positive.
+    :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
     :param weight_decay: L2 regularization factor for conv and dense layers,
         the classifier included.
     :param kernel_initializer: Weight initialization strategy, the
-        classifier's included.
+        classifier's included: a name, a serialized config dict or an
+        `Initializer` instance. Each site draws from its own clone of it, so a
+        name, a dict or a seedless instance gives every kernel its own draw; an
+        instance or dict carrying an explicit `seed` reuses that seed at every
+        site by contract, so same-shaped kernels start equal. `get_config`
+        reports its serialized spec.
+    :param include_top: Whether to include the pooling and classification head.
+    :param input_shape: Input shape `(height, width, channels)`; `None` means
+        `(224, 224, 3)`.
     :param head_config_overrides: Optional dict merged into the head
         configuration. `name`, `num_classes` and `task_type` raise
         `ValueError`.
-    :param include_top: Whether to include the pooling and classification head.
-    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param kwargs: Passthrough to `keras.Model`.
+    :raises ValueError: If `num_classes` is not positive with a head,
+        `width_multiplier` is not positive, `dropout_rate` is outside `[0, 1)`,
+        or `input_shape` is not 3-D.
+    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
+        `Initializer` instance.
+    :raises NotImplementedError: If `kernel_initializer` is an `Initializer`
+        instance that cannot serialize itself.
 
     Input shape:
-        3D tensor `(height, width, channels)`, e.g. `(224, 224, 3)`.
+        4-D tensor `(batch_size, height, width, channels)`.
 
     Output shape:
-        `(batch_size, num_classes)` if `include_top=True`, else a 4-D feature map.
+        - `include_top=True`: logits `(batch_size, num_classes)`.
+        - `include_top=False`: the last conv's feature map
+          `(batch_size, H/32, W/32, last_conv.filters)`.
 
     Example::
 
-        model = MobileNetV2(num_classes=1000, width_multiplier=1.0)
+        model = MobileNetV2.from_variant("medium", num_classes=1000)
         small = MobileNetV2(num_classes=10, width_multiplier=0.75, input_shape=(32, 32, 3))
     """
 
@@ -132,7 +171,7 @@ class MobileNetV2(keras.Model):
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
             weight_decay: float = 4e-5,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
             head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -140,41 +179,77 @@ class MobileNetV2(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
+
         if width_multiplier <= 0:
             raise ValueError(f"width_multiplier must be positive, got {width_multiplier}")
-        self.input_shape_config = input_shape or (224, 224, 3)
-        if len(self.input_shape_config) != 3:
-            raise ValueError(f"input_shape must be a 3D tuple, got {self.input_shape_config}")
+
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
         self.num_classes = num_classes
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
+        # DECISION plan-2026-10-26T125959-7af851e5/D-039: keep the caller's Initializer and hand a clone of it to each site; compute the spec only to refuse a bad initializer here and to report it in get_config. Do NOT store the spec and hand it to the sites, as MobileNetV4 does.
+        # A stored spec re-draws every kernel from a fresh default seed, so a seeded V2 kernel would no longer equal the base's (0 of 53 kernels at `small` stay equal); the clone keeps the seeded draw unchanged. See decisions.md.
+        self._kernel_initializer_spec = initializer_spec(kernel_initializer)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
+        self.input_shape_config = input_shape
         self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        # Head configuration
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
-
-        self._build_model_layers()
-
-    def _build_model_layers(self) -> None:
-        """Create every sub-layer from the stored configuration."""
-        first_channels = make_divisible(32 * self.width_multiplier)
-        self.initial_conv = keras.layers.Conv2D(
-            first_channels, 3, strides=2, padding='same', use_bias=False,
-            kernel_initializer=clone_initializer(self.kernel_initializer),
-            kernel_regularizer=self.kernel_regularizer, name='conv1'
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "MobileNetV2"
         )
-        self.initial_bn = keras.layers.BatchNormalization(
-            momentum=REFERENCE_BN_MOMENTUM,
-            epsilon=REFERENCE_BN_EPSILON,
-            name='conv1_bn',
-        )
-        self.initial_relu = keras.layers.ReLU(max_value=6, name='conv1_relu6')
+
+        self._build_stem()
 
         self.blocks = []
+        self._build_blocks()
+        self._build_last_block()
+
+        self.classification_head = None
+        if self.include_top:
+            self._build_head()
+
+        logger.info(
+            f"Created MobileNetV2 (alpha={width_multiplier}) with {len(self.blocks)} blocks "
+            f"for input {self.input_shape_config}"
+        )
+
+    def _build_stem(self) -> None:
+        """Build the stem: conv, batch norm and ReLU6 in one :class:`ConvStem`."""
+        self.stem = ConvStem(
+            filters=make_divisible(32 * self.width_multiplier),
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            use_bias=False,
+            num_convs=1,
+            normalization_type='batch_norm',
+            normalization_kwargs=reference_bn_kwargs(),
+            activation_type='relu',
+            activation_kwargs={'max_value': 6},
+            use_pooling=False,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            kernel_regularizer=self.kernel_regularizer,
+            name='stem',
+        )
+
+    def _build_blocks(self) -> None:
+        """Build one :class:`UniversalInvertedBottleneck` per row of ``ARCHITECTURE``, repeated ``n`` times.
+
+        The blocks are named ``block_{i}``, counted from 0.
+        """
         block_id = 0
         for t, c, n, s in self.ARCHITECTURE:
             output_channels = make_divisible(c * self.width_multiplier)
@@ -194,7 +269,7 @@ class MobileNetV2(keras.Model):
                     activation_args={'max_value': 6},
                     normalization_type='batch_norm',
                     # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; see mobilenet_v1.py for the measured impact. See decisions.md.
-                    normalization_args={'epsilon': REFERENCE_BN_EPSILON},
+                    normalization_args=reference_bn_kwargs(),
                     use_bias=False,
                     kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
@@ -202,7 +277,12 @@ class MobileNetV2(keras.Model):
                 ))
                 block_id += 1
 
-        # Matches the paper: the last convolution's channels are not scaled down for width_multiplier <= 1.0.
+    def _build_last_block(self) -> None:
+        """Build the last 1x1 conv, its batch norm and its ReLU6.
+
+        The conv is not scaled down for `width_multiplier <= 1.0`, as in the
+        paper, and widened above it.
+        """
         if self.width_multiplier > 1.0:
             last_channels = make_divisible(1280 * self.width_multiplier)
         else:
@@ -213,17 +293,10 @@ class MobileNetV2(keras.Model):
             kernel_regularizer=self.kernel_regularizer, name='conv_last'
         )
         self.last_bn = keras.layers.BatchNormalization(
-            momentum=REFERENCE_BN_MOMENTUM,
-            epsilon=REFERENCE_BN_EPSILON,
+            **reference_bn_kwargs(),
             name='conv_last_bn',
         )
         self.last_relu = keras.layers.ReLU(max_value=6, name='conv_last_relu6')
-
-        # Classification head using standardized factory
-        if self.include_top:
-            self._build_head()
-        else:
-            self.classification_head = None
 
     def _build_head(self) -> None:
         """Build the reference classifier on the shared ``ClassificationHead``.
@@ -276,9 +349,7 @@ class MobileNetV2(keras.Model):
         :param training: Passed to batch norm and dropout.
         :return: Logits, or the 4-D feature map if `include_top=False`.
         """
-        x = self.initial_conv(inputs)
-        x = self.initial_bn(x, training=training)
-        x = self.initial_relu(x)
+        x = self.stem(inputs, training=training)
 
         for block in self.blocks:
             x = block(x, training=training)
@@ -292,14 +363,70 @@ class MobileNetV2(keras.Model):
 
         return x
 
+    def compute_output_shape(
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Report the shape `call` returns, without building the model.
+
+        :param input_shape: `(batch_size, height, width, channels)`; the
+            spatial axes may be `None`.
+        :return: The logits shape `(batch_size, num_classes)`
+            (`include_top=True`) or the last conv's feature map shape.
+        """
+        shape = self.stem.compute_output_shape(input_shape)
+
+        for block in self.blocks:
+            shape = block.compute_output_shape(shape)
+
+        shape = self.last_conv.compute_output_shape(shape)
+        shape = self.last_bn.compute_output_shape(shape)
+        shape = self.last_relu.compute_output_shape(shape)
+
+        if not self.include_top:
+            return shape
+
+        # The head reports both keys; the model returns the logits.
+        return self.classification_head.compute_output_shape(shape)['logits']
+
+    def load_pretrained_weights(
+            self,
+            weights_path: str,
+            skip_mismatch: bool = True
+    ) -> None:
+        """Load a local `.keras` checkpoint into the model, layer by layer.
+
+        The transfer is `load_pretrained_checkpoint`: it builds the model at
+        `input_shape` if it is unbuilt and takes a headed checkpoint into a
+        headless model. Every layer outside the classification head must be
+        restored, so a checkpoint of another width raises and leaves the model
+        untouched. Only a head of another `num_classes` is skipped: it keeps
+        its initialization and a warning names it. The archive's own config is
+        compared too: a constructor argument that both hold and that is not in
+        `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint of another
+        `width_multiplier` is refused even when every weight shape fits. An
+        argument only one side holds is not compared, and an archive without a
+        config of this class is checked by layers only.
+
+        :param weights_path: Path to the weights file (`.keras` format).
+        :param skip_mismatch: `True` (default) lets the head layers differ;
+            `False` allows no difference anywhere. The inverse of the transfer
+            helper's `strict`.
+        :raises FileNotFoundError: If `weights_path` doesn't exist.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
+        )
+
     @classmethod
     def from_variant(
             cls,
             variant: str,
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
-            width_multiplier: float = 1.0,
-            head_config_overrides: Optional[Dict[str, Any]] = None,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "MobileNetV2":
         """Create a MobileNetV2 model from a predefined variant.
@@ -307,91 +434,65 @@ class MobileNetV2(keras.Model):
         :param variant: One of `"large"`, `"medium"`, `"small"`, `"nano"`, `"pico"`.
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
-        :param width_multiplier: Extra multiplier applied on top of the variant default.
-        :param head_config_overrides: Optional dict merged into the head
-            configuration (e.g. `{'block_dims': (512,)}`). `name`,
-            `num_classes` and `task_type` raise `ValueError`.
-        :param kwargs: Passthrough to the constructor.
+        :param pretrained: A path to a local weights file, `True` (raises
+            `NotImplementedError`, since no MobileNetV2 weights ship with
+            `dl_techniques`), or `False` (default, random init).
+        :param kwargs: Passthrough to the constructor; a field of the variant
+            (`width_multiplier`) is replaced by the value given here.
         :return: A configured `MobileNetV2` instance.
+        :raises ValueError: If `variant` is not recognized.
+        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
+
+        Example::
+
+            model = MobileNetV2.from_variant("medium", num_classes=1000)
+            small = MobileNetV2.from_variant("nano", num_classes=10, input_shape=(32, 32, 3))
         """
         if variant not in cls.MODEL_VARIANTS:
-            raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}")
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
 
-        config = cls.MODEL_VARIANTS[variant]
-        effective_width = config["width_multiplier"] * width_multiplier
-        logger.info(f"Creating MobileNetV2-{variant} (α={effective_width})")
-
-        return cls(
-            num_classes=num_classes,
-            width_multiplier=effective_width,
-            input_shape=input_shape,
-            head_config_overrides=head_config_overrides,
-            **kwargs
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
+        # See decisions.md.
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
         )
+
+        config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
+        config.update(kwargs)
+
+        model = cls(num_classes=num_classes, input_shape=input_shape, **config)
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
+        config = {
             "num_classes": self.num_classes,
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
             "weight_decay": self.weight_decay,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_initializer": self._kernel_initializer_spec,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
             "head_config_overrides": self._head_config_overrides,
-        })
-        return config
-
-
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the model."""
-        current_shape = input_shape
-
-        # Initial conv
-        current_shape = self.initial_conv.compute_output_shape(current_shape)
-        current_shape = self.initial_bn.compute_output_shape(current_shape)
-        current_shape = self.initial_relu.compute_output_shape(current_shape)
-
-        # Blocks
-        for block in self.blocks:
-            current_shape = block.compute_output_shape(current_shape)
-
-        # Last conv
-        current_shape = self.last_conv.compute_output_shape(current_shape)
-        current_shape = self.last_bn.compute_output_shape(current_shape)
-        current_shape = self.last_relu.compute_output_shape(current_shape)
-
-        # Head
-        if self.include_top and self.classification_head is not None:
-            # The head reports both keys; the model returns the logits.
-            current_shape = self.classification_head.compute_output_shape(
-                current_shape)['logits']
-
-        return current_shape
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     def summary(self, **kwargs):
-        """Print the model summary, plus configuration and parameter count."""
+        """Print the model summary; an unbuilt model is materialized first."""
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: materialize with a real forward pass.
         # The keras.Input + build(shape) route marked the model built without creating any sub-layer weights. See decisions.md.
         materialize_for_summary(self, self.input_shape_config)
 
         super().summary(**kwargs)
-
-        total_blocks = len(self.blocks)
-        total_params = self.count_params()
-
-        logger.info("MobileNetV2 Configuration:")
-        logger.info(f"  - Input shape: {self.input_shape_config}")
-        logger.info(f"  - Width multiplier (α): {self.width_multiplier}")
-        logger.info(f"  - Number of bottleneck blocks: {total_blocks}")
-        logger.info(f"  - Include top: {self.include_top}")
-        if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-        logger.info(f"  - Dropout rate: {self.dropout_rate}")
-        logger.info(f"  - Weight decay: {self.weight_decay}")
-        logger.info(f"  - Total parameters: {total_params:,}")
 
 
 # ---------------------------------------------------------------------
@@ -400,9 +501,7 @@ def create_mobilenetv2(
         variant: str = "medium",
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
-        width_multiplier: float = 1.0,
-        pretrained: bool = False,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> MobileNetV2:
     """Create a MobileNetV2 model.
@@ -410,43 +509,24 @@ def create_mobilenetv2(
     :param variant: Model variant: `"large"`, `"medium"`, `"small"`, `"nano"`, `"pico"`.
     :param num_classes: Number of output classes.
     :param input_shape: Input shape; defaults to `(224, 224, 3)`.
-    :param width_multiplier: Extra multiplier applied on top of the variant default.
-    :param pretrained: Must be `False`; `True` raises `NotImplementedError`
-        since no MobileNetV2 checkpoints ship with this package.
-    :param head_config_overrides: Optional dict merged into the head
-        configuration (e.g. `{'block_dims': (512,)}`). `name`,
-        `num_classes` and `task_type` raise `ValueError`.
-    :param kwargs: Passthrough to the constructor.
+    :param pretrained: A path to a local weights file, `True` (raises
+        `NotImplementedError`), or `False` (default, random init).
+    :param kwargs: Passthrough to `MobileNetV2.from_variant`, e.g.
+        `width_multiplier`, `head_config_overrides`, `include_top`.
     :return: A configured `MobileNetV2` instance.
+    :raises NotImplementedError: If `pretrained` is `True`.
 
     Example::
 
         model = create_mobilenetv2("medium", num_classes=1000)
         small = create_mobilenetv2("nano", num_classes=10, input_shape=(32, 32, 3))
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
-    # See decisions.md.
-    if pretrained:
-        raise NotImplementedError(
-            f"No pretrained MobileNetV2 weights are distributed with dl_techniques "
-            f"(requested variant '{variant}'). Build the architecture with "
-            f"pretrained=False and warm-start from a local checkpoint instead: "
-            f"model = create_mobilenetv2('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras'). Prefer "
-            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
-            f"path), which raises when a load changes ZERO variables -- raw "
-            f"load_weights is silent about a checkpoint that matches nothing."
-        )
-
-    model = MobileNetV2.from_variant(
+    return MobileNetV2.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
-        width_multiplier=width_multiplier,
-        head_config_overrides=head_config_overrides,
+        pretrained=pretrained,
         **kwargs
     )
-
-    return model
 
 # ---------------------------------------------------------------------

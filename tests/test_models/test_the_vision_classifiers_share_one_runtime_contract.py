@@ -213,7 +213,8 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         "mobilenet_v2", f"{_VISION}.mobilenet.mobilenet_v2", "MobileNetV2", "small", (32, 48, 3),
         _ctor(f"{_VISION}.mobilenet.mobilenet_v2", "MobileNetV2", width_multiplier=0.35,
               input_shape=(32, 48, 3)),
-        tiny={}, override={"width_multiplier": 0.25}, head_markers=("classification_head",),
+        tiny={"width_multiplier": 0.35}, override={"width_multiplier": 0.25},
+        head_markers=("classification_head",),
         invalid=(({"dropout_rate": 2.0}, "dropout_rate", 2.0), ({"num_classes": 0}, "num_classes", 0)),
         sizes=_DEFAULT_SIZES),
     Classifier(
@@ -424,24 +425,12 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("unknown_variant_lists_the_keys", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"',
-        'Available: ['),
     ("documented_override_is_accepted", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         "width_multiplier=0.25 gives 0.125: the variant's own value is multiplied, not "
         'overridden',
         "{'width_multiplier': 0.125}"),
-    ("documented_override_is_accepted", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        "width_multiplier=0.25 gives 0.1875: the variant's own value is multiplied, not "
-        'overridden',
-        "{'width_multiplier': 0.1875}"),
     ("documented_override_is_accepted", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -458,12 +447,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
         'NotImplementedError',
         "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("pretrained_true_names_the_variant", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -488,12 +471,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("missing_path_raises_file_not_found", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -530,12 +507,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("local_path_round_trip_headed", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("local_path_round_trip_headed", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -572,12 +543,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("local_path_round_trip_headless", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("local_path_round_trip_headless", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -634,12 +599,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)",
-        'classifier_dropout_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
@@ -751,11 +710,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
     ("layer_names_follow_the_table", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): no layer is named `stem`',
-        'no layer is named `stem`'),
-    ("layer_names_follow_the_table", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         '1 violation(s): no layer is named `stem`',
@@ -998,10 +952,19 @@ MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "resnet": ("resnet18", {"block_type": "bottleneck"}),
     "cliffordnet": ("nano", {"patch_size": 1}),
     "hierarchical": ("hier_345", {"patch_size": 1}),
+    "mobilenet_v2": ("small", {"width_multiplier": 0.5}),
     "mobilenet_v3": ("large", {}),
     "mobilenet_v4": ("hybrid_medium", {}),
 }
 MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
+
+#: What the layer check must name when a donor's trunk does not fit. A donor of another
+#: depth or block type misses layers the receiver has; MobileNet V1 and V2 have one fixed
+#: layer list, so a donor of another width has every layer and no shape that fits.
+TRUNK_MISMATCH_REPORT: Dict[str, Tuple[str, ...]] = {
+    "mobilenet_v2": ("shape_mismatch",),
+}
+_DEFAULT_TRUNK_MISMATCH_REPORT = ("shape_mismatch", "missing_in_source")
 
 
 @pytest.mark.parametrize(
@@ -1029,7 +992,8 @@ def test_a_checkpoint_whose_trunk_does_not_fit_is_refused(key, tmp_path) -> None
         load_pretrained_checkpoint(own, str(path), c.input_shape,
                                    ignore_config_keys=tuple(own.get_config()))
     message = str(caught.value)
-    assert "shape_mismatch" in message and "missing_in_source" in message, message
+    named = TRUNK_MISMATCH_REPORT.get(key, _DEFAULT_TRUNK_MISMATCH_REPORT)
+    assert all(word in message for word in named), message
 
 
 #: The same classifiers, with a donor that differs by ONE constructor argument that moves
@@ -1040,6 +1004,7 @@ SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
     "resnet": ({"activation_type": "gelu"}, "activation_type"),
     "cliffordnet": ({"ctx_mode": "abs"}, "ctx_mode"),
     "hierarchical": ({"ctx_mode": "abs"}, "ctx_mode"),
+    "mobilenet_v2": ({"width_multiplier": 0.36}, "width_multiplier"),
     "mobilenet_v3": ({"width_multiplier": 0.51}, "width_multiplier"),
     "mobilenet_v4": ({"strides": [1, 1, 2, 2, 1, 2, 1]}, "strides"),
 }
@@ -1801,6 +1766,7 @@ FAMILY_CHILD_NAMES: Dict[str, str] = {
     "cliffordnet": r"stem|block_\d+(?:_drop_path)?|classification_head",
     "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*(?:_drop_path)?"
                      r"|downsample_\d+_(?:depthwise|norm|pointwise)|classification_head"),
+    "mobilenet_v2": r"stem|block_\d+|conv_last|conv_last_bn|conv_last_relu6|classification_head",
     "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|last_hard_swish|classification_head",
     "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
 }
@@ -1841,6 +1807,8 @@ FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
                     lambda: _built(classifier("cliffordnet"), patch_size=1)),
     "hierarchical": (lambda: _built(classifier("hierarchical")),
                      lambda: _built(classifier("hierarchical"), include_top=False)),
+    "mobilenet_v2": (lambda: _built(classifier("mobilenet_v2")),
+                     lambda: _built(classifier("mobilenet_v2"), include_top=False)),
     "mobilenet_v3": (lambda: _built(classifier("mobilenet_v3")),),
     "mobilenet_v4": (lambda: _built(classifier("mobilenet_v4")), _hybrid_v4),
 }
