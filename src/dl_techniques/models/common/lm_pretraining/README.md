@@ -1,8 +1,9 @@
-# Masked Language Model (MLM) Pre-training Framework
+# Language-Model Pre-training Wrappers (MLM and CLM)
 
-A model-agnostic pre-training wrapper for the masked language modelling objective,
-plus a causal counterpart. Point it at any encoder that satisfies a two-item contract
-and it handles corruption, the masked loss, and the metrics.
+Model-agnostic pre-training wrappers for language backbones: `MaskedLanguageModel`
+(bidirectional masked objective) and `CausalLanguageModel` (next-token objective).
+Point either at a backbone that satisfies its small contract and it handles corruption
+or shifting, the loss, and the metrics.
 
 ---
 
@@ -139,7 +140,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.models.language.bert.model import BERT
-from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.lm_pretraining import MaskedLanguageModel
 
 VOCAB, SEQ = 500, 32
 
@@ -190,7 +191,7 @@ With a real tokenizer, `vocab_size=tokenizer.vocab_size`,
 | `create_mlm_training_model` | Factory; returns a **compiled** model. |
 | `visualize_mlm_predictions` | Prints decoded original / masked / reconstruction. |
 
-All four import from `dl_techniques.models.common.masked_language_model`.
+All four import from `dl_techniques.models.common.lm_pretraining`.
 
 ```python
 MaskedLanguageModel(
@@ -328,7 +329,7 @@ raises on an unbuilt layer.
 
 ```python
 from dl_techniques.models.language.bert.model import BERT
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     create_mlm_training_model,
 )
 
@@ -356,7 +357,7 @@ is already reported under that key.
 import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.lm_pretraining import MaskedLanguageModel
 
 
 # The package string is the defining module's dotted path: `my_project.<module>` for your
@@ -546,7 +547,7 @@ registered too.
 
 - **Backend:** TensorFlow only. `train_step` uses `tf.GradientTape` directly.
 - **Masking implementation:** `dl_techniques.utils.masking.strategies.apply_mlm_masking`.
-- **Registration key:** `dl_techniques.models.masked_language_model.mlm>MaskedLanguageModel`.
+- **Registration key:** `dl_techniques.models.lm_pretraining.mlm>MaskedLanguageModel`.
 - **Loss scaling:** the *unscaled* loss is reported while the scaled one is differentiated.
   Under `mixed_float16` Keras wraps the optimizer in a `LossScaleOptimizer` whose `apply()`
   divides every gradient by the dynamic scale unconditionally, so omitting `scale_loss`

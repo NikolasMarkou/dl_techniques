@@ -54,7 +54,7 @@ from train.common.clm_pretrain import (
     make_clm_steps_per_epoch,
 )
 from dl_techniques.models.language.gpt2 import GPT2
-from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -155,7 +155,7 @@ def create_gpt2_model(
     constructed with ``skip_head=True, output_key="logits"`` -- GPT2's
     already-correct head is reused unchanged, never rebuilt. ``pre_shifted=
     True`` matches ``preprocess_clm_dataset``'s ``(input_ids, labels)``
-    packed-CLM contract. See ``masked_language_model/clm.py`` module
+    packed-CLM contract. See ``lm_pretraining/clm.py`` module
     docstring for the full flag contract.
 
     :param config: Training configuration.
@@ -328,7 +328,7 @@ def train_gpt2(
     # `model` is now the CausalLanguageModel wrapper: `output_key="logits"`
     # already extracts the tensor inside `_backbone_forward`, so `call()`
     # returns the logits tensor directly (no `["logits"]` indexing) -- see
-    # `masked_language_model/clm.py:_backbone_forward`.
+    # `lm_pretraining/clm.py:_backbone_forward`.
     probe_cb = GenerationProbeCallback(
         logits_fn=lambda ctx: model(ctx, training=False)[0, -1, :].numpy(),
         repetition_penalty_mode="divide",

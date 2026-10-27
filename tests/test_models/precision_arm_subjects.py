@@ -57,8 +57,8 @@ CHARGED_PACKAGES: Tuple[str, ...] = (
     "SAM", "accunet", "beit", "bert", "bias_free_denoisers",
     "blt", "capsnet", "cbam", "cliffordlm", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
-    "gpt2", "hnet", "hrm", "ideogram4", "lewm",
-    "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "neural_hmm", "ntm",
+    "gpt2", "hnet", "hrm", "ideogram4", "lewm", "lm_pretraining",
+    "masked_autoencoder", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "neural_hmm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
     "time_series", "topolm", "trm", "vae", "video_jepa", "vit",
@@ -530,16 +530,16 @@ _sub("hnet", _b_hnet, lambda: _ids(64, 2, 16))
 _sub("topolm", _b_topolm, lambda: _ids(64, 2, 16), dtype_exempt_outputs=(0,))
 
 
-def _b_masked_language_model():
+def _b_lm_pretraining():
     from dl_techniques.models.language.bert import BERT
-    from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
+    from dl_techniques.models.common.lm_pretraining import MaskedLanguageModel
     encoder = BERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                    intermediate_size=64, max_position_embeddings=32,
                    hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0)
     return MaskedLanguageModel(encoder=encoder, vocab_size=64, mask_token_id=3)
 
 
-_sub("masked_language_model", _b_masked_language_model, lambda: _ids(64, 2, 16))
+_sub("lm_pretraining", _b_lm_pretraining, lambda: _ids(64, 2, 16))
 
 
 def _b_hrm():

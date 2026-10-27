@@ -484,7 +484,7 @@ class Mamba(keras.Model):
         unaffected. Mirrors
         ``dl_techniques.models.language.mamba.mamba_v2.Mamba2.hidden_size``
         (plan-2026-09-12T195532-422091c3/D-009). See
-        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.lm_pretraining.clm.CausalLanguageModel``,
         whose ``__init__`` requires a ``hidden_size`` attribute on any
         backbone built with ``skip_head=False``.
 

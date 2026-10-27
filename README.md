@@ -386,7 +386,7 @@ dl_techniques/
 │   │   ├── general_purpose/   # 4 — kan, hkan, mothnet, power_mlp
 │   │   ├── graph/             # 3 — relgt, graph_energy_transformer, shgcn
 │   │   ├── neural_computer/   # 2 — ntm, nam
-│   │   ├── common/            # 2 — power_sampling, masked_language_model
+│   │   ├── common/            # 2 — power_sampling, lm_pretraining
 │   │   ├── memory/            # 1 — som
 │   │   ├── point_cloud/       # 1 — latent_gmm_registration
 │   │   └── tabular/           # 1 — tabm

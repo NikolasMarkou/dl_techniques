@@ -3,11 +3,11 @@
 Text and byte sequence models live here (encoders, decoders, SSMs, reasoning
 stacks). The member list lives in `__init__.py`'s docstring; this file is
 the training-head usage guide. The heads themselves live in
-`models/common/masked_language_model/` — model-agnostic wrappers around any
+`models/common/lm_pretraining/` — model-agnostic wrappers around any
 backbone, which is why they are not under `language/`. Import from the leaf:
 
 ```python
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     MaskedLanguageModel, CausalLanguageModel, create_mlm_training_model,
 )
 ```
@@ -190,7 +190,7 @@ around a guarded backbone caches step functions of its own: its `build` catches
 `SequenceLengthError` from the backbone, drops them and re-raises, so the wrapper
 stays unbuilt and its next legal call works too (any other backbone build error
 keeps the CLM's logged-warning path); pinned by
-`tests/test_models/test_masked_language_model/test_a_refused_backbone_leaves_the_wrapper_usable.py`.
+`tests/test_models/test_lm_pretraining/test_a_refused_backbone_leaves_the_wrapper_usable.py`.
 An old `.keras` archive whose recorded build shape is over-long (saved before
 the guard) still loads, with every weight and a logged warning, and the loaded
 model refuses an over-long call: Keras rebuilds from the recorded shape inside a
@@ -304,7 +304,7 @@ built with `aggregate_backbone_losses=True`.
 
 ## Tests
 
-`tests/test_models/test_masked_language_model/` (forward, masking, locator,
+`tests/test_models/test_lm_pretraining/` (forward, masking, locator,
 serialization) plus per-trainer `tests/test_train/test_<trainer>/`. Pitfalls
 with RED proofs there: double-shift, probe degradation, metric-name clash.
 

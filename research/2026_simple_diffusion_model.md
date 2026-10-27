@@ -253,14 +253,14 @@ Invariants: `κ=1` best everywhere without SC (73.9→88.4 Sudoku, 12.6→45.8 T
 | Attention/FFN | `layers/attention/factory.py`, `layers/ffn/factory.py` (`gelu_tanh` = DiT's tanh-GELU) | `TransformerLayer` (`layers/transformers/transformer.py`, direct import, no factory) covers most; `text_encoder.py`/`vision_encoder.py` preset builders |
 | AdaLN | `layers/transformers/sd3_adaln.py` (`AdaLayerNormZero` 6-way, `AdaLayerNormContinuous` 2-way, `modulate`) | Direct reuse for simplex DiT conditioning `c = t_emb (+ y_emb)`; DiT `blocks.py` shows composition |
 | Masking | `utils/masking/strategies.py`, `dl_techniques.utils.masking` (canonical mask factory) + `layers/attention/common.py::apply_attention_mask` | Use for padding/conditional-prefix handling; **never** hand-roll additive `−1e9` mask (fp16 `0·−inf=NaN`, GUIDE §4) |
-| Heads | `layers/heads/factory.py::create_head(domain,…)` + `layers/heads/nlp/` | Denoiser output head = logits over vocab; follow `common/masked_language_model` head conventions (untied by default for model-agnostic wrapper) |
+| Heads | `layers/heads/factory.py::create_head(domain,…)` + `layers/heads/nlp/` | Denoiser output head = logits over vocab; follow `common/lm_pretraining` head conventions (untied by default for model-agnostic wrapper) |
 | Activations | `layers/activations/common.py` trio + `utils/activation_serialization.py` | Canonical `(de)serialization`; Layer-rejecting contract |
 
 ### 6.3 Training wrappers — do not invent a new one
 
 | Asset | Path | Note |
 |---|---|---|
-| MLM/CLM wrappers | `models/common/masked_language_model/{mlm.py,clm.py,utils.py}` + `models/language/AGENTS.md` | `MaskedLanguageModel` (bidirectional, dynamic masking in `train_step`, TF-only) / `CausalLanguageModel` (`skip_head`, `pre_shifted`, `loss_fn`, `aggregate_backbone_losses`, `output_key`, causality probe). SDM denoiser is **bidirectional non-causal** → MLM-shaped wrapper is the closer cousin, but SDM needs simplex-state input + Dirichlet corruption, so **new wrapper**, same head discipline (`task_head/` prefix, byte-identical headless output) |
+| MLM/CLM wrappers | `models/common/lm_pretraining/{mlm.py,clm.py,utils.py}` + `models/language/AGENTS.md` | `MaskedLanguageModel` (bidirectional, dynamic masking in `train_step`, TF-only) / `CausalLanguageModel` (`skip_head`, `pre_shifted`, `loss_fn`, `aggregate_backbone_losses`, `output_key`, causality probe). SDM denoiser is **bidirectional non-causal** → MLM-shaped wrapper is the closer cousin, but SDM needs simplex-state input + Dirichlet corruption, so **new wrapper**, same head discipline (`task_head/` prefix, byte-identical headless output) |
 | NLP pipeline | `src/train/common/nlp.py` (`create_tokenizer`, `preprocess_{mlm,clm}_dataset`, `estimate_clm_steps_per_epoch`, warmup schedule, `build_headed_model_from_encoder`) + `src/train/AGENTS.md` Pattern 3 | Reuse tokenization/dataset/steps helpers; byte path uses `datasets/byte_lm.py` (vocab 256 cannot use tiktoken pipeline) |
 | Trainer scaffold | `src/train/dit/{train_dit.py,synthetic_data.py,ema_callback.py}` | Copy CLI→config map (`CLI_TO_CONFIG` + `test_cli_contract`), explicit `model.build()` before `fit` (EMA correctness), stock `fit` assertion (`train_step is keras.Model.train_step`), timestamped run dirs, `create_callbacks` + `WeightEMACallback(0.9999)` |
 | Common trainer lib | `src/train/common/{callbacks.py,args.py,run_io.py,stats.py,optimizer.py}` | `create_callbacks`, `resolve_monitor_mode`, `set_seeds`, `setup_gpu`, `optimizer_builder` (note renamed clipping keys + hardcoded `AdamW` name) |
@@ -272,7 +272,7 @@ Invariants: `κ=1` best everywhere without SC (73.9→88.4 Sudoku, 12.6→45.8 T
 
 `tests/test_models/test_dit/` (surface, config, diffusion incl. nonzero-mask/`eta=0`/respacing-map,
 blocks attribution, identity-at-init, CFG 3-channel, variance-logit, null-row, frozen pos-embed,
-unpatchify orientation, build-parity, gradient flow) + `tests/test_models/test_masked_language_model/`
+unpatchify orientation, build-parity, gradient flow) + `tests/test_models/test_lm_pretraining/`
 + `tests/test_losses/test_ddpm_hybrid_loss.py` + `test_the_premature_scalar_family_is_pinned.py`
 + `test_package_api_contract.py` + `test_the_legacy_alias_namespace_has_no_collisions.py`
 + tree-wide `pytest tests/test_models/ -q --collect-only` (~3 s) after public-surface changes.
@@ -468,7 +468,7 @@ Sweep `T_end ∈ §K.5 list`, `p ∈ {0.92,0.96}`, `λ ∈ {1.5,3,4.5,6,8}`, `γ
   Sahoo et al. 2024 / Shi et al. 2024 (MDM); Austin et al. 2021 / Campbell et al. 2022 (DDM).
 - In-tree: `models/vision/dit/{README,PORT_NOTES,model,blocks,diffusion,config}.py`,
   `models/vision_language/bit_diffusion/{sde,bridge_process}.py`,
-  `models/language/bert/model.py`, `models/common/masked_language_model/README.md`,
+  `models/language/bert/model.py`, `models/common/lm_pretraining/README.md`,
   `losses/{ddpm_hybrid_loss,flow_matching_velocity_loss,masked_causal_lm_loss}.py`,
   `utils/ddpm_schedule.py`, `layers/{embedding/factory,transformers/sd3_adaln}.py`,
   `src/train/{dit/train_dit.py,AGENTS.md}`, `models/{AGENTS,GUIDE,README}.md`.

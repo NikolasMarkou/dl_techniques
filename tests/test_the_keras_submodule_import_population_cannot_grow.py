@@ -406,7 +406,7 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_models/test_mamba/test_dt_proj_survives_stateless_build.py": 1,
     "tests/test_models/test_mamba/test_mamba2_group_routing.py": 1,
     "tests/test_models/test_masked_autoencoder/test_patch_masking.py": 1,
-    "tests/test_models/test_masked_language_model/test_clm.py": 1,
+    "tests/test_models/test_lm_pretraining/test_clm.py": 1,
     "tests/test_models/test_mini_vec2vec/test_smoke.py": 1,
     "tests/test_models/test_mobile_clip/test_mobile_clip_v2.py": 1,
     "tests/test_models/test_modern_bert/test_positional_signal.py": 1,

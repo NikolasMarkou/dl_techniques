@@ -187,7 +187,7 @@ class TopoLM(RecordedBuildShapeMixin, keras.Model):
             └─────────────────────────┘
 
     Both leaves come back together, so
-    :class:`~dl_techniques.models.common.masked_language_model.CausalLanguageModel`
+    :class:`~dl_techniques.models.common.lm_pretraining.CausalLanguageModel`
     and the standard CLM data wrapper work unchanged. No ``None`` is echoed into
     the output dict, so ``predict({"input_ids": ...})`` does not trip Keras'
     nested-structure check.

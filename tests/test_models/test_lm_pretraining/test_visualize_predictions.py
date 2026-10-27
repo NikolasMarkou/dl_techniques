@@ -23,7 +23,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.common.masked_language_model import (
+from dl_techniques.models.common.lm_pretraining import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
 )

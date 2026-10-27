@@ -179,7 +179,7 @@ image-patch input modality now matches its filing.)
 | `neural_computer/nam/` | Neural Arithmetic **Module**. Name misattributes |
 | `neural_computer/ntm/` | Neural Turing Machine |
 | `common/power_sampling/` | inference-time power sampling for any causal LM/VLM — model-agnostic, which is why it is not under `language/` |
-| `common/masked_language_model/` | MLM/CLM training heads — consumed by every language trainer, filed here (not under `language/`) because they wrap any backbone rather than implementing one |
+| `common/lm_pretraining/` | MLM/CLM training heads — consumed by every language trainer, filed here (not under `language/`) because they wrap any backbone rather than implementing one |
 | `memory/som/` | Self-Organizing Maps |
 | `point_cloud/latent_gmm_registration/` | latent GMM registration |
 | `probabilistic/neural_hmm/` | Neural Hidden Markov Model: exact forward-algorithm likelihood, Viterbi and posteriors over neural transitions and emissions; generative or CRF. A sequence model, not a forecaster, so not under `time_series/` |

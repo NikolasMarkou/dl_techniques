@@ -5,7 +5,7 @@ projection (`logits = hidden_states @ embedding_weights.T`, optionally
 `+ bias`), used only when the model's `tie_word_embeddings` / `tie_weights` /
 `use_weight_tying` / `use_shared_embedding` flag is `True`: `gpt2/gpt2.py`,
 `hnet/model.py`, `wave_field/model.py`, `zamba2/model.py` (unconditional there
--- it has no untied path), `masked_language_model/clm.py` (the one site with a
+-- it has no untied path), `lm_pretraining/clm.py` (the one site with a
 learned bias), `language/cliffordlm/model.py`, and `vision_language/nano_vlm/model.py`
 (two call sites, `call()` and `generate()`). This module extracts the one
 expression that is genuinely identical across all of them -- the

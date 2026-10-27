@@ -62,7 +62,7 @@ from dl_techniques.layers.attention.wave_field_attention import (
 from dl_techniques.initializers.identity_plus_noise import (
     IdentityPlusNoise,
 )
-from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.lm_pretraining.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -180,7 +180,7 @@ def create_wave_field_llm_model(config: TrainingConfig) -> CausalLanguageModel:
     WaveFieldLLM's already-correct head is reused unchanged, never rebuilt.
     ``pre_shifted=True`` matches ``preprocess_clm_dataset``'s
     ``(input_ids, labels)`` packed-CLM contract. See
-    ``masked_language_model/clm.py`` module docstring for the full flag
+    ``lm_pretraining/clm.py`` module docstring for the full flag
     contract.
     """
     logger.info(f"Creating WaveFieldLLM-{config.model_variant.upper()}...")
@@ -351,7 +351,7 @@ def train_wave_field_llm(
     # `model` is now the CausalLanguageModel wrapper: `output_key="logits"`
     # already extracts the tensor inside `_backbone_forward`, so `call()`
     # returns the logits tensor directly (no `["logits"]` indexing) -- see
-    # `masked_language_model/clm.py:_backbone_forward`.
+    # `lm_pretraining/clm.py:_backbone_forward`.
     probe_ctx = max(1, config.max_seq_length - 1)
     probe_cb = GenerationProbeCallback(
         logits_fn=lambda ctx: model(ctx, training=False)[0, -1, :].numpy(),
