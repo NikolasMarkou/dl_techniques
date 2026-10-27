@@ -140,11 +140,11 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 | **`MobileNetV4`** | `...mobilenet.mobilenet_v4.MobileNetV4` | Keras `Model` for V4. |
 | **`create_mobilenetv4`** | `...mobilenet.mobilenet_v4.create_mobilenetv4` | Factory for `MobileNetV4`. |
 
-V4 takes the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
+V3 and V4 take the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
 (raises `NotImplementedError`) or `False`:
 
 ```python
-create_mobilenetv4(
+create_mobilenetv4(          # same for v3
     variant="medium",        # default variant differs per version: see section 7
     num_classes=1000,
     input_shape=None,        # defaults to (224, 224, 3)
@@ -153,14 +153,14 @@ create_mobilenetv4(
 )
 ```
 
-V1, V2 and V3 still take `width_multiplier` as a named argument beside `pretrained`:
+V1 and V2 still take `width_multiplier` as a named argument beside `pretrained`:
 `create_mobilenetv2(variant, num_classes, input_shape, width_multiplier, pretrained, **kwargs)`.
 
 `kwargs` reaches the constructor arguments `dropout_rate`, `weight_decay`,
 `kernel_initializer` and `include_top` on every version, plus `depths`, `dims`,
-`block_types`, `strides`, `use_attention`, `attention_stages` and `width_multiplier` on V4. A keyword
-given for a field of the variant (`MobileNetV4.from_variant("small", depths=[1] * 7, use_attention=True)`)
-replaces the variant's own value.
+`block_types`, `strides`, `use_attention` and `attention_stages` on V4, and `width_multiplier` on V3
+and V4. A keyword given for a field of the variant
+(`MobileNetV4.from_variant("small", depths=[1] * 7, use_attention=True)`) replaces the variant's own value.
 
 ---
 
@@ -246,7 +246,7 @@ pooled vector. If you want the pooled vector, add a `keras.layers.GlobalAverageP
 yourself.
 
 `summary()` on a never-called model runs a real dummy forward pass to materialize the weights.
-On V2 and V4 `build((None, H, W, C))` also creates every weight, by tracing `call`; on V1 and V3
+On V2, V3 and V4 `build((None, H, W, C))` also creates every weight, by tracing `call`; on V1
 `keras.Model.build(...)` alone does not, since on a subclassed model it only marks the model built.
 
 ---
@@ -302,6 +302,13 @@ archives load by tracked-layer order: `stage_{s}_block_{b}` is now `stage{S}_blo
 `stage_{s}_mqa` is `stage{S}_mqa` (S and B count from 1; 195 of the 207 weights of `small` move,
 for example `stage_0_block_0/expand_conv/kernel` is `stage1_block1/expand_conv/kernel`). Code that
 selects weights by path must follow.
+
+A `MobileNetV3` archive saved at that revision loads unchanged: `load_model` and `load_weights` restore
+every tensor for `large`, `small` and `large` at `width_multiplier=0.75`, headed and headless, and the
+inference output is equal at `atol=0` (measured). No `w.path` moves for V3 (`stem`, `block_{i}`,
+`last_conv`, `last_bn`, `classification_head`). As for V4, `load_weights` is also equal in
+`training=True` and `load_model` of a headed model is not: the head's Dropout draws a different mask
+after a reload (with `dropout_rate=0.0` the two are equal), which is independent of this change.
 
 ---
 

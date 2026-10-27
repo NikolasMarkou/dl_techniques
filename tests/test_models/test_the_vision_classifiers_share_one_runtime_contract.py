@@ -196,7 +196,8 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         "mobilenet_v3", f"{_VISION}.mobilenet.mobilenet_v3", "MobileNetV3", "small", (32, 48, 3),
         _ctor(f"{_VISION}.mobilenet.mobilenet_v3", "MobileNetV3", variant="small",
               width_multiplier=0.5, input_shape=(32, 48, 3)),
-        tiny={}, override={"width_multiplier": 0.5}, head_markers=("classification_head",),
+        tiny={"width_multiplier": 0.5}, override={"width_multiplier": 0.5},
+        head_markers=("classification_head",),
         invalid=(({"dropout_rate": 2.0}, "dropout_rate", 2.0), ({"num_classes": 0}, "num_classes", 0)),
         sizes=_DEFAULT_SIZES),
     Classifier(
@@ -316,12 +317,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
         'NotImplementedError',
         "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "mobilenet_v3"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("pretrained_true_names_the_variant", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -352,12 +347,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "mobilenet_v3"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("missing_path_raises_file_not_found", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -400,12 +389,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "mobilenet_v3"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("local_path_round_trip_headed", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -448,12 +431,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "mobilenet_v3"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("local_path_round_trip_headless", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -504,19 +481,9 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V1 and V2 migration",
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
-    ("explicit_build_equals_lazy", "mobilenet_v3"): Open(
-        UserWarning,
-        "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy_headless", "mobilenet_v1"): Open(
         UserWarning,
         "the MobileNet V1 and V2 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
-    ("explicit_build_equals_lazy_headless", "mobilenet_v3"): Open(
-        UserWarning,
-        "the MobileNet V3 and V4 migration",
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(

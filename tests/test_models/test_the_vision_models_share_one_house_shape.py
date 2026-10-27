@@ -1119,18 +1119,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
          "'input_shape', 'pretrained')",
          'create_mobilenetv2 is not one `return Class.from_variant(..., '
          '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "mobilenet_v3"): Open(
-        "the MobileNet V3 and V4 migration",
-        "2 violation(s): create_mobilenetv3('variant', 'num_classes', 'input_shape', "
-        "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
-        "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv3 is not one `return "
-        'Class.from_variant(..., **kwargs)`',
-        ("create_mobilenetv3('variant', 'num_classes', 'input_shape', "
-         "'width_multiplier', 'pretrained', "
-         "'head_config_overrides') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_mobilenetv3 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
@@ -1281,22 +1269,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         'constructor has no `kernel_regularizer` argument',
         ('constructor argument `weight_decay` should be `kernel_regularizer`',
          'constructor has no `kernel_regularizer` argument')),
-    ("h2_member_order", "mobilenet_v3"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`',
-        ('`compute_output_shape` comes after `get_config`',)),
-    ("h3_one_init_log", "mobilenet_v3"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h4_no_logging_outside_init", "mobilenet_v3"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): `summary` writes 8 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "mobilenet_v3"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): the class defines no `build`',
-        ('the class defines no `build`',)),
     ("h10_one_name_per_concept", "mobilenet_v3"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
