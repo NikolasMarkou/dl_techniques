@@ -423,11 +423,13 @@ class RADConvNet(keras.Model):
         ``use_bias`` is set, and one linear layer that has a bias only when
         ``use_bias`` is set; no hidden block.
         """
-        # The head turns its initializer into an instance and then clones it for the
+        # DECISION plan-2026-10-26T125959-7af851e5/D-043: the head turns its initializer
+        # into an instance and then clones it for the
         # classifier, and a seedless clone draws a second default seed. The classifier
         # kernel was drawn from the FIRST default seed taken after the last block, so the
         # seed is taken here and handed over explicitly (a clone keeps an explicit seed):
         # the kernel of a seeded build stays what it was before the head moved.
+        # See decisions.md.
         head_initializer = keras.initializers.TruncatedNormal(
             seed=keras.initializers.get(self.HEAD_INITIALIZER).seed
         )
