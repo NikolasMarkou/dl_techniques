@@ -690,7 +690,7 @@ class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
 
         :param variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
         :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` archive to load (the by-name backbone route reads the archive's layer structure, so a bare ``.weights.h5`` file is not accepted).
-        :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT / ResNet — currently unused since no public weights are hosted).
+        :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT — currently unused since no public weights are hosted).
         :param cache_dir: Optional cache directory for downloaded weights.
         :param **kwargs: Forwarded to ``TreeTransformer.__init__``, including
             ``include_top``, ``task_config`` and ``head_config_overrides``. A

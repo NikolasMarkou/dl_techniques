@@ -583,9 +583,9 @@ class GammaProbeCallback(keras.callbacks.Callback):
 # weight transfer.
 #
 # Why not train standalone ``CliffordNet`` / ``CliffordNetLM`` and transfer?
-# Layer names don't match (``clifford_block_N`` vs ``vision_clifford_block_N``
-# / ``text_clifford_block_N``), so ``load_weights_from_checkpoint`` would
-# need a per-layer name map. Wrapping is simpler and keeps the whole thing
+# Layer names don't match (``block_N`` in ``CliffordNet`` and ``clifford_block_N``
+# in ``CliffordNetLM`` vs ``vision_clifford_block_N`` / ``text_clifford_block_N``),
+# so ``load_weights_from_checkpoint`` would need a per-layer name map. Wrapping is simpler and keeps the whole thing
 # in one process.
 
 # DECISION plan-2026-10-14T062616-81938e81/D-069: every direct CliffordCLIP

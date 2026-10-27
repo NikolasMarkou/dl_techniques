@@ -255,7 +255,7 @@ class SimpleCustomLayer(keras.layers.Layer):
         units: int,
         activation: Optional[Union[str, Callable]] = None,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -268,7 +268,10 @@ class SimpleCustomLayer(keras.layers.Layer):
         self.units = units
         self.activation = activations.get(activation)
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        # A string or dict spec, never the caller's instance: an instance handed to two
+        # sites replays one draw, and its config is not JSON (see models/AGENTS.md,
+        # "Names inside the class").
+        self.kernel_initializer = initializer_spec(kernel_initializer)
 
         # 3. Declare weight attributes; they are created in build()
         self.kernel = None
@@ -303,15 +306,18 @@ class SimpleCustomLayer(keras.layers.Layer):
         return tuple(input_shape[:-1]) + (self.units,)
 
     def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
+        config = {
             "units": self.units,
             "activation": activations.serialize(self.activation),
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-        })
-        return config
+            "kernel_initializer": self.kernel_initializer,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 ```
+
+`initializer_spec` is `dl_techniques.initializers.clone.initializer_spec`; `add_weight` and the sub-layers
+resolve the stored spec themselves, so `build()` passes `self.kernel_initializer` on unchanged.
 
 ### 3.2 Pattern 2 — A Layer Containing Sub-layers
 
@@ -585,8 +591,8 @@ class MyModel(keras.Model):
 | Member | Requirement |
 |---|---|
 | `call(self, inputs, training=None)` | **no logging inside** — it fires on every trace |
-| `get_config()` | every constructor argument, complex objects serialized |
-| `from_config()` | deserializes them |
+| `get_config()` | every constructor argument, complex objects serialized; an initializer is stored as `initializer_spec(...)` (a string or dict), not as the caller's instance; the body is `config = {...}` then `return {**base_config, **config}` |
+| `from_config()` | none by default: `__init__` resolves strings and dicts itself. Add one only when it does measured real work, and never let it write into the dict it receives |
 | `from_variant(cls, variant, ..., pretrained=False, **kwargs)` | raises `ValueError` **listing available keys** on a miss; accepts the overrides its own docstring advertises; does not splat description metadata into the constructor |
 
 **Measured:** several `from_variant` implementations raised `TypeError` on exactly the override their
@@ -673,22 +679,21 @@ grep-based census of this question was wrong about several packages.
 
 ```python
 def get_config(self):
-    config = super().get_config()
-    config.update({
+    config = {
         "depth": self.depth,
         "activation": activations.serialize(self.activation),
-        "kernel_initializer": initializers.serialize(self.kernel_initializer),
+        "kernel_initializer": self.kernel_initializer,    # a string or dict spec
         "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-    })
-    return config
-
-@classmethod
-def from_config(cls, config):
-    for key in ("kernel_initializer", "kernel_regularizer"):
-        if key in config and isinstance(config[key], dict):
-            config[key] = getattr(keras, key.split("_")[1] + "s").deserialize(config[key])
-    return cls(**config)
+    }
+    base_config = super().get_config()
+    return {**base_config, **config}
 ```
+
+No `from_config` is written: `__init__` resolves a spec or a serialized regularizer itself
+(`initializer_spec(...)`, `regularizers.get(...)`), so the inherited `from_config` rebuilds the
+object. Add one only when it does measured real work, and then copy the dict first
+(`config = dict(config)`): one that writes into the dict it is handed corrupts the caller's
+config.
 
 ### 6.2 `**kwargs` Is Not a Channel to Your Sub-layers
 
@@ -2345,14 +2350,14 @@ def get_config(self):
 
 # ✅ CORRECT
 def get_config(self):
-    config = super().get_config()
-    config.update({
+    config = {
         "units": self.units,
         "activation": activations.serialize(self.activation),
         "use_bias": self.use_bias,
         # ... every __init__ parameter
-    })
-    return config
+    }
+    base_config = super().get_config()
+    return {**base_config, **config}
 ```
 
 ### Pitfall 5: `.assign()` of a constant table in `build()`
@@ -2621,7 +2626,8 @@ line — the scaled value must be the one handed to `tape.gradient`.
 - [ ] `compute_output_shape` implemented, from stored config, working unbuilt
 - [ ] Shape arithmetic in exactly one pure helper shared by `build` / `call` / `compute_output_shape`
 - [ ] `get_config()` returns **every** constructor argument, complex objects serialized
-- [ ] `from_config()` deserializes them; no popping of base keys
+- [ ] `__init__` resolves spec and serialized arguments; `from_config()` only when it does measured real work, and never writes into the dict it receives or pops base keys
+- [ ] An initializer argument is stored as `initializer_spec(...)` (a string or dict), not as the caller's instance
 - [ ] Normalization epsilon from the factory, or passed explicitly with a cited reference
 
 **Reuse**
