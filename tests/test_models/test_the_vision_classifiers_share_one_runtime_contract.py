@@ -24,7 +24,8 @@ SqueezeNet V1 and V2) and asks each the same questions:
     initialization differs from the donor's, so equal tensors mean the load ran.
 ``headless_attribute_is_none`` and ``headless_model_has_no_head_weights``
     ``include_top=False`` leaves ``classification_head`` defined as ``None`` and
-    builds no head weight.
+    builds no head weight; a toy model that leaks its head into the headless build
+    proves the second check can fail.
 ``explicit_build_equals_lazy`` and ``..._headless``
     ``build((None, H, W, C))`` materializes exactly what ``call`` runs: the same
     relative weight paths in the same order, and a non-zero ``count_params()``.
@@ -41,7 +42,7 @@ SqueezeNet V1 and V2) and asks each the same questions:
 ``no_replayed_draw``
     No live initializer instance reaches two sites: ``replayed_pairs`` finds no
     two kernels that carry one random draw, built with the default and with a
-    seedless ``Initializer`` instance.
+    seedless ``Initializer`` instance; an arm that compares no pair fails too.
 ``layer_names_follow_the_table``
     Every governed layer name follows the naming table (``stem``, ``block_{i}``,
     ``stage{S}_block{B}``, ``downsample_{i}_*``, ``classification_head``); the
@@ -57,12 +58,16 @@ unbuilt ``compute_output_shape`` rows because it is built in ``__init__``.
 The ledger
 ----------
 :data:`LEDGER` lists every row that fails today as a strict ``xfail`` carrying the
-exception it raises, the number measured by running this file and the migration
-that closes it. A strict ``xfail`` that starts passing fails the run, so the
-migration that fixes a row deletes its ledger line in the same commit. An empty
-ledger means the contract is complete.
+exception it raises, the number measured by running this file, the migration that
+closes it and a ``signature``: a piece of the failure text that names which
+violation it is, holding no count. A strict ``xfail`` that starts passing fails the
+run, and a ledgered row that fails with text lacking its signature is a plain
+failure (the exception type alone cannot tell one violation from another of the
+same type), so the migration that fixes or changes a row edits its ledger line in
+the same commit. An empty ledger means the contract is complete.
 """
 
+import functools
 import importlib
 import inspect
 import itertools
@@ -78,6 +83,7 @@ import pytest
 
 from .initializer_replay_oracle import replayed_pairs
 from .roundtrip_instrument_oracle import relative_path, weight_map
+from tests.layer_naming import PublicAutoName
 
 NUM_CLASSES = 5
 SRC = Path(__file__).resolve().parents[2] / "src" / "dl_techniques"
@@ -254,11 +260,18 @@ def classifier(key: str) -> Classifier:
 
 @dataclass(frozen=True)
 class Open:
-    """A row that fails today: how it fails, what was measured, what closes it."""
+    """A row that fails today: how it fails, what was measured, what closes it.
+
+    ``signature`` is a substring of ``"<ExceptionType>: <message>"`` that names the
+    failure's identity and holds no measured count. A ledgered row that fails with a
+    message lacking it is a plain failure, not an expected one: a partial closure
+    that leaves another violation of the same type shows up as red.
+    """
 
     raises: type
     closed_by: str
     measured: str
+    signature: str
 
 
 #: Every row that fails today, keyed ``(rule, subject)``.
@@ -267,481 +280,588 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         AssertionError,
         "the CliffordNet migration",
         "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"'),
+        'variants: [...]"',
+        'Available: ['),
     ("unknown_variant_lists_the_keys", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
         "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"'),
+        'variants: [...]"',
+        'Available: ['),
     ("unknown_variant_lists_the_keys", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"'),
+        'variants: [...]"',
+        'Available: ['),
     ("documented_override_is_accepted", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         "width_multiplier=0.25 gives 0.125: the variant's own value is multiplied, not "
-        'overridden'),
+        'overridden',
+        "{'width_multiplier': 0.125}"),
     ("documented_override_is_accepted", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         "width_multiplier=0.25 gives 0.1875: the variant's own value is multiplied, not "
-        'overridden'),
+        'overridden',
+        "{'width_multiplier': 0.1875}"),
     ("documented_override_is_accepted", "mobilenet_v4"): Open(
         TypeError,
         "the MobileNet V3 and V4 migration",
-        "TypeError: got multiple values for keyword argument 'use_attention'"),
+        "TypeError: got multiple values for keyword argument 'use_attention'",
+        "got multiple values for keyword argument 'use_attention'"),
     ("documented_override_is_accepted", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'"),
+        "TypeError: got multiple values for keyword argument 'depths'",
+        "got multiple values for keyword argument 'depths'"),
     ("documented_override_is_accepted", "convnext_v2"): Open(
         TypeError,
         "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'"),
+        "TypeError: got multiple values for keyword argument 'depths'",
+        "got multiple values for keyword argument 'depths'"),
     ("pretrained_true_names_the_variant", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
-        'the NotImplementedError message does not name the variant'),
+        'the NotImplementedError message does not name the variant',
+        'checkpoints are distributed'),
     ("pretrained_true_names_the_variant", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
-        'the NotImplementedError message does not name the variant'),
+        'the NotImplementedError message does not name the variant',
+        'checkpoints are distributed'),
     ("pretrained_true_names_the_variant", "mobilenet_v1"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
     ("pretrained_true_names_the_variant", "mobilenet_v2"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("pretrained_true_names_the_variant", "mobilenet_v3"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("pretrained_true_names_the_variant", "mobilenet_v4"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("pretrained_true_names_the_variant", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("pretrained_true_names_the_variant", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
     ("pretrained_true_names_the_variant", "squeezenet_v2"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError'),
+        'NotImplementedError',
+        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
     ("missing_path_raises_file_not_found", "mobilenet_v1"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
     ("missing_path_raises_file_not_found", "mobilenet_v2"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("missing_path_raises_file_not_found", "mobilenet_v3"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("missing_path_raises_file_not_found", "mobilenet_v4"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("missing_path_raises_file_not_found", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("missing_path_raises_file_not_found", "convnext_v2"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("missing_path_raises_file_not_found", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("missing_path_raises_file_not_found", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
     ("missing_path_raises_file_not_found", "squeezenet_v2"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
     ("local_path_round_trip_headed", "mobilenet_v1"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
     ("local_path_round_trip_headed", "mobilenet_v2"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("local_path_round_trip_headed", "mobilenet_v3"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("local_path_round_trip_headed", "mobilenet_v4"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("local_path_round_trip_headed", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headed", "convnext_v2"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headed", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("local_path_round_trip_headed", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
     ("local_path_round_trip_headed", "squeezenet_v2"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
     ("local_path_round_trip_headless", "mobilenet_v1"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
     ("local_path_round_trip_headless", "mobilenet_v2"): Open(
         ValueError,
         "the MobileNet V1 and V2 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
     ("local_path_round_trip_headless", "mobilenet_v3"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
     ("local_path_round_trip_headless", "mobilenet_v4"): Open(
         ValueError,
         "the MobileNet V3 and V4 migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("local_path_round_trip_headless", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headless", "convnext_v2"): Open(
         TypeError,
         "the ConvNeXt migration",
         "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)'),
+        'cannot be built)',
+        "got multiple values for keyword argument 'depths'"),
     ("local_path_round_trip_headless", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
     ("local_path_round_trip_headless", "squeezenet_v1"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
     ("local_path_round_trip_headless", "squeezenet_v2"): Open(
         ValueError,
         "the SqueezeNet migration",
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path'),
+        'takes no pretrained path',
+        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
     ("headless_attribute_is_none", "resnet"): Open(
         AssertionError,
         "the ResNet migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)'),
+        'include_top=False leaves no classification_head attribute (hasattr is False)',
+        'include_top=False leaves no attribute'),
     ("headless_attribute_is_none", "convnext_v1"): Open(
         AssertionError,
         "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)'),
+        'include_top=False leaves no classification_head attribute (hasattr is False)',
+        'include_top=False leaves no attribute'),
     ("headless_attribute_is_none", "convnext_v2"): Open(
         AssertionError,
         "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)'),
+        'include_top=False leaves no classification_head attribute (hasattr is False)',
+        'include_top=False leaves no attribute'),
     ("headless_attribute_is_none", "rad_convnet"): Open(
         AssertionError,
         "the RADConvNet migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)'),
+        'include_top=False leaves no classification_head attribute (hasattr is False)',
+        'include_top=False leaves no attribute'),
     ("explicit_build_equals_lazy", "mobilenet_v1"): Open(
         UserWarning,
         "the MobileNet V1 and V2 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy", "mobilenet_v3"): Open(
         UserWarning,
         "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy", "mobilenet_v4"): Open(
         UserWarning,
         "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy_headless", "mobilenet_v1"): Open(
         UserWarning,
         "the MobileNet V1 and V2 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy_headless", "mobilenet_v3"): Open(
         UserWarning,
         "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy_headless", "mobilenet_v4"): Open(
         UserWarning,
         "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0'),
+        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
+        'does not have a `build()` method implemented'),
     ("compute_output_shape::odd::headed", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("compute_output_shape::odd::headless", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("compute_output_shape::non_square::headed", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("compute_output_shape::non_square::headless", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("compute_output_shape::unknown::headed", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("compute_output_shape::unknown::headless", "resnet"): Open(
         NotImplementedError,
         "the ResNet migration",
-        'NotImplementedError: ResNet has no compute_output_shape'),
+        'NotImplementedError: ResNet has no compute_output_shape',
+        'does not have a `compute_output_shape` method implemented'),
     ("config_round_trip", "resnet"): Open(
         ValueError,
         "the ResNet migration",
-        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob"),
+        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob",
+        "Unrecognized keyword arguments passed to ResNet: {'kernel_initializer'"),
     ("config_round_trip", "mobilenet_v4"): Open(
         TypeError,
         "the MobileNet V3 and V4 migration",
-        'TypeError: Object of type HeNormal is not JSON serializable'),
+        'TypeError: Object of type HeNormal is not JSON serializable',
+        'Object of type HeNormal is not JSON serializable'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
         'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)"),
+        "layer's argument, not the model's)",
+        'classifier_dropout_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::stochastic_depth_rate=-1.0", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
         "the message reads \"drop_path_rate must be in [0, 1), got -1.0\" (a sub-layer's "
-        "argument, not the model's)"),
+        "argument, not the model's)",
+        'drop_path_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
         'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)"),
+        "layer's argument, not the model's)",
+        'classifier_dropout_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::stochastic_depth_rate=-1.0", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
         "the message reads \"drop_path_rate must be in [0, 1), got -1.0\" (a sub-layer's "
-        "argument, not the model's)"),
+        "argument, not the model's)",
+        'drop_path_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)"),
+        "layer's argument, not the model's)",
+        'classifier_dropout_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
         'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)"),
+        "layer's argument, not the model's)",
+        'classifier_dropout_rate must be in [0, 1)'),
     ("invalid_values_name_the_value::num_classes=0", "rad_convnet"): Open(
         AssertionError,
         "the RADConvNet migration",
+        'num_classes=0 was accepted',
         'num_classes=0 was accepted'),
     ("invalid_values_name_the_value::use_bypass=bogus", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",
+        "use_bypass='bogus' was accepted",
         "use_bypass='bogus' was accepted"),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
-        '28 regularization losses by default'),
+        '28 regularization losses by default',
+        'regularization losses by default'),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
-        '36 regularization losses by default'),
+        '36 regularization losses by default',
+        'regularization losses by default'),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v3"): Open(
         AssertionError,
         "the MobileNet V3 and V4 migration",
-        '43 regularization losses by default'),
+        '43 regularization losses by default',
+        'regularization losses by default'),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v4"): Open(
         AssertionError,
         "the MobileNet V3 and V4 migration",
-        '27 regularization losses by default'),
+        '27 regularization losses by default',
+        'regularization losses by default'),
     ("no_replayed_draw::instance", "resnet"): Open(
         ValueError,
         "the ResNet migration",
-        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob"),
+        "ValueError: Unrecognized keyword arguments {'kernel_initializer': ...}, no such knob",
+        "Unrecognized keyword arguments passed to ResNet: {'kernel_initializer'"),
     ("no_replayed_draw::default", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
-        '666 of 1891 kernel pairs replay one draw'),
+        '666 of 1891 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
-        '666 of 1891 kernel pairs replay one draw'),
+        '666 of 1891 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
-        '820 of 2211 kernel pairs replay one draw'),
+        '820 of 2211 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
-        '820 of 2211 kernel pairs replay one draw'),
+        '820 of 2211 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "mobilenet_v4"): Open(
         AssertionError,
         "the MobileNet V3 and V4 migration",
-        '3 of 2701 kernel pairs replay one draw'),
+        '3 of 2701 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",
-        '276 of 325 kernel pairs replay one draw'),
+        '276 of 325 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "squeezenet_v2"): Open(
         AssertionError,
         "the SqueezeNet migration",
-        '120 of 153 kernel pairs replay one draw'),
+        '120 of 153 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "vae"): Open(
         AssertionError,
         "the ConvUNext and VAE migration",
-        '91 of 136 kernel pairs replay one draw'),
+        '91 of 136 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "uca_encoder"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
-        '3 of 120 kernel pairs replay one draw'),
+        '3 of 120 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "capsnet"): Open(
         AssertionError,
         "the CapsNet migration",
-        '21 of 21 kernel pairs replay one draw'),
+        '21 of 21 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "capsnet"): Open(
         AssertionError,
         "the CapsNet migration",
-        '21 of 21 kernel pairs replay one draw'),
+        '21 of 21 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "capsnet_v2_legacy"): Open(
         AssertionError,
         "the CapsNet migration",
-        '15 of 15 kernel pairs replay one draw'),
+        '15 of 15 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "capsnet_v2_legacy"): Open(
         AssertionError,
         "the CapsNet migration",
-        '15 of 15 kernel pairs replay one draw'),
+        '15 of 15 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "capsnet_v2_resnet18"): Open(
         AssertionError,
         "the CapsNet migration",
-        '6 of 276 kernel pairs replay one draw'),
+        '6 of 276 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "capsnet_v2_resnet18"): Open(
         AssertionError,
         "the CapsNet migration",
-        '6 of 276 kernel pairs replay one draw'),
+        '6 of 276 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "siamfc"): Open(
         AssertionError,
         "the SiamFC and DaSiamRPN stem migration",
-        '10 of 10 kernel pairs replay one draw'),
+        '10 of 10 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "dasiamrpn"): Open(
         AssertionError,
         "the SiamFC and DaSiamRPN stem migration",
-        '45 of 45 kernel pairs replay one draw'),
+        '45 of 45 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "depth_anything_real"): Open(
         AssertionError,
         "the depth_anything stem migration",
-        '12 of 3403 kernel pairs replay one draw'),
+        '12 of 3403 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "depth_anything_placeholder"): Open(
         AssertionError,
         "the depth_anything stem migration",
-        '45 of 861 kernel pairs replay one draw'),
+        '45 of 861 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "clifford_clip"): Open(
         AssertionError,
         "the CliffordCLIP stem migration",
-        '776 of 9316 kernel pairs replay one draw'),
+        '776 of 9316 kernel pairs replay one draw',
+        'kernel pairs replay one draw'),
     ("layer_names_follow_the_table", "cliffordnet"): Open(
         AssertionError,
         "the CliffordNet migration",
         '4 violation(s): clifford_block_0, clifford_drop_path_0, clifford_block_1, '
-        'clifford_drop_path_1'),
+        'clifford_drop_path_1',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "hierarchical"): Open(
         AssertionError,
         "the CliffordNet migration",
         '5 violation(s): stage0_block_0, stage0_drop_path_0, stage1_block_0, '
-        'stage1_drop_path_0, ...'),
+        'stage1_drop_path_0, ...',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): no layer is named `stem`'),
+        '1 violation(s): no layer is named `stem`',
+        'no layer is named `stem`'),
     ("layer_names_follow_the_table", "mobilenet_v2"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): no layer is named `stem`'),
+        '1 violation(s): no layer is named `stem`',
+        'no layer is named `stem`'),
     ("layer_names_follow_the_table", "mobilenet_v4"): Open(
         AssertionError,
         "the MobileNet V3 and V4 migration",
         '12 violation(s): stage_0_block_0, stage_1_block_0, stage_2_block_0, stage_2_block_1,'
-        ' ...'),
+        ' ...',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "convnext_v1"): Open(
         AssertionError,
         "the ConvNeXt migration",
         '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0'),
+        'stage_1_block_0',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "convnext_v2"): Open(
         AssertionError,
         "the ConvNeXt migration",
         '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0'),
+        'stage_1_block_0',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "rad_convnet"): Open(
         AssertionError,
         "the RADConvNet migration",
         '13 violation(s): stage0_block0_rad_conv, stage0_block0_norm, stage0_block0_expand, '
-        'stage0_block0_reduce, ...'),
+        'stage0_block0_reduce, ...',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "clifford_rbf_protonet"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
-        '4 violation(s): clifford_block_0, drop_path_0, clifford_block_1, drop_path_1'),
+        '4 violation(s): clifford_block_0, drop_path_0, clifford_block_1, drop_path_1',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "uca_encoder"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
-        '7 violation(s): cpe_0, stage_0_block_0, merge_1, merge_norm_1, ...'),
+        '7 violation(s): cpe_0, stage_0_block_0, merge_1, merge_norm_1, ...',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "capsnet"): Open(
         AssertionError,
         "the CapsNet migration",
-        '7 violation(s): conv_1, bn_1, relu_1, conv_2, ...'),
+        '7 violation(s): conv_1, bn_1, relu_1, conv_2, ...',
+        'is not a table spelling'),
     ("layer_names_follow_the_table", "capsnet_v2_legacy"): Open(
         AssertionError,
         "the CapsNet migration",
-        '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...'),
+        '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
+        'is not a table spelling'),
 }
 
 
@@ -765,12 +885,59 @@ def _row_name(rule: str, rest: Sequence[Any]) -> str:
     return "::".join([rule, *map(str, rest)])
 
 
+class LedgerSignatureMismatch(RuntimeError):
+    """A ledgered row failed, but not the way its ledger line says it fails.
+
+    Not an ``AssertionError`` nor any type a ledger row names in ``raises``, so the
+    strict ``xfail`` does not absorb it: the row is red.
+    """
+
+
+def failure_text(error: BaseException) -> str:
+    """The text a ledger signature is matched against: ``"<Type>: <message>"``."""
+    return f"{type(error).__name__}: {error}"
+
+
+def with_signature_check(test: Callable, rule: str, axes: Sequence[str],
+                         ledger: Dict[Tuple[str, str], Open]) -> Callable:
+    """``test`` wrapped so that a ledgered row's failure must carry the row's signature.
+
+    Interface contract: ``rule`` is the ledger rule name, ``axes`` the names of the
+    test's sub-case parameters in the order :func:`_row_name` joins them; the test
+    takes ``key`` and those parameters by keyword. A row with no ledger line is
+    untouched. A ledgered row whose failure text lacks its ``signature`` raises
+    :class:`LedgerSignatureMismatch`, chained to the original error; any other
+    failure propagates unchanged.
+    """
+
+    @functools.wraps(test)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return test(*args, **kwargs)
+        except Exception as error:
+            row = ledger.get((_row_name(rule, [kwargs[a] for a in axes]), kwargs["key"]))
+            if row is not None and row.signature not in failure_text(error):
+                raise LedgerSignatureMismatch(
+                    f"{rule} on {kwargs['key']} failed without its signature "
+                    f"{row.signature!r}: {failure_text(error)}") from error
+            raise
+
+    run.ledger_rule = rule
+    return run
+
+
+def ledgered(rule: str, *axes: str) -> Callable[[Callable], Callable]:
+    """Decorator form of :func:`with_signature_check` over the module's :data:`LEDGER`."""
+    return lambda test: with_signature_check(test, rule, axes, LEDGER)
+
+
 # ---------------------------------------------------------------------------
 # Rows that need a variant, a path or a built model
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("key", _rows("unknown_variant_lists_the_keys", CLASSIFIER_KEYS))
+@ledgered("unknown_variant_lists_the_keys")
 def test_an_unknown_variant_lists_the_keys(key: str) -> None:
     c = classifier(key)
     with pytest.raises(ValueError) as caught:
@@ -782,6 +949,7 @@ def test_an_unknown_variant_lists_the_keys(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", _rows("documented_override_is_accepted", CLASSIFIER_KEYS))
+@ledgered("documented_override_is_accepted")
 def test_a_documented_override_reaches_the_config(key: str) -> None:
     c = classifier(key)
     model = c.cls.from_variant(c.variant, num_classes=NUM_CLASSES, input_shape=c.input_shape,
@@ -792,6 +960,7 @@ def test_a_documented_override_reaches_the_config(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", _rows("pretrained_true_names_the_variant", CLASSIFIER_KEYS))
+@ledgered("pretrained_true_names_the_variant")
 def test_pretrained_true_names_the_variant(key: str) -> None:
     c = classifier(key)
     with pytest.raises(NotImplementedError) as caught:
@@ -800,6 +969,7 @@ def test_pretrained_true_names_the_variant(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", _rows("missing_path_raises_file_not_found", CLASSIFIER_KEYS))
+@ledgered("missing_path_raises_file_not_found")
 def test_a_missing_checkpoint_raises_file_not_found(key: str, tmp_path: Path) -> None:
     c = classifier(key)
     with pytest.raises(FileNotFoundError):
@@ -851,11 +1021,13 @@ def _round_trip(key: str, headless: bool, checkpoints, tmp_path_factory) -> None
 
 
 @pytest.mark.parametrize("key", _rows("local_path_round_trip_headed", CLASSIFIER_KEYS))
+@ledgered("local_path_round_trip_headed")
 def test_a_local_checkpoint_loads_into_a_headed_model(key, checkpoints, tmp_path_factory) -> None:
     _round_trip(key, False, checkpoints, tmp_path_factory)
 
 
 @pytest.mark.parametrize("key", _rows("local_path_round_trip_headless", CLASSIFIER_KEYS))
+@ledgered("local_path_round_trip_headless")
 def test_a_local_checkpoint_loads_into_a_headless_model(key, checkpoints, tmp_path_factory) -> None:
     _round_trip(key, True, checkpoints, tmp_path_factory)
 
@@ -867,6 +1039,7 @@ def _built(c: Classifier, **knobs: Any) -> keras.Model:
 
 
 @pytest.mark.parametrize("key", _rows("headless_attribute_is_none", HEAD_ATTRIBUTE_KEYS))
+@ledgered("headless_attribute_is_none")
 def test_a_headless_model_still_defines_its_head_attribute(key: str) -> None:
     c = classifier(key)
     model = c.make(include_top=False)
@@ -874,15 +1047,62 @@ def test_a_headless_model_still_defines_its_head_attribute(key: str) -> None:
     assert model.classification_head is None
 
 
-def _head_paths(c: Classifier, model: keras.Model) -> List[str]:
-    return [w.path for w in model.weights if any(m in w.path for m in c.head_markers)]
+def _head_paths(markers: Sequence[str], model: keras.Model) -> List[str]:
+    return [w.path for w in model.weights if any(m in w.path for m in markers)]
+
+
+def head_weight_problems(make: Callable[..., keras.Model], markers: Sequence[str],
+                         inputs: np.ndarray) -> List[str]:
+    """What is wrong with how ``make(include_top=...)`` builds its head weights.
+
+    Interface contract: ``make`` returns an unbuilt model and takes ``include_top``;
+    ``markers`` are the weight-path pieces that mean "this is the head"; ``inputs`` is
+    one batch the model can run. Returns a list of problems, empty when the headed
+    model has a head weight (the control) and the headless one has none. Raises what
+    ``make`` or the forward pass raises.
+    """
+    headed, headless = make(include_top=True), make(include_top=False)
+    headed(inputs)
+    headless(inputs)
+    out = [] if _head_paths(markers, headed) else ["control: the headed model has no head weight"]
+    leftovers = _head_paths(markers, headless)
+    return out + ([f"the headless model still builds {leftovers}"] if leftovers else [])
 
 
 @pytest.mark.parametrize("key", _rows("headless_model_has_no_head_weights", CLASSIFIER_KEYS))
+@ledgered("headless_model_has_no_head_weights")
 def test_a_headless_model_builds_no_head_weight(key: str) -> None:
     c = classifier(key)
-    assert _head_paths(c, _built(c)), "control: the headed model has no head weight"
-    assert _head_paths(c, _built(c, include_top=False)) == []
+    assert head_weight_problems(c.make, c.head_markers, _images(*c.input_shape)) == []
+
+
+class _ToyHeaded(PublicAutoName, keras.Model):
+    """A one-layer body and a head named ``classification_head``.
+
+    ``leaks`` makes the headless model build the head anyway; ``head_name`` renames it.
+    """
+
+    def __init__(self, include_top: bool = True, leaks: bool = False,
+                 head_name: str = "classification_head", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.body = keras.layers.Dense(4, name="body")
+        self.include_top = include_top
+        self.head = (keras.layers.Dense(3, name=head_name)
+                     if include_top or leaks else None)
+
+    def call(self, inputs: Any) -> Any:
+        x = self.body(inputs)
+        return self.head(x) if self.head is not None else x
+
+
+def test_the_head_weight_rule_sees_a_headless_model_that_still_builds_its_head() -> None:
+    inputs = np.ones((2, 5), dtype="float32")
+    markers = ("classification_head",)
+    assert head_weight_problems(_ToyHeaded, markers, inputs) == []
+    leaking = head_weight_problems(functools.partial(_ToyHeaded, leaks=True), markers, inputs)
+    assert len(leaking) == 1 and "the headless model still builds" in leaking[0], leaking
+    unmarked = head_weight_problems(functools.partial(_ToyHeaded, head_name="logits"), markers, inputs)
+    assert unmarked and unmarked[0].startswith("control:"), unmarked
 
 
 def _paths(model: keras.Model) -> List[str]:
@@ -898,11 +1118,13 @@ def _explicit_equals_lazy(c: Classifier, **knobs: Any) -> None:
 
 
 @pytest.mark.parametrize("key", _rows("explicit_build_equals_lazy", BUILT_LATER_KEYS))
+@ledgered("explicit_build_equals_lazy")
 def test_an_explicit_build_materializes_what_call_runs(key: str) -> None:
     _explicit_equals_lazy(classifier(key))
 
 
 @pytest.mark.parametrize("key", _rows("explicit_build_equals_lazy_headless", BUILT_LATER_KEYS))
+@ledgered("explicit_build_equals_lazy_headless")
 def test_an_explicit_build_of_a_headless_model_materializes_what_call_runs(key: str) -> None:
     _explicit_equals_lazy(classifier(key), include_top=False)
 
@@ -917,6 +1139,7 @@ def _forward_shape(c: Classifier, headless: bool, size: Tuple[int, int]) -> Tupl
     ("key", "size", "head"),
     [_param("compute_output_shape", c.key, size, head) for c in CLASSIFIERS
      for size in (_ODD, _NON_SQUARE, _UNKNOWN) if size in c.sizes for head in ("headed", "headless")])
+@ledgered("compute_output_shape", "size", "head")
 def test_compute_output_shape_works_unbuilt_and_equals_the_forward_shape(key, size, head) -> None:
     c = classifier(key)
     headless = head == "headless"
@@ -942,6 +1165,7 @@ def _config_equal(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
 
 
 @pytest.mark.parametrize("key", _rows("config_round_trip", CLASSIFIER_KEYS))
+@ledgered("config_round_trip")
 def test_get_config_is_json_safe_and_from_config_rebuilds_the_model(key: str) -> None:
     c = classifier(key)
     knobs = {"kernel_initializer": keras.initializers.HeNormal()} if c.knob else {}
@@ -971,6 +1195,7 @@ def test_the_value_rule_can_fail() -> None:
     ("key", "case"),
     [_param("invalid_values_name_the_value", c.key, f"{argument}={value}")
      for c in CLASSIFIERS for _, argument, value in c.invalid])
+@ledgered("invalid_values_name_the_value", "case")
 def test_an_invalid_value_is_refused_by_name(key: str, case: str) -> None:
     c = classifier(key)
     kwargs, argument, value = next(
@@ -987,6 +1212,7 @@ _MOBILENETS = tuple(k for k in CLASSIFIER_KEYS if k.startswith("mobilenet"))
 
 
 @pytest.mark.parametrize("key", _rows("mobilenet_default_has_no_l2_losses", _MOBILENETS))
+@ledgered("mobilenet_default_has_no_l2_losses")
 def test_a_default_mobilenet_adds_no_regularization_loss(key: str) -> None:
     c = classifier(key)
     model = _built(c)
@@ -1227,13 +1453,16 @@ def test_the_replay_oracle_sees_a_shared_instance_and_not_independent_draws() ->
                               keras.layers.Dense(32, kernel_initializer="he_normal", name="b")])
     fresh.build((None, 32))
     assert replayed_pairs(shared)[0] and not replayed_pairs(fresh)[0]
+    assert replayed_pairs(fresh)[1] > 0, "the clean model's kernels were never compared"
 
 
 @pytest.mark.parametrize(
     ("key", "arm"),
     [_param("no_replayed_draw", key, arm) for key, arm in _REPLAY_ARMS])
+@ledgered("no_replayed_draw", "arm")
 def test_no_two_kernels_replay_one_draw(key: str, arm: str) -> None:
     pairs, compared = replay_report(key, arm)
+    assert compared > 0, "the model exposes fewer than two kernels: nothing was compared"
     assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
 
 
@@ -1343,6 +1572,7 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
 
 @pytest.mark.parametrize(
     "key", [_param("layer_names_follow_the_table", s.key) for s in NAMED_SUBJECTS])
+@ledgered("layer_names_follow_the_table")
 def test_the_layer_names_follow_the_naming_table(key: str) -> None:
     subject = next(s for s in NAMED_SUBJECTS if s.key == key)
     model = subject.build()
@@ -1381,3 +1611,37 @@ def test_the_ledger_names_only_rows_that_exist() -> None:
     assert set(LEDGER) <= _all_row_names(), sorted(set(LEDGER) - _all_row_names())
     for row in LEDGER.values():
         assert row.closed_by and row.measured and issubclass(row.raises, BaseException)
+        assert row.signature, "a ledger row without a signature pins only its exception type"
+
+
+def test_a_ledgered_failure_without_its_signature_is_a_plain_failure() -> None:
+    ledger = {("toy_rule", "toy"): Open(AssertionError, "x", "m", "Available: ["),
+              ("toy_rule::odd", "toy"): Open(AssertionError, "x", "m", "Available: [")}
+
+    def failing(message: str, *axes: str) -> Callable:
+        def test(key: str, **sub: str) -> None:
+            raise AssertionError(message)
+        return with_signature_check(test, "toy_rule", axes, ledger)
+
+    with pytest.raises(AssertionError) as expected:
+        failing("Unknown variant 'x'. Available: ['a']")(key="toy")
+    assert not isinstance(expected.value, LedgerSignatureMismatch)
+    with pytest.raises(LedgerSignatureMismatch, match="without its signature") as changed:
+        failing("Unknown variant 'x'. Available variants: ['a']")(key="toy")
+    assert isinstance(changed.value.__cause__, AssertionError)
+    with pytest.raises(LedgerSignatureMismatch):
+        failing("Unknown variant 'x'. Available variants: ['a']", "size")(key="toy", size="odd")
+    with pytest.raises(AssertionError) as unledgered:
+        failing("Available variants: ['a']")(key="other")
+    assert not isinstance(unledgered.value, LedgerSignatureMismatch)
+    assert with_signature_check(lambda key: 7, "toy_rule", (), ledger)(key="toy") == 7
+
+
+def test_a_signature_mismatch_is_not_absorbed_by_any_strict_xfail() -> None:
+    assert not any(issubclass(LedgerSignatureMismatch, row.raises) for row in LEDGER.values())
+
+
+def test_every_ledger_rule_is_checked_for_its_signature() -> None:
+    checked = {getattr(fn, "ledger_rule", None) for fn in globals().values() if inspect.isfunction(fn)}
+    ruled = {rule.split("::")[0] for rule, _ in LEDGER}
+    assert ruled <= checked, sorted(ruled - checked)

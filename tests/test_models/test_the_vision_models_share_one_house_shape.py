@@ -57,34 +57,52 @@ The rules
     file set.
 
 Each rule is a function of source text, so :data:`PLANTED` hands it a module
-that breaks the rule (it must report) and a clean twin (it must not).
+that breaks the rule (it must report) and a clean twin (it must not). The same
+plants are moved into a base class to prove a leaf is read together with its base.
 
 Exemptions, each with the reason it is allowed
 ----------------------------------------------
 See :data:`EXEMPTIONS`. A subject or module names the exemption that waives a
-rule and no row is generated for a waived pair; a meta test keeps both ends
-honest.
+rule and no row is generated for a waived pair; an exemption no waiver names is
+tied to a check that the situation it describes exists in the source
+(:data:`EXEMPTION_WITNESSES`), and a meta test keeps both ends honest.
+
+Rows that pass because there is nothing to read
+-----------------------------------------------
+A rule whose precondition is absent (``from_config`` not defined, no ``_build_*``
+method, not a classifier) returns no violation by construction.
+:data:`VACUOUS` pins those ``(rule, subject)`` pairs; a subject that gains the
+missing member changes the computed list and fails the run until the pin is
+decided.
 
 The ledger
 ----------
 :data:`LEDGER` lists every row that fails today as a strict ``xfail`` carrying
-the number measured by running this file and the migration that closes it. A
-strict ``xfail`` that starts passing fails the run, so the migration that fixes a
-row deletes its ledger line in the same commit. An empty ledger means the house
+the number measured by running this file, the migration that closes it and a
+``signature``: the pieces of the failure text that name which violations the row
+has. A strict ``xfail`` that starts passing fails the run, and a ledgered row that
+fails with text lacking its signature is a plain failure (the assertion type alone
+cannot tell one violation from another), so the migration that fixes or changes a
+row edits its ledger line in the same commit. An empty ledger means the house
 shape is complete.
 """
 
 import ast
+import functools
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "dl_techniques"
 VISION = "models/vision"
+#: The one spelling of the ConvNeXt base file's path: the module row, the leaves'
+#: ``base`` and the anchor set all read it from here.
+CONVNEXT_COMMON = f"{VISION}/convnext/common.py"
 
 #: What every exemption says about itself. A waiver names one of these keys and
 #: ``test_every_waiver_names_a_written_exemption`` checks both ends.
@@ -207,7 +225,7 @@ MODULES: Tuple[Module, ...] = (
            factory_signature=CANONICAL_FACTORY),
     Module("convnext_v2", f"{VISION}/convnext/convnext_v2.py", ("ConvNeXtV2",),
            factory_signature=CANONICAL_FACTORY),
-    Module("convnext_common", f"{VISION}/convnext/common.py", model_module=False),
+    Module("convnext_common", CONVNEXT_COMMON, model_module=False),
     Module("rad_convnet", f"{VISION}/rad_convnet/model.py", ("RADConvNet",),
            factory_signature=CANONICAL_FACTORY),
     Module("squeezenet_v1", f"{VISION}/squeezenet/squeezenet_v1.py", ("SqueezeNetV1",),
@@ -230,7 +248,7 @@ _INIT_AND_REG = ("kernel_initializer", "kernel_regularizer")
 _E2 = {"h3_builders_assign": "E-2", "h3_headless_attribute": "E-2",
        "h5_build_materializes": "E-2"}
 _NOT_TRACED = {"h5_build_materializes": "not-a-traced-model"}
-_CONVNEXT_BASE = (f"{VISION}/convnext/common.py", "_ConvNeXtBase")
+_CONVNEXT_BASE = (CONVNEXT_COMMON, "_ConvNeXtBase")
 
 
 def _subject(key, module, cls, rules=_ALL, **kw) -> Subject:
@@ -303,7 +321,7 @@ def module_rules(module: Module) -> Tuple[str, ...]:
 ANCHOR_SETS: Dict[str, Tuple[str, ...]] = {
     "convnext": (f"src/dl_techniques/{VISION}/convnext/convnext_v1.py",
                  f"src/dl_techniques/{VISION}/convnext/convnext_v2.py",
-                 f"src/dl_techniques/{VISION}/convnext/common.py"),
+                 f"src/dl_techniques/{CONVNEXT_COMMON}"),
     "cliffordnet": (f"src/dl_techniques/{VISION}/cliffordnet/model.py",
                     f"src/dl_techniques/{VISION}/cliffordnet/hierarchical.py"),
 }
@@ -743,6 +761,44 @@ def h11_from_config_does_real_work(members: Sequence[Member], subject: Subject) 
     return []
 
 
+_NEEDS_INIT = frozenset({
+    "h3_one_init_log", "h3_headless_attribute", "h10_num_classes_first_kwargs_last",
+    "h10_trailing_parameter_order", "h10_stored_attribute_names", "h10_one_name_per_concept",
+    "h11_get_config_covers_the_constructor"})
+
+
+def precondition_absent(members: Sequence[Member], subject: Subject, rule: str) -> Optional[str]:
+    """Why ``rule`` can report nothing about ``subject``, or ``None`` when it can look.
+
+    A rule that returns no violation because the thing it inspects is absent (a
+    ``from_config`` that is not defined, a class that is not a classifier) passes by
+    construction. Interface contract: ``members`` are the subject's
+    :func:`subject_members`; returns a short reason, or ``None`` when the rule has
+    something to read. Mirrors each rule's own early return, nothing else.
+    """
+    if rule in _NEEDS_INIT and _def(members, "__init__") is None:
+        return "no __init__ to inspect"
+    if rule == "h3_headless_attribute" and subject.head_attribute is None:
+        return "the subject names no head attribute"
+    if rule == "h10_trailing_parameter_order" and not subject.classifier:
+        return "not a classifier: rule returns [] by construction"
+    if rule == "h10_trailing_parameter_order" and not subject.include_top_last:
+        init = _def(members, "__init__")
+        ordered = ("include_top", "input_shape", "head_config_overrides")
+        if init is not None and sum(n in _params(init) for n in ordered) < 2:
+            return "fewer than two of include_top, input_shape, head_config_overrides to order"
+    if rule == "h3_builders_assign" and not any(
+            kind == "def" and name.startswith("_build_") for kind, name, _ in members):
+        return "no _build_* method to inspect"
+    if rule == "h4_no_logging_outside_init" and not any(
+            kind == "def" and (name in _NO_LOGGING_IN or name.startswith("_build_"))
+            for kind, name, _ in members):
+        return "no method the rule reads"
+    if rule == "h11_from_config_does_real_work" and _def(members, "from_config") is None:
+        return "no from_config defined (rule only bites a defined one)"
+    return None
+
+
 CLASS_RULE_FUNCTIONS: Dict[str, Callable[[Sequence[Member], Subject], Violations]] = {
     "h2_member_order": h2_member_order,
     "h3_one_init_log": h3_one_init_log,
@@ -1021,10 +1077,17 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
 
 @dataclass(frozen=True)
 class Open:
-    """A row that fails today: the migration that closes it and what was measured."""
+    """A row that fails today: the migration that closes it and what was measured.
+
+    ``signature`` is the pieces of the failure text that name which violations the
+    row has, each holding no count or line number. A ledgered row that fails with a
+    message lacking any piece is a plain failure, not an expected one: the rule
+    still fails, but not the way the row says, so a partial closure shows up as red.
+    """
 
     closed_by: str
     measured: str
+    signature: Tuple[str, ...]
 
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
@@ -1034,338 +1097,505 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "2 violation(s): create_resnet('variant', 'num_classes', 'input_shape', 'pretrained', "
         "'weights_dataset', 'weights_input_shape', 'cache_dir', 'head_config_overrides') is not "
         "('variant', 'num_classes', 'input_shape', 'pretrained'); create_resnet: `input_shape` "
-        'does not default to None'),
+        'does not default to None',
+        ("create_resnet('variant', 'num_classes', 'input_shape', "
+         "'pretrained', 'weights_dataset', 'weights_input_shape', "
+         "'cache_dir', 'head_config_overrides') is not ('variant', "
+         "'num_classes', 'input_shape', 'pretrained')",
+         'create_resnet: `input_shape` does not default to None')),
     ("h9_factory_is_one_delegating_return", "cliffordnet"): Open(
         "the CliffordNet migration",
         "3 violation(s): create_cliffordnet('variant', 'num_classes', 'pretrained', "
         "'weights_dataset', 'cache_dir') is not ('variant', 'num_classes', 'input_shape', "
         "'pretrained'); create_cliffordnet: `num_classes` does not default to 1000; "
-        'create_cliffordnet: `input_shape` does not default to None'),
+        'create_cliffordnet: `input_shape` does not default to None',
+        ("create_cliffordnet('variant', 'num_classes', 'pretrained', "
+         "'weights_dataset', 'cache_dir') is not ('variant', "
+         "'num_classes', 'input_shape', 'pretrained')",
+         'create_cliffordnet: `num_classes` does not default to 1000',
+         'create_cliffordnet: `input_shape` does not default to None')),
     ("h9_factory_is_one_delegating_return", "hierarchical"): Open(
         "the CliffordNet migration",
         "3 violation(s): create_hierarchical_cliffordnet('variant', 'num_classes', 'pretrained') "
         "is not ('variant', 'num_classes', 'input_shape', 'pretrained'); "
         'create_hierarchical_cliffordnet: `num_classes` does not default to 1000; '
-        'create_hierarchical_cliffordnet: `input_shape` does not default to None'),
+        'create_hierarchical_cliffordnet: `input_shape` does not default to None',
+        ("create_hierarchical_cliffordnet('variant', 'num_classes', "
+         "'pretrained') is not ('variant', 'num_classes', 'input_shape', "
+         "'pretrained')",
+         'create_hierarchical_cliffordnet: `num_classes` does not default to 1000',
+         'create_hierarchical_cliffordnet: `input_shape` does not default to None')),
     ("h9_factory_is_one_delegating_return", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
         "2 violation(s): create_mobilenetv1('variant', 'num_classes', 'input_shape', "
         "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
         "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv1 is not one `return "
-        'Class.from_variant(..., **kwargs)`'),
+        'Class.from_variant(..., **kwargs)`',
+        ("create_mobilenetv1('variant', 'num_classes', 'input_shape', "
+         "'width_multiplier', 'pretrained', "
+         "'head_config_overrides') is not ('variant', 'num_classes', "
+         "'input_shape', 'pretrained')",
+         'create_mobilenetv1 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "mobilenet_v2"): Open(
         "the MobileNet V1 and V2 migration",
         "2 violation(s): create_mobilenetv2('variant', 'num_classes', 'input_shape', "
         "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
         "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv2 is not one `return "
-        'Class.from_variant(..., **kwargs)`'),
+        'Class.from_variant(..., **kwargs)`',
+        ("create_mobilenetv2('variant', 'num_classes', 'input_shape', "
+         "'width_multiplier', 'pretrained', "
+         "'head_config_overrides') is not ('variant', 'num_classes', "
+         "'input_shape', 'pretrained')",
+         'create_mobilenetv2 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "mobilenet_v3"): Open(
         "the MobileNet V3 and V4 migration",
         "2 violation(s): create_mobilenetv3('variant', 'num_classes', 'input_shape', "
         "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
         "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv3 is not one `return "
-        'Class.from_variant(..., **kwargs)`'),
+        'Class.from_variant(..., **kwargs)`',
+        ("create_mobilenetv3('variant', 'num_classes', 'input_shape', "
+         "'width_multiplier', 'pretrained', "
+         "'head_config_overrides') is not ('variant', 'num_classes', "
+         "'input_shape', 'pretrained')",
+         'create_mobilenetv3 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
         "2 violation(s): create_mobilenetv4('variant', 'num_classes', 'input_shape', "
         "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
         "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv4 is not one `return "
-        'Class.from_variant(..., **kwargs)`'),
+        'Class.from_variant(..., **kwargs)`',
+        ("create_mobilenetv4('variant', 'num_classes', 'input_shape', "
+         "'width_multiplier', 'pretrained', "
+         "'head_config_overrides') is not ('variant', 'num_classes', "
+         "'input_shape', 'pretrained')",
+         'create_mobilenetv4 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
         "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
         "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
         ' create_convnext_v1: `input_shape` does not default to None; create_convnext_v1 is not '
-        'one `return Class.from_variant(..., **kwargs)`'),
+        'one `return Class.from_variant(..., **kwargs)`',
+        ("create_convnext_v1('variant', 'num_classes', 'input_shape', "
+         "'pretrained', 'weights_dataset', 'weights_input_shape', "
+         "'cache_dir', 'head_config_overrides') is not ('variant', "
+         "'num_classes', 'input_shape', 'pretrained')",
+         'create_convnext_v1: `input_shape` does not default to None',
+         'create_convnext_v1 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "convnext_v2"): Open(
         "the ConvNeXt migration",
         "3 violation(s): create_convnext_v2('variant', 'num_classes', 'input_shape', "
         "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
         "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
         ' create_convnext_v2: `input_shape` does not default to None; create_convnext_v2 is not '
-        'one `return Class.from_variant(..., **kwargs)`'),
+        'one `return Class.from_variant(..., **kwargs)`',
+        ("create_convnext_v2('variant', 'num_classes', 'input_shape', "
+         "'pretrained', 'weights_dataset', 'weights_input_shape', "
+         "'cache_dir', 'head_config_overrides') is not ('variant', "
+         "'num_classes', 'input_shape', 'pretrained')",
+         'create_convnext_v2: `input_shape` does not default to None',
+         'create_convnext_v2 is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h1_module_header", "convnext_common"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet'),
+        '1 violation(s): models/vision/convnext/common.py does not exist yet',
+        ('models/vision/convnext/common.py does not exist yet',)),
     ("no_from_keras_import", "convnext_common"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet'),
+        '1 violation(s): models/vision/convnext/common.py does not exist yet',
+        ('models/vision/convnext/common.py does not exist yet',)),
     ("h9_factory_is_one_delegating_return", "rad_convnet"): Open(
         "the RADConvNet migration",
         "3 violation(s): create_rad_convnet('variant', 'num_classes', 'input_shape') is not "
         "('variant', 'num_classes', 'input_shape', 'pretrained'); create_rad_convnet: "
         '`input_shape` does not default to None; create_rad_convnet: `pretrained` does not '
-        'default to False'),
+        'default to False',
+        ("create_rad_convnet('variant', 'num_classes', "
+         "'input_shape') is not ('variant', 'num_classes', 'input_shape', "
+         "'pretrained')",
+         'create_rad_convnet: `input_shape` does not default to None',
+         'create_rad_convnet: `pretrained` does not default to False')),
     ("h9_factory_is_one_delegating_return", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
         "3 violation(s): create_squeezenet_v1('variant', 'num_classes', 'input_shape', 'weights')"
         " is not ('variant', 'num_classes', 'input_shape', 'pretrained'); create_squeezenet_v1: "
         '`input_shape` does not default to None; create_squeezenet_v1: `pretrained` does not '
-        'default to False'),
+        'default to False',
+        ("create_squeezenet_v1('variant', 'num_classes', 'input_shape', "
+         "'weights') is not ('variant', 'num_classes', 'input_shape', "
+         "'pretrained')",
+         'create_squeezenet_v1: `input_shape` does not default to None',
+         'create_squeezenet_v1: `pretrained` does not default to False')),
     ("h9_factory_is_one_delegating_return", "squeezenet_v2"): Open(
         "the SqueezeNet migration",
         "3 violation(s): create_squeezenodule_net_v2('variant', 'num_classes', 'input_shape', "
         "'weights') is not ('variant', 'num_classes', 'input_shape', 'pretrained'); "
         'create_squeezenodule_net_v2: `input_shape` does not default to None; '
-        'create_squeezenodule_net_v2: `pretrained` does not default to False'),
+        'create_squeezenodule_net_v2: `pretrained` does not default to False',
+        ("create_squeezenodule_net_v2('variant', 'num_classes', "
+         "'input_shape', 'weights') is not ('variant', 'num_classes', "
+         "'input_shape', 'pretrained')",
+         'create_squeezenodule_net_v2: `input_shape` does not default to None',
+         'create_squeezenodule_net_v2: `pretrained` does not default to False')),
     ("h9_factory_is_one_delegating_return", "vae"): Open(
         "the ConvUNext and VAE migration",
         '6 violation(s): create_vae has no `pretrained` parameter; create_vae is not one `return '
         'Class.from_variant(..., **kwargs)`; create_vae_from_config has no `input_shape` '
         'parameter; create_vae_from_config has no `pretrained` parameter; create_vae_from_config '
         'does not end in **kwargs; create_vae_from_config is not one `return '
-        'Class.from_variant(..., **kwargs)`'),
+        'Class.from_variant(..., **kwargs)`',
+        ('create_vae has no `pretrained` parameter',
+         'create_vae is not one `return Class.from_variant(..., **kwargs)`',
+         'create_vae_from_config has no `input_shape` parameter',
+         'create_vae_from_config has no `pretrained` parameter',
+         'create_vae_from_config does not end in **kwargs',
+         'create_vae_from_config is not one `return Class.from_variant(..., '
+         '**kwargs)`')),
     ("h1_factories_follow_the_classes", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `def create_rbf_protonet` (line 487) sits between classes'),
+        '1 violation(s): `def create_rbf_protonet` (line 487) sits between classes',
+        ('`def create_rbf_protonet`',)),
     ("no_from_keras_import", "uca_encoder"): Open(
         "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): line 25: from keras import ...'),
+        '1 violation(s): line 25: from keras import ...',
+        ('from keras import ...',)),
     ("no_from_keras_import", "capsnet"): Open(
         "the CapsNet migration",
-        '1 violation(s): line 25: from keras import ...'),
+        '1 violation(s): line 25: from keras import ...',
+        ('from keras import ...',)),
     ("h3_headless_attribute", "resnet"): Open(
         "the ResNet migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h10_one_name_per_concept", "resnet"): Open(
         "the ResNet migration",
-        '1 violation(s): constructor has no `kernel_initializer` argument'),
+        '1 violation(s): constructor has no `kernel_initializer` argument',
+        ('constructor has no `kernel_initializer` argument',)),
     ("h2_member_order", "cliffordnet"): Open(
         "the CliffordNet migration",
         "3 violation(s): class constants after the first method: ['MODEL_VARIANTS']; "
         'MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is); `from_variant` '
-        'comes after `summary`'),
+        'comes after `summary`',
+        ("class constants after the first method: ['MODEL_VARIANTS']",
+         'MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',
+         '`from_variant` comes after `summary`')),
     ("h4_no_logging_outside_init", "cliffordnet"): Open(
         "the CliffordNet migration",
-        '1 violation(s): `summary` writes 13 logger call(s)'),
+        '1 violation(s): `summary` writes 13 logger call(s)',
+        ('`summary` writes',)),
     ("h5_build_materializes", "cliffordnet"): Open(
         "the CliffordNet migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h2_member_order", "hierarchical"): Open(
         "the CliffordNet migration",
-        '1 violation(s): MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)'),
+        '1 violation(s): MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',
+        ('MODEL_VARIANTS is not the first class constant (LAYERNORM_EPSILON is)',)),
     ("h5_build_materializes", "hierarchical"): Open(
         "the CliffordNet migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h2_member_order", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`'),
+        '1 violation(s): `compute_output_shape` comes after `get_config`',
+        ('`compute_output_shape` comes after `get_config`',)),
     ("h3_one_init_log", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h3_headless_attribute", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h4_no_logging_outside_init", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): `summary` writes 9 logger call(s)'),
+        '1 violation(s): `summary` writes 9 logger call(s)',
+        ('`summary` writes',)),
     ("h5_build_materializes", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): the class defines no `build`'),
+        '1 violation(s): the class defines no `build`',
+        ('the class defines no `build`',)),
     ("h10_stored_attribute_names", "mobilenet_v1"): Open(
         "the MobileNet V1 and V2 migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "mobilenet_v1"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument'),
+        'constructor has no `kernel_regularizer` argument',
+        ('constructor argument `weight_decay` should be `kernel_regularizer`',
+         'constructor has no `kernel_regularizer` argument')),
     ("h2_member_order", "mobilenet_v2"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`'),
+        '1 violation(s): `compute_output_shape` comes after `get_config`',
+        ('`compute_output_shape` comes after `get_config`',)),
     ("h3_one_init_log", "mobilenet_v2"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h3_headless_attribute", "mobilenet_v2"): Open(
         "the MobileNet V1 and V2 migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h4_no_logging_outside_init", "mobilenet_v2"): Open(
         "the MobileNet V1 and V2 migration",
-        '1 violation(s): `summary` writes 9 logger call(s)'),
+        '1 violation(s): `summary` writes 9 logger call(s)',
+        ('`summary` writes',)),
     ("h10_one_name_per_concept", "mobilenet_v2"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument'),
+        'constructor has no `kernel_regularizer` argument',
+        ('constructor argument `weight_decay` should be `kernel_regularizer`',
+         'constructor has no `kernel_regularizer` argument')),
     ("h2_member_order", "mobilenet_v3"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`'),
+        '1 violation(s): `compute_output_shape` comes after `get_config`',
+        ('`compute_output_shape` comes after `get_config`',)),
     ("h3_one_init_log", "mobilenet_v3"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h4_no_logging_outside_init", "mobilenet_v3"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): `summary` writes 8 logger call(s)'),
+        '1 violation(s): `summary` writes 8 logger call(s)',
+        ('`summary` writes',)),
     ("h5_build_materializes", "mobilenet_v3"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): the class defines no `build`'),
+        '1 violation(s): the class defines no `build`',
+        ('the class defines no `build`',)),
     ("h10_one_name_per_concept", "mobilenet_v3"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument'),
+        'constructor has no `kernel_regularizer` argument',
+        ('constructor argument `weight_decay` should be `kernel_regularizer`',
+         'constructor has no `kernel_regularizer` argument')),
     ("h2_member_order", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
         '2 violation(s): `_build_stem` comes after `call`; `compute_output_shape` comes after '
-        '`get_config`'),
+        '`get_config`',
+        ('`_build_stem` comes after `call`',
+         '`compute_output_shape` comes after `get_config`')),
     ("h3_one_init_log", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h3_builders_assign", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
         '2 violation(s): `_build_stem` returns a value (line 270); `_build_stage` returns a value'
-        ' (line 344)'),
+        ' (line 344)',
+        ('`_build_stem` returns a value',
+         '`_build_stage` returns a value')),
     ("h4_no_logging_outside_init", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
         '2 violation(s): `_build_stage` writes 2 logger call(s); `summary` writes 14 logger '
-        'call(s)'),
+        'call(s)',
+        ('`_build_stage` writes',
+         '`summary` writes')),
     ("h5_build_materializes", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
-        '1 violation(s): the class defines no `build`'),
+        '1 violation(s): the class defines no `build`',
+        ('the class defines no `build`',)),
     ("h10_stored_attribute_names", "mobilenet_v4"): Open(
         "the MobileNet V3 and V4 migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "mobilenet_v4"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument'),
+        'constructor has no `kernel_regularizer` argument',
+        ('constructor argument `weight_decay` should be `kernel_regularizer`',
+         'constructor has no `kernel_regularizer` argument')),
     ("h2_member_order", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`'),
+        '`compute_output_shape` comes after `from_variant`',
+        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
+         '`compute_output_shape` comes after `from_variant`')),
     ("h3_one_init_log", "convnext_v1"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
+        ('__init__ writes 2 logger.info calls, expected 1',)),
     ("h3_headless_attribute", "convnext_v1"): Open(
         "the ConvNeXt migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h4_no_logging_outside_init", "convnext_v1"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)'),
+        '1 violation(s): `summary` writes 10 logger call(s)',
+        ('`summary` writes',)),
     ("h5_build_materializes", "convnext_v1"): Open(
         "the ConvNeXt migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h10_stored_attribute_names", "convnext_v1"): Open(
         "the ConvNeXt migration",
         '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self.input_shape`',)),
     ("h2_member_order", "convnext_v2"): Open(
         "the ConvNeXt migration",
         "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`'),
+        '`compute_output_shape` comes after `from_variant`',
+        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
+         '`compute_output_shape` comes after `from_variant`')),
     ("h3_one_init_log", "convnext_v2"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
+        ('__init__ writes 2 logger.info calls, expected 1',)),
     ("h3_headless_attribute", "convnext_v2"): Open(
         "the ConvNeXt migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h4_no_logging_outside_init", "convnext_v2"): Open(
         "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)'),
+        '1 violation(s): `summary` writes 10 logger call(s)',
+        ('`summary` writes',)),
     ("h5_build_materializes", "convnext_v2"): Open(
         "the ConvNeXt migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h10_stored_attribute_names", "convnext_v2"): Open(
         "the ConvNeXt migration",
         '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self.input_shape`',)),
     ("h2_member_order", "rad_convnet"): Open(
         "the RADConvNet migration",
-        '1 violation(s): `from_variant` comes after `from_config`'),
+        '1 violation(s): `from_variant` comes after `from_config`',
+        ('`from_variant` comes after `from_config`',)),
     ("h3_headless_attribute", "rad_convnet"): Open(
         "the RADConvNet migration",
         '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute'),
+        'model has no such attribute',
+        ('__init__ never assigns `self.classification_head = None`',)),
     ("h5_build_materializes", "rad_convnet"): Open(
         "the RADConvNet migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h10_stored_attribute_names", "rad_convnet"): Open(
         "the RADConvNet migration",
         '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`'),
+        '`self.activation`',
+        ('argument `activation` is stored as `self.activation_name`',)),
     ("h11_from_config_does_real_work", "rad_convnet"): Open(
         "the RADConvNet migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it'),
+        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
+        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
     ("h3_one_init_log", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h10_stored_attribute_names", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "squeezenet_v1"): Open(
         "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`'),
+        '1 violation(s): constructor argument `variant_config` should be `variant`',
+        ('constructor argument `variant_config` should be `variant`',)),
     ("h3_one_init_log", "squeezenet_v2"): Open(
         "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h10_stored_attribute_names", "squeezenet_v2"): Open(
         "the SqueezeNet migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "squeezenet_v2"): Open(
         "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`'),
+        '1 violation(s): constructor argument `variant_config` should be `variant`',
+        ('constructor argument `variant_config` should be `variant`',)),
     ("h10_stored_attribute_names", "convunext_stem"): Open(
         "the ConvUNext and VAE migration",
         '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`'),
+        '`self.activation`',
+        ('argument `activation` is stored as `self.activation_name`',)),
     ("h11_from_config_does_real_work", "convunext_stem"): Open(
         "the ConvUNext and VAE migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it'),
+        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
+        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
     ("h4_no_logging_outside_init", "vae"): Open(
         "the ConvUNext and VAE migration",
-        '1 violation(s): `summary` writes 9 logger call(s)'),
+        '1 violation(s): `summary` writes 9 logger call(s)',
+        ('`summary` writes',)),
     ("h10_stored_attribute_names", "vae"): Open(
         "the ConvUNext and VAE migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_num_classes_first_kwargs_last", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `num_classes` is parameter 10, not the first'),
+        '1 violation(s): `num_classes` is parameter 10, not the first',
+        ('`num_classes` is parameter',)),
     ("h10_num_classes_first_kwargs_last", "clifford_rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `num_classes` is parameter 2, not the first'),
+        '1 violation(s): `num_classes` is parameter 2, not the first',
+        ('`num_classes` is parameter',)),
     ("h2_member_order", "capsnet"): Open(
         "the CapsNet migration",
-        '1 violation(s): `_build_sublayer_tree` comes after `build`'),
+        '1 violation(s): `_build_sublayer_tree` comes after `build`',
+        ('`_build_sublayer_tree` comes after `build`',)),
     ("h3_one_init_log", "capsnet"): Open(
         "the CapsNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h4_no_logging_outside_init", "capsnet"): Open(
         "the CapsNet migration",
-        '2 violation(s): `build` writes 1 logger call(s); `summary` writes 11 logger call(s)'),
+        '2 violation(s): `build` writes 1 logger call(s); `summary` writes 11 logger call(s)',
+        ('`build` writes',
+         '`summary` writes')),
     ("h5_build_materializes", "capsnet"): Open(
         "the CapsNet migration",
         '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`'),
+        '`materialize_sublayers(self, input_shape)`',
+        ('`build` lacks `if self.built: return`',
+         '`build` does not call `materialize_sublayers(self, input_shape)`')),
     ("h10_stored_attribute_names", "capsnet"): Open(
         "the CapsNet migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h3_one_init_log", "capsnet_v2"): Open(
         "the CapsNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1'),
+        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
+        ('__init__ writes 0 logger.info calls, expected 1',)),
     ("h5_build_materializes", "capsnet_v2"): Open(
         "the CapsNet migration",
-        '1 violation(s): the class defines no `build`'),
+        '1 violation(s): the class defines no `build`',
+        ('the class defines no `build`',)),
     ("h10_stored_attribute_names", "capsnet_v2"): Open(
         "the CapsNet migration",
         '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`'),
+        '`self.input_shape_config`',
+        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "capsnet_v2"): Open(
         "the CapsNet migration",
-        '1 violation(s): constructor argument `stem` should be `stem_type`'),
+        '1 violation(s): constructor argument `stem` should be `stem_type`',
+        ('constructor argument `stem` should be `stem_type`',)),
 }
 
 
@@ -1380,24 +1610,98 @@ def module_violations(module: Module, rule: str, source: Optional[str] = None) -
     return MODULE_RULE_FUNCTIONS[rule](text, module)
 
 
-def run_class_rule(source: str, subject: Subject, rule: str,
-                   base_source: Optional[str] = None) -> Violations:
-    """Run one class rule on ``source``; ``base_source`` holds the base class, if any."""
+def subject_members(source: str, subject: Subject, base_source: Optional[str] = None) -> List[Member]:
+    """The members a reader of ``subject.cls`` meets in ``source`` (and ``base_source``)."""
     tree = ast.parse(source)
     base_tree = ast.parse(base_source) if base_source is not None else None
     assert _find_class(tree, subject.cls) is not None, f"{subject.cls} is not in the source"
-    members = _effective_members(tree, subject.cls, base_tree,
-                                 subject.base[1] if subject.base else None)
-    return CLASS_RULE_FUNCTIONS[rule](members, subject)
+    return _effective_members(tree, subject.cls, base_tree, subject.base[1] if subject.base else None)
+
+
+def run_class_rule(source: str, subject: Subject, rule: str,
+                   base_source: Optional[str] = None) -> Violations:
+    """Run one class rule on ``source``; ``base_source`` holds the base class, if any."""
+    return CLASS_RULE_FUNCTIONS[rule](subject_members(source, subject, base_source), subject)
+
+
+def base_source(subject: Subject) -> Optional[str]:
+    """The text of the file that holds ``subject``'s base class: the one accessor every row uses.
+
+    Interface contract: returns ``None`` when the subject has no base or its file does
+    not exist yet (the leaf is then read alone, and the rows of the base module itself
+    stay ledgered). Once the file exists it is read, and the base class must be in it:
+    raises ``AssertionError`` otherwise, so a renamed base cannot silently drop the
+    inherited members out of every rule.
+    """
+    if subject.base is None:
+        return None
+    path, name = subject.base
+    text = _read(path)
+    if text is not None:
+        assert _find_class(ast.parse(text), name) is not None, f"{name} is not in {path}"
+    return text
+
+
+def subject_source_members(subject: Subject) -> List[Member]:
+    """:func:`subject_members` for the files the subject really lives in."""
+    module = next(m for m in MODULES if m.key == subject.module)
+    text = _read(module.path)
+    assert text is not None, f"{module.path} does not exist yet"
+    return subject_members(text, subject, base_source(subject))
 
 
 def class_violations(subject: Subject, rule: str) -> Violations:
     """Run one class rule on the file the subject lives in (and its base's file)."""
-    module = next(m for m in MODULES if m.key == subject.module)
-    text = _read(module.path)
-    assert text is not None, f"{module.path} does not exist yet"
-    base_text = _read(subject.base[0]) if subject.base is not None else None
-    return run_class_rule(text, subject, rule, base_text)
+    return CLASS_RULE_FUNCTIONS[rule](subject_source_members(subject), subject)
+
+
+class LedgerSignatureMismatch(RuntimeError):
+    """A ledgered row failed, but not the way its ledger line says it fails.
+
+    Not an ``AssertionError``, so the strict ``xfail`` (``raises=AssertionError``)
+    does not absorb it: the row is red.
+    """
+
+
+def failure_text(error: BaseException) -> str:
+    """The text a ledger signature is matched against: ``"<Type>: <message>"``."""
+    return f"{type(error).__name__}: {error}"
+
+
+def _ledger_key(kwargs: Dict[str, Any]) -> Tuple[str, str]:
+    """The ledger key of the row a test was called for (``rule`` and ``key``, or an anchor ``target``)."""
+    return (kwargs["rule"], kwargs["key"]) if "rule" in kwargs else ("anchors", kwargs["target"])
+
+
+def with_signature_check(test: Callable, ledger: Dict[Tuple[str, str], Open]) -> Callable:
+    """``test`` wrapped so that a ledgered row's failure must carry every piece of its signature.
+
+    Interface contract: the test is called by keyword with ``key`` and ``rule`` (a
+    module or class row) or with ``target`` (an anchor row). A row with no ledger line
+    is untouched. A ledgered row whose failure text lacks a piece of its ``signature``
+    raises :class:`LedgerSignatureMismatch`, chained to the original error; any other
+    failure propagates unchanged.
+    """
+
+    @functools.wraps(test)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return test(*args, **kwargs)
+        except Exception as error:
+            row = ledger.get(_ledger_key(kwargs))
+            lacking = [] if row is None else [p for p in row.signature if p not in failure_text(error)]
+            if lacking:
+                raise LedgerSignatureMismatch(
+                    f"{_ledger_key(kwargs)} failed without {lacking}: {failure_text(error)}") from error
+            raise
+
+    run.checks_ledger_signatures = True
+    return run
+
+
+def signature_checked(test: Callable) -> Callable:
+    """Decorator form of :func:`with_signature_check` over the module's :data:`LEDGER`."""
+    return with_signature_check(test, LEDGER)
 
 
 def _marks(rule: str, key: str) -> list:
@@ -1441,6 +1745,7 @@ def _anchor_rows():
 
 
 @pytest.mark.parametrize(("key", "rule"), list(_module_rows()))
+@signature_checked
 def test_a_module_follows_the_house_shape(key: str, rule: str) -> None:
     module = next(m for m in MODULES if m.key == key)
     violations = module_violations(module, rule)
@@ -1448,6 +1753,7 @@ def test_a_module_follows_the_house_shape(key: str, rule: str) -> None:
 
 
 @pytest.mark.parametrize(("key", "rule"), list(_class_rows()))
+@signature_checked
 def test_a_class_follows_the_house_shape(key: str, rule: str) -> None:
     subject = next(s for s in SUBJECTS if s.key == key)
     violations = class_violations(subject, rule)
@@ -1455,6 +1761,7 @@ def test_a_class_follows_the_house_shape(key: str, rule: str) -> None:
 
 
 @pytest.mark.parametrize("target", list(_anchor_rows()))
+@signature_checked
 def test_every_decision_anchor_is_still_in_its_file(target: str) -> None:
     root = SRC.parents[1]
     if target in ANCHOR_SETS:
@@ -1682,16 +1989,67 @@ def test_every_rule_has_a_planted_violation() -> None:
     assert rules == set(PLANTED)
 
 
+_LEAF = 'class Toy(_Base):\n    """Leaf."""\n'
+_LEAF_SUBJECT = Subject("toy", "toy", "Toy", _ALL, head_attribute="classification_head",
+                        classifier=True, base=("toy_base.py", "_Base"))
+
+
+def _as_base(source: str) -> str:
+    return _plant("class Toy(keras.Model):", "class _Base(keras.Model):", source)
+
+
 def test_a_leaf_class_is_read_together_with_its_base() -> None:
     """After the ConvNeXt base lands, the leaves hold almost nothing; the rules must still bite."""
-    base = _plant("class Toy(keras.Model):", "class _Base(keras.Model):")
-    leaf = ('class Toy(_Base):\n    """Leaf."""\n\n    MODEL_VARIANTS = {"a": {}}\n')
-    subject = Subject("toy", "toy", "Toy", _ALL, head_attribute="classification_head",
-                      classifier=True, base=("toy.py", "_Base"))
+    base = _as_base(TOY)
     for rule in CLASS_RULE_FUNCTIONS:
-        assert run_class_rule(leaf, subject, rule, base) == [], rule
-    broken = _plant("        if self.built:\n            return\n", "", base)
-    assert run_class_rule(leaf, subject, "h5_build_materializes", broken)
+        assert run_class_rule(_LEAF, _LEAF_SUBJECT, rule, base) == [], rule
+
+
+def _class_plants():
+    for rule, plants in PLANTED.items():
+        if rule in CLASS_RULE_FUNCTIONS:
+            for label in plants:
+                yield pytest.param(rule, label, id=f"{rule}: {label}")
+
+
+@pytest.mark.parametrize(("rule", "label"), list(_class_plants()))
+def test_a_violation_placed_in_the_base_class_is_caught_through_the_leaf(rule: str, label: str) -> None:
+    """Every planted class violation, moved into the base, is reported for the leaf."""
+    found = run_class_rule(_LEAF, _LEAF_SUBJECT, rule, _as_base(PLANTED[rule][label]))
+    assert found, f"{rule} saw nothing wrong with `{label}` once it sat in the base class"
+
+
+def test_the_rows_read_the_base_file_through_one_accessor(tmp_path: Path, monkeypatch) -> None:
+    """The base file is read when it exists, ignored while it does not, and must hold its class."""
+    this = sys.modules[__name__]
+    module = Module("toy_leaf", "toy_leaf.py", ("Toy",))
+    subject = Subject("toy", "toy_leaf", "Toy", frozenset({"h5_build_materializes"}),
+                      base=("toy_base.py", "_Base"))
+    monkeypatch.setattr(this, "SRC", tmp_path)
+    monkeypatch.setattr(this, "MODULES", (*MODULES, module))
+    (tmp_path / "toy_leaf.py").write_text(_LEAF + "\n    def build(self, input_shape):\n        pass\n")
+
+    assert base_source(subject) is None
+    # No base file yet: the leaf is read alone, and its own `build` is what is judged.
+    assert class_violations(subject, "h5_build_materializes")
+
+    (tmp_path / "toy_base.py").write_text(_as_base(TOY))
+    assert base_source(subject) == _as_base(TOY)
+    leaf_without_build = _LEAF + "    pass\n"
+    (tmp_path / "toy_leaf.py").write_text(leaf_without_build)
+    assert class_violations(subject, "h5_build_materializes") == []
+
+    (tmp_path / "toy_base.py").write_text(_as_base(
+        _plant("        materialize_sublayers(self, input_shape)\n", "")))
+    assert class_violations(subject, "h5_build_materializes"), "a violation in the base file was not read"
+
+    (tmp_path / "toy_base.py").write_text(_plant("class Toy(keras.Model):", "class Renamed(keras.Model):"))
+    with pytest.raises(AssertionError, match="_Base is not in toy_base.py"):
+        base_source(subject)
+
+
+def test_a_subject_without_a_base_has_no_base_source() -> None:
+    assert base_source(next(s for s in SUBJECTS if s.key == "resnet")) is None
 
 
 def test_the_anchor_rule_sees_a_dropped_and_a_moved_token() -> None:
@@ -1706,6 +2064,48 @@ def test_the_anchor_rule_sees_a_dropped_and_a_moved_token() -> None:
     # An anchor naming a second decision on its continuation line counts both.
     assert set(anchor_token_counts("# DECISION p/D-001 + p/D-009: a\n# also p/D-003\n")) == {
         "p/D-001", "p/D-009", "p/D-003"}
+
+
+def test_a_ledgered_failure_without_its_signature_is_a_plain_failure() -> None:
+    ledger = {("toy_rule", "toy"): Open("x", "m", ("kernel_initializer", "weight_decay")),
+              ("anchors", "toy.py"): Open("x", "m", ("lost",))}
+
+    def failing(message: str) -> Callable:
+        def test(key: str, rule: str) -> None:
+            raise AssertionError(message)
+        return with_signature_check(test, ledger)
+
+    def lost(target: str) -> None:
+        raise AssertionError("toy.py lost ['p/D-001']")
+
+    with pytest.raises(AssertionError) as expected:
+        failing("Toy: ['has no kernel_initializer', 'weight_decay is used']")(key="toy", rule="toy_rule")
+    assert not isinstance(expected.value, LedgerSignatureMismatch)
+    # One violation of the same rule is gone: the row no longer fails the way it says.
+    with pytest.raises(LedgerSignatureMismatch, match="weight_decay") as changed:
+        failing("Toy: ['has no kernel_initializer']")(key="toy", rule="toy_rule")
+    assert isinstance(changed.value.__cause__, AssertionError)
+    # A different violation of the same rule is not the ledgered one either.
+    with pytest.raises(LedgerSignatureMismatch):
+        failing("Toy: ['num_classes comes second']")(key="toy", rule="toy_rule")
+    with pytest.raises(AssertionError) as unledgered:
+        failing("Toy: ['num_classes comes second']")(key="other", rule="toy_rule")
+    assert not isinstance(unledgered.value, LedgerSignatureMismatch)
+    with pytest.raises(AssertionError) as anchored:
+        with_signature_check(lost, ledger)(target="toy.py")
+    assert not isinstance(anchored.value, LedgerSignatureMismatch)
+    assert with_signature_check(lambda key, rule: 7, ledger)(key="toy", rule="toy_rule") == 7
+
+
+def test_a_signature_mismatch_is_not_absorbed_by_the_strict_xfail() -> None:
+    assert not issubclass(LedgerSignatureMismatch, AssertionError)
+
+
+def test_every_row_test_checks_its_ledger_signatures() -> None:
+    checked = [fn for fn in globals().values() if getattr(fn, "checks_ledger_signatures", False)]
+    assert {fn.__name__ for fn in checked} == {
+        "test_a_module_follows_the_house_shape", "test_a_class_follows_the_house_shape",
+        "test_every_decision_anchor_is_still_in_its_file"}
 
 
 # ---------------------------------------------------------------------------
@@ -1740,9 +2140,91 @@ def test_every_waiver_names_a_written_exemption() -> None:
                 f"{owner.key}: {rule} is waived and still has a row")
 
 
+def _init_facts(source: str, cls: str, method: str = "__init__") -> Tuple[List[str], Dict[str, Any]]:
+    """``(parameter names, {parameter: constant default})`` of ``cls.method`` in ``source``."""
+    fn = _def(_members(_find_class(ast.parse(source), cls)), method)
+    assert fn is not None, f"{cls} has no {method}"
+    names = [a.arg for a in fn.args.args]
+    defaults = {n: d.value for n, d in zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults)
+                if isinstance(d, ast.Constant)}
+    return _params(fn), defaults
+
+
+def e1_problems(source: str, cls: str) -> Violations:
+    """E-1 holds of ``cls``: ``include_top`` last, no ``input_shape``, ``num_classes`` 1000."""
+    names, defaults = _init_facts(source, cls)
+    out = [] if names[-1] == "include_top" else [f"{cls}: the last parameter is `{names[-1]}`"]
+    out += [f"{cls} takes an `input_shape`"] if "input_shape" in names else []
+    out += [] if defaults.get("num_classes") == 1000 else [f"{cls}: num_classes does not default to 1000"]
+    return out
+
+
+def e5_problems(source: str, cls: str) -> Violations:
+    """E-5 holds of ``cls``: ``from_variant`` takes variant, input_shape, latent_dim, no num_classes."""
+    names, _ = _init_facts(source, cls, "from_variant")
+    out = [f"{cls}.from_variant has no `{n}`" for n in ("variant", "input_shape", "latent_dim")
+           if n not in names]
+    return out + ([f"{cls}.from_variant takes `num_classes`"] if "num_classes" in names else [])
+
+
+def e6_problems(source: str, cls: str) -> Violations:
+    """E-6 holds of ``cls``: ``num_classes`` defaults to 100, a prototype count."""
+    _, defaults = _init_facts(source, cls)
+    return [] if defaults.get("num_classes") == 100 else [f"{cls}: num_classes does not default to 100"]
+
+
+def _facts_of_the_waived_situation_e1() -> Violations:
+    flagged = {s.key for s in SUBJECTS if s.include_top_last}
+    out = [] if flagged == {"cliffordnet", "hierarchical"} else [f"include_top_last is set on {sorted(flagged)}"]
+    for module, cls in (("cliffordnet", "CliffordNet"), ("hierarchical", "HierarchicalCliffordNet")):
+        out += e1_problems(_read(next(m.path for m in MODULES if m.key == module)), cls)
+    return out
+
+
+def _facts_of_the_waived_situation_e5() -> Violations:
+    inexact = {m.key for m in MODULES if m.model_module and m.factory_signature and not m.factory_exact}
+    out = [] if inexact == {"vae"} else [f"factory_exact is off for {sorted(inexact)}"]
+    return out + e5_problems(_read(next(m.path for m in MODULES if m.key == "vae")), "VAE")
+
+
+def _facts_of_the_waived_situation_e6() -> Violations:
+    path = next(m.path for m in MODULES if m.key == "rbf_protonet")
+    return e6_problems(_read(path), "RBFProtoNet") + e6_problems(_read(path), "CliffordRBFProtoNet")
+
+
+#: The exemptions no ``waived`` entry names. Their effect is on a rule's data (a flag,
+#: a signature, a default) rather than on a missing row, so each is tied to a check
+#: that the situation it describes exists in the source today.
+EXEMPTION_WITNESSES: Dict[str, Callable[[], Violations]] = {
+    "E-1": _facts_of_the_waived_situation_e1,
+    "E-5": _facts_of_the_waived_situation_e5,
+    "E-6": _facts_of_the_waived_situation_e6,
+}
+
+
 def test_every_exemption_is_used() -> None:
     used = {label for owner in (*MODULES, *SUBJECTS) for label in owner.waived.values()}
-    assert used | {"E-1", "E-5", "E-6"} == set(EXEMPTIONS)
+    assert used | set(EXEMPTION_WITNESSES) == set(EXEMPTIONS)
+    assert not used & set(EXEMPTION_WITNESSES), "a waived exemption needs no witness"
+
+
+@pytest.mark.parametrize("label", sorted(EXEMPTION_WITNESSES))
+def test_an_unwaived_exemption_describes_a_situation_that_exists(label: str) -> None:
+    assert EXEMPTION_WITNESSES[label]() == []
+
+
+def test_the_exemption_witnesses_can_fail() -> None:
+    """The twin has none of the three situations; a source that has each one passes."""
+    assert e1_problems(TOY, "Toy"), "E-1 saw nothing wrong with a constructor that takes input_shape"
+    assert e6_problems(TOY, "Toy"), "E-6 saw nothing wrong with num_classes=1000"
+    assert e5_problems(TOY, "Toy"), "E-5 saw nothing wrong with a from_variant that has no latent_dim"
+    assert e1_problems(
+        "class A:\n    def __init__(self, num_classes=1000, include_top=True, **kwargs):\n        pass\n",
+        "A") == []
+    assert e6_problems("class A:\n    def __init__(self, num_classes=100):\n        pass\n", "A") == []
+    assert e5_problems(
+        "class A:\n    @classmethod\n    def from_variant(cls, variant, input_shape, latent_dim=None):\n"
+        "        pass\n", "A") == []
 
 
 def test_the_ledger_names_only_rows_that_exist() -> None:
@@ -1752,3 +2234,67 @@ def test_the_ledger_names_only_rows_that_exist() -> None:
     assert set(LEDGER) <= rows, sorted(set(LEDGER) - rows)
     for row in LEDGER.values():
         assert row.closed_by and row.measured
+        assert row.signature and all(row.signature), "a ledger row without a signature pins nothing"
+
+
+# ---------------------------------------------------------------------------
+# A rule that passes because its precondition is absent is pinned, not silent
+# ---------------------------------------------------------------------------
+
+_NOT_A_CLASSIFIER = "not a classifier: rule returns [] by construction"
+_NO_FROM_CONFIG = "no from_config defined (rule only bites a defined one)"
+_NO_BUILDERS = "no _build_* method to inspect"
+
+#: The ``(rule, subject)`` rows that pass because there is nothing for the rule to
+#: read. A subject that gains a ``from_config`` or a ``_build_*`` method (or a
+#: classifier flag) stops being vacuous for that rule and
+#: ``test_the_vacuous_rows_are_exactly_the_pinned_ones`` fails: the author decides
+#: whether the new method obeys the rule (delete the line) or why it does not.
+VACUOUS: Dict[Tuple[str, str], str] = {
+    **{("h10_trailing_parameter_order", key): _NOT_A_CLASSIFIER for key in (
+        "convunext_stem", "vae", "rbf_protonet", "clifford_rbf_protonet", "uca_encoder",
+        "capsnet", "capsnet_v2")},
+    **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
+        "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
+        "mobilenet_v4", "uca_encoder")},
+    **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
+}
+
+
+def test_the_vacuous_rows_are_exactly_the_pinned_ones() -> None:
+    found = {}
+    for subject in SUBJECTS:
+        members = subject_source_members(subject)
+        for rule in CLASS_RULES:
+            if rule in subject.rules:
+                reason = precondition_absent(members, subject, rule)
+                if reason:
+                    found[(rule, subject.key)] = reason
+    assert found == VACUOUS, (
+        f"became readable: {sorted(set(VACUOUS) - set(found))}; "
+        f"became vacuous: {sorted(set(found) - set(VACUOUS))}")
+
+
+def test_the_precondition_detector_sees_each_absent_thing() -> None:
+    def reasons(source: str, subject: Subject) -> Dict[str, str]:
+        members = subject_members(source, subject)
+        return {rule: reason for rule in CLASS_RULES
+                if (reason := precondition_absent(members, subject, rule))}
+
+    assert reasons(TOY, _TOY_SUBJECT) == {}
+    no_from_config = _plant(TOY[TOY.index("    @classmethod\n    def from_config"):TOY.index("def create_toy")], "", TOY)
+    assert reasons(no_from_config, _TOY_SUBJECT) == {"h11_from_config_does_real_work": _NO_FROM_CONFIG}
+    no_builder = _plant("        self._build_stem()\n", "", _plant(
+        "    def _build_stem(self):\n        self.stem = keras.layers.Dense(1)\n\n", "", TOY))
+    assert reasons(no_builder, _TOY_SUBJECT) == {"h3_builders_assign": _NO_BUILDERS}
+    not_a_classifier = Subject("toy", "toy", "Toy", _ALL, head_attribute="classification_head",
+                               classifier=False)
+    assert reasons(TOY, not_a_classifier) == {"h10_trailing_parameter_order": _NOT_A_CLASSIFIER}
+    no_init = "class Toy:\n    def call(self, x):\n        return x\n"
+    assert set(reasons(no_init, _TOY_SUBJECT)) >= {"h3_one_init_log", "h10_one_name_per_concept"}
+
+
+def test_every_pinned_vacuous_row_is_a_row_that_exists() -> None:
+    rows = {(rule, s.key) for s in SUBJECTS for rule in CLASS_RULES if rule in s.rules}
+    assert set(VACUOUS) <= rows, sorted(set(VACUOUS) - rows)
+
