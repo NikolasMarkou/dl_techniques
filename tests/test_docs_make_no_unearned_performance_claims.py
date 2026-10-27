@@ -187,6 +187,10 @@ def test_no_doc_uses_unverifiable_maturity_puffery():
 # `detr` is NOT an offender and must not be "fixed": its backbone is
 # `keras.applications.ResNet50(weights="imagenet")`, a real download that really
 # works, which is why the rule keys on the phrase, not on the package.
+
+# Since 2026-10-27 `ResNet._download_weights` no longer exists: `from_variant`
+# refuses `pretrained=True` through `pretrained_path_or_raise`. The rule is
+# unchanged, because it keys on the README's wording and never on that symbol.
 DISCLAIMER_RE = re.compile(
     # `[#>*\s]*` absorbs a line-wrap through a code comment or a blockquote:
     # `masked_autoencoder` wraps as "raises\n# `NotImplementedError`".
@@ -302,6 +306,15 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # test_the_token_decoder.py) and by the behavioural arm of
         # test_package_api_contract.py. Both halves checked.
         "bit_diffusion",
+        # cliffordnet: README section 2 names `pretrained=True` only to say it
+        # raises `NotImplementedError` naming the variant; both
+        # `CliffordNet.from_variant` and `HierarchicalCliffordNet.from_variant`
+        # really do, through `pretrained_path_or_raise`, verified by EXECUTING
+        # both with `pretrained=True` (tests/test_models/test_cliffordnet/
+        # test_model.py and test_hierarchical.py) and by the runtime contract
+        # (test_the_vision_classifiers_share_one_runtime_contract.py). Both
+        # halves checked.
+        "cliffordnet",
         "colbert",
         # depth_anything: the one package whose `pretrained=True` WORKS (plan
         # -2026-10-14T062616-81938e81 step 1.7): it loads the official DINOv2

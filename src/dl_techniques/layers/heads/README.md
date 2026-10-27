@@ -119,10 +119,10 @@ the FFN is on.
   resolve. A name resolving is not the archive loading: the vision and VLM head layouts changed on
   2026-10-14/15 (see the vision and VLM READMEs), and archives saved before then either fail to
   load or load with logits where they held probabilities. The
-  classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`
-  (from `dl_techniques.utils.keras_registration`), so
+  classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.<module>")`
+  (from `dl_techniques.utils.keras_registration`; the string is the defining module's path), so
   `keras.saving.get_registered_name(EnhancementHead)` is
-  `dl_techniques.layers.heads.vision.factory>EnhancementHead`. The
+  `dl_techniques.layers.heads.vision.enhancement>EnhancementHead`. The
   helper additionally binds the legacy `Custom>ClassName` as an alias to the same object —
   and that alias is keyed on the **bare class name**, which is why the names must stay
   verbatim and why a `git mv` costs nothing. See `AGENTS.md` in this directory.

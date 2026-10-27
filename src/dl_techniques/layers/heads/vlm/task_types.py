@@ -10,16 +10,17 @@ classes live here:
 * :class:`VLMTaskConfiguration` -- a validated set of tasks, plus a query for
   whether that set needs text generation.
 
-``vlm/factory.py`` reads these objects and picks the head class to build,
+``vlm/factory.py`` (through ``vlm/dispatch.py``) reads these objects and picks the head class to build,
 from its one table, ``VLM_HEAD_DISPATCH``. Only 4 of the 47 task names have a
 head; the other 43 raise ``ValueError``. The table in :class:`VLMTaskType`
 lists both groups.
 """
 
+import dataclasses
 import numbers
 from enum import Enum, unique
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Union
 
 from ..validation import positive_int
 
@@ -37,7 +38,7 @@ class VLMTaskType(Enum):
 
     **Head dispatch:**
 
-    ``vlm/factory.py``'s ``VLM_HEAD_DISPATCH`` decides which head class runs
+    ``vlm/dispatch.py``'s ``VLM_HEAD_DISPATCH`` decides which head class runs
     a task, and ``get_head_class`` reads it. Four members have a head. The
     other 43 are absent from the table and raise ``ValueError`` when the head
     is created, not when it is called. The two groups sum to 47.
@@ -200,7 +201,7 @@ class VLMTaskType(Enum):
         """
         Group the members into twelve named categories.
 
-        The grouping is descriptive only. ``vlm/factory.py`` never reads it.
+        The grouping is descriptive only. no VLM module reads it.
         Every member is filed exactly once, so the twelve lists hold 47
         members in total. The per-category counts are in the class
         docstring.
@@ -446,6 +447,49 @@ class VLMTaskConfig:
                 f"{owner}: dropout_rate must be a number in [0, 1), got "
                 f"{rate!r}"
             )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Return every field as plain JSON data.
+
+        Interface contract, shared by every VLM head's ``get_config`` and
+        ``MultiTaskVLMHead.get_config``: a new dict holding each dataclass
+        field, with ``task_type`` as its string value (an enum member is not
+        JSON-serializable). ``VLMTaskConfig(**config.to_dict()) == config``.
+
+        :return: The fields, JSON-serializable.
+        :rtype: Dict[str, Any]
+        """
+        fields = dataclasses.asdict(self)
+        fields["task_type"] = self.task_type.value
+        return fields
+
+    @classmethod
+    def coerce(cls, value: Union["VLMTaskConfig", Dict[str, Any]]) -> "VLMTaskConfig":
+        """
+        Return the config for an instance or a dict of its fields.
+
+        Interface contract, shared by ``create_vlm_head``, the multi-task
+        factory, ``MultiTaskVLMHead.__init__`` and the heads' ``from_config``:
+        an instance is returned unchanged (unlike ``NLPTaskConfig.coerce``,
+        which copies), a dict of its fields is passed to the constructor
+        (which parses a string ``task_type``; the dict is not modified), and
+        anything else raises ``TypeError``.
+
+        :param value: A config, or a dict of its fields.
+        :type value: Union[VLMTaskConfig, Dict[str, Any]]
+        :return: A ``VLMTaskConfig``.
+        :rtype: VLMTaskConfig
+        :raises TypeError: If ``value`` is neither.
+        """
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, dict):
+            raise TypeError(
+                "A VLM task config must be a VLMTaskConfig or a dict of its "
+                f"fields, got {type(value).__name__}."
+            )
+        return cls(**value)
 
 
 # ---------------------------------------------------------------------

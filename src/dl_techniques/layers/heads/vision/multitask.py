@@ -1,6 +1,6 @@
 """Multi-task vision head: several heads behind one layer."""
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import keras
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -9,16 +9,12 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # local imports
 # ---------------------------------------------------------------------
 
-from .dispatch import (
-    _as_vision_task_type,
-    VISION_HEAD_DISPATCH,
-    _dispatched_task_list,
-    create_vision_head,
-)
+from ..validation import key_by_name, lookup_head
+from .dispatch import VISION_HEAD_DISPATCH, create_vision_head
 from .task_types import TaskConfiguration, VisionTaskType
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.multitask")
 class MultiTaskHead(keras.layers.Layer):
     """
     Several vision heads behind one layer.
@@ -162,13 +158,9 @@ class MultiTaskHead(keras.layers.Layer):
             # stripped it as a side effect and broke get_config() round trips
             # and repeated construction.
             config = dict(config)
-            task_type = _as_vision_task_type(config.pop('task_type'))
-            if task_type not in VISION_HEAD_DISPATCH:
-                raise ValueError(
-                    f"MultiTaskHead task {task_name!r}: task type "
-                    f"{task_type.value!r} has no vision head. "
-                    f"{_dispatched_task_list()}"
-                )
+            task_type, _ = lookup_head(
+                config.pop('task_type'), VISION_HEAD_DISPATCH, VisionTaskType,
+                'vision', owner=f"MultiTaskHead task {task_name!r}")
 
             # Add shared configuration
             config['hidden_dim'] = config.get('hidden_dim', self.shared_backbone_dim)
@@ -358,15 +350,10 @@ def create_multi_task_head(
     if isinstance(task_configuration, TaskConfiguration):
         tasks = task_configuration.get_enabled_tasks()
     elif isinstance(task_configuration, (list, tuple)):
-        tasks = [VisionTaskType.coerce(task) for task in task_configuration]
-        values = [task.value for task in tasks]
-        repeated = sorted({v for v in values if values.count(v) > 1})
-        if repeated:
-            raise ValueError(
-                f"create_multi_task_head: task(s) {repeated} appear more than "
-                "once; the heads are keyed by task, so all but one would be "
-                "dropped. Name each task once."
-            )
+        tasks = list(key_by_name(
+            [VisionTaskType.coerce(task) for task in task_configuration],
+            lambda task: task.value, 'create_multi_task_head', 'task_configuration',
+        ).values())
     elif isinstance(task_configuration, dict):
         tasks = None
         task_configs = task_configuration

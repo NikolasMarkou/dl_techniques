@@ -1,18 +1,19 @@
 """``CliffordNet`` and ``HierarchicalCliffordNet`` with ``include_top=False``
 return the final feature map.
 
-Plan plan-2026-10-26T125959-7af851e5 step 4 (D-011): the switch mirrors ResNet
-and ConvNeXt. ``include_top=True`` (the default) is the model as it was, so the
-head recipe, the parameter pins in ``test_paper_v2_variants.py`` and the logits
-contract are untouched; ``include_top=False`` drops the head and returns the
-block stack's output ``(B, ceil(H/p), ceil(W/p), channels)``.
+The switch mirrors ResNet and ConvNeXt. ``include_top=True`` (the default) is the
+headed model, so the head recipe, the parameter pins in
+``test_paper_v2_variants.py`` and the logits contract do not depend on it;
+``include_top=False`` drops the head and returns the block stack's output
+``(B, ceil(H/p), ceil(W/p), channels)``. ``HierarchicalCliffordNet`` has the same
+switch; its headless output is the last stage's map, after
+``len(stage_depths) - 1`` stride-2 downsamplers.
 
-Step 5 gave ``HierarchicalCliffordNet`` the same switch (its headless output is
-the last stage's map, after ``len(stage_depths) - 1`` stride-2 downsamplers) and,
-by D-017, made ``from_variant(..., pretrained=<path>, input_shape=...)`` of BOTH
-models build the model before the weight transfer: ``from_variant`` builds
-nothing and the loader refuses an unbuilt target, so before this a checkpoint
-could not be loaded through ``from_variant`` at all, headed or not.
+``from_variant(..., pretrained=<path>, input_shape=...)`` of both models loads the
+checkpoint through the shared loader, which builds an unbuilt model at the
+default probe shape before the transfer, so a checkpoint loads through
+``from_variant`` headed or not, and a load that leaves any layer outside
+``classification_head`` unrestored raises (``TestAPretrainedTrunkMustFit``).
 
 Every expectation below is derived from the model itself or from the geometry
 (``ceil(size / patch)`` for the 'same'-padded strided stems), never from a
@@ -82,6 +83,22 @@ def _perturb(model: CliffordNet, seed: int = 11) -> None:
         )
 
 
+def _spy_on_the_transfer(monkeypatch) -> list:
+    """Record the report of every layer-by-layer transfer the shared loader runs."""
+    import dl_techniques.utils.weight_transfer as weight_transfer
+
+    reports = []
+    real = weight_transfer.load_weights_from_checkpoint
+
+    def spy(*args, **kwargs):
+        report = real(*args, **kwargs)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(weight_transfer, "load_weights_from_checkpoint", spy)
+    return reports
+
+
 def _weights_by_path(model) -> dict:
     """Weights keyed by their path below the model name.
 
@@ -133,7 +150,7 @@ class TestHeadlessOutput:
         logits = _np(headed(x, training=False))
         # Recompute the logits from the headless map through the headed head.
         # The operation sequence is the same one, so the difference is exactly
-        # zero: measured on CPU (2026-10-26, iter-1 step 4.1) max|diff| = 0.0
+        # zero: measured on CPU max|diff| = 0.0
         # for input seeds 3, 4 and 5 (max|logit| 2.3 to 2.9). A tolerance would
         # hide a real change of the head's input, so none is allowed.
         recomputed = _np(
@@ -247,8 +264,8 @@ class TestHeadedToHeadlessTransfer:
             target=headless, ckpt_path=path, skip_prefixes=(), strict=True
         )
 
-        # The loader reports rather than raises on zero matches (Pre-Mortem 3),
-        # so the count is asserted, and it must cover every trunk layer.
+        # This loader reports rather than raises on zero matches, so the
+        # count is asserted, and it must cover every trunk layer.
         trunk_layers = [layer for layer in headless.layers if layer.weights]
         assert len(report.loaded) > 0
         assert len(report.loaded) == len(trunk_layers)
@@ -262,8 +279,8 @@ class TestHeadedToHeadlessTransfer:
             np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
 
         # A block kernel and the stem kernel, named, so a failure reads clearly.
-        for needle in ("stem_conv1", "clifford_block_0"):
-            hits = [p for p in dst if needle in p and p.endswith("kernel")]
+        for needle in ("stem/stem_conv1/", "block_0/"):
+            hits = [p for p in dst if p.startswith(needle) and p.endswith("kernel")]
             assert hits, f"no {needle} kernel among {sorted(dst)[:6]}"
             for p in hits:
                 np.testing.assert_allclose(dst[p], src[p], rtol=0, atol=0)
@@ -282,42 +299,37 @@ class TestHeadedToHeadlessTransfer:
             headed.classification_head(feature_map, training=False)["logits"]
         )
         # Same operation sequence on identical weights: measured on CPU
-        # (2026-10-26, iter-1 step 4.1) max|diff| = 0.0, so the bound is zero.
+        # max|diff| = 0.0, so the bound is zero.
         np.testing.assert_allclose(
             recomputed, _np(headed(x, training=False)), rtol=0, atol=0.0
         )
 
-    @pytest.mark.parametrize(
-        "kwargs, expect_skip",
-        [
-            # Headless: no classifier exists, so a class count that differs
-            # from the hosted 100 (here the default 1000) must not relax the
-            # loader.
-            ({"include_top": False}, False),
-            ({"include_top": False, "num_classes": 7}, False),
-            # Headed: a width that differs from the hosted 100 skips the
-            # classifier, as before.
-            ({"num_classes": 7}, True),
-            ({"num_classes": 100}, False),
-        ],
-    )
-    def test_from_variant_gates_the_classifier_skip_on_include_top(
-        self, monkeypatch, kwargs, expect_skip
+    @pytest.mark.parametrize("num_classes", [NUM_CLASSES, 3])
+    def test_from_variant_loads_a_checkpoint_of_another_class_count(
+        self, tmp_path, monkeypatch, num_classes
     ):
-        seen = {}
+        """The head of another width is skipped and the trunk still copies.
 
-        def record(self, weights_path, skip_mismatch=True):
-            seen["skip_mismatch"] = skip_mismatch
+        The transfer works per layer and skips a shape-mismatched one, whatever
+        class count the checkpoint was trained on, so ``from_variant`` has no
+        rule of its own about it.
+        """
+        reports = _spy_on_the_transfer(monkeypatch)
+        headed, path = self._checkpoint(tmp_path)
 
-        monkeypatch.setattr(CliffordNet, "load_pretrained_weights", record)
-        CliffordNet.from_variant(
-            "nano",
-            pretrained="unused.keras",
-            channels=CHANNELS,
-            depth=1,
-            **kwargs,
+        loaded = CliffordNet.from_variant(
+            "nano", num_classes=num_classes, pretrained=path,
+            channels=CHANNELS, depth=2,
         )
-        assert seen == {"skip_mismatch": expect_skip}
+
+        (report,) = reports
+        trunk = {p: v for p, v in _weights_by_path(loaded).items()
+                 if not p.startswith("classification_head")}
+        src = _weights_by_path(headed)
+        for path_, value in trunk.items():
+            np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
+        assert trunk, "the trunk holds no weights"
+        assert bool(report.shape_mismatch) == (num_classes != NUM_CLASSES)
 
 
 class TestNumClasses:
@@ -379,7 +391,7 @@ class TestDefaultIsUnchanged:
 
 
 class TestFromVariantBuildsBeforeLoading:
-    """D-017: ``from_variant(pretrained=<path>, input_shape=...)`` loads.
+    """``from_variant(pretrained=<path>, input_shape=...)`` loads.
 
     The checkpoint is a perturbed headed model, so every trunk tensor differs
     from a fresh initialisation: equality at ``rtol=0, atol=0`` proves the
@@ -390,17 +402,8 @@ class TestFromVariantBuildsBeforeLoading:
     VARIANT_KWARGS = dict(channels=CHANNELS, depth=2)
 
     @staticmethod
-    def _spy(monkeypatch, module):
-        reports = []
-        real = module.load_weights_from_checkpoint
-
-        def spy(*args, **kwargs):
-            report = real(*args, **kwargs)
-            reports.append(report)
-            return report
-
-        monkeypatch.setattr(module, "load_weights_from_checkpoint", spy)
-        return reports
+    def _spy(monkeypatch):
+        return _spy_on_the_transfer(monkeypatch)
 
     def _checkpoint(self, tmp_path):
         headed = CliffordNet.from_variant(
@@ -416,9 +419,7 @@ class TestFromVariantBuildsBeforeLoading:
     def test_headless_from_variant_loads_the_trunk(
         self, tmp_path, monkeypatch, input_shape
     ):
-        import dl_techniques.models.vision.cliffordnet.model as module
-
-        reports = self._spy(monkeypatch, module)
+        reports = self._spy(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
         extra = {} if input_shape is None else {"input_shape": input_shape}
 
@@ -441,9 +442,7 @@ class TestFromVariantBuildsBeforeLoading:
     def test_headed_from_variant_loads_the_head_too(
         self, tmp_path, monkeypatch
     ):
-        import dl_techniques.models.vision.cliffordnet.model as module
-
-        reports = self._spy(monkeypatch, module)
+        reports = self._spy(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
 
         loaded = CliffordNet.from_variant(
@@ -723,24 +722,14 @@ class TestHierarchicalHeadedToHeadlessTransfer:
         assert dst
         for path_, value in dst.items():
             np.testing.assert_allclose(value, src[path_], rtol=0, atol=0)
-        for needle in ("stem_conv1", "stage0_block_0", "downsample_0_depthwise"):
-            hits = [p for p in dst if needle in p and p.endswith("kernel")]
+        for needle in ("stem/stem_conv1/", "stage1_block1/", "downsample_0_depthwise/"):
+            hits = [p for p in dst if p.startswith(needle) and p.endswith("kernel")]
             assert hits, f"no {needle} kernel among {sorted(dst)[:6]}"
 
     def test_from_variant_builds_then_loads_headless_and_headed(
         self, tmp_path, monkeypatch
     ):
-        import dl_techniques.models.vision.cliffordnet.hierarchical as module
-
-        reports = []
-        real = module.load_weights_from_checkpoint
-
-        def spy(*args, **kwargs):
-            report = real(*args, **kwargs)
-            reports.append(report)
-            return report
-
-        monkeypatch.setattr(module, "load_weights_from_checkpoint", spy)
+        reports = _spy_on_the_transfer(monkeypatch)
         headed, path = self._checkpoint(tmp_path)
         kwargs = dict(stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS))
         src = _weights_by_path(headed)
@@ -853,7 +842,7 @@ class TestHierarchicalDefaultIsUnchanged:
 
 
 # ---------------------------------------------------------------------
-# Positional argument order (review concern 1)
+# Positional argument order
 # ---------------------------------------------------------------------
 
 
@@ -903,7 +892,7 @@ class TestIncludeTopIsNotASecondPositionalArgument:
 
 
 # ---------------------------------------------------------------------
-# numpy.bool_ (review pass 2, NOTE 8)
+# numpy.bool_
 # ---------------------------------------------------------------------
 
 
@@ -989,3 +978,115 @@ class TestIncludeTopAcceptsANumpyBool:
                         include_top=np.int64(1))
         assert "numpy.int64" in str(caught.value)
         assert "(bool)" not in str(caught.value)
+
+
+# ---------------------------------------------------------------------
+# D-040: a pretrained load restores every layer outside the head
+# ---------------------------------------------------------------------
+
+
+class TestAPretrainedTrunkMustFit:
+    """A checkpoint whose trunk does not fit is refused, not half-loaded.
+
+    Only ``classification_head`` may differ (another ``num_classes``). A stem of
+    another patch size leaves the blocks that do fit loaded and the stem random,
+    which is a model that looks pretrained and is not.
+    """
+
+    CLIFFORD = dict(channels=CHANNELS, depth=2, input_shape=(H, W, C_IN))
+    HIERARCHICAL = dict(
+        stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS),
+        input_shape=(H, W, C_IN),
+    )
+
+    @staticmethod
+    def _save(model, tmp_path):
+        path = os.path.join(str(tmp_path), "donor.keras")
+        model.save(path)
+        return path
+
+    def test_a_clifford_stem_of_another_patch_size_raises(self, tmp_path):
+        donor = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, patch_size=2, **self.CLIFFORD
+        )
+        path = self._save(donor, tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            CliffordNet.from_variant(
+                "nano", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
+                **self.CLIFFORD,
+            )
+
+        assert "stem" in str(caught.value), str(caught.value)
+
+    def test_a_hierarchical_stem_of_another_patch_size_raises(self, tmp_path):
+        donor = HierarchicalCliffordNet.from_variant(
+            "hier_345", num_classes=NUM_CLASSES, patch_size=2, **self.HIERARCHICAL
+        )
+        path = self._save(donor, tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            HierarchicalCliffordNet.from_variant(
+                "hier_345", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
+                **self.HIERARCHICAL,
+            )
+
+        assert "stem" in str(caught.value), str(caught.value)
+
+    def test_a_clifford_checkpoint_of_another_width_writes_nothing(self, tmp_path):
+        donor = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, **{**self.CLIFFORD, "channels": 24}
+        )
+        path = self._save(donor, tmp_path)
+        receiver = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, **self.CLIFFORD
+        )
+        before = [_np(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError, match="block_0"):
+            receiver.load_pretrained_weights(path)
+
+        for a, w in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, _np(w))
+
+    @pytest.mark.parametrize("family", ["clifford", "hierarchical"])
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(
+        self, tmp_path, family
+    ):
+        cls, name, kwargs = (
+            (CliffordNet, "nano", self.CLIFFORD) if family == "clifford"
+            else (HierarchicalCliffordNet, "hier_345", self.HIERARCHICAL)
+        )
+        donor = cls.from_variant(name, num_classes=NUM_CLASSES, **kwargs)
+        _perturb(donor)
+        path = self._save(donor, tmp_path)
+
+        loaded = cls.from_variant(name, num_classes=3, pretrained=path, **kwargs)
+
+        src, dst = _weights_by_path(donor), _weights_by_path(loaded)
+        trunk = {p: v for p, v in dst.items() if not p.startswith("classification_head")}
+        assert trunk
+        for p, value in trunk.items():
+            np.testing.assert_allclose(value, src[p], rtol=0, atol=0, err_msg=p)
+        # The head is one layer: its width differs, so all of it keeps its init.
+        heads = {p: v for p, v in dst.items() if p.startswith("classification_head")}
+        assert heads and any(v.shape != src[p].shape for p, v in heads.items())
+
+    @pytest.mark.parametrize("family", ["clifford", "hierarchical"])
+    def test_a_headless_model_loads_from_a_headed_checkpoint(self, tmp_path, family):
+        cls, name, kwargs = (
+            (CliffordNet, "nano", self.CLIFFORD) if family == "clifford"
+            else (HierarchicalCliffordNet, "hier_345", self.HIERARCHICAL)
+        )
+        donor = cls.from_variant(name, num_classes=NUM_CLASSES, **kwargs)
+        _perturb(donor)
+        path = self._save(donor, tmp_path)
+
+        headless = cls.from_variant(
+            name, include_top=False, pretrained=path, **kwargs
+        )
+
+        src, dst = _weights_by_path(donor), _weights_by_path(headless)
+        assert dst
+        for p, value in dst.items():
+            np.testing.assert_allclose(value, src[p], rtol=0, atol=0, err_msg=p)

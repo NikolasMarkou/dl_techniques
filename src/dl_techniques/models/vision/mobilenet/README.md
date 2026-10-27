@@ -78,7 +78,7 @@ MobileNet answers this by redesigning the building block itself rather than by p
 
 ### 4.4 `MobileNetV4`
 - **Stem**: a `3x3` convolution.
-- **Body**: seven stages of UIB blocks; the `block_types` entry for each stage selects the block shape. Hybrid variants insert `MobileMQA` attention at `attention_stages` (5 and 6 by default).
+- **Body**: seven stages of UIB blocks; the `block_types` entry for each stage selects the block shape. Hybrid variants insert `MobileMQA` attention at `attention_stages` (5 and 6 by default). The layers are named `stem`, `stage{S}_block{B}` and `stage{S}_mqa` (S and B count from 1, as in ResNet) and `classification_head`.
 - **Head**: the paper's classifier as timm builds it (`head_norm=True`): global average pooling, `Dense(1280) -> BatchNorm -> ReLU -> Dropout -> Dense(num_classes)`, the BatchNorm at the family's reference epsilon 1e-3.
 
 Every version returns **logits** (the classifier is linear): compile with `from_logits=True` and apply `keras.ops.softmax` to read probabilities. The model's `kernel_initializer` and its `weight_decay` L2 reach the head's `Dense` layers. Every conv and `Dense` draws from its own clone of `kernel_initializer`, so no two kernels replay one draw (the stem, every block's convs and the classifier were tied before 2026-10-16). The `return_dict` and `head_config_preset` arguments are gone; `head_config_overrides` still reshapes the head, and `name`, `num_classes` and `task_type` in it raise `ValueError`. Archives saved before 2026-10-14 (a dict output, a softmax head, or the two-`DenseBlock` head) do not load and are not supported.
@@ -140,22 +140,29 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 | **`MobileNetV4`** | `...mobilenet.mobilenet_v4.MobileNetV4` | Keras `Model` for V4. |
 | **`create_mobilenetv4`** | `...mobilenet.mobilenet_v4.create_mobilenetv4` | Factory for `MobileNetV4`. |
 
-All four factories share the same signature shape:
+V3 and V4 take the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
+(raises `NotImplementedError`) or `False`. A path loads every layer outside `classification_head` or
+raises `ValueError` and leaves the model untouched (a checkpoint of another variant is refused; only a
+head of another `num_classes` is skipped, with a warning):
 
 ```python
-create_mobilenetv4(          # same for v1 / v2 / v3
+create_mobilenetv4(          # same for v3
     variant="medium",        # default variant differs per version: see section 7
     num_classes=1000,
-    input_shape=None,        # V4 defaults to (224, 224, 3)
-    width_multiplier=1.0,
-    pretrained=False,        # True raises NotImplementedError
-    **kwargs,                # forwarded to the model, e.g. include_top, dropout_rate
+    input_shape=None,        # defaults to (224, 224, 3)
+    pretrained=False,        # True raises NotImplementedError; a path loads that checkpoint
+    **kwargs,                # forwarded to MobileNetV4.from_variant, e.g. width_multiplier, include_top
 )
 ```
 
+V1 and V2 still take `width_multiplier` as a named argument beside `pretrained`:
+`create_mobilenetv2(variant, num_classes, input_shape, width_multiplier, pretrained, **kwargs)`.
+
 `kwargs` reaches the constructor arguments `dropout_rate`, `weight_decay`,
 `kernel_initializer` and `include_top` on every version, plus `depths`, `dims`,
-`block_types`, `strides`, `use_attention` and `attention_stages` on V4.
+`block_types`, `strides`, `use_attention` and `attention_stages` on V4, and `width_multiplier` on V3
+and V4. A keyword given for a field of the variant
+(`MobileNetV4.from_variant("small", depths=[1] * 7, use_attention=True)`) replaces the variant's own value.
 
 ---
 
@@ -240,7 +247,8 @@ All four versions share this contract: `include_top=False` returns the **4-D fea
 pooled vector. If you want the pooled vector, add a `keras.layers.GlobalAveragePooling2D()`
 yourself.
 
-`summary()` on a never-called model runs a real dummy forward pass to materialize the weights;
+`summary()` on a never-called model runs a real dummy forward pass to materialize the weights.
+On V2, V3 and V4 `build((None, H, W, C))` also creates every weight, by tracing `call`; on V1
 `keras.Model.build(...)` alone does not, since on a subclassed model it only marks the model built.
 
 ---
@@ -285,6 +293,24 @@ one; check `len(backbone.get_weights())` against your own checkpoint before rely
 A `MobileNetV3` or `MobileNetV4` `.keras` file saved before 2026-10-26, when the stem moved onto
 one `ConvStem` named `stem` (its weights were `stem_conv/...` and `stem_bn/...`), does not load:
 `keras.models.load_model` raises `ValueError`, and no legacy shim exists.
+
+A `MobileNetV4` archive saved at the revision before the layer names moved (2026-10-27, 0192d3e45)
+still loads: `keras.models.load_model` and `load_weights` restore every tensor for `small`,
+`hybrid_medium` and `small` at `width_multiplier=0.75`, headed and headless, and the inference
+output (`training=False`) is equal at `atol=0` (measured; `load_weights` is equal in `training=True`
+too, and `load_model` of a headed model differs there exactly as it does between two copies of one
+unchanged revision, so that difference is not new). Only the `w.path` strings change, because
+archives load by tracked-layer order: `stage_{s}_block_{b}` is now `stage{S}_block{B}` and
+`stage_{s}_mqa` is `stage{S}_mqa` (S and B count from 1; 195 of the 207 weights of `small` move,
+for example `stage_0_block_0/expand_conv/kernel` is `stage1_block1/expand_conv/kernel`). Code that
+selects weights by path must follow.
+
+A `MobileNetV3` archive saved at that revision loads unchanged: `load_model` and `load_weights` restore
+every tensor for `large`, `small` and `large` at `width_multiplier=0.75`, headed and headless, and the
+inference output is equal at `atol=0` (measured). No `w.path` moves for V3 (`stem`, `block_{i}`,
+`last_conv`, `last_bn`, `classification_head`). As for V4, `load_weights` is also equal in
+`training=True` and `load_model` of a headed model is not: the head's Dropout draws a different mask
+after a reload (with `dropout_rate=0.0` the two are equal), which is independent of this change.
 
 ---
 

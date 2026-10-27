@@ -45,7 +45,7 @@ from dl_techniques.layers.heads.nlp import (
     create_multi_task_nlp_head,
     create_nlp_head,
 )
-from dl_techniques.layers.heads.nlp.factory import BaseNLPHead
+from dl_techniques.layers.heads.nlp import BaseNLPHead
 
 D = 8
 B, S, C = 2, 5, 3

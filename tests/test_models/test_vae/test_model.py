@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu, exact_leaky_relu
 from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling, VMFSampling
 from dl_techniques.models.vision.vae.model import VAE, create_vae, create_vae_from_config
 
@@ -118,6 +119,30 @@ class TestVAEInitialization:
         reg = keras.regularizers.L1(0.01)
         vae3 = VAE(latent_dim=64, input_shape=input_shape, kernel_regularizer=reg)
         assert vae3.kernel_regularizer is reg
+
+
+class TestVAEEncoderStem:
+    """The encoder's first stage is a ``ConvStem`` named ``encoder_stem``."""
+
+    @pytest.mark.parametrize(
+        "name,exact", [("leaky_relu", exact_leaky_relu), ("gelu", exact_gelu)]
+    )
+    def test_the_vae_stem_activation_is_the_exact_form(self, name, exact):
+        """The stem runs ``exact_leaky_relu`` / ``exact_gelu``, not the stock
+        kernel (the exact forms of ``substitute_exact``). The two are
+        bit-identical at float32, so no value comparison can see a dropped
+        ``substitute_exact``; the layer's own function is what is checked.
+        """
+        vae = VAE(
+            latent_dim=8,
+            input_shape=(32, 32, 3),
+            depths=2,
+            steps_per_depth=1,
+            filters=[8, 16],
+            activation=name,
+        )
+        stem = vae.get_layer("encoder_stem")
+        assert stem.act1.activation is exact
 
 
 class TestVAEVariants:

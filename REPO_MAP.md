@@ -128,8 +128,9 @@ other shapes:
   two named constructors, `create_mann` and `create_som_2d`, and nothing else.
 - **A three-tier dispatcher.** `src/dl_techniques/layers/heads/factory.py` defines a thin
   `create_head(domain, ...)` shim that forwards to one per-domain factory each:
-  `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vlm/factory.py`. Task heads are
-  selected by *domain first*, then by key.
+  `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vlm/factory.py`. Each domain is a
+  package of one module per head plus `dispatch.py` (task type to class) and a thin
+  `factory.py`. Task heads are selected by *domain first*, then by key.
 
 Two deliberate absences. **`src/dl_techniques/layers/dynamic_chunking/` has no factory and
 no registry** — its three layers (`RoutingModule`, `ChunkLayer`, `DeChunkLayer`) are H-Net's

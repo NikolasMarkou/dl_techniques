@@ -17,6 +17,7 @@ Test Categories:
 - Performance benchmarks
 """
 
+import copy
 import pytest
 import tempfile
 import os
@@ -458,6 +459,156 @@ class TestMobileNetV3:
             f"every predicted row sums to 1 within {atol:.2e}: {rows}")
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(predictions, axis=-1))
         np.testing.assert_allclose(probs.sum(axis=1), np.ones(10), rtol=0, atol=atol)
+
+    def test_a_mobilenet_reports_the_shape_it_runs(self):
+        """``compute_output_shape`` and a symbolic call agree with the eager forward.
+
+        The stem is ``self.stem`` (a ``ConvStem``); ``compute_output_shape``
+        must read it and not the sub-layers it used to alias. Keras uses a
+        model's ``compute_output_shape`` for a symbolic call, so a stale read
+        raises ``AttributeError`` on both paths while every test that only runs
+        the eager forward stays green.
+        """
+        model = MobileNetV3(
+            variant="small",
+            num_classes=4,
+            include_top=False,
+            input_shape=(32, 32, 3),
+        )
+        batch = np.zeros((1, 32, 32, 3), "float32")
+        eager = model(batch, training=False)
+
+        reported = model.compute_output_shape((None, 32, 32, 3))
+        assert tuple(reported) == (None,) + tuple(eager.shape[1:])
+
+        symbolic = model(keras.Input(shape=(32, 32, 3)))
+        assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
+
+
+class TestMobileNetV3HouseShape:
+    """The constructor, ``from_variant`` and ``build`` contract of the house shape."""
+
+    @pytest.mark.parametrize("variant,count", [
+        ("small", 2_554_968),
+        ("large", 5_507_432),
+    ])
+    def test_an_explicit_build_creates_every_weight(self, variant, count):
+        """``build`` materializes what ``call`` runs.
+
+        The model used to inherit Keras' ``build``, which marked it built with
+        0 weights and a warning.
+        """
+        model = MobileNetV3.from_variant(variant, num_classes=1000)
+        model.build((None, 64, 64, 3))
+        assert model.count_params() == count
+
+    def test_an_override_does_not_poison_the_variant_table(self):
+        before = copy.deepcopy(MobileNetV3.MODEL_VARIANTS)
+        MobileNetV3.from_variant("small", width_multiplier=0.5, dropout_rate=0.3)
+        assert MobileNetV3.MODEL_VARIANTS == before
+
+    def test_the_constructor_lists_the_variants_it_knows(self):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV3(variant="medium")
+        assert "Unknown variant 'medium'. Available variants: ['large', 'small']" in str(
+            caught.value)
+
+    @pytest.mark.parametrize("kwargs,message", [
+        ({"width_multiplier": 0.0}, "width_multiplier must be positive, got 0.0"),
+        ({"width_multiplier": -1.0}, "width_multiplier must be positive, got -1.0"),
+        ({"dropout_rate": 1.0}, "dropout_rate must be in [0, 1), got 1.0"),
+        ({"dropout_rate": -0.1}, "dropout_rate must be in [0, 1), got -0.1"),
+        ({"num_classes": 0}, "num_classes must be positive when include_top=True, got 0"),
+    ])
+    def test_an_invalid_value_is_refused_naming_the_argument_and_the_value(
+            self, kwargs, message):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV3(input_shape=(32, 32, 3), **kwargs)
+        assert message in str(caught.value), str(caught.value)
+
+    def test_a_headless_model_needs_no_class_count(self):
+        model = MobileNetV3(num_classes=0, include_top=False, input_shape=(32, 32, 3))
+        assert model.classification_head is None
+
+    def test_the_last_block_is_three_named_layers(self):
+        model = MobileNetV3(variant="small", input_shape=(32, 32, 3))
+        assert [model.last_conv.name, model.last_bn.name, model.last_activation.name] == [
+            "last_conv", "last_bn", "last_hard_swish"]
+        assert model.last_conv.filters == 576
+
+
+class TestMobileNetV3PretrainedTrunk:
+    """D-040: a pretrained load restores every layer outside the head.
+
+    Only ``classification_head`` may differ. A trunk of another variant used to
+    load the layers that happened to fit, report the rest and return normally.
+    """
+
+    @staticmethod
+    def _saved(tmp_path, variant, **kwargs):
+        donor = MobileNetV3.from_variant(
+            variant, num_classes=10, input_shape=(32, 32, 3), **kwargs
+        )
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(str(tmp_path), "donor.keras")
+        donor.save(path)
+        return donor, path
+
+    @staticmethod
+    def _by_path(model):
+        return {w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)
+                for w in model.weights}
+
+    def test_a_checkpoint_of_another_variant_is_refused(self, tmp_path):
+        _, path = self._saved(tmp_path, "large")
+
+        with pytest.raises(ValueError) as caught:
+            MobileNetV3.from_variant(
+                "small", num_classes=10, input_shape=(32, 32, 3), pretrained=path
+            )
+
+        message = str(caught.value)
+        assert "shape_mismatch" in message and "missing_in_source" in message, message
+
+    def test_a_refused_load_writes_nothing(self, tmp_path):
+        _, path = self._saved(tmp_path, "large")
+        receiver = MobileNetV3.from_variant(
+            "small", num_classes=10, input_shape=(32, 32, 3)
+        )
+        before = [keras.ops.convert_to_numpy(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError):
+            receiver.load_pretrained_weights(path)
+
+        for a, w in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, keras.ops.convert_to_numpy(w))
+
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
+        donor, path = self._saved(tmp_path, "small")
+
+        loaded = MobileNetV3.from_variant(
+            "small", num_classes=3, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(loaded)
+        trunk = {p: v for p, v in dst.items() if not p.startswith("classification_head")}
+        assert trunk
+        for p, value in trunk.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
+        heads = {p: v for p, v in dst.items() if p.startswith("classification_head")}
+        assert heads and any(v.shape != src[p].shape for p, v in heads.items())
+
+    def test_a_headless_model_loads_from_a_headed_checkpoint(self, tmp_path):
+        donor, path = self._saved(tmp_path, "small")
+
+        headless = MobileNetV3.from_variant(
+            "small", include_top=False, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(headless)
+        assert dst
+        for p, value in dst.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
 
 
 if __name__ == "__main__":

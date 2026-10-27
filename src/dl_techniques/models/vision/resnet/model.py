@@ -14,17 +14,20 @@ under the bottleneck design); everywhere else it is parameter-free.
 
 The head is the shared vision `ClassificationHead` configured as the
 paper's: global average pool, then one linear `Dense(num_classes)`
-(`block_dims=()`), and the model returns its pre-softmax LOGITS: compile with `from_logits=True` and apply
-`keras.ops.softmax` to read probabilities. With deep supervision on, every
-stage but the last gets its own head of the same kind, and the model returns
-the logits list `[final_output, stage3, stage2, stage1]` (deepest head
-first). BatchNorm
-momentum defaults to `0.9` (Keras convention) to match torchvision's
-`momentum=0.1` (`keras_momentum = 1 - torch_momentum`), a training-only
-constant that does not affect the `training=False` forward pass. No
-pretrained weights ship with this package; `pretrained=True` raises
-`NotImplementedError`. Local checkpoints load by path, skipping
-shape-mismatched layers by name.
+(`block_dims=()`). The model returns its pre-softmax LOGITS: compile with
+`from_logits=True` and apply `keras.ops.softmax` to read probabilities. With
+deep supervision on, every stage but the last gets its own head of the same
+kind, and the model returns the logits list
+`[final_output, stage3, stage2, stage1]` (deepest head first).
+
+Every convolution kernel draws from `he_normal` unless `kernel_initializer`
+names another; each convolution gets its own draw from that spec, so two
+kernels never replay one sample. BatchNorm momentum defaults to `0.9` (Keras
+convention) to match torchvision's `momentum=0.1`
+(`keras_momentum = 1 - torch_momentum`), a training-only constant that does
+not affect the `training=False` forward pass. No pretrained weights ship with
+this package; `pretrained=True` raises `NotImplementedError`. Local
+checkpoints load by path, skipping shape-mismatched layers by name.
 
 References:
     - He et al., 2015. Deep Residual Learning for Image Recognition.
@@ -40,7 +43,7 @@ References:
       (https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html)
 """
 
-import os
+import copy
 import keras
 from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 
@@ -49,7 +52,11 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.weight_transfer import (
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
 from dl_techniques.layers.conv_blocks.stem import ConvStem
@@ -71,18 +78,17 @@ class ResNet(keras.Model):
     not obstruct optimization. A stem -- 7x7 stride-2 plus max pool by default,
     or a 3x3 stride-1 CIFAR stem via ``stem_type='cifar'`` -- feeds four stages
     that each halve spatial resolution and double channel width, built from
-    either
-    ``BasicBlock`` (two 3x3 convolutions) or ``BottleneckBlock`` (1x1 reduce,
-    3x3, 1x1 expand). Shortcut projections are inserted only where the identity
-    cannot be taken verbatim: at the first block of every stage after the first
-    (stride-2 shape change), plus stage 0's first block under the bottleneck
-    design (channel widening at stride 1). The head is the shared
+    either ``BasicBlock`` (two 3x3 convolutions) or ``BottleneckBlock`` (1x1
+    reduce, 3x3, 1x1 expand). Shortcut projections are inserted only where the
+    identity cannot be taken verbatim: at the first block of every stage after
+    the first (stride-2 shape change), plus stage 0's first block under the
+    bottleneck design (channel widening at stride 1). The head is the shared
     ``ClassificationHead`` configured as the paper's (He et al., Sec. 3.4:
     "global average pooling and a 1000-way fully-connected layer"): GAP, then
     a linear ``Dense(num_classes)`` with no hidden block (``block_dims=()``),
-    and the model returns its logits. With ``enable_deep_supervision=True`` every stage but
-    the last receives its own head of the same kind (the last stage is the main
-    head's own), and the model returns the logits list
+    and the model returns its logits. With ``enable_deep_supervision=True``
+    every stage but the last receives its own head of the same kind (the last
+    stage is the main head's own), and the model returns the logits list
     ``[final_output, stage3, stage2, stage1]``.
 
     Architecture:
@@ -136,16 +142,6 @@ class ResNet(keras.Model):
         │   deep_supervision=True    → [final, s3, s2, s1]      │
         └───────────────────────────────────────────────────────┘
 
-    Variants:
-
-    .. code-block:: text
-
-        resnet18   [2, 2, 2, 2]   [64, 128, 256, 512]   basic
-        resnet34   [3, 4, 6, 3]   [64, 128, 256, 512]   basic
-        resnet50   [3, 4, 6, 3]   [64, 128, 256, 512]   bottleneck
-        resnet101  [3, 4, 23, 3]  [64, 128, 256, 512]   bottleneck
-        resnet152  [3, 8, 36, 3]  [64, 128, 256, 512]   bottleneck
-
     :param num_classes: Number of output classes. Only used when
         ``include_top=True``, where it must be positive.
     :type num_classes: int
@@ -162,6 +158,13 @@ class ResNet(keras.Model):
         kernel of the stem and the blocks, and to the classifier kernel of the
         main and every supervision head.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_initializer: Initializer of every convolution kernel in the stem
+        and the blocks (the classifier heads keep the head's own initializer). A
+        name or a serialized config is handed to each convolution, which draws
+        from it independently; an ``Initializer`` instance is stored as its
+        serialized config, so no two kernels replay one draw. Defaults to
+        ``'he_normal'``.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param normalization_type: Normalization layer identifier passed to
         ``create_normalization_layer``. Defaults to ``'batch_norm'``.
     :type normalization_type: str
@@ -201,9 +204,8 @@ class ResNet(keras.Model):
     :param head_config_overrides: Optional dict merged into the configuration of
         the main and every supervision ``ClassificationHead`` (e.g.,
         ``{'block_dims': (512,), 'dropout_rate': 0.2}`` adds a hidden block).
-        ``name``,
-        ``num_classes`` and ``task_type`` are owned by the model and raise
-        ``ValueError``. Defaults to None.
+        ``name``, ``num_classes`` and ``task_type`` are owned by the model and
+        raise ``ValueError``. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
@@ -211,8 +213,11 @@ class ResNet(keras.Model):
         positive, if ``blocks_per_stage`` and ``filters_per_stage`` differ
         in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
         ``stem_type`` is not ``'imagenet'`` or ``'cifar'``, if
-        ``input_shape`` is not 3D, or if ``head_config_overrides`` names
-        ``name``, ``num_classes`` or ``task_type``.
+        ``input_shape`` is not 3D, if ``kernel_initializer`` is not a known
+        initializer, or if ``head_config_overrides`` names ``name``,
+        ``num_classes`` or ``task_type``.
+    :raises TypeError: If ``kernel_initializer`` is not a string, a dict or an
+        ``Initializer`` instance.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``.
@@ -277,6 +282,7 @@ class ResNet(keras.Model):
             filters_per_stage: Optional[List[int]] = None,
             block_type: Literal["basic", "bottleneck"] = "bottleneck",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
             normalization_type: str = "batch_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
@@ -324,6 +330,9 @@ class ResNet(keras.Model):
         self.block_type = block_type
         self.stem_type = stem_type
         self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem and to every block; never keep the caller's Initializer instance.
+        # A seedless instance given to two layers replays one random draw at both, and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003: forward normalization_kwargs to every factory call in the stem and every block.
         # A None default resolves to {}, so every call stays byte-identical to the pre-plumbing version and existing checkpoints stay bit-exact. See decisions.md.
@@ -338,9 +347,7 @@ class ResNet(keras.Model):
         self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
         self.input_shape_config = input_shape
-        self.input_height, self.input_width, self.input_channels = input_shape
 
-        # Head configuration
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_stem()
@@ -349,6 +356,7 @@ class ResNet(keras.Model):
         for stage_idx in range(len(blocks_per_stage)):
             self._build_stage(stage_idx)
 
+        self.classification_head = None
         if self.include_top:
             self._build_head()
 
@@ -389,7 +397,7 @@ class ResNet(keras.Model):
             # DECISION plan-2026-10-26T125959-7af851e5/D-019 and plan-2026-10-26T125959-7af851e5/D-020 (D-020 corrects D-019): the original ResNet passed strides=2, padding="same" explicitly; ConvStem's defaults (stride = pool_size, "valid") would drift from them, so state both. Do not drop these arguments. See decisions.md.
             pool_strides=2,
             pool_padding="same",
-            kernel_initializer="he_normal",
+            kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="stem",
         )
@@ -403,6 +411,14 @@ class ResNet(keras.Model):
         base_filters = self.filters_per_stage[stage_idx]
 
         BlockClass = BasicBlock if self.block_type == "basic" else BottleneckBlock
+
+        # The initializer is the stored spec (a name or a config dict, never an
+        # Initializer instance), so each block, and each convolution inside it,
+        # resolves its own draw from it.
+        kernel_kwargs = {
+            "kernel_regularizer": self.kernel_regularizer,
+            "kernel_initializer": self.kernel_initializer,
+        }
 
         stage_blocks = []
 
@@ -421,7 +437,7 @@ class ResNet(keras.Model):
                 filters=base_filters,
                 stride=stride,
                 use_projection=use_projection,
-                kernel_regularizer=self.kernel_regularizer,
+                **kernel_kwargs,
                 normalization_type=self.normalization_type,
                 normalization_kwargs=dict(self.normalization_kwargs),
                 activation_type=self.activation_type,
@@ -431,26 +447,35 @@ class ResNet(keras.Model):
 
         self.stages.append(stage_blocks)
 
+    def _head_config(self, name: str) -> Dict[str, Any]:
+        """Configuration of one `ClassificationHead`, before `head_config_overrides`.
+
+        The paper's head: global average pooling, then one linear layer and no
+        hidden block. The name is deterministic because an unnamed head takes
+        Keras' auto suffix in process-creation order, which breaks the by-name
+        matching that weight transfer relies on.
+
+        :param name: Layer name of the head.
+        :return: The configuration passed to `build_model_vision_head`.
+        """
+        return {
+            'num_classes': self.num_classes,
+            'dropout_rate': 0.0,
+            'normalization_type': self.normalization_type,
+            'activation_type': self.activation_type,
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'block_dims': (),
+            'kernel_regularizer': self.kernel_regularizer,
+            'name': name,
+        }
+
     def _build_head(self) -> None:
-        """Build classification head using the vision heads factory."""
+        """Build the main classification head through the vision heads factory."""
         self.classification_head = build_model_vision_head(
             VisionTaskType.CLASSIFICATION,
-            {
-                'num_classes': self.num_classes,
-                'dropout_rate': 0.0,  # ResNet doesn't use dropout in head by default
-                'normalization_type': self.normalization_type,
-                'activation_type': self.activation_type,
-                'use_global_pooling': True,
-                'pooling_type': 'avg',  # GAP for ResNet
-                'use_attention': False,
-                # The paper's head: GAP, then one FC. No hidden block.
-                'block_dims': (),
-                'kernel_regularizer': self.kernel_regularizer,
-                # Deterministic layer name: an unnamed head takes Keras'
-                # auto suffix in process-creation order, which breaks the
-                # by-name matching that weight transfer relies on.
-                'name': 'classification_head',
-            },
+            self._head_config('classification_head'),
             self._head_config_overrides,
         )
 
@@ -459,36 +484,21 @@ class ResNet(keras.Model):
 
         The final stage is already served by the main head; stage 0 is
         supervised since it is the one stage where deep supervision
-        actually shortens the backpropagation path.
+        actually shortens the backpropagation path. Each head is named by its
+        stage, since this model builds several.
         """
         # DECISION plan-2026-08-17T183311-79c63e38/D-019: range(0, N-1), not range(1, N) or range(1, N-1).
         # Supervising the final stage duplicates the main head; skipping stage 0 loses the one stage the technique helps most. See decisions.md.
         for stage_idx in range(0, len(self.blocks_per_stage) - 1):
             sup_head = build_model_vision_head(
                 VisionTaskType.CLASSIFICATION,
-                {
-                    'num_classes': self.num_classes,
-                    'dropout_rate': 0.0,
-                    'normalization_type': self.normalization_type,
-                    'activation_type': self.activation_type,
-                    'use_global_pooling': True,
-                    'pooling_type': 'avg',
-                    'use_attention': False,
-                    'block_dims': (),
-                    'kernel_regularizer': self.kernel_regularizer,
-                    # Per-stage suffix: this model builds N heads, so they need
-                    # distinct names. Deterministic, because an unnamed head takes
-                    # Keras' auto suffix in process-creation order, which breaks
-                    # the by-name matching that weight transfer relies on.
-                    'name': f'supervision_head_{stage_idx}',
-                },
+                self._head_config(f'supervision_head_{stage_idx}'),
                 self._head_config_overrides,
             )
             self.supervision_heads.append({
                 "head": sup_head,
                 "stage_idx": stage_idx
             })
-
 
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from `input_shape` by tracing `call`.
@@ -544,69 +554,65 @@ class ResNet(keras.Model):
 
         return final_output
 
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
+        """Report the shape `call` returns, without building the model.
+
+        :param input_shape: `(batch_size, height, width, channels)`; the
+            spatial axes may be `None`.
+        :return: The logits shape `(batch_size, num_classes)`
+            (`include_top=True`), the final feature map
+            `(batch_size, H', W', channels)` (`include_top=False`), or, with
+            deep supervision, one logits shape per head in the order `call`
+            returns them.
+        """
+        shape = self.stem.compute_output_shape(input_shape)
+        stage_shapes = []
+        for stage_blocks in self.stages:
+            for block in stage_blocks:
+                shape = block.compute_output_shape(shape)
+            stage_shapes.append(shape)
+
+        if not self.include_top:
+            return shape
+
+        logits = self.classification_head.compute_output_shape(shape)['logits']
+        if not self.supervision_heads:
+            return logits
+        return [logits] + [
+            sup_head["head"].compute_output_shape(
+                stage_shapes[sup_head["stage_idx"]]
+            )['logits']
+            for sup_head in reversed(self.supervision_heads)
+        ]
+
     def load_pretrained_weights(
             self,
             weights_path: str,
             skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model from a local checkpoint.
+        """Load a local `.keras` checkpoint into the model, layer by layer.
 
-        Transfer is layer-by-layer via
-        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
-        not `self.load_weights(..., by_name=True)`: Keras 3 removed `by_name`
-        from `Model.load_weights`, so that call raises `ValueError` for
-        every caller.
+        The transfer is `load_pretrained_checkpoint`: it builds the model at
+        `input_shape` if it is unbuilt and takes a headed checkpoint into a
+        headless model. Every layer outside the classification head (and the deep-supervision heads) must be
+        restored, so a checkpoint of another variant, block type, width or stem
+        raises and leaves the model untouched. Only a head of another
+        `num_classes` is skipped: it keeps its initialization and a warning
+        names it.
 
         :param weights_path: Path to the weights file (`.keras` format).
-        :param skip_mismatch: Whether to skip layers with mismatched shapes;
-            the inverse of the transfer helper's `strict`.
+        :param skip_mismatch: `True` (default) lets the head layers differ;
+            `False` allows no difference anywhere. The inverse of the transfer
+            helper's `strict`.
         :raises FileNotFoundError: If `weights_path` doesn't exist.
-        :raises ValueError: If weights cannot be loaded.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
         """
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(f"Weights file not found: {weights_path}")
-
-        try:
-            if not self.built:
-                dummy_input = keras.random.normal((1,) + tuple(self.input_shape_config))
-                self(dummy_input, training=False)
-
-            logger.info(f"Loading pretrained weights from {weights_path}")
-            report = load_weights_from_checkpoint(
-                target=self,
-                ckpt_path=weights_path,
-                skip_prefixes=(),
-                strict=not skip_mismatch,
-            )
-            logger.info(f"Weight transfer complete: {report}")
-
-        except Exception as e:
-            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
-
-    # Raises instead of falling back to random init; do not reinstate a warn-and-return branch here or in from_variant.
-    # No public ResNet weights are distributed with dl_techniques; pass a local path via pretrained="/path/to/file.keras".
-    @staticmethod
-    def _download_weights(
-            variant: str,
-            dataset: str = "imagenet",
-            cache_dir: Optional[str] = None
-    ) -> str:
-        """Always raise; no public ResNet weights ship with `dl_techniques`.
-
-        Kept to mirror the BERT / GPT-2 / WaveFieldLLM factory recipe and
-        give an explicit failure mode instead of a silent random-init
-        fallback.
-
-        :param variant: Variant name (unused).
-        :param dataset: Dataset name (unused).
-        :param cache_dir: Cache directory (unused).
-        :raises NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            f"No pretrained ResNet weights are distributed with dl_techniques "
-            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
-            f"checkpoint instead: ResNet.from_variant('{variant}', "
-            f"pretrained='/path/to/weights.keras')."
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch
         )
 
     @classmethod
@@ -616,9 +622,6 @@ class ResNet(keras.Model):
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
             pretrained: Union[bool, str] = False,
-            weights_dataset: str = "imagenet",
-            weights_input_shape: Optional[Tuple[int, ...]] = None,
-            cache_dir: Optional[str] = None,
             **kwargs
     ) -> "ResNet":
         """Create a ResNet model from a predefined variant.
@@ -630,13 +633,12 @@ class ResNet(keras.Model):
         :param pretrained: A path to a local weights file, `True` (raises
             `NotImplementedError`, since no public ResNet weights ship with
             `dl_techniques`), or `False` (default, random init).
-        :param weights_dataset: Dataset the pretrained weights were trained on.
-        :param weights_input_shape: Input shape used during pretraining.
-        :param cache_dir: Directory to cache downloaded weights.
-        :param kwargs: Passthrough to the constructor.
+        :param kwargs: Passthrough to the constructor; an architecture field
+            of the variant (e.g. `blocks_per_stage`) overrides the preset.
         :return: A configured `ResNet` instance.
         :raises ValueError: If `variant` is not recognized.
         :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
         Example::
 
@@ -649,63 +651,20 @@ class ResNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset, drop metadata, then config.update(kwargs) -- do not splat preset fields alongside **kwargs.
-        # Splatting raised TypeError on every overridden field; skipping .copy() would permanently poison the shared MODEL_VARIANTS[variant] dict. See decisions.md.
-        config = cls.MODEL_VARIANTS[variant].copy()
-        config.pop("description", None)
-        config.update(kwargs)
-
-        if input_shape is None:
-            input_shape = (224, 224, 3)
-
-        logger.info(f"Creating {variant.upper()} model")
-
-        load_weights_path = None
-        skip_mismatch = False
-
-        if pretrained:
-            if isinstance(pretrained, str):
-                load_weights_path = pretrained
-                logger.info(f"Will load weights from local file: {load_weights_path}")
-            else:
-                load_weights_path = cls._download_weights(
-                    variant=variant,
-                    dataset=weights_dataset,
-                    cache_dir=cache_dir
-                )
-
-            # The ImageNet head is 1000-wide; a different num_classes or a
-            # different input shape than the checkpoint was trained at means the
-            # affected layers must be skipped rather than refused.
-            if kwargs.get("include_top", True) and num_classes != 1000:
-                skip_mismatch = True
-                logger.info(
-                    f"num_classes ({num_classes}) differs from the pretrained 1000; "
-                    f"classifier weights will be skipped."
-                )
-
-            if weights_input_shape and input_shape and weights_input_shape != input_shape:
-                logger.info(
-                    f"Loading weights pretrained on {weights_input_shape} "
-                    f"for model with input shape {input_shape}."
-                )
-                skip_mismatch = True
-
-        model = cls(
-            num_classes=num_classes,
-            input_shape=input_shape,
-            **config
+        # Raises for True instead of falling back to random init; do not reinstate a warn-and-return branch.
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
         )
 
-        if load_weights_path:
-            try:
-                model.load_pretrained_weights(
-                    weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch
-                )
-            except Exception as e:
-                logger.error(f"Failed to load pretrained weights: {str(e)}")
-                raise
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset, drop metadata, then config.update(kwargs) -- do not splat preset fields alongside **kwargs.
+        # Splatting raised TypeError on every overridden field; skipping .copy() would permanently poison the shared MODEL_VARIANTS[variant] dict. See decisions.md.
+        config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
+        config.update(kwargs)
+
+        model = cls(num_classes=num_classes, input_shape=input_shape, **config)
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
 
         return model
 
@@ -719,6 +678,7 @@ class ResNet(keras.Model):
             "stem_type": self.stem_type,
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
+            "kernel_initializer": self.kernel_initializer,
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
@@ -746,12 +706,8 @@ class ResNet(keras.Model):
 def create_resnet(
         variant: str = "resnet50",
         num_classes: int = 1000,
-        input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
+        input_shape: Optional[Tuple[int, ...]] = None,
         pretrained: Union[bool, str] = False,
-        weights_dataset: str = "imagenet",
-        weights_input_shape: Optional[Tuple[int, ...]] = None,
-        cache_dir: Optional[str] = None,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
 ) -> ResNet:
     """Create a ResNet model.
@@ -759,17 +715,11 @@ def create_resnet(
     :param variant: Model variant: `"resnet18"`, `"resnet34"`, `"resnet50"`,
         `"resnet101"`, `"resnet152"`.
     :param num_classes: Number of output classes.
-    :param input_shape: Input shape.
+    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param pretrained: A path to a local weights file, `True` (raises
         `NotImplementedError`), or `False` (default, random init).
-    :param weights_dataset: Dataset the pretrained weights were trained on.
-    :param weights_input_shape: Input shape used during pretraining.
-    :param cache_dir: Directory to cache downloaded weights.
-    :param head_config_overrides: Optional dict merged into every head's
-        configuration; ``name``, ``num_classes`` and ``task_type`` raise
-        ``ValueError``.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :param kwargs: Passthrough to the constructor.
+    :param kwargs: Passthrough to `ResNet.from_variant`, e.g.
+        `head_config_overrides`, `enable_deep_supervision`, `include_top`.
     :return: A configured `ResNet` instance.
     :raises NotImplementedError: If `pretrained` is `True`.
 
@@ -783,10 +733,6 @@ def create_resnet(
         num_classes=num_classes,
         input_shape=input_shape,
         pretrained=pretrained,
-        weights_dataset=weights_dataset,
-        weights_input_shape=weights_input_shape,
-        cache_dir=cache_dir,
-        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

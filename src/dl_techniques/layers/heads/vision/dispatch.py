@@ -15,6 +15,7 @@ from typing import Any, Dict, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from ..validation import lookup_head
 from .base import BaseVisionHead
 from .classification import ClassificationHead
 from .detection import DetectionHead
@@ -64,40 +65,6 @@ VISION_HEAD_DISPATCH: Dict[
 #: The two task types :func:`create_enhancement_head` serves.
 ENHANCEMENT_TASK_TYPES: Tuple[VisionTaskType, ...] = (
     VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION)
-
-
-def _as_vision_task_type(task_type: Any) -> VisionTaskType:
-    """
-    Parse a task type given as an enum member or its string value.
-
-    :param task_type: A :class:`VisionTaskType` or a string that
-        :meth:`VisionTaskType.from_string` parses.
-    :type task_type: Any
-    :return: The enum member.
-    :rtype: VisionTaskType
-    :raises ValueError: If a string names no member, or the value is
-        neither a member nor a string.
-    """
-    if isinstance(task_type, VisionTaskType):
-        return task_type
-    if isinstance(task_type, str):
-        return VisionTaskType.from_string(task_type)
-    raise ValueError(
-        f"task_type must be a VisionTaskType or its string value, got "
-        f"{task_type!r}"
-    )
-
-
-def _dispatched_task_list() -> str:
-    """
-    One sentence naming the task types that have a head, for error messages.
-
-    :return: The sentence.
-    :rtype: str
-    """
-    names = ', '.join(sorted(t.value for t in VISION_HEAD_DISPATCH))
-    return (f"The {len(VISION_HEAD_DISPATCH)} task types with a head are: "
-            f"{names}.")
 
 
 def create_vision_head(
@@ -152,13 +119,8 @@ def create_vision_head(
     :rtype: BaseVisionHead
     :raises ValueError: If the task type is one of the other 27.
     """
-    task_type = _as_vision_task_type(task_type)
-    if task_type not in VISION_HEAD_DISPATCH:
-        raise ValueError(
-            f"Unsupported task type: {task_type.value!r} has no vision head. "
-            f"{_dispatched_task_list()}"
-        )
-    head_class, defaults = VISION_HEAD_DISPATCH[task_type]
+    _, (head_class, defaults) = lookup_head(
+        task_type, VISION_HEAD_DISPATCH, VisionTaskType, 'vision')
     return head_class(**{**defaults, **kwargs})
 
 
@@ -184,7 +146,7 @@ def create_enhancement_head(
     :rtype: EnhancementHead
     :raises ValueError: If the task type is not an enhancement task.
     """
-    task_type = _as_vision_task_type(task_type)
+    task_type = VisionTaskType.coerce(task_type)
     if task_type not in ENHANCEMENT_TASK_TYPES:
         raise ValueError(
             f"create_enhancement_head builds "

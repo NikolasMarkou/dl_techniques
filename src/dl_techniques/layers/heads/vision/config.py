@@ -12,13 +12,9 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from ..validation import lookup_head
 from .base import BaseVisionHead
-from .dispatch import (
-    VISION_HEAD_DISPATCH,
-    _as_vision_task_type,
-    _dispatched_task_list,
-    create_vision_head,
-)
+from .dispatch import VISION_HEAD_DISPATCH, create_vision_head
 from .task_types import VisionTaskType
 from .utils import _drop_off_stage_knobs
 
@@ -116,12 +112,9 @@ class HeadConfiguration:
         :rtype: Dict[str, Any]
         :raises ValueError: If ``task_type`` has no head.
         """
-        task_type = _as_vision_task_type(task_type)
-        if task_type not in VISION_HEAD_DISPATCH:
-            raise ValueError(
-                f"HeadConfiguration has no preset for {task_type.value!r}: "
-                f"it has no vision head. {_dispatched_task_list()}"
-            )
+        task_type, _ = lookup_head(
+            task_type, VISION_HEAD_DISPATCH, VisionTaskType, 'vision',
+            owner='HeadConfiguration')
 
         base_config = {
             'hidden_dim': 256,
@@ -209,7 +202,7 @@ class HeadConfiguration:
         :raises ValueError: If ``task_type`` has no head.
         """
 
-        task_type = _as_vision_task_type(task_type)
+        task_type = VisionTaskType.coerce(task_type)
         config = HeadConfiguration.get_default_config(task_type)
         config.update({
             'hidden_dim': 128,

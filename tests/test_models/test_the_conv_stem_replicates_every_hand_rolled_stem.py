@@ -1,12 +1,12 @@
 """``ConvStem`` replicates every stem it replaced, layer for layer.
 
-HEAD ``20b48aba6`` moved ten hand-rolled stems onto ``ConvStem`` and the move
-was not exact: ResNet's ``MaxPooling2D(3, strides=2, padding="same")`` became
+The commit ``20b48aba6`` moved ten hand-rolled stems onto ``ConvStem`` and the
+move was not exact: ResNet's ``MaxPooling2D(3, strides=2, padding="same")`` became
 a stride-3 ``valid`` pool (224 px -> 37x37 instead of 56x56), and no test saw
 it because every comparison in the tree was between the NEW code and itself.
 This file compares the stem a model builds against the ORIGINAL layers, rebuilt
-inline here from the pre-migration source (``git show 20b48aba6^:<path>``) with
-every constructor argument written out as a literal, never read back from the
+inline here from the pre-migration revision ``20b48aba6^`` (``git show
+20b48aba6^:<path>``) with every constructor argument written out as a literal, never read back from the
 model under test.
 
 How a case is checked (``assert_stem_matches_original``):
@@ -32,11 +32,11 @@ How to add a case (one per original variant, later steps extend the table):
 
 * Write ``_<model>_original(...)`` returning an ``Original``: ``sublayers``
   keyed by the ``ConvStem`` attribute the layer corresponds to (``conv1``,
-  ``norm1``, ``activation1``, ``conv2``, ``norm2``, ``activation2``, ``pool``;
+  ``norm1``, ``act1``, ``conv2``, ``norm2``, ``act2``, ``pool``;
   omit a role the original had no layer for) and ``forward(x, training)``
   chaining them exactly as the original ``call()`` did. An activation the
   original FUSED into its conv (``Conv2D(activation="relu")``, no layer of its
-  own, no weights) is declared in ``Original.fused`` (``("activation1",)``)
+  own, no weights) is declared in ``Original.fused`` (``("act1",)``)
   instead of ``sublayers``: the role-set check then expects ``ConvStem`` to
   carry a weightless layer in that role and nothing else, and the comparison
   stays at ``rtol=0, atol=0`` because the conv, then the same ReLU, is the same
@@ -111,6 +111,7 @@ from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
+from tests.layer_naming import PublicAutoName
 from tests.numerics import true_float32_matmul
 
 
@@ -125,7 +126,7 @@ def _true_float32():
 BATCH = 2
 
 #: Sub-layer attributes of ``ConvStem`` a case may supply, in forward order.
-ROLES = ("conv1", "norm1", "activation1", "conv2", "norm2", "activation2", "pool")
+ROLES = ("conv1", "norm1", "act1", "conv2", "norm2", "act2", "pool")
 
 
 # ---------------------------------------------------------------------
@@ -386,6 +387,12 @@ def assert_stem_settings_match_original(case: StemCase, stem: ConvStem) -> None:
 # factory with momentum 0.9 -> factory ReLU -> MaxPooling2D(3, strides=2,
 # padding="same") for the imagenet stem only).
 
+#: ``ResNet``'s ``kernel_initializer`` knob, built with a value that is neither
+#: its default (``he_normal``) nor ConvStem's (``glorot_uniform``), so a stem that
+#: dropped the argument is visible. The original's literal ``he_normal`` becomes
+#: this value, the one place the knob is expected to reach.
+_RESNET_KERNEL_INIT = "lecun_normal"
+
 
 def _resnet_original(stem_type: str) -> Original:
     imagenet = stem_type == "imagenet"
@@ -395,7 +402,7 @@ def _resnet_original(stem_type: str) -> Original:
         strides=2 if imagenet else 1,
         padding="same",
         use_bias=False,
-        kernel_initializer="he_normal",
+        kernel_initializer=_RESNET_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(1e-4),
         name="stem_conv",
     )
@@ -417,7 +424,7 @@ def _resnet_original(stem_type: str) -> Original:
             x = pool(x)
         return x
 
-    sublayers = {"conv1": conv, "norm1": norm, "activation1": act}
+    sublayers = {"conv1": conv, "norm1": norm, "act1": act}
     if pool is not None:
         sublayers["pool"] = pool
     return Original(sublayers=sublayers, forward=forward)
@@ -431,6 +438,7 @@ def _resnet_model(stem_type: str, input_shape=(64, 64, 3)) -> ResNet:
         include_top=False,
         stem_type=stem_type,
         kernel_regularizer=keras.regularizers.L2(1e-4),
+        kernel_initializer=_RESNET_KERNEL_INIT,
     )
 
 
@@ -464,7 +472,7 @@ RESNET_CIFAR = StemCase(
 # the single-conv stems run conv (bias per ``use_bias``) -> ``stem_norm`` BN.
 # The functional ``keras.activations.silu`` is represented here by a
 # parameterless ``Activation`` layer over the same op, which fills the
-# ``activation1`` role the ConvStem has.
+# ``act1`` role the ConvStem has.
 
 #: Non-default conv knobs the models are built with, so a dropped one is seen.
 _CLIFFORD_KERNEL_REG = 1e-4
@@ -519,7 +527,7 @@ def _clifford_family_original(
             sublayers={
                 "conv1": conv1,
                 "norm1": bn1,
-                "activation1": silu,
+                "act1": silu,
                 "conv2": conv2,
                 "norm2": norm,
             },
@@ -728,7 +736,7 @@ def _convunext_original(
 
     sublayers = {"conv1": conv, "norm1": norm}
     if not identity_activation:
-        sublayers["activation1"] = act
+        sublayers["act1"] = act
     return Original(sublayers=sublayers, forward=forward)
 
 
@@ -979,7 +987,7 @@ def _mobilenet_original(
         return activation_layer(x)
 
     return Original(
-        sublayers={"conv1": conv, "norm1": norm, "activation1": activation_layer},
+        sublayers={"conv1": conv, "norm1": norm, "act1": activation_layer},
         forward=forward,
     )
 
@@ -1034,8 +1042,8 @@ MOBILENET_V4 = StemCase(
 # SqueezeNet V1 and SqueezeNoduleNet V2 (2D path)
 # ---------------------------------------------------------------------
 
-# Original: the files at HEAD, which were never migrated
-# (``models/vision/squeezenet/squeezenet_v1.py`` and ``squeezenet_v2.py``,
+# Original: the files before they were migrated (``git show 7cea79771^:<path>``;
+# ``models/vision/squeezenet/squeezenet_v1.py`` and ``squeezenet_v2.py``,
 # ``_build_stem``). ``Conv2D(conv1_filters, conv1_kernel, strides=conv1_stride,
 # activation="relu", padding="same" if conv1_stride == 1 else "valid",
 # kernel_regularizer, kernel_initializer="lecun_uniform")`` with the default
@@ -1082,7 +1090,7 @@ def _squeezenet_original(
     sublayers = {"conv1": conv}
     if maxpool is not None:
         sublayers["pool"] = maxpool
-    return Original(sublayers=sublayers, forward=forward, fused=("activation1",))
+    return Original(sublayers=sublayers, forward=forward, fused=("act1",))
 
 
 def _squeezenet_v1_model(variant: str, pool_indices=None) -> SqueezeNetV1:
@@ -1181,7 +1189,7 @@ SQUEEZENET_V2_NOPOOL = StemCase(
 # VAE encoder stem
 # ---------------------------------------------------------------------
 
-# Original: ``git show HEAD~1:src/dl_techniques/models/vision/vae/model.py``
+# Original: ``git show cad74076e^:src/dl_techniques/models/vision/vae/model.py``
 # (``_build_encoder``), the functional initial stem: ``Conv2D(filters[0], 3,
 # strides=1, padding="same", use_bias, kernel_initializer, kernel_regularizer)``
 # -> (``use_batch_norm`` only) a bare ``BatchNormalization(center=use_bias)``,
@@ -1228,7 +1236,7 @@ def _vae_original(
     if norm is not None:
         sublayers["norm1"] = norm
     if not identity_activation:
-        sublayers["activation1"] = act
+        sublayers["act1"] = act
     return Original(sublayers=sublayers, forward=forward)
 
 
@@ -1499,7 +1507,7 @@ def _model_stem(model) -> ConvStem:
 #   which IS ConvStem's default, so nothing can be made non-default. The reason
 #   is the model has no initializer to forward.
 INITIALIZER_AUDIT = {
-    "ResNet": ("hardcoded", "he_normal literal in the stem call"),
+    "ResNet": ("knob", "lecun_normal (default he_normal)"),
     "CliffordNet": (
         "knob",
         "kernel TruncatedNormal(0.02), bias Constant(0.25), L2 kernel and bias",
@@ -1790,21 +1798,22 @@ def _norm_applied_twice(stem: ConvStem, x, training):
     x = stem.conv1(x)
     x = stem.norm1(x, training=training)
     x = stem.norm1(x, training=training)
-    if stem.activation1 is not None:
-        x = stem.activation1(x)
+    if stem.act1 is not None:
+        x = stem.act1(x)
     if stem.pool is not None:
         x = stem.pool(x)
     return x
 
 
-def test_control_the_harness_sees_a_wrong_pool():
-    """Stride 3 / ``valid`` (the HEAD defect) must make the comparison fail."""
+def test_the_guard_the_harness_sees_a_wrong_pool():
+    """Stride 3 / ``valid`` (the defect the first migration introduced) must make
+    the comparison fail."""
     stem = _stem_from_config(RESNET_IMAGENET, pool_strides=None, pool_padding="valid")
     with pytest.raises(AssertionError, match="shape"):
         assert_stem_matches_original(RESNET_IMAGENET, stem)
 
 
-def test_control_the_harness_sees_a_wrong_epsilon():
+def test_the_guard_the_harness_sees_a_wrong_epsilon():
     """BN epsilon 1e-3 against the original's 1e-6 must make the comparison fail."""
     stem = _stem_from_config(
         RESNET_IMAGENET, normalization_kwargs={"epsilon": 1e-3}
@@ -1814,7 +1823,7 @@ def test_control_the_harness_sees_a_wrong_epsilon():
         assert_stem_matches_original(RESNET_IMAGENET, stem)
 
 
-def test_control_the_harness_sees_a_norm_applied_twice():
+def test_the_guard_the_harness_sees_a_norm_applied_twice():
     """A norm in the forward twice must make the comparison fail."""
     model = RESNET_IMAGENET.make_model()
     with pytest.raises(AssertionError, match="differs from the original"):
@@ -1862,7 +1871,7 @@ def test_control_the_harness_sees_a_norm_applied_twice():
         "vae-initializer-dropped",
     ],
 )
-def test_control_the_settings_check_sees_a_wrong_initializer_or_regularizer(
+def test_the_guard_the_settings_check_sees_a_wrong_initializer_or_regularizer(
     case, override, setting
 ):
     """A stem built with a wrong setting must fail the settings comparison,
@@ -1888,7 +1897,7 @@ def _mobilenet_v3_at_its_default_initializer() -> MobileNetV3:
     )
 
 
-def test_control_the_audit_sees_a_model_built_at_convstems_default():
+def test_the_guard_the_audit_sees_a_model_built_at_convstems_default():
     """The pass-2 case: MobileNetV3 at its own default initializer, which is
     ConvStem's. The audit must refuse it."""
     with pytest.raises(AssertionError, match="own default kernel_initializer"):
@@ -1897,22 +1906,22 @@ def test_control_the_audit_sees_a_model_built_at_convstems_default():
         )
 
 
-def test_control_the_audit_sees_a_wrong_table_row():
+def test_the_guard_the_audit_sees_a_wrong_table_row():
     """A row that contradicts the constructor (a knob called hardcoded, and a
     hardcoded model called a knob) must fail."""
     lie = {**INITIALIZER_AUDIT, "MobileNetV4": ("hardcoded", "wrong")}
     with pytest.raises(AssertionError, match="has kernel_initializer parameter"):
         assert_initializer_audit(MOBILENET_V4, audit=lie)
-    lie = {**INITIALIZER_AUDIT, "ResNet": ("knob", "wrong")}
+    lie = {**INITIALIZER_AUDIT, "UcaEncoder": ("knob", "wrong")}
     with pytest.raises(AssertionError, match="has no kernel_initializer parameter"):
-        assert_initializer_audit(RESNET_CIFAR, audit=lie)
+        assert_initializer_audit(UCA_ENCODER, audit=lie)
     with pytest.raises(AssertionError, match="no INITIALIZER_AUDIT row"):
         assert_initializer_audit(
             MOBILENET_V4, audit={k: v for k, v in INITIALIZER_AUDIT.items() if k != "MobileNetV4"}
         )
 
 
-def test_control_a_correct_stem_survives_the_settings_check():
+def test_the_guard_a_correct_stem_survives_the_settings_check():
     """Anti-vacuity twin: a stem rebuilt from the model's own config passes, and
     so does the two-conv stem whose conv2 holds a clone with another seed."""
     assert_stem_settings_match_original(
@@ -1923,7 +1932,7 @@ def test_control_a_correct_stem_survives_the_settings_check():
     assert_stem_settings_match_original(CLIFFORD_P1, stem)
 
 
-def test_control_a_correct_stem_survives_the_same_harness():
+def test_the_guard_a_correct_stem_survives_the_same_harness():
     """Anti-vacuity twin: the controls above fail for their defect, not because
     the harness rejects everything. A stem rebuilt from the model's own config
     with no override passes.
@@ -1945,7 +1954,7 @@ def test_control_a_correct_stem_survives_the_same_harness():
 # of its stem in inference. The comparison is only meaningful if the arm differs
 # from the others, so ``test_training_none_is_inference_for_batch_norm`` pins
 # that on the original (None == False != True once the statistics are random),
-# and ``test_control_the_harness_sees_none_treated_as_training`` hands the arm a
+# and ``test_the_guard_the_harness_sees_none_treated_as_training`` hands the arm a
 # stem that turns ``None`` into ``True``, which passes the False and True arms
 # and must fail only this one. LayerNorm, GRN and conv-only stems ignore
 # ``training``; they stay in the set because a stem that special-cased ``None``
@@ -2010,7 +2019,7 @@ def _none_treated_as_training(stem: ConvStem, x, training):
     return stem(x, training=True if training is None else training)
 
 
-def test_control_the_harness_sees_none_treated_as_training():
+def test_the_guard_the_harness_sees_none_treated_as_training():
     """Passes the False and True arms (same output there), fails ``None``."""
     model = RESNET_IMAGENET.make_model()
     assert_stem_matches_original(RESNET_IMAGENET, model.stem, forward=_none_treated_as_training)
@@ -2023,7 +2032,7 @@ def test_control_the_harness_sees_none_treated_as_training():
         )
 
 
-def test_control_the_none_arm_sees_a_wrong_epsilon():
+def test_the_guard_the_none_arm_sees_a_wrong_epsilon():
     """The existing wrong-epsilon control, run through the ``None`` arm as well:
     the stem fails the whole comparison with the arm switched on."""
     stem = _stem_from_config(
@@ -2048,7 +2057,7 @@ def test_control_the_none_arm_sees_a_wrong_epsilon():
 def test_every_migrated_model_builds_its_stem(make_model, input_shape, stem_of):
     """After a forward, ``model.stem`` and every sub-layer of it are built.
 
-    HEAD's ResNet, ConvNeXt and RAD ran their stems through aliases of the
+    After the first migration, ResNet, ConvNeXt and RAD ran their stems through aliases of the
     sub-layers, so the ``ConvStem`` object itself was never called and stayed
     unbuilt (``stem.built is False``) under a green suite.
     """
@@ -2070,8 +2079,8 @@ def test_every_migrated_model_builds_its_stem(make_model, input_shape, stem_of):
 # ---------------------------------------------------------------------
 
 # The harness compares a stem in isolation, so a model that applies the stem (or
-# one of its layers) again in its own ``call`` is invisible to it. HEAD's
-# UcaEncoder did exactly that: ConvStem already ran conv -> norm, and ``call()``
+# one of its layers) again in its own ``call`` is invisible to it. The first
+# migration's UcaEncoder did exactly that: ConvStem already ran conv -> norm, and ``call()``
 # still ran ``self.stem_norm(x)`` after it. The counter is the pattern of
 # ``test_mambalct.py`` (wrap ``layer.call``), made restoring.
 
@@ -2140,7 +2149,7 @@ def test_every_migrated_model_applies_its_stem_exactly_once(
         )
 
 
-class _AppliesItsStem(keras.layers.Layer):
+class _AppliesItsStem(PublicAutoName, keras.layers.Layer):
     """A planted model: applies a shape-preserving ConvStem ``times`` times."""
 
     def __init__(self, times: int, **kwargs):
@@ -2155,7 +2164,7 @@ class _AppliesItsStem(keras.layers.Layer):
         return x
 
 
-def test_control_the_counter_reads_two_when_a_model_applies_its_stem_twice():
+def test_the_guard_the_counter_reads_two_when_a_model_applies_its_stem_twice():
     """The counter is not blind: 1 for a single application, 2 for a double one,
     and the wrappers are gone afterwards."""
     batch = np.zeros((1, 8, 8, 3), "float32")
@@ -2170,84 +2179,4 @@ def test_control_the_counter_reads_two_when_a_model_applies_its_stem_twice():
         assert all("call" not in vars(layer) for layer in sites.values())
     assert set(readings[1].values()) == {1}, readings[1]
     assert set(readings[2].values()) == {2}, readings[2]
-    assert set(readings[2]) == {"stem", "stem.conv1", "stem.norm1", "stem.activation1"}
-
-
-@pytest.mark.parametrize(
-    "name,exact", [("leaky_relu", exact_leaky_relu), ("gelu", exact_gelu)]
-)
-def test_the_vae_stem_activation_is_the_exact_form(name, exact):
-    """D-277 at the VAE call site: the stem runs ``exact_leaky_relu`` /
-    ``exact_gelu``, not the stock kernel. The two are bit-identical at float32,
-    so no value comparison can see a dropped ``substitute_exact``; the layer's
-    own function is what is checked.
-    """
-    stem = _vae_stem_of(_vae_model(True, True, name))
-    assert stem.activation1.activation is exact
-
-
-# ---------------------------------------------------------------------
-# MobileNet V3 / V4 report the shape they run
-# ---------------------------------------------------------------------
-
-_MOBILENET_MODELS = [
-    ("mobilenet-v3", _mobilenet_v3_model),
-    ("mobilenet-v4", _mobilenet_v4_model),
-]
-
-
-@pytest.mark.parametrize(
-    "make_model",
-    [m for _, m in _MOBILENET_MODELS],
-    ids=[i for i, _ in _MOBILENET_MODELS],
-)
-def test_a_mobilenet_reports_the_shape_it_runs(make_model):
-    """``compute_output_shape`` and a symbolic call agree with the eager forward.
-
-    HEAD's MobileNetV3 and V4 read ``stem_conv`` / ``stem_bn`` /
-    ``stem_activation`` in ``compute_output_shape`` after the stem became
-    ``self.stem``; V4's ``call`` read them too. Keras uses a model's
-    ``compute_output_shape`` for a symbolic call, so both paths raised
-    ``AttributeError`` while every test that only ran the eager V3 forward
-    stayed green.
-    """
-    model = make_model()
-    batch = np.zeros((1, 32, 32, 3), "float32")
-    eager = model(batch, training=False)
-
-    reported = model.compute_output_shape((None, 32, 32, 3))
-    assert tuple(reported) == (None,) + tuple(eager.shape[1:])
-
-    symbolic = model(keras.Input(shape=(32, 32, 3)))
-    assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
-
-
-# ---------------------------------------------------------------------
-# ConvUNextStem owns its ConvStem from __init__
-# ---------------------------------------------------------------------
-
-#: Attributes ConvUNextStem exposed as aliases (or held privately) before the
-#: ConvStem became a plain sub-layer; none may come back.
-_CONVUNEXT_REMOVED_ATTRIBUTES = ("_conv_stem", "conv", "norm", "activation_layer")
-
-
-def test_convunext_stem_creates_its_conv_stem_in_init():
-    """``stem.stem`` is a ``ConvStem`` the moment the layer is constructed, is
-    unbuilt until the layer is, and no alias of a sub-layer exists at any time.
-
-    HEAD created the ConvStem inside ``build()`` and set ``conv`` / ``norm`` /
-    ``activation_layer`` aliases there, so before the first call the stem had
-    no sub-layers at all and the Keras layer tree was empty.
-    """
-    layer = _convunext_model("global_response_norm", "gelu", False)
-    assert isinstance(layer.stem, ConvStem)
-    assert layer.stem.name == "stem"
-    assert layer.stem.built is False
-    assert layer.stem in list(layer._flatten_layers(include_self=False))
-    for name in _CONVUNEXT_REMOVED_ATTRIBUTES:
-        assert not hasattr(layer, name), f"alias {name!r} exists before build"
-
-    layer(np.zeros((1, 16, 16, 3), "float32"), training=False)
-    assert layer.stem.built is True
-    for name in _CONVUNEXT_REMOVED_ATTRIBUTES:
-        assert not hasattr(layer, name), f"alias {name!r} exists after build"
+    assert set(readings[2]) == {"stem", "stem.conv1", "stem.norm1", "stem.act1"}

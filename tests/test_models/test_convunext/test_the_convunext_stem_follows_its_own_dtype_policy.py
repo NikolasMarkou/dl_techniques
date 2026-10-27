@@ -1,9 +1,9 @@
 """``ConvUNextStem(dtype=...)`` reaches the ``ConvStem`` it owns.
 
-Pass-2 review NOTE 7 of plan-2026-10-26T125959-7af851e5. ``ConvStem`` carries a
-per-layer dtype policy to its convolutions, normalization, activation and pool
-(its own suite, ``TestAPerLayerDtypePolicyReachesEverySubLayer``), but
-``ConvUNextStem`` built that ``ConvStem`` without passing its own policy on:
+``ConvStem`` carries a per-layer dtype policy to its convolutions, normalization,
+activation and pool (``test_the_stem_follows_its_own_dtype_policy.py`` under
+``tests/test_layers/test_conv_blocks/``), but ``ConvUNextStem`` built that
+``ConvStem`` without passing its own policy on:
 ``ConvUNextStem(dtype="float64")`` reported ``compute_dtype`` float64 while the
 inner stem and every sub-layer under it computed in float32, so the output came
 back float32. The same defect one level up from the one fixed in ``ConvStem``.
@@ -12,13 +12,6 @@ back float32. The same defect one level up from the one fixed in ``ConvStem``.
 without the fix and shows the assertions do not reject everything. The global
 policy cannot see this defect because every layer reads it by default, so each
 arm sets the policy on the layer only.
-
-The second half pins what ``ConvUNextStem`` documents about its ``activation``
-argument. It is handed to ``ConvStem``, whose rules apply unchanged: a string, a
-callable, or a Layer that is unbuilt (holds no weights) and whose class Keras can
-locate; a built Layer or an unlocatable class is a ``ValueError`` at
-construction. The messages were measured through ``ConvUNextStem``, not only
-through ``ConvStem``.
 """
 
 import json
@@ -27,13 +20,12 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
 
 POLICIES = ["float32", "mixed_float16", "float64"]
 #: ``(attribute, ...)`` of the inner ConvStem a ConvUNextStem configures.
-SUBLAYERS = ("conv1", "norm1", "activation1")
+SUBLAYERS = ("conv1", "norm1", "act1")
 
 
 def _stem(policy: str, **kwargs) -> ConvUNextStem:
@@ -78,7 +70,7 @@ def test_the_exact_activation_forms_follow_the_policy(activation):
     """``substitute_exact`` turns these strings into the exact callables
     (D-277); the callable path of ``ConvStem`` must carry the policy too."""
     outer = _stem("float64", activation=activation)
-    assert outer.stem.activation1.compute_dtype == "float64"
+    assert outer.stem.act1.compute_dtype == "float64"
     out = outer(_x(), training=False)
     assert keras.backend.standardize_dtype(out.dtype) == "float64"
 
@@ -89,57 +81,3 @@ def test_the_policy_survives_a_config_round_trip():
     assert rebuilt.compute_dtype == "float16"
     for attribute in SUBLAYERS:
         assert getattr(rebuilt.stem, attribute).compute_dtype == "float16", attribute
-
-
-# ---------------------------------------------------------------------
-# The documented refusals of the ``activation`` argument
-# ---------------------------------------------------------------------
-
-
-def _unlocatable_activation() -> keras.layers.Layer:
-    """A custom activation Layer Keras cannot locate by name.
-
-    Defined inside a function on purpose: Keras resolves a serialized class by
-    ``module`` + ``class_name``, so a module-level class IS found again and
-    would not exercise the failure.
-    """
-
-    class UnlocatableActivation(keras.layers.Layer):
-        def call(self, inputs):
-            return keras.ops.relu(inputs)
-
-    return UnlocatableActivation()
-
-
-def test_a_built_layer_holding_weights_is_refused():
-    built = keras.layers.PReLU()
-    built.build((None, 4))
-    assert built.weights, "control: the PReLU holds an alpha weight"
-    with pytest.raises(ValueError, match="PReLU.*already holds weights"):
-        ConvUNextStem(filters=4, activation=built)
-
-
-def test_a_layer_whose_class_cannot_be_located_is_refused_by_name():
-    with pytest.raises(ValueError, match="UnlocatableActivation.*cannot clone") as caught:
-        ConvUNextStem(filters=4, activation=_unlocatable_activation())
-    assert "register" in str(caught.value)
-
-
-def test_a_registered_unbuilt_layer_is_accepted_and_rebuilt_per_site():
-    """Control for the two refusals: the same PReLU, unbuilt, is fine."""
-    outer = ConvUNextStem(filters=4, activation=keras.layers.PReLU())
-    assert isinstance(outer.stem.activation1, keras.layers.PReLU)
-    out = outer(_x(), training=False)
-    assert tuple(out.shape) == (2, 8, 8, 4)
-
-
-def test_a_registered_callable_activation_is_accepted():
-    outer = ConvUNextStem(filters=4, activation=exact_gelu)
-    assert isinstance(outer.stem.activation1, keras.layers.Activation)
-    assert tuple(outer(_x(), training=False).shape) == (2, 8, 8, 4)
-
-
-@pytest.mark.parametrize("activation", ["gelu", "relu", "linear"])
-def test_a_string_activation_is_accepted(activation):
-    outer = ConvUNextStem(filters=4, activation=activation)
-    assert tuple(outer(_x(), training=False).shape) == (2, 8, 8, 4)

@@ -5,12 +5,15 @@ The premise (a shared seedless instance replays one seed) is MEASURED here
 rather than assumed, and each arm has the control that makes it a finding.
 """
 
+import json
+
 import keras
 import numpy as np
 import pytest
 from keras import ops
 
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.initializers.clone import initializer_spec
 
 
 def _kernel(initializer):
@@ -255,3 +258,72 @@ class TestTheThreeExemptions:
             )
             > 0.0
         )
+
+
+# ---------------------------------------------------------------------
+# initializer_spec: the JSON-safe form a model stores and hands to every site.
+#
+# A model keeps the caller's initializer as a str or dict spec and gives each
+# layer the spec, so each layer resolves its own instance. The contrast below is
+# the reason: the SAME live instance handed to two layers replays one sample,
+# its serialized spec handed to two layers does not.
+# ---------------------------------------------------------------------
+
+
+class TestInitializerSpecForms:
+    def test_a_string_is_returned_unchanged(self):
+        name = "glorot_uniform"
+        assert initializer_spec(name) is name
+
+    def test_a_dict_is_returned_unchanged(self):
+        spec = {"class_name": "HeNormal", "config": {"seed": 3}}
+        assert initializer_spec(spec) is spec
+
+    def test_an_initializer_instance_returns_its_serialized_dict(self):
+        instance = keras.initializers.GlorotUniform(seed=7)
+        spec = initializer_spec(instance)
+        assert isinstance(spec, dict)
+        assert spec == keras.initializers.serialize(instance)
+        assert spec["config"] == {"seed": 7}
+
+    def test_the_spec_of_an_instance_is_json_safe_and_resolves_to_its_class(self):
+        spec = initializer_spec(keras.initializers.get("he_normal"))
+        assert json.loads(json.dumps(spec)) == spec
+        assert isinstance(
+            keras.initializers.get(spec), keras.initializers.HeNormal
+        )
+
+    @pytest.mark.parametrize(
+        "bad",
+        [None, 3, 2.5, ["he_normal"], len],
+        ids=["none", "int", "float", "list", "function"],
+    )
+    def test_anything_else_raises_type_error_naming_the_type(self, bad):
+        with pytest.raises(TypeError, match=type(bad).__name__):
+            initializer_spec(bad)
+
+
+class TestInitializerSpecReplaysNothing:
+    """Measured contrast: a live instance replays, its spec does not."""
+
+    def test_the_same_seedless_instance_handed_to_two_layers_replays(self):
+        keras.utils.set_random_seed(1234)
+        shared = keras.initializers.get("glorot_uniform")
+        assert np.array_equal(_kernel(shared), _kernel(shared))
+
+    def test_the_spec_of_that_instance_handed_to_two_layers_draws_twice(self):
+        keras.utils.set_random_seed(1234)
+        spec = initializer_spec(keras.initializers.get("glorot_uniform"))
+        assert spec["config"]["seed"] is None, (
+            "a seedless instance serializes seedless: the self-assigned seed "
+            "is not part of its config"
+        )
+        a, b = _kernel(spec), _kernel(spec)
+        assert not np.array_equal(a, b)
+        assert float(np.abs(a - b).max()) > 0.0
+
+    def test_a_seeded_instance_replays_through_its_spec_by_contract(self):
+        """The documented exemption: an explicit seed is a request for replay."""
+        keras.utils.set_random_seed(1234)
+        spec = initializer_spec(keras.initializers.GlorotUniform(seed=7))
+        assert np.array_equal(_kernel(spec), _kernel(spec))

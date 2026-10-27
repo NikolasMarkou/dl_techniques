@@ -47,18 +47,29 @@ from dl_techniques.layers.heads.vlm import (
 
 HEADS = pathlib.Path(__file__).resolve().parents[3] / "src/dl_techniques/layers/heads"
 
-#: The factories whose rank reads go through ``static_rank``: all three.
+#: The domains whose rank reads go through ``static_rank``: all three. Every
+#: module of a domain is scanned, not only its ``factory.py``: each factory was
+#: split into one module per head, and a scan of ``factory.py`` alone would read
+#: a re-export file and pass forever.
 SCANNED = ("nlp", "vlm", "vision")
+MODULES = sorted(
+    p for domain in SCANNED for p in (HEADS / domain).glob("*.py")
+    if p.name != "__init__.py"
+)
 
 _OLD_SPELLING = re.compile(r"len\(\s*(?:keras\.)?ops\.shape\(")
 
 
-@pytest.mark.parametrize("domain", SCANNED)
-def test_no_factory_reads_a_rank_through_len_of_shape(domain) -> None:
-    source = (HEADS / domain / "factory.py").read_text()
-    hits = [i + 1 for i, line in enumerate(source.splitlines())
+def test_the_scan_has_subjects() -> None:
+    assert len(MODULES) >= 30, f"only {len(MODULES)} head modules found"
+    assert {m.name for m in MODULES} >= {"base.py", "factory.py", "dispatch.py"}
+
+
+@pytest.mark.parametrize("module", MODULES, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_no_head_module_reads_a_rank_through_len_of_shape(module) -> None:
+    hits = [i + 1 for i, line in enumerate(module.read_text().splitlines())
             if _OLD_SPELLING.search(line)]
-    assert not hits, f"{domain}/factory.py reads a rank with len(ops.shape(...)) at lines {hits}"
+    assert not hits, f"{module.name} reads a rank with len(ops.shape(...)) at lines {hits}"
 
 
 def test_the_scan_sees_the_spelling_it_forbids() -> None:

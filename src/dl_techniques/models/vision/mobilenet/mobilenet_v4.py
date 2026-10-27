@@ -18,9 +18,11 @@ carry attention, appended once at the end of stages 5 and 6; `MobileMQA`
 has no positional encoding, so it depends entirely on the convolutional
 stack for spatial ordering, and its `num_heads=8` default means a stage
 width not divisible by 8 raises at construction. `width_multiplier` scales
-`dims` by plain truncation, with no round-to-multiple-of-8 rule. No
-pretrained checkpoints ship with this package; `pretrained=True` raises
-`NotImplementedError`.
+`dims` by plain truncation, with no round-to-multiple-of-8 rule. Every
+convolution kernel draws from `kernel_initializer` through its own copy of
+the stored spec, so no two kernels replay one sample. No pretrained
+checkpoints ship with this package; `pretrained=True` raises
+`NotImplementedError`, and a local `.keras` path loads by layer.
 
 References:
     - Qin et al., 2024. MobileNetV4: Universal Models for the Mobile Ecosystem.
@@ -35,21 +37,27 @@ References:
       subsumes.
 """
 
+import copy
 import keras
-from typing import Tuple, Optional, Dict, Any, Sequence
+from typing import Tuple, Optional, Dict, Any, Sequence, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.weight_transfer import (
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.mobilenet.common import (
-    REFERENCE_BN_EPSILON,
-    REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
+    reference_bn_kwargs,
 )
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
@@ -82,33 +90,50 @@ class MobileNetV4(keras.Model):
            v
         logits  [num_classes]
 
-    :param num_classes: Number of output classes; used only if `include_top=True`.
+    :param num_classes: Number of output classes; used only if `include_top=True`,
+        where it must be positive.
     :param depths: UIB block count per stage.
     :param dims: Channel count per stage.
     :param block_types: UIB structure per stage: `"IB"`, `"ConvNext"`, `"ExtraDW"`, `"FFN"`.
     :param strides: Stride for the first block of each stage.
-    :param width_multiplier: Channel-count multiplier, applied by truncation.
+    :param width_multiplier: Channel-count multiplier, applied by truncation. Must be positive.
     :param use_attention: Add Mobile MQA to `attention_stages`.
     :param attention_stages: Stage indices to add attention to, when `use_attention=True`.
-    :param dropout_rate: Dropout rate in the classifier head.
+    :param dropout_rate: Dropout rate in the classifier head, in `[0, 1)`.
     :param weight_decay: L2 regularization factor for all layers, the head's
         included.
     :param kernel_initializer: Weight initialization strategy, the head's
-        included.
+        included: a name, a serialized config dict, or an `Initializer`
+        instance. It is stored as its serialized spec and every layer draws
+        from its own copy of it.
+    :param include_top: Whether to include the classification head.
+    :param input_shape: Input shape `(height, width, channels)`; `None` means
+        `(224, 224, 3)`.
     :param head_config_overrides: Optional dict merged into the head
         configuration. `name`, `num_classes` and `task_type` raise
         `ValueError`.
-    :param include_top: Whether to include the classification head.
-    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
     :param kwargs: Passthrough to `keras.Model`.
     :raises ValueError: If `depths`, `dims`, `block_types`, or `strides` have
-        different lengths, an invalid block type is given, or an attention
-        stage index is out of range.
+        different lengths, an invalid block type is given, an attention
+        stage index is out of range, `num_classes` is not positive with a
+        head, `width_multiplier` is not positive, `dropout_rate` is outside
+        `[0, 1)`, or `input_shape` is not 3-D.
+    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
+        `Initializer` instance.
+
+    Input shape:
+        4-D tensor `(batch_size, height, width, channels)`.
+
+    Output shape:
+        - `include_top=True`: logits `(batch_size, num_classes)`.
+        - `include_top=False`: the last stage's feature map
+          `(batch_size, H', W', actual_dims[-1])`.
 
     Example::
 
         model = MobileNetV4.from_variant("medium", num_classes=1000)
         small = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+        shallow = MobileNetV4.from_variant("small", depths=[1, 1, 1, 1, 1, 1, 1])
     """
 
     # Model variant configurations
@@ -117,24 +142,28 @@ class MobileNetV4(keras.Model):
             "depths": [1, 1, 2, 3, 2, 2, 1],
             "dims": [16, 24, 32, 64, 96, 128, 160],
             "block_types": ["IB", "IB", "IB", "ExtraDW", "IB", "IB", "IB"],
+            "strides": [1, 2, 2, 2, 1, 2, 1],
             "use_attention": False,
         },
         "medium": {
             "depths": [1, 2, 3, 4, 3, 3, 1],
             "dims": [16, 24, 40, 80, 112, 192, 320],
             "block_types": ["IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"],
+            "strides": [1, 2, 2, 2, 1, 2, 1],
             "use_attention": False,
         },
         "large": {
             "depths": [1, 2, 4, 5, 4, 4, 1],
             "dims": [24, 32, 48, 96, 136, 224, 384],
             "block_types": ["IB", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "IB"],
+            "strides": [1, 2, 2, 2, 1, 2, 1],
             "use_attention": False,
         },
         "hybrid_medium": {
             "depths": [1, 2, 3, 4, 3, 3, 1],
             "dims": [16, 24, 40, 80, 112, 192, 320],
             "block_types": ["IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"],
+            "strides": [1, 2, 2, 2, 1, 2, 1],
             "use_attention": True,
             "attention_stages": [5, 6],
         },
@@ -142,6 +171,7 @@ class MobileNetV4(keras.Model):
             "depths": [1, 2, 4, 5, 4, 4, 1],
             "dims": [24, 32, 48, 96, 136, 224, 384],
             "block_types": ["IB", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "IB"],
+            "strides": [1, 2, 2, 2, 1, 2, 1],
             "use_attention": True,
             "attention_stages": [5, 6],
         },
@@ -150,10 +180,7 @@ class MobileNetV4(keras.Model):
     # Architecture constants
     STEM_KERNEL_SIZE = 3
     STEM_STRIDE = 2
-    DEFAULT_STRIDES = [1, 2, 2, 2, 1, 2, 1]
-    DEFAULT_ATTENTION_STAGES = [5, 6]
     HEAD_HIDDEN_DIM = 1280
-    LAYERNORM_EPSILON = 1e-6
 
     def __init__(
         self,
@@ -167,20 +194,25 @@ class MobileNetV4(keras.Model):
         attention_stages: Sequence[int] = (5, 6),
         dropout_rate: float = 0.2,
         weight_decay: float = 1e-5,
-        kernel_initializer: str = "he_normal",
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
         include_top: bool = True,
-        input_shape: Tuple[int, ...] = (224, 224, 3),
+        input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
         head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
 
-        valid_block_types = {"IB", "ConvNext", "ExtraDW", "FFN"}
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
+
+        valid_block_types = ("ConvNext", "ExtraDW", "FFN", "IB")
         for block_type in block_types:
             if block_type not in valid_block_types:
                 raise ValueError(
                     f"Invalid block type '{block_type}'. "
-                    f"Must be one of {valid_block_types}"
+                    f"Must be one of {list(valid_block_types)}"
                 )
 
         stage_configs = [depths, dims, block_types, strides]
@@ -201,13 +233,22 @@ class MobileNetV4(keras.Model):
                         f"Must be in [0, {max_stage_idx}]"
                     )
 
-        if input_shape and len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+        if width_multiplier <= 0:
+            raise ValueError(
+                f"width_multiplier must be positive, got {width_multiplier}"
+            )
 
-        if input_shape:
-            height, width, channels = input_shape
-            if channels not in [1, 3]:
-                logger.warning(f"Unusual number of channels: {channels}")
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(
+                f"dropout_rate must be in [0, 1), got {dropout_rate}"
+            )
+
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+        if input_shape[2] not in (1, 3):
+            logger.warning(f"Unusual number of channels: {input_shape[2]}")
 
         self.num_classes = num_classes
         # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as a list even though the default is a tuple.
@@ -221,9 +262,11 @@ class MobileNetV4(keras.Model):
         self.attention_stages = list(attention_stages)
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
-        self.kernel_initializer = kernel_initializer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem, every block, every Mobile MQA and the head; never keep the caller's Initializer instance.
+        # A seedless instance given to two layers replays one draw at both (the stem and the Mobile MQA downsample did, 3 of 2701 kernel pairs at hybrid_medium), and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.include_top = include_top
-        self._input_shape = input_shape
+        self.input_shape_config = input_shape
 
         # Head configuration
         self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
@@ -232,42 +275,24 @@ class MobileNetV4(keras.Model):
 
         self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        self.stem = self._build_stem()
+        self._build_stem()
 
         self.stages = []
         for stage_idx in range(len(self.depths)):
-            stage_layers = self._build_stage(stage_idx)
-            self.stages.append(stage_layers)
+            self._build_stage(stage_idx)
 
+        self.classification_head = None
         if self.include_top:
             self._build_head()
-        else:
-            self.classification_head = None
 
-    def call(self, x, training=None):
-        """Run the stem, stages, and optional head.
+        logger.info(
+            f"Created MobileNetV4 with {sum(self.depths)} blocks in "
+            f"{len(self.depths)} stages for input {input_shape}"
+        )
 
-        :param x: Input images, shape `(B, H, W, C)`.
-        :param training: Passed to batch norm and dropout.
-        :return: Logits, or the 4-D feature map if `include_top=False`.
-        """
-        x = self.stem(x, training=training)
-
-        for stage_layers in self.stages:
-            for layer in stage_layers:
-                x = layer(x, training=training)
-
-        if self.include_top:
-            return self.classification_head(x, training=training)['logits']
-
-        return x
-
-    def _build_stem(self) -> ConvStem:
-        """Build the stem: conv, batch norm and ReLU in one :class:`ConvStem`.
-
-        :return: The unbuilt stem, named ``stem``.
-        """
-        return ConvStem(
+    def _build_stem(self) -> None:
+        """Build the stem: conv, batch norm and ReLU in one :class:`ConvStem`."""
+        self.stem = ConvStem(
             filters=self.actual_dims[0],
             kernel_size=self.STEM_KERNEL_SIZE,
             strides=self.STEM_STRIDE,
@@ -275,10 +300,7 @@ class MobileNetV4(keras.Model):
             use_bias=False,
             num_convs=1,
             normalization_type='batch_norm',
-            normalization_kwargs={
-                'momentum': REFERENCE_BN_MOMENTUM,
-                'epsilon': REFERENCE_BN_EPSILON,
-            },
+            normalization_kwargs=reference_bn_kwargs(),
             activation_type='relu',
             use_pooling=False,
             kernel_initializer=self.kernel_initializer,
@@ -286,22 +308,19 @@ class MobileNetV4(keras.Model):
             name='stem',
         )
 
-    def _build_stage(self, stage_idx: int):
+    def _build_stage(self, stage_idx: int) -> None:
         """Build the UIB blocks, and optional Mobile MQA, for one stage.
 
+        The blocks are named ``stage{S}_block{B}`` and the attention layer
+        ``stage{S}_mqa``, with S and B counted from 1.
+
         :param stage_idx: Index into `depths`/`dims`/`block_types`/`strides`.
-        :return: List of layers for this stage, in call order.
         """
         stage_layers = []
         depth = self.depths[stage_idx]
         dim = self.actual_dims[stage_idx]
         block_type = self.block_types[stage_idx]
         stage_stride = self.strides[stage_idx]
-
-        logger.info(
-            f"Building stage {stage_idx}: {depth} blocks, {dim} dims, "
-            f"type={block_type}, stride={stage_stride}"
-        )
 
         # DECISION plan-2026-08-14T183218-f4c612aa/D-011: map block_type to which depthwise POSITION is occupied, not to use_dw1/use_dw2.
         # Both use_dw1/use_dw2 are post-expansion, so that mapping cannot express a pre-expansion start depthwise and built a plain IB for every stage. See decisions.md.
@@ -322,26 +341,25 @@ class MobileNetV4(keras.Model):
                 stride=block_stride,
                 block_type=block_type,
                 # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; see mobilenet_v1.py for the measured impact. See decisions.md.
-                normalization_args={'epsilon': REFERENCE_BN_EPSILON},
+                normalization_args=reference_bn_kwargs(),
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                name=f"stage_{stage_idx}_block_{block_idx}",
+                name=f"stage{stage_idx + 1}_block{block_idx + 1}",
                 **block_structure
             )
             stage_layers.append(block)
 
         if self.use_attention and stage_idx in self.attention_stages:
-            logger.info(f"Adding Mobile MQA to stage {stage_idx}")
             mqa_layer = MobileMQA(
                 dim=dim,
                 use_downsampling=True,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                name=f"stage_{stage_idx}_mqa"
+                name=f"stage{stage_idx + 1}_mqa"
             )
             stage_layers.append(mqa_layer)
 
-        return stage_layers
+        self.stages.append(stage_layers)
 
     def _build_head(self) -> None:
         """Build the reference classifier on the shared ``ClassificationHead``.
@@ -366,10 +384,7 @@ class MobileNetV4(keras.Model):
                 'normalization_type': 'batch_norm',
                 # The family rule (common.py, D-111 of plan-2026-08-22): every
                 # BatchNorm runs at the reference epsilon, the head's too.
-                'normalization_kwargs': {
-                    'epsilon': REFERENCE_BN_EPSILON,
-                    'momentum': REFERENCE_BN_MOMENTUM,
-                },
+                'normalization_kwargs': reference_bn_kwargs(),
                 # timm's conv_head is "never a bias": the BatchNorm after it would
                 # leave a bias with an identically-zero gradient (measured).
                 'block_use_bias': False,
@@ -385,14 +400,93 @@ class MobileNetV4(keras.Model):
             self._head_config_overrides,
         )
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from `input_shape` by tracing `call`.
+
+        `materialize_sublayers` traces `call` on symbolic inputs, so what
+        gets built cannot drift from what gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to `call`.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
+    def call(self, x, training=None):
+        """Run the stem, stages, and optional head.
+
+        :param x: Input images, shape `(B, H, W, C)`.
+        :param training: Passed to batch norm and dropout.
+        :return: Logits, or the 4-D feature map if `include_top=False`.
+        """
+        x = self.stem(x, training=training)
+
+        for stage_layers in self.stages:
+            for layer in stage_layers:
+                x = layer(x, training=training)
+
+        if self.include_top:
+            return self.classification_head(x, training=training)['logits']
+
+        return x
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Report the shape `call` returns, without building the model.
+
+        :param input_shape: `(batch_size, height, width, channels)`; the
+            spatial axes may be `None`.
+        :return: The logits shape `(batch_size, num_classes)`
+            (`include_top=True`) or the last stage's feature map shape.
+        """
+        shape = self.stem.compute_output_shape(input_shape)
+
+        for stage_layers in self.stages:
+            for layer in stage_layers:
+                shape = layer.compute_output_shape(shape)
+
+        if not self.include_top:
+            return shape
+
+        # The head reports both keys; the model returns the logits.
+        return self.classification_head.compute_output_shape(shape)['logits']
+
+    def load_pretrained_weights(
+        self,
+        weights_path: str,
+        skip_mismatch: bool = True
+    ) -> None:
+        """Load a local `.keras` checkpoint into the model, layer by layer.
+
+        The transfer is `load_pretrained_checkpoint`: it builds the model at
+        `input_shape` if it is unbuilt and takes a headed checkpoint into a
+        headless model. Every layer outside the classification head must be
+        restored, so a checkpoint of another variant, block type, width or stem
+        raises and leaves the model untouched. Only a head of another
+        `num_classes` is skipped: it keeps its initialization and a warning
+        names it.
+
+        :param weights_path: Path to the weights file (`.keras` format).
+        :param skip_mismatch: `True` (default) lets the head layers differ;
+            `False` allows no difference anywhere. The inverse of the transfer
+            helper's `strict`.
+        :raises FileNotFoundError: If `weights_path` doesn't exist.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch
+        )
+
     @classmethod
     def from_variant(
         cls,
         variant: str,
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
-        width_multiplier: float = 1.0,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs
     ) -> "MobileNetV4":
         """Create a MobileNetV4 model from a predefined variant.
@@ -400,18 +494,22 @@ class MobileNetV4(keras.Model):
         :param variant: One of `"small"`, `"medium"`, `"large"`, `"hybrid_medium"`, `"hybrid_large"`.
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
-        :param width_multiplier: Channel-count multiplier.
-        :param head_config_overrides: Optional dict merged into the head
-            configuration (e.g. `{'block_dims': (512,)}`). `name`,
-            `num_classes` and `task_type` raise `ValueError`.
-        :param kwargs: Passthrough to the constructor.
+        :param pretrained: A path to a local weights file, `True` (raises
+            `NotImplementedError`, since no MobileNetV4 weights ship with
+            `dl_techniques`), or `False` (default, random init).
+        :param kwargs: Passthrough to the constructor; a field of the variant
+            (e.g. `depths`, `use_attention`, `width_multiplier`) is replaced
+            by the value given here.
         :return: A configured `MobileNetV4` instance.
         :raises ValueError: If `variant` is not recognized.
+        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
         Example::
 
             model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
             hybrid = MobileNetV4.from_variant("hybrid_medium", num_classes=1000)
+            wide = MobileNetV4.from_variant("small", width_multiplier=0.5, use_attention=True)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -419,27 +517,21 @@ class MobileNetV4(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.MODEL_VARIANTS[variant]
-
-        if input_shape is None:
-            input_shape = (224, 224, 3)
-
-        logger.info(f"Creating MobileNetV4-{variant} model")
-        logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
-
-        return cls(
-            num_classes=num_classes,
-            depths=config["depths"],
-            dims=config["dims"],
-            block_types=config["block_types"],
-            strides=config.get("strides", cls.DEFAULT_STRIDES),
-            width_multiplier=width_multiplier,
-            use_attention=config["use_attention"],
-            attention_stages=config.get("attention_stages", cls.DEFAULT_ATTENTION_STAGES),
-            input_shape=input_shape,
-            head_config_overrides=head_config_overrides,
-            **kwargs
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
+        # See decisions.md.
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
         )
+
+        config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
+        config.update(kwargs)
+
+        model = cls(num_classes=num_classes, input_shape=input_shape, **config)
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -456,60 +548,19 @@ class MobileNetV4(keras.Model):
             "weight_decay": self.weight_decay,
             "kernel_initializer": self.kernel_initializer,
             "include_top": self.include_top,
-            "input_shape": self._input_shape,
+            "input_shape": self.input_shape_config,
             "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
 
-
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the model."""
-        current_shape = input_shape
-
-        # Stem
-        current_shape = self.stem.compute_output_shape(current_shape)
-
-        # Stages
-        for stage_layers in self.stages:
-            for layer in stage_layers:
-                current_shape = layer.compute_output_shape(current_shape)
-
-        # Head
-        if self.include_top and self.classification_head is not None:
-            # The head reports both keys; the model returns the logits.
-            current_shape = self.classification_head.compute_output_shape(
-                current_shape)['logits']
-
-        return current_shape
-
     def summary(self, **kwargs):
-        """Print the model summary, plus configuration and parameter count."""
+        """Print the model summary; an unbuilt model is materialized first."""
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: materialize with a real forward pass.
         # self.build(self._input_shape) passed an unbatched shape where Model.build() expects a batch shape, and even fixed would materialize no sub-layer weights. See decisions.md.
-        materialize_for_summary(self, self._input_shape)
+        materialize_for_summary(self, self.input_shape_config)
 
         super().summary(**kwargs)
-
-        total_blocks = sum(self.depths)
-        total_params = self.count_params()
-
-        logger.info("MobileNetV4 Configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
-        logger.info(f"  - Stages: {len(self.depths)}")
-        logger.info(f"  - Depths: {self.depths}")
-        logger.info(f"  - Original dimensions: {self.dims}")
-        logger.info(f"  - Actual dimensions: {self.actual_dims}")
-        logger.info(f"  - Block types: {self.block_types}")
-        logger.info(f"  - Total blocks: {total_blocks}")
-        logger.info(f"  - Width multiplier: {self.width_multiplier}")
-        logger.info(f"  - Use attention: {self.use_attention}")
-        if self.use_attention:
-            logger.info(f"  - Attention stages: {self.attention_stages}")
-        logger.info(f"  - Include top: {self.include_top}")
-        if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-        logger.info(f"  - Total parameters: {total_params:,}")
 
 
 # ---------------------------------------------------------------------
@@ -518,9 +569,7 @@ def create_mobilenetv4(
     variant: str = "medium",
     num_classes: int = 1000,
     input_shape: Optional[Tuple[int, ...]] = None,
-    width_multiplier: float = 1.0,
-    pretrained: bool = False,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
+    pretrained: Union[bool, str] = False,
     **kwargs
 ) -> MobileNetV4:
     """Create a MobileNetV4 model.
@@ -528,43 +577,24 @@ def create_mobilenetv4(
     :param variant: Model variant: `"small"`, `"medium"`, `"large"`, `"hybrid_medium"`, `"hybrid_large"`.
     :param num_classes: Number of output classes.
     :param input_shape: Input shape; defaults to `(224, 224, 3)`.
-    :param width_multiplier: Channel-count multiplier.
-    :param pretrained: Must be `False`; `True` raises `NotImplementedError`
-        since no MobileNetV4 checkpoints ship with this package.
-    :param head_config_overrides: Optional dict merged into the head
-        configuration (e.g. `{'block_dims': (512,)}`). `name`,
-        `num_classes` and `task_type` raise `ValueError`.
-    :param kwargs: Passthrough to the constructor.
+    :param pretrained: A path to a local weights file, `True` (raises
+        `NotImplementedError`), or `False` (default, random init).
+    :param kwargs: Passthrough to `MobileNetV4.from_variant`, e.g.
+        `width_multiplier`, `head_config_overrides`, `include_top`.
     :return: A configured `MobileNetV4` instance.
+    :raises NotImplementedError: If `pretrained` is `True`.
 
     Example::
 
         model = create_mobilenetv4("small", num_classes=10, input_shape=(32, 32, 3))
         hybrid = create_mobilenetv4("hybrid_medium", num_classes=1000)
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
-    # See decisions.md.
-    if pretrained:
-        raise NotImplementedError(
-            f"No pretrained MobileNetV4 weights are distributed with dl_techniques "
-            f"(requested variant '{variant}'). Build the architecture with "
-            f"pretrained=False and warm-start from a local checkpoint instead: "
-            f"model = create_mobilenetv4('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras'). Prefer "
-            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
-            f"path), which raises when a load changes ZERO variables -- raw "
-            f"load_weights is silent about a checkpoint that matches nothing."
-        )
-
-    model = MobileNetV4.from_variant(
+    return MobileNetV4.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
-        width_multiplier=width_multiplier,
-        head_config_overrides=head_config_overrides,
+        pretrained=pretrained,
         **kwargs
     )
-
-    return model
 
 # ------------------------------------------------------------------------

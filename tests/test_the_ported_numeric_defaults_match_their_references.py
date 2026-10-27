@@ -184,9 +184,9 @@ def _resnet_default_momentum() -> float:
 
 
 def _cliffordnet_stem_momentum() -> float:
-    from dl_techniques.models.vision.cliffordnet.model import _STEM_BN_MOMENTUM
+    from dl_techniques.models.vision.cliffordnet.model import STEM_BN_MOMENTUM
 
-    return _STEM_BN_MOMENTUM
+    return STEM_BN_MOMENTUM
 
 
 def _clifford_clip_stem_momentum() -> float:
@@ -256,7 +256,7 @@ REFERENCE_PINS: List[Tuple[str, Callable[[], Any], Any, Any, str]] = [
         _TORCHVISION_BN,
     ),
     (
-        "cliffordnet/model.py _STEM_BN_MOMENTUM (stem_norm1, stem_norm2)",
+        "cliffordnet/model.py STEM_BN_MOMENTUM (stem_norm1, stem_norm2)",
         _cliffordnet_stem_momentum,
         0.9,
         _KERAS_BN_MOMENTUM_DEFAULT,

@@ -33,7 +33,9 @@ neither does this one. No accuracy and no parameter count of this model is
 published, so nothing here is compared against a paper value. The architecture was
 built from a summary of the authors' file, not from a byte-checked read. No
 pretrained weights are distributed, so ``pretrained=True`` raises
-``NotImplementedError``; pass a local ``.keras`` path instead.
+``NotImplementedError``; pass a local ``.keras`` path instead. The stem, head and
+argument checks are CliffordNet's own helpers, imported from
+:mod:`dl_techniques.models.vision.cliffordnet.model`.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -46,7 +48,6 @@ References:
 from __future__ import annotations
 
 import copy
-import os
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -59,33 +60,27 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
-from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.cliffordnet.model import (
     DEFAULT_INPUT_SHAPE,
+    DEFAULT_KERNEL_INITIALIZER,
+    STEM_BN_MOMENTUM,
+    build_clifford_stem,
+    clifford_head_config,
     coerce_include_top,
+    validate_rates,
 )
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.weight_transfer import (
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
-
-# trunc_normal_(std=0.02) for every Conv2d and Linear, as in the reference.
-_DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
-
-# Keras momentum 0.9 is torch momentum 0.1, the reference's BatchNorm default.
-_BN_MOMENTUM = 0.9
-
-# DECISION plan-2026-10-26T125959-7af851e5/D-007: the stem's BatchNormalization
-# epsilon is 1e-3, the Keras default these layers had before the stem moved onto
-# ConvStem. It is the PRE-MIGRATION value, not a published reference (no paper
-# citation was found). The norm factory's own default is 1e-6, so leaving it
-# unstated moved every stem BN by 1000x with no shape symptom. The downsamplers
-# below still use the bare Keras default. Guard:
-# tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
-_STEM_BN_EPSILON = 1e-3
 
 # Stage widths when ``stage_dims`` is not given: doubling from this width.
 _BASE_WIDTH = 32
@@ -153,14 +148,21 @@ class HierarchicalCliffordNet(keras.Model):
     ``patch_size=2`` is one 3x3 convolution with stride 2 and a batch norm. The
     stem is one :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named
     ``stem`` whose batch norms use momentum 0.9 and epsilon 1e-3. The
-    convolutions of the two-conv stem are bias-free.
+    convolutions of the two-conv stem are bias-free. The stem and the head are
+    CliffordNet's (``build_clifford_stem`` and ``clifford_head_config``), so the two
+    models cannot drift.
 
-    Variants:
+    ``MODEL_VARIANTS`` holds the one preset, ``hier_345``, the authors' constructor
+    default.
 
-    .. code-block:: text
+    Input shape:
+        ``(batch_size, height, width, channels_in)``; the spatial sizes are free.
 
-        variant    stage_depths  stage_dims    patch  shifts  cli_mode
-        hier_345   3, 4, 5       32, 64, 128   1      1, 2    full
+    Output shape:
+        ``(batch_size, num_classes)`` logits with ``include_top=True``;
+        ``(batch_size, h, w, stage_dims[-1])`` with ``include_top=False``, where
+        ``h`` and ``w`` are the stem's output sizes halved (rounding up) once per
+        downsampler.
 
     :param num_classes: Number of output classes. Must be positive when
         ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
@@ -178,12 +180,17 @@ class HierarchicalCliffordNet(keras.Model):
     :param ctx_mode: ``"diff"`` (default) | ``"abs"``.
     :param layer_scale_init: Initial LayerScale gamma of every block.
     :param stochastic_depth_rate: Maximum DropPath rate, ramped linearly over all
-        blocks. 0 disables it.
-    :param dropout_rate: Dropout before the classifier's linear layer.
+        blocks, in ``[0, 1)``. 0 disables it.
+    :param dropout_rate: Dropout before the classifier's linear layer, in
+        ``[0, 1)``.
     :param use_bias: Whether the block convolutions and the downsampler's 1x1
         convolution carry a bias.
-    :param kernel_initializer: Initializer of every kernel.
-    :param bias_initializer: Initializer of every bias.
+    :param kernel_initializer: Initializer of every kernel: a name, a config dict
+        or an ``Initializer`` instance. It is stored as a name or config dict (an
+        instance is serialized) and that spec is handed to every layer, so each
+        layer draws its own kernel.
+    :param bias_initializer: Initializer of every bias; stored and handed out like
+        ``kernel_initializer``.
     :param kernel_regularizer: Optional kernel regularizer.
     :param bias_regularizer: Optional bias regularizer.
     :param head_config_overrides: Optional overrides merged into the head config.
@@ -198,12 +205,15 @@ class HierarchicalCliffordNet(keras.Model):
     :param kwargs: Passed to :class:`keras.Model`.
     :raises TypeError: If ``include_top`` is not a ``bool``.
     :raises ValueError: If an argument is out of range (``num_classes`` only
-        while ``include_top`` is true), ``stage_dims`` and ``stage_depths``
-        differ in length, or ``cli_mode`` is unknown.
-    """
+        while ``include_top`` is true), ``dropout_rate`` or
+        ``stochastic_depth_rate`` is outside ``[0, 1)``, ``stage_dims`` and
+        ``stage_depths`` differ in length, or ``cli_mode`` is unknown.
 
-    # The head's pooled LayerNorm, torch's nn.LayerNorm default eps.
-    LAYERNORM_EPSILON: float = 1e-5
+    Example::
+
+        model = HierarchicalCliffordNet.from_variant("hier_345", num_classes=100)
+        small = HierarchicalCliffordNet(stage_depths=[2, 2], stage_dims=[16, 32])
+    """
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "hier_345": dict(
@@ -214,7 +224,7 @@ class HierarchicalCliffordNet(keras.Model):
             cli_mode="full",
             ctx_mode="diff",
             layer_scale_init=1e-5,
-            kernel_initializer=_DEFAULT_KERNEL_INIT,
+            kernel_initializer=DEFAULT_KERNEL_INITIALIZER,
         ),
     }
 
@@ -273,6 +283,7 @@ class HierarchicalCliffordNet(keras.Model):
                 f"patch_size=1 halves the first width for its first convolution, "
                 f"so stage_dims[0] must be at least 2, got {dims[0]}"
             )
+        validate_rates(dropout_rate, stochastic_depth_rate)
 
         self.num_classes = num_classes
         self.include_top = include_top
@@ -286,8 +297,10 @@ class HierarchicalCliffordNet(keras.Model):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-031: store each initializer as a spec and hand that spec, never a live instance, to the stem, every block, every downsampler and the head.
+        # A block resolves one instance per sub-layer from a spec. An instance given to the stem, the blocks and the downsamplers replays one draw at all of them (820 of 2211 kernel pairs at `hier_345`), and a clone built once outside the block loop and splatted into every block still shares it. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
+        self.bias_initializer = initializer_spec(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
@@ -298,11 +311,10 @@ class HierarchicalCliffordNet(keras.Model):
         self._build_stem()
         self._build_blocks()
         self._build_downsamplers()
+        # Always defined, so `model.classification_head` is safe to read.
+        self.classification_head = None
         if self.include_top:
             self._build_head()
-        else:
-            # Always defined, so `model.classification_head` is safe to read.
-            self.classification_head = None
 
         logger.info(
             f"Created HierarchicalCliffordNet (stage_depths={depths}, "
@@ -323,65 +335,39 @@ class HierarchicalCliffordNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build the stem via :class:`ConvStem`, emitting ``stage_dims[0]``.
+        """Build the stem with :func:`build_clifford_stem`, emitting ``stage_dims[0]``.
 
         :return: Nothing.
         :rtype: None
         """
-        width = self.stage_dims[0]
-        norm_kwargs = {"momentum": _BN_MOMENTUM, "epsilon": _STEM_BN_EPSILON}
-        if self.patch_size == 1:
-            # Conv(D/2) -> BN -> SiLU -> Conv(D) -> BN, both convs bias-free.
-            self.stem = ConvStem(
-                filters=width // 2,
-                conv2_filters=width,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=False,
-                num_convs=2,
-                normalization_type="batch_norm",
-                normalization_kwargs=norm_kwargs,
-                activation_type="silu",
-                final_activation=False,
-                use_pooling=False,
-                name="stem",
-                **self._conv_kwargs(),
-            )
-        else:
-            # Conv(D, stride=2) -> BN
-            self.stem = ConvStem(
-                filters=width,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=self.use_bias,
-                num_convs=1,
-                normalization_type="batch_norm",
-                normalization_kwargs=norm_kwargs,
-                activation_type="linear",
-                use_pooling=False,
-                name="stem",
-                **self._conv_kwargs(),
-            )
+        self.stem = build_clifford_stem(
+            channels=self.stage_dims[0],
+            patch_size=self.patch_size,
+            use_bias=self.use_bias,
+            **self._conv_kwargs(),
+        )
 
     def _build_blocks(self) -> None:
         """Build every block with its drop-path gate, in one flat list.
 
-        The list is flat on purpose (a list of lists of layers has lost weights
-        in this repository before); :attr:`stages` groups it. The drop-path rates
-        ramp linearly over ALL blocks, indexed globally.
+        The list is flat so that the blocks are created, tracked and saved in one
+        order, stage after stage; the :attr:`stages` property groups it by each
+        entry's ``stage``, so the partition is derived from ``stage_depths`` and
+        is not a second container to keep in step with the first. The drop-path
+        rates ramp linearly over ALL blocks, indexed globally.
 
         :return: Nothing.
         :rtype: None
         """
         total = sum(self.stage_depths)
         drop_rates = linear_drop_path_rates(total, self.stochastic_depth_rate)
+        conv_kw = self._conv_kwargs()
 
         self.blocks_list: List[Dict[str, Any]] = []
         index = 0
         for stage, (depth, width) in enumerate(zip(self.stage_depths, self.stage_dims)):
             for j in range(depth):
+                name = f"stage{stage + 1}_block{j + 1}"
                 block = CliffordNetBlock(
                     channels=width,
                     shifts=self.shifts,
@@ -389,15 +375,12 @@ class HierarchicalCliffordNet(keras.Model):
                     ctx_mode=self.ctx_mode,
                     layer_scale_init=self.layer_scale_init,
                     use_bias=self.use_bias,
-                    kernel_initializer=self.kernel_initializer,
-                    bias_initializer=self.bias_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    bias_regularizer=self.bias_regularizer,
-                    name=f"stage{stage}_block_{j}",
+                    name=name,
+                    **conv_kw,
                 )
                 drop_path = StochasticDepth(
                     drop_path_rate=drop_rates[index],
-                    name=f"stage{stage}_drop_path_{j}",
+                    name=f"{name}_drop_path",
                 )
                 self.blocks_list.append(
                     {"stage": stage, "block": block, "drop_path": drop_path}
@@ -413,6 +396,12 @@ class HierarchicalCliffordNet(keras.Model):
         :return: Nothing.
         :rtype: None
         """
+        conv_kw = self._conv_kwargs()
+        # The initializer is the stored spec, so each layer resolves its own draw.
+        depthwise_kw = dict(
+            depthwise_initializer=self.kernel_initializer,
+            depthwise_regularizer=self.kernel_regularizer,
+        )
         self.downsamplers: List[Dict[str, Any]] = []
         for i in range(len(self.stage_dims) - 1):
             pointwise = None
@@ -420,23 +409,31 @@ class HierarchicalCliffordNet(keras.Model):
                 pointwise = keras.layers.Conv2D(
                     filters=self.stage_dims[i + 1], kernel_size=1,
                     use_bias=self.use_bias, name=f"downsample_{i}_pointwise",
-                    **self._conv_kwargs(),
+                    **conv_kw,
                 )
+            depthwise = keras.layers.DepthwiseConv2D(
+                kernel_size=3, strides=2, padding="same", use_bias=False,
+                name=f"downsample_{i}_depthwise", **depthwise_kw,
+            )
+            # The downsampler's BatchNormalization takes the stem's momentum.
+            # DECISION plan-2026-10-26T125959-7af851e5/D-007: the stem's BatchNormalization
+            # epsilon is 1e-3, the Keras default these layers had before the stem moved onto
+            # ConvStem. It is the PRE-MIGRATION value, not a published reference (no paper
+            # citation was found). The norm factory's own default is 1e-6, so leaving it
+            # unstated moved every stem BN by 1000x with no shape symptom. The downsamplers
+            # below still use the bare Keras default. Guard:
+            # tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
+            norm = keras.layers.BatchNormalization(
+                name=f"downsample_{i}_norm", momentum=STEM_BN_MOMENTUM
+            )
             self.downsamplers.append({
-                "depthwise": keras.layers.DepthwiseConv2D(
-                    kernel_size=3, strides=2, padding="same", use_bias=False,
-                    depthwise_initializer=self.kernel_initializer,
-                    depthwise_regularizer=self.kernel_regularizer,
-                    name=f"downsample_{i}_depthwise",
-                ),
-                "bn": keras.layers.BatchNormalization(
-                    name=f"downsample_{i}_bn", momentum=_BN_MOMENTUM
-                ),
+                "depthwise": depthwise,
+                "norm": norm,
                 "pointwise": pointwise,
             })
 
     def _build_head(self) -> None:
-        """Build the pooled-LayerNorm classifier head as a shared ``ClassificationHead``.
+        """Build the pooled-LayerNorm classifier head from :func:`clifford_head_config`.
 
         :return: Nothing.
         :rtype: None
@@ -444,24 +441,11 @@ class HierarchicalCliffordNet(keras.Model):
         """
         self.classification_head = build_model_vision_head(
             VisionTaskType.CLASSIFICATION,
-            {
-                'num_classes': self.num_classes,
-                'use_global_pooling': True,
-                'pooling_type': 'avg',
-                'use_attention': False,
-                'block_dims': (),
-                'pooled_normalization_type': 'layer_norm',
-                'normalization_kwargs': {'epsilon': self.LAYERNORM_EPSILON},
-                'classifier_dropout_rate': self.dropout_rate,
-                'dropout_rate': 0.0,
-                'kernel_initializer': self.kernel_initializer,
-                'bias_initializer': self.bias_initializer,
-                'kernel_regularizer': self.kernel_regularizer,
-                'bias_regularizer': self.bias_regularizer,
-                # Fixed name: an unnamed head gets a counter suffix that differs
-                # after a .keras round trip and breaks by-name weight transfer.
-                'name': 'classification_head',
-            },
+            clifford_head_config(
+                num_classes=self.num_classes,
+                dropout_rate=self.dropout_rate,
+                **self._conv_kwargs(),
+            ),
             self._head_config_overrides,
         )
 
@@ -477,31 +461,16 @@ class HierarchicalCliffordNet(keras.Model):
         return grouped
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the model via a symbolic forward pass.
-
-        A 3-tuple is read as an unbatched shape, with the batch axis prepended.
+        """Materialize every sub-layer from ``input_shape`` by tracing ``call``.
 
         :param input_shape: Input tensor shape ``(B, H, W, C_in)``.
         :return: Nothing.
         :rtype: None
         """
-        if len(input_shape) == 3:
-            build_shape = (None,) + tuple(input_shape)
-        else:
-            build_shape = tuple(input_shape)
-        _ = self.call(keras.KerasTensor(build_shape))
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
         super().build(input_shape)
-
-    def _apply_stem(
-        self, inputs: keras.KerasTensor, training: Optional[bool]
-    ) -> keras.KerasTensor:
-        """Apply the stem via :class:`ConvStem`.
-
-        :param inputs: Raw image batch ``(B, H, W, C_in)``.
-        :param training: Whether in training mode (batch norm).
-        :return: Embedded feature map ``(B, H/p, W/p, stage_dims[0])``.
-        """
-        return self.stem(inputs, training=training)
 
     def _downsample(
         self, index: int, x: keras.KerasTensor, training: Optional[bool]
@@ -515,7 +484,7 @@ class HierarchicalCliffordNet(keras.Model):
         """
         entry = self.downsamplers[index]
         x = entry["depthwise"](x)
-        x = keras.activations.silu(entry["bn"](x, training=training))
+        x = keras.activations.silu(entry["norm"](x, training=training))
         if entry["pointwise"] is not None:
             x = entry["pointwise"](x)
         return x
@@ -532,7 +501,7 @@ class HierarchicalCliffordNet(keras.Model):
         :return: One feature map per stage, taken before that stage's
             downsampler: ``(B, h_i, w_i, stage_dims[i])``.
         """
-        x = self._apply_stem(inputs, training=training)
+        x = self.stem(inputs, training=training)
         features: List[keras.KerasTensor] = []
         for stage, stage_blocks in enumerate(self.stages):
             for entry in stage_blocks:
@@ -583,41 +552,37 @@ class HierarchicalCliffordNet(keras.Model):
     def load_pretrained_weights(
         self, weights_path: str, skip_mismatch: bool = True
     ) -> None:
-        """Load weights from a local ``.keras`` checkpoint into this model.
+        """Load a local ``.keras`` checkpoint into the model, layer by layer.
 
-        Transfers layer by layer through
-        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`.
+        The transfer is
+        :func:`~dl_techniques.utils.weight_transfer.load_pretrained_checkpoint`:
+        it builds the model at :data:`DEFAULT_INPUT_SHAPE` if it is unbuilt and
+        takes a headed checkpoint into a headless model. Every layer outside
+        ``classification_head`` must be restored, so a checkpoint of another
+        width, depth or stem raises and leaves the model untouched. Only a head
+        of another ``num_classes`` is skipped: it keeps its initialization and
+        a warning names it.
 
         :param weights_path: Path to the ``.keras`` weights file.
-        :param skip_mismatch: Skip layers whose shapes differ, which lets a
-            checkpoint with another ``num_classes`` load.
-        :return: Nothing.
-        :rtype: None
+        :param skip_mismatch: ``True`` (default) lets the head differ, which
+            lets a checkpoint with another ``num_classes`` load; ``False``
+            allows no difference anywhere. The inverse of the transfer
+            helper's ``strict``.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
-        :raises ValueError: If the weights cannot be loaded.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
         """
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(f"Weights file not found: {weights_path}")
-        try:
-            report = load_weights_from_checkpoint(
-                target=self,
-                ckpt_path=weights_path,
-                skip_prefixes=(),
-                strict=not skip_mismatch,
-            )
-            logger.info(report.summary_string())
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to load weights from {weights_path}: {exc}"
-            ) from exc
+        load_pretrained_checkpoint(
+            self, weights_path, DEFAULT_INPUT_SHAPE, skip_mismatch
+        )
 
     @classmethod
     def from_variant(
         cls,
         variant: str,
         num_classes: int = 1000,
-        pretrained: Union[bool, str] = False,
         input_shape: Optional[Tuple[int, ...]] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any,
     ) -> "HierarchicalCliffordNet":
         """Create a :class:`HierarchicalCliffordNet` from a predefined variant.
@@ -625,43 +590,54 @@ class HierarchicalCliffordNet(keras.Model):
         :param variant: A key of :attr:`MODEL_VARIANTS`.
         :param num_classes: Number of output classes. Ignored when
             ``include_top=False`` is passed in ``kwargs``.
-        :param pretrained: A local path to a ``.keras`` weights file. ``True``
-            raises, since no checkpoints are hosted.
         :param input_shape: Unbatched ``(H, W, C_in)`` the model is built at.
-            When given the model is always returned built, with or without
-            ``pretrained``, as for ResNet. When ``None`` the model is built
-            only if ``pretrained`` weights are loaded (the loader refuses an
-            unbuilt model), at :data:`DEFAULT_INPUT_SHAPE` ``(32, 32, 3)``, and
-            otherwise stays unbuilt. Weight shapes do not depend on ``H`` and
-            ``W``, only on ``C_in``.
-        :param kwargs: Override any variant default.
+            The constructor takes no ``input_shape``, so unlike ResNet, which
+            only stores it, ``from_variant`` builds the model whenever one is
+            given, with or without ``pretrained``. Without it the model stays
+            unbuilt until its first call or ``build``, and a pretrained load
+            builds it at :data:`DEFAULT_INPUT_SHAPE` ``(32, 32, 3)``. Weight
+            shapes do not depend on ``H`` and ``W``, only on ``C_in``.
+        :param pretrained: A path to a local ``.keras`` weights file, ``True``
+            (raises ``NotImplementedError``, since no checkpoints are hosted)
+            or ``False`` (default, random init).
+        :param kwargs: Passthrough to the constructor; an argument of the
+            variant (e.g. ``stage_depths``) overrides the preset.
         :return: Configured instance.
         :raises ValueError: If ``variant`` is not recognised.
         :raises NotImplementedError: If ``pretrained`` is ``True``.
+        :raises FileNotFoundError: If ``pretrained`` is a path that does not exist.
+
+        Example::
+
+            model = HierarchicalCliffordNet.from_variant("hier_345", num_classes=100)
+            backbone = HierarchicalCliffordNet.from_variant(
+                "hier_345", include_top=False, pretrained="weights.keras"
+            )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
-                f"Unknown variant '{variant}'. "
-                f"Available: {list(cls.MODEL_VARIANTS.keys())}"
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
             )
-        if pretrained is True:
-            raise NotImplementedError(
-                "No public HierarchicalCliffordNet checkpoints are distributed. "
-                "To load local weights, pass `pretrained='/path/to/weights.keras'`."
-            )
+
+        # Raises for True instead of falling back to random init; do not reinstate a warn-and-return branch.
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
+        )
+
         # Deep copy: the table holds lists, and a shallow copy let a mutation of
         # the built model reach the shared table.
         config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
         config.update(kwargs)
 
-        logger.info(f"Creating HierarchicalCliffordNet-{variant}")
         model = cls(num_classes=num_classes, **config)
 
-        if input_shape is not None or isinstance(pretrained, str):
-            model.build((None,) + tuple(input_shape or DEFAULT_INPUT_SHAPE))
+        if input_shape is not None:
+            model.build((None,) + tuple(input_shape))
 
-        if isinstance(pretrained, str):
-            model.load_pretrained_weights(weights_path=pretrained)
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
         return model
 
     def get_config(self) -> Dict[str, Any]:
@@ -684,12 +660,8 @@ class HierarchicalCliffordNet(keras.Model):
                 "stochastic_depth_rate": self.stochastic_depth_rate,
                 "dropout_rate": self.dropout_rate,
                 "use_bias": self.use_bias,
-                "kernel_initializer": keras.initializers.serialize(
-                    self.kernel_initializer
-                ),
-                "bias_initializer": keras.initializers.serialize(
-                    self.bias_initializer
-                ),
+                "kernel_initializer": self.kernel_initializer,
+                "bias_initializer": self.bias_initializer,
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -704,18 +676,20 @@ class HierarchicalCliffordNet(keras.Model):
 
 def create_hierarchical_cliffordnet(
     variant: str = "hier_345",
-    num_classes: int = 100,
+    num_classes: int = 1000,
+    input_shape: Optional[Tuple[int, ...]] = None,
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
-) -> "HierarchicalCliffordNet":
+) -> HierarchicalCliffordNet:
     """Create a HierarchicalCliffordNet from a variant name.
 
     A thin factory that delegates to :meth:`HierarchicalCliffordNet.from_variant`
-    and adds no logic of its own. The model builds on first call, or with
-    ``model.build((None, H, W, C))``.
+    and adds no logic of its own.
 
     :param variant: A key of ``HierarchicalCliffordNet.MODEL_VARIANTS``.
     :param num_classes: Number of output classes.
+    :param input_shape: Unbatched ``(H, W, C_in)`` to build the model at, or
+        ``None`` to leave it unbuilt.
     :param pretrained: A local ``.keras`` weights path, or ``True`` to raise
         ``NotImplementedError`` (no checkpoints are hosted).
     :param kwargs: Forwarded to ``from_variant`` (for example
@@ -723,7 +697,15 @@ def create_hierarchical_cliffordnet(
     :return: A :class:`HierarchicalCliffordNet`.
     :raises ValueError: If ``variant`` is not recognised.
     :raises NotImplementedError: If ``pretrained`` is ``True``.
+
+    Example::
+
+        model = create_hierarchical_cliffordnet("hier_345", num_classes=100)
     """
     return HierarchicalCliffordNet.from_variant(
-        variant, num_classes=num_classes, pretrained=pretrained, **kwargs
+        variant,
+        num_classes=num_classes,
+        input_shape=input_shape,
+        pretrained=pretrained,
+        **kwargs,
     )

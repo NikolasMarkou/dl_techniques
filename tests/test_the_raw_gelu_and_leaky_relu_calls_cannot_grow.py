@@ -57,7 +57,7 @@ RAW_GELU_LEAKY_SITES: Dict[str, int] = {
     "src/train/bfunet/train_unet_denoiser.py": 1,
     # Not enumerated (no registry subject reaches them, D-082); held here.
     "src/dl_techniques/layers/geometric/point_cloud_autoencoder.py": 2,
-    "src/dl_techniques/layers/heads/vlm/factory.py": 1,
+    "src/dl_techniques/layers/heads/vlm/vqa.py": 1,
     "src/dl_techniques/layers/regularization/router.py": 1,
     "src/dl_techniques/layers/transformers/vision_encoder.py": 1,
     "src/dl_techniques/models/graph/graph_energy_transformer/model.py": 1,

@@ -8,6 +8,7 @@ every forward pass, a degenerate (1x1) spatial-extent sweep, dtype-policy arms
 with a float32 control, and XLA-vs-eager agreement.
 """
 
+import json
 import os
 import keras
 import numpy as np
@@ -15,6 +16,8 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
+
+from ...test_models.initializer_replay_oracle import replayed_pairs
 
 # The XLA-vs-eager tolerance below was derived CPU-only; on a TF32-capable GPU
 # the tensor-core matmul path misses it by ~50x (measured, review-iter-1.md
@@ -227,3 +230,41 @@ class TestKerasRoundTripExact:
             rtol=0.0, atol=0.0,
             err_msg="reloaded model is not bit-identical to the original",
         )
+
+
+# ---------------------------------------------------------------------
+# kernel_initializer
+# ---------------------------------------------------------------------
+
+def _convs(layer):
+    return [layer.conv1, layer.conv2, layer.conv3, layer.shortcut_conv]
+
+
+class TestKernelInitializer:
+    def test_the_default_is_he_normal_at_every_convolution(self):
+        layer = BottleneckBlock(filters=8, use_projection=True)
+        layer.build((B, 8, 8, 32))
+        for conv in _convs(layer):
+            assert isinstance(conv.kernel_initializer, keras.initializers.HeNormal)
+        assert layer.get_config()["kernel_initializer"] == "he_normal"
+
+    def test_the_knob_reaches_every_convolution(self):
+        layer = BottleneckBlock(filters=8, use_projection=True, kernel_initializer="lecun_normal")
+        layer.build((B, 8, 8, 32))
+        for conv in _convs(layer):
+            assert isinstance(conv.kernel_initializer, keras.initializers.LecunNormal)
+
+    def test_an_initializer_instance_replays_no_draw_and_the_config_is_json_safe(self):
+        layer = BottleneckBlock(
+            filters=8, use_projection=True, kernel_initializer=keras.initializers.HeNormal()
+        )
+        json.dumps(layer.get_config())
+        layer.build((B, 8, 8, 32))
+        pairs, compared = replayed_pairs(layer)
+        assert compared > 0
+        assert pairs == [], f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
+
+    def test_the_config_round_trips_an_initializer_instance(self):
+        config = BottleneckBlock(filters=8, kernel_initializer=keras.initializers.LecunNormal()).get_config()
+        rebuilt = BottleneckBlock.from_config(json.loads(json.dumps(config)))
+        assert json.loads(json.dumps(rebuilt.get_config())) == json.loads(json.dumps(config))

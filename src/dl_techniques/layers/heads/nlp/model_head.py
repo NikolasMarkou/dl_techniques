@@ -46,7 +46,8 @@ import keras
 # local imports
 # ---------------------------------------------------------------------
 
-from .factory import BaseNLPHead, create_nlp_head
+from .base import BaseNLPHead
+from .factory import create_nlp_head
 from .task_types import NLP_HEAD_DISPATCH, NLPTaskConfig, NLPTaskType
 
 # ---------------------------------------------------------------------

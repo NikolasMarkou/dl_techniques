@@ -205,7 +205,7 @@ class Mamba(keras.Model):
     :vartype final_norm: keras.layers.LayerNormalization
     :ivar task_head: The task head named ``"task_head"``, or None when
         ``include_top`` is False.
-    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.base.BaseNLPHead]
 
     :raises ValueError: If ``vocab_size``, ``d_model`` or ``num_layers`` is not
         positive, if ``include_top=True`` comes without a ``task_config``, or if a

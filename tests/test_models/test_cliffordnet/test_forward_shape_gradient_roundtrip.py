@@ -31,7 +31,7 @@ deletes weight RESTORATION for the blocks. Note that the obvious form of that
 injection is inert: ``CliffordNetBlock`` holds **zero own variables** (all 15 of
 its weights live in sublayers), so stubbing ``load_own_variables`` on the block
 class changes nothing — a vacuous injection that "passes" for the wrong reason.
-Stubbing it on every layer whose path contains ``clifford_block`` is the live
+Stubbing it on every layer whose path contains ``block_`` is the live
 form, and it reproduces the trap's exact signature: **paths equal, param totals
 equal, 18 of 40 weight VALUES wrong, outputs differ.** Every value assertion
 below goes RED under it; the count/path/param assertions stay GREEN, which is

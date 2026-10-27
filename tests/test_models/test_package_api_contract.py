@@ -2764,20 +2764,20 @@ def _sweep_weight_load_handlers(roots=None, src_root=None):
     return sorted(offenders), n_handlers
 
 
-#: The seven handlers that match "logs a weight-load failure and falls through"
+#: The four handlers that match "logs a weight-load failure and falls through"
 #: today, keyed by ``(relpath, enclosing symbol, except-clause source)`` -- NEVER
 #: by line number -- each with the read from D-003 §6 that clears it.
 #:
 #: This is a WAIVER, not a narrowed predicate, and the distinction is the whole
 #: point. Narrowing the predicate to exclude these shapes (e.g. "only bare
 #: ``except Exception`` counts", or "only handlers around ``load_weights``")
-#: would stop matching the moment somebody broadened one of the five narrow
+#: would stop matching the moment somebody broadened one of the three narrow
 #: tuples to ``Exception`` -- which is the ONLY way this defect can appear here,
-#: since all five are currently unreachable precisely because their tuple does
+#: since all three are currently unreachable precisely because their tuple does
 #: not catch the ``NotImplementedError`` their body can raise. A waiver keyed to
 #: the clause TEXT fails loudly on exactly that edit.
 _WEIGHT_LOAD_HANDLER_WAIVERS = {
-    # 1-4: dead by construction. `_download_weights` raises only
+    # 1-3: dead by construction. `_download_weights` raises only
     # NotImplementedError, which `(IOError, OSError, ValueError)` does not catch,
     # so the handler body never runs and the NIE reaches the caller (runtime-proved
     # at D-003 3a: 45/45 sites raise). Each is one broadened `except` away from
@@ -2789,16 +2789,14 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
     # `_download_weights` bare. Re-adding any `except` there makes this sweep
     # report an unwaived R-049 offender, which is this deletion's RED-proof.
     # See decisions.md D-122.
+    # `models/vision/cliffordnet/model.py` was another of the five and is gone the same way: its
+    # `_download_weights` and the download branch of `from_variant` were deleted,
+    # and `pretrained=True` now raises inside `pretrained_path_or_raise`.
     (
         "models/language/bert/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- _download_weights raises only NotImplementedError",
-    (
-        "models/vision/cliffordnet/model.py",
-        "from_variant",
-        "(IOError, OSError, ValueError)",
-    ): "dead handler -- same proof as bert",
     (
         "models/language/tree_transformer/model.py",
         "from_variant",
@@ -4265,8 +4263,9 @@ _CREATE_DELEGATION_WAIVERS = {
     # copy in the factory is the duplicated validation R-051 names by name.
     ("models/vision/mobilenet/mobilenet_v1.py", "create_mobilenetv1"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/vision/mobilenet/mobilenet_v2.py", "create_mobilenetv2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/vision/mobilenet/mobilenet_v3.py", "create_mobilenetv3"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/vision/mobilenet/mobilenet_v4.py", "create_mobilenetv4"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    # `models/vision/mobilenet/mobilenet_v3.py::create_mobilenetv3` and `mobilenet_v4.py::create_mobilenetv4`
+    # were two more of these and are gone the same way as the squeezenet pair: the `if pretrained: raise`
+    # moved into `from_variant` (through `pretrained_path_or_raise`) and each factory is one delegating return.
     ("models/vision/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     # The two `models/vision/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
     # D-129). Their recorded reason -- "duplicated from from_variant" -- was

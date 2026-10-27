@@ -293,7 +293,7 @@ We provide a complete Keras~3 / TensorFlow~2.18 implementation of CliffordNet, i
 \begin{itemize}
   \item \textbf{Serialization}: All layers and models support full round-trip serialization via \texttt{get\_config()} and are decorated with \texttt{@keras.saving.register\_keras\_serializable()}.
   \item \textbf{Backend-agnostic ops}: All tensor operations use \texttt{keras.ops} rather than raw TensorFlow ops, ensuring forward compatibility with JAX and PyTorch backends.
-  \item \textbf{Config-driven construction}: Model variants are instantiated via factory methods (\texttt{CliffordNet.nano()}, \texttt{CliffordNetLM.base()}, etc.) that return fully configured instances.
+  \item \textbf{Config-driven construction}: Model variants are instantiated via factory methods (\texttt{CliffordNet.from\_variant("nano")}, \texttt{CliffordNetLM.base()}, etc.) that return fully configured instances.
   \item \textbf{Test coverage}: Comprehensive pytest suites covering initialization, forward pass, gradient flow, serialization round-trips, causality verification, and numerical stability.
 \end{itemize}
 

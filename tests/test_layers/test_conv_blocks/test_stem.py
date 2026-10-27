@@ -1,20 +1,30 @@
-"""Tests for ConvStem.
+"""Tests for ConvStem: the contract a caller can state through its arguments.
 
 The stem is a configurable Conv -> [norm] -> [activation] (-> second conv ...)
--> [pool] composer. These tests pin what a caller can state through its
-arguments alone: shapes and pool geometry, an absent norm, the norm epsilon,
-bias initializer / regularizer, every accepted activation form and its
-``get_config`` round trip, and a bit-exact ``.keras`` round trip.
+-> [pool] composer. This file pins what the arguments alone decide: weights
+that exist after ``build()``, invalid arguments, shapes and pool geometry, an
+absent norm, the norm epsilon, bias initializer / regularizer, every accepted
+activation form, ``get_config``, gradient flow, a bit-exact ``.keras`` round
+trip and registration. The traced forward (``jit_compile=True`` and an unknown
+batch and spatial size) is compared against the eager one. A stem of ``rank=3``
+is compared with stock ``Conv3D`` / ``MaxPooling3D`` / ``AveragePooling3D`` at
+``atol=0``, and the normalization types that work at rank 3 are pinned as data.
 
-The independent-initializer guard (D-005 of plan-2026-10-26T125959-7af851e5)
-sits at the bottom with a planted positive control: a two-conv stem must not
-hand ONE seedless initializer instance to both kernels, because the second
-kernel would then be the first kernel's draw (``initializers/clone.py``).
+Three claims have a file of their own, because each is a different kind of
+guard:
+
+* ``test_the_stem_follows_its_own_dtype_policy.py`` -- a per-layer ``dtype=``
+  reaches every sub-layer, for every normalization type the factory can build;
+* ``test_a_stem_activation_survives_the_config_round_trip.py`` -- the activation
+  comes back from ``get_config`` as what the caller wrote;
+* ``test_the_two_convs_of_a_stem_draw_independently.py`` -- the second kernel
+  is not the first kernel's draw.
+
+The helpers they share are in ``stem_instruments.py``.
 """
 
 import inspect
 import json
-import os
 
 import keras
 import numpy as np
@@ -23,88 +33,130 @@ import tensorflow as tf
 
 from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.stem import ConvStem
-from dl_techniques.layers.norms.factory import (
-    _TYPE_TO_CLASS, create_normalization_layer)
+from dl_techniques.layers.norms.factory import _TYPE_TO_CLASS
 from tests.norm_epsilon_oracle import collect_norm_epsilons
+from tests.numerics import reassociation_atol
 
-from ...test_models.initializer_replay_oracle import replayed_pairs
+from . import stem_instruments
+from .stem_instruments import (
+    B, EPS32, random_input, randomize_weights, roundtrip_exact, to_numpy)
 
 # The module scopes TF32 off so the exact-equality comparisons below are made
 # in true float32 on a TF32-capable GPU as well as on CPU.
 pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
-B = 2
-EPS32 = float(np.finfo(np.float32).eps)
+# The ``rng`` fixture is owned by ``stem_instruments``; binding it here is what
+# makes pytest find it in this module.
+rng = stem_instruments.rng
 
 
-@pytest.fixture
-def rng():
-    return np.random.default_rng(0)
+# ---------------------------------------------------------------------
+# Weights exist after build() alone
+# ---------------------------------------------------------------------
+
+class TestConvStemWeightsBeforeFirstCall:
+    def test_build_alone_creates_every_weight_with_exact_values(self, rng):
+        layer = ConvStem(filters=6, kernel_size=3, num_convs=2,
+                         kernel_initializer="zeros", name="preweights")
+        layer.build((B, 8, 8, 4))
+        assert layer.built
+        for sub in layer._flatten_layers(include_self=False, recursive=False):
+            assert sub.built, f"{sub.name} was not built by ConvStem.build()"
+        before = [w.path for w in layer.weights]
+        # 2 convs x (kernel, bias) + 2 BN x (gamma, beta, moving mean, moving var)
+        assert len(before) == 12
+
+        np.testing.assert_allclose(to_numpy(layer.conv1.kernel), 0.0, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(to_numpy(layer.conv2.kernel), 0.0, rtol=0.0, atol=0.0)
+        assert layer.conv1.kernel.shape == (3, 3, 4, 6)
+        assert layer.conv2.kernel.shape == (3, 3, 6, 6)
+        for conv in (layer.conv1, layer.conv2):
+            np.testing.assert_allclose(to_numpy(conv.bias), 0.0, rtol=0.0, atol=0.0)
+        for norm in (layer.norm1, layer.norm2):
+            np.testing.assert_allclose(to_numpy(norm.gamma), 1.0, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(norm.beta), 0.0, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(norm.moving_mean), 0.0, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(norm.moving_variance), 1.0, rtol=0.0, atol=0.0)
+
+        layer(random_input(rng, (B, 8, 8, 4)))
+        assert [w.path for w in layer.weights] == before, (
+            "the first call created weights that build() did not")
+
+    def test_sublayers_exist_before_build(self):
+        layer = ConvStem(filters=4, num_convs=2, use_pooling=True)
+        assert not layer.built
+        assert layer.conv1 is not None and layer.conv2 is not None
+        assert layer.norm1 is not None and layer.pool is not None
+        assert not layer.conv1.built
 
 
-def _x(rng, shape=(B, 16, 16, 3)):
-    return rng.standard_normal(shape).astype("float32")
+# ---------------------------------------------------------------------
+# Invalid arguments
+# ---------------------------------------------------------------------
 
+class TestConvStemInvalidArgs:
+    @pytest.mark.parametrize("ctor, message", [
+        (lambda: ConvStem(filters=0), "filters"),
+        (lambda: ConvStem(filters=4, num_convs=3), "num_convs"),
+        (lambda: ConvStem(filters=4, padding="reflect"), "padding must be"),
+        (lambda: ConvStem(filters=4, pool_type="min"), "pool_type must be"),
+        (lambda: ConvStem(filters=4, use_pooling=True, pool_padding="causal"),
+         "pool_padding must be"),
+        (lambda: ConvStem(filters=4, num_convs=2, conv2_filters=0), "conv2_filters"),
+        (lambda: ConvStem(filters=4, normalization_type="not_a_norm"), "not_a_norm"),
+        (lambda: ConvStem(filters=4, activation_type="not_an_activation"),
+         "not_an_activation"),
+        (lambda: ConvStem(filters=4, normalization_type=None,
+                          normalization_kwargs={"epsilon": 1e-3}),
+         "normalization_kwargs"),
+        (lambda: ConvStem(filters=4, normalization_kwargs={"not_a_kwarg": 1}),
+         "not_a_kwarg"),
+    ], ids=[
+        "filters_zero", "num_convs", "padding", "pool_type", "pool_padding",
+        "conv2_filters", "unknown_norm", "unknown_activation",
+        "norm_kwargs_without_norm", "unknown_norm_kwarg",
+    ])
+    def test_invalid_args_raise(self, ctor, message):
+        """The message is matched: ``Layer.__init__`` also raises ``ValueError``
+        for an unrecognised keyword, so a bare ``ValueError`` would pass against
+        a stem that has never heard of the argument."""
+        with pytest.raises(ValueError, match=message):
+            ctor()
 
-def _np(tensor):
-    return keras.ops.convert_to_numpy(tensor)
+    @pytest.mark.parametrize("activation", [
+        "sigmoid", "linear", None, exact_gelu, keras.layers.LeakyReLU(0.1),
+    ], ids=["keras_name", "linear", "none", "callable", "layer"])
+    def test_activation_kwargs_are_refused_off_the_registry(self, activation):
+        """``resolve_activation_layer`` drops kwargs silently off the registry."""
+        with pytest.raises(ValueError, match="activation_kwargs"):
+            ConvStem(filters=4, activation_type=activation,
+                     activation_kwargs={"negative_slope": 0.2})
 
-
-def _randomize(layer, rng):
-    """Give every weight a distinct non-trivial value (BN statistics included).
-
-    A freshly built BatchNormalization is the identity at ``training=False``
-    (moving mean 0, variance 1, gamma 1, beta 0), so a comparison made on it
-    cannot see a lost norm; variance is kept positive.
-    """
-    for weight in layer.weights:
-        values = rng.uniform(0.5, 1.5, size=tuple(weight.shape)).astype("float32")
-        if "moving_variance" not in weight.path and "kernel" not in weight.path:
-            values = values - 1.0
-        weight.assign(values)
-
-
-def _roundtrip_exact(layer, input_shape, data, name, tmp_path):
-    """Save a functional model around ``layer``, reload it, demand bit identity."""
-    inputs = keras.Input(shape=input_shape)
-    model = keras.Model(inputs, layer(inputs))
-    y0 = _np(model(data, training=False))
-    path = os.path.join(tmp_path, f"{name}.keras")
-    model.save(path)
-    loaded = keras.models.load_model(path)
-    original = {w.path: _np(w) for w in model.weights}
-    restored = {w.path: _np(w) for w in loaded.weights}
-    assert set(original) == set(restored)
-    for key in original:
-        np.testing.assert_allclose(
-            original[key], restored[key], rtol=0.0, atol=0.0,
-            err_msg=f"weight {key} changed across the .keras round trip",
-        )
-    y1 = _np(loaded(data, training=False))
-    assert np.isfinite(y1).all()
-    np.testing.assert_allclose(
-        y0, y1, rtol=0.0, atol=0.0,
-        err_msg="reloaded model is not bit-identical to the original",
-    )
-    return loaded
+    def test_an_undeclared_registry_kwarg_is_refused(self):
+        # The match names the factory and the registry key: a bare ValueError
+        # also passes for any other refusal ``Layer.__init__`` raises.
+        with pytest.raises(
+                ValueError, match=r"create_activation_layer\('relu'\).*not_a_kwarg"):
+            ConvStem(filters=4, activation_type="relu",
+                     activation_kwargs={"not_a_kwarg": 1})
 
 
 # ---------------------------------------------------------------------
 # Shapes and pool geometry
 # ---------------------------------------------------------------------
 
-class TestShapes:
+class TestConvStemShapes:
     def test_single_conv_forward_and_shape(self, rng):
         layer = ConvStem(filters=8, kernel_size=3, strides=2, name="single")
-        out = layer(_x(rng))
+        out = layer(random_input(rng))
         assert tuple(out.shape) == (B, 8, 8, 8)
         assert layer.compute_output_shape((B, 16, 16, 3)) == (B, 8, 8, 8)
-        assert np.isfinite(_np(out)).all()
+        assert np.isfinite(to_numpy(out)).all()
 
     def test_two_convs_apply_the_stride_to_each_conv(self, rng):
         layer = ConvStem(filters=8, num_convs=2, conv2_filters=12, strides=2,
                          name="two")
-        out = layer(_x(rng))
+        out = layer(random_input(rng))
         assert tuple(out.shape) == (B, 4, 4, 12)
         assert layer.conv1.filters == 8 and layer.conv2.filters == 12
 
@@ -117,22 +169,39 @@ class TestShapes:
         layer.build((B, 8, 8, 3))
         assert layer.conv1.name == "stem_conv1"
         assert layer.norm1.name == "stem_norm1"
-        assert layer.activation1.name == "stem_act1"
+        assert layer.act1.name == "stem_act1"
         assert layer.conv2.name == "stem_conv2"
         assert layer.norm2.name == "stem_norm2"
-        assert layer.activation2.name == "stem_act2"
+        assert layer.act2.name == "stem_act2"
         assert layer.pool.name == "stem_pool"
+
+    def test_a_stems_attributes_carry_the_names_of_its_layers(self):
+        # Every sub-layer attribute is named after itself under the stem's own
+        # name (``stem.act1`` is ``{name}_act1``), so a weight path and a Python
+        # attribute spell the same word. Two names are used so a hard-coded
+        # prefix cannot pass.
+        for stem_name in ("stem", "patch_embed"):
+            layer = ConvStem(filters=4, num_convs=2, use_pooling=True, name=stem_name)
+            roles = ("conv1", "norm1", "act1", "conv2", "norm2", "act2", "pool")
+            for role in roles:
+                sublayer = getattr(layer, role)
+                assert sublayer.name == f"{stem_name}_{role}", (stem_name, role)
+            held = {
+                attr for attr, value in vars(layer).items()
+                if isinstance(value, keras.layers.Layer)
+            }
+            assert held == set(roles), sorted(held ^ set(roles))
 
     def test_final_activation_false_builds_no_second_activation(self, rng):
         on = ConvStem(filters=6, num_convs=2, final_activation=True)
         off = ConvStem(filters=6, num_convs=2, final_activation=False)
-        assert on.activation2 is not None
-        assert off.activation2 is None
-        assert off.activation1 is not None
-        x = _x(rng, (B, 8, 8, 3))
-        assert float(np.min(_np(on(x)))) >= 0.0
+        assert on.act2 is not None
+        assert off.act2 is None
+        assert off.act1 is not None
+        x = random_input(rng, (B, 8, 8, 3))
+        assert float(np.min(to_numpy(on(x)))) >= 0.0
         # No trailing ReLU: BN output of a random conv has negative entries.
-        assert float(np.min(_np(off(x)))) < 0.0
+        assert float(np.min(to_numpy(off(x)))) < 0.0
 
     def test_resnet_pool_geometry_is_stride_two_same(self, rng):
         """7x7/2 same conv then 3x3/2 same max-pool: 224 -> 112 -> 56."""
@@ -184,8 +253,12 @@ class TestShapes:
     ], ids=["resnet", "squeezenet", "two_conv_pool", "asymmetric"])
     def test_compute_output_shape_matches_the_real_forward(self, kwargs, rng):
         layer = ConvStem(filters=6, **kwargs)
-        out = layer(_x(rng, (B, 32, 32, 3)))
-        assert layer.compute_output_shape((B, 32, 32, 3)) == tuple(out.shape)
+        reported = layer.compute_output_shape((B, 32, 32, 3))
+        # Asking for a shape must not build the layer: Keras calls it on an
+        # unbuilt layer, and a build here would create weights early.
+        assert not layer.built
+        out = layer(random_input(rng, (B, 32, 32, 3)))
+        assert reported == tuple(out.shape)
 
     @pytest.mark.parametrize("input_shape", [
         (None, None, None, 3), (None, 224, 224, 3), (None, None, 64, 3)])
@@ -194,65 +267,19 @@ class TestShapes:
             filters=16, kernel_size=7, strides=2, padding="same",
             use_pooling=True, pool_size=3, pool_strides=2, pool_padding="same",
         )
+        assert not layer.built
         got = layer.compute_output_shape(input_shape)
+        assert not layer.built
         expected = tuple(
             None if d is None else (d + 3) // 4 for d in input_shape[1:3])
         assert got == (None,) + expected + (16,)
 
 
 # ---------------------------------------------------------------------
-# Invalid arguments
-# ---------------------------------------------------------------------
-
-class TestInvalidArgs:
-    @pytest.mark.parametrize("ctor, message", [
-        (lambda: ConvStem(filters=0), "filters"),
-        (lambda: ConvStem(filters=4, num_convs=3), "num_convs"),
-        (lambda: ConvStem(filters=4, padding="reflect"), "padding must be"),
-        (lambda: ConvStem(filters=4, pool_type="min"), "pool_type must be"),
-        (lambda: ConvStem(filters=4, use_pooling=True, pool_padding="causal"),
-         "pool_padding must be"),
-        (lambda: ConvStem(filters=4, num_convs=2, conv2_filters=0), "conv2_filters"),
-        (lambda: ConvStem(filters=4, normalization_type="not_a_norm"), "not_a_norm"),
-        (lambda: ConvStem(filters=4, activation_type="not_an_activation"),
-         "not_an_activation"),
-        (lambda: ConvStem(filters=4, normalization_type=None,
-                          normalization_kwargs={"epsilon": 1e-3}),
-         "normalization_kwargs"),
-        (lambda: ConvStem(filters=4, normalization_kwargs={"not_a_kwarg": 1}),
-         "not_a_kwarg"),
-    ], ids=[
-        "filters_zero", "num_convs", "padding", "pool_type", "pool_padding",
-        "conv2_filters", "unknown_norm", "unknown_activation",
-        "norm_kwargs_without_norm", "unknown_norm_kwarg",
-    ])
-    def test_invalid_args_raise(self, ctor, message):
-        """The message is matched: ``Layer.__init__`` also raises ``ValueError``
-        for an unrecognised keyword, so a bare ``ValueError`` would pass against
-        a stem that has never heard of the argument."""
-        with pytest.raises(ValueError, match=message):
-            ctor()
-
-    @pytest.mark.parametrize("activation", [
-        "sigmoid", "linear", None, exact_gelu, keras.layers.LeakyReLU(0.1),
-    ], ids=["keras_name", "linear", "none", "callable", "layer"])
-    def test_activation_kwargs_are_refused_off_the_registry(self, activation):
-        """``resolve_activation_layer`` drops kwargs silently off the registry."""
-        with pytest.raises(ValueError, match="activation_kwargs"):
-            ConvStem(filters=4, activation_type=activation,
-                     activation_kwargs={"negative_slope": 0.2})
-
-    def test_an_undeclared_registry_kwarg_is_refused(self):
-        with pytest.raises(ValueError):
-            ConvStem(filters=4, activation_type="relu",
-                     activation_kwargs={"not_a_kwarg": 1})
-
-
-# ---------------------------------------------------------------------
 # normalization_type=None
 # ---------------------------------------------------------------------
 
-class TestNoNormalization:
+class TestConvStemNoNormalization:
     def test_no_norm_layer_and_no_norm_weights(self):
         layer = ConvStem(filters=6, num_convs=2, normalization_type=None)
         layer.build((B, 8, 8, 3))
@@ -266,18 +293,18 @@ class TestNoNormalization:
 
     def test_forward_is_conv_then_activation(self, rng):
         layer = ConvStem(filters=6, normalization_type=None, activation_type="relu")
-        x = _x(rng, (B, 8, 8, 3))
-        out = _np(layer(x))
-        expected = np.maximum(_np(layer.conv1(x)), 0.0)
+        x = random_input(rng, (B, 8, 8, 3))
+        out = to_numpy(layer(x))
+        expected = np.maximum(to_numpy(layer.conv1(x)), 0.0)
         np.testing.assert_allclose(out, expected, rtol=0.0, atol=0.0)
 
     def test_two_conv_forward_without_norm(self, rng):
         layer = ConvStem(filters=6, num_convs=2, normalization_type=None,
                          activation_type="relu")
-        x = _x(rng, (B, 8, 8, 3))
-        out = _np(layer(x))
-        mid = np.maximum(_np(layer.conv1(x)), 0.0)
-        expected = np.maximum(_np(layer.conv2(mid)), 0.0)
+        x = random_input(rng, (B, 8, 8, 3))
+        out = to_numpy(layer(x))
+        mid = np.maximum(to_numpy(layer.conv1(x)), 0.0)
+        expected = np.maximum(to_numpy(layer.conv2(mid)), 0.0)
         np.testing.assert_allclose(out, expected, rtol=0.0, atol=0.0)
 
     def test_the_config_round_trips_a_missing_norm(self):
@@ -292,7 +319,7 @@ class TestNoNormalization:
 # Normalization epsilon and the training flag
 # ---------------------------------------------------------------------
 
-class TestNormalization:
+class TestConvStemNormalization:
     def test_default_epsilon_is_the_factorys(self):
         layer = ConvStem(filters=4, num_convs=2)
         assert [e for _, _, e in collect_norm_epsilons([layer])] == [1e-6, 1e-6]
@@ -314,15 +341,15 @@ class TestNormalization:
     def test_training_reaches_every_batch_norm(self, rng):
         layer = ConvStem(filters=4, num_convs=2,
                          normalization_kwargs={"momentum": 0.5})
-        x = _x(rng, (B, 8, 8, 3))
+        x = random_input(rng, (B, 8, 8, 3))
         layer(x, training=False)
-        before = [_np(n.moving_mean).copy() for n in (layer.norm1, layer.norm2)]
+        before = [to_numpy(n.moving_mean).copy() for n in (layer.norm1, layer.norm2)]
         layer(x, training=False)
         for norm, old in zip((layer.norm1, layer.norm2), before):
-            np.testing.assert_allclose(_np(norm.moving_mean), old, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(norm.moving_mean), old, rtol=0.0, atol=0.0)
         layer(x, training=True)
         for norm, old in zip((layer.norm1, layer.norm2), before):
-            assert np.max(np.abs(_np(norm.moving_mean) - old)) > 1e-4, (
+            assert np.max(np.abs(to_numpy(norm.moving_mean) - old)) > 1e-4, (
                 f"{norm.name} statistics did not move under training=True")
 
 
@@ -330,27 +357,27 @@ class TestNormalization:
 # Bias initializer / regularizer
 # ---------------------------------------------------------------------
 
-class TestBias:
+class TestConvStemBias:
     def test_default_bias_is_zeros(self):
         layer = ConvStem(filters=4, num_convs=2)
         layer.build((B, 8, 8, 3))
         for conv in (layer.conv1, layer.conv2):
-            np.testing.assert_allclose(_np(conv.bias), 0.0, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(conv.bias), 0.0, rtol=0.0, atol=0.0)
 
     def test_bias_initializer_reaches_both_convs(self):
         layer = ConvStem(filters=4, num_convs=2, bias_initializer="ones")
         layer.build((B, 8, 8, 3))
         for conv in (layer.conv1, layer.conv2):
-            np.testing.assert_allclose(_np(conv.bias), 1.0, rtol=0.0, atol=0.0)
+            np.testing.assert_allclose(to_numpy(conv.bias), 1.0, rtol=0.0, atol=0.0)
 
     def test_bias_regularizer_reaches_both_convs_and_is_summed_into_losses(self, rng):
         layer = ConvStem(filters=4, num_convs=2, bias_initializer="ones",
                          bias_regularizer=keras.regularizers.L2(0.5))
-        layer(_x(rng, (B, 8, 8, 3)))
+        layer(random_input(rng, (B, 8, 8, 3)))
         for conv in (layer.conv1, layer.conv2):
             assert isinstance(conv.bias.regularizer, keras.regularizers.L2)
         # L2(0.5) of a length-4 ones vector is 0.5 * 4 = 2.0, once per conv.
-        total = float(sum(_np(loss) for loss in layer.losses))
+        total = float(sum(to_numpy(loss) for loss in layer.losses))
         np.testing.assert_allclose(total, 4.0, rtol=0.0, atol=1e-6)
 
     def test_kernel_regularizer_reaches_both_convs(self):
@@ -369,7 +396,7 @@ class TestBias:
         assert config["bias_regularizer"]["class_name"] == "L2"
         rebuilt = ConvStem.from_config(config)
         rebuilt.build((B, 8, 8, 3))
-        np.testing.assert_allclose(_np(rebuilt.conv2.bias), 1.0, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(to_numpy(rebuilt.conv2.bias), 1.0, rtol=0.0, atol=0.0)
         assert float(rebuilt.conv1.bias.regularizer.l2) == 0.25
         assert float(rebuilt.conv1.kernel.regularizer.l1) == 0.125
 
@@ -388,17 +415,17 @@ def _leaky(x, slope):
     return np.where(x >= 0.0, x, slope * x)
 
 
-class TestActivationForms:
+class TestConvStemActivationForms:
     """Every accepted spelling builds, computes the right function and serializes."""
 
     @staticmethod
     def _run(activation, rng, **kwargs):
         layer = ConvStem(filters=6, normalization_type=None,
                          activation_type=activation, **kwargs)
-        x = _x(rng, (B, 8, 8, 3))
+        x = random_input(rng, (B, 8, 8, 3))
         layer.build(x.shape)  # a sub-layer called before the stem is built cannot be built again
-        pre = _np(layer.conv1(x))
-        return layer, pre, _np(layer(x))
+        pre = to_numpy(layer.conv1(x))
+        return layer, pre, to_numpy(layer(x))
 
     def test_registry_key_with_kwargs(self, rng):
         layer, pre, out = self._run("relu", rng, activation_kwargs={"negative_slope": 0.25})
@@ -413,7 +440,7 @@ class TestActivationForms:
     ])
     def test_string_names(self, name, reference, rng):
         layer, pre, out = self._run(name, rng)
-        assert layer.activation1 is not None
+        assert layer.act1 is not None
         np.testing.assert_allclose(out, reference(pre), rtol=0.0, atol=4 * EPS32)
 
     @pytest.mark.parametrize("name", ["gelu", "silu", "hard_swish"])
@@ -425,12 +452,12 @@ class TestActivationForms:
             "hard_swish": keras.activations.hard_swish,
         }[name](tf.constant(pre))
         peak = max(1.0, float(np.max(np.abs(pre))))
-        np.testing.assert_allclose(out, _np(reference), rtol=0.0, atol=8 * EPS32 * peak)
+        np.testing.assert_allclose(out, to_numpy(reference), rtol=0.0, atol=8 * EPS32 * peak)
 
     def test_callable_is_applied(self, rng):
         layer, pre, out = self._run(exact_gelu, rng)
         np.testing.assert_allclose(
-            out, _np(exact_gelu(tf.constant(pre))), rtol=0.0, atol=0.0)
+            out, to_numpy(exact_gelu(tf.constant(pre))), rtol=0.0, atol=0.0)
 
     def test_layer_instance_is_applied(self, rng):
         layer, pre, out = self._run(keras.layers.LeakyReLU(0.1), rng)
@@ -447,7 +474,7 @@ class TestActivationForms:
         """Two sites sharing one PReLU would share one ``alpha``."""
         layer = ConvStem(filters=6, num_convs=2, activation_type=keras.layers.PReLU())
         layer.build((B, 8, 8, 3))
-        assert layer.activation1 is not layer.activation2
+        assert layer.act1 is not layer.act2
         alphas = [w for w in layer.weights if "alpha" in w.path]
         assert len(alphas) == 2
 
@@ -455,11 +482,11 @@ class TestActivationForms:
     def test_linear_and_none_build_no_activation(self, activation, rng):
         layer = ConvStem(filters=6, num_convs=2, normalization_type=None,
                          activation_type=activation)
-        assert layer.activation1 is None and layer.activation2 is None
-        x = _x(rng, (B, 8, 8, 3))
-        out = _np(layer(x))
+        assert layer.act1 is None and layer.act2 is None
+        x = random_input(rng, (B, 8, 8, 3))
+        out = to_numpy(layer(x))
         np.testing.assert_allclose(
-            out, _np(layer.conv2(layer.conv1(x))), rtol=0.0, atol=0.0)
+            out, to_numpy(layer.conv2(layer.conv1(x))), rtol=0.0, atol=0.0)
 
 
 # ---------------------------------------------------------------------
@@ -476,7 +503,7 @@ _ACTIVATIONS = [
 ]
 
 
-class TestGetConfig:
+class TestConvStemGetConfig:
     @pytest.mark.parametrize("activation", _ACTIVATIONS)
     def test_config_is_json_serializable_and_round_trips(self, activation, rng):
         layer = ConvStem(
@@ -492,18 +519,18 @@ class TestGetConfig:
         rebuilt = ConvStem.from_config(config)
         assert json.dumps(rebuilt.get_config(), sort_keys=True) == json.dumps(
             layer.get_config(), sort_keys=True)
-        x = _x(rng, (B, 16, 16, 3))
+        x = random_input(rng, (B, 16, 16, 3))
         layer.build(x.shape)
         rebuilt.build(x.shape)
         rebuilt.set_weights(layer.get_weights())
         np.testing.assert_allclose(
-            _np(rebuilt(x)), _np(layer(x)), rtol=0.0, atol=4 * EPS32)
+            to_numpy(rebuilt(x)), to_numpy(layer(x)), rtol=0.0, atol=4 * EPS32)
 
     def test_the_activation_serializes_to_the_documented_form(self):
         assert ConvStem(filters=4, activation_type="relu").get_config()[
             "activation_type"] == "relu"
         # An exact callable is written as the registered function, NOT as the
-        # stock name (review concern 7; see TestAnExactActivationSurvives...).
+        # stock name (``test_a_stem_activation_survives_the_config_round_trip.py``).
         exact_config = ConvStem(filters=4, activation_type=exact_gelu).get_config()[
             "activation_type"]
         assert exact_config["class_name"] == "function"
@@ -520,10 +547,10 @@ class TestGetConfig:
         layer = ConvStem(filters=4, normalization_type=None,
                          activation_type=keras.layers.LeakyReLU(0.3))
         rebuilt = ConvStem.from_config(json.loads(json.dumps(layer.get_config())))
-        x = _x(rng, (B, 8, 8, 3))
+        x = random_input(rng, (B, 8, 8, 3))
         rebuilt.build(x.shape)
-        pre = _np(rebuilt.conv1(x))
-        np.testing.assert_allclose(_np(rebuilt(x)), _leaky(pre, 0.3), rtol=0.0, atol=EPS32)
+        pre = to_numpy(rebuilt.conv1(x))
+        np.testing.assert_allclose(to_numpy(rebuilt(x)), _leaky(pre, 0.3), rtol=0.0, atol=EPS32)
 
     def test_every_constructor_argument_is_in_the_config(self):
         params = set(inspect.signature(ConvStem.__init__).parameters)
@@ -542,50 +569,10 @@ class TestGetConfig:
 
 
 # ---------------------------------------------------------------------
-# Weights exist after build() alone
-# ---------------------------------------------------------------------
-
-class TestWeightsBeforeFirstCall:
-    def test_build_alone_creates_every_weight_with_exact_values(self, rng):
-        layer = ConvStem(filters=6, kernel_size=3, num_convs=2,
-                         kernel_initializer="zeros", name="preweights")
-        layer.build((B, 8, 8, 4))
-        assert layer.built
-        for sub in layer._flatten_layers(include_self=False, recursive=False):
-            assert sub.built, f"{sub.name} was not built by ConvStem.build()"
-        before = [w.path for w in layer.weights]
-        # 2 convs x (kernel, bias) + 2 BN x (gamma, beta, moving mean, moving var)
-        assert len(before) == 12
-
-        np.testing.assert_allclose(_np(layer.conv1.kernel), 0.0, rtol=0.0, atol=0.0)
-        np.testing.assert_allclose(_np(layer.conv2.kernel), 0.0, rtol=0.0, atol=0.0)
-        assert layer.conv1.kernel.shape == (3, 3, 4, 6)
-        assert layer.conv2.kernel.shape == (3, 3, 6, 6)
-        for conv in (layer.conv1, layer.conv2):
-            np.testing.assert_allclose(_np(conv.bias), 0.0, rtol=0.0, atol=0.0)
-        for norm in (layer.norm1, layer.norm2):
-            np.testing.assert_allclose(_np(norm.gamma), 1.0, rtol=0.0, atol=0.0)
-            np.testing.assert_allclose(_np(norm.beta), 0.0, rtol=0.0, atol=0.0)
-            np.testing.assert_allclose(_np(norm.moving_mean), 0.0, rtol=0.0, atol=0.0)
-            np.testing.assert_allclose(_np(norm.moving_variance), 1.0, rtol=0.0, atol=0.0)
-
-        layer(_x(rng, (B, 8, 8, 4)))
-        assert [w.path for w in layer.weights] == before, (
-            "the first call created weights that build() did not")
-
-    def test_sublayers_exist_before_build(self):
-        layer = ConvStem(filters=4, num_convs=2, use_pooling=True)
-        assert not layer.built
-        assert layer.conv1 is not None and layer.conv2 is not None
-        assert layer.norm1 is not None and layer.pool is not None
-        assert not layer.conv1.built
-
-
-# ---------------------------------------------------------------------
 # Gradient flow
 # ---------------------------------------------------------------------
 
-class TestGradientFlow:
+class TestConvStemGradientFlow:
     @pytest.mark.parametrize("kwargs", [
         # A bias in front of a training-mode BatchNorm has an identically zero
         # gradient (the batch mean absorbs it), so the BN arm drops the bias.
@@ -595,7 +582,7 @@ class TestGradientFlow:
     def test_every_trainable_weight_receives_a_gradient(self, kwargs, rng):
         layer = ConvStem(filters=6, num_convs=2, use_pooling=True, pool_size=2,
                          **kwargs)
-        x = tf.constant(_x(rng, (B, 8, 8, 3)))
+        x = tf.constant(random_input(rng, (B, 8, 8, 3)))
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
             loss = keras.ops.mean(keras.ops.square(y))
@@ -603,32 +590,119 @@ class TestGradientFlow:
         assert len(layer.trainable_weights) > 0
         for weight, grad in zip(layer.trainable_weights, grads):
             assert grad is not None, f"{weight.path} received no gradient"
-            grad_np = _np(grad)
+            grad_np = to_numpy(grad)
             assert np.isfinite(grad_np).all(), f"{weight.path} gradient non-finite"
             assert np.max(np.abs(grad_np)) > 0.0, f"{weight.path} gradient is zero"
 
 
 # ---------------------------------------------------------------------
-# dtype policy
+# The traced forward is the eager forward
 # ---------------------------------------------------------------------
 
-class TestDtypePolicy:
-    def test_forward_pass_is_finite_under_every_policy(self, dtype_policy, rng):
-        layer = ConvStem(filters=6, num_convs=2, use_pooling=True, pool_size=3,
-                         pool_strides=2, pool_padding="same",
-                         name=f"dtype_{dtype_policy}")
-        out = layer(_x(rng, (B, 8, 8, 4)), training=False)
-        assert np.isfinite(_np(out).astype("float64")).all()
-        mixed = dtype_policy == "mixed_float16"
-        assert (layer.compute_dtype != layer.variable_dtype) == mixed
-        assert keras.backend.standardize_dtype(out.dtype) == layer.compute_dtype
+# One stem per branch of ``call`` that changes the graph: no pool, a pool, and
+# two convs with a pool.
+_TRACED_STEMS = {
+    "unpooled": dict(filters=8, kernel_size=3, strides=2),
+    "pooled": dict(filters=8, kernel_size=7, strides=2, padding="same",
+                   use_pooling=True, pool_size=3, pool_strides=2,
+                   pool_padding="same"),
+    "two_conv_pooled": dict(filters=8, num_convs=2, conv2_filters=12,
+                            kernel_size=3, strides=1, padding="same",
+                            use_pooling=True, pool_size=2),
+}
+
+
+def _randomized_stem(config, rng, input_shape):
+    """A built stem whose every weight (BN statistics included) is non-trivial."""
+    layer = ConvStem(name="traced", **config)
+    layer.build(input_shape)
+    randomize_weights(layer, rng)
+    return layer
+
+
+def _contraction_lengths(layer):
+    """Length of each convolution's reduction: ``kh * kw * in_channels``."""
+    return [int(np.prod(conv.kernel.shape[:-1]))
+            for conv in (layer.conv1, layer.conv2) if conv is not None]
+
+
+class TestConvStemTracedForward:
+    """``fit()`` runs a traced graph, and ``call`` must not need eager values.
+
+    A ``.numpy()`` or a Python branch on a tensor value inside ``call`` is
+    correct in the notebook and fails here: ``jit_compile=True`` lowers the
+    graph through XLA, and a ``TensorSpec`` with unknown batch and spatial
+    sizes traces it without any concrete shape.
+
+    The bound for both arms is ``tests.numerics.reassociation_atol`` over the
+    stem's own convolution lengths (batch norm at inference adds no reduction).
+    Measured on CPU with TF32 off, over 8 seeds per stem, ``max|eager - xla|``
+    is 4.8e-07 to 9.5e-07 for ``unpooled`` (bound 1.9e-05 to 3.1e-05), 9.5e-07 to
+    2.9e-06 for ``pooled`` (bound 9.3e-05 to 1.9e-04) and 3.8e-06 to 1.1e-05 for
+    ``two_conv_pooled`` (bound 2.5e-04 to 4.4e-04): the bound sits 19x to 50x
+    above the noise it models. The unknown-size trace (no XLA) was bit-identical
+    to eager in every one of 48 comparisons, so its bound is a device margin,
+    not a measured need. The planted control shows the comparison sees a 1e-3
+    error in every kernel entry.
+    """
+
+    @pytest.mark.parametrize("name", sorted(_TRACED_STEMS))
+    def test_the_jit_compiled_forward_matches_the_eager_one(self, name, rng):
+        x = random_input(rng, (B, 32, 32, 3))
+        layer = _randomized_stem(_TRACED_STEMS[name], rng, x.shape)
+        eager = to_numpy(layer(x, training=False))
+        compiled = tf.function(
+            lambda t: layer(t, training=False), jit_compile=True)
+        traced = to_numpy(compiled(tf.constant(x)))
+        assert traced.shape == eager.shape
+        assert np.isfinite(traced).all()
+        bound = reassociation_atol(
+            _contraction_lengths(layer), 1, float(np.max(np.abs(eager))))
+        np.testing.assert_allclose(traced, eager, rtol=0.0, atol=bound)
+
+    def test_the_jit_bound_is_far_below_a_real_weight_error(self, rng):
+        """Control: the same comparison sees a 1e-3 error in every kernel entry."""
+        x = random_input(rng, (B, 32, 32, 3))
+        config = _TRACED_STEMS["unpooled"]
+        layer = _randomized_stem(config, rng, x.shape)
+        twin = ConvStem(name="traced_twin", **config)
+        twin.build(x.shape)
+        twin.set_weights(layer.get_weights())
+        twin.conv1.kernel.assign(twin.conv1.kernel + 1e-3)
+        eager = to_numpy(layer(x, training=False))
+        compiled = tf.function(
+            lambda t: twin(t, training=False), jit_compile=True)
+        gap = float(np.max(np.abs(to_numpy(compiled(tf.constant(x))) - eager)))
+        bound = reassociation_atol(
+            _contraction_lengths(layer), 1, float(np.max(np.abs(eager))))
+        assert gap > 10.0 * bound, (gap, bound)
+
+    @pytest.mark.parametrize("name", sorted(_TRACED_STEMS))
+    def test_a_trace_with_unknown_batch_and_spatial_size_runs_at_any_size(
+            self, name, rng):
+        layer = _randomized_stem(
+            _TRACED_STEMS[name], rng, (None, None, None, 3))
+        forward = tf.function(
+            lambda t: layer(t, training=False),
+            input_signature=[tf.TensorSpec([None, None, None, 3], "float32")])
+        concrete = forward.get_concrete_function()
+        assert tuple(concrete.output_shapes.as_list()) == layer.compute_output_shape(
+            (None, None, None, 3))
+        for shape in ((B, 32, 32, 3), (3, 40, 56, 3)):
+            x = random_input(rng, shape)
+            eager = to_numpy(layer(x, training=False))
+            traced = to_numpy(forward(tf.constant(x)))
+            assert traced.shape == eager.shape
+            bound = reassociation_atol(
+                _contraction_lengths(layer), 1, float(np.max(np.abs(eager))))
+            np.testing.assert_allclose(traced, eager, rtol=0.0, atol=bound)
 
 
 # ---------------------------------------------------------------------
 # .keras round trip at rtol=0
 # ---------------------------------------------------------------------
 
-class TestKerasRoundTripExact:
+class TestConvStemKerasRoundTripExact:
     @pytest.mark.parametrize("kwargs", [
         dict(),
         dict(kernel_size=7, strides=2, use_pooling=True, pool_size=3,
@@ -642,10 +716,10 @@ class TestKerasRoundTripExact:
             "no_norm_linear"])
     def test_round_trip_is_bit_identical(self, kwargs, tmp_path, rng):
         layer = ConvStem(filters=6, name="exact_rt", **kwargs)
-        x = _x(rng, (B, 16, 16, 3))
+        x = random_input(rng, (B, 16, 16, 3))
         layer.build(x.shape)
-        _randomize(layer, rng)
-        loaded = _roundtrip_exact(layer, (16, 16, 3), x, "exact_rt", tmp_path)
+        randomize_weights(layer, rng)
+        loaded = roundtrip_exact(layer, (16, 16, 3), x, "exact_rt", tmp_path)
         reloaded_stem = [
             m for m in loaded.layers if isinstance(m, ConvStem)][0]
         assert json.dumps(reloaded_stem.get_config(), sort_keys=True) == json.dumps(
@@ -653,10 +727,281 @@ class TestKerasRoundTripExact:
 
 
 # ---------------------------------------------------------------------
+# rank=3: the same stem over (B, D, H, W, C)
+# ---------------------------------------------------------------------
+
+_X3_SHAPE = (B, 8, 12, 12, 2)
+
+
+def _stock_rank_three_forward(kwargs, stem, x, training):
+    """The stem's computation written with stock Keras 3D layers, weights copied.
+
+    The oracle reads the same constructor arguments the stem was given and
+    rebuilds Conv3D, BatchNormalization (the factory's epsilon, 1e-6), ReLU
+    and the 3D pool from ``keras.layers`` directly, so nothing in it comes from
+    ``ConvStem``. The weights are copied out of ``stem`` first: a call with
+    ``training=True`` moves the batch-norm statistics.
+    """
+    conv = keras.layers.Conv3D(
+        kwargs["filters"], kwargs.get("kernel_size", 3),
+        strides=kwargs.get("strides", 1), padding=kwargs.get("padding", "same"))
+    conv.build(x.shape)
+    conv.set_weights(stem.conv1.get_weights())
+    h = conv(x)
+    if kwargs.get("normalization_type", "batch_norm") is not None:
+        norm = keras.layers.BatchNormalization(epsilon=1e-6)
+        norm.build(h.shape)
+        norm.set_weights(stem.norm1.get_weights())
+        h = norm(h, training=training)
+    h = keras.ops.relu(h)
+    if kwargs.get("use_pooling"):
+        pool_cls = (keras.layers.MaxPooling3D if kwargs["pool_type"] == "max"
+                    else keras.layers.AveragePooling3D)
+        h = pool_cls(
+            kwargs["pool_size"], strides=kwargs.get("pool_strides"),
+            padding=kwargs.get("pool_padding", "valid"))(h)
+    return h
+
+
+def _assert_rank_three_matches_stock(stem_cls, kwargs, rng):
+    """Build ``stem_cls(rank=3, **kwargs)`` and demand it equals the stock 3D layers."""
+    stem = stem_cls(filters=kwargs["filters"], rank=3, name="rank3",
+                    **{k: v for k, v in kwargs.items() if k != "filters"})
+    x = random_input(rng, _X3_SHAPE)
+    stem.build(x.shape)
+    randomize_weights(stem, rng)
+    assert type(stem.conv1) is keras.layers.Conv3D
+    if kwargs.get("use_pooling"):
+        assert type(stem.pool) is (
+            keras.layers.MaxPooling3D if kwargs["pool_type"] == "max"
+            else keras.layers.AveragePooling3D)
+    for training in (False, True):
+        expected = to_numpy(_stock_rank_three_forward(kwargs, stem, x, training))
+        got = to_numpy(stem(x, training=training))
+        assert got.ndim == 5
+        np.testing.assert_allclose(
+            got, expected, rtol=0.0, atol=0.0,
+            err_msg=f"rank-3 stem differs from stock 3D layers (training={training})")
+    return stem
+
+
+_RANK_THREE_CASES = {
+    "conv_only": dict(filters=6, normalization_type=None),
+    "conv_norm": dict(filters=6),
+    "conv_norm_max_pool": dict(filters=6, use_pooling=True, pool_type="max",
+                               pool_size=2),
+    "conv_norm_avg_pool": dict(filters=6, use_pooling=True, pool_type="avg",
+                               pool_size=2),
+    "conv_max_pool": dict(filters=6, normalization_type=None, use_pooling=True,
+                          pool_type="max", pool_size=2),
+    "strided_valid_asymmetric_pool": dict(
+        filters=6, kernel_size=(3, 3, 1), strides=(1, 2, 2), padding="valid",
+        use_pooling=True, pool_type="avg", pool_size=(1, 2, 2),
+        pool_strides=(1, 1, 1), pool_padding="same"),
+}
+
+
+class TestConvStemRankThree:
+    @pytest.mark.parametrize("name", sorted(_RANK_THREE_CASES))
+    def test_the_forward_equals_the_stock_3d_layers_exactly(self, name, rng):
+        _assert_rank_three_matches_stock(ConvStem, _RANK_THREE_CASES[name], rng)
+
+    def test_a_stem_that_ignores_rank_fails_the_3d_case(self, rng):
+        """Planted control: the oracle comparison is able to fail."""
+
+        class RankIgnoringStem(ConvStem):
+            def __init__(self, *args, rank=3, **kwargs):
+                super().__init__(*args, rank=2, **kwargs)
+
+        # A rank-2 stem fails in one of two places: Keras refuses the 5-D input
+        # when it builds Conv2D, or the class assertions in the helper catch it.
+        with pytest.raises((AssertionError, ValueError)):
+            _assert_rank_three_matches_stock(
+                RankIgnoringStem, _RANK_THREE_CASES["conv_norm_max_pool"], rng)
+
+    def test_rank_two_is_the_default_and_builds_2d_layers(self):
+        layer = ConvStem(filters=4, use_pooling=True)
+        assert layer.rank == 2
+        assert type(layer.conv1) is keras.layers.Conv2D
+        assert type(layer.pool) is keras.layers.MaxPooling2D
+
+    def test_a_two_conv_stem_builds_two_3d_convs(self, rng):
+        layer = ConvStem(filters=4, conv2_filters=6, rank=3, num_convs=2,
+                         use_pooling=True, pool_type="avg", name="two3")
+        out = layer(random_input(rng, _X3_SHAPE))
+        assert type(layer.conv2) is keras.layers.Conv3D
+        assert type(layer.pool) is keras.layers.AveragePooling3D
+        assert tuple(out.shape) == (B, 4, 6, 6, 6)
+
+    @pytest.mark.parametrize("rank", [1, 4, 0, "3"])
+    def test_a_rank_other_than_two_or_three_is_refused_naming_the_value(self, rank):
+        with pytest.raises(ValueError, match=rf"rank must be .*, got {rank}"):
+            ConvStem(filters=4, rank=rank)
+
+    @pytest.mark.parametrize("kwargs, argument", [
+        (dict(rank=3, kernel_size=(3, 3)), "kernel_size"),
+        (dict(rank=2, kernel_size=(3, 3, 3)), "kernel_size"),
+        (dict(rank=3, strides=(2, 2)), "strides"),
+        (dict(rank=3, use_pooling=True, pool_size=(2, 2)), "pool_size"),
+        (dict(rank=3, use_pooling=True, pool_strides=(2, 2)), "strides"),
+    ], ids=["kernel_rank3", "kernel_rank2", "strides", "pool_size", "pool_strides"])
+    def test_a_tuple_whose_length_is_not_the_rank_is_refused(self, kwargs, argument):
+        with pytest.raises(ValueError, match=argument):
+            ConvStem(filters=4, **kwargs)
+
+    def test_an_int_expands_to_every_spatial_dimension(self):
+        layer = ConvStem(filters=4, rank=3, kernel_size=5, strides=2,
+                         use_pooling=True, pool_size=3)
+        assert layer.conv1.kernel_size == (5, 5, 5)
+        assert layer.conv1.strides == (2, 2, 2)
+        assert layer.pool.pool_size == (3, 3, 3)
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(kernel_size=3, strides=2, padding="same"),
+        dict(kernel_size=3, strides=1, padding="valid", use_pooling=True,
+             pool_size=2),
+        dict(kernel_size=(3, 5, 1), strides=(1, 2, 1), padding="valid",
+             num_convs=2),
+    ], ids=["same", "valid_pool", "asymmetric_two_conv"])
+    def test_compute_output_shape_of_an_unbuilt_stem_matches_the_forward(
+            self, kwargs, rng):
+        layer = ConvStem(filters=6, rank=3, **kwargs)
+        assert not layer.built
+        reported = layer.compute_output_shape(_X3_SHAPE)
+        assert not layer.built
+        out = layer(random_input(rng, _X3_SHAPE))
+        assert reported == tuple(out.shape)
+
+    def test_unknown_spatial_dims_pass_through_compute_output_shape(self):
+        layer = ConvStem(filters=16, rank=3, kernel_size=3, strides=2)
+        assert layer.compute_output_shape((None, None, 20, None, 3)) == (
+            None, None, 10, None, 16)
+
+    def test_the_config_carries_rank_and_round_trips(self, rng):
+        layer = ConvStem(filters=6, rank=3, kernel_size=(3, 3, 1), num_convs=2,
+                         use_pooling=True, pool_size=(2, 2, 1), name="cfg3")
+        config = json.loads(json.dumps(layer.get_config()))
+        assert config["rank"] == 3
+        rebuilt = ConvStem.from_config(config)
+        assert rebuilt.rank == 3
+        assert type(rebuilt.conv1) is keras.layers.Conv3D
+        assert type(rebuilt.pool) is keras.layers.MaxPooling3D
+        x = random_input(rng, _X3_SHAPE)
+        layer.build(x.shape)
+        rebuilt.build(x.shape)
+        rebuilt.set_weights(layer.get_weights())
+        np.testing.assert_allclose(
+            to_numpy(rebuilt(x)), to_numpy(layer(x)), rtol=0.0, atol=0.0)
+
+    def test_a_config_written_before_rank_existed_loads_as_rank_two(self):
+        config = json.loads(json.dumps(
+            ConvStem(filters=6, use_pooling=True, name="old").get_config()))
+        del config["rank"]
+        loaded = ConvStem.from_config(config)
+        assert loaded.rank == 2
+        assert type(loaded.conv1) is keras.layers.Conv2D
+        assert loaded.get_config()["rank"] == 2
+
+    def test_the_keras_round_trip_is_bit_identical(self, tmp_path, rng):
+        layer = ConvStem(filters=6, rank=3, num_convs=2, use_pooling=True,
+                         name="rt3")
+        x = random_input(rng, _X3_SHAPE)
+        layer.build(x.shape)
+        randomize_weights(layer, rng)
+        loaded = roundtrip_exact(layer, _X3_SHAPE[1:], x, "rt3", tmp_path)
+        reloaded_stem = [m for m in loaded.layers if isinstance(m, ConvStem)][0]
+        assert reloaded_stem.rank == 3
+        assert type(reloaded_stem.conv2) is keras.layers.Conv3D
+
+    @pytest.mark.parametrize("name", sorted(_TRACED_STEMS))
+    def test_a_rank_three_stem_traces_at_unknown_batch_and_spatial_size(
+            self, name, rng):
+        layer = ConvStem(name="traced3", rank=3, **_TRACED_STEMS[name])
+        layer.build((None, None, None, None, 2))
+        forward = tf.function(
+            lambda t: layer(t, training=False),
+            input_signature=[tf.TensorSpec([None, None, None, None, 2], "float32")])
+        for shape in ((B, 8, 12, 12, 2), (3, 10, 14, 9, 2)):
+            x = random_input(rng, shape)
+            eager = to_numpy(layer(x, training=False))
+            traced = to_numpy(forward(tf.constant(x)))
+            assert traced.shape == eager.shape
+            np.testing.assert_allclose(traced, eager, rtol=0.0, atol=0.0)
+
+
+# Which of the 19 factory normalization types a rank-3 stem can use, measured
+# on CPU (2026-10-27) by running ``ConvStem(filters=6, rank=3,
+# normalization_type=t)`` forward on a (2, 8, 12, 12, 2) input. The stem adds
+# no guard for the refused ones: each fails by itself, inside its own layer or
+# because it does not return one shape-preserving tensor, and the two pins
+# below are what notices a norm gaining or losing rank-5 support.
+_NORMS_THAT_WORK_AT_RANK_THREE = frozenset({
+    "adaptive_band_rms", "band_logit_norm", "band_rms", "batch_norm",
+    "bias_free_batch_norm", "dynamic_tanh", "energy_layer_norm", "layer_norm",
+    "logit_norm", "max_logit_norm", "rms_norm",
+    "zero_centered_adaptive_band_rms_norm", "zero_centered_band_rms_norm",
+    "zero_centered_rms_norm",
+})
+_NORMS_REFUSED_AT_RANK_THREE = {
+    "global_response_norm": "raises ValueError itself: it accepts input ranks 2 to 4",
+    "local_response_norm": "raises ValueError itself: it accepts input ranks 3 and 4",
+    "decoupled_max_logit": "returns a tuple, at every rank",
+    "dml_plus_center": "returns a tuple, at every rank",
+    "dml_plus_focal": "drops the channel axis, at every rank",
+}
+
+
+def _rank_three_outcome(norm_type):
+    """``(works, error)`` for one norm type: ``error`` is what the forward raised."""
+    stem = ConvStem(filters=6, rank=3, normalization_type=norm_type,
+                    name=f"sweep3_{norm_type}")
+    x = random_input(np.random.default_rng(0), _X3_SHAPE)
+    try:
+        out = stem(x, training=False)
+    except Exception as error:  # the measurement is which types fail, however
+        return False, error
+    works = (
+        not isinstance(out, (tuple, list))
+        and tuple(out.shape) == tuple(stem.compute_output_shape(x.shape))
+        and bool(np.isfinite(to_numpy(out)).all()))
+    return works, None
+
+
+@pytest.fixture(scope="module")
+def rank_three_outcomes():
+    """``{norm_type: (works, error)}`` for every registered type, measured once."""
+    return {t: _rank_three_outcome(t) for t in sorted(_TYPE_TO_CLASS)}
+
+
+class TestConvStemRankThreeNormalizationTypes:
+    def test_the_pinned_sets_partition_the_registry(self):
+        assert not _NORMS_THAT_WORK_AT_RANK_THREE & set(_NORMS_REFUSED_AT_RANK_THREE)
+        assert (_NORMS_THAT_WORK_AT_RANK_THREE | set(_NORMS_REFUSED_AT_RANK_THREE)
+                == set(_TYPE_TO_CLASS))
+        assert len(_NORMS_THAT_WORK_AT_RANK_THREE) == 14
+        assert len(_NORMS_REFUSED_AT_RANK_THREE) == 5
+
+    def test_the_working_set_is_exactly_the_measured_one(self, rank_three_outcomes):
+        measured = {t for t, (works, _) in rank_three_outcomes.items() if works}
+        assert measured == _NORMS_THAT_WORK_AT_RANK_THREE
+
+    def test_the_refused_set_is_exactly_the_measured_one(self, rank_three_outcomes):
+        measured = {t for t, (works, _) in rank_three_outcomes.items() if not works}
+        assert measured == set(_NORMS_REFUSED_AT_RANK_THREE)
+
+    @pytest.mark.parametrize("norm_type", ["global_response_norm", "local_response_norm"])
+    def test_a_response_norm_refuses_rank_five_in_its_own_layer(
+            self, norm_type, rank_three_outcomes):
+        works, error = rank_three_outcomes[norm_type]
+        assert not works
+        assert isinstance(error, ValueError) and "rank 5" in str(error), repr(error)
+
+
+# ---------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------
 
-class TestRegistration:
+class TestConvStemRegistration:
     def test_registration_contract(self, registration_contract):
         key = registration_contract(
             ConvStem, expected_package="dl_techniques.layers.conv_blocks.stem")
@@ -666,479 +1011,3 @@ class TestRegistration:
         import dl_techniques.layers.conv_blocks as package
         assert package.__all__ == ["ConvStem"]
         assert package.ConvStem is ConvStem
-
-
-# ---------------------------------------------------------------------
-# D-005: the two convs of a stem must not replay one initializer draw
-# ---------------------------------------------------------------------
-
-_INITIALIZERS = {
-    "string": lambda: "glorot_uniform",
-    "instance": lambda: keras.initializers.GlorotUniform(),
-    "he_normal": lambda: keras.initializers.HeNormal(),
-}
-
-
-class TestTheTwoConvsDrawIndependently:
-    """A seedless initializer INSTANCE replays one sample at every weight it is
-    handed to, and a shorter draw comes out as the longer draw's prefix
-    (``initializers/clone.py``). The oracle compares the leading values of every
-    pair of kernels, so a replay across DIFFERENT shapes is caught too:
-    ``replay_r`` is 0.9999 against a null standard deviation of
-    ``1 / sqrt(255) = 0.063`` at 256 values (``initializer_replay_oracle``).
-    """
-
-    @pytest.mark.parametrize("seed", (1, 2, 3))
-    @pytest.mark.parametrize("which", sorted(_INITIALIZERS))
-    def test_conv1_and_conv2_kernels_do_not_replay_one_draw(self, which, seed):
-        keras.utils.set_random_seed(seed)
-        layer = ConvStem(filters=6, num_convs=2,
-                         kernel_initializer=_INITIALIZERS[which]())
-        layer.build((B, 8, 8, 4))
-        replayed, compared = replayed_pairs(layer)
-        # Anti-vacuity: the two kernels (216 and 324 values) were compared.
-        assert compared == 1, compared
-        assert replayed == [], replayed
-
-    def test_the_detector_sees_a_planted_shared_instance(self):
-        """Positive control: ONE seedless instance at the stem's two shapes is caught."""
-        keras.utils.set_random_seed(1)
-        shared = keras.initializers.get("glorot_uniform")
-        inputs = keras.Input((8, 8, 4))
-        first = keras.layers.Conv2D(6, 3, kernel_initializer=shared, name="site_1")
-        second = keras.layers.Conv2D(6, 3, kernel_initializer=shared, name="site_2")
-        model = keras.Model(inputs, second(first(inputs)))
-        replayed, compared = replayed_pairs(model)
-        assert compared == 1
-        assert len(replayed) == 1, replayed
-
-
-# ---------------------------------------------------------------------
-# A per-layer dtype policy reaches every sub-layer (review concern 6)
-# ---------------------------------------------------------------------
-
-def _every_sublayer(stem):
-    """``(attribute, layer)`` for each sub-layer a fully configured stem owns."""
-    names = ("conv1", "norm1", "activation1", "conv2", "norm2", "activation2", "pool")
-    return [(name, getattr(stem, name)) for name in names]
-
-
-class TestAPerLayerDtypePolicyReachesEverySubLayer:
-    """``ConvStem(dtype=...)`` is a per-layer policy, not the global one.
-
-    Measured before the fix: ``ConvStem(4, dtype="mixed_float16")`` reported
-    ``compute_dtype`` float16 while ``conv1``, ``norm1``, the activation and the
-    pool computed in float32, so the output was float32 (and ``dtype="float64"``
-    behaved the same way). ``TestDtypePolicy`` sets the GLOBAL policy, which every
-    sub-layer reads by default, so it cannot see this. ``float32`` is the control:
-    it is the ambient policy, so it passes with or without the fix and shows the
-    assertions are not rejecting everything.
-    """
-
-    @staticmethod
-    def _stem(policy, **kwargs):
-        return ConvStem(filters=6, num_convs=2, use_pooling=True, pool_size=3,
-                        pool_strides=2, pool_padding="same", dtype=policy,
-                        name=f"per_layer_{policy}", **kwargs)
-
-    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
-    def test_every_sublayer_follows_the_stems_policy(self, policy):
-        stem = self._stem(policy)
-        for attribute, layer in _every_sublayer(stem):
-            assert layer is not None, attribute
-            assert layer.compute_dtype == stem.compute_dtype, (
-                f"{attribute}: compute {layer.compute_dtype} != stem "
-                f"{stem.compute_dtype} under dtype={policy!r}")
-            assert layer.variable_dtype == stem.variable_dtype, attribute
-
-    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
-    def test_the_output_is_in_the_stems_compute_dtype(self, policy, rng):
-        stem = self._stem(policy)
-        out = stem(_x(rng, (B, 8, 8, 4)), training=False)
-        assert keras.backend.standardize_dtype(out.dtype) == stem.compute_dtype
-        assert np.isfinite(_np(out).astype("float64")).all()
-
-    @pytest.mark.parametrize("activation, kwargs", [
-        ("mish", {}),
-        ("relu", {"negative_slope": 0.25}),
-        ("tanh", {}),
-        (exact_gelu, {}),
-    ], ids=["registry_key", "registry_key_with_kwargs", "keras_name", "callable"])
-    def test_every_activation_form_follows_the_policy(self, activation, kwargs):
-        stem = self._stem("mixed_float16", activation_type=activation,
-                          activation_kwargs=kwargs)
-        assert stem.activation1.compute_dtype == "float16"
-        assert stem.activation2.compute_dtype == "float16"
-
-    def test_a_non_default_norm_type_follows_the_policy(self):
-        stem = self._stem("float64", normalization_type="rms_norm")
-        assert stem.norm1.compute_dtype == "float64"
-        assert stem.norm2.compute_dtype == "float64"
-
-    def test_an_explicit_dtype_in_the_norm_kwargs_wins(self):
-        stem = self._stem("mixed_float16", normalization_kwargs={"dtype": "float32"})
-        assert stem.norm1.compute_dtype == "float32"
-        assert stem.conv1.compute_dtype == "float16"
-
-    def test_the_policy_survives_a_config_round_trip(self):
-        stem = self._stem("mixed_float16")
-        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
-        for attribute, layer in _every_sublayer(rebuilt):
-            assert layer.compute_dtype == "float16", attribute
-
-
-# ---------------------------------------------------------------------
-# An exact activation callable survives the config round trip (review concern 7)
-# ---------------------------------------------------------------------
-
-@pytest.fixture
-def float64_policy():
-    """Set the GLOBAL float64 policy for one test and ALWAYS restore it.
-
-    The exact and stock leaky ReLU differ only at float64 (D-277: TensorFlow
-    builds the stock slope constant in float32), so the comparison has to run
-    there. Same capture / restore-in-``finally`` shape as ``tests/test_layers/
-    conftest.py::dtype_policy``, scoped to the one policy this class needs.
-    """
-    previous = keras.mixed_precision.global_policy().name
-    keras.mixed_precision.set_global_policy("float64")
-    try:
-        yield "float64"
-    finally:
-        keras.mixed_precision.set_global_policy(previous)
-        assert keras.mixed_precision.global_policy().name == previous
-
-
-class TestAnExactActivationSurvivesTheConfigRoundTrip:
-    """``substitute_exact("leaky_relu")`` is a CALLABLE, and ConvStem keeps it one.
-
-    Measured before the fix: ``get_config`` wrote the exact form as the string
-    ``"leaky_relu"``, and ``from_config`` then built the stock
-    ``Activation("leaky_relu")``, so a reloaded float64 stem differed from the
-    original by ``max|delta| = 2.97e-08``. A string in ``activation_type`` means
-    the stock form (``stem.py`` docstring), so the exact form is written as the
-    registered function it is, and reloads as that same function object.
-    """
-
-    @staticmethod
-    def _stem(activation, name):
-        return ConvStem(filters=6, normalization_type=None,
-                        activation_type=activation, name=name)
-
-    @staticmethod
-    def _data():
-        # Negative-heavy: the two forms differ only where the slope applies.
-        return np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
-
-    def test_the_reloaded_stem_computes_the_exact_form_at_float64(self, float64_policy):
-        from dl_techniques.layers.activations.exact_activations import substitute_exact
-        stem = self._stem(substitute_exact("leaky_relu"), "exact_rt")
-        data = self._data()
-        stem.build(data.shape)
-        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
-        rebuilt.build(data.shape)
-        rebuilt.set_weights(stem.get_weights())
-        assert stem.conv1.compute_dtype == "float64"
-        np.testing.assert_allclose(
-            _np(rebuilt(data)), _np(stem(data)), rtol=0.0, atol=0.0)
-
-    def test_the_stock_string_stays_stock_and_differs_from_the_exact_form(
-            self, float64_policy):
-        """Two-armed control: the instrument sees the 2.97e-08 gap at all.
-
-        Without this arm the round-trip test above could pass vacuously on a
-        policy under which the two forms are bit-identical (float32).
-        """
-        from dl_techniques.layers.activations.exact_activations import substitute_exact
-        data = self._data()
-        exact = self._stem(substitute_exact("leaky_relu"), "exact_ctl")
-        stock = self._stem("leaky_relu", "stock_ctl")
-        exact.build(data.shape)
-        stock.build(data.shape)
-        stock.set_weights(exact.get_weights())
-        assert stock.get_config()["activation_type"] == "leaky_relu"
-        reloaded = ConvStem.from_config(json.loads(json.dumps(stock.get_config())))
-        reloaded.build(data.shape)
-        reloaded.set_weights(exact.get_weights())
-        np.testing.assert_allclose(
-            _np(reloaded(data)), _np(stock(data)), rtol=0.0, atol=0.0)
-        gap = float(np.max(np.abs(_np(stock(data)) - _np(exact(data)))))
-        assert gap > 1e-9, f"stock and exact leaky_relu agree to {gap:.2e}; vacuous"
-
-    @pytest.mark.parametrize("name", ["leaky_relu", "gelu"])
-    def test_the_config_holds_the_registered_function_not_the_stock_name(self, name):
-        from dl_techniques.layers.activations.exact_activations import (
-            EXACT_ACTIVATIONS, substitute_exact)
-        spec = self._stem(substitute_exact(name), "cfg_exact").get_config()[
-            "activation_type"]
-        assert isinstance(spec, dict) and spec["class_name"] == "function", spec
-        restored = ConvStem.from_config(json.loads(json.dumps(
-            self._stem(substitute_exact(name), "cfg_exact").get_config())))
-        assert restored.activation_type is EXACT_ACTIVATIONS[name]
-
-
-# ---------------------------------------------------------------------
-# A Layer activation must be one the stem can clone (review concern 8)
-# ---------------------------------------------------------------------
-
-def _unlocatable_activation():
-    """A custom activation Layer Keras cannot locate by name.
-
-    Defined inside a function on purpose: Keras resolves a serialized class by
-    ``module`` + ``class_name``, so a module-level class IS found again (it is
-    importable) and would not exercise the failure. A function-local class is
-    neither registered nor an attribute of its module.
-    """
-
-    class UnlocatableActivation(keras.layers.Layer):
-        def call(self, inputs):
-            return keras.ops.relu(inputs)
-
-    return UnlocatableActivation()
-
-
-class TestALayerActivationMustBeCloneable:
-    """The stem stores a Layer activation as its config and rebuilds it per site.
-
-    Measured before the fix: a Layer Keras cannot locate by name raised
-    ``TypeError: Could not locate class`` from deep inside ``keras.layers.
-    deserialize``, and a built Layer holding weights was cloned fresh with its
-    weights silently dropped. Both are now a ``ValueError`` at construction that
-    names the problem. A locatable, unbuilt Layer still works
-    (``TestActivationForms``).
-    """
-
-    def test_an_unlocatable_layer_is_refused_by_name(self):
-        with pytest.raises(ValueError, match="UnlocatableActivation") as caught:
-            ConvStem(filters=4, activation_type=_unlocatable_activation())
-        assert "registered" in str(caught.value)
-
-    def test_a_layer_holding_weights_is_refused(self):
-        trained = keras.layers.PReLU()
-        trained.build((None, 4))
-        assert trained.weights, "control: the PReLU holds an alpha weight"
-        with pytest.raises(ValueError, match="PReLU.*weights"):
-            ConvStem(filters=4, activation_type=trained)
-
-    def test_a_registered_unbuilt_layer_is_still_accepted(self):
-        stem = ConvStem(filters=4, activation_type=keras.layers.PReLU())
-        assert isinstance(stem.activation1, keras.layers.PReLU)
-
-
-# ---------------------------------------------------------------------
-# Every normalization type the stem can build, at every policy (review pass 2, NOTE 4)
-# ---------------------------------------------------------------------
-
-# Types the stem cannot use. The stem needs its norm to preserve the shape of
-# its input (module docstring); these three REDUCE the normalized axis away
-# (norms/factory.py, "Three types are not shape-preserving"). The census test
-# below measures each one on a rank-4 input, so a listed type that became
-# shape-preserving fails there instead of staying excluded unnoticed.
-_NORMS_THE_STEM_CANNOT_BUILD = {
-    "decoupled_max_logit":
-        "returns a 3-tuple (score, MaxCosine, MaxNorm), each (B, H, W): the "
-        "channel axis is reduced away",
-    "dml_plus_focal":
-        "returns one (B, H, W) tensor: the channel axis is reduced away",
-    "dml_plus_center":
-        "returns a 2-tuple, (B, H, W) and (B, H, W, 1): the channel axis is "
-        "reduced away",
-}
-
-# Extra constructor arguments a swept type needs beyond its name. EMPTY by
-# measurement (2026-10-26): all 16 swept types build from the name alone. The
-# only registry types with a required constructor argument are the two
-# ``dml_plus_*`` ones (``model_type``, which the factory forces), and both are
-# in the exclusion table above. A new type that needs an argument fails
-# ``test_the_table_supplies_every_required_argument`` until it is listed here.
-_NORM_EXTRA_KWARGS = {}
-
-_SWEPT_NORMS = sorted(set(_TYPE_TO_CLASS) - set(_NORMS_THE_STEM_CANNOT_BUILD))
-
-
-class TestEveryNormTypeTheStemCanBuild:
-    """``ConvStem(dtype=...)`` with each factory norm, at float32 / mixed / float64.
-
-    Measured before the fix (CPU, ``ConvStem(8, num_convs=2, dtype=policy)``):
-    ``band_logit_norm`` raised ``InvalidArgumentError`` (Mul dtype mismatch) at
-    ``float64`` and ``mixed_float16``, and ``adaptive_band_rms`` /
-    ``zero_centered_adaptive_band_rms_norm`` ran but built their inner ``Dense``
-    at float32. The other 14 swept types were already correct. The earlier
-    per-layer test covered ``rms_norm`` only, so it could not see any of them.
-    ``float32`` is the control: it is the ambient policy and passes with or
-    without the fix.
-    """
-
-    def test_the_sweep_covers_the_registry_and_is_not_vacuous(self):
-        assert set(_NORMS_THE_STEM_CANNOT_BUILD) <= set(_TYPE_TO_CLASS)
-        assert set(_SWEPT_NORMS) | set(_NORMS_THE_STEM_CANNOT_BUILD) == set(
-            _TYPE_TO_CLASS)
-        assert not set(_SWEPT_NORMS) & set(_NORMS_THE_STEM_CANNOT_BUILD)
-        # Derived from the registry, but pinned: a registry change must be read
-        # against the exclusion table instead of being swept (or skipped) blind.
-        assert len(_SWEPT_NORMS) == 16, _SWEPT_NORMS
-        assert set(_NORM_EXTRA_KWARGS) <= set(_SWEPT_NORMS)
-
-    @pytest.mark.parametrize("norm_type", sorted(_NORMS_THE_STEM_CANNOT_BUILD))
-    def test_each_excluded_type_really_leaves_the_shape_contract(self, norm_type):
-        """The exclusion is measured, not asserted by name."""
-        assert _NORMS_THE_STEM_CANNOT_BUILD[norm_type]
-        out = create_normalization_layer(norm_type)(
-            np.ones((B, 8, 8, 4), "float32"))
-        if isinstance(out, (tuple, list)):
-            return
-        assert tuple(out.shape) != (B, 8, 8, 4), (
-            f"{norm_type} now preserves the shape: sweep it instead")
-
-    @pytest.mark.parametrize("norm_type", _SWEPT_NORMS)
-    def test_the_table_supplies_every_required_argument(self, norm_type):
-        parameters = inspect.signature(_TYPE_TO_CLASS[norm_type].__init__).parameters
-        required = {
-            name for name, parameter in parameters.items()
-            if name != "self" and parameter.default is parameter.empty
-            and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD,
-                                   parameter.KEYWORD_ONLY)}
-        assert required <= set(_NORM_EXTRA_KWARGS.get(norm_type, {})), (
-            f"{norm_type} needs {required}: add it to _NORM_EXTRA_KWARGS")
-
-    @pytest.mark.parametrize("policy", ["float32", "mixed_float16", "float64"])
-    @pytest.mark.parametrize("norm_type", _SWEPT_NORMS)
-    def test_the_stem_computes_in_its_policy(self, norm_type, policy, rng):
-        stem = ConvStem(
-            filters=6, num_convs=2, use_pooling=True, pool_size=3,
-            pool_strides=2, pool_padding="same", normalization_type=norm_type,
-            dtype=policy, name=f"sweep_{norm_type}_{policy}",
-            normalization_kwargs=dict(_NORM_EXTRA_KWARGS.get(norm_type, {})))
-        x = _x(rng, (B, 8, 8, 4))
-        out = stem(x, training=False)
-        assert not isinstance(out, (tuple, list)), type(out)
-        assert tuple(out.shape) == tuple(stem.compute_output_shape(x.shape))
-        assert keras.backend.standardize_dtype(out.dtype) == stem.compute_dtype
-        assert np.isfinite(_np(out).astype("float64")).all()
-        # Every layer under the stem, nested ones included: an inner layer a
-        # norm builds for itself is one of them.
-        walked = list(stem._flatten_layers(include_self=False))
-        assert len(walked) >= 7, [layer.name for layer in walked]
-        for layer in walked:
-            assert (layer.compute_dtype, layer.variable_dtype) == (
-                stem.compute_dtype, stem.variable_dtype), (
-                f"{layer.name} ({type(layer).__name__}): compute "
-                f"{layer.compute_dtype} / variable {layer.variable_dtype} under "
-                f"ConvStem(dtype={policy!r}, normalization_type={norm_type!r})")
-
-
-# ---------------------------------------------------------------------
-# What a config round trip does to each kind of callable (review pass 2, NOTES 5, 6)
-# ---------------------------------------------------------------------
-
-def an_unregistered_activation(x):
-    """Module level on purpose, and registered with nobody."""
-    return keras.ops.relu(x) * 2.0
-
-
-class TestWhatAConfigRoundTripDoesToACallable:
-    """Measured 2026-10-26 (CPU, keras 3.8); the ``stem.py`` docstring states it."""
-
-    def test_an_unregistered_callable_fails_at_reload_not_at_get_config(self):
-        stem = ConvStem(filters=4, normalization_type=None,
-                        activation_type=an_unregistered_activation)
-        config = stem.get_config()  # does not raise
-        assert config["activation_type"]["config"] == "an_unregistered_activation"
-        assert config["activation_type"]["class_name"] == "function"
-        reloadable = json.loads(json.dumps(config))
-        with pytest.raises(TypeError, match="an_unregistered_activation"):
-            ConvStem.from_config(reloadable)
-
-    def test_an_unregistered_callable_fails_in_load_model_too(self, tmp_path):
-        stem = ConvStem(filters=4, normalization_type=None,
-                        activation_type=an_unregistered_activation, name="unreg")
-        inputs = keras.Input((8, 8, 3))
-        path = str(tmp_path / "unregistered.keras")
-        keras.Model(inputs, stem(inputs)).save(path)
-        with pytest.raises(TypeError, match="an_unregistered_activation"):
-            keras.models.load_model(path)
-
-    def test_a_keras_builtin_is_written_as_its_string_and_reloads_as_a_layer(
-            self, float64_policy):
-        data = np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
-        stem = ConvStem(filters=6, normalization_type=None,
-                        activation_type=keras.activations.gelu, name="builtin")
-        stem.build(data.shape)
-        assert stem.get_config()["activation_type"] == "gelu"
-        assert type(stem.activation1) is keras.layers.Activation
-        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
-        rebuilt.build(data.shape)
-        rebuilt.set_weights(stem.get_weights())
-        # The type changes with the string: Activation -> the registry GELU.
-        assert type(rebuilt.activation1).__name__ == "GELU"
-        assert type(rebuilt.activation1) is not type(stem.activation1)
-        delta = float(np.max(np.abs(_np(rebuilt(data)) - _np(stem(data)))))
-        # Measured 5.023e-09 (float64, this data); the reviewer's 5.0e-09 matches.
-        assert delta == pytest.approx(5.0e-09, rel=0.1), delta
-
-    def test_the_gap_is_gelus_alone_relu_reloads_exactly(self, float64_policy):
-        """Control: the instrument reads 0.0 where the string and the callable agree."""
-        data = np.random.default_rng(7).uniform(-2.0, 2.0, (B, 8, 8, 3))
-        stem = ConvStem(filters=6, normalization_type=None,
-                        activation_type=keras.activations.relu, name="builtin_relu")
-        stem.build(data.shape)
-        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
-        rebuilt.build(data.shape)
-        rebuilt.set_weights(stem.get_weights())
-        assert type(rebuilt.activation1) is keras.layers.ReLU
-        np.testing.assert_allclose(
-            _np(rebuilt(data)), _np(stem(data)), rtol=0.0, atol=0.0)
-
-
-# ---------------------------------------------------------------------
-# A registered Layer that fails for its OWN reason keeps its own message (NOTE 9)
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable(package="test_stem_layer_activation")
-class ActivationWithAStrayConfigKey(keras.layers.Layer):
-    """Registered, but ``get_config`` emits a key ``__init__`` rejects."""
-
-    def call(self, inputs):
-        return keras.ops.relu(inputs)
-
-    def get_config(self):
-        return {**super().get_config(), "a_stray_config_key": 1}
-
-
-@keras.saving.register_keras_serializable(package="test_stem_layer_activation")
-class ActivationWhoseFromConfigFails(keras.layers.Layer):
-    """Registered, but ``from_config`` raises its own ``ValueError``."""
-
-    def call(self, inputs):
-        return keras.ops.relu(inputs)
-
-    @classmethod
-    def from_config(cls, config):
-        raise ValueError("this activation refuses its own config: sentinel-7731")
-
-
-class TestARegisteredLayerKeepsItsOwnError:
-    """Only Keras' "Could not locate class" is relabelled by the stem.
-
-    Measured before the fix: every ``TypeError`` / ``ValueError`` from
-    ``keras.layers.deserialize`` became "cannot clone ... Register it", so a
-    registered Layer with a bad config key told the caller to register a class
-    that was registered already. ``TestALayerActivationMustBeCloneable`` keeps
-    the other direction: an unlocatable class IS relabelled.
-    """
-
-    def test_a_stray_config_key_keeps_its_own_typeerror(self):
-        with pytest.raises(TypeError, match="a_stray_config_key") as caught:
-            ConvStem(filters=4, activation_type=ActivationWithAStrayConfigKey())
-        assert "cannot clone" not in str(caught.value)
-
-    def test_a_failing_from_config_keeps_its_own_message(self):
-        with pytest.raises(ValueError, match="sentinel-7731") as caught:
-            ConvStem(filters=4, activation_type=ActivationWhoseFromConfigFails())
-        assert "cannot clone" not in str(caught.value)
-
-    def test_both_layers_are_registered_so_the_error_is_not_a_locate_failure(self):
-        """Control: Keras CAN locate both classes, so neither is the relabelled case."""
-        for cls in (ActivationWithAStrayConfigKey, ActivationWhoseFromConfigFails):
-            assert keras.saving.get_registered_object(
-                keras.saving.get_registered_name(cls)) is cls

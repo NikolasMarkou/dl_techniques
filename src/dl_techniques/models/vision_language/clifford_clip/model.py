@@ -344,7 +344,7 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.05,
         ),
         # nano with the vision global-context branch (gFFN-G), mirroring
-        # CliffordNet.lite_g. The flag currently reaches every stage.
+        # the lite_g variant of CliffordNet. The flag currently reaches every stage.
         "nano_g": dict(
             vision_stage_channels=[128, 128, 256, 256],
             vision_stage_depths=[3, 3, 3, 3],
@@ -1481,7 +1481,7 @@ class CliffordCLIP(keras.Model):
 
         :param variant: One of ``"nano"``, ``"nano_g"``, ``"mini"``, ``"small"``, ``"base"``, ``"large"``.
             ``nano_g`` is ``nano`` with a global-context branch on the vision
-            tower (analogue of :class:`CliffordNet.lite_g`).
+            tower (analogue of the ``lite_g`` variant of :class:`CliffordNet`).
         :param vocab_size: Vocabulary size (use the tokenizer's
             ``vocab_size``).
         :param image_size: Image resolution of the training data. Required, like

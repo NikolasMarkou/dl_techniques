@@ -1,9 +1,10 @@
 """
 Shared pytest fixtures for `tests/test_layers/`.
 
-Hosts the two PROCESS-GLOBAL settings this tree mutates: the Keras mixed-precision
-policy (`dtype_policy`, used by the Energy Transformer dtype tests, plan
-plan_2026-07-13_57c9833e success criterion S13) and TensorFloat-32 matmul
+Hosts the PROCESS-GLOBAL settings this tree mutates: the Keras mixed-precision
+policy (`dtype_policy`, `mixed_float16_policy`, used by the Energy Transformer dtype
+tests, plan plan_2026-07-13_57c9833e success criterion S13), a genuine float64 arm
+(`float64_policy`: the policy AND `floatx`) and TensorFloat-32 matmul
 (`tf32_disabled` + `_tf32_leak_canary`).
 
 **Why they live HERE and not in each test module.** `keras.mixed_precision.set_global_policy`
@@ -67,6 +68,41 @@ def mixed_float16_policy():
         yield "mixed_float16"
     finally:
         keras.mixed_precision.set_global_policy(previous)
+
+
+@pytest.fixture
+def float64_policy():
+    """Force a genuine float64 policy for one test, then ALWAYS restore both globals.
+
+    The ONE owner of the float64 arm for every directory under ``tests/test_layers/``.
+    ``dtype_policy`` and ``mixed_float16_policy`` above set the global policy and
+    nothing else. That is correct for mixed precision, but it is NOT sufficient for
+    float64: with the policy alone, ``keras.backend.floatx()`` stays ``'float32'``, so
+    ``keras.ops.convert_to_tensor`` and ``keras.Input`` keep producing float32 and the
+    "float64" arm silently agrees with float32 to eight digits. A precision guard
+    written on top of that cannot fail (guide rule L-38). This fixture therefore sets
+    ``floatx`` IN ADDITION to the policy and restores BOTH in a ``finally``.
+
+    **Every test using it must additionally assert the REALISED input dtype.** The
+    fixture makes float64 reachable; only the assert proves it arrived. A related
+    measured trap: ``set_floatx`` does not re-point an already-materialised policy, so a
+    layer built before the fixture runs stays float32 -- build inside the test, never at
+    module import.
+
+    :yield: the literal string ``'float64'``.
+    :rtype: str
+    """
+    previous_policy = keras.mixed_precision.global_policy().name
+    previous_floatx = keras.backend.floatx()
+    keras.backend.set_floatx("float64")
+    keras.mixed_precision.set_global_policy("float64")
+    try:
+        yield "float64"
+    finally:
+        # Runs even if the test body raises. A leaked policy or a leaked `floatx`
+        # poisons every subsequent test in the session.
+        keras.mixed_precision.set_global_policy(previous_policy)
+        keras.backend.set_floatx(previous_floatx)
 
 
 # ---------------------------------------------------------------------

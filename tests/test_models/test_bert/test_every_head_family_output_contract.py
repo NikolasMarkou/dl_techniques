@@ -62,11 +62,8 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.layers.heads.nlp.factory import (
-    QuestionAnsweringHead,
-    TextGenerationHead,
-    get_head_class,
-)
+from dl_techniques.layers.heads.nlp import QuestionAnsweringHead, TextGenerationHead
+from dl_techniques.layers.heads.nlp.dispatch import get_head_class
 from dl_techniques.models.language.bert import create_bert
 
 VARIANT = "tiny"

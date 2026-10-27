@@ -108,7 +108,7 @@ def test_nlp_refuses_a_repeated_name(seq):
 @pytest.mark.parametrize("seq", [list, tuple])
 def test_vlm_refuses_a_repeated_name(seq):
     first = _vlm_configs()[0]
-    with pytest.raises(ValueError, match="Duplicate task name.*ground"):
+    with pytest.raises(ValueError, match="ground.*more than once"):
         _vlm(seq([first, first]))
 
 

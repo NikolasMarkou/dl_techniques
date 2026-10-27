@@ -34,6 +34,7 @@ import pytest
 from dl_techniques.utils.weight_transfer import (
     TransferReport,
     VocabChange,
+    load_pretrained_checkpoint,
     load_weights_from_checkpoint,
     load_weights_or_raise,
     pretrained_path_or_raise,
@@ -841,3 +842,378 @@ class TestLoadWeightsOrRaise:
         assert not tgt_unbuilt.built, "fixture precondition: target must be unbuilt"
         with pytest.raises(ValueError, match="built"):
             load_weights_or_raise(tgt_unbuilt, ckpt)
+
+
+# ---------------------------------------------------------------------------
+# load_pretrained_checkpoint -- the models' ``pretrained=<path>`` load
+# ---------------------------------------------------------------------------
+
+_BUILD_SHAPE = (_INPUT_DIM,)
+
+
+@keras.saving.register_keras_serializable(package="test_weight_transfer")
+class TinyCheckpointClassifier(keras.Model):
+    """A subclassed model of the house shape: lazy build, optional head.
+
+    ``build_shapes`` records every shape ``build`` was called with, so a test can
+    say how often and at what shape the loader built it.
+    """
+
+    def __init__(
+        self,
+        include_top: bool = True,
+        width: int = 6,
+        block_width: int = None,
+        num_classes: int = 3,
+        extra_block: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.include_top = include_top
+        self.width = width
+        self.block_width = width if block_width is None else block_width
+        self.num_classes = num_classes
+        self.extra_block = extra_block
+        self.build_shapes = []
+        self.stem = keras.layers.Dense(width, activation="relu", name="stem")
+        self.block_0 = keras.layers.Dense(
+            self.block_width, activation="relu", name="block_0"
+        )
+        self.block_1 = (
+            keras.layers.Dense(self.block_width, activation="relu", name="block_1")
+            if extra_block else None
+        )
+        self.classification_head = (
+            keras.layers.Dense(num_classes, name="classification_head")
+            if include_top else None
+        )
+
+    def build(self, input_shape):
+        # No `if self.built: return` guard on purpose: every call is recorded.
+        self.build_shapes.append(tuple(input_shape))
+        self.stem.build(input_shape)
+        self.block_0.build((*input_shape[:-1], self.width))
+        if self.block_1 is not None:
+            self.block_1.build((*input_shape[:-1], self.block_width))
+        if self.classification_head is not None:
+            self.classification_head.build((*input_shape[:-1], self.block_width))
+        super().build(input_shape)
+
+    def call(self, x):
+        x = self.block_0(self.stem(x))
+        if self.block_1 is not None:
+            x = self.block_1(x)
+        return x if self.classification_head is None else self.classification_head(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "include_top": self.include_top,
+                "width": self.width,
+                "block_width": self.block_width,
+                "num_classes": self.num_classes,
+                "extra_block": self.extra_block,
+            }
+        )
+        return config
+
+
+def _tiny(include_top=True, width=6, block_width=None, built=True,
+          num_classes=3, extra_block=False):
+    model = TinyCheckpointClassifier(
+        include_top=include_top, width=width, block_width=block_width,
+        num_classes=num_classes, extra_block=extra_block,
+    )
+    if built:
+        model.build((1, *_BUILD_SHAPE))
+    return model
+
+
+def _by_layer_name(model):
+    return {layer.name: layer.get_weights() for layer in model.layers}
+
+
+class TestLoadPretrainedCheckpoint:
+    """One reviewed load for every model's ``pretrained=<path>``.
+
+    The reporting loader returns an empty report when the checkpoint and the
+    model share layer names and nothing else, and a model that logged a
+    successful load then trains from random weights. The first test shows that
+    fact; the rest pin what the shared function does about it.
+    """
+
+    def test_the_reporting_loader_alone_restores_nothing_and_returns(self, tmp_path):
+        ckpt = _save(_tiny(width=6), tmp_path)
+        tgt = _tiny(width=10)
+        before = _by_layer_name(tgt)
+
+        report = load_weights_from_checkpoint(
+            tgt, ckpt, skip_prefixes=(), strict=False
+        )
+
+        assert report.num_loaded == 0
+        assert report.num_shape_mismatch == 3
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights)
+
+    def test_tensors_are_restored_and_the_report_names_the_layers(self, tmp_path):
+        src = _tiny()
+        ckpt = _save(src, tmp_path)
+        tgt = _tiny()
+        assert not _weights_equal(
+            _by_layer_name(src)["stem"], _by_layer_name(tgt)["stem"]
+        ), "fixture precondition: two builds start from different weights"
+
+        report = load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert isinstance(report, TransferReport)
+        assert sorted(report.loaded) == ["block_0", "classification_head", "stem"]
+        for name, weights in _by_layer_name(src).items():
+            assert _weights_equal(weights, _by_layer_name(tgt)[name])
+        x = np.random.default_rng(0).normal(size=(2, _INPUT_DIM)).astype("float32")
+        assert np.array_equal(
+            keras.ops.convert_to_numpy(src(x)), keras.ops.convert_to_numpy(tgt(x))
+        )
+
+    def test_a_headless_target_loads_from_a_headed_checkpoint(self, tmp_path):
+        src = _tiny(include_top=True)
+        ckpt = _save(src, tmp_path)
+        tgt = _tiny(include_top=False)
+        assert tgt.classification_head is None
+
+        report = load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+        assert report.unused_in_source == ["classification_head"]
+        for name in ("stem", "block_0"):
+            assert _weights_equal(
+                _by_layer_name(src)[name], _by_layer_name(tgt)[name]
+            )
+
+    def test_an_unbuilt_model_is_built_once_at_batch_one(self, tmp_path):
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(built=False)
+        assert not tgt.built, "fixture precondition"
+
+        load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert tgt.built
+        assert tgt.build_shapes == [(1, *_BUILD_SHAPE)]
+
+    def test_a_built_model_is_not_rebuilt(self, tmp_path):
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny()
+        variables_before = list(tgt.weights)
+        builds_before = list(tgt.build_shapes)
+
+        load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert len(tgt.weights) == len(variables_before)
+        assert all(a is b for a, b in zip(tgt.weights, variables_before))
+        assert tgt.build_shapes == builds_before
+
+    def test_a_missing_file_raises_file_not_found_unwrapped(self, tmp_path):
+        tgt = _tiny(built=False)
+        missing = os.path.join(str(tmp_path), "nope.keras")
+        with pytest.raises(FileNotFoundError, match="nope.keras"):
+            load_pretrained_checkpoint(tgt, missing, _BUILD_SHAPE)
+        assert not tgt.built, "a missing file is refused before any build"
+
+    def test_a_load_that_restores_nothing_raises_and_names_the_path(self, tmp_path):
+        """No layer restored, none of them a head the caller expects to differ."""
+        ckpt = _save(_tiny(width=6), tmp_path)
+        tgt = _tiny(width=10)
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError, match="source.keras"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights)
+
+    def test_a_model_made_only_of_a_mismatched_head_restores_no_layer(self, tmp_path):
+        """The zero-layer raise stays reachable: the head rule alone does not catch it."""
+        src = keras.Sequential(
+            [keras.Input((_INPUT_DIM,)), keras.layers.Dense(3, name="classification_head")]
+        )
+        ckpt = _save(src, tmp_path)
+        tgt = keras.Sequential(
+            [keras.Input((_INPUT_DIM,)), keras.layers.Dense(4, name="classification_head")]
+        )
+
+        with pytest.raises(ValueError, match="restored no layer") as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert "source.keras" in str(caught.value)
+
+    def test_a_transfer_failure_raises_value_error_chained(self, tmp_path):
+        ckpt = _save(_tiny(width=6), tmp_path)
+        tgt = _tiny(width=10)
+
+        with pytest.raises(ValueError, match="Failed to load weights") as caught:
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, skip_mismatch=False
+            )
+
+        cause = caught.value.__cause__
+        assert isinstance(cause, ValueError)
+        assert "Shape mismatch on layer" in str(cause)
+        assert "source.keras" in str(caught.value)
+
+    def test_skip_mismatch_keeps_the_layers_that_do_fit(self, tmp_path):
+        """Anti-vacuity: the refusal must not turn a head-only difference into a failure."""
+        ckpt = _save(_tiny(), tmp_path)
+        # Every layer but the head keeps its shape: another class count.
+        tgt = _tiny(num_classes=5)
+
+        report = load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+        assert [name for name, _, _ in report.shape_mismatch] == ["classification_head"]
+
+
+class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
+    """D-040: a wrong-architecture checkpoint is an error, not a report.
+
+    ``resnet50`` into ``resnet18`` restored one layer, reported nine shape
+    mismatches and nine missing layers, and returned normally. Only the head
+    layers (``head_prefixes``) may differ.
+    """
+
+    def test_a_trunk_layer_of_another_width_raises_and_leaves_the_model_alone(
+        self, tmp_path
+    ):
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(block_width=5)
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        message = str(caught.value)
+        assert "source.keras" in message
+        assert "block_0" in message, message
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_the_error_counts_restored_mismatched_and_missing_layers(self, tmp_path):
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(block_width=5)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        message = str(caught.value)
+        # stem fits; block_0 and the head it feeds do not.
+        assert "loaded             : 1 layers" in message, message
+        assert "shape_mismatch     : 2 layers" in message, message
+        assert "missing_in_source  : 2 layers" in message, message
+
+    def test_a_long_offender_list_names_the_first_layers_and_counts_the_rest(
+        self, tmp_path
+    ):
+        def stack(width):
+            return keras.Sequential(
+                [keras.Input((_INPUT_DIM,))]
+                + [keras.layers.Dense(width, name=f"layer_{i:02d}") for i in range(12)]
+            )
+
+        ckpt = _save(stack(8), tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(stack(9), ckpt, _BUILD_SHAPE)
+
+        message = str(caught.value)
+        assert "layer_00" in message and "layer_07" in message, message
+        assert "layer_11" not in message, message
+        assert "4 more" in message, message
+
+    def test_a_deeper_checkpoint_raises_instead_of_dropping_its_extra_layer(
+        self, tmp_path
+    ):
+        ckpt = _save(_tiny(extra_block=True), tmp_path)
+        tgt = _tiny()
+
+        with pytest.raises(ValueError, match="block_1"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+    def test_a_shallower_checkpoint_raises_instead_of_leaving_a_layer_random(
+        self, tmp_path
+    ):
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(extra_block=True)
+
+        with pytest.raises(ValueError, match="block_1"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
+        src = _tiny(num_classes=3)
+        ckpt = _save(src, tmp_path)
+        tgt = _tiny(num_classes=5)
+        head_before = _by_layer_name(tgt)["classification_head"]
+
+        report = load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+        assert [name for name, _, _ in report.shape_mismatch] == ["classification_head"]
+        for name in ("stem", "block_0"):
+            assert _weights_equal(_by_layer_name(src)[name], _by_layer_name(tgt)[name])
+        assert _weights_equal(head_before, _by_layer_name(tgt)["classification_head"])
+
+    def test_a_headless_checkpoint_loads_into_a_headed_model_with_a_fresh_head(
+        self, tmp_path
+    ):
+        src = _tiny(include_top=False)
+        ckpt = _save(src, tmp_path)
+        tgt = _tiny(include_top=True)
+        head_before = _by_layer_name(tgt)["classification_head"]
+
+        report = load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+        assert report.missing_in_source == ["classification_head"]
+        assert _weights_equal(head_before, _by_layer_name(tgt)["classification_head"])
+
+    def test_head_prefixes_name_the_layers_that_may_differ(self, tmp_path):
+        ckpt = _save(_tiny(num_classes=3), tmp_path)
+
+        tgt = _tiny(num_classes=5)
+        with pytest.raises(ValueError, match="classification_head"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE, head_prefixes=())
+
+        tgt = _tiny(block_width=5)
+        report = load_pretrained_checkpoint(
+            tgt, ckpt, _BUILD_SHAPE, head_prefixes=("block_0", "classification_head")
+        )
+        assert report.loaded == ["stem"]
+
+    def test_a_head_kept_at_its_initialization_is_named_in_a_warning(
+        self, tmp_path, caplog
+    ):
+        from dl_techniques.utils.logger import logger as dl_logger
+
+        ckpt = _save(_tiny(num_classes=3), tmp_path)
+        tgt = _tiny(num_classes=5)
+
+        dl_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level("WARNING", logger=dl_logger.name):
+                load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+        finally:
+            dl_logger.removeHandler(caplog.handler)
+
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("classification_head" in m and "initialization" in m for m in warned), warned
+
+    def test_skip_mismatch_false_refuses_a_head_of_another_width_too(self, tmp_path):
+        ckpt = _save(_tiny(num_classes=3), tmp_path)
+        tgt = _tiny(num_classes=5)
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError, match="classification_head") as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE, skip_mismatch=False)
+
+        assert isinstance(caught.value.__cause__, ValueError)
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights)

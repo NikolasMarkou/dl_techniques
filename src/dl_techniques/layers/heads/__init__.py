@@ -14,7 +14,7 @@ Domains
   token classification, question answering, multiple choice, generation,
   similarity and multi-task. Sequence pooling for the ``cls``, ``mean``,
   ``max`` and ``last`` strategies reuses the shared ``SequencePooling`` layer.
-  The learnable ``attention`` strategy stays inline in ``nlp/factory.py``,
+  The learnable ``attention`` strategy stays inline in ``nlp/base.py``,
   because it uses a different mechanism and a different weight set.
 - :mod:`~dl_techniques.layers.heads.vision` — vision task heads: detection,
   segmentation, depth, classification, instance segmentation, enhancement and

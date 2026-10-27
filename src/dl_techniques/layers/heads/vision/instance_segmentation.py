@@ -1,6 +1,6 @@
 """Instance segmentation head: detection outputs plus per-instance mask logits."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import keras
 
@@ -15,7 +15,7 @@ from .base import BaseVisionHead
 from .detection import DetectionHead
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.instance_segmentation")
 class InstanceSegmentationHead(BaseVisionHead):
     """
     Boxes, class scores and per-instance masks from one feature map.

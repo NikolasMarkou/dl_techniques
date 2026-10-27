@@ -1,6 +1,6 @@
 """Detection head: class scores and box offsets, per anchor."""
 
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import keras
 
@@ -9,14 +9,13 @@ import keras
 # ---------------------------------------------------------------------
 
 from ...conv_blocks.conv_block import ConvBlock
-from dl_techniques.utils.tensors import is_single_shape
 from ..validation import positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
 from .base import BaseVisionHead
-from .utils import _DEFAULT_BBOX_DIMS, _refuse_dropout_no_layer_applies
+from .utils import _DEFAULT_BBOX_DIMS
 
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.detection")
 class DetectionHead(BaseVisionHead):
     """
     Class scores and box offsets, one set per anchor per location.

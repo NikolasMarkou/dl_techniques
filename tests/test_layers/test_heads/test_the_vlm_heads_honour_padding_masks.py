@@ -298,7 +298,7 @@ def test_a_masked_functional_model_round_trips_by_value() -> None:
 # ---------------------------------------------------------------------
 
 def test_a_mask_pooler_draws_no_random_seed_and_owns_no_weight() -> None:
-    """``_weightless_pooling`` builds a ``SequencePooling`` that takes no seed.
+    """A ``'mean'`` or ``'max'`` ``SequencePooling`` takes no seed and owns no weight.
 
     ``SequencePooling.__init__`` resolves a ``'glorot_uniform'`` default, and a
     seedless Keras initializer takes a seed from the global Python RNG when it
@@ -306,17 +306,21 @@ def test_a_mask_pooler_draws_no_random_seed_and_owns_no_weight() -> None:
     initial weights of every VQA, grounding and matching head. The census in
     the step scratchpad compared every head's weights and outputs at a fixed
     seed against ``8b4182f9d``: bit-identical with ``kernel_initializer='zeros'``.
-    Since D-087 the layer itself skips the draw for a weightless strategy and
-    the helper passes no initializer; the census is bit-identical again.
+    Since D-087 the layer itself skips the draw for a weightless strategy, so
+    the heads build it with no initializer argument (the one-line helper that
+    used to wrap this was inlined on 2026-10-27); the census is bit-identical
+    again.
     """
     import random
 
-    from dl_techniques.layers.heads.vlm.factory import _weightless_pooling
+    from dl_techniques.layers.sequence_pooling import SequencePooling
 
-    keras.utils.set_random_seed(3)
-    expected = random.random()
-    keras.utils.set_random_seed(3)
-    pooler = _weightless_pooling("mean", "probe_pooling")
-    assert random.random() == expected, "building a mask pooler drew a random seed"
-    pooler.build((None, 4, DIM))
-    assert pooler.weights == []
+    for strategy in ("mean", "max"):
+        keras.utils.set_random_seed(3)
+        expected = random.random()
+        keras.utils.set_random_seed(3)
+        pooler = SequencePooling(strategy=strategy, name="probe_pooling")
+        assert random.random() == expected, (
+            f"building a {strategy} mask pooler drew a random seed")
+        pooler.build((None, 4, DIM))
+        assert pooler.weights == []

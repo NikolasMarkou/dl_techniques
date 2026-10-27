@@ -10,7 +10,7 @@ most of the surprises below: no `.input`, no `.output`, no `output_names`, and
 `count_params()` raises until the model is built.
 
 > **`pretrained=True` raises `NotImplementedError` — no weights are downloadable.**
-> `_download_weights` raises by design. The working form is a local checkpoint path:
+> `from_variant` raises it before building anything, naming the variant. The working form is a local checkpoint path:
 > `ResNet.from_variant('resnet50', pretrained='/path/to/file.keras')`. See § 9.
 
 ## 1. Overview: What is ResNet and Why It Matters
@@ -63,7 +63,8 @@ The head is the shared vision `ClassificationHead` from `layers/heads/vision`, c
 as the paper's (He et al., Sec. 3.4, "global average pooling and a 1000-way
 fully-connected layer"; torchvision's `avgpool` + `fc`): GAP, then one linear `Dense` with
 no hidden block (`block_dims=()`). The model's `kernel_regularizer` reaches that `Dense`.
-The model returns logits. Pass `head_config_overrides` (for example
+The model returns logits, and `model.classification_head` is `None` when `include_top=False`.
+Pass `head_config_overrides` (for example
 `{'block_dims': (512,)}`) to add hidden blocks; `name`, `num_classes` and `task_type` are
 owned by the model and raise `ValueError`. Archives saved before 2026-10-14 (a softmax
 head, or the two-`DenseBlock` head) do not load and are not supported.
@@ -170,7 +171,7 @@ architectural fact rather than a measurement on a checkpoint.
 > table used to carry `Top-1 Acc` / `Top-5 Acc` columns and a per-variant
 > `Performance (ImageNet)` block, all of them He et al.'s published figures presented as
 > though they described this code. **No pretrained weights exist for any architecture in this
-> repository** — `_download_weights` raises `NotImplementedError` by design — so nothing here
+> repository** — `pretrained=True` raises `NotImplementedError` by design — so nothing here
 > has ever been evaluated on ImageNet. For reference numbers read the paper; for numbers about
 > *this* code, train it and measure.
 
@@ -193,9 +194,12 @@ accept these.
 | `normalization_kwargs` | `None` | forwarded to every norm; `batch_norm` gets `momentum=0.9` unless you override it |
 | `activation_type` | `'relu'` | activation factory key |
 | `kernel_regularizer` | `None` | applied to every convolution |
+| `kernel_initializer` | `'he_normal'` | name, config dict or `Initializer` for every convolution kernel (stem and blocks); each convolution draws independently, and an instance is stored as its config |
+| `head_config_overrides` | `None` | dict merged into every `ClassificationHead` config, e.g. `{'block_dims': (512,), 'dropout_rate': 0.2}`; `name`, `num_classes`, `task_type` raise `ValueError` |
 
-`from_variant` / `create_resnet` additionally take `pretrained` (§ 9), `weights_dataset`,
-`weights_input_shape` and `cache_dir`. The `momentum=0.9` default is deliberate: Keras and
+`from_variant` / `create_resnet` additionally take `pretrained` (§ 9). `compute_output_shape`
+works on an unbuilt model and equals the shape of the forward pass (a list with one shape per
+head under deep supervision). The `momentum=0.9` default is deliberate: Keras and
 PyTorch define BatchNorm momentum oppositely (`keras_momentum = 1 - torch_momentum`), so
 torchvision's `0.1` *is* Keras' `0.9`. Do not "correct" it.
 
@@ -334,8 +338,14 @@ small_head = ResNet.from_variant("resnet50", pretrained=CKPT, num_classes=100)
 backbone = ResNet.from_variant("resnet50", pretrained=CKPT, include_top=False)
 
 # DOES NOT WORK -- raises NotImplementedError, no download exists:
-#   ResNet.from_variant("resnet50", pretrained=True, weights_dataset="imagenet")
+#   ResNet.from_variant("resnet50", pretrained=True)
 ```
+
+The loader restores every layer outside the classification head (and the deep-supervision heads) or
+raises `ValueError`, naming the first layers that did not load and the loaded, mismatched and
+missing counts, and leaving the model untouched: a `resnet50` checkpoint into
+`ResNet.from_variant("resnet18", pretrained=path)` is refused (it used to restore the stem alone and
+return). Only a head of another `num_classes` is skipped, and a warning names it.
 
 Once you have a checkpoint the three usual strategies apply: freeze everything and train a new
 head; freeze the stem and early stages and fine-tune the rest at `1e-4`; or unfreeze
@@ -430,7 +440,7 @@ the target model to be built first. `ResNet` and its blocks register under
 `pytest tests/test_models/test_resnet/ -q`. Four files pin this README specifically:
 `test_the_readme_flops_table_reproduces.py` (§ 17's numbers),
 `test_the_readme_deep_supervision_pattern_runs.py` (§ 7 and § 8 execute as written),
-`test_stem_type.py` (both stems, against a golden reference) and `test_model.py` (fails if an
+`test_stem_type.py` (both stems, against a golden reference) and `test_resnet.py` (fails if an
 accuracy claim reappears here).
 
 ## 16. Troubleshooting & FAQs

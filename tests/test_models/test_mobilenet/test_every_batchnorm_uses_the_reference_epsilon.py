@@ -177,3 +177,21 @@ def test_the_epsilon_change_is_visible_on_a_live_network(generation):
         "MEASURED 2026-08-23 with a live network: V1 1.1e-3, V2 9.8e-4, "
         "V3 4.6e-4, V4 3.7e-3."
     )
+
+
+def test_the_reference_bn_kwargs_are_the_two_constants_in_a_fresh_dict():
+    """One spelling of the family's BatchNorm keywords, one dict per caller.
+
+    Every model builds its BatchNorm keywords from this function, so the two
+    constants cannot drift apart between the stem, the blocks and the head;
+    the dict is fresh because a layer that stores or edits its keyword dict
+    must not change another layer's.
+    """
+    from dl_techniques.models.vision.mobilenet.common import reference_bn_kwargs
+
+    first, second = reference_bn_kwargs(), reference_bn_kwargs()
+    assert first == {"momentum": REFERENCE_BN_MOMENTUM, "epsilon": REFERENCE_BN_EPSILON}
+    assert first is not second
+    first["epsilon"] = 0.5
+    assert second["epsilon"] == REFERENCE_BN_EPSILON
+    assert reference_bn_kwargs()["epsilon"] == REFERENCE_BN_EPSILON

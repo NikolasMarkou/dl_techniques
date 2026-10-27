@@ -34,8 +34,9 @@ import pytest
 import dl_techniques.layers.heads as heads
 import dl_techniques.layers.heads.nlp as nlp
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, create_nlp_head
-from dl_techniques.layers.heads.nlp import factory as nlp_factory
+from dl_techniques.layers.heads.nlp import dispatch as nlp_dispatch
 from dl_techniques.layers.heads.nlp import model_head
+from dl_techniques.layers.heads.nlp.base import BaseNLPHead
 from dl_techniques.layers.heads.nlp.task_types import NLP_HEAD_DISPATCH
 
 D = 8
@@ -48,11 +49,11 @@ _NEEDS_CLASSES = {"TextClassificationHead", "TokenClassificationHead"}
 def test_get_head_class_reads_the_table(task) -> None:
     if task not in NLP_HEAD_DISPATCH:
         with pytest.raises(ValueError, match=task.name):
-            nlp_factory.get_head_class(task)
+            nlp_dispatch.get_head_class(task)
         return
-    head_class = nlp_factory.get_head_class(task)
+    head_class = nlp_dispatch.get_head_class(task)
     assert head_class.__name__ == NLP_HEAD_DISPATCH[task]
-    assert nlp_factory.get_head_class(task.value) is head_class
+    assert nlp_dispatch.get_head_class(task.value) is head_class
 
 
 def test_the_table_names_six_real_head_classes() -> None:
@@ -61,7 +62,7 @@ def test_the_table_names_six_real_head_classes() -> None:
                      "QuestionAnsweringHead", "TextSimilarityHead",
                      "TextGenerationHead", "MultipleChoiceHead"}
     for name in names:
-        assert issubclass(getattr(nlp_factory, name), nlp_factory.BaseNLPHead)
+        assert issubclass(getattr(nlp, name), BaseNLPHead)
     assert len(NLP_HEAD_DISPATCH) == 24
 
 
@@ -91,11 +92,11 @@ def test_a_task_with_no_head_has_no_output_types(task) -> None:
 
 
 def test_the_dead_default_config_helper_is_gone() -> None:
-    assert not hasattr(nlp_factory, "NLPHeadConfiguration")
+    assert not hasattr(nlp_dispatch, "NLPHeadConfiguration")
 
 
 def test_base_nlp_head_is_exported_like_the_other_bases() -> None:
-    assert nlp.BaseNLPHead is nlp_factory.BaseNLPHead
-    assert heads.BaseNLPHead is nlp_factory.BaseNLPHead
+    assert nlp.BaseNLPHead is BaseNLPHead
+    assert heads.BaseNLPHead is BaseNLPHead
     assert "BaseNLPHead" in nlp.__all__ and "BaseNLPHead" in heads.__all__
     assert "BaseVisionHead" in heads.__all__ and "BaseVLMHead" in heads.__all__

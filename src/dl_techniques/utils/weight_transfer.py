@@ -24,7 +24,7 @@ Typical use::
     )
     logger.info(report.summary_string())
 
-Two functions live here, and they are not interchangeable:
+Three loaders live here, and they are not interchangeable:
 
 * :func:`load_weights_from_checkpoint` — partial, name-matched transfer between
   two *different* architectures. A zero-layer result is a legitimate outcome, so
@@ -32,6 +32,11 @@ Two functions live here, and they are not interchangeable:
 * :func:`load_weights_or_raise` — whole-file ``.keras`` restore into the *same*
   architecture. A load that restores nothing is always a defect there, so it
   raises.
+* :func:`load_pretrained_checkpoint` — a model's own ``pretrained=<path>`` load:
+  builds the model if it is not built, transfers through
+  :func:`load_weights_from_checkpoint` (a headless model takes a headed
+  checkpoint) and raises unless every layer outside the classifier head is
+  restored (only ``head_prefixes`` may differ), or when no layer is restored.
 
 :func:`load_weights_from_checkpoint` reports by default; pass ``allow_unloaded``
 to make it complete-or-raise instead (every target layer loads and every
@@ -275,6 +280,18 @@ def _matches_any_prefix(name: str, prefixes: Sequence[str]) -> bool:
     return any(name.startswith(p) for p in prefixes)
 
 
+def _listed(names: Sequence[str], limit: int = 8) -> str:
+    """``names`` as a list literal, cut to the first *limit* with the rest counted.
+
+    A wrong-architecture checkpoint can leave hundreds of layers unloaded; the
+    error then names the first ones and says how many more there are.
+    """
+    names = list(names)
+    if len(names) <= limit:
+        return str(names)
+    return f"{str(names[:limit])[:-1]}, ... ({len(names) - limit} more)]"
+
+
 def _layer_weight_shapes(layer: keras.layers.Layer) -> List[Tuple[int, ...]]:
     return [tuple(w.shape) for w in layer.get_weights()]
 
@@ -510,8 +527,8 @@ def load_weights_from_checkpoint(
         if unloaded or unused:
             raise ValueError(
                 f"Checkpoint {ckpt_path!r} leaves {len(unloaded)} target "
-                f"layer(s) unloaded: {unloaded}, and holds {len(unused)} "
-                f"layer(s) with no target layer: {unused}. Only layers "
+                f"layer(s) unloaded: {_listed(unloaded)}, and holds {len(unused)} "
+                f"layer(s) with no target layer: {_listed(unused)}. Only layers "
                 f"starting with {list(allowed)} may be left out on either "
                 f"side.\n{report.summary_string()}"
             )
@@ -693,6 +710,110 @@ def load_backbone_from_checkpoint(
         allow_unloaded=tuple(tops) if headed or change is not None else (),
         vocab_change=change,
     )
+
+
+#: Layer-name prefixes of the classifier head(s) of the vision classifiers: the main
+#: ``classification_head`` and ResNet's deep-supervision ``supervision_head_{i}``.
+#: The names come from the naming table the house-shape guards enforce
+#: (``test_the_layer_names_follow_the_naming_table``), so a model that renames its
+#: head fails there before it can fail here.
+DEFAULT_HEAD_PREFIXES: Tuple[str, ...] = ("classification_head", "supervision_head")
+
+
+def load_pretrained_checkpoint(
+    model: keras.Model,
+    weights_path: str,
+    build_shape: Sequence[Optional[int]],
+    skip_mismatch: bool = True,
+    head_prefixes: Sequence[str] = DEFAULT_HEAD_PREFIXES,
+) -> TransferReport:
+    """Load a local ``.keras`` checkpoint into *model*; every layer outside the head must load.
+
+    Interface contract (the shared body for a model's
+    ``load_pretrained_weights``): builds *model* at ``(1, *build_shape)`` only
+    when it is not built yet, then transfers layer by layer through
+    :func:`load_weights_from_checkpoint` with no skipped prefix and
+    ``allow_unloaded=head_prefixes``. The model is never rebuilt: a built model
+    keeps its variables.
+
+    Only the head may differ. With ``skip_mismatch=True`` (default) a layer whose
+    name starts with one of *head_prefixes* may have another shape (another
+    ``num_classes``), be absent from the checkpoint (a headless checkpoint into a
+    headed model) or be absent from the model (a headed checkpoint into a
+    ``include_top=False`` model); a head left at its initialization is logged as
+    a warning. Every other layer must be present in both and fit: a checkpoint of
+    another architecture (a different variant, block type, width or stem), a
+    deeper one and a shallower one all raise, and the error names the first
+    offending layers and carries the report's counts (loaded, shape mismatch,
+    missing, unused). The check runs before the first weight is copied, so a
+    refused load leaves *model* untouched.
+
+    :param model: The receiving model, built or not.
+    :param weights_path: Path to a ``.keras`` checkpoint.
+    :param build_shape: The input shape without the batch axis, used only when
+        *model* is not built.
+    :param skip_mismatch: ``True`` (default) lets the head layers differ as above.
+        ``False`` allows no difference anywhere: every layer of the model and of
+        the checkpoint must load, so a classifier of another width raises too.
+    :param head_prefixes: Layer-name prefixes of the head layers allowed to
+        differ. Default :data:`DEFAULT_HEAD_PREFIXES`; pass ``()`` when the
+        caller expects no layer, the head included, to differ.
+    :returns: The :class:`TransferReport` of the transfer, for a caller that
+        wants to inspect what the head kept.
+    :raises FileNotFoundError: *weights_path* does not exist.
+    :raises ValueError: the build or the transfer failed (chained to the
+        original error), a layer outside the head was not restored, or no layer
+        was restored at all.
+    """
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+    try:
+        if not model.built:
+            model.build((1, *build_shape))
+        logger.info(f"Loading pretrained weights from {weights_path}")
+        # DECISION plan-2026-10-26T125959-7af851e5/D-040: only the head
+        # (`head_prefixes`) may be left out, on either side. Do NOT go back to a
+        # bare reporting transfer (`allow_unloaded=None`): resnet50 into resnet18
+        # then restored the stem, listed 9 shape mismatches and 9 missing layers
+        # and returned, a model that looks pretrained and is mostly random. Do NOT
+        # relax it to "at least N layers loaded" either: a count does not say
+        # WHICH layers, and the zero-layer rule below is that same count at N=1.
+        report = load_weights_from_checkpoint(
+            target=model,
+            ckpt_path=weights_path,
+            skip_prefixes=(),
+            strict=not skip_mismatch,
+            allow_unloaded=tuple(head_prefixes) if skip_mismatch else (),
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load weights from {weights_path}: {e}"
+        ) from e
+
+    # DECISION plan-2026-10-26T125959-7af851e5/D-023: raise here, in the models'
+    # loader. Do NOT move this check into `load_weights_from_checkpoint`: the D-070
+    # anchor above keeps that function reporting, and a same-named checkpoint whose
+    # every shape differs returns an empty report there. A model that logged a
+    # successful load and then trained from random weights is the defect.
+    if report.num_loaded == 0:
+        # 2026-10-27 (D-040): the head rule refuses a partial load first; this
+        # raise is what remains for a model whose every weighted layer is a head.
+        raise ValueError(
+            f"Loading {weights_path} restored no layer of this model. "
+            f"{report.summary_string()}"
+        )
+    kept = [
+        name for name in report.missing_in_source
+        if _matches_any_prefix(name, head_prefixes)
+    ]
+    if kept:
+        logger.warning(
+            f"Head layers kept at their initialization (absent from "
+            f"{weights_path} or of another shape): {kept}"
+        )
+    logger.info(f"Loaded {report.num_loaded} layers from {weights_path}")
+    return report
 
 
 def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]:

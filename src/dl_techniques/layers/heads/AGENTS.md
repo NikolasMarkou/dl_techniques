@@ -11,20 +11,22 @@ question: the vision and VLM head layouts and output contracts changed on
 loads, what fails and what loads with changed semantics.
 
 **Registration (current).** These classes register through
-`@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, from
-`dl_techniques.utils.keras_registration`:
+`@register_dl_technique("<defining module's dotted path>")`, from
+`dl_techniques.utils.keras_registration`, so a class registers under the module that
+defines it (`dl_techniques.layers.heads.nlp.base`, `...vision.detection`,
+`...vlm.vqa`, ...):
 
 ```python
 import keras
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+@register_dl_technique("dl_techniques.layers.heads.vision.enhancement")
 class EnhancementHead(BaseVisionHead):
     ...
 ```
 
 `keras.saving.get_registered_name(EnhancementHead)` resolves to
-`dl_techniques.layers.heads.vision.factory>EnhancementHead`. The package
+`dl_techniques.layers.heads.vision.enhancement>EnhancementHead`. The package
 string is the defining module's dotted path; under `dl_techniques.models` the 12 family
 directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
 `super_resolution`, `sam`) are stripped, but nothing is stripped under `layers/`.
@@ -44,7 +46,7 @@ this package merge) still resolve.
 >
 > ```bash
 > grep -hoP '^class \K\w+Head\b' \
->   src/dl_techniques/layers/heads/{nlp,vision,vlm}/factory.py | sort -u | wc -l
+>   src/dl_techniques/layers/heads/{nlp,vision,vlm}/*.py | sort -u | wc -l
 > ```
 >
 > The `\b` keeps a class whose name only contains `Head` out of the count: it
@@ -53,7 +55,7 @@ this package merge) still resolve.
 > Breakdown: 8 NLP + 10 vision + 6 VLM. The private `_DenseVectorHeadBase`
 > (the shared body of the normals and flow heads) does not match the pattern.
 
-**NLP** (`nlp/factory.py`) — `BaseNLPHead`, `TextClassificationHead`,
+**NLP** (one module per head under `nlp/`, see `nlp/AGENTS.md`) — `BaseNLPHead`, `TextClassificationHead`,
 `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`,
 `TextGenerationHead`, `MultipleChoiceHead`, `MultiTaskNLPHead`.
 
@@ -62,7 +64,7 @@ this package merge) still resolve.
 `OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`,
 `EnhancementHead`, `MultiTaskHead`.
 
-**VLM** (`vlm/factory.py`) — `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`,
+**VLM** (one module per head under `vlm/`, see `vlm/AGENTS.md`) — `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`,
 `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead`.
 
 ## Factory
@@ -79,7 +81,7 @@ this package merge) still resolve.
   module); `get_head_class`, `NLPTaskConfig`'s checks, `get_output_types` and
   `model_head`'s generation set read it (D-064).
 - `nlp/factory.py` — `create_nlp_head(task_config, input_dim, ...)`,
-  `create_multi_task_nlp_head(...)`, `get_head_class(...)`.
+  `create_multi_task_nlp_head(...)`; `nlp/dispatch.py` — `get_head_class(...)`.
 - `nlp/model_head.py` — helpers for a language model that owns its task head
   (`include_top=True`): `validate_task_head_knobs(include_top, task_config,
   head_config_overrides)` (the two knob `ValueError`s, one source),
@@ -127,21 +129,30 @@ this package merge) still resolve.
   `build_model_vision_head(task_type, head_config, head_config_overrides)`,
   the one call every preset-based vision head is built with (21 sites;
   DETR, MambaLCT and SuperPoint call `create_vision_head` with full configs).
-- `vlm/factory.py` — `VLM_HEAD_DISPATCH` (the one task-type to head-class
-  table, 4 rows), `create_vlm_head(task_config, ...)`,
+- `vlm/dispatch.py` — `VLM_HEAD_DISPATCH` (the one task-type to head-class
+  table, 4 rows) and `get_head_class`; `vlm/factory.py` — `create_vlm_head(task_config, ...)`,
   `create_multi_task_vlm_head(...)`. **No model, trainer or application
   constructs a VLM head today**; the callers are `layers/heads` and the tests
   (`vlm/README.md` § 1 has the grep).
-- `validation.py` — the three checks the domains share: `positive_int(value,
+- `validation.py` — the six checks the domains share: `positive_int(value,
   name, owner)` (every vision count, `VQAHead.num_heads`, the
   `VLMTaskConfig` and `NLPTaskConfig` counts, the NLP heads' `input_dim` and
   `intermediate_size`) and `static_rank(x, name, owner)` (a head that
   branches on rank reads it once, from the input's static shape, and refuses
   an unknown rank by name; the VLM and NLP heads use it, and
   `test_the_heads_read_a_static_rank.py` keeps `len(ops.shape(...))` out of
-  all three factories), and `resolve_stage_knobs(owner, table, flags, given)`
+  every module of the three domains), and `resolve_stage_knobs(owner, table, flags, given)`
   (an attention/FFN knob resolves to its default with its stage on and is
-  refused with it off; the vision and NLP bases, D-210/D-211).
+  refused with it off; the vision and NLP bases, D-210/D-211), `lookup_head(task_type, table,
+  enum_cls, domain, owner='')` (a task type, member or string, to its dispatch row or a
+  `ValueError` listing the ones with a head; the three dispatchers, no fallback anywhere),
+  `key_by_name(items, name_of, owner)` (a list or tuple of task configs keyed by name, a repeated
+  name refused; the three multi-task factories) and `pool_or_passthrough(features, mask, pool, ...)`
+  (rank 3 pooled under its mask, rank 2 passed through, a mask for rank 2 refused; the NLP and VLM
+  heads).
+- `masking.py` — `fill_masked(scores, keep, sentinel_dtype=None)`: masked positions set to the dtype's
+  finite sentinel by selection (NLP attention pooling, QA logits, VLM grounding region scores). It is
+  here and not in `utils/dtype_policy.py`, which is pure numeric policy by design.
 - `task_types.py` — aggregator re-exporting `NLPTaskType`, `VisionTaskType`,
   `VLMTaskType`, plus configs/helpers (`NLPTaskConfig`,
   `VLMTaskConfig`, `TaskConfiguration`, `parse_task_list`,
@@ -254,7 +265,7 @@ this package merge) still resolve.
   `get_config` JSON-serializable (no `Enum` members).
 - **`EnhancementHead` is module-scope**, not a closure-local class inside
   `create_enhancement_head()`. Do NOT re-nest it. Its primary key is
-  `dl_techniques.layers.heads.vision.factory>EnhancementHead`, and the legacy alias the helper
+  `dl_techniques.layers.heads.vision.enhancement>EnhancementHead`, and the legacy alias the helper
   mints is keyed on the bare class NAME — `keras.saving.get_registered_object("Custom>EnhancementHead")`
   returns this class. Renaming it would drop that alias and break every pre-existing archive, so
   the name stays EXACTLY `EnhancementHead`.
@@ -263,10 +274,12 @@ this package merge) still resolve.
   dict and break round-trips). The NLP heads copy every `NLPTaskConfig` they are
   given (`NLPTaskConfig.coerce`), so editing a config after construction changes
   neither a head nor its `get_config` (D-065).
-- **Serialization-stable class names.** Every decorator here is
-  `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, so each class carries a
-  package-qualified key plus the legacy `Custom>ClassName` alias. The class names must stay
-  verbatim, because that alias is keyed on the bare name. Sub-layers are created in
+- **Registered keys.** Each class carries a package-qualified key plus the `Custom>ClassName`
+  alias the helper mints. Keys follow the defining module and were renamed on 2026-10-27 when
+  the NLP and VLM factories were split and the vision keys were brought in line; archives saved
+  under the old `dl_techniques.layers.heads.<domain>.factory>...` keys do not load, by decision.
+  `tests/test_layers/test_heads/test_the_head_classes_register_under_their_own_module.py` pins it
+  for all 24 classes. Sub-layers are created in
   `__init__`/`build`; `keras.ops` only; `dl_techniques.utils.logger` only.
 - Public API: `from dl_techniques.layers.heads import create_head` (or per-domain
   `from dl_techniques.layers.heads.{nlp,vision,vlm} import ...`).

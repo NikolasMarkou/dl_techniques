@@ -34,7 +34,7 @@ from dl_techniques.layers.attention.factory import (
     create_attention_layer,
     STRICT_DROPPED_KEY_MARKER,
 )
-from dl_techniques.layers.heads.nlp.factory import BaseNLPHead
+from dl_techniques.layers.heads.nlp import BaseNLPHead
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.heads.vision.factory import BaseVisionHead
 

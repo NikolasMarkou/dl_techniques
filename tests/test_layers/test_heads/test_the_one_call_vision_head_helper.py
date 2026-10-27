@@ -65,7 +65,7 @@ def test_an_override_of_a_model_owned_key_is_refused(reserved) -> None:
 
 
 def test_a_task_type_with_no_head_is_refused() -> None:
-    with pytest.raises(ValueError, match="pose_estimation"):
+    with pytest.raises(ValueError, match="POSE_ESTIMATION"):
         build_model_vision_head("pose_estimation", {})
 
 
