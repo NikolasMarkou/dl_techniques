@@ -61,6 +61,12 @@ from train.common.megadepth import (
     MegaDepthDataset,
 )
 from train.common.seed import DEFAULT_SEED, set_seeds
+from train.common.conformal import (
+    add_conformal_arguments,
+    collect_logits,
+    load_conformal_model,
+    run_conformal,
+)
 from train.common.imagenet import (
     add_imagenet_arguments,
     eval_head,
@@ -152,6 +158,7 @@ from train.common.token_superposition import (
 # A name added to an import above but NOT added here now shows up as a pyflakes
 # 'imported but unused' warning -- that is the intended enforcement, not noise.
 __all__ = [
+    "add_conformal_arguments",
     "add_imagenet_arguments",
     "apply_tst",
     "attach_run_log",
@@ -197,6 +204,7 @@ __all__ = [
     "ElementMapFn",
     "EpochMetricsPlotCallback",
     "estimate_clm_steps_per_epoch",
+    "collect_logits",
     "eval_head",
     "explicitly_set_flags",
     "ClmPretrainConfig",
@@ -226,6 +234,7 @@ __all__ = [
     "load_coco2017_local_split",
     "load_dataset",
     "load_hf_clm_datasets",
+    "load_conformal_model",
     "load_imagenet_splits",
     "load_megadepth_pair",
     "load_tfds_clm_datasets",
@@ -256,6 +265,7 @@ __all__ = [
     "read_tfrecord_dataset",
     "refuse_existing_run",
     "require_imagenet_root",
+    "run_conformal",
     "resolved_run_dir",
     "RESULTS_SUMMARY_NAME",
     "render_training_dashboard",
