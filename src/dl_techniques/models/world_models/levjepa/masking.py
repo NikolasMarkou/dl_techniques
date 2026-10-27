@@ -2,8 +2,8 @@
 
 Two functions, :func:`build_block_causal_mask` and :func:`random_token_drop`,
 operating directly on ``keras.KerasTensor``/backend tensors and consumed by
-:mod:`dl_techniques.models.vision.levjepa.blocks` and
-:mod:`dl_techniques.models.vision.levjepa.encoder`. Neither carries
+:mod:`dl_techniques.models.world_models.levjepa.blocks` and
+:mod:`dl_techniques.models.world_models.levjepa.encoder`. Neither carries
 ``@register_dl_technique``: both are plain functions with no config to
 round-trip, unlike the ``Layer``/``Model`` classes the decorator serializes.
 

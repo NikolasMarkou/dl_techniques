@@ -391,7 +391,7 @@ class TestPackageDiscovery:
         containers = {
             "common", "general_purpose", "graph", "language", "memory",
             "neural_computer", "point_cloud", "probabilistic", "tabular",
-            "time_series", "vision", "vision_language",
+            "time_series", "vision", "vision_language", "world_models",
             "image_restoration", "keypoints", "super_resolution", "sam",
         }
         found = containers & set(PACKAGES)
@@ -6008,7 +6008,7 @@ _FROZEN_STEP_OVERRIDES = {
     ("src/dl_techniques/models/time_series/deepar/model.py", "DeepAR", "predict_step"),
     ("src/dl_techniques/models/vision/vae/model.py", "VAE", "test_step"),
     ("src/dl_techniques/models/vision/vae/model.py", "VAE", "train_step"),
-    ("src/dl_techniques/models/vision/video_jepa/model.py", "VideoJEPA", "train_step"),
+    ("src/dl_techniques/models/world_models/video_jepa/model.py", "VideoJEPA", "train_step"),
     ("src/dl_techniques/models/vision/vq_vae/model.py", "VQVAEModel", "test_step"),
     ("src/dl_techniques/models/vision/vq_vae/model.py", "VQVAEModel", "train_step"),
     ("src/dl_techniques/models/vision/vq_vae_rotation/model.py",

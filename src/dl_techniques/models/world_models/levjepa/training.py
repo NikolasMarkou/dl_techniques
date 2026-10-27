@@ -25,8 +25,8 @@ from typing import Any, Dict, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.models.vision.levjepa.encoder import LeVJEPAEncoder
-from dl_techniques.models.vision.levjepa.projector import LeVJEPAProjector
+from dl_techniques.models.world_models.levjepa.encoder import LeVJEPAEncoder
+from dl_techniques.models.world_models.levjepa.projector import LeVJEPAProjector
 from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 # ---------------------------------------------------------------------
@@ -77,8 +77,8 @@ class LeVJEPATrainingModel(keras.Model):
     :param encoder: A (built or unbuilt) :class:`LeVJEPAEncoder` in video mode
         (``num_frames > 1``), run on both the global and every local view.
         Passing an already-constructed encoder (e.g. from
-        :func:`~dl_techniques.models.vision.levjepa.model.create_levjepa` or
-        :func:`~dl_techniques.models.vision.levjepa.model.from_variant`)
+        :func:`~dl_techniques.models.world_models.levjepa.model.create_levjepa` or
+        :func:`~dl_techniques.models.world_models.levjepa.model.from_variant`)
         keeps encoder construction (variant tables, RoPE-vs-sincos, attention
         mode) entirely in ``model.py`` rather than duplicated here.
     :type encoder: LeVJEPAEncoder
@@ -122,8 +122,8 @@ class LeVJEPATrainingModel(keras.Model):
     .. code-block:: python
 
         import keras
-        from dl_techniques.models.vision.levjepa.model import create_levjepa
-        from dl_techniques.models.vision.levjepa.training import LeVJEPATrainingModel
+        from dl_techniques.models.world_models.levjepa.model import create_levjepa
+        from dl_techniques.models.world_models.levjepa.training import LeVJEPATrainingModel
 
         encoder = create_levjepa(
             variant="vit_tiny", input_shape=(32, 32, 3), num_frames=4,

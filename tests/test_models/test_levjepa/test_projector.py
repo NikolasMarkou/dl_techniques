@@ -4,7 +4,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision.levjepa.projector import LeVJEPAProjector
+from dl_techniques.models.world_models.levjepa.projector import LeVJEPAProjector
 
 
 class TestLeVJEPAProjectorForward:

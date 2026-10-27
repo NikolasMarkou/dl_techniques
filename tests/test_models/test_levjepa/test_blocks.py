@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.vision.levjepa.blocks import LeVJEPABlock
+from dl_techniques.models.world_models.levjepa.blocks import LeVJEPABlock
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 from tests.layer_naming import PublicAutoName

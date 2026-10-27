@@ -1,7 +1,7 @@
 """Video-shaped multi-crop ``tf.data`` transform: 1 global + N local views.
 
 Produces the ``{"global_frame": (T, S, S, C), "local_frames": (V, T, S, S, C)}``
-element :class:`~dl_techniques.models.vision.levjepa.training.LeVJEPATrainingModel`
+element :class:`~dl_techniques.models.world_models.levjepa.training.LeVJEPATrainingModel`
 consumes, from one ``(T, H, W, C)`` source clip -- the ``"pixels"`` key
 :func:`~dl_techniques.datasets.synthetic_drone_video.synthetic_drone_video_dataset`
 / :func:`~dl_techniques.datasets.bdd100k_video.bdd100k_video_dataset` both yield

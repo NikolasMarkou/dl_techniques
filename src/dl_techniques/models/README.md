@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **106 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **106 leaf packages** grouped into **13 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (106 of 106 have the file; 103 are non-empty, and `vision/metaformer/`, `vision/video_jepa/` and `vision/vit_siglip/` ship an empty one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (106 of 106 have the file; 103 are non-empty, and `vision/metaformer/`, `world_models/video_jepa/` and `vision/vit_siglip/` ship an empty one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -21,13 +21,13 @@ from dl_techniques.models import resnet                               # no - not
 ```
 
 Family-level re-exports were considered and rejected: `import dl_techniques.models.vision`
-would then eagerly construct all 51 vision packages — the whole Keras/TensorFlow import cost
+would then eagerly construct all 48 vision packages — the whole Keras/TensorFlow import cost
 of the family to reach one model — and it opens a circular-import surface between packages
 that share layers. The family `__init__.py` files carry a docstring listing their members and
 nothing else. `time_series/` is the single exception; it predates this layout, has 9 children
 rather than 51, and its consumers rely on the re-exports.
 
-## The 12 families
+## The 13 families
 
 Counts are **leaf counts**, which for `vision` and `vision_language` are larger than the
 direct-child count, because those two nest one level further. Re-derive with the `find` in
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **51** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **48** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 20 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 9 | forecasting, probabilistic and point |
@@ -47,9 +47,10 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`probabilistic/`](probabilistic/) | 1 | latent-variable models with exact, tractable inference |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
+| [`world_models/`](world_models/) | 3 | JEPA-style world models and their video encoder |
 | **Sum** | **106** | |
 
-### `vision/` (51)
+### `vision/` (48)
 
 | Package | |
 |---|---|
@@ -80,8 +81,6 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `image_restoration/scunet/` | SCUNet denoiser |
 | `keypoints/lightglue/` | LightGlue keypoint matcher — consumes keypoints and descriptors from any extractor (SuperPoint, SIFT, ...), returns per-layer soft assignments with a dustbin; static masked `call()` for training plus an eager `match()` with early exit and pruning. Generic blocks live in `layers/matching/`; trained by `src/train/lightglue/` on a frozen SuperPoint |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
-| `levjepa/` | LeVJEPA joint-embedding video pretraining ViT encoder |
-| `lewm/` | latent-energy world model |
 | `masked_autoencoder/` | MAE |
 | `mambalct/` | MambaLCT long-term context tracker (hierarchical encoder + SSM temporal scanner, per-frame box/score head) |
 | `metaformer/` | *(a stub: empty `__init__.py` and `README.md`, two architecture PNGs, no model code)* |
@@ -97,13 +96,20 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `thera/` | THERA aliasing-free arbitrary-scale super-resolution |
 | `topographic_vae/` | Topographic VAE (Keller & Welling 2022): Student-t topographic prior with temporal coherence, two Gaussian posteriors, capsule traversal |
 | `vae/` | Variational Autoencoder, ResNet encoder/decoder, Gaussian / hypersphere / vMF sampling |
-| `video_jepa/` | Video JEPA, joint embedding predictive |
 | `vit/` | Vision Transformer |
 | `vit_hmlp/` | ViT with hierarchical MLP |
 | `vit_siglip/` | ViT with a two-stage conv patch-embedding stem. Name misattributes |
 | `vq_vae/` | VQ-VAE |
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
+
+### `world_models/` (3)
+
+| Package | |
+|---|---|
+| `levjepa/` | LeVJEPA joint-embedding video pretraining ViT encoder |
+| `lewm/` | latent-energy world model |
+| `video_jepa/` | Video JEPA, joint embedding predictive |
 
 ### `language/` (20)
 

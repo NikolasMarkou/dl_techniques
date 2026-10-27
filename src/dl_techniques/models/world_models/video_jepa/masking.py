@@ -12,7 +12,7 @@ mask. Exact per-row cardinality reuses the argsort-of-uniform-noise idiom
 from :mod:`dl_techniques.models.vision.masked_autoencoder.patch_masking`.
 
 This layer is stateless: it holds no weights. The learned mask token lives
-on :class:`dl_techniques.models.vision.video_jepa.model.VideoJEPA`.
+on :class:`dl_techniques.models.world_models.video_jepa.model.VideoJEPA`.
 """
 
 from __future__ import annotations

@@ -54,7 +54,7 @@ return info['class'](**params)
   | `SequencePooling` | `sequence_pooling.py` | `dl_techniques.layers.sequence_pooling.sequence_pooling>SequencePooling` |
 
   The package string is the defining module's dotted path. (Only under
-  `dl_techniques.models` is anything stripped — its 12 family directories and its 4
+  `dl_techniques.models` is anything stripped — its 13 family directories and its 4
   subfamily containers `image_restoration`, `keypoints`, `super_resolution`, `sam`,
   because a family there is a filing decision rather than a namespace. Nothing is
   stripped under `layers/`.)

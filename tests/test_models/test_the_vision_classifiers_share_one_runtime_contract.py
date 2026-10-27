@@ -1651,7 +1651,7 @@ def name_violations(names: Sequence[str], required: Sequence[str] = ()) -> List[
 #: they were not part of the work that adopted it.
 NAME_RULE_EXEMPT_FILES: Dict[str, str] = {
     "models/language/cliffordlm": "CliffordNetLM keeps `clifford_block_{i}`",
-    "models/vision/video_jepa": "the video JEPA encoder keeps `clifford_block_{i}`",
+    "models/world_models/video_jepa": "the video JEPA encoder keeps `clifford_block_{i}`",
     "models/vision_language/clifford_clip": "the vision tower's blocks are `vision_clifford_block_{i}`",
 }
 

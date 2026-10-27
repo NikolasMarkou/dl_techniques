@@ -21,7 +21,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision.video_jepa.predictor import (
+from dl_techniques.models.world_models.video_jepa.predictor import (
     CausalSelfAttnMLPBlock,
 )
 

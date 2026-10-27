@@ -33,7 +33,7 @@ The framework relies on centralized factories to ensure consistency, serializati
     `keras.saving.get_registered_name(MultiHeadAttention)` resolves to
     `dl_techniques.layers.attention.multi_head_attention>MultiHeadAttention` (verified
     2026-08-29). The package string is the defining module's dotted path; only under
-    `dl_techniques.models` is anything stripped (its 12 family directories and its 4 subfamily
+    `dl_techniques.models` is anything stripped (its 13 family directories and its 4 subfamily
     containers `image_restoration`, `keypoints`, `super_resolution`, `sam`), because a family is
     a filing decision rather than a namespace.
 

@@ -251,7 +251,7 @@ class LeVJEPABlock(keras.layers.Layer):
     .. code-block:: python
 
         import keras
-        from dl_techniques.models.vision.levjepa.blocks import LeVJEPABlock
+        from dl_techniques.models.world_models.levjepa.blocks import LeVJEPABlock
 
         block = LeVJEPABlock(dim=192, num_heads=3, use_rope=True, layer_id=1)
         x = keras.random.normal((2, 1 + 18, 192))
@@ -481,7 +481,7 @@ class LeVJEPABlock(keras.layers.Layer):
             ``True`` means attend, broadcastable against the
             ``(batch, num_heads, num_tokens, num_tokens)`` logits. Typically the
             output of
-            :func:`~dl_techniques.models.vision.levjepa.masking.build_block_causal_mask`.
+            :func:`~dl_techniques.models.world_models.levjepa.masking.build_block_causal_mask`.
             ``None`` means unmasked attention.
         :type attn_mask: Optional[Any]
         :param training: Standard Keras training flag.

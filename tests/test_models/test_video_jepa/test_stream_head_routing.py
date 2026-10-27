@@ -17,8 +17,8 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.vision.video_jepa.model import VideoJEPA
+from dl_techniques.models.world_models.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.world_models.video_jepa.model import VideoJEPA
 
 
 def _cfg(**overrides) -> VideoJEPAConfig:

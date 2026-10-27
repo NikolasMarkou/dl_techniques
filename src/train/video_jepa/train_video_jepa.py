@@ -52,8 +52,8 @@ import tensorflow as tf
 from train.common import DEFAULT_SEED, setup_gpu, create_base_argument_parser, set_seeds
 from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
-from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.vision.video_jepa.model import VideoJEPA
+from dl_techniques.models.world_models.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.world_models.video_jepa.model import VideoJEPA
 from dl_techniques.datasets.synthetic_drone_video import (
     synthetic_drone_video_dataset,
 )

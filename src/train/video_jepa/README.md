@@ -5,7 +5,7 @@ Self-supervised pretraining of a patch-level latent video model. The encoder is
 intact; a causal predictor forecasts future patch latents at several horizons,
 with a V-JEPA-style tube-masked latent objective and SIGReg for collapse
 prevention. Model code:
-`src/dl_techniques/models/vision/video_jepa/{config,model}.py`. Single script:
+`src/dl_techniques/models/world_models/video_jepa/{config,model}.py`. Single script:
 `train_video_jepa.py`.
 
 There is no pixel decoder. Outputs live in latent patch space, e.g.

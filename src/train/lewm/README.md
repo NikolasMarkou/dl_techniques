@@ -5,7 +5,7 @@ a JEPA-style action-conditioned world model. Trains on a synthetic random
 dataset by default; an HDF5 PushT loader skeleton is provided for real data.
 
 - **Script**: `src/train/lewm/train_lewm.py`
-- **Model**: `src/dl_techniques/models/vision/lewm/`
+- **Model**: `src/dl_techniques/models/world_models/lewm/`
 - **Dataset producers**: `src/dl_techniques/datasets/pusht_hdf5.py`
 - **Loss regularizer**: `src/dl_techniques/regularizers/sigreg.py`
 - **Upstream reference**: Sobal et al., 2024 (LeWM), PyTorch
@@ -20,7 +20,7 @@ round-trip), not a production training recipe. Its defaults track upstream LeWM
 
 ## Model Overview
 
-`LeWM` (`src/dl_techniques/models/vision/lewm/model.py`) is a self-supervised
+`LeWM` (`src/dl_techniques/models/world_models/lewm/model.py`) is a self-supervised
 world model that predicts future visual embeddings conditioned on actions.
 
 ### Components

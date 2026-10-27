@@ -159,7 +159,7 @@ INTERNAL: Dict[Key, str] = {
     ("vision/image_restoration/doc_scanner/model.py", "DocScanner.call", "sigmoid()"):
         "the segmenter's logits become the confidence the composite thresholds at 0.5 (D-146)",
     ("vision/image_restoration/doc_scanner/warp.py", "convex_upsample", "softmax()"): "convex upsampling weights",
-    ("vision/levjepa/blocks.py", "LeVJEPABlock.call", "softmax()"): "attention weights",
+    ("world_models/levjepa/blocks.py", "LeVJEPABlock.call", "softmax()"): "attention weights",
     ("vision/super_resolution/pft_sr/blocks.py", "PFTLayer._attend", "softmax()"):
         "attention weights of the official PFT layer (D-212; the site arrived with the body port)",
     ("vision_language/bit_diffusion/bridge_process.py", "sample_timesteps_logit_normal", "sigmoid()"):
