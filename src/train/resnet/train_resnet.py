@@ -23,16 +23,13 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
+from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets.vision.imagenet2012 import (
-    IMAGENET2012_DEFAULT_ROOT,
-    ImageNet2012Config,
-    load_imagenet2012,
-)
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -108,8 +105,7 @@ class TrainingConfig:
             raise ValueError("Invalid image_size: must be positive")
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
-        if not Path(self.imagenet_root).exists():
-            raise ValueError(f"ImageNet root does not exist: {self.imagenet_root}")
+        require_imagenet_root(self.imagenet_root)
 
 
 # =============================================================================
@@ -337,25 +333,17 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
-    loader_kwargs = dict(
+    train_data, val_data = load_imagenet_splits(
         root=config.imagenet_root,
         devkit_dir=config.devkit_dir,
         image_size=config.image_size,
         batch_size=config.batch_size,
-        augment=config.augment_data,
-        augment_color=True,
         seed=config.seed,
         num_parallel_calls=config.num_parallel_calls,
+        augment=config.augment_data,
+        augment_color=True,
+        num_classes=config.num_classes,
     )
-    train_data = load_imagenet2012(
-        "train", ImageNet2012Config(drop_remainder=True, **loader_kwargs)
-    )
-    val_data = load_imagenet2012("val", ImageNet2012Config(**loader_kwargs))
-    if train_data.num_classes != config.num_classes:
-        raise ValueError(
-            f"num_classes={config.num_classes} but {config.imagenet_root} has "
-            f"{train_data.num_classes} classes"
-        )
     train_dataset, val_dataset = train_data.dataset, val_data.dataset
     steps_per_epoch = train_data.steps_per_epoch
     logger.info(f"Steps per epoch: {steps_per_epoch}")
@@ -437,11 +425,7 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--imagenet-root', type=str, default=IMAGENET2012_DEFAULT_ROOT,
-                        help='Folder holding train/ and val/ (extracted ILSVRC2012 images)')
-    parser.add_argument('--devkit-dir', type=str, default=None,
-                        help='ILSVRC2012 devkit folder with meta.mat and the val ground truth '
-                             '(default: <imagenet-root>/devkit)')
+    add_imagenet_arguments(parser)
     parser.add_argument('--image-size', type=int, default=224)
 
     parser.add_argument('--variant', type=str, default='resnet50',

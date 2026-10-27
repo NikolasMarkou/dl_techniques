@@ -29,7 +29,7 @@ What each guard pins, and why it is not satisfied-by-construction:
 
 ``test_help_exits_zero_without_reaching_anything_expensive``
     ``--help`` must exit having called NOTHING expensive. Sentinels are
-    installed over ``setup_gpu``, ``create_resnet``, ``load_imagenet2012``
+    installed over ``setup_gpu``, ``create_resnet``, ``load_imagenet_splits``
     and ``train_resnet_imagenet``; each raises on contact and each is asserted to
     have been called ZERO times. Moving ``parse_arguments()`` below any of them
     fails by the named ``--help reached ...`` message, not by the exit code -- so
@@ -194,7 +194,7 @@ class _Sentinel:
 EXPENSIVE = (
     "setup_gpu",
     "create_resnet",
-    "load_imagenet2012",
+    "load_imagenet_splits",
     "train_resnet_imagenet",
 )
 

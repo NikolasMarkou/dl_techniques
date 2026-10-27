@@ -9,7 +9,6 @@ import os
 import numpy as np
 import pytest
 import tensorflow as tf
-from scipy.io import savemat
 
 from dl_techniques.datasets.vision import imagenet2012 as m
 from dl_techniques.datasets.vision.imagenet2012 import (
@@ -17,49 +16,19 @@ from dl_techniques.datasets.vision.imagenet2012 import (
     ImageNet2012Config,
     load_imagenet2012,
 )
-
-# Sorted wnid order is a < b < c; the ILSVRC ids below are deliberately NOT in
-# that order, so a loader that used the id as the class index would be wrong.
-WNIDS = ["n0000000a", "n0000000b", "n0000000c"]
-ILSVRC_ID = {"n0000000a": 3, "n0000000b": 1, "n0000000c": 2}
-PER_CLASS = 4
-VAL_CLASSES = [2, 0, 1, 1, 0, 2]  # sorted-wnid index of val image #1..#6
-
-
-def _jpeg(path, h, w, value):
-    # Seeded noise, so a crop of a different region gives different pixels.
-    rng = np.random.default_rng(int(value))
-    img = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
-    tf.io.write_file(str(path), tf.io.encode_jpeg(tf.constant(img)))
-
-
-def _make_devkit(devkit_dir):
-    os.makedirs(devkit_dir, exist_ok=True)
-    dtype = [("ILSVRC2012_ID", "O"), ("WNID", "O"), ("num_children", "O")]
-    rows = [(ILSVRC_ID[w], w, 0) for w in WNIDS]
-    rows += [(1001, "n9999999x", 2), (1002, "n9999999y", 3)]  # non-leaf synsets
-    synsets = np.empty((len(rows), 1), dtype=dtype)
-    for i, r in enumerate(rows):
-        synsets[i, 0] = r
-    savemat(os.path.join(devkit_dir, "meta.mat"), {"synsets": synsets})
-    # ground truth holds ILSVRC ids, one per val image in file-name order
-    id_of_class = {i: ILSVRC_ID[w] for i, w in enumerate(WNIDS)}
-    with open(os.path.join(devkit_dir, "ILSVRC2012_validation_ground_truth.txt"), "w") as f:
-        f.write("\n".join(str(id_of_class[c]) for c in VAL_CLASSES) + "\n")
+from tests.imagenet_fake_tree import (
+    PER_CLASS,
+    VAL_CLASSES,
+    WNIDS,
+    build_fake_imagenet,
+    jpeg as _jpeg,
+    make_devkit as _make_devkit,
+)
 
 
 @pytest.fixture
 def root(tmp_path):
-    r = tmp_path / "imagenet2012"
-    for ci, w in enumerate(WNIDS):
-        (r / "train" / w).mkdir(parents=True)
-        for j in range(PER_CLASS):
-            _jpeg(r / "train" / w / f"{w}_{j}.JPEG", 40 + 5 * j, 60, 50 * ci + 10 * j)
-    (r / "val").mkdir()
-    for k in range(len(VAL_CLASSES)):
-        _jpeg(r / "val" / f"ILSVRC2012_val_{k + 1:08d}.JPEG", 48, 64, 20 * k)
-    _make_devkit(str(r / "devkit"))
-    return str(r)
+    return build_fake_imagenet(tmp_path / "imagenet2012")
 
 
 def _cfg(root, **kw):

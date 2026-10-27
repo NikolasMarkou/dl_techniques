@@ -8,7 +8,7 @@ from train.common.args import (
     explicitly_set_flags,
     resolved_run_dir,
 )
-from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, CIFAR100_MEAN, CIFAR100_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
+from train.common.datasets import load_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, CIFAR100_MEAN, CIFAR100_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
 from train.common.optimizer import build_optimizer
 from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback, resolve_monitor_mode
 from train.common.augment import augment_patch, augment_pair
@@ -61,6 +61,12 @@ from train.common.megadepth import (
     MegaDepthDataset,
 )
 from train.common.seed import DEFAULT_SEED, set_seeds
+from train.common.imagenet import (
+    add_imagenet_arguments,
+    eval_head,
+    load_imagenet_splits,
+    require_imagenet_root,
+)
 from train.common.config_io import save_config_json, json_numpy_default
 from train.common.run_io import (
     TIMESTAMP_FORMAT,
@@ -146,6 +152,7 @@ from train.common.token_superposition import (
 # A name added to an import above but NOT added here now shows up as a pyflakes
 # 'imported but unused' warning -- that is the intended enforcement, not noise.
 __all__ = [
+    "add_imagenet_arguments",
     "apply_tst",
     "attach_run_log",
     "augment_and_normalize",
@@ -190,6 +197,7 @@ __all__ = [
     "ElementMapFn",
     "EpochMetricsPlotCallback",
     "estimate_clm_steps_per_epoch",
+    "eval_head",
     "explicitly_set_flags",
     "ClmPretrainConfig",
     "extract_step_from_checkpoint",
@@ -218,7 +226,7 @@ __all__ = [
     "load_coco2017_local_split",
     "load_dataset",
     "load_hf_clm_datasets",
-    "load_imagenet_dataset",
+    "load_imagenet_splits",
     "load_megadepth_pair",
     "load_tfds_clm_datasets",
     "load_text_dataset",
@@ -247,6 +255,7 @@ __all__ = [
     "read_decode_resize_uint8",
     "read_tfrecord_dataset",
     "refuse_existing_run",
+    "require_imagenet_root",
     "resolved_run_dir",
     "RESULTS_SUMMARY_NAME",
     "render_training_dashboard",
