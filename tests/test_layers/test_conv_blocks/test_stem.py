@@ -6,7 +6,9 @@ that exist after ``build()``, invalid arguments, shapes and pool geometry, an
 absent norm, the norm epsilon, bias initializer / regularizer, every accepted
 activation form, ``get_config``, gradient flow, a bit-exact ``.keras`` round
 trip and registration. The traced forward (``jit_compile=True`` and an unknown
-batch and spatial size) is compared against the eager one.
+batch and spatial size) is compared against the eager one. A stem of ``rank=3``
+is compared with stock ``Conv3D`` / ``MaxPooling3D`` / ``AveragePooling3D`` at
+``atol=0``, and the normalization types that work at rank 3 are pinned as data.
 
 Three claims have a file of their own, because each is a different kind of
 guard:
@@ -31,6 +33,7 @@ import tensorflow as tf
 
 from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.stem import ConvStem
+from dl_techniques.layers.norms.factory import _TYPE_TO_CLASS
 from tests.norm_epsilon_oracle import collect_norm_epsilons
 from tests.numerics import reassociation_atol
 
@@ -721,6 +724,277 @@ class TestConvStemKerasRoundTripExact:
             m for m in loaded.layers if isinstance(m, ConvStem)][0]
         assert json.dumps(reloaded_stem.get_config(), sort_keys=True) == json.dumps(
             layer.get_config(), sort_keys=True)
+
+
+# ---------------------------------------------------------------------
+# rank=3: the same stem over (B, D, H, W, C)
+# ---------------------------------------------------------------------
+
+_X3_SHAPE = (B, 8, 12, 12, 2)
+
+
+def _stock_rank_three_forward(kwargs, stem, x, training):
+    """The stem's computation written with stock Keras 3D layers, weights copied.
+
+    The oracle reads the same constructor arguments the stem was given and
+    rebuilds Conv3D, BatchNormalization (the factory's epsilon, 1e-6), ReLU
+    and the 3D pool from ``keras.layers`` directly, so nothing in it comes from
+    ``ConvStem``. The weights are copied out of ``stem`` first: a call with
+    ``training=True`` moves the batch-norm statistics.
+    """
+    conv = keras.layers.Conv3D(
+        kwargs["filters"], kwargs.get("kernel_size", 3),
+        strides=kwargs.get("strides", 1), padding=kwargs.get("padding", "same"))
+    conv.build(x.shape)
+    conv.set_weights(stem.conv1.get_weights())
+    h = conv(x)
+    if kwargs.get("normalization_type", "batch_norm") is not None:
+        norm = keras.layers.BatchNormalization(epsilon=1e-6)
+        norm.build(h.shape)
+        norm.set_weights(stem.norm1.get_weights())
+        h = norm(h, training=training)
+    h = keras.ops.relu(h)
+    if kwargs.get("use_pooling"):
+        pool_cls = (keras.layers.MaxPooling3D if kwargs["pool_type"] == "max"
+                    else keras.layers.AveragePooling3D)
+        h = pool_cls(
+            kwargs["pool_size"], strides=kwargs.get("pool_strides"),
+            padding=kwargs.get("pool_padding", "valid"))(h)
+    return h
+
+
+def _assert_rank_three_matches_stock(stem_cls, kwargs, rng):
+    """Build ``stem_cls(rank=3, **kwargs)`` and demand it equals the stock 3D layers."""
+    stem = stem_cls(filters=kwargs["filters"], rank=3, name="rank3",
+                    **{k: v for k, v in kwargs.items() if k != "filters"})
+    x = random_input(rng, _X3_SHAPE)
+    stem.build(x.shape)
+    randomize_weights(stem, rng)
+    assert type(stem.conv1) is keras.layers.Conv3D
+    if kwargs.get("use_pooling"):
+        assert type(stem.pool) is (
+            keras.layers.MaxPooling3D if kwargs["pool_type"] == "max"
+            else keras.layers.AveragePooling3D)
+    for training in (False, True):
+        expected = to_numpy(_stock_rank_three_forward(kwargs, stem, x, training))
+        got = to_numpy(stem(x, training=training))
+        assert got.ndim == 5
+        np.testing.assert_allclose(
+            got, expected, rtol=0.0, atol=0.0,
+            err_msg=f"rank-3 stem differs from stock 3D layers (training={training})")
+    return stem
+
+
+_RANK_THREE_CASES = {
+    "conv_only": dict(filters=6, normalization_type=None),
+    "conv_norm": dict(filters=6),
+    "conv_norm_max_pool": dict(filters=6, use_pooling=True, pool_type="max",
+                               pool_size=2),
+    "conv_norm_avg_pool": dict(filters=6, use_pooling=True, pool_type="avg",
+                               pool_size=2),
+    "conv_max_pool": dict(filters=6, normalization_type=None, use_pooling=True,
+                          pool_type="max", pool_size=2),
+    "strided_valid_asymmetric_pool": dict(
+        filters=6, kernel_size=(3, 3, 1), strides=(1, 2, 2), padding="valid",
+        use_pooling=True, pool_type="avg", pool_size=(1, 2, 2),
+        pool_strides=(1, 1, 1), pool_padding="same"),
+}
+
+
+class TestConvStemRankThree:
+    @pytest.mark.parametrize("name", sorted(_RANK_THREE_CASES))
+    def test_the_forward_equals_the_stock_3d_layers_exactly(self, name, rng):
+        _assert_rank_three_matches_stock(ConvStem, _RANK_THREE_CASES[name], rng)
+
+    def test_a_stem_that_ignores_rank_fails_the_3d_case(self, rng):
+        """Planted control: the oracle comparison is able to fail."""
+
+        class RankIgnoringStem(ConvStem):
+            def __init__(self, *args, rank=3, **kwargs):
+                super().__init__(*args, rank=2, **kwargs)
+
+        # A rank-2 stem fails in one of two places: Keras refuses the 5-D input
+        # when it builds Conv2D, or the class assertions in the helper catch it.
+        with pytest.raises((AssertionError, ValueError)):
+            _assert_rank_three_matches_stock(
+                RankIgnoringStem, _RANK_THREE_CASES["conv_norm_max_pool"], rng)
+
+    def test_rank_two_is_the_default_and_builds_2d_layers(self):
+        layer = ConvStem(filters=4, use_pooling=True)
+        assert layer.rank == 2
+        assert type(layer.conv1) is keras.layers.Conv2D
+        assert type(layer.pool) is keras.layers.MaxPooling2D
+
+    def test_a_two_conv_stem_builds_two_3d_convs(self, rng):
+        layer = ConvStem(filters=4, conv2_filters=6, rank=3, num_convs=2,
+                         use_pooling=True, pool_type="avg", name="two3")
+        out = layer(random_input(rng, _X3_SHAPE))
+        assert type(layer.conv2) is keras.layers.Conv3D
+        assert type(layer.pool) is keras.layers.AveragePooling3D
+        assert tuple(out.shape) == (B, 4, 6, 6, 6)
+
+    @pytest.mark.parametrize("rank", [1, 4, 0, "3"])
+    def test_a_rank_other_than_two_or_three_is_refused_naming_the_value(self, rank):
+        with pytest.raises(ValueError, match=rf"rank must be .*, got {rank}"):
+            ConvStem(filters=4, rank=rank)
+
+    @pytest.mark.parametrize("kwargs, argument", [
+        (dict(rank=3, kernel_size=(3, 3)), "kernel_size"),
+        (dict(rank=2, kernel_size=(3, 3, 3)), "kernel_size"),
+        (dict(rank=3, strides=(2, 2)), "strides"),
+        (dict(rank=3, use_pooling=True, pool_size=(2, 2)), "pool_size"),
+        (dict(rank=3, use_pooling=True, pool_strides=(2, 2)), "strides"),
+    ], ids=["kernel_rank3", "kernel_rank2", "strides", "pool_size", "pool_strides"])
+    def test_a_tuple_whose_length_is_not_the_rank_is_refused(self, kwargs, argument):
+        with pytest.raises(ValueError, match=argument):
+            ConvStem(filters=4, **kwargs)
+
+    def test_an_int_expands_to_every_spatial_dimension(self):
+        layer = ConvStem(filters=4, rank=3, kernel_size=5, strides=2,
+                         use_pooling=True, pool_size=3)
+        assert layer.conv1.kernel_size == (5, 5, 5)
+        assert layer.conv1.strides == (2, 2, 2)
+        assert layer.pool.pool_size == (3, 3, 3)
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(kernel_size=3, strides=2, padding="same"),
+        dict(kernel_size=3, strides=1, padding="valid", use_pooling=True,
+             pool_size=2),
+        dict(kernel_size=(3, 5, 1), strides=(1, 2, 1), padding="valid",
+             num_convs=2),
+    ], ids=["same", "valid_pool", "asymmetric_two_conv"])
+    def test_compute_output_shape_of_an_unbuilt_stem_matches_the_forward(
+            self, kwargs, rng):
+        layer = ConvStem(filters=6, rank=3, **kwargs)
+        assert not layer.built
+        reported = layer.compute_output_shape(_X3_SHAPE)
+        assert not layer.built
+        out = layer(random_input(rng, _X3_SHAPE))
+        assert reported == tuple(out.shape)
+
+    def test_unknown_spatial_dims_pass_through_compute_output_shape(self):
+        layer = ConvStem(filters=16, rank=3, kernel_size=3, strides=2)
+        assert layer.compute_output_shape((None, None, 20, None, 3)) == (
+            None, None, 10, None, 16)
+
+    def test_the_config_carries_rank_and_round_trips(self, rng):
+        layer = ConvStem(filters=6, rank=3, kernel_size=(3, 3, 1), num_convs=2,
+                         use_pooling=True, pool_size=(2, 2, 1), name="cfg3")
+        config = json.loads(json.dumps(layer.get_config()))
+        assert config["rank"] == 3
+        rebuilt = ConvStem.from_config(config)
+        assert rebuilt.rank == 3
+        assert type(rebuilt.conv1) is keras.layers.Conv3D
+        assert type(rebuilt.pool) is keras.layers.MaxPooling3D
+        x = random_input(rng, _X3_SHAPE)
+        layer.build(x.shape)
+        rebuilt.build(x.shape)
+        rebuilt.set_weights(layer.get_weights())
+        np.testing.assert_allclose(
+            to_numpy(rebuilt(x)), to_numpy(layer(x)), rtol=0.0, atol=0.0)
+
+    def test_a_config_written_before_rank_existed_loads_as_rank_two(self):
+        config = json.loads(json.dumps(
+            ConvStem(filters=6, use_pooling=True, name="old").get_config()))
+        del config["rank"]
+        loaded = ConvStem.from_config(config)
+        assert loaded.rank == 2
+        assert type(loaded.conv1) is keras.layers.Conv2D
+        assert loaded.get_config()["rank"] == 2
+
+    def test_the_keras_round_trip_is_bit_identical(self, tmp_path, rng):
+        layer = ConvStem(filters=6, rank=3, num_convs=2, use_pooling=True,
+                         name="rt3")
+        x = random_input(rng, _X3_SHAPE)
+        layer.build(x.shape)
+        randomize_weights(layer, rng)
+        loaded = roundtrip_exact(layer, _X3_SHAPE[1:], x, "rt3", tmp_path)
+        reloaded_stem = [m for m in loaded.layers if isinstance(m, ConvStem)][0]
+        assert reloaded_stem.rank == 3
+        assert type(reloaded_stem.conv2) is keras.layers.Conv3D
+
+    @pytest.mark.parametrize("name", sorted(_TRACED_STEMS))
+    def test_a_rank_three_stem_traces_at_unknown_batch_and_spatial_size(
+            self, name, rng):
+        layer = ConvStem(name="traced3", rank=3, **_TRACED_STEMS[name])
+        layer.build((None, None, None, None, 2))
+        forward = tf.function(
+            lambda t: layer(t, training=False),
+            input_signature=[tf.TensorSpec([None, None, None, None, 2], "float32")])
+        for shape in ((B, 8, 12, 12, 2), (3, 10, 14, 9, 2)):
+            x = random_input(rng, shape)
+            eager = to_numpy(layer(x, training=False))
+            traced = to_numpy(forward(tf.constant(x)))
+            assert traced.shape == eager.shape
+            np.testing.assert_allclose(traced, eager, rtol=0.0, atol=0.0)
+
+
+# Which of the 19 factory normalization types a rank-3 stem can use, measured
+# on CPU (2026-10-27) by running ``ConvStem(filters=6, rank=3,
+# normalization_type=t)`` forward on a (2, 8, 12, 12, 2) input. The stem adds
+# no guard for the refused ones: each fails by itself, inside its own layer or
+# because it does not return one shape-preserving tensor, and the two pins
+# below are what notices a norm gaining or losing rank-5 support.
+_NORMS_THAT_WORK_AT_RANK_THREE = frozenset({
+    "adaptive_band_rms", "band_logit_norm", "band_rms", "batch_norm",
+    "bias_free_batch_norm", "dynamic_tanh", "energy_layer_norm", "layer_norm",
+    "logit_norm", "max_logit_norm", "rms_norm",
+    "zero_centered_adaptive_band_rms_norm", "zero_centered_band_rms_norm",
+    "zero_centered_rms_norm",
+})
+_NORMS_REFUSED_AT_RANK_THREE = {
+    "global_response_norm": "raises ValueError itself: it accepts input ranks 2 to 4",
+    "local_response_norm": "raises ValueError itself: it accepts input ranks 3 and 4",
+    "decoupled_max_logit": "returns a tuple, at every rank",
+    "dml_plus_center": "returns a tuple, at every rank",
+    "dml_plus_focal": "drops the channel axis, at every rank",
+}
+
+
+def _rank_three_outcome(norm_type):
+    """``(works, error)`` for one norm type: ``error`` is what the forward raised."""
+    stem = ConvStem(filters=6, rank=3, normalization_type=norm_type,
+                    name=f"sweep3_{norm_type}")
+    x = random_input(np.random.default_rng(0), _X3_SHAPE)
+    try:
+        out = stem(x, training=False)
+    except Exception as error:  # the measurement is which types fail, however
+        return False, error
+    works = (
+        not isinstance(out, (tuple, list))
+        and tuple(out.shape) == tuple(stem.compute_output_shape(x.shape))
+        and bool(np.isfinite(to_numpy(out)).all()))
+    return works, None
+
+
+@pytest.fixture(scope="module")
+def rank_three_outcomes():
+    """``{norm_type: (works, error)}`` for every registered type, measured once."""
+    return {t: _rank_three_outcome(t) for t in sorted(_TYPE_TO_CLASS)}
+
+
+class TestConvStemRankThreeNormalizationTypes:
+    def test_the_pinned_sets_partition_the_registry(self):
+        assert not _NORMS_THAT_WORK_AT_RANK_THREE & set(_NORMS_REFUSED_AT_RANK_THREE)
+        assert (_NORMS_THAT_WORK_AT_RANK_THREE | set(_NORMS_REFUSED_AT_RANK_THREE)
+                == set(_TYPE_TO_CLASS))
+        assert len(_NORMS_THAT_WORK_AT_RANK_THREE) == 14
+        assert len(_NORMS_REFUSED_AT_RANK_THREE) == 5
+
+    def test_the_working_set_is_exactly_the_measured_one(self, rank_three_outcomes):
+        measured = {t for t, (works, _) in rank_three_outcomes.items() if works}
+        assert measured == _NORMS_THAT_WORK_AT_RANK_THREE
+
+    def test_the_refused_set_is_exactly_the_measured_one(self, rank_three_outcomes):
+        measured = {t for t, (works, _) in rank_three_outcomes.items() if not works}
+        assert measured == set(_NORMS_REFUSED_AT_RANK_THREE)
+
+    @pytest.mark.parametrize("norm_type", ["global_response_norm", "local_response_norm"])
+    def test_a_response_norm_refuses_rank_five_in_its_own_layer(
+            self, norm_type, rank_three_outcomes):
+        works, error = rank_three_outcomes[norm_type]
+        assert not works
+        assert isinstance(error, ValueError) and "rank 5" in str(error), repr(error)
 
 
 # ---------------------------------------------------------------------

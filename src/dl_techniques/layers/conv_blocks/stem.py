@@ -1,10 +1,11 @@
 """
 Configurable convolutional stem for vision models.
 
-``ConvStem`` wires one or two ``Conv2D`` layers to an optional normalization
-and an optional activation, then an optional pooling layer. Normalization and
-activation are chosen by name through the ``norms`` and ``activations``
-factories, so a stem is stated by constructor arguments alone.
+``ConvStem`` wires one or two convolutions (``Conv2D``, or ``Conv3D`` at
+``rank=3``) to an optional normalization and an optional activation, then an
+optional pooling layer. Normalization and activation are chosen by name through
+the ``norms`` and ``activations`` factories, so a stem is stated by constructor
+arguments alone.
 
 Architecture (single conv, the default):
 
@@ -39,13 +40,19 @@ Architecture (two convs, ``num_convs=2``):
           ▼
     Conv2D → [Normalization] → [Activation] → [Pooling] → output
 
-Scope: the stem is 2D only. ``Conv3D`` / ``MaxPooling3D`` are not supported,
-and there is no ``rank`` option (D-004 of plan-2026-10-26T125959-7af851e5): a
-second 3D stem would have to appear before that abstraction pays for itself.
-The normalization and the activation must preserve the shape of their input,
-so only the convolutions and the pool move the output shape. The accepted
-activation forms and what each does across a config round trip are stated once,
-in the ``activation_type`` entry of the :class:`ConvStem` docstring.
+Scope: ``rank`` is 2 (the default, ``Conv2D`` / ``MaxPooling2D`` /
+``AveragePooling2D``) or 3 (the ``3D`` classes, inputs ``[B, D, H, W, C_in]``).
+It started 2D only, with no ``rank`` option (D-004 of
+plan-2026-10-26T125959-7af851e5: a second 3D stem would have to appear before
+that abstraction pays for itself). 2026-10-27: SqueezeNet V2's 3D stem is that
+second caller, so D-030 of the same plan adds ``rank``; its anchor sits at
+``_LAYERS_BY_RANK``. The normalization and the activation must preserve the
+shape of their input, so only the convolutions and the pool move the output
+shape. Of the 19 factory normalization types, 14 do that at rank 3; the other
+five are pinned in ``tests/test_layers/test_conv_blocks/test_stem.py``. The
+accepted activation forms and what each does across a config round trip are
+stated once, in the ``activation_type`` entry of the :class:`ConvStem`
+docstring.
 """
 
 from __future__ import annotations
@@ -63,6 +70,27 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
+
+# DECISION plan-2026-10-26T125959-7af851e5/D-030
+# The one place that knows the rank: conv and pool classes by rank, read by
+# _make_conv and _make_pool. Do NOT add a ConvStem3D sibling (a 570-line copy of
+# this file, measured) or an `if rank == 3` at each construction site; a third
+# rank is one more row here. Supersedes D-004 (no rank option): SqueezeNet V2's
+# Conv3D stem is the second caller. Keras expands an int and refuses a tuple of
+# the wrong length for every spatial argument, so the stem adds no length check.
+_LAYERS_BY_RANK = {
+    2: {
+        "conv": keras.layers.Conv2D,
+        "max": keras.layers.MaxPooling2D,
+        "avg": keras.layers.AveragePooling2D,
+    },
+    3: {
+        "conv": keras.layers.Conv3D,
+        "max": keras.layers.MaxPooling3D,
+        "avg": keras.layers.AveragePooling3D,
+    },
+}
+
 
 def _canonical_activation(activation: Any) -> Any:
     """Canonicalize the ``activation_type`` argument for storage.
@@ -103,7 +131,8 @@ def _canonical_activation(activation: Any) -> Any:
 class ConvStem(keras.layers.Layer):
     """Configurable convolutional stem: Conv → [norm] → [activation] → [pool].
 
-    Supports single-conv (default) and two-conv stems. The two-conv form
+    Supports single-conv (default) and two-conv stems, over 2D images
+    (``rank=2``, the default) or 3D volumes (``rank=3``). The two-conv form
     places normalization (+ optional activation) between the convolutions.
     Every sub-layer is created in ``__init__`` and built by an explicit
     ``build()``, in forward order.
@@ -120,10 +149,13 @@ class ConvStem(keras.layers.Layer):
 
     :param filters: Number of convolutional filters (output channels).
     :type filters: int
-    :param kernel_size: Size of the convolutional kernel.
-    :type kernel_size: int or tuple[int, int]
-    :param strides: Convolution strides. Applied to every conv layer.
-    :type strides: int or tuple[int, int]
+    :param kernel_size: Size of the convolutional kernel: an int (used for
+        every spatial dimension) or a tuple with one entry per spatial dimension
+        (``rank`` of them).
+    :type kernel_size: int or tuple[int, ...]
+    :param strides: Convolution strides, in the same forms. Applied to every
+        conv layer.
+    :type strides: int or tuple[int, ...]
     :param padding: Padding mode of the convolutions (``'same'`` or
         ``'valid'``).
     :type padding: str
@@ -198,11 +230,12 @@ class ConvStem(keras.layers.Layer):
     :type use_pooling: bool
     :param pool_type: Type of pooling (``'max'`` or ``'avg'``).
     :type pool_type: str
-    :param pool_size: Size of the pooling window.
-    :type pool_size: int or tuple[int, int]
+    :param pool_size: Size of the pooling window, in the same forms as
+        ``kernel_size``.
+    :type pool_size: int or tuple[int, ...]
     :param pool_strides: Pooling strides. ``None`` keeps the Keras default
         (stride equals ``pool_size``).
-    :type pool_strides: int or tuple[int, int] or None
+    :type pool_strides: int or tuple[int, ...] or None
     :param pool_padding: Pooling padding (``'valid'`` or ``'same'``).
     :type pool_padding: str
     :param kernel_initializer: Initializer for the convolution kernel(s).
@@ -213,6 +246,13 @@ class ConvStem(keras.layers.Layer):
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param bias_regularizer: Regularizer for the convolution bias(es).
     :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param rank: Number of spatial dimensions: 2 builds ``Conv2D`` and a 2D
+        pool for ``[B, H, W, C]`` inputs, 3 builds ``Conv3D`` and a 3D pool for
+        ``[B, D, H, W, C]`` inputs. A config saved before this argument existed
+        has no ``rank`` and loads as 2. At rank 3 only 14 of the 19 factory
+        normalization types can be used; the others fail inside their own layer
+        or do not preserve the shape (the stem adds no guard of its own).
+    :type rank: int
     :param name: Layer name. Sub-layers are named ``{name}_conv1`` /
         ``{name}_conv2``, ``{name}_norm1`` / ``{name}_norm2``,
         ``{name}_act1`` / ``{name}_act2`` and ``{name}_pool``.
@@ -221,7 +261,8 @@ class ConvStem(keras.layers.Layer):
     :type kwargs: Any
 
     :raises ValueError: If ``filters`` or ``conv2_filters`` is not positive,
-        ``num_convs`` is not 1 or 2, ``padding`` / ``pool_type`` /
+        ``rank`` is not 2 or 3, ``num_convs`` is not 1 or 2, a tuple argument
+        does not have ``rank`` entries, ``padding`` / ``pool_type`` /
         ``pool_padding`` is invalid, ``normalization_kwargs`` is given with no
         normalization, or ``activation_kwargs`` is given for an activation
         that is not a registry key, or ``activation_type`` is a Layer that
@@ -232,8 +273,8 @@ class ConvStem(keras.layers.Layer):
     def __init__(
         self,
         filters: int,
-        kernel_size: Union[int, Tuple[int, int]] = 3,
-        strides: Union[int, Tuple[int, int]] = 1,
+        kernel_size: Union[int, Tuple[int, ...]] = 3,
+        strides: Union[int, Tuple[int, ...]] = 1,
         padding: str = "same",
         use_bias: bool = True,
         num_convs: int = 1,
@@ -245,13 +286,14 @@ class ConvStem(keras.layers.Layer):
         final_activation: bool = True,
         use_pooling: bool = False,
         pool_type: Literal["max", "avg"] = "max",
-        pool_size: Union[int, Tuple[int, int]] = 2,
-        pool_strides: Optional[Union[int, Tuple[int, int]]] = None,
+        pool_size: Union[int, Tuple[int, ...]] = 2,
+        pool_strides: Optional[Union[int, Tuple[int, ...]]] = None,
         pool_padding: Literal["valid", "same"] = "valid",
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        rank: int = 2,
         name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
@@ -259,6 +301,10 @@ class ConvStem(keras.layers.Layer):
 
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
+        if rank not in _LAYERS_BY_RANK:
+            raise ValueError(
+                f"rank must be one of {sorted(_LAYERS_BY_RANK)}, got {rank}"
+            )
         if num_convs not in (1, 2):
             raise ValueError(f"num_convs must be 1 or 2, got {num_convs}")
         if padding not in ("same", "valid"):
@@ -287,6 +333,7 @@ class ConvStem(keras.layers.Layer):
                 f"{dict(activation_kwargs)} silently"
             )
 
+        self.rank = rank
         self.filters = filters
         self.kernel_size = kernel_size
         self.strides = strides
@@ -321,7 +368,7 @@ class ConvStem(keras.layers.Layer):
         # -----------------------------------------------------------------
         # Second convolution (optional)
         # -----------------------------------------------------------------
-        self.conv2: Optional[keras.layers.Conv2D] = None
+        self.conv2: Optional[keras.layers.Layer] = None
         self.norm2: Optional[keras.layers.Layer] = None
         self.act2: Optional[keras.layers.Layer] = None
 
@@ -363,14 +410,14 @@ class ConvStem(keras.layers.Layer):
         filters: int,
         kernel_initializer: keras.initializers.Initializer,
         bias_initializer: keras.initializers.Initializer,
-    ) -> keras.layers.Conv2D:
+    ) -> keras.layers.Layer:
         """Build one convolution; everything but the filters and initializers is shared.
 
         The initializers are arguments, not read from the attributes, because the
         second convolution must not receive the first one's instances (see the
         D-005 anchor in ``__init__``).
         """
-        return keras.layers.Conv2D(
+        return _LAYERS_BY_RANK[self.rank]["conv"](
             filters=filters,
             kernel_size=self.kernel_size,
             strides=self.strides,
@@ -388,12 +435,7 @@ class ConvStem(keras.layers.Layer):
         """Build the pooling layer, or ``None`` when ``use_pooling`` is false."""
         if not self.use_pooling:
             return None
-        pool_cls = (
-            keras.layers.MaxPooling2D
-            if self.pool_type == "max"
-            else keras.layers.AveragePooling2D
-        )
-        return pool_cls(
+        return _LAYERS_BY_RANK[self.rank][self.pool_type](
             pool_size=self.pool_size,
             strides=self.pool_strides,
             padding=self.pool_padding,
@@ -505,7 +547,8 @@ class ConvStem(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the stem.
 
-        :param inputs: Input tensor ``(B, H, W, C_in)``.
+        :param inputs: Input tensor ``(B, H, W, C_in)``, or ``(B, D, H, W, C_in)``
+            at ``rank=3``.
         :param training: Whether in training mode (affects normalization).
         :return: Output tensor.
         """
@@ -577,6 +620,7 @@ class ConvStem(keras.layers.Layer):
                 )
                 if self.bias_regularizer
                 else None,
+                "rank": self.rank,
             }
         )
         return config
