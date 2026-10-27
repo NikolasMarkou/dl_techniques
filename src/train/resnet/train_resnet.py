@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
+from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
@@ -89,6 +90,9 @@ class TrainingConfig:
 
     # Data Pipeline
     num_parallel_calls: int = tf.data.AUTOTUNE
+
+    # Conformal prediction sets fitted on val after training (None = off)
+    conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
     # Output
     output_dir: str = 'results'
@@ -401,12 +405,24 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     logger.info(f"Training completed in {(time.time() - start_time) / 3600:.2f} hours")
 
     # Save inference model
+    inference_model = model
     if config.enable_deep_supervision and has_multiple_outputs:
         inference_model = create_inference_model_from_training_model(
             model, input_shape=input_shape
         )
         inference_model.save(output_dir / "inference_model.keras")
         logger.info("Inference model saved")
+
+    # Conformal prediction sets on the primary output, over ALL of val. The
+    # deep-supervised val_dataset above carries tuple labels, so use the loader's.
+    if config.conformal_alpha is not None:
+        run_conformal(
+            inference_model, val_data.dataset, alpha=config.conformal_alpha,
+            seed=config.seed, out_dir=output_dir, input_shape=input_shape,
+            model_name=f"resnet_{config.model_variant}",
+            weights="last epoch, or the best val_loss epoch when early stopping "
+                    "fired (selected on this same validation set)",
+        )
 
     # Save history
     save_training_history_json(history, output_dir)
@@ -426,6 +442,7 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     add_imagenet_arguments(parser)
+    add_conformal_arguments(parser)
     parser.add_argument('--image-size', type=int, default=224)
 
     parser.add_argument('--variant', type=str, default='resnet50',
@@ -484,6 +501,7 @@ def main() -> None:
         augment_data=args.augment_data, label_smoothing=args.label_smoothing,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
+        conformal_alpha=None if args.no_conformal else args.conformal_alpha,
         output_dir=args.output_dir, experiment_name=args.experiment_name,
         seed=args.seed,
     )

@@ -60,6 +60,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
+from train.common.conformal import add_conformal_arguments, run_conformal
 from train.common.datasets import get_class_names
 from train.common.run_io import save_training_history_json
 from train.convnext.common import build_loss
@@ -665,7 +666,8 @@ def train_model(args) -> None:
         "input_shape": list(input_shape),
         "num_classes": num_classes,
         **({"imagenet_root": args.imagenet_root, "devkit_dir": args.devkit_dir,
-            "eval_samples": args.eval_samples}
+            "eval_samples": args.eval_samples,
+            "conformal_alpha": None if args.no_conformal else args.conformal_alpha}
            if args.dataset == "imagenet" else {}),
     }, results_dir)
 
@@ -711,6 +713,18 @@ def train_model(args) -> None:
     test_results = best_model.evaluate(val_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")
 
+    # ---- Conformal prediction sets (ImageNet), over ALL of val ----------
+    # Before the figures and the model analysis, which are the heavy steps.
+    conformal: Optional[Dict[str, Any]] = None
+    if args.dataset == "imagenet" and not args.no_conformal:
+        conformal = run_conformal(
+            best_model, val_ds, alpha=args.conformal_alpha, seed=args.seed,
+            out_dir=Path(results_dir), input_shape=input_shape,
+            model_name=f"cliffordnet_{args.variant}_imagenet",
+            weights="best checkpoint, selected on this same validation set's "
+                    "val_accuracy" if os.path.exists(best_path) else "last epoch",
+        )
+
     # ---- Classification figures --------------------------------------
     # The model emits logits; every probability consumer gets a softmax. The eval
     # data is ordered, so the predictions line up with y_eval. For CIFAR x_eval is
@@ -755,6 +769,14 @@ def train_model(args) -> None:
         f.write("Test Results:\n")
         for key, val in test_results.items():
             f.write(f"  {key}: {val:.4f}\n")
+        if conformal is not None:
+            splits = conformal["repeated_splits"]
+            f.write(
+                f"\nConformal sets (alpha {conformal['alpha']}, tau {conformal['tau']}): "
+                f"coverage {splits['coverage_mean']:.4f} on random half splits "
+                f"(min {splits['coverage_min']:.4f}), mean set size "
+                f"{splits['mean_size']:.2f}\n"
+            )
         f.write(f"\nBest val_accuracy: {best_val_acc:.4f}\n")
 
     logger.info(f"Summary written to: {summary_path}")
@@ -774,6 +796,7 @@ def main() -> None:
         dataset_choices=["cifar10", "cifar100", "imagenet"],
     )
     add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
+    add_conformal_arguments(parser, note="Used only when --dataset imagenet: ")
     parser.add_argument('--eval-samples', type=int, default=None, dest='eval_samples',
                         help='Only with --dataset imagenet: how many val images the '
                              'end-of-run figures, model analysis and save/reload '

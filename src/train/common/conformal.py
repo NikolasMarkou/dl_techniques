@@ -57,17 +57,20 @@ def _alpha(text: str) -> float:
     return value
 
 
-def add_conformal_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add ``--conformal-alpha`` and ``--no-conformal`` to ``parser``."""
+def add_conformal_arguments(parser: argparse.ArgumentParser, note: str = "") -> None:
+    """Add ``--conformal-alpha`` and ``--no-conformal`` to ``parser``.
+
+    ``note`` prefixes both help strings, e.g. ``"Used only when --dataset imagenet: "``.
+    """
     parser.add_argument(
         "--conformal-alpha", type=_alpha, default=DEFAULT_ALPHA, dest="conformal_alpha",
-        help="Miscoverage level of the conformal prediction sets fitted on the "
+        help=f"{note}miscoverage level of the conformal prediction sets fitted on the "
              f"validation set after training (default {DEFAULT_ALPHA}: sets that "
              "contain the true class about 90%% of the time)",
     )
     parser.add_argument(
         "--no-conformal", action="store_true", dest="no_conformal",
-        help="Skip the post-training conformal calibration and export",
+        help=f"{note}skip the post-training conformal calibration and export",
     )
 
 

@@ -103,6 +103,7 @@ DEST_TO_FIELD: Dict[str, str] = {
     "weight_decay": "weight_decay",
     "augment_data": "augment_data",
     "label_smoothing": "label_smoothing",
+    "conformal_alpha": "conformal_alpha",
     "output_dir": "output_dir",
     "experiment_name": "experiment_name",
     "monitor_every": "monitor_every_n_epochs",
@@ -113,6 +114,7 @@ DEST_TO_FIELD: Dict[str, str] = {
 # Dests that are NOT ``TrainingConfig`` fields, each with the reason it is not.
 UNMAPPED_DESTS: Dict[str, str] = {
     "gpu": "forwarded as train_resnet_imagenet(config, gpu_id=args.gpu)",
+    "no_conformal": "folded into conformal_alpha=None; see test_no_conformal_turns_the_step_off",
 }
 
 # ``TrainingConfig`` fields with no CLI flag at all. Asserted to still hold
@@ -141,6 +143,7 @@ EXPECTED: Dict[str, Any] = {
     "weight_decay": 0.0009,
     "augment_data": False,
     "label_smoothing": 0.037,
+    "conformal_alpha": 0.05,
     "experiment_name": "cli_contract_probe",
     "monitor_every_n_epochs": 11,
     "early_stopping_patience": 4,
@@ -248,6 +251,7 @@ def _argv(tmp_path: Path) -> List[str]:
         "--weight-decay", str(EXPECTED["weight_decay"]),
         "--no-augmentation",
         "--label-smoothing", str(EXPECTED["label_smoothing"]),
+        "--conformal-alpha", str(EXPECTED["conformal_alpha"]),
         "--output-dir", str(tmp_path / "run_output"),
         "--experiment-name", EXPECTED["experiment_name"],
         "--monitor-every", str(EXPECTED["monitor_every_n_epochs"]),
@@ -405,6 +409,16 @@ def test_fields_with_no_flag_keep_their_defaults(
             f"{_default(field)!r}; this test is not looking at the config it "
             f"thinks it is"
         )
+
+
+def test_no_conformal_turns_the_step_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "argv", [*_argv(tmp_path), "--no-conformal"])
+    _install_sentinels(monkeypatch, passive=("train_resnet_imagenet",))
+    train_resnet.main()
+    sentinel = train_resnet.train_resnet_imagenet
+    assert sentinel.args[0].conformal_alpha is None
 
 
 def test_gpu_reaches_the_trainer_not_the_config(

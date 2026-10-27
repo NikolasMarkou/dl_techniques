@@ -98,6 +98,7 @@ actually uses.
 | `--stochastic-depth-rate` | `0.3` (`0.4` for `cn_64_5`) | Maximum DropPath, linearly ramped over depth. |
 | `--dropout-rate` | `0.0` | |
 | `--label-smoothing` | `0.0` | Opt-in, `a` in `[0, 1)`, anything else is a parser error. `0.0` keeps the stock `SparseCategoricalCrossentropy(from_logits=True)`; above 0 the loss is `train.convnext.common.SmoothedSparseCategoricalCrossentropy`, so `loss` and `val_loss` include the smoothing and are not comparable with unsmoothed runs (accuracy is unchanged in meaning). |
+| `--conformal-alpha` / `--no-conformal` | `0.1` / off | `--dataset imagenet` only. After training, `train.common.conformal` runs the best checkpoint over all of val, fits an APS threshold, checks coverage on 20 random half splits and writes `conformal.json` and `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. Coverage is marginal and the checkpoint was chosen on the same val set, so the guarantee is weakened; the record says so. |
 | `--random-erasing-prob` | `0.25` | CIFAR only; refused with `--dataset imagenet`, which uses random-resized-crop and flip, no AutoAugment and no random erasing. |
 | `--epoch-analysis-every` | `0` | Standard analysis schedule, 0 = off: the data-free weight/spectral analyzer runs before training (`epoch_000`), after epoch 1, then at N, 2N, ... into `<run>/epoch_analysis/epoch_NNN/`. |
 | `--gpu` | none | |

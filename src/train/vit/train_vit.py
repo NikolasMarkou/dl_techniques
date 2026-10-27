@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, EpochMetricsPlotCallback
+from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
@@ -99,6 +100,10 @@ class TrainingConfig:
     # Data pipeline
     prefetch_buffer: int = tf.data.AUTOTUNE
     num_parallel_calls: int = tf.data.AUTOTUNE
+
+    # Conformal prediction sets fitted on val after training (None = off);
+    # ImageNet only
+    conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
     # Output
     output_dir: str = "results"
@@ -382,6 +387,7 @@ def train_vit(
     output_dir = prepare_run_dir(config)
 
     # ---- Datasets ----
+    conformal_ds = None  # the ImageNet val set, set below
     if config.dataset in ("cifar10", "cifar100"):
         train_ds, val_ds, steps_per_epoch, val_steps = create_cifar_dataset(config)
         input_shape = (config.image_size, config.image_size, 3)
@@ -402,6 +408,7 @@ def train_vit(
             num_classes=config.num_classes,
         )
         train_ds, val_ds = train_data.dataset, val_data.dataset
+        conformal_ds = val_data.dataset
         steps_per_epoch = train_data.steps_per_epoch
         val_steps = config.validation_steps
         input_shape = (config.image_size, config.image_size, 3)
@@ -487,6 +494,16 @@ def train_vit(
     # ---- Save history ----
     save_training_history_json(history, output_dir)
 
+    # ---- Conformal prediction sets (ImageNet), over ALL of val ----
+    if config.conformal_alpha is not None and conformal_ds is not None:
+        run_conformal(
+            model, conformal_ds, alpha=config.conformal_alpha, seed=config.seed,
+            out_dir=output_dir, input_shape=input_shape,
+            model_name=f"vit_{config.model_variant}",
+            weights="last epoch, or the best val_loss epoch when early stopping "
+                    "fired (selected on this same validation set)",
+        )
+
     # Convergence accounting (DECISION plan_2026-05-12_f2d29729/D-007)
     val_acc_curve = history.history.get("val_accuracy", [0.0]) or [0.0]
     best_val_acc = float(max(val_acc_curve))
@@ -516,6 +533,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, default="cifar10",
                         choices=["cifar10", "cifar100", "imagenet"])
     add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
+    add_conformal_arguments(parser, note="Used only when --dataset imagenet: ")
     parser.add_argument("--image-size", type=int, default=None,
                         help="Auto: 32 for CIFAR, 224 for ImageNet")
 
@@ -617,6 +635,7 @@ def main() -> None:
         label_smoothing=args.label_smoothing,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
+        conformal_alpha=None if args.no_conformal else args.conformal_alpha,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         success_threshold=args.success_threshold,

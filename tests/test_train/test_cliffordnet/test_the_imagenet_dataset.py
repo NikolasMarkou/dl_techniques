@@ -32,6 +32,8 @@ class _Seen:
     analysis_x = None
     figure_kwargs = None
     figure_args = None
+    order = None
+    conformal_record = None
 
 
 def _tiny(**kwargs):
@@ -44,9 +46,19 @@ def _tiny(**kwargs):
 
 def _analysis(*_a, **kwargs):
     _Seen.analysis_x = kwargs["test_data"]
+    _Seen.order.append("analysis")
 
 
 def _patch(monkeypatch):
+    _Seen.order = []
+    real_conformal = module.run_conformal
+
+    def conformal_spy(*args, **kwargs):
+        _Seen.order.append("conformal")
+        _Seen.conformal_record = real_conformal(*args, **kwargs)
+        return _Seen.conformal_record
+
+    monkeypatch.setattr(module, "run_conformal", conformal_spy)
     real = module.run_summary.write_classification_figures
 
     def spy(*args, **kwargs):
@@ -71,7 +83,7 @@ def run(tmp_path_factory):
     _patch(mp)
     _argv(mp, "--dataset", "imagenet", "--imagenet-root", root, "--image-size", "32",
           "--batch-size", "4", "--epochs", "1", "--eval-samples", "5",
-          "--output-dir", str(out))
+          "--conformal-alpha", "0.3", "--output-dir", str(out))
     try:
         module.main()
     finally:
@@ -107,6 +119,7 @@ def test_the_config_records_the_imagenet_run(run):
     assert cfg["dataset"] == "imagenet"
     assert cfg["imagenet_root"] == run[1]
     assert cfg["eval_samples"] == 5
+    assert cfg["conformal_alpha"] == 0.3
     assert cfg["input_shape"] == [32, 32, 3]
     assert cfg["num_classes"] == 3
     assert cfg["random_erasing_prob"] == 0.0
@@ -116,6 +129,44 @@ def test_the_summary_names_the_root_and_the_head(run):
     text = (run[0] / "training_summary.txt").read_text()
     assert f"ImageNet root: {run[1]}" in text
     assert "first 5 val images" in text
+
+
+def test_the_conformal_step_sees_all_of_val_and_runs_before_the_analysis(run):
+    assert _Seen.conformal_record["n_calibration"] == 6  # not the 5-image head
+    assert _Seen.order == ["conformal", "analysis"]
+    assert _Seen.conformal_record["weights"].startswith("best checkpoint")
+
+
+def test_the_conformal_files_are_in_the_run_directory(run):
+    record = json.loads((run[0] / "conformal.json").read_text())
+    assert record["alpha"] == 0.3 and record["model"] == "cliffordnet_nano_imagenet"
+    assert (run[0] / "conformal_model.keras").is_file()
+
+
+def test_the_summary_reports_the_conformal_coverage(run):
+    text = (run[0] / "training_summary.txt").read_text()
+    assert "Conformal sets (alpha 0.3" in text and "on random half splits" in text
+
+
+def test_no_conformal_skips_the_step(tmp_path, monkeypatch):
+    root = build_fake_imagenet(tmp_path / "tree" / "imagenet2012")
+    _patch(monkeypatch)
+    _argv(monkeypatch, "--dataset", "imagenet", "--imagenet-root", root, "--image-size", "32",
+          "--batch-size", "4", "--epochs", "1", "--eval-samples", "5", "--no-conformal",
+          "--output-dir", str(tmp_path / "out"))
+    module.main()
+    (run_dir,) = [p for p in (tmp_path / "out").iterdir() if p.is_dir()]
+    assert not (run_dir / "conformal.json").exists()
+    assert _Seen.order == ["analysis"]
+    cfg = json.loads((run_dir / "config.json").read_text())
+    assert cfg["conformal_alpha"] is None
+
+
+def test_an_alpha_outside_the_open_unit_interval_is_refused(monkeypatch, capsys):
+    _argv(monkeypatch, "--dataset", "imagenet", "--conformal-alpha", "1.0")
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
 
 
 # ---------------------------------------------------------------------
@@ -190,5 +241,6 @@ def test_the_help_lists_the_imagenet_flags(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         module.main()
     out = capsys.readouterr().out
-    for flag in ("--imagenet-root", "--devkit-dir", "--eval-samples"):
+    for flag in ("--imagenet-root", "--devkit-dir", "--eval-samples",
+                 "--conformal-alpha", "--no-conformal"):
         assert flag in out

@@ -63,6 +63,13 @@ class TestArguments:
         assert exc.value.code == 2
         assert "alpha" in capsys.readouterr().err
 
+    def test_the_note_prefixes_both_help_strings(self):
+        parser = argparse.ArgumentParser()
+        add_conformal_arguments(parser, note="Used only when X: ")
+        helps = [a.help for a in parser._actions
+                 if a.dest in ("conformal_alpha", "no_conformal")]
+        assert len(helps) == 2 and all(h.startswith("Used only when X: ") for h in helps)
+
     def test_the_names_are_exported_from_the_hub(self):
         for name in ("add_conformal_arguments", "collect_logits",
                      "load_conformal_model", "run_conformal"):
