@@ -97,7 +97,7 @@ class LeVJEPAProjector(keras.layers.Layer):
     .. code-block:: python
 
         import keras
-        from dl_techniques.models.vision.levjepa.projector import LeVJEPAProjector
+        from dl_techniques.models.world_models.levjepa.projector import LeVJEPAProjector
 
         projector = LeVJEPAProjector(hidden_dim=2048)
         x = keras.random.normal((3, 8, 384))  # (views, batch, dim)

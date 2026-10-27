@@ -47,8 +47,8 @@ import tensorflow as tf
 from train.common import setup_gpu, create_base_argument_parser, set_seeds, save_config_json
 from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
-from dl_techniques.models.vision.lewm.config import LeWMConfig
-from dl_techniques.models.vision.lewm.model import LeWM
+from dl_techniques.models.world_models.lewm.config import LeWMConfig
+from dl_techniques.models.world_models.lewm.model import LeWM
 from dl_techniques.datasets.pusht_hdf5 import (
     synthetic_lewm_dataset,
     PushTHDF5Dataset,

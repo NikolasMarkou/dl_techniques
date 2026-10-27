@@ -1,6 +1,6 @@
 # Models Package
 
-Model architectures, grouped into 12 families under `src/dl_techniques/models/`.
+Model architectures, grouped into 13 families under `src/dl_techniques/models/`.
 `src/dl_techniques/models/README.md` is the catalogue: every family, every leaf package,
 one line each. This file is the authoring contract.
 
@@ -17,7 +17,7 @@ one line each. This file is the authoring contract.
 ## Layout
 
 Families: `common` `general_purpose` `graph` `language` `memory`
-`neural_computer` `point_cloud` `probabilistic` `tabular` `time_series` `vision` `vision_language`.
+`neural_computer` `point_cloud` `probabilistic` `tabular` `time_series` `vision` `vision_language` `world_models`.
 
 A **leaf package** is a directory with an `__init__.py` and no `__init__.py`-bearing child.
 Four families nest one level further (`vision/image_restoration`, `vision/keypoints`,
@@ -82,9 +82,9 @@ class ResNet(keras.Model):
 even though the class lives at
 `src/dl_techniques/models/vision/resnet/model.py`.
 
-The `package` string is the defining module's dotted path with the **12 family directories**
+The `package` string is the defining module's dotted path with the **13 family directories**
 (`common`, `general_purpose`, `graph`, `language`, `memory`,
-`neural_computer`, `point_cloud`, `probabilistic`, `tabular`, `time_series`, `vision`, `vision_language`) and the
+`neural_computer`, `point_cloud`, `probabilistic`, `tabular`, `time_series`, `vision`, `vision_language`, `world_models`) and the
 **4 subfamily containers** (`image_restoration`, `keypoints`, `super_resolution`, `sam`) removed.
 A family is a filing decision, not a namespace: it has been reshuffled before, and a key derived
 from it would break every archive the moment it moves again.

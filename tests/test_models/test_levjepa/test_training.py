@@ -5,8 +5,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision.levjepa.encoder import LeVJEPAEncoder
-from dl_techniques.models.vision.levjepa.training import LeVJEPATrainingModel
+from dl_techniques.models.world_models.levjepa.encoder import LeVJEPAEncoder
+from dl_techniques.models.world_models.levjepa.training import LeVJEPATrainingModel
 
 
 def _make_model(**kwargs):

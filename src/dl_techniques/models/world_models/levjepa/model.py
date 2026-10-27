@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vision.levjepa.encoder import LeVJEPAEncoder, AttnMode
+from dl_techniques.models.world_models.levjepa.encoder import LeVJEPAEncoder, AttnMode
 
 # ---------------------------------------------------------------------
 
@@ -201,7 +201,7 @@ def create_levjepa(
 
     .. code-block:: python
 
-        from dl_techniques.models.vision.levjepa.model import create_levjepa
+        from dl_techniques.models.world_models.levjepa.model import create_levjepa
 
         encoder = create_levjepa(variant="vit_tiny", input_shape=(64, 64, 3))
     """

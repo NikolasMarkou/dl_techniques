@@ -71,7 +71,7 @@ sees `pred_loss` and `sigreg_loss` alongside the summed `loss`.
 
 ## Design point: the encoder is live, not an EMA target
 
-Unlike the sibling `models/vision/video_jepa/` package, `LeWM` uses **one
+Unlike the sibling `models/world_models/video_jepa/` package, `LeWM` uses **one
 live encoder for both the prediction target and the context** — no EMA
 shadow copy, no `stop_gradient` anywhere in `call()`. Gradients flow through
 both paths, matching upstream LeWM. `video_jepa` instead uses an EMA target
@@ -178,7 +178,7 @@ exercised by the trainer's post-training reload check (see
 ## `create_lewm(...)` factory
 
 ```python
-from dl_techniques.models.vision.lewm.model import create_lewm
+from dl_techniques.models.world_models.lewm.model import create_lewm
 
 model = create_lewm(img_size=64, patch_size=16, depth=1, history_size=2)
 out = model({"pixels": pixels, "action": actions})

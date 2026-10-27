@@ -764,7 +764,7 @@ _sub("nano_vlm", _b_nano_vlm,
 
 
 def _b_video_jepa():
-    from dl_techniques.models.vision.video_jepa import create_video_jepa
+    from dl_techniques.models.world_models.video_jepa import create_video_jepa
     return create_video_jepa(img_size=32, patch_size=16, num_frames=2,
                              embed_dim=32)
 
@@ -776,7 +776,7 @@ _sub("video_jepa", _b_video_jepa, lambda: {"pixels": _f32(1, 2, 32, 32, 3)},
 
 
 def _b_lewm():
-    from dl_techniques.models.vision.lewm import create_lewm
+    from dl_techniques.models.world_models.lewm import create_lewm
     return create_lewm(img_size=56, patch_size=14, encoder_scale="tiny",
                        embed_dim=192, projector_hidden_dim=192,
                        history_size=2, num_preds=1, depth=1, heads=2,
@@ -1491,7 +1491,7 @@ _extra("ets", _b_ets, lambda: _f32(2, 16, 1))
 
 
 def _b_levjepa():
-    from dl_techniques.models.vision.levjepa.model import create_levjepa
+    from dl_techniques.models.world_models.levjepa.model import create_levjepa
     return create_levjepa(variant="vit_tiny", input_shape=(32, 32, 3))
 
 

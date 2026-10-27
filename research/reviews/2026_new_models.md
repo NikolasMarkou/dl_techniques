@@ -448,7 +448,7 @@ Video world models for physical AI (robotics, driving, smart spaces): predict fu
 | `layers/adapters/lora.py` | LoRA post-training |
 | `callbacks/ema_shadow_callback.py` | EMA weights |
 | `models/vision/vae`, `vq_vae` | VAE / quantizer base |
-| `models/vision/video_jepa`, `levjepa`, `lewm` | Latent-space world model counterparts for comparison |
+| `models/world_models/video_jepa`, `levjepa`, `lewm` | Latent-space world model counterparts for comparison |
 | `models/language/qwen` | Small decoder-only stand-in for Cosmos-Reason1 text encoder |
 
 ### New components needed

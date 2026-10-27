@@ -1,6 +1,6 @@
 """LeVJEPA training script.
 
-Wires :class:`~dl_techniques.models.vision.levjepa.training.LeVJEPATrainingModel`
+Wires :class:`~dl_techniques.models.world_models.levjepa.training.LeVJEPATrainingModel`
 to this repo's existing ``tf.data`` video loaders (per plan.md D-002, mirroring
 ``src/train/video_jepa/train_video_jepa.py``'s ``--dataset`` scaffolding) and
 the new video multi-crop transform
@@ -41,8 +41,8 @@ from train.common import DEFAULT_SEED, setup_gpu, set_seeds, save_config_json
 from train.common.callbacks import EpochCSVLogger
 from train.common.args import explicitly_set_flags
 from dl_techniques.optimization import optimizer_builder, WarmupSchedule
-from dl_techniques.models.vision.levjepa.model import create_levjepa, SCALE_CONFIGS
-from dl_techniques.models.vision.levjepa.training import LeVJEPATrainingModel
+from dl_techniques.models.world_models.levjepa.model import create_levjepa, SCALE_CONFIGS
+from dl_techniques.models.world_models.levjepa.training import LeVJEPATrainingModel
 from dl_techniques.callbacks.ema_shadow_callback import EMAShadowCallback
 from dl_techniques.datasets.vision.multi_crop_video import make_multi_crop_video_map_fn
 from dl_techniques.datasets.synthetic_drone_video import synthetic_drone_video_dataset

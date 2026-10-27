@@ -1,4 +1,4 @@
-"""Tests for :mod:`dl_techniques.models.vision.levjepa.masking`.
+"""Tests for :mod:`dl_techniques.models.world_models.levjepa.masking`.
 
 The block-causal mask's CLS row/column semantic is pinned by an exact,
 per-query-position delta-impulse probe (not a shape-only check) — this is
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.vision.levjepa.masking import (
+from dl_techniques.models.world_models.levjepa.masking import (
     build_block_causal_mask,
     random_token_drop,
 )

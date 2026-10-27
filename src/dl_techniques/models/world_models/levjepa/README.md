@@ -49,7 +49,7 @@ pretraining.
 ## Usage
 
 ```python
-from dl_techniques.models.vision.levjepa import create_levjepa
+from dl_techniques.models.world_models.levjepa import create_levjepa
 
 # Image mode, frozen sincos positions, full attention.
 encoder = create_levjepa(variant="vit_tiny", input_shape=(64, 64, 3))
@@ -93,6 +93,6 @@ Flagged by `plan.md` Success Criterion 12's own check
 self-reported at the end of Step 6. Fixed in the iter-1 completion-fix round
 (step 6.2): all 4 files now use `import keras` and qualify every call site as
 `keras.ops.<fn>(...)`. Re-verified empty:
-`grep -rn "from keras import ops" src/dl_techniques/models/vision/levjepa/
+`grep -rn "from keras import ops" src/dl_techniques/models/world_models/levjepa/
 src/dl_techniques/layers/embedding/patch_embed_3d.py
 src/dl_techniques/layers/embedding/video_rope.py`.

@@ -35,8 +35,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.embedding.patch_embed_3d import PatchEmbed3D
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.sincos_pos_embed_3d import get_3d_sincos_pos_embed
-from dl_techniques.models.vision.levjepa.blocks import LeVJEPABlock, REFERENCE_INIT_STD
-from dl_techniques.models.vision.levjepa.masking import (
+from dl_techniques.models.world_models.levjepa.blocks import LeVJEPABlock, REFERENCE_INIT_STD
+from dl_techniques.models.world_models.levjepa.masking import (
     build_block_causal_mask,
     random_token_drop,
 )
@@ -54,7 +54,7 @@ class LeVJEPAEncoder(keras.Model):
     The encoder patch-embeds the input, adds position information, optionally
     drops a fraction of patch tokens at train time, prepends a learnable CLS
     token, optionally builds a block-causal attention mask, runs the
-    :class:`~dl_techniques.models.vision.levjepa.blocks.LeVJEPABlock` stack, and
+    :class:`~dl_techniques.models.world_models.levjepa.blocks.LeVJEPABlock` stack, and
     normalizes. Each block receives the patch grid dimensions, the surviving
     ``token_ids`` and the mask, so rotation and masking stay correct after
     tokens are dropped.
@@ -212,7 +212,7 @@ class LeVJEPAEncoder(keras.Model):
     .. code-block:: python
 
         import keras
-        from dl_techniques.models.vision.levjepa.encoder import LeVJEPAEncoder
+        from dl_techniques.models.world_models.levjepa.encoder import LeVJEPAEncoder
 
         # Image mode
         enc = LeVJEPAEncoder(

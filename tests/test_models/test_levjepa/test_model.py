@@ -3,8 +3,8 @@
 import keras
 import pytest
 
-from dl_techniques.models.vision.levjepa.encoder import LeVJEPAEncoder
-from dl_techniques.models.vision.levjepa.model import (
+from dl_techniques.models.world_models.levjepa.encoder import LeVJEPAEncoder
+from dl_techniques.models.world_models.levjepa.model import (
     SCALE_CONFIGS,
     MODEL_VARIANTS,
     from_variant,
