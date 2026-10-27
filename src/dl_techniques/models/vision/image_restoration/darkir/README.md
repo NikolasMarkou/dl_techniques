@@ -145,6 +145,7 @@ Replaces activation functions like ReLU or GELU in the feature mixing blocks.
 *   Output is $X_1 \odot X_2$.
 *   Acts as a parameter-free attention mechanism where one half gates the other.
 
+![dark ir architecture](dark_ir_architecture.png)
 ---
 
 ## 5. Quick Start Guide
