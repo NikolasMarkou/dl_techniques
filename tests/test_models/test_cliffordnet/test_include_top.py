@@ -33,7 +33,10 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.weight_transfer import (
+    load_pretrained_checkpoint,
+    load_weights_from_checkpoint,
+)
 
 H, W, C_IN = 18, 26, 3
 CHANNELS = 16
@@ -1005,6 +1008,13 @@ class TestAPretrainedTrunkMustFit:
         model.save(path)
         return path
 
+    @staticmethod
+    def _by_layers_only(receiver, path):
+        """The shared loader with the configuration comparison off: the layer rule alone."""
+        return load_pretrained_checkpoint(
+            receiver, path, (H, W, C_IN), ignore_config_keys=tuple(receiver.get_config())
+        )
+
     def test_a_clifford_stem_of_another_patch_size_raises(self, tmp_path):
         donor = CliffordNet.from_variant(
             "nano", num_classes=NUM_CLASSES, patch_size=2, **self.CLIFFORD
@@ -1016,8 +1026,14 @@ class TestAPretrainedTrunkMustFit:
                 "nano", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
                 **self.CLIFFORD,
             )
+        assert "patch_size: checkpoint 2, model 1" in str(caught.value), str(caught.value)
 
-        assert "stem" in str(caught.value), str(caught.value)
+        receiver = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, patch_size=1, **self.CLIFFORD
+        )
+        with pytest.raises(ValueError) as by_layers:
+            self._by_layers_only(receiver, path)
+        assert "- stem:" in str(by_layers.value), str(by_layers.value)
 
     def test_a_hierarchical_stem_of_another_patch_size_raises(self, tmp_path):
         donor = HierarchicalCliffordNet.from_variant(
@@ -1030,8 +1046,14 @@ class TestAPretrainedTrunkMustFit:
                 "hier_345", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
                 **self.HIERARCHICAL,
             )
+        assert "patch_size: checkpoint 2, model 1" in str(caught.value), str(caught.value)
 
-        assert "stem" in str(caught.value), str(caught.value)
+        receiver = HierarchicalCliffordNet.from_variant(
+            "hier_345", num_classes=NUM_CLASSES, patch_size=1, **self.HIERARCHICAL
+        )
+        with pytest.raises(ValueError) as by_layers:
+            self._by_layers_only(receiver, path)
+        assert "- stem:" in str(by_layers.value), str(by_layers.value)
 
     def test_a_clifford_checkpoint_of_another_width_writes_nothing(self, tmp_path):
         donor = CliffordNet.from_variant(
@@ -1043,8 +1065,11 @@ class TestAPretrainedTrunkMustFit:
         )
         before = [_np(w).copy() for w in receiver.weights]
 
-        with pytest.raises(ValueError, match="block_0"):
+        with pytest.raises(ValueError, match="channels: checkpoint 24, model"):
             receiver.load_pretrained_weights(path)
+        # With the configuration comparison off, the layer rule refuses it by itself.
+        with pytest.raises(ValueError, match="block_0"):
+            self._by_layers_only(receiver, path)
 
         for a, w in zip(before, receiver.weights):
             np.testing.assert_array_equal(a, _np(w))

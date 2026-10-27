@@ -71,8 +71,12 @@ from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import (
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
     pretrained_path_or_raise,
 )
@@ -84,6 +88,23 @@ from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 _BASE_WIDTH = 32
 _DEFAULT_STAGE_DEPTHS = (3, 4, 5)
 _SUPPORTED_PATCH_SIZES = (1, 2)
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (initializers,
+# regularizers, dropout and stochastic-depth rates, the layer-scale starting value).
+# `load_pretrained_checkpoint` compares every other key the checkpoint and the model
+# both hold, so a changed `shifts`, `ctx_mode`, `cli_mode` or width is refused even when
+# every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "kernel_initializer",
+    "bias_initializer",
+    "kernel_regularizer",
+    "bias_regularizer",
+    "dropout_rate",
+    "stochastic_depth_rate",
+    "layer_scale_init",
+)
 
 # ---------------------------------------------------------------------
 
@@ -153,47 +174,54 @@ class HierarchicalCliffordNet(keras.Model):
     ``MODEL_VARIANTS`` holds the one preset, ``hier_345``, the authors' constructor
     default.
 
-    Input shape:
-        ``(batch_size, height, width, channels_in)``; the spatial sizes are free.
-
-    Output shape:
-        ``(batch_size, num_classes)`` logits with ``include_top=True``;
-        ``(batch_size, h, w, stage_dims[-1])`` with ``include_top=False``, where
-        ``h`` and ``w`` are the stem's output sizes halved (rounding up) once per
-        downsampler.
-
     :param num_classes: Number of output classes. Must be positive when
         ``include_top`` is true and is otherwise ignored, so ``0`` is accepted
         headless. Defaults to ``1000``.
+    :type num_classes: int
     :param stage_depths: Blocks per stage, one entry per stage; each must be
         positive. Defaults to ``[3, 4, 5]``.
+    :type stage_depths: Optional[List[int]]
     :param stage_dims: Width of each stage, same length as ``stage_depths``; each
         must be positive. Defaults to 32 doubling per stage. The stem emits
         ``stage_dims[0]`` channels.
+    :type stage_dims: Optional[List[int]]
     :param patch_size: Total stride of the stem, 1 or 2.
+    :type patch_size: int
     :param shifts: Channel offsets of the rolling interaction, shared by every
         stage. Defaults to ``[1, 2]``. An offset not below a stage's width is
         dropped by the block.
+    :type shifts: Optional[List[int]]
     :param cli_mode: ``"inner"`` | ``"wedge"`` | ``"full"`` (default).
+    :type cli_mode: CliMode
     :param ctx_mode: ``"diff"`` (default) | ``"abs"``.
+    :type ctx_mode: CtxMode
     :param layer_scale_init: Initial LayerScale gamma of every block.
+    :type layer_scale_init: float
     :param stochastic_depth_rate: Maximum DropPath rate, ramped linearly over all
         blocks, in ``[0, 1)``. 0 disables it.
+    :type stochastic_depth_rate: float
     :param dropout_rate: Dropout before the classifier's linear layer, in
         ``[0, 1)``.
+    :type dropout_rate: float
     :param use_bias: Whether the block convolutions and the downsampler's 1x1
         convolution carry a bias.
+    :type use_bias: bool
     :param kernel_initializer: Initializer of every kernel: a name, a config dict
         or an ``Initializer`` instance. It is stored as a name or config dict (an
         instance is serialized) and that spec is handed to every layer, so each
         layer draws its own kernel when the spec is a name, a dict or a seedless
         instance. An instance or dict carrying an explicit ``seed`` reuses that
         seed at every layer by contract, so same-shaped kernels start equal.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param bias_initializer: Initializer of every bias; stored and handed out like
         ``kernel_initializer``.
+    :type bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param kernel_regularizer: Optional kernel regularizer.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param bias_regularizer: Optional bias regularizer.
+    :type bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param head_config_overrides: Optional overrides merged into the head config.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param include_top: Whether to build the classification head. When
         ``False`` there is no head, ``classification_head`` is ``None`` and
         the model returns the last stage's feature map
@@ -202,12 +230,22 @@ class HierarchicalCliffordNet(keras.Model):
         raises ``TypeError``); it is the last named
         parameter, after ``head_config_overrides``, so it cannot capture a
         positional ``stage_depths``. Defaults to ``True``.
+    :type include_top: bool
     :param kwargs: Passed to :class:`keras.Model`.
     :raises TypeError: If ``include_top`` is not a ``bool``.
     :raises ValueError: If an argument is out of range (``num_classes`` only
         while ``include_top`` is true), ``dropout_rate`` or
         ``stochastic_depth_rate`` is outside ``[0, 1)``, ``stage_dims`` and
         ``stage_depths`` differ in length, or ``cli_mode`` is unknown.
+
+    Input shape:
+        ``(batch_size, height, width, channels_in)``; the spatial sizes are free.
+
+    Output shape:
+        ``(batch_size, num_classes)`` logits with ``include_top=True``;
+        ``(batch_size, h, w, stage_dims[-1])`` with ``include_top=False``, where
+        ``h`` and ``w`` are the stem's output sizes halved (rounding up) once per
+        downsampler.
 
     Example::
 
@@ -241,10 +279,10 @@ class HierarchicalCliffordNet(keras.Model):
         stochastic_depth_rate: float = 0.0,
         dropout_rate: float = 0.0,
         use_bias: bool = True,
-        kernel_initializer: Any = "glorot_uniform",
-        bias_initializer: Any = "zeros",
-        kernel_regularizer: Optional[Any] = None,
-        bias_regularizer: Optional[Any] = None,
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "glorot_uniform",
+        bias_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "zeros",
+        kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
+        bias_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
         include_top: bool = True,
         **kwargs: Any,
@@ -304,13 +342,18 @@ class HierarchicalCliffordNet(keras.Model):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        self._head_config_overrides = (
-            dict(head_config_overrides) if head_config_overrides else None
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "HierarchicalCliffordNet"
         )
 
         self._build_stem()
+
+        self.blocks: List[Dict[str, Any]] = []
         self._build_blocks()
+
+        self.downsamplers: List[Dict[str, Any]] = []
         self._build_downsamplers()
+
         # Always defined, so `model.classification_head` is safe to read.
         self.classification_head = None
         if self.include_top:
@@ -363,7 +406,6 @@ class HierarchicalCliffordNet(keras.Model):
         drop_rates = linear_drop_path_rates(total, self.stochastic_depth_rate)
         conv_kw = self._conv_kwargs()
 
-        self.blocks: List[Dict[str, Any]] = []
         index = 0
         for stage, (depth, width) in enumerate(zip(self.stage_depths, self.stage_dims)):
             for j in range(depth):
@@ -402,7 +444,6 @@ class HierarchicalCliffordNet(keras.Model):
             depthwise_initializer=self.kernel_initializer,
             depthwise_regularizer=self.kernel_regularizer,
         )
-        self.downsamplers: List[Dict[str, Any]] = []
         for i in range(len(self.stage_dims) - 1):
             pointwise = None
             if self.stage_dims[i + 1] != self.stage_dims[i]:
@@ -537,19 +578,20 @@ class HierarchicalCliffordNet(keras.Model):
         """Compute the output shape.
 
         :param input_shape: ``(B, H, W, C_in)``.
-        :return: ``(B, num_classes)`` when ``include_top``; otherwise the last
-            stage's map ``(B, h, w, stage_dims[-1])``: the stem's output shape
-            chained through each downsampler's own ``compute_output_shape``, an
-            unknown size staying unknown.
+        :return: ``(B, num_classes)`` when ``include_top``, the head's own
+            ``compute_output_shape``; otherwise the last stage's map
+            ``(B, h, w, stage_dims[-1])``: the stem's output shape chained
+            through each downsampler's own ``compute_output_shape``, an unknown
+            size staying unknown.
         """
-        if self.include_top:
-            return (input_shape[0], self.num_classes)
         shape = tuple(self.stem.compute_output_shape(input_shape))
         for entry in self.downsamplers:
             shape = entry["depthwise"].compute_output_shape(shape)
             if entry["pointwise"] is not None:
                 shape = entry["pointwise"].compute_output_shape(shape)
-        return tuple(shape)
+        if not self.include_top:
+            return tuple(shape)
+        return tuple(self.classification_head.compute_output_shape(shape)["logits"])
 
     def load_pretrained_weights(
         self, weights_path: str, skip_mismatch: bool = True
@@ -563,7 +605,13 @@ class HierarchicalCliffordNet(keras.Model):
         ``classification_head`` must be restored, so a checkpoint of another
         width, depth or stem raises and leaves the model untouched. Only a head
         of another ``num_classes`` is skipped: it keeps its initialization and
-        a warning names it.
+        a warning names it. The archive's own config is compared too: a
+        constructor argument that both hold and that is not in
+        ``_NON_STRUCTURAL_CONFIG_KEYS`` must be equal, so a checkpoint of
+        another ``ctx_mode``, ``cli_mode`` or ``shifts`` is refused even when
+        every weight shape fits. An argument only one side holds is not
+        compared, and an archive without a config of this class is checked by
+        layers only.
 
         :param weights_path: Path to the ``.keras`` weights file.
         :param skip_mismatch: ``True`` (default) lets the head differ, which
@@ -575,7 +623,8 @@ class HierarchicalCliffordNet(keras.Model):
             the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
-            self, weights_path, DEFAULT_INPUT_SHAPE, skip_mismatch
+            self, weights_path, DEFAULT_INPUT_SHAPE, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 
     @classmethod

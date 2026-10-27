@@ -143,7 +143,18 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 V3 and V4 take the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
 (raises `NotImplementedError`) or `False`. A path loads every layer outside `classification_head` or
 raises `ValueError` and leaves the model untouched (a checkpoint of another variant is refused; only a
-head of another `num_classes` is skipped, with a warning):
+head of another `num_classes` is skipped, with a warning). Loading with another `num_classes` discards the
+whole `classification_head`, so the head's pretrained hidden layer is skipped with the classifier and keeps
+its initialization (measured parameter counts of that hidden layer: V3 `small` 590,848, V3 `large`
+1,230,080, V4 `small` 209,920, V4 `medium` and `hybrid_medium` 414,720; V4's includes its BatchNorm).
+The checkpoint's own configuration is compared too: when the archive records the same class, every
+constructor argument that both the archive and the model hold, except the ones that leave the weight
+layout and the computed function alone (`num_classes`, `include_top`, `head_config_overrides`,
+initializers, regularizers, dropout and stochastic-depth rates), must be equal. A V4 checkpoint into
+the same variant under other `strides`, or a V3 checkpoint under another `width_multiplier`, is
+refused, naming the argument and both values. An argument that only one side holds is not compared,
+so an archive written by an earlier revision still loads, and an archive without a configuration of
+the model's class (a functional wrapper) is checked layer by layer only.
 
 ```python
 create_mobilenetv4(          # same for v3

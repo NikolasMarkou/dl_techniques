@@ -68,3 +68,32 @@ def test_a_negative_axis_raises_rather_than_wrapping():
     """
     with pytest.raises(ValueError, match="non-negative"):
         concretize_axes((None, None), {-1: 1})
+
+
+class TestPlainHeadConfigOverrides:
+    def test_none_and_empty_mean_no_overrides(self):
+        from dl_techniques.utils.model_build import plain_head_config_overrides
+
+        assert plain_head_config_overrides(None, "M") is None
+        assert plain_head_config_overrides({}, "M") is None
+
+    def test_json_data_is_copied_not_aliased(self):
+        from dl_techniques.utils.model_build import plain_head_config_overrides
+
+        given = {"hidden_dims": [8, 4], "activation": "gelu",
+                 "kernel_regularizer": {"class_name": "L2", "config": {"l2": 1e-4}}}
+        got = plain_head_config_overrides(given, "M")
+        assert got == given and got is not given
+
+    def test_a_live_object_is_refused_naming_the_key_and_the_type(self):
+        import keras
+
+        from dl_techniques.utils.model_build import plain_head_config_overrides
+
+        with pytest.raises(ValueError) as caught:
+            plain_head_config_overrides(
+                {"activation": "gelu", "kernel_regularizer": keras.regularizers.L2(1e-4)}, "Toy")
+        message = str(caught.value)
+        assert "Toy" in message and "head_config_overrides['kernel_regularizer']" in message
+        assert "L2" in message and "activation" not in message
+        assert isinstance(caught.value.__cause__, TypeError)

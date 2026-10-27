@@ -31,6 +31,7 @@ import tensorflow as tf
 from tests.numerics import reassociation_atol
 
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3, create_mobilenetv3
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
 
 
 def make_divisible(value: float, divisor: int = 8) -> int:
@@ -656,7 +657,15 @@ class TestMobileNetV3PretrainedTrunk:
                 "small", num_classes=10, input_shape=(32, 32, 3), pretrained=path
             )
 
-        message = str(caught.value)
+        assert "variant: checkpoint 'large', model 'small'" in str(caught.value), str(caught.value)
+
+        # With the configuration comparison off, the layer rule refuses it by itself.
+        receiver = MobileNetV3.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+        with pytest.raises(ValueError) as by_layers:
+            load_pretrained_checkpoint(
+                receiver, path, (32, 32, 3), ignore_config_keys=tuple(receiver.get_config())
+            )
+        message = str(by_layers.value)
         assert "shape_mismatch" in message and "missing_in_source" in message, message
 
     def test_a_refused_load_writes_nothing(self, tmp_path):

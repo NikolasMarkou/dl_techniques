@@ -103,6 +103,8 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
+
 from .initializer_replay_oracle import replayed_pairs
 from .roundtrip_instrument_oracle import relative_path, weight_map
 from tests.layer_naming import PublicAutoName
@@ -665,12 +667,12 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         'regularization losses by default'),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v3"): Open(
         AssertionError,
-        "the MobileNet V3 and V4 migration",
+        "the MobileNet kernel_regularizer rename",
         '43 regularization losses by default',
         'regularization losses by default'),
     ("mobilenet_default_has_no_l2_losses", "mobilenet_v4"): Open(
         AssertionError,
-        "the MobileNet V3 and V4 migration",
+        "the MobileNet kernel_regularizer rename",
         '27 regularization losses by default',
         'regularization losses by default'),
     ("no_replayed_draw::instance", "squeezenet_v1"): Open(
@@ -1019,10 +1021,69 @@ def test_a_checkpoint_whose_trunk_does_not_fit_is_refused(key, tmp_path) -> None
     own.build((None, *c.input_shape))
     assert donor_layers & {layer.name for layer in own.layers if layer.weights} - {
         "classification_head"}, "control: no trunk layer is shared by name, the old load restored nothing"
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError):
         c.from_variant(pretrained=str(path))
+    # The configuration check refuses these donors first (they differ in a structural argument);
+    # with it switched off the layer check is what refuses them, which this row is about.
+    with pytest.raises(ValueError) as caught:
+        load_pretrained_checkpoint(own, str(path), c.input_shape,
+                                   ignore_config_keys=tuple(own.get_config()))
     message = str(caught.value)
     assert "shape_mismatch" in message and "missing_in_source" in message, message
+
+
+#: The same classifiers, with a donor that differs by ONE constructor argument that moves
+#: no weight shape: ``(from_variant keywords, the config key that differs)``. The layer
+#: check restores every layer of such a donor, so only the archive's own config can tell
+#: the architectures apart.
+SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
+    "resnet": ({"activation_type": "gelu"}, "activation_type"),
+    "cliffordnet": ({"ctx_mode": "abs"}, "ctx_mode"),
+    "hierarchical": ({"ctx_mode": "abs"}, "ctx_mode"),
+    "mobilenet_v3": ({"width_multiplier": 0.51}, "width_multiplier"),
+    "mobilenet_v4": ({"strides": [1, 1, 2, 2, 1, 2, 1]}, "strides"),
+}
+SAME_SHAPE_KEYS = tuple(SAME_SHAPE_DONORS)
+
+
+def test_the_same_shape_donors_cover_every_loader_family() -> None:
+    assert set(SAME_SHAPE_KEYS) == set(MIGRATED_LOADER_KEYS)
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_refuses_another_architecture_of_equal_shape", SAME_SHAPE_KEYS))
+@ledgered("local_path_refuses_another_architecture_of_equal_shape")
+def test_a_checkpoint_of_another_architecture_with_every_shape_equal_is_refused(
+        key, tmp_path) -> None:
+    c = classifier(key)
+    change, config_key = SAME_SHAPE_DONORS[key]
+    donor = c.from_variant(**change)
+    donor.build((None, *c.input_shape))
+    path = tmp_path / "donor.keras"
+    donor.save(path)
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    assert _weight_layout(own) == _weight_layout(donor), (
+        "control: the donor must differ in no weight shape, or the layer check would refuse it")
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(str(path))
+    assert f"{config_key}: checkpoint" in str(caught.value), str(caught.value)
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    c.from_variant(**change, pretrained=str(path))  # the donor's own architecture loads
+
+
+@pytest.mark.parametrize(
+    "key", _rows("head_config_overrides_are_json", MIGRATED_LOADER_KEYS))
+@ledgered("head_config_overrides_are_json")
+def test_a_live_object_in_head_config_overrides_is_refused_by_name(key) -> None:
+    c = classifier(key)
+    with pytest.raises(ValueError, match=r"head_config_overrides\['kernel_regularizer'\]"):
+        c.make(head_config_overrides={"kernel_regularizer": keras.regularizers.L2(1e-4)})
+    serialized = {"kernel_regularizer": keras.regularizers.serialize(keras.regularizers.L2(1e-4))}
+    model = c.make(head_config_overrides=serialized)
+    assert json.loads(json.dumps(model.get_config()))["head_config_overrides"] == serialized
 
 
 def _built(c: Classifier, **knobs: Any) -> keras.Model:
@@ -1730,28 +1791,30 @@ def test_the_layer_names_follow_the_naming_table(key: str) -> None:
 
 
 #: The finished families, each with the one pattern every layer the model OWNS (a direct
-#: child that holds a weight, at any depth below it) must match. The deny-list above only
-#: reads names it has heard of; this table is positive, so a spelling nobody anticipated
-#: (``uib1_1`` for a MobileNetV4 block) fails here. Deeper names belong to the layers
-#: themselves (``stem_conv1``, ``dw_conv``, ``classifier``) and are not read.
+#: sublayer, weighted or not: a drop path, an activation, a pooling, a flatten) must match.
+#: The deny-list above only reads names it has heard of; this table is positive, so a
+#: spelling nobody anticipated (``uib1_1`` for a MobileNetV4 block, ``dp0`` for a drop path)
+#: fails here. Deeper names belong to the layers themselves (``stem_conv1``, ``dw_conv``,
+#: ``classifier``) and are not read.
 FAMILY_CHILD_NAMES: Dict[str, str] = {
     "resnet": r"stem|stage[1-9]\d*_block[1-9]\d*|classification_head|supervision_head_\d+",
-    "cliffordnet": r"stem|block_\d+|classification_head",
-    "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*|downsample_\d+_(?:depthwise|norm|pointwise)"
-                     r"|classification_head"),
-    "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|classification_head",
+    "cliffordnet": r"stem|block_\d+(?:_drop_path)?|classification_head",
+    "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*(?:_drop_path)?"
+                     r"|downsample_\d+_(?:depthwise|norm|pointwise)|classification_head"),
+    "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|last_hard_swish|classification_head",
     "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
 }
 
 
-def weighted_children(model: keras.Model) -> List[str]:
-    """The names of the layers ``model`` owns directly that hold at least one weight.
+def direct_children(model: keras.Model) -> List[str]:
+    """The names of the layers ``model`` owns directly, whether or not they hold a weight.
 
-    Interface contract: a weight path reads ``<model>/<child>/.../<variable>``; the
-    child is its second segment. A weight sitting on the model itself has no child and
-    is skipped. Returns the distinct names, sorted.
+    Interface contract: ``model.layers`` is the model's direct sublayers (Keras tracks
+    the ones kept in a list or a dict attribute too). Returns the distinct names, sorted.
+    A weightless child (a drop path, an activation, a pooling) is therefore read, which
+    the weight paths of a built model cannot show.
     """
-    return sorted({parts[1] for w in model.weights if len(parts := w.path.split("/")) > 2})
+    return sorted({layer.name for layer in model.layers})
 
 
 def child_name_violations(key: str, children: Sequence[str]) -> List[str]:
@@ -1790,8 +1853,8 @@ def test_every_finished_family_has_a_name_table_and_builds() -> None:
 @pytest.mark.parametrize("key", sorted(FAMILY_CHILD_NAMES))
 def test_a_finished_family_owns_only_the_layer_names_of_its_table(key: str) -> None:
     for build in FAMILY_BUILDS[key]:
-        children = weighted_children(build())
-        assert children, "control: the model owns no weighted layer"
+        children = direct_children(build())
+        assert children, "control: the model owns no layer"
         assert child_name_violations(key, children) == []
 
 
@@ -1806,10 +1869,20 @@ def test_the_positive_name_rule_sees_a_spelling_the_deny_list_does_not_know() ->
     assert child_name_violations("resnet", ["stem", "supervision_head_0", "block_0"])
 
 
-def test_weighted_children_reads_the_second_path_segment() -> None:
+def test_the_positive_name_rule_reads_a_weightless_layer() -> None:
+    clean = ["stem", "block_0", "block_0_drop_path", "classification_head"]
+    assert child_name_violations("cliffordnet", clean) == []
+    for planted in ("dp0", "drop_path_0", "block_0_dp", "gap", "flatten", "activation"):
+        assert child_name_violations("cliffordnet", [*clean, planted]), planted
+    assert child_name_violations("mobilenet_v3", ["stem", "last_hard_swish"]) == []
+    assert child_name_violations("mobilenet_v3", ["stem", "last_swish"])
+
+
+def test_direct_children_lists_every_direct_sublayer_weighted_or_not() -> None:
     model = _ToyHeaded(head_name="classification_head")
+    model.drop = keras.layers.Dropout(0.1, name="dropout_0")
     model(np.ones((2, 5), dtype="float32"))
-    assert weighted_children(model) == ["body", "classification_head"]
+    assert direct_children(model) == ["body", "classification_head", "dropout_0"]
 
 
 # ---------------------------------------------------------------------------

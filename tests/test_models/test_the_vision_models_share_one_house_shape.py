@@ -491,6 +491,27 @@ def _is_delegating_return(fn: ast.FunctionDef, classes: Sequence[str]) -> bool:
             and call.func.value.id in classes and any(k.arg is None for k in call.keywords))
 
 
+def _from_variant_slots(tree: ast.Module, classes: Sequence[str]) -> Optional[List[str]]:
+    """The positional parameter names of ``from_variant`` after ``cls`` in the module's own
+    classes, or ``None`` when the module defines none (the method lives in a base class)."""
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name in classes:
+            for member in node.body:
+                if isinstance(member, ast.FunctionDef) and member.name == "from_variant":
+                    return [a.arg for a in member.args.args[1:]]
+    return None
+
+
+def _routes_to_its_own_slot(call: ast.Call, name: str, slots: Optional[List[str]]) -> bool:
+    """True when ``name`` reaches the SAME-NAMED keyword, or the positional slot of that name."""
+    by_keyword = any(k.arg == name and isinstance(k.value, ast.Name) and k.value.id == name
+                     for k in call.keywords)
+    by_position = slots is not None and any(
+        isinstance(arg, ast.Name) and arg.id == name and i < len(slots) and slots[i] == name
+        for i, arg in enumerate(call.args))
+    return by_keyword or by_position
+
+
 def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violations:
     factories = [n for n in ast.parse(source).body
                  if isinstance(n, ast.FunctionDef) and n.name.startswith("create_")]
@@ -522,6 +543,11 @@ def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violatio
             unsent = [p for p in taken if p not in forwarded]
             if unsent:
                 out.append(f"{fn.name} does not forward {unsent} to `from_variant`")
+            slots = _from_variant_slots(ast.parse(source), module.classes)
+            misrouted = [p for p in names if p in forwarded
+                         and not _routes_to_its_own_slot(_body_without_docstring(fn)[0].value, p, slots)]
+            if misrouted:
+                out.append(f"{fn.name} sends {misrouted} to a `from_variant` slot of another name")
     return out
 
 
@@ -1072,6 +1098,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-26T125959-7af851e5/D-007": 1,
         "plan-2026-10-26T125959-7af851e5/D-023": 3,
         "plan-2026-10-26T125959-7af851e5/D-031": 1,
+        "plan-2026-10-26T125959-7af851e5/D-041": 1,
         "plan_2026-05-11_0090b0b8/D-001": 2,
     },
     "src/dl_techniques/models/vision/convnext/convnext_v1.py": {
@@ -1221,6 +1248,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-11T170958-dc4d2202/D-015": 1,
         "plan-2026-10-13T035756-5dd4d94d/D-007": 1,
         "plan-2026-10-26T125959-7af851e5/D-023": 1,
+        "plan-2026-10-26T125959-7af851e5/D-040": 1,
+        "plan-2026-10-26T125959-7af851e5/D-041": 2,
     },
 }
 
@@ -2035,6 +2064,14 @@ PLANTED: Dict[str, Dict[str, str]] = {
             "    return Toy.from_variant(variant,", "    model = Toy.from_variant(variant,").replace(
             "pretrained=pretrained, **kwargs)\n", "pretrained=pretrained, **kwargs)\n    return model\n"),
         "an input_shape default": _plant("input_shape=None, pretrained", "input_shape=(8, 8, 3), pretrained"),
+        "a factory that swaps num_classes and input_shape": _plant(
+            "num_classes=num_classes, input_shape=input_shape,",
+            "num_classes=input_shape, input_shape=num_classes,"),
+        "a factory that swaps two positional slots": _plant(
+            "Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
+            "                            pretrained=pretrained, **kwargs)",
+            "Toy.from_variant(variant, num_classes, input_shape=input_shape,\n"
+            "                            pretrained=pretrained, **kwargs)"),
         "a factory that ignores its arguments": _plant(
             "    return Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
             "                            pretrained=pretrained, **kwargs)\n",
@@ -2473,3 +2510,20 @@ def test_every_pinned_vacuous_row_is_a_row_that_exists() -> None:
     rows = {(rule, s.key) for s in SUBJECTS for rule in CLASS_RULES if rule in s.rules}
     assert set(VACUOUS) <= rows, sorted(set(VACUOUS) - rows)
 
+
+
+def test_a_factory_argument_must_reach_the_slot_of_its_own_name() -> None:
+    def route(call: str, slots: Optional[List[str]]) -> List[str]:
+        node = ast.parse(call).body[0].value
+        return [p for p in ("variant", "num_classes", "input_shape")
+                if not _routes_to_its_own_slot(node, p, slots)]
+
+    slots = ["variant", "num_classes", "input_shape", "pretrained"]
+    assert route("C.from_variant(variant, num_classes=num_classes, input_shape=input_shape)", slots) == []
+    assert route("C.from_variant(variant, num_classes, input_shape)", slots) == []
+    assert route("C.from_variant(variant, num_classes, input_shape)", None) == [
+        "variant", "num_classes", "input_shape"], "a positional slot needs the method's own signature"
+    assert route("C.from_variant(variant, num_classes=num_classes, input_shape=num_classes)", slots) == [
+        "input_shape"]
+    assert route("C.from_variant(input_shape, num_classes, variant)", slots) == [
+        "variant", "input_shape"]

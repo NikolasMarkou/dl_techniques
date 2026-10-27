@@ -82,15 +82,30 @@ while a subclassed ``keras.Model`` refuses the same keyword with
 argument is then silently ignored. :func:`refuse_unknown_model_kwargs` restores
 the subclassed models' refusal for such a class, called on its ``**kwargs``
 before ``super().__init__``.
+
+Head overrides that ``get_config`` can write
+--------------------------------------------
+A model keeps the caller's ``head_config_overrides`` and returns them from
+``get_config``. A live Keras object in them (``{"kernel_regularizer": L2(1e-4)}``)
+saves in a ``.keras`` archive, because Keras serializes nested objects, but
+``json.dumps(model.get_config())`` then raises ``TypeError`` long after the
+mistake. :func:`plain_head_config_overrides` refuses it at construction, naming
+the key.
 """
 
-from typing import Any, Mapping
+import json
+from typing import Any, Dict, Mapping, Optional
 
 import keras
 
 # ---------------------------------------------------------------------
 
-__all__ = ["concretize_axes", "materialize_sublayers", "refuse_unknown_model_kwargs"]
+__all__ = [
+    "concretize_axes",
+    "materialize_sublayers",
+    "plain_head_config_overrides",
+    "refuse_unknown_model_kwargs",
+]
 
 #: The keywords a functional ``keras.Model`` subclass may forward to
 #: ``super().__init__``: ``name`` and ``trainable``, which Keras applies, and
@@ -238,5 +253,41 @@ def refuse_unknown_model_kwargs(kwargs: Mapping[str, Any], class_name: str) -> N
         raise ValueError(
             f"Unrecognized keyword arguments passed to {class_name}: {unknown}"
         )
+
+# ---------------------------------------------------------------------
+
+
+def plain_head_config_overrides(
+    head_config_overrides: Optional[Mapping[str, Any]], class_name: str
+) -> Optional[Dict[str, Any]]:
+    """Return a copy of a model's ``head_config_overrides`` that ``get_config`` can write.
+
+    Interface contract (call sites: the ``__init__`` of the vision classifiers that
+    take ``head_config_overrides``, which store the result and return it from
+    ``get_config``): the argument is inspected, never mutated. ``None`` or an empty
+    mapping returns ``None``. Otherwise every value must be JSON data (a string, a
+    number, a bool, ``None``, a list or dict of those, a tuple counting as a list):
+    a regularizer or initializer is passed as its name or as the dict
+    ``keras.regularizers.serialize(...)`` returns, never as the live object.
+
+    :param head_config_overrides: The constructor argument.
+    :param class_name: The model class name, quoted in the message.
+    :return: ``dict(head_config_overrides)``, or ``None`` when it is empty.
+    :raises ValueError: If a value is not JSON data; the message names the key, the
+        value's type and the serialized form to pass instead.
+    """
+    if not head_config_overrides:
+        return None
+    for key, value in head_config_overrides.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{class_name}: head_config_overrides[{key!r}] is a "
+                f"{type(value).__name__}, which get_config cannot write as JSON. "
+                "Pass a name or a serialized dict instead, for example "
+                "keras.regularizers.serialize(...)."
+            ) from error
+    return dict(head_config_overrides)
 
 # ---------------------------------------------------------------------

@@ -137,7 +137,15 @@ An unknown variant raises `ValueError` listing the variants; `pretrained=True` r
 loads a local `.keras` file through the shared loader, which restores every layer outside
 `classification_head` or raises (a checkpoint of another width, depth or stem patch is refused and the
 model is left untouched; a checkpoint with another `num_classes` loads its trunk and leaves the new
-head at its initialization, with a warning naming it). There are no `nano()`, `lite()` or
+head at its initialization, with a warning naming it). The checkpoint's own configuration is
+compared too: when the archive records the same class, every constructor argument that both the
+archive and the model hold, except the ones that leave the weight layout and the computed function
+alone (`num_classes`, `include_top`, `head_config_overrides`, initializers, regularizers, dropout
+and stochastic-depth rates), must be equal. A `ctx_mode="diff"` checkpoint into `ctx_mode="abs"`, or
+`shifts=[1, 2]` into `[1, 3]`, restores every shape and is refused, naming the argument and both
+values. An argument that only one side holds is not compared, so an archive written by an earlier
+revision still loads, and an archive without a configuration of the model's class (a functional
+wrapper) is checked layer by layer only. There are no `nano()`, `lite()` or
 `lite_g()` shortcuts: use `from_variant("nano", ...)`.
 
 **`from_variant(..., input_shape=...)` builds the model.** The constructors take no

@@ -49,9 +49,13 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import (
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
     pretrained_path_or_raise,
 )
@@ -66,6 +70,19 @@ from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.initializers.clone import clone_initializer, initializer_spec
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the initializer, the
+# dropout rate, the weight decay, the input size). `load_pretrained_checkpoint` compares
+# every other key the checkpoint and the model both hold, so a changed variant or width
+# multiplier is refused even when every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "dropout_rate",
+    "weight_decay",
+)
 
 # ---------------------------------------------------------------------
 
@@ -101,10 +118,15 @@ class MobileNetV3(keras.Model):
 
     :param num_classes: Number of output classes; used only if `include_top=True`,
         where it must be positive.
+    :type num_classes: int
     :param variant: `"large"` or `"small"`.
+    :type variant: Literal['large', 'small']
     :param width_multiplier: Channel-count multiplier. Must be positive.
+    :type width_multiplier: float
     :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
+    :type dropout_rate: float
     :param weight_decay: L2 regularization factor, the head's included.
+    :type weight_decay: float
     :param kernel_initializer: Weight initialization strategy, the head's
         included: a name, a serialized config dict or an `Initializer` instance.
         Each site draws from its own clone of it, so a name, a dict or a seedless
@@ -112,12 +134,16 @@ class MobileNetV3(keras.Model):
         an explicit `seed` reuses that seed at every site by contract, so
         same-shaped kernels start equal (`HeNormal(seed=7)` ties 903 of 1431
         kernel pairs at `small`). `get_config` reports its serialized spec.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param include_top: Whether to include the classification head.
+    :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
+    :type input_shape: Optional[Tuple[int, ...]]
     :param head_config_overrides: Optional dict merged into the head
         configuration. `name`, `num_classes` and `task_type` raise
         `ValueError`.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to `keras.Model`.
     :raises ValueError: If `variant` is not `"large"` or `"small"`,
         `num_classes` is not positive with a head, `width_multiplier` is not
@@ -147,7 +173,6 @@ class MobileNetV3(keras.Model):
         "small": {"variant": "small"},
     }
 
-    # Model configurations from the paper
     LARGE_CONFIG = [
         # exp_size, out_channels, kernel_size, stride, use_se, activation
         # Stage 1
@@ -201,9 +226,9 @@ class MobileNetV3(keras.Model):
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
             weight_decay: float = 1e-5,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "glorot_uniform",
             include_top: bool = True,
-            input_shape: Optional[Tuple[int, int, int]] = None,
+            input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
@@ -247,7 +272,9 @@ class MobileNetV3(keras.Model):
         self.include_top = include_top
         self.input_shape_config = input_shape
 
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "MobileNetV3"
+        )
 
         if variant == "large":
             self.block_configs = self.LARGE_CONFIG
@@ -266,6 +293,8 @@ class MobileNetV3(keras.Model):
         )
 
         self._build_stem()
+
+        self.blocks = []
         self._build_blocks()
         self._build_last_block()
 
@@ -301,7 +330,6 @@ class MobileNetV3(keras.Model):
 
         The blocks are named ``block_{i}``, counted from 0.
         """
-        self.blocks = []
         in_channels = self.STEM_FILTERS
         # The table's input width at width_multiplier 1.0 (the stem's 16 for
         # the first row): exp_size / in_size is the row's expansion ratio.
@@ -480,7 +508,14 @@ class MobileNetV3(keras.Model):
         restored, so a checkpoint of another variant, block type, width or stem
         raises and leaves the model untouched. Only a head of another
         `num_classes` is skipped: it keeps its initialization and a warning
-        names it.
+        names it. The skipped head is the whole `classification_head`, so its
+        pretrained hidden layer (V3 `small`: 590,848 parameters) is discarded with the
+        classifier. The archive's own config is compared too: a constructor
+        argument that both hold and that is not in `_NON_STRUCTURAL_CONFIG_KEYS`
+        must be equal, so a checkpoint of another `width_multiplier` or stride
+        pattern is refused even when every weight shape fits. An argument only
+        one side holds is not compared, and an archive without a config of this
+        class is checked by layers only.
 
         :param weights_path: Path to the weights file (`.keras` format).
         :param skip_mismatch: `True` (default) lets the head layers differ;
@@ -491,7 +526,8 @@ class MobileNetV3(keras.Model):
             the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
-            self, weights_path, self.input_shape_config, skip_mismatch
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 
     @classmethod
