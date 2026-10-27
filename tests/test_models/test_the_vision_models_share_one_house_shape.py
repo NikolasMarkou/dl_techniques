@@ -1131,18 +1131,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
          "'input_shape', 'pretrained')",
          'create_mobilenetv3 is not one `return Class.from_variant(..., '
          '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        "2 violation(s): create_mobilenetv4('variant', 'num_classes', 'input_shape', "
-        "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
-        "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv4 is not one `return "
-        'Class.from_variant(..., **kwargs)`',
-        ("create_mobilenetv4('variant', 'num_classes', 'input_shape', "
-         "'width_multiplier', 'pretrained', "
-         "'head_config_overrides') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_mobilenetv4 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
         "the ConvNeXt migration",
         "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
@@ -1315,37 +1303,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         'constructor has no `kernel_regularizer` argument',
         ('constructor argument `weight_decay` should be `kernel_regularizer`',
          'constructor has no `kernel_regularizer` argument')),
-    ("h2_member_order", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '2 violation(s): `_build_stem` comes after `call`; `compute_output_shape` comes after '
-        '`get_config`',
-        ('`_build_stem` comes after `call`',
-         '`compute_output_shape` comes after `get_config`')),
-    ("h3_one_init_log", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h3_builders_assign", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '2 violation(s): `_build_stem` returns a value (line 270); `_build_stage` returns a value'
-        ' (line 344)',
-        ('`_build_stem` returns a value',
-         '`_build_stage` returns a value')),
-    ("h4_no_logging_outside_init", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '2 violation(s): `_build_stage` writes 2 logger call(s); `summary` writes 14 logger '
-        'call(s)',
-        ('`_build_stage` writes',
-         '`summary` writes')),
-    ("h5_build_materializes", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): the class defines no `build`',
-        ('the class defines no `build`',)),
-    ("h10_stored_attribute_names", "mobilenet_v4"): Open(
-        "the MobileNet V3 and V4 migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_one_name_per_concept", "mobilenet_v4"): Open(
         "the MobileNet kernel_regularizer rename",
         '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '

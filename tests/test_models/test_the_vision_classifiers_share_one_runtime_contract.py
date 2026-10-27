@@ -294,11 +294,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "width_multiplier=0.25 gives 0.1875: the variant's own value is multiplied, not "
         'overridden',
         "{'width_multiplier': 0.1875}"),
-    ("documented_override_is_accepted", "mobilenet_v4"): Open(
-        TypeError,
-        "the MobileNet V3 and V4 migration",
-        "TypeError: got multiple values for keyword argument 'use_attention'",
-        "got multiple values for keyword argument 'use_attention'"),
     ("documented_override_is_accepted", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -327,12 +322,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
         'NotImplementedError',
         "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "mobilenet_v4"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("pretrained_true_names_the_variant", "rad_convnet"): Open(
         ValueError,
         "the RADConvNet migration",
@@ -369,12 +358,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "mobilenet_v4"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("missing_path_raises_file_not_found", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -423,12 +406,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
-    ("local_path_round_trip_headed", "mobilenet_v4"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("local_path_round_trip_headed", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -477,12 +454,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
         'takes no pretrained path',
         "Unrecognized keyword arguments passed to MobileNetV3: {'pretrained'"),
-    ("local_path_round_trip_headless", "mobilenet_v4"): Open(
-        ValueError,
-        "the MobileNet V3 and V4 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV4: {'pretrained'"),
     ("local_path_round_trip_headless", "convnext_v1"): Open(
         TypeError,
         "the ConvNeXt migration",
@@ -538,11 +509,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
-    ("explicit_build_equals_lazy", "mobilenet_v4"): Open(
-        UserWarning,
-        "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
     ("explicit_build_equals_lazy_headless", "mobilenet_v1"): Open(
         UserWarning,
         "the MobileNet V1 and V2 migration",
@@ -553,16 +519,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
         'does not have a `build()` method implemented'),
-    ("explicit_build_equals_lazy_headless", "mobilenet_v4"): Open(
-        UserWarning,
-        "the MobileNet V3 and V4 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
-    ("config_round_trip", "mobilenet_v4"): Open(
-        TypeError,
-        "the MobileNet V3 and V4 migration",
-        'TypeError: Object of type HeNormal is not JSON serializable',
-        'Object of type HeNormal is not JSON serializable'),
     ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(
         AssertionError,
         "the MobileNet V1 and V2 migration",
@@ -605,11 +561,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V3 and V4 migration",
         '27 regularization losses by default',
         'regularization losses by default'),
-    ("no_replayed_draw::instance", "mobilenet_v4"): Open(
-        AssertionError,
-        "the MobileNet V3 and V4 migration",
-        '3 of 2701 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "squeezenet_v1"): Open(
         AssertionError,
         "the SqueezeNet migration",
@@ -695,12 +646,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the MobileNet V1 and V2 migration",
         '1 violation(s): no layer is named `stem`',
         'no layer is named `stem`'),
-    ("layer_names_follow_the_table", "mobilenet_v4"): Open(
-        AssertionError,
-        "the MobileNet V3 and V4 migration",
-        '12 violation(s): stage_0_block_0, stage_1_block_0, stage_2_block_0, stage_2_block_1,'
-        ' ...',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "convnext_v1"): Open(
         AssertionError,
         "the ConvNeXt migration",

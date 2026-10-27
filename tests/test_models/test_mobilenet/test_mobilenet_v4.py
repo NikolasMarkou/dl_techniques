@@ -17,6 +17,8 @@ Test Categories:
 - Performance benchmarks
 """
 
+import copy
+import json
 import pytest
 import tempfile
 import os
@@ -254,7 +256,7 @@ class TestMobileNetV4:
 
         assert model.num_classes == 10
         assert model.width_multiplier == 0.75
-        assert model._input_shape == (32, 32, 3)
+        assert model.input_shape_config == (32, 32, 3)
 
     # ============================================================================
     # block_type -> structure Tests
@@ -651,6 +653,101 @@ class TestMobileNetV4:
 
         symbolic = model(keras.Input(shape=(32, 32, 3)))
         assert tuple(symbolic.shape) == (None,) + tuple(eager.shape[1:])
+
+
+class TestMobileNetV4HouseShape:
+    """The constructor, ``from_variant`` and ``build`` contract of the house shape."""
+
+    @pytest.mark.parametrize("override", [
+        {"depths": [1, 1, 1, 1, 1, 1, 1]},
+        {"dims": [8, 16, 24, 32, 40, 48, 56]},
+        {"block_types": ["IB", "IB", "IB", "IB", "IB", "IB", "FFN"]},
+        {"strides": [1, 1, 2, 2, 1, 2, 1]},
+        {"width_multiplier": 0.5},
+        {"use_attention": True},
+        {"use_attention": True, "attention_stages": [4, 5]},
+        {"dropout_rate": 0.3, "include_top": False},
+    ])
+    def test_from_variant_replaces_a_field_of_the_variant(self, override):
+        """A keyword given to ``from_variant`` replaces the preset's own value.
+
+        The preset fields used to be splatted beside ``**kwargs``, so
+        naming one of them raised ``TypeError: got multiple values``.
+        """
+        model = MobileNetV4.from_variant(
+            "small", num_classes=3, input_shape=(32, 32, 3), **override)
+        for name, value in override.items():
+            stored = getattr(model, name)
+            assert stored == (list(value) if isinstance(value, tuple) else value), name
+
+    def test_an_override_does_not_poison_the_variant_table(self):
+        before = copy.deepcopy(MobileNetV4.MODEL_VARIANTS)
+        MobileNetV4.from_variant("hybrid_medium", depths=[2] * 7, attention_stages=[1])
+        assert MobileNetV4.MODEL_VARIANTS == before
+
+    def test_every_variant_row_names_its_strides(self):
+        for name, row in MobileNetV4.MODEL_VARIANTS.items():
+            assert len(row["strides"]) == len(row["depths"]), name
+
+    @pytest.mark.parametrize("variant,side,count", [
+        ("small", 64, 2_124_024),
+        ("hybrid_medium", 128, 3_722_250),
+    ])
+    def test_an_explicit_build_creates_every_weight(self, variant, side, count):
+        """``build`` materializes what ``call`` runs.
+
+        The model used to inherit Keras' ``build``, which marked it built with
+        0 weights and a warning.
+        """
+        model = MobileNetV4.from_variant(variant, num_classes=1000)
+        model.build((None, side, side, 3))
+        assert model.count_params() == count
+
+    def test_the_input_shape_defaults_to_the_imagenet_shape(self):
+        assert MobileNetV4(input_shape=None).input_shape_config == (224, 224, 3)
+        assert MobileNetV4.from_variant("small").input_shape_config == (224, 224, 3)
+
+    def test_an_initializer_instance_is_stored_as_its_serialized_spec(self):
+        model = MobileNetV4.from_variant(
+            "small", input_shape=(32, 32, 3),
+            kernel_initializer=keras.initializers.HeNormal())
+        assert isinstance(model.kernel_initializer, dict)
+        config = json.loads(json.dumps(model.get_config()))
+        assert config["kernel_initializer"] == model.kernel_initializer
+        rebuilt = MobileNetV4.from_config(config)
+        assert rebuilt.kernel_initializer == model.kernel_initializer
+
+    def test_layers_are_named_by_stage_and_block_from_one(self):
+        model = MobileNetV4.from_variant("hybrid_medium", input_shape=(128, 128, 3))
+        names = [layer.name for stage in model.stages for layer in stage]
+        expected = []
+        for stage_idx, depth in enumerate(model.depths):
+            expected += [f"stage{stage_idx + 1}_block{b + 1}" for b in range(depth)]
+            if stage_idx in model.attention_stages:
+                expected.append(f"stage{stage_idx + 1}_mqa")
+        assert names == expected
+        assert names[0] == "stage1_block1"
+        assert "stage6_mqa" in names and "stage7_mqa" in names
+
+    @pytest.mark.parametrize("kwargs,message", [
+        ({"width_multiplier": 0.0}, "width_multiplier must be positive, got 0.0"),
+        ({"width_multiplier": -1.0}, "width_multiplier must be positive, got -1.0"),
+        ({"dropout_rate": 1.0}, "dropout_rate must be in [0, 1), got 1.0"),
+        ({"dropout_rate": -0.1}, "dropout_rate must be in [0, 1), got -0.1"),
+        ({"num_classes": 0}, "num_classes must be positive when include_top=True, got 0"),
+        ({"block_types": ["IB", "Bogus"], "depths": [1, 1], "dims": [16, 24],
+          "strides": [1, 2]},
+         "Invalid block type 'Bogus'. Must be one of ['ConvNext', 'ExtraDW', 'FFN', 'IB']"),
+    ])
+    def test_an_invalid_value_is_refused_naming_the_argument_and_the_value(
+            self, kwargs, message):
+        with pytest.raises(ValueError) as caught:
+            MobileNetV4(input_shape=(32, 32, 3), **kwargs)
+        assert message in str(caught.value), str(caught.value)
+
+    def test_a_headless_model_needs_no_class_count(self):
+        model = MobileNetV4(num_classes=0, include_top=False, input_shape=(32, 32, 3))
+        assert model.classification_head is None
 
 
 # ============================================================================

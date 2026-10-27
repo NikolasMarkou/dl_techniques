@@ -3,6 +3,8 @@
 ``REFERENCE_BN_MOMENTUM`` and ``REFERENCE_BN_EPSILON`` hold the one
 BatchNorm momentum/epsilon pair all four generations use; see the
 ``D-111`` anchor below for where the values come from.
+``reference_bn_kwargs()`` returns that pair as a fresh keyword dict, so a
+model spells its BatchNorm configuration once instead of in every layer.
 
 ``materialize_for_summary(model, input_shape)`` runs a real forward pass
 on a subclassed ``keras.Model`` so its weights are materialized before
@@ -13,7 +15,7 @@ is already built or ``input_shape`` contains ``None``, and it does not
 catch a genuine forward-pass failure.
 """
 
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import keras
 
@@ -23,6 +25,23 @@ import keras
 # All four models must forward epsilon=REFERENCE_BN_EPSILON into every BatchNorm, including inside the shared block layers (create_normalization_layer defaults to 1e-6). See decisions.md D-111, D-203.
 REFERENCE_BN_MOMENTUM: float = 0.99
 REFERENCE_BN_EPSILON: float = 1e-3
+
+# ---------------------------------------------------------------------
+
+
+def reference_bn_kwargs() -> Dict[str, float]:
+    """Return the family's BatchNorm keywords as a new dict.
+
+    Interface contract: takes no argument and cannot fail. The result is
+    ``{"momentum": REFERENCE_BN_MOMENTUM, "epsilon": REFERENCE_BN_EPSILON}`` and
+    is a different dict on every call, because a layer that stores its keyword
+    dict (``ConvStem.normalization_kwargs``, the block's ``normalization_args``)
+    must not see another layer's later edit. Callers: the stem, block and head
+    construction of ``MobileNetV3`` and ``MobileNetV4``; unpack it into a
+    ``BatchNormalization`` or pass it as a layer's normalization keywords.
+    """
+    return {"momentum": REFERENCE_BN_MOMENTUM, "epsilon": REFERENCE_BN_EPSILON}
+
 
 # ---------------------------------------------------------------------
 
