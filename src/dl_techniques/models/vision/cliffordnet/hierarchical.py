@@ -556,16 +556,21 @@ class HierarchicalCliffordNet(keras.Model):
 
         The transfer is
         :func:`~dl_techniques.utils.weight_transfer.load_pretrained_checkpoint`:
-        it builds the model at :data:`DEFAULT_INPUT_SHAPE` if it is unbuilt,
-        takes a headed checkpoint into a headless model, and refuses a
-        checkpoint that restores no layer.
+        it builds the model at :data:`DEFAULT_INPUT_SHAPE` if it is unbuilt and
+        takes a headed checkpoint into a headless model. Every layer outside
+        ``classification_head`` must be restored, so a checkpoint of another
+        width, depth or stem raises and leaves the model untouched. Only a head
+        of another ``num_classes`` is skipped: it keeps its initialization and
+        a warning names it.
 
         :param weights_path: Path to the ``.keras`` weights file.
-        :param skip_mismatch: Skip layers whose shapes differ, which lets a
-            checkpoint with another ``num_classes`` load; the inverse of the
-            transfer helper's ``strict``.
+        :param skip_mismatch: ``True`` (default) lets the head differ, which
+            lets a checkpoint with another ``num_classes`` load; ``False``
+            allows no difference anywhere. The inverse of the transfer
+            helper's ``strict``.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
-        :raises ValueError: If the weights cannot be loaded or none are restored.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
             self, weights_path, DEFAULT_INPUT_SHAPE, skip_mismatch

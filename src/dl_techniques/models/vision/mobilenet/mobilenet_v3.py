@@ -465,14 +465,20 @@ class MobileNetV3(keras.Model):
         """Load a local `.keras` checkpoint into the model, layer by layer.
 
         The transfer is `load_pretrained_checkpoint`: it builds the model at
-        `input_shape` if it is unbuilt, takes a headed checkpoint into a
-        headless model, and refuses a checkpoint that restores no layer.
+        `input_shape` if it is unbuilt and takes a headed checkpoint into a
+        headless model. Every layer outside the classification head must be
+        restored, so a checkpoint of another variant, block type, width or stem
+        raises and leaves the model untouched. Only a head of another
+        `num_classes` is skipped: it keeps its initialization and a warning
+        names it.
 
         :param weights_path: Path to the weights file (`.keras` format).
-        :param skip_mismatch: Whether to skip layers with mismatched shapes;
-            the inverse of the transfer helper's `strict`.
+        :param skip_mismatch: `True` (default) lets the head layers differ;
+            `False` allows no difference anywhere. The inverse of the transfer
+            helper's `strict`.
         :raises FileNotFoundError: If `weights_path` doesn't exist.
-        :raises ValueError: If weights cannot be loaded or none are restored.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
             self, weights_path, self.input_shape_config, skip_mismatch

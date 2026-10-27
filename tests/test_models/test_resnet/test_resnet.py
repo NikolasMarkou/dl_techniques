@@ -377,8 +377,78 @@ class TestResNetPretrainedLoad:
         donor.save(path)
 
         receiver = _tiny(filters_per_stage=[16, 32], num_classes=7)
-        with pytest.raises(ValueError, match="restored no layer"):
+        with pytest.raises(ValueError, match="stage1_block1"):
             receiver.load_pretrained_weights(path)
+
+    @staticmethod
+    def _saved(tmp_path, **overrides):
+        donor = _tiny(**overrides)
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(tmp_path, "donor.keras")
+        donor.save(path)
+        return donor, path
+
+    def test_a_resnet50_checkpoint_does_not_load_into_resnet18(self, tmp_path):
+        """The R1 reproduction: it used to restore the stem alone and return."""
+        donor = ResNet.from_variant("resnet50", num_classes=10, input_shape=(32, 32, 3))
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(tmp_path, "resnet50.keras")
+        donor.save(path)
+
+        with pytest.raises(ValueError) as caught:
+            ResNet.from_variant(
+                "resnet18", num_classes=10, input_shape=(32, 32, 3), pretrained=path
+            )
+
+        message = str(caught.value)
+        assert "stage1_block1" in message, message
+        assert "shape_mismatch" in message and "missing_in_source" in message, message
+
+    def test_a_trunk_of_another_block_type_raises_and_writes_nothing(self, tmp_path):
+        _, path = self._saved(tmp_path, block_type="bottleneck")
+        receiver = _tiny()
+        before = [np.asarray(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError, match="stage1_block1"):
+            receiver.load_pretrained_weights(path)
+
+        for a, b in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, np.asarray(b))
+
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
+        donor, path = self._saved(tmp_path, num_classes=10)
+
+        receiver = ResNet.from_variant(
+            "resnet18", num_classes=5, pretrained=path,
+            blocks_per_stage=[1, 1], filters_per_stage=[8, 16], block_type="basic",
+            input_shape=(32, 32, 3),
+        )
+
+        donor_weights = {w.path.split("/", 1)[1]: np.asarray(w) for w in donor.weights}
+        trunk = [w for w in receiver.weights if "classification_head" not in w.path]
+        assert trunk, "the receiver holds no trunk weight"
+        for w in trunk:
+            np.testing.assert_array_equal(
+                np.asarray(w), donor_weights[w.path.split("/", 1)[1]], err_msg=w.path
+            )
+        head = [w for w in receiver.weights if "classification_head" in w.path]
+        assert head and all(w.shape[-1] == 5 or w.shape == (5,) for w in head)
+
+    def test_a_headless_model_loads_the_trunk_of_a_headed_checkpoint(self, tmp_path):
+        donor, path = self._saved(tmp_path)
+
+        receiver = ResNet.from_variant(
+            "resnet18", include_top=False, pretrained=path,
+            blocks_per_stage=[1, 1], filters_per_stage=[8, 16], block_type="basic",
+            input_shape=(32, 32, 3),
+        )
+
+        donor_weights = {w.path.split("/", 1)[1]: np.asarray(w) for w in donor.weights}
+        assert receiver.weights
+        for w in receiver.weights:
+            np.testing.assert_array_equal(
+                np.asarray(w), donor_weights[w.path.split("/", 1)[1]], err_msg=w.path
+            )
 
 
 class TestResNetKernelInitializer:

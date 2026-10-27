@@ -12,7 +12,8 @@ switch; its headless output is the last stage's map, after
 ``from_variant(..., pretrained=<path>, input_shape=...)`` of both models loads the
 checkpoint through the shared loader, which builds an unbuilt model at the
 default probe shape before the transfer, so a checkpoint loads through
-``from_variant`` headed or not, and a load that restores nothing raises.
+``from_variant`` headed or not, and a load that leaves any layer outside
+``classification_head`` unrestored raises (``TestAPretrainedTrunkMustFit``).
 
 Every expectation below is derived from the model itself or from the geometry
 (``ceil(size / patch)`` for the 'same'-padded strided stems), never from a
@@ -977,3 +978,115 @@ class TestIncludeTopAcceptsANumpyBool:
                         include_top=np.int64(1))
         assert "numpy.int64" in str(caught.value)
         assert "(bool)" not in str(caught.value)
+
+
+# ---------------------------------------------------------------------
+# D-040: a pretrained load restores every layer outside the head
+# ---------------------------------------------------------------------
+
+
+class TestAPretrainedTrunkMustFit:
+    """A checkpoint whose trunk does not fit is refused, not half-loaded.
+
+    Only ``classification_head`` may differ (another ``num_classes``). A stem of
+    another patch size leaves the blocks that do fit loaded and the stem random,
+    which is a model that looks pretrained and is not.
+    """
+
+    CLIFFORD = dict(channels=CHANNELS, depth=2, input_shape=(H, W, C_IN))
+    HIERARCHICAL = dict(
+        stage_depths=list(STAGE_DEPTHS), stage_dims=list(STAGE_DIMS),
+        input_shape=(H, W, C_IN),
+    )
+
+    @staticmethod
+    def _save(model, tmp_path):
+        path = os.path.join(str(tmp_path), "donor.keras")
+        model.save(path)
+        return path
+
+    def test_a_clifford_stem_of_another_patch_size_raises(self, tmp_path):
+        donor = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, patch_size=2, **self.CLIFFORD
+        )
+        path = self._save(donor, tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            CliffordNet.from_variant(
+                "nano", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
+                **self.CLIFFORD,
+            )
+
+        assert "stem" in str(caught.value), str(caught.value)
+
+    def test_a_hierarchical_stem_of_another_patch_size_raises(self, tmp_path):
+        donor = HierarchicalCliffordNet.from_variant(
+            "hier_345", num_classes=NUM_CLASSES, patch_size=2, **self.HIERARCHICAL
+        )
+        path = self._save(donor, tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            HierarchicalCliffordNet.from_variant(
+                "hier_345", num_classes=NUM_CLASSES, patch_size=1, pretrained=path,
+                **self.HIERARCHICAL,
+            )
+
+        assert "stem" in str(caught.value), str(caught.value)
+
+    def test_a_clifford_checkpoint_of_another_width_writes_nothing(self, tmp_path):
+        donor = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, **{**self.CLIFFORD, "channels": 24}
+        )
+        path = self._save(donor, tmp_path)
+        receiver = CliffordNet.from_variant(
+            "nano", num_classes=NUM_CLASSES, **self.CLIFFORD
+        )
+        before = [_np(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError, match="block_0"):
+            receiver.load_pretrained_weights(path)
+
+        for a, w in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, _np(w))
+
+    @pytest.mark.parametrize("family", ["clifford", "hierarchical"])
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(
+        self, tmp_path, family
+    ):
+        cls, name, kwargs = (
+            (CliffordNet, "nano", self.CLIFFORD) if family == "clifford"
+            else (HierarchicalCliffordNet, "hier_345", self.HIERARCHICAL)
+        )
+        donor = cls.from_variant(name, num_classes=NUM_CLASSES, **kwargs)
+        _perturb(donor)
+        path = self._save(donor, tmp_path)
+
+        loaded = cls.from_variant(name, num_classes=3, pretrained=path, **kwargs)
+
+        src, dst = _weights_by_path(donor), _weights_by_path(loaded)
+        trunk = {p: v for p, v in dst.items() if not p.startswith("classification_head")}
+        assert trunk
+        for p, value in trunk.items():
+            np.testing.assert_allclose(value, src[p], rtol=0, atol=0, err_msg=p)
+        # The head is one layer: its width differs, so all of it keeps its init.
+        heads = {p: v for p, v in dst.items() if p.startswith("classification_head")}
+        assert heads and any(v.shape != src[p].shape for p, v in heads.items())
+
+    @pytest.mark.parametrize("family", ["clifford", "hierarchical"])
+    def test_a_headless_model_loads_from_a_headed_checkpoint(self, tmp_path, family):
+        cls, name, kwargs = (
+            (CliffordNet, "nano", self.CLIFFORD) if family == "clifford"
+            else (HierarchicalCliffordNet, "hier_345", self.HIERARCHICAL)
+        )
+        donor = cls.from_variant(name, num_classes=NUM_CLASSES, **kwargs)
+        _perturb(donor)
+        path = self._save(donor, tmp_path)
+
+        headless = cls.from_variant(
+            name, include_top=False, pretrained=path, **kwargs
+        )
+
+        src, dst = _weights_by_path(donor), _weights_by_path(headless)
+        assert dst
+        for p, value in dst.items():
+            np.testing.assert_allclose(value, src[p], rtol=0, atol=0, err_msg=p)

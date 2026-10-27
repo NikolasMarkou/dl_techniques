@@ -537,5 +537,79 @@ class TestMobileNetV3HouseShape:
         assert model.last_conv.filters == 576
 
 
+class TestMobileNetV3PretrainedTrunk:
+    """D-040: a pretrained load restores every layer outside the head.
+
+    Only ``classification_head`` may differ. A trunk of another variant used to
+    load the layers that happened to fit, report the rest and return normally.
+    """
+
+    @staticmethod
+    def _saved(tmp_path, variant, **kwargs):
+        donor = MobileNetV3.from_variant(
+            variant, num_classes=10, input_shape=(32, 32, 3), **kwargs
+        )
+        donor.build((None, 32, 32, 3))
+        path = os.path.join(str(tmp_path), "donor.keras")
+        donor.save(path)
+        return donor, path
+
+    @staticmethod
+    def _by_path(model):
+        return {w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)
+                for w in model.weights}
+
+    def test_a_checkpoint_of_another_variant_is_refused(self, tmp_path):
+        _, path = self._saved(tmp_path, "large")
+
+        with pytest.raises(ValueError) as caught:
+            MobileNetV3.from_variant(
+                "small", num_classes=10, input_shape=(32, 32, 3), pretrained=path
+            )
+
+        message = str(caught.value)
+        assert "shape_mismatch" in message and "missing_in_source" in message, message
+
+    def test_a_refused_load_writes_nothing(self, tmp_path):
+        _, path = self._saved(tmp_path, "large")
+        receiver = MobileNetV3.from_variant(
+            "small", num_classes=10, input_shape=(32, 32, 3)
+        )
+        before = [keras.ops.convert_to_numpy(w).copy() for w in receiver.weights]
+
+        with pytest.raises(ValueError):
+            receiver.load_pretrained_weights(path)
+
+        for a, w in zip(before, receiver.weights):
+            np.testing.assert_array_equal(a, keras.ops.convert_to_numpy(w))
+
+    def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
+        donor, path = self._saved(tmp_path, "small")
+
+        loaded = MobileNetV3.from_variant(
+            "small", num_classes=3, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(loaded)
+        trunk = {p: v for p, v in dst.items() if not p.startswith("classification_head")}
+        assert trunk
+        for p, value in trunk.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
+        heads = {p: v for p, v in dst.items() if p.startswith("classification_head")}
+        assert heads and any(v.shape != src[p].shape for p, v in heads.items())
+
+    def test_a_headless_model_loads_from_a_headed_checkpoint(self, tmp_path):
+        donor, path = self._saved(tmp_path, "small")
+
+        headless = MobileNetV3.from_variant(
+            "small", include_top=False, input_shape=(32, 32, 3), pretrained=path
+        )
+
+        src, dst = self._by_path(donor), self._by_path(headless)
+        assert dst
+        for p, value in dst.items():
+            np.testing.assert_array_equal(value, src[p], err_msg=p)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

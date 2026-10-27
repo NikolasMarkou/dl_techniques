@@ -22,6 +22,12 @@ SqueezeNet V1 and V2) and asks each the same questions:
     the donor's tensors exactly, into a headed model and into one built with
     ``include_top=False``. A control inside the row proves the receiver's own
     initialization differs from the donor's, so equal tensors mean the load ran.
+``local_path_refuses_a_trunk_mismatch``
+    For the classifiers on the shared pretrained loader (``MIGRATED_LOADER_KEYS``), a
+    checkpoint whose trunk does not fit (another variant, block type or stem patch,
+    chosen so that SOME layers still match by name) makes ``from_variant(pretrained=path)``
+    raise ``ValueError`` naming the unrestored layers, instead of loading the layers that
+    fit and returning (plan-2026-10-26T125959-7af851e5 D-040).
 ``headless_attribute_is_none`` and ``headless_model_has_no_head_weights``
     ``include_top=False`` leaves ``classification_head`` defined as ``None`` and
     builds no head weight; a toy model that leaks its head into the headless build
@@ -819,6 +825,43 @@ def test_a_local_checkpoint_loads_into_a_headed_model(key, checkpoints, tmp_path
 @ledgered("local_path_round_trip_headless")
 def test_a_local_checkpoint_loads_into_a_headless_model(key, checkpoints, tmp_path_factory) -> None:
     _round_trip(key, True, checkpoints, tmp_path_factory)
+
+
+#: The classifiers whose ``pretrained=<path>`` goes through ``load_pretrained_checkpoint``,
+#: with a donor that shares layer names with the receiver and differs in its trunk:
+#: ``(variant, from_variant keywords)``. Some layers fit by name, so the load used to
+#: restore them, report the rest and return.
+MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
+    "resnet": ("resnet18", {"block_type": "bottleneck"}),
+    "cliffordnet": ("nano", {"patch_size": 1}),
+    "hierarchical": ("hier_345", {"patch_size": 1}),
+    "mobilenet_v3": ("large", {}),
+    "mobilenet_v4": ("hybrid_medium", {}),
+}
+MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_refuses_a_trunk_mismatch", MIGRATED_LOADER_KEYS))
+@ledgered("local_path_refuses_a_trunk_mismatch")
+def test_a_checkpoint_whose_trunk_does_not_fit_is_refused(key, tmp_path) -> None:
+    c = classifier(key)
+    variant, donor_kwargs = MIGRATED_LOADER_DONORS[key]
+    donor = c.cls.from_variant(variant, **{"num_classes": NUM_CLASSES,
+                                           "input_shape": c.input_shape, **c.tiny,
+                                           **donor_kwargs})
+    donor.build((None, *c.input_shape))
+    path = tmp_path / "donor.keras"
+    donor.save(path)
+    donor_layers = {layer.name for layer in donor.layers if layer.weights}
+    own = c.make()
+    own.build((None, *c.input_shape))
+    assert donor_layers & {layer.name for layer in own.layers if layer.weights} - {
+        "classification_head"}, "control: no trunk layer is shared by name, the old load restored nothing"
+    with pytest.raises(ValueError) as caught:
+        c.from_variant(pretrained=str(path))
+    message = str(caught.value)
+    assert "shape_mismatch" in message and "missing_in_source" in message, message
 
 
 def _built(c: Classifier, **knobs: Any) -> keras.Model:

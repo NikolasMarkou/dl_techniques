@@ -141,7 +141,9 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 | **`create_mobilenetv4`** | `...mobilenet.mobilenet_v4.create_mobilenetv4` | Factory for `MobileNetV4`. |
 
 V3 and V4 take the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
-(raises `NotImplementedError`) or `False`:
+(raises `NotImplementedError`) or `False`. A path loads every layer outside `classification_head` or
+raises `ValueError` and leaves the model untouched (a checkpoint of another variant is refused; only a
+head of another `num_classes` is skipped, with a warning):
 
 ```python
 create_mobilenetv4(          # same for v3

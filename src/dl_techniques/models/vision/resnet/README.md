@@ -341,8 +341,11 @@ backbone = ResNet.from_variant("resnet50", pretrained=CKPT, include_top=False)
 #   ResNet.from_variant("resnet50", pretrained=True)
 ```
 
-A checkpoint that restores no layer of the model (every shape differs) raises `ValueError`
-rather than leaving the random initialization in place.
+The loader restores every layer outside the classification head (and the deep-supervision heads) or
+raises `ValueError`, naming the first layers that did not load and the loaded, mismatched and
+missing counts, and leaving the model untouched: a `resnet50` checkpoint into
+`ResNet.from_variant("resnet18", pretrained=path)` is refused (it used to restore the stem alone and
+return). Only a head of another `num_classes` is skipped, and a warning names it.
 
 Once you have a checkpoint the three usual strategies apply: freeze everything and train a new
 head; freeze the stem and early stages and fine-tune the rest at `1e-4`; or unfreeze

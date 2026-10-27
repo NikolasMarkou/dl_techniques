@@ -134,9 +134,10 @@ is the one constructor path** (the same as ResNet's), for both models and for
 `create_cliffordnet` and `create_hierarchical_cliffordnet`, whose defaults are the same.
 An unknown variant raises `ValueError` listing the variants; `pretrained=True` raises
 `NotImplementedError` naming the variant (no weights are distributed); `pretrained=<path>`
-loads a local `.keras` file through the shared loader, which skips a layer whose shapes differ
-(a checkpoint with another `num_classes` loads its trunk and leaves the new head at its
-initialization), and raises when it restores no layer. There are no `nano()`, `lite()` or
+loads a local `.keras` file through the shared loader, which restores every layer outside
+`classification_head` or raises (a checkpoint of another width, depth or stem patch is refused and the
+model is left untouched; a checkpoint with another `num_classes` loads its trunk and leaves the new
+head at its initialization, with a warning naming it). There are no `nano()`, `lite()` or
 `lite_g()` shortcuts: use `from_variant("nano", ...)`.
 
 **`from_variant(..., input_shape=...)` builds the model.** The constructors take no
