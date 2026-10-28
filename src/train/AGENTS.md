@@ -362,11 +362,20 @@ train, and the TEST split never selects.
   `dl_techniques.datasets.vision.classification` (`DatasetSpec`, `CLASSIFICATION_DATASETS`);
   ImageNet's pair is defined once in `imagenet2012.py`. A trainer imports the names.
 - `classification_data._load_raw` is the ONE `keras.datasets` call under `src/train`; a trainer
-  test replaces it (`tests/classification_fakes.py`). Exceptions are named, with reasons, in
-  `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`: the
-  self-supervised raw-image pipeline `build_raw_image_dataset` (dino, BEiT MIM and tokenizer, ET
-  masked completion: unlabelled images through element-map slots; it reads the Imagenette records
-  and CIFAR-10 itself), CIFAR-100's coarse labels (`head_comparison`).
+  test replaces it (`tests/classification_fakes.py`). The one exception, named with its reason in
+  `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`, is
+  CIFAR-100's coarse labels (`head_comparison`).
+- **Self-supervised trainers** (dino, BEiT MIM and tokenizer, ET masked completion) take their
+  images from `train.common.image_streams.load_image_streams(dataset, ...)`: the same protocol
+  (a seeded `validation_split` slice of train is the selection split, the labelled test split is
+  scored once after `fit`), the same rows as the classifiers for one seed (Imagenette through
+  `dl_techniques.datasets.vision.imagenette.imagenette_examples`, CIFAR-10 through
+  `load_split_arrays`), plus a per-sample map before batching: `element_map_fn(image, label)` on
+  all three streams, or `indexed_element_map_fn(index, image, label)` on the train stream only
+  (`.repeat().enumerate()`, the counter a stateless augmentation keys on; the other two streams
+  are then plain). They use `add_selection_arguments(parser, imagenet=False, figures=False)`.
+  DINO's per-epoch k-NN probe queries the selection slice, and `KNNEvalCallback.evaluate_split`
+  scores the test split once after training (`knn_test.json`).
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity

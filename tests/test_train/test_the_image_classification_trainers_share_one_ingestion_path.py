@@ -1,4 +1,4 @@
-"""MNIST, CIFAR and ImageNet reach a trainer through ``train.common.classification_data``.
+"""MNIST, CIFAR, Imagenette and ImageNet reach a trainer through ``train.common``'s loaders.
 
 Before it, every labelled-image trainer ingested its data its own way: thirteen called
 ``train.common.load_dataset``, six more called ``keras.datasets`` themselves, about eleven
@@ -9,10 +9,14 @@ reported), and ImageNet's mean/std lived twice. This module holds the structure,
 * ``keras.datasets.<name>.load_data`` is called only by ``_load_raw`` (the seam every trainer
   test replaces) and by the named exceptions below, each with its reason;
 * ``train.common`` no longer offers ``load_dataset`` and nothing imports one from it;
-* no ``fit(...)`` is given a test split as ``validation_data``;
-* Imagenette's TFDS records are named only by the self-supervised pipeline
-  (``build_raw_image_dataset``, which dino, BEiT MIM/tokenizer and ET masked completion
-  use) and the names it re-exports; the classifiers reach them through the loader.
+* no ``fit(...)`` is given a test split as ``validation_data``, directly or through a name
+  bound to one (the old self-supervised pipeline validated on ``val_ds``, the labelled test
+  split, and the name-only check could not see it);
+* nothing under ``src/train`` names Imagenette's TFDS records: they are the library's, read
+  through ``dl_techniques.datasets.vision.imagenette``;
+* the self-supervised raw-image pipeline ``build_raw_image_dataset`` is gone, and its four
+  trainers (dino, BEiT MIM and tokenizer, ET masked completion) read through
+  ``train.common.image_streams.load_image_streams``, whose selection split is cut from train.
 
 The constants' single home is guarded by ``tests/test_datasets/test_the_dataset_statistics_have_one_home.py``.
 """
@@ -28,8 +32,6 @@ SRC_TRAIN = Path(common.__file__).resolve().parents[1]
 
 #: ``keras.datasets`` callers outside the seam, each with the reason it stays.
 KERAS_DATASET_EXCEPTIONS = {
-    "common/datasets.py": "build_raw_image_dataset's CIFAR-10 branch: the self-supervised "
-                          "(dino, beit, energy_transformer) pipeline with its own crop policies",
     "head_comparison/train_heads.py": "CIFAR-100's coarse labels, a second label set aligned "
                                       "through the loader's row indices",
     "rms_variants_train/experiments/e3_tinytransformer_imdb.py": "IMDB text, not images",
@@ -42,12 +44,13 @@ TEST_AS_VALIDATION_EXCEPTIONS = {
                                 "not an image dataset",
 }
 
-#: Files under ``src/train`` that may name ``IMAGENETTE_TFDS_NAME``, each with its reason.
-IMAGENETTE_RECORD_USERS = {
-    "common/datasets.py": "build_raw_image_dataset, the self-supervised pipeline",
-    "common/__init__.py": "the export of that name",
-    "energy_transformer/common.py": "the re-export of that name",
-}
+#: The self-supervised trainers and the module whose loader they must call.
+SELF_SUPERVISED_TRAINERS = (
+    "dino/train_dino.py",
+    "beit/train_mim.py",
+    "beit/train_tokenizer.py",
+    "energy_transformer/train_masked_completion.py",
+)
 
 TEST_NAMES = ("x_test", "y_test", "test_ds", "test_x", "X_test")
 
@@ -66,15 +69,55 @@ def _keras_dataset_calls(tree):
     ]
 
 
+def _mentions_a_test_split(source: str) -> bool:
+    return any(name in source for name in TEST_NAMES)
+
+
+def _names_bound_to_a_test_split(scope) -> set:
+    """Names assigned (or tuple-unpacked) inside ``scope`` from an expression that mentions a
+    test split."""
+    tainted = set()
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Tuple) and isinstance(node.value, ast.Tuple) \
+                    and len(target.elts) == len(node.value.elts):
+                pairs = list(zip(target.elts, node.value.elts))
+            else:
+                pairs = [(target, node.value)]
+            for element, value in pairs:
+                if _mentions_a_test_split(ast.unparse(value)):
+                    tainted.update(
+                        n.id for n in ast.walk(element) if isinstance(n, ast.Name))
+    return tainted
+
+
+def _enclosing_scopes(tree):
+    """Yield ``(call, scope)`` for every ``.fit(...)`` call, ``scope`` being the innermost
+    function that contains it (the module when there is none). A name bound in another
+    function is a different variable, so the taint never crosses a function boundary."""
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            inner = child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) \
+                    and child.func.attr == "fit":
+                yield child, scope
+            yield from visit(child, inner)
+
+    yield from visit(tree, tree)
+
+
 def _test_split_validation_calls(tree):
     hits = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr == "fit":
-            for keyword in node.keywords:
-                if keyword.arg == "validation_data" and any(
-                        name in ast.unparse(keyword.value) for name in TEST_NAMES):
-                    hits.append(node.lineno)
+    for call, scope in _enclosing_scopes(tree):
+        tainted = _names_bound_to_a_test_split(scope)
+        for keyword in call.keywords:
+            if keyword.arg != "validation_data":
+                continue
+            names = {n.id for n in ast.walk(keyword.value) if isinstance(n, ast.Name)}
+            if _mentions_a_test_split(ast.unparse(keyword.value)) or names & tainted:
+                hits.append(call.lineno)
     return hits
 
 
@@ -82,7 +125,7 @@ def test_the_census_sees_the_seam() -> None:
     # A broken walk would make every check below pass vacuously.
     calls = {name: _keras_dataset_calls(tree) for name, tree in _trees()}
     assert len(calls["common/classification_data.py"]) == 3
-    assert sum(1 for lines in calls.values() if lines) >= 4
+    assert sum(1 for lines in calls.values() if lines) >= 3
 
 
 def test_only_the_seam_and_the_named_exceptions_read_keras_datasets() -> None:
@@ -134,17 +177,36 @@ def _names_imagenette_records(tree) -> bool:
     )
 
 
-def test_only_the_self_supervised_pipeline_names_the_imagenette_records() -> None:
-    offenders = [
-        name for name, tree in _trees()
-        if _names_imagenette_records(tree) and name not in IMAGENETTE_RECORD_USERS
+def _mentions(tree, name: str):
+    """Lines that define, import or reference ``name``."""
+    return [
+        getattr(node, "lineno", 0) for node in ast.walk(tree)
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == name)
+        or (isinstance(node, ast.Name) and node.id == name)
+        or (isinstance(node, ast.Attribute) and node.attr == name)
+        or (isinstance(node, ast.alias) and node.name == name)
     ]
-    assert offenders == [], f"read the Imagenette records outside the loader: {offenders}"
 
 
-def test_every_imagenette_exception_still_names_the_records() -> None:
-    named = {name for name, tree in _trees() if _names_imagenette_records(tree)}
-    assert set(IMAGENETTE_RECORD_USERS) <= named
+def test_nothing_under_src_train_names_the_imagenette_records() -> None:
+    offenders = [name for name, tree in _trees() if _names_imagenette_records(tree)]
+    assert offenders == [], f"name the Imagenette records outside the library: {offenders}"
+
+
+def test_the_old_raw_image_pipeline_is_gone() -> None:
+    offenders = [
+        f"{name}:{line}" for name, tree in _trees()
+        for line in _mentions(tree, "build_raw_image_dataset")
+    ]
+    assert offenders == [], f"build_raw_image_dataset is deleted, yet: {offenders}"
+    assert not hasattr(common, "build_raw_image_dataset")
+
+
+def test_the_self_supervised_trainers_read_through_image_streams() -> None:
+    trees = dict(_trees())
+    missing = [name for name in SELF_SUPERVISED_TRAINERS
+               if not _mentions(trees[name], "load_image_streams")]
+    assert missing == [], f"these trainers do not call load_image_streams: {missing}"
 
 
 @pytest.mark.parametrize("source, expected", [
@@ -160,3 +222,25 @@ def test_the_census_detects_what_it_claims(source, expected) -> None:
         ast.parse("model.fit(x, y, validation_data=(x_val, y_val))")) == []
     assert _names_imagenette_records(ast.parse("tfds.builder(IMAGENETTE_TFDS_NAME)"))
     assert not _names_imagenette_records(ast.parse("tfds.builder('mnist')"))
+
+
+@pytest.mark.parametrize("source, expected", [
+    # the pattern the old self-supervised trainers had: a name bound to the test split
+    ("val_ds = streams.test_ds\nmodel.fit(x, validation_data=val_ds)", 1),
+    ("train_ds, val_ds = a.train_ds, a.test_ds\nmodel.fit(x, validation_data=val_ds)", 1),
+    ("val_ds = x_test\nmodel.fit(x, validation_data=(val_ds, y))", 1),
+    # selection is fine, and so is a name that merely sits beside a test split
+    ("val_ds = streams.select_ds\nmodel.fit(x, validation_data=val_ds)", 0),
+    ("train_ds, val_ds = a.train_ds, a.select_ds\nmodel.fit(x, validation_data=val_ds)", 0),
+    ("test_ds = a.test_ds\nmodel.fit(x, validation_data=val_ds)", 0),
+])
+def test_the_census_follows_a_name_bound_to_a_test_split(source, expected) -> None:
+    assert len(_test_split_validation_calls(ast.parse(source))) == expected
+
+
+def test_the_census_detects_the_removed_pipeline_and_the_stream_loader() -> None:
+    assert _mentions(ast.parse("from train.common import build_raw_image_dataset"),
+                     "build_raw_image_dataset")
+    assert _mentions(ast.parse("def build_raw_image_dataset(): pass"), "build_raw_image_dataset")
+    assert _mentions(ast.parse("x = load_image_streams('cifar10')"), "load_image_streams")
+    assert not _mentions(ast.parse("x = load_classification_data('cifar10')"), "load_image_streams")

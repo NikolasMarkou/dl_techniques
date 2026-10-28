@@ -48,7 +48,8 @@ Data loading, generation, and preprocessing utilities for various domains.
     `validation_split` slice of train, never augmented) and `"test"` (the labelled validation
     split). The encoded jpegs are held in memory once; `crop_policy` is `"random_resized_crop"`
     (the ImageNet recipe) or `"resize"`. `read_imagenette_records` is the only TFDS touch and the
-    test seam. The geometry helpers are shared with `train.common.datasets.build_raw_image_dataset`.
+    test seam. `imagenette_examples(split, config)` is the unbatched stage under it (the same decode
+    and crop path serves `train.common.image_streams`, the self-supervised trainers' loader).
   - `splits.py` — the seeded train / selection / test arithmetic (`split_sizes`,
     `seeded_split_indices`) that MNIST, CIFAR and Imagenette share.
   - `imagenet2012.py` — ImageNet-1k read straight from the extracted
