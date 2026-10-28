@@ -1332,20 +1332,7 @@ class Open:
 
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
-LEDGER: Dict[Tuple[str, str], Open] = {
-    ('h15_initializer_storage', 'capsnet'): Open(
-        'the CapsNet migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h15_initializer_storage', 'capsnet_v2'): Open(
-        'the CapsNet migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-}
+LEDGER: Dict[Tuple[str, str], Open] = {}
 
 
 def _read(path: str) -> Optional[str]:

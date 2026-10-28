@@ -14,6 +14,7 @@ import pytest
 
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.resnet.model import ResNet
+from ..initializer_replay_oracle import replayed_pairs
 from dl_techniques.models.vision.capsnet.model_v2 import (
     CapsNetV2,
     create_capsnet_v2,
@@ -430,6 +431,47 @@ class TestCapsNetV2Reload:
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(loaded.reconstruct(x)), expected, rtol=0, atol=1e-6
         )
+
+
+class TestCapsNetV2Initializer:
+    """One ``kernel_initializer`` argument, one fresh draw per site, the ResNet backbone's included."""
+
+    def test_a_named_initializer_is_stored_as_the_name(self):
+        assert CapsNetV2(num_classes=10, input_shape=(28, 28, 1)).kernel_initializer == "he_normal"
+
+    def test_an_instance_is_stored_as_its_serialized_spec(self):
+        model = CapsNetV2(
+            num_classes=10, input_shape=(28, 28, 1),
+            kernel_initializer=keras.initializers.HeNormal(seed=5),
+        )
+        assert isinstance(model.kernel_initializer, dict)
+        assert model.kernel_initializer["config"]["seed"] == 5
+        json.dumps(model.get_config())
+
+    def test_the_initializer_reaches_the_resnet_backbone(self):
+        """The argument was silently ignored for the backbone: a ResNet stem drew ``he_normal``
+        whatever the caller asked for."""
+        model = CapsNetV2(
+            num_classes=10, input_shape=(32, 32, 3), stem_type="resnet18",
+            primary_capsules=4, kernel_initializer=keras.initializers.Constant(0.01),
+        )
+        model.build((None, 32, 32, 3))
+        stem_kernel = keras.ops.convert_to_numpy(model.stem.stem.conv1.kernel)
+        assert np.allclose(stem_kernel, 0.01)
+
+    @pytest.mark.parametrize("stem_type, shape", [("legacy", (28, 28, 1)), ("resnet18", (32, 32, 3))])
+    @pytest.mark.parametrize("initializer", ["he_normal", keras.initializers.HeNormal()],
+                             ids=["name", "seedless-instance"])
+    def test_no_two_kernels_replay_one_draw(self, stem_type, shape, initializer):
+        keras.utils.set_random_seed(1234)
+        model = CapsNetV2(
+            num_classes=10, input_shape=shape, stem_type=stem_type, reconstruction=True,
+            decoder_architecture=[32, 64], kernel_initializer=initializer,
+        )
+        model.build((None, *shape))
+        pairs, compared = replayed_pairs(model)
+        assert compared > 0
+        assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
 
 
 class TestCapsNetV2Config:

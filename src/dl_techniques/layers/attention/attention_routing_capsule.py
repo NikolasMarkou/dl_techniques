@@ -52,6 +52,7 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -166,7 +167,12 @@ class AttentionRoutingCapsule(keras.layers.Layer):
     :param kernel_initializer: Initializer for the transformation tensor ``W``,
         the per-output query ``q``, AND the internal ``prob_head`` Dense kernel.
         Accepts a string spec or an ``Initializer``; normalized through
-        ``keras.initializers.get``. Defaults to ``'glorot_uniform'``.
+        ``keras.initializers.get``. ``W`` draws from the resolved instance; ``q``
+        and the ``prob_head`` kernel draw from clones of it, so the three weights
+        are independent draws, not one sample read three times (a seedless
+        instance handed to all three replays its sample at each, whatever the
+        shapes). A seeded instance keeps its seed in the clones, by contract.
+        Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer applied to ``W`` and ``q``.
         Accepts a string spec (e.g. ``"l2"``), a serialized dict, or a
@@ -274,11 +280,16 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         # Per-capsule scalar probability head:
         # maps a D_out-dim capsule vector to a scalar probability via Dense(1).
         # activation=None emits a raw logit; call() applies the sigmoid.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-051: W, q and the prob_head kernel each draw
+        # from their own clone of the initializer. Do NOT hand self.kernel_initializer to all three:
+        # a seedless instance replays one sample at every site, so q came out as the leading values of W
+        # and the head kernel as the leading values of both (3 of 3 weight pairs at dim_capsules=16).
+        # They play different roles (transformation, query, readout), so the tie is a pathology. See decisions.md.
         self.prob_head = keras.layers.Dense(
             units=1,
             activation=None,
             use_bias=True,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="prob_head",
         )
 
@@ -342,7 +353,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         # Shape chosen so the dot product u_hat · q is broadcastable.
         self.q = self.add_weight(
             shape=(1, 1, self.num_capsules, self.dim_capsules),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True,
             name="capsule_routing_query",
@@ -630,9 +641,11 @@ class CapsuleBlockV2(keras.layers.Layer):
         and used locally under both square roots of the direction-only
         normalizer. Defaults to ``1e-7``.
     :type eps: float
-    :param kernel_initializer: Initializer for the routing capsule's ``W`` and
-        ``q``. Resolved here via ``keras.initializers.get`` and the resolved
-        object is what is forwarded. Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for the routing capsule's ``W``,
+        ``q`` and ``prob_head`` kernel. Resolved here via ``keras.initializers.get``
+        and the resolved object is what is forwarded; the routing capsule draws
+        ``q`` and the head kernel from clones of it (see
+        :class:`AttentionRoutingCapsule`). Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer forwarded to the routing
         capsule. Resolved here via ``keras.regularizers.get`` and the resolved

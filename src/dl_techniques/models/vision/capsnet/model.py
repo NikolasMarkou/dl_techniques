@@ -32,6 +32,7 @@ from typing import Optional, Tuple, Union, Dict, Any, List, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.metrics.capsule_accuracy import CapsuleAccuracy
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
@@ -196,8 +197,8 @@ class CapsNet(keras.Model):
     :type input_shape: Optional[Tuple[int, int, int]]
     :param decoder_architecture: Hidden layer sizes for the reconstruction decoder.
     :type decoder_architecture: Sequence[int]
-    :param kernel_initializer: Initializer for convolutional and dense weights.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Initializer for convolutional and dense weights. Stored as a name or a serialized config (an ``Initializer`` instance is serialized once), and every block, capsule layer and decoder layer resolves its own instance from it, so no two kernels replay one draw. A seeded instance, or a config with an explicit ``seed``, keeps that seed at every site by contract, so same-shaped kernels start equal.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for convolutional and dense weights. The names ``"l1"``, ``"l2"`` and ``"l1_l2"`` resolve to strength 0.01.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param use_batch_norm: Whether to apply batch normalization after each convolution.
@@ -227,7 +228,7 @@ class CapsNet(keras.Model):
         reconstruction: bool = True,
         input_shape: Optional[Tuple[int, int, int]] = None,
         decoder_architecture: Sequence[int] = (512, 1024),
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
         positive_margin: float = 0.9,
@@ -255,7 +256,9 @@ class CapsNet(keras.Model):
         self.reconstruction = reconstruction
         self.input_shape_config = tuple(input_shape) if input_shape is not None else None
         self.decoder_architecture = list(decoder_architecture)
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to every block, capsule layer and decoder layer; never keep the caller's Initializer instance.
+        # A seedless instance given to two layers replays one random draw at both (21 of 21 kernel pairs here), and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.kernel_regularizer = self._process_regularizer(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
 
@@ -752,7 +755,7 @@ class CapsNet(keras.Model):
             "reconstruction": self.reconstruction,
             "input_shape": self.input_shape_config,
             "decoder_architecture": self.decoder_architecture,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_batch_norm": self.use_batch_norm,
             "positive_margin": self.positive_margin,
@@ -829,7 +832,7 @@ class CapsNet(keras.Model):
 def build_capsule_conv_blocks(
     conv_filters: Sequence[int],
     use_batch_norm: bool,
-    kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer],
+    kernel_initializer: Union[str, Dict[str, Any]],
     kernel_regularizer: Optional[keras.regularizers.Regularizer],
 ) -> List[ConvStem]:
     """Build the convolution trunk shared by :class:`CapsNet` and ``CapsNetV2``.
@@ -848,7 +851,9 @@ def build_capsule_conv_blocks(
 
     :param conv_filters: Filter count of each block.
     :param use_batch_norm: Whether each block normalizes after its convolution.
-    :param kernel_initializer: Kernel initializer handed to every convolution.
+    :param kernel_initializer: Kernel initializer spec (a name or a serialized config) handed to
+        every convolution; each block resolves its own instance from it. An ``Initializer``
+        instance passed here would feed every block and replay one draw at all of them.
     :param kernel_regularizer: Kernel regularizer handed to every convolution.
     :return: The blocks, in forward order.
     """

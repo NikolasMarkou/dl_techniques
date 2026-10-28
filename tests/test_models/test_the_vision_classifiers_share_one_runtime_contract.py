@@ -445,36 +445,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::default", "capsnet"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '21 of 21 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "capsnet"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '21 of 21 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::default", "capsnet_v2_legacy"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '15 of 15 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "capsnet_v2_legacy"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '15 of 15 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::default", "capsnet_v2_resnet18"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '6 of 276 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "capsnet_v2_resnet18"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '6 of 276 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "siamfc"): Open(
         AssertionError,
         "the SiamFC and DaSiamRPN stem migration",
@@ -1502,12 +1472,13 @@ def _build_capsnet(init):
                     np.random.default_rng(0).uniform(size=(2, 28, 28, 1)).astype("float32"))
 
 
-def _capsnet_v2(backbone: str, shape: Tuple[int, int, int]):
+def _capsnet_v2(backbone: str, shape: Tuple[int, int, int], reconstruction: bool = False):
     def build(init):
         from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
-        return _forward(CapsNetV2(num_classes=10, input_shape=shape, **_selector(CapsNetV2, backbone),
-                                  **_kw(init)),
-                        np.random.default_rng(0).uniform(size=(2, *shape)).astype("float32"))
+        model = CapsNetV2(num_classes=10, input_shape=shape, reconstruction=reconstruction,
+                          **_selector(CapsNetV2, backbone), **_kw(init))
+        model.build((None, *shape))  # the decoder is built here, not by a forward pass
+        return _forward(model, np.random.default_rng(0).uniform(size=(2, *shape)).astype("float32"))
     return build
 
 
@@ -1607,6 +1578,7 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "mambalct": (_build_mambalct, False),
     "capsnet": (_build_capsnet, True),
     "capsnet_v2_legacy": (_capsnet_v2("legacy", (28, 28, 1)), True),
+    "capsnet_v2_legacy_reconstruction": (_capsnet_v2("legacy", (28, 28, 1), reconstruction=True), True),
     "capsnet_v2_resnet18": (_capsnet_v2("resnet18", (32, 32, 3)), True),
     "siamfc": (_build_siamfc, True),
     "dasiamrpn": (_build_dasiamrpn, True),

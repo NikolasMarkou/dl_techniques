@@ -31,6 +31,7 @@ from typing import Optional, Tuple, Union, Dict, Any, List, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.losses.capsule_margin_loss import CapsuleMarginLoss
 from dl_techniques.layers.capsules import PrimaryCapsule
 from dl_techniques.models.vision.capsnet.model import build_capsule_conv_blocks
@@ -205,8 +206,8 @@ class CapsNetV2(keras.Model):
     :type block_dropout_rate: float
     :param block_direction_only_norm: Whether `CapsuleBlockV2` uses length-preserving direction normalization.
     :type block_direction_only_norm: bool
-    :param kernel_initializer: Initializer for trainable layers.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Initializer for trainable layers, the ResNet backbone's included. Stored as a name or a serialized config (an ``Initializer`` instance is serialized once), and every block, capsule layer, decoder layer and backbone convolution resolves its own instance from it, so no two kernels replay one draw. A seeded instance, or a config with an explicit ``seed``, keeps that seed at every site by contract, so same-shaped kernels start equal.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for trainable layers.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param name: Model name.
@@ -251,7 +252,7 @@ class CapsNetV2(keras.Model):
         load_balancing_weight: float = 0.01,
         block_dropout_rate: float = 0.0,
         block_direction_only_norm: bool = False,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         name: Optional[str] = "capsnet_v2",
         **kwargs: Any,
@@ -298,7 +299,9 @@ class CapsNetV2(keras.Model):
         self.load_balancing_weight = float(load_balancing_weight)
         self.block_dropout_rate = float(block_dropout_rate)
         self.block_direction_only_norm = block_direction_only_norm
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to every block, capsule layer, decoder layer and the ResNet backbone; never keep the caller's Initializer instance.
+        # A seedless instance given to two layers replays one random draw at both (15 of 15 kernel pairs at the legacy stem), and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._build_stem()
@@ -339,6 +342,7 @@ class CapsNetV2(keras.Model):
                 input_shape=self.input_shape_config,
                 pretrained=self.stem_pretrained,
                 include_top=False,
+                kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="stem",
             )
@@ -597,7 +601,7 @@ class CapsNetV2(keras.Model):
             "load_balancing_weight": self.load_balancing_weight,
             "block_dropout_rate": self.block_dropout_rate,
             "block_direction_only_norm": self.block_direction_only_norm,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         }
         base_config = super().get_config()

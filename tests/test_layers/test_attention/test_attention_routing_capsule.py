@@ -12,6 +12,7 @@ from dl_techniques.layers.attention.attention_routing_capsule import (
     AttentionRoutingCapsule,
     CapsuleBlockV2,
 )
+from tests.test_models.initializer_replay_oracle import replayed_pairs
 
 
 # ---------------------------------------------------------------------
@@ -245,12 +246,18 @@ class TestInitializerAndRegularizerPlumbing:
 
     # -- kernel_initializer reaches prob_head -----------------------------
 
-    def test_prob_head_uses_the_constructor_initializer_object(self):
+    def test_prob_head_uses_the_constructor_initializer_configuration(self):
+        """The head draws like the caller asked, from its OWN instance (see
+        ``TestRoutingWeightsDrawIndependently``): same class, same configuration,
+        not the same object."""
         init = keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=1234)
         layer = AttentionRoutingCapsule(
             num_capsules=4, dim_capsules=6, kernel_initializer=init
         )
-        assert layer.prob_head.kernel_initializer is layer.kernel_initializer
+        head = layer.prob_head.kernel_initializer
+        assert type(head) is type(layer.kernel_initializer)
+        assert head.get_config() == layer.kernel_initializer.get_config()
+        assert head is not layer.kernel_initializer
 
     def test_prob_head_uses_the_constructor_initializer_string(self):
         layer = AttentionRoutingCapsule(
@@ -482,6 +489,84 @@ class TestInitializerAndRegularizerPlumbing:
 
 
 # ---------------------------------------------------------------------
+
+
+class TestRoutingWeightsDrawIndependently:
+    """``W``, ``q`` and the ``prob_head`` kernel are three draws, not one sample read three times.
+
+    A seedless initializer INSTANCE replays one sample at every weight it is handed to,
+    whatever the shapes (``initializers/clone.py``). The layer holds one instance and used to
+    give it to all three: ``q`` came out as the leading values of ``W`` (scaled), and the
+    ``prob_head`` kernel as the leading values of both. The weights play different roles
+    (a transformation, a query, a probability readout), so the tie is a training pathology.
+    """
+
+    @staticmethod
+    def _built(initializer, dim_capsules: int = 16, num_capsules: int = 4):
+        keras.utils.set_random_seed(1234)
+        layer = AttentionRoutingCapsule(
+            num_capsules=num_capsules,
+            dim_capsules=dim_capsules,
+            kernel_initializer=initializer,
+        )
+        layer.build((None, 8, 8))
+        return layer
+
+    @pytest.mark.parametrize("initializer", ["glorot_uniform", "he_normal"])
+    def test_a_named_initializer_gives_three_independent_draws(self, initializer):
+        layer = self._built(initializer)
+        pairs, compared = replayed_pairs(layer)
+        assert compared == 3, "W, q and the prob_head kernel must all be compared"
+        assert not pairs, f"{len(pairs)} of {compared} weight pairs replay one draw: {pairs}"
+
+    @pytest.mark.parametrize(
+        "make", [keras.initializers.HeNormal, keras.initializers.GlorotUniform],
+        ids=["he_normal", "glorot_uniform"],
+    )
+    def test_a_seedless_initializer_instance_gives_three_independent_draws(self, make):
+        layer = self._built(make())
+        pairs, compared = replayed_pairs(layer)
+        assert compared == 3
+        assert not pairs, f"{len(pairs)} of {compared} weight pairs replay one draw: {pairs}"
+
+    def test_the_block_wrapper_hands_the_routing_layer_three_independent_draws(self):
+        keras.utils.set_random_seed(1234)
+        block = CapsuleBlockV2(
+            num_capsules=4, dim_capsules=16, kernel_initializer=keras.initializers.HeNormal()
+        )
+        block.build((None, 8, 8))
+        pairs, compared = replayed_pairs(block)
+        assert compared == 3 and not pairs, pairs
+
+    def test_a_seeded_initializer_keeps_its_seed_at_every_site(self):
+        """A clone keeps an explicit seed, so a caller asking for ``seed=7`` still gets
+        exactly what ``GlorotUniform(seed=7)`` draws at each weight's own shape."""
+        layer = self._built(keras.initializers.GlorotUniform(seed=7))
+        np.testing.assert_array_equal(
+            np.asarray(layer.q),
+            np.asarray(keras.initializers.GlorotUniform(seed=7)(layer.q.shape)),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(layer.W),
+            np.asarray(keras.initializers.GlorotUniform(seed=7)(layer.W.shape)),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(layer.prob_head.kernel),
+            np.asarray(keras.initializers.GlorotUniform(seed=7)(layer.prob_head.kernel.shape)),
+        )
+
+    def test_a_constant_initializer_still_reaches_the_query(self):
+        layer = self._built(keras.initializers.Constant(0.25))
+        assert np.allclose(np.asarray(layer.q), 0.25)
+        assert np.allclose(np.asarray(layer.W), 0.25)
+
+    def test_the_oracle_sees_the_defect_on_this_layer(self):
+        """Positive control: a layer whose three weights ARE one sample is reported."""
+        layer = self._built("glorot_uniform")
+        size = int(np.prod(tuple(layer.q.shape)))
+        layer.q.assign(np.asarray(layer.W).ravel()[:size].reshape(tuple(layer.q.shape)))
+        pairs, _ = replayed_pairs(layer)
+        assert any("capsule_routing_query" in pair for pair in pairs)
 
 
 class TestCapsuleBlockV2:

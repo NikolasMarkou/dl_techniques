@@ -21,6 +21,7 @@ from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.utils.tensors import length
 
+from ..initializer_replay_oracle import replayed_pairs
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     build_seeded,
@@ -1333,6 +1334,65 @@ class TestCapsNetBuildAndShapes(_MnistFixtures):
         with caplog.at_level("INFO"):
             capsnet.summary(print_fn=lambda *args, **kwargs: None)
         assert not [r for r in caplog.records if "CapsNet Configuration" in r.getMessage()]
+
+
+class TestCapsNetInitializer(_MnistFixtures):
+    """One ``kernel_initializer`` argument, one fresh draw per site."""
+
+    @staticmethod
+    def _site_initializers(capsnet: CapsNet):
+        """The initializer object behind every kernel the model draws."""
+        sites = [block.conv1.kernel_initializer for block in capsnet.conv_blocks]
+        sites.append(capsnet.primary_caps.conv.kernel_initializer)
+        sites.append(capsnet.digit_caps.kernel_initializer)
+        if capsnet.decoder is not None:
+            sites += [
+                layer.kernel_initializer
+                for layer in capsnet.decoder.layers
+                if isinstance(layer, keras.layers.Dense)
+            ]
+        return sites
+
+    def test_a_named_initializer_is_stored_as_the_name(self):
+        assert CapsNet(num_classes=10).kernel_initializer == "he_normal"
+
+    def test_an_instance_is_stored_as_its_serialized_spec(self):
+        capsnet = CapsNet(num_classes=10, kernel_initializer=keras.initializers.HeNormal(seed=5))
+        assert isinstance(capsnet.kernel_initializer, dict)
+        assert capsnet.kernel_initializer["class_name"] == "HeNormal"
+        assert capsnet.kernel_initializer["config"]["seed"] == 5
+        json.dumps(capsnet.get_config())
+
+    @pytest.mark.parametrize("initializer", ["he_normal", keras.initializers.HeNormal()],
+                             ids=["name", "seedless-instance"])
+    def test_no_live_instance_reaches_two_sites(self, mnist_input_shape, initializer):
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=True,
+            kernel_initializer=initializer,
+        )
+        sites = self._site_initializers(capsnet)
+        assert len(sites) == 2 + 1 + 1 + 3  # two blocks, primary, digit, three decoder Dense layers
+        assert len({id(site) for site in sites}) == len(sites)
+
+    @pytest.mark.parametrize("initializer", ["he_normal", keras.initializers.HeNormal()],
+                             ids=["name", "seedless-instance"])
+    def test_no_two_kernels_replay_one_draw(self, mnist_input_shape, initializer):
+        keras.utils.set_random_seed(1234)
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=True,
+            kernel_initializer=initializer,
+        )
+        capsnet.build((None, *mnist_input_shape))
+        pairs, compared = replayed_pairs(capsnet)
+        assert compared > 0
+        assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
+
+    def test_a_seeded_instance_keeps_its_seed_at_every_site(self, mnist_input_shape):
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape,
+            kernel_initializer=keras.initializers.HeNormal(seed=5),
+        )
+        assert {site.get_config()["seed"] for site in self._site_initializers(capsnet)} == {5}
 
 
 class TestCapsNetConfig(_MnistFixtures):
