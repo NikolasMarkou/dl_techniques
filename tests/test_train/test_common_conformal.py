@@ -15,6 +15,8 @@ from dl_techniques.utils.conformal_classification import (
     softmax,
 )
 from train.common.conformal import (
+    CAVEAT_NOT_SELECTED_ON_CALIBRATION,
+    CAVEAT_SELECTED_ON_CALIBRATION,
     CONFORMAL_JSON_NAME,
     CONFORMAL_MODEL_NAME,
     add_conformal_arguments,
@@ -104,6 +106,7 @@ class TestRunConformal:
         record = run_conformal(
             _identity_model(10), _ds(logits, labels), alpha=0.1, seed=3,
             out_dir=out, input_shape=(10,), model_name="identity", weights="last epoch",
+            selection_overlaps_calibration=True,
         )
         return out, record, logits, labels
 
@@ -116,6 +119,35 @@ class TestRunConformal:
         assert on_disk["model"] == "identity" and on_disk["weights"] == "last epoch"
         assert on_disk["score"] == "aps_deterministic" and on_disk["tau_is_infinite"] is False
         assert 0.0 < on_disk["tau"] <= 1.0 and on_disk["caveat"]
+
+    def test_a_model_selected_on_the_calibration_set_says_so(self, run):
+        record = run[1]
+        assert record["model_selected_on_calibration_set"] is True
+        assert record["caveat"] == CAVEAT_SELECTED_ON_CALIBRATION
+        assert "weakens" in record["caveat"]
+
+    def test_a_model_selected_elsewhere_says_so(self, tmp_path):
+        logits, labels = _problem(n=400, c=5)
+        record = run_conformal(
+            _identity_model(5), _ds(logits, labels), alpha=0.1, seed=0, out_dir=tmp_path,
+            input_shape=(5,), model_name="identity", weights="best checkpoint",
+            selection_overlaps_calibration=False,
+        )
+        assert record["model_selected_on_calibration_set"] is False
+        assert record["caveat"] == CAVEAT_NOT_SELECTED_ON_CALIBRATION
+        assert "weakens" not in record["caveat"]
+        on_disk = json.loads((tmp_path / CONFORMAL_JSON_NAME).read_text())
+        assert on_disk["model_selected_on_calibration_set"] is False
+        assert on_disk["caveat"] == CAVEAT_NOT_SELECTED_ON_CALIBRATION
+
+    def test_the_overlap_flag_has_no_default(self, tmp_path):
+        logits, labels = _problem(n=50, c=4)
+        with pytest.raises(TypeError, match="selection_overlaps_calibration"):
+            run_conformal(
+                _identity_model(4), _ds(logits, labels), alpha=0.1, seed=0,
+                out_dir=tmp_path, input_shape=(4,), model_name="identity",
+                weights="last epoch",
+            )
 
     def test_the_random_half_splits_reach_the_target(self, run):
         splits = run[1]["repeated_splits"]
@@ -142,6 +174,7 @@ class TestRunConformal:
         record = run_conformal(
             _identity_model(4), _ds(logits, labels), alpha=0.05, seed=0, out_dir=tmp_path,
             input_shape=(4,), model_name="identity", weights="last epoch",
+            selection_overlaps_calibration=True,
         )
         assert record["tau_is_infinite"] is True and record["tau"] is None
         model = load_conformal_model(tmp_path / CONFORMAL_MODEL_NAME)

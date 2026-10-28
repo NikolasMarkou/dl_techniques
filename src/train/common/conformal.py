@@ -1,14 +1,20 @@
-"""Conformal prediction sets for a trained classifier, shared by the ImageNet trainers.
+"""Conformal prediction sets for a trained classifier, shared by the classification trainers.
 
-After training, :func:`run_conformal` runs the model once over the labelled validation
+After training, :func:`run_conformal` runs the model once over a labelled calibration
 set, measures on random 50/50 splits whether the calibrated sets reach the target
-coverage, fits the final threshold on all of the validation set, and exports the
+coverage, fits the final threshold on all of the calibration set, and exports the
 classifier with a :class:`ConformalPredictionSet` on top (``conformal_model.keras``,
 outputs ``(logits, probs, in_set)``) next to a ``conformal.json`` record. The score is
 the deterministic APS rule, the one the exported layer computes, so the reported
 numbers describe the exported model. The math is in
 ``dl_techniques.utils.conformal_classification``, including the caveat that the
-validation set must not also have chosen the model.
+calibration set must not also have chosen the model.
+
+Two cases are told apart by the caller through ``selection_overlaps_calibration``. The
+ResNet, ViT and CliffordNet ImageNet runs calibrate on the val set that also picked
+their checkpoint (``True``: the guarantee is weakened). The ConvNeXt and CapsNet runs
+select on a held-out slice of train and calibrate on the test split (``False``: the
+model was not chosen on the calibration data).
 """
 from __future__ import annotations
 
@@ -37,13 +43,21 @@ CONFORMAL_MODEL_NAME = "conformal_model.keras"
 DEFAULT_ALPHA = 0.1
 SPLIT_REPEATS = 20
 
-CAVEAT = (
+CAVEAT_SELECTED_ON_CALIBRATION = (
     "Coverage is marginal (on average over the validation distribution), not "
     "per-image or per-class. It holds when the calibration and deployment data are "
     "exchangeable and the model was not chosen on the calibration data; a "
     "checkpoint picked on this validation set weakens it. The split statistics "
     "calibrate on half of the validation set and measure on the other half; the "
     "exported threshold is fit on all of it."
+)
+CAVEAT_NOT_SELECTED_ON_CALIBRATION = (
+    "Coverage is marginal (on average over the calibration distribution), not "
+    "per-image or per-class. It holds when the calibration and deployment data are "
+    "exchangeable. The model was not chosen on the calibration data (early stopping "
+    "and the checkpoint used a separate selection split), so the other condition of "
+    "the guarantee holds. The split statistics calibrate on half of the calibration "
+    "set and measure on the other half; the exported threshold is fit on all of it."
 )
 
 
@@ -64,8 +78,8 @@ def add_conformal_arguments(parser: argparse.ArgumentParser, note: str = "") -> 
     """
     parser.add_argument(
         "--conformal-alpha", type=_alpha, default=DEFAULT_ALPHA, dest="conformal_alpha",
-        help=f"{note}miscoverage level of the conformal prediction sets fitted on the "
-             f"validation set after training (default {DEFAULT_ALPHA}: sets that "
+        help=f"{note}miscoverage level of the conformal prediction sets fitted on a "
+             f"labelled set after training (default {DEFAULT_ALPHA}: sets that "
              "contain the true class about 90%% of the time)",
     )
     parser.add_argument(
@@ -103,23 +117,28 @@ def run_conformal(
         input_shape: Tuple[int, ...],
         model_name: str,
         weights: str,
+        selection_overlaps_calibration: bool,
 ) -> Dict[str, Any]:
     """Calibrate, check on random splits, export the model and write the record.
 
     :param model: Trained single-output classifier that emits logits.
-    :param dataset: Batched, ordered ``(x, y)`` validation dataset (all of it).
+    :param dataset: Batched, ordered ``(x, y)`` calibration dataset (all of it); ``y`` holds
+        integer class ids.
     :param alpha: Miscoverage level in ``(0, 1)``.
     :param seed: Seed of the random splits.
     :param out_dir: Run directory; ``conformal.json`` and ``conformal_model.keras`` go here.
     :param input_shape: Per-sample input shape without the batch axis.
     :param model_name: Recorded in ``conformal.json``.
     :param weights: Which weights ``model`` holds (for example ``"last epoch"``), recorded.
+    :param selection_overlaps_calibration: ``True`` when ``dataset`` also drove early
+        stopping or the checkpoint choice (the guarantee is weakened and the record's
+        caveat says so); ``False`` when the model was selected on other data.
     :return: The record that was written.
     """
     out_dir = Path(out_dir)
     logits, labels = collect_logits(model, dataset)
     n = int(labels.shape[0])
-    logger.info(f"Conformal: {n} validation samples, alpha={alpha}")
+    logger.info(f"Conformal: {n} calibration samples, alpha={alpha}")
 
     splits = repeated_split_coverage(
         logits, labels, alpha, repeats=SPLIT_REPEATS, seed=seed, randomized=False
@@ -136,9 +155,11 @@ def run_conformal(
         "n_calibration": n,
         "model": model_name,
         "weights": weights,
+        "model_selected_on_calibration_set": selection_overlaps_calibration,
         "accuracy": full["accuracy"],
         "repeated_splits": splits,
-        "caveat": CAVEAT,
+        "caveat": (CAVEAT_SELECTED_ON_CALIBRATION if selection_overlaps_calibration
+                   else CAVEAT_NOT_SELECTED_ON_CALIBRATION),
     }
 
     attach_conformal_sets(model, tau, input_shape).save(out_dir / CONFORMAL_MODEL_NAME)

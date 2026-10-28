@@ -422,6 +422,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
             model_name=f"resnet_{config.model_variant}",
             weights="last epoch, or the best val_loss epoch when early stopping "
                     "fired (selected on this same validation set)",
+            selection_overlaps_calibration=True,
         )
 
     # Save history

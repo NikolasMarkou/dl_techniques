@@ -502,6 +502,7 @@ def train_vit(
             model_name=f"vit_{config.model_variant}",
             weights="last epoch, or the best val_loss epoch when early stopping "
                     "fired (selected on this same validation set)",
+            selection_overlaps_calibration=True,
         )
 
     # Convergence accounting (DECISION plan_2026-05-12_f2d29729/D-007)

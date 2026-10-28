@@ -723,6 +723,7 @@ def train_model(args) -> None:
             model_name=f"cliffordnet_{args.variant}_imagenet",
             weights="best checkpoint, selected on this same validation set's "
                     "val_accuracy" if os.path.exists(best_path) else "last epoch",
+            selection_overlaps_calibration=True,
         )
 
     # ---- Classification figures --------------------------------------
