@@ -58,6 +58,28 @@ class TestArguments:
         args = self._parse("--conformal-alpha", "0.05", "--no-conformal")
         assert args.conformal_alpha == 0.05 and args.no_conformal is True
 
+    def _parse_opt_in(self, *argv):
+        parser = argparse.ArgumentParser()
+        add_conformal_arguments(parser, on_by_default=False)
+        return parser, parser.parse_args(list(argv))
+
+    def test_opt_in_is_off_when_the_flag_is_absent(self):
+        parser, args = self._parse_opt_in()
+        assert args.conformal_alpha is None
+        assert not hasattr(args, "no_conformal")
+        assert "--no-conformal" not in parser._option_string_actions
+
+    def test_opt_in_turns_on_with_a_bare_flag_at_the_default_alpha(self):
+        assert self._parse_opt_in("--conformal-alpha")[1].conformal_alpha == 0.1
+
+    def test_opt_in_takes_an_explicit_alpha(self):
+        assert self._parse_opt_in("--conformal-alpha", "0.05")[1].conformal_alpha == 0.05
+
+    def test_opt_in_still_refuses_an_alpha_outside_the_open_unit_interval(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            self._parse_opt_in("--conformal-alpha", "1.5")
+        assert exc.value.code == 2 and "alpha" in capsys.readouterr().err
+
     @pytest.mark.parametrize("bad", ["0", "1", "-0.1", "1.5", "abc"])
     def test_an_alpha_outside_the_open_unit_interval_is_refused(self, bad, capsys):
         with pytest.raises(SystemExit) as exc:

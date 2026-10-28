@@ -104,13 +104,13 @@ def test_the_summary_carries_the_record(imagenet_runs) -> None:
     assert any("conformal.json" in n and "WHOLE test split" in n for n in on_disk["notes"])
 
 
-def test_no_conformal_leaves_no_files_and_a_null_summary_block(imagenet_runs) -> None:
+def test_a_run_without_conformal_alpha_leaves_no_files_and_a_null_summary_block(imagenet_runs) -> None:
     run_dir = imagenet_runs.out / "off"
     assert not (run_dir / CONFORMAL_JSON_NAME).exists()
     assert not (run_dir / CONFORMAL_MODEL_NAME).exists()
     summary = json.loads((run_dir / "results_summary.json").read_text())
     assert summary["conformal"] is None
-    assert any("--no-conformal" in n for n in summary["notes"])
+    assert any("--conformal-alpha" in n for n in summary["notes"])
     assert len(imagenet_runs.seen.datasets) == 1
 
 
@@ -129,3 +129,29 @@ def test_an_array_dataset_calibrates_on_its_test_split_too(tmp_path) -> None:
     assert record["n_calibration"] == summary["n_test"] == MAX_SAMPLES < N_TEST
     assert record["model_selected_on_calibration_set"] is False
     assert "validation_split=0.1" in record["weights"]
+
+
+# ---------------------------------------------------------------------
+# The step is off unless asked for
+# ---------------------------------------------------------------------
+
+
+def _config_from(*argv):
+    args = common.parse_arguments(list(argv), "v1")
+    return common.config_from_args(args, "v1")
+
+
+def test_the_step_is_off_by_default(tmp_path) -> None:
+    assert common.TrainingConfig(output_dir=str(tmp_path)).conformal_alpha is None
+    assert _config_from().conformal_alpha is None
+
+
+def test_one_flag_turns_it_on_and_a_bare_flag_uses_the_default_alpha() -> None:
+    assert _config_from("--conformal-alpha").conformal_alpha == 0.1
+    assert _config_from("--conformal-alpha", "0.05").conformal_alpha == 0.05
+
+
+def test_there_is_no_off_switch_because_off_is_the_default(capsys) -> None:
+    with pytest.raises(SystemExit):
+        common.parse_arguments(["--no-conformal"], "v1")
+    assert "unrecognized arguments" in capsys.readouterr().err

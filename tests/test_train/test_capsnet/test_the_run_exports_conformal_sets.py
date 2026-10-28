@@ -39,7 +39,7 @@ BATCH = 4
 def _argv(tree, *extra):
     return ["prog", "--dataset", "imagenet", "--imagenet-root", tree, "--image-size", "32",
             "--epochs", "1", "--batch-size", str(BATCH), "--holdout-per-class", "1",
-            "--eval-samples", "4", "--patience", "5", "--conformal-alpha", "0.3", *extra]
+            "--eval-samples", "4", "--patience", "5", *extra]
 
 
 def _run(tree, work, *extra):
@@ -68,8 +68,8 @@ def runs(tmp_path_factory):
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(module, "run_conformal", spy)
-        on = _run(tree, tmp_path_factory.mktemp("on"))
-    off = _run(tree, tmp_path_factory.mktemp("off"), "--no-conformal")
+        on = _run(tree, tmp_path_factory.mktemp("on"), "--conformal-alpha", "0.3")
+    off = _run(tree, tmp_path_factory.mktemp("off"))
     return SimpleNamespace(on=on, off=off, seen=seen)
 
 
@@ -117,20 +117,20 @@ def test_the_exported_scores_are_the_log_odds_of_the_capsule_lengths(runs) -> No
     assert np.array_equal(np.argsort(logits, axis=-1), np.argsort(lengths, axis=-1))
 
 
-def test_no_conformal_leaves_no_files(runs) -> None:
+def test_a_run_without_the_flag_leaves_no_conformal_files(runs) -> None:
     assert not (runs.off / CONFORMAL_JSON_NAME).exists()
     assert not (runs.off / CONFORMAL_MODEL_NAME).exists()
 
 
-def test_the_conformal_flags_are_declared(monkeypatch) -> None:
+def test_the_step_is_off_by_default_and_one_flag_turns_it_on(monkeypatch) -> None:
     seen = {}
     monkeypatch.setattr(module, "train_model", lambda args: seen.update(vars(args)))
-    monkeypatch.setattr(sys, "argv", ["prog", "--conformal-alpha", "0.05"])
-    module.main()
-    assert seen["conformal_alpha"] == 0.05 and seen["no_conformal"] is False
-    monkeypatch.setattr(sys, "argv", ["prog", "--no-conformal"])
-    module.main()
-    assert seen["no_conformal"] is True and seen["conformal_alpha"] == 0.1
+    for argv, expected in ((["prog"], None), (["prog", "--conformal-alpha"], 0.1),
+                           (["prog", "--conformal-alpha", "0.05"], 0.05)):
+        monkeypatch.setattr(sys, "argv", argv)
+        module.main()
+        assert seen["conformal_alpha"] == expected
+    assert "no_conformal" not in seen
 
 
 # ---------------------------------------------------------------------

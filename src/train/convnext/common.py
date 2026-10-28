@@ -98,7 +98,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
-from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
+from train.common.conformal import add_conformal_arguments, run_conformal
 
 
 # ---------------------------------------------------------------------
@@ -263,8 +263,9 @@ class TrainingConfig:
     # MNIST and CIFAR use their whole test set).
     eval_samples: int = DEFAULT_EVAL_SAMPLES
 
-    # Conformal prediction sets fitted on the whole test split with the best weights (None = off).
-    conformal_alpha: Optional[float] = DEFAULT_ALPHA
+    # Conformal prediction sets fitted on the whole test split with the best weights.
+    # Off unless asked for (``--conformal-alpha``).
+    conformal_alpha: Optional[float] = None
 
     # Training (defaults are the pre-normalization CLI's values, not measured here)
     epochs: int = 100
@@ -495,7 +496,8 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                             "of a 198 s CIFAR-10 5-epoch run; its spectral verdicts are "
                             "heuristics, see the README). --no-model-analysis skips it.")
 
-    add_conformal_arguments(parser.add_argument_group("conformal prediction sets"))
+    add_conformal_arguments(parser.add_argument_group("conformal prediction sets"),
+                           on_by_default=False)
 
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
@@ -543,9 +545,7 @@ def config_from_args(args: argparse.Namespace, model_family: str) -> TrainingCon
     """
     # Every config field except the family comes from the namespace of the same name, so a
     # field with no flag raises AttributeError here instead of silently keeping its default.
-    values = {f.name: getattr(args, f.name) for f in fields(TrainingConfig)
-              if f.name not in ("model_family", "conformal_alpha")}
-    values["conformal_alpha"] = None if args.no_conformal else args.conformal_alpha
+    values = {f.name: getattr(args, f.name) for f in fields(TrainingConfig) if f.name != "model_family"}
     return TrainingConfig(model_family=model_family, **values)
 
 
@@ -1114,7 +1114,7 @@ def _conformal_notes(alpha: Optional[float]) -> List[str]:
         alpha: The configured miscoverage level, or ``None`` when the step is off.
     """
     if alpha is None:
-        return ["conformal prediction sets skipped (--no-conformal); `conformal` is null"]
+        return ["conformal prediction sets not requested (--conformal-alpha); `conformal` is null"]
     return [
         f"`conformal` is the record of conformal.json: APS prediction sets at alpha {alpha:g} "
         "calibrated on the WHOLE test split with the best weights; the model was selected on "

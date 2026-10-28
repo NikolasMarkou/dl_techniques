@@ -14,8 +14,8 @@ test set, evaluated whole; the reconstruction callback and the final figures use
 first ``--eval-samples`` images of those two splits. Inputs are scaled to [0, 1]
 because the decoder ends in a sigmoid and the reconstruction loss subtracts the input.
 
-After training, conformal prediction sets are fitted on the whole test split with the best
-weights (``--conformal-alpha``, ``--no-conformal``), for every dataset. The model emits
+With ``--conformal-alpha [ALPHA]`` (off by default), conformal prediction sets are fitted on
+the whole test split with the best weights after training, for every dataset. The model emits
 capsule lengths in [0, 1], not logits, and the set layer applies a softmax, which over values
 that differ by at most 1 is nearly uniform; the exported ``conformal_model.keras`` therefore
 wraps the model with ``ProbabilityLogits`` (the log-odds of each length, same class order).
@@ -825,7 +825,7 @@ def train_model(args) -> None:
         logger.info(f"  {name}: {value:.4f}")
 
     # Conformal sets, over the whole test split with the best weights. Before the figures.
-    if not args.no_conformal:
+    if args.conformal_alpha is not None:
         fit_conformal_sets(model, args, test_x, test_y, model_config['input_shape'], results_dir)
 
     # Visualizations
@@ -889,7 +889,7 @@ def main():
                         help='Used only when --dataset imagenet: images of the selection and '
                              'test splits kept in memory for the reconstruction figures '
                              f'(default: {DEFAULT_EVAL_SAMPLES}); the test metrics use all of them')
-    add_conformal_arguments(parser)
+    add_conformal_arguments(parser, on_by_default=False)
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Used only when --dataset imagenet: cap train and test at this '
                              'many images (smoke runs); the selection split is not capped')

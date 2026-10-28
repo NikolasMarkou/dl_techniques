@@ -80,8 +80,6 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
         Row(("--model-analysis", "--no-model-analysis"), ("--no-model-analysis",),
             "model_analysis", False),
         Row(("--conformal-alpha",), ("--conformal-alpha", "0.07"), "conformal_alpha", 0.07),
-        # store_true: the probe turns the step off, which the config spells as None.
-        Row(("--no-conformal",), ("--no-conformal",), "conformal_alpha", None),
         Row(("--output-dir",), ("--output-dir", "/probe/convnext-out"), "output_dir",
             "/probe/convnext-out"),
         Row(("--experiment-name",), ("--experiment-name", "probe-experiment-name"),

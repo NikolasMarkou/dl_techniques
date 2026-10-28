@@ -71,11 +71,30 @@ def _alpha(text: str) -> float:
     return value
 
 
-def add_conformal_arguments(parser: argparse.ArgumentParser, note: str = "") -> None:
-    """Add ``--conformal-alpha`` and ``--no-conformal`` to ``parser``.
+def add_conformal_arguments(
+        parser: argparse.ArgumentParser, note: str = "", on_by_default: bool = True
+) -> None:
+    """Add the conformal flags to ``parser``.
 
-    ``note`` prefixes both help strings, e.g. ``"Used only when --dataset imagenet: "``.
+    With ``on_by_default`` (the ResNet, ViT and CliffordNet ImageNet runs) the step runs
+    unless asked not to: ``--conformal-alpha`` defaults to :data:`DEFAULT_ALPHA` and
+    ``--no-conformal`` skips it. Without it (ConvNeXt, CapsNet) the step is off unless
+    asked for and there is ONE flag: ``--conformal-alpha [ALPHA]`` turns it on, with
+    :data:`DEFAULT_ALPHA` when no value follows; ``conformal_alpha`` is ``None`` when the
+    flag is absent and there is no ``--no-conformal``.
+
+    ``note`` prefixes the help strings, e.g. ``"Used only when --dataset imagenet: "``.
     """
+    if not on_by_default:
+        parser.add_argument(
+            "--conformal-alpha", type=_alpha, nargs="?", const=DEFAULT_ALPHA, default=None,
+            dest="conformal_alpha", metavar="ALPHA",
+            help=f"{note}fit conformal prediction sets after training and export them; "
+                 f"ALPHA is the miscoverage level (default {DEFAULT_ALPHA} when no value "
+                 "follows: sets that contain the true class about 90%% of the time). Off "
+                 "when the flag is absent",
+        )
+        return
     parser.add_argument(
         "--conformal-alpha", type=_alpha, default=DEFAULT_ALPHA, dest="conformal_alpha",
         help=f"{note}miscoverage level of the conformal prediction sets fitted on a "
