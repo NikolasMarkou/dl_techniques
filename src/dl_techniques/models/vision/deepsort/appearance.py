@@ -40,7 +40,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -48,8 +47,15 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    refuse_input_shape,
+    validate_rates,
+)
+from dl_techniques.utils.validation import positive_int
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -117,13 +123,14 @@ class DeepSortResidualBlock(keras.layers.Layer):
         dropout_rate: float = DROPOUT_RATE,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, "DeepSortResidualBlock", "the block takes whatever tensor reaches it"
+        )
         super().__init__(**kwargs)
-        if filters <= 0:
-            raise ValueError(f"filters must be positive, got {filters}")
+        filters = positive_int(filters, "filters", "DeepSortResidualBlock")
         if stride not in (1, 2):
             raise ValueError(f"stride must be 1 or 2, got {stride}")
-        if not 0.0 <= dropout_rate < 1.0:
-            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        validate_rates(dropout_rate=dropout_rate)
         self.filters = filters
         self.stride = stride
         self.is_first = is_first
@@ -136,7 +143,7 @@ class DeepSortResidualBlock(keras.layers.Layer):
         self.pre_bn = create_normalization_layer(
             "batch_norm", momentum=BN_MOMENTUM, epsilon=BN_EPSILON, name="pre_bn"
         )
-        self.conv1 = layers.Conv2D(
+        self.conv1 = keras.layers.Conv2D(
             filters=filters,
             kernel_size=3,
             strides=stride,
@@ -150,8 +157,8 @@ class DeepSortResidualBlock(keras.layers.Layer):
         self.bn1 = create_normalization_layer(
             "batch_norm", momentum=BN_MOMENTUM, epsilon=BN_EPSILON, name="bn1"
         )
-        self.drop = layers.Dropout(dropout_rate, name="drop")
-        self.conv2 = layers.Conv2D(
+        self.drop = keras.layers.Dropout(dropout_rate, name="drop")
+        self.conv2 = keras.layers.Conv2D(
             filters=filters,
             kernel_size=3,
             strides=1,
@@ -164,7 +171,7 @@ class DeepSortResidualBlock(keras.layers.Layer):
         )
         # Created always for layout stability; built only when used and
         # pinned by the no-projection-builds-no-projection-weights test.
-        self.projection = layers.Conv2D(
+        self.projection = keras.layers.Conv2D(
             filters=filters,
             kernel_size=1,
             strides=stride,
@@ -205,10 +212,10 @@ class DeepSortResidualBlock(keras.layers.Layer):
         h = inputs
         if not self.is_first:
             h = self.pre_bn(h, training=training)
-            h = ops.elu(h)
+            h = keras.ops.elu(h)
         y = self.conv1(h)
         y = self.bn1(y, training=training)
-        y = ops.elu(y)
+        y = keras.ops.elu(y)
         y = self.drop(y, training=training)
         y = self.conv2(y)
         shortcut = self.projection(inputs) if self.use_projection else inputs
@@ -255,13 +262,12 @@ class CosineClassifier(keras.layers.Layer):
         embedding_dim: int = EMBEDDING_DIM,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, "CosineClassifier", "the head reads a feature vector of embedding_dim"
+        )
         super().__init__(**kwargs)
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be positive, got {num_classes}")
-        if embedding_dim <= 0:
-            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
-        self.num_classes = num_classes
-        self.embedding_dim = embedding_dim
+        self.num_classes = positive_int(num_classes, "num_classes", "CosineClassifier")
+        self.embedding_dim = positive_int(embedding_dim, "embedding_dim", "CosineClassifier")
         self.class_vectors = None
         self.raw_scale = None
 
@@ -297,12 +303,12 @@ class CosineClassifier(keras.layers.Layer):
         :return: Logits ``(B, num_classes)``.
         :rtype: keras.KerasTensor
         """
-        scale = ops.softplus(self.raw_scale)
-        normalized = self.class_vectors / ops.maximum(
-            ops.sqrt(ops.sum(ops.square(self.class_vectors), axis=0, keepdims=True)),
+        scale = keras.ops.softplus(self.raw_scale)
+        normalized = self.class_vectors / keras.ops.maximum(
+            keras.ops.sqrt(keras.ops.sum(keras.ops.square(self.class_vectors), axis=0, keepdims=True)),
             keras.config.epsilon(),
         )
-        return scale * ops.matmul(inputs, normalized)
+        return scale * keras.ops.matmul(inputs, normalized)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         return (input_shape[0], self.num_classes)
@@ -319,7 +325,9 @@ class CosineClassifier(keras.layers.Layer):
 class DeepSortAppearanceNet(keras.Model):
     """mars-small128 person appearance embedding network.
 
-    Two 3x3 convolutions (32) plus a 3x3/2 pool feed six residual blocks
+    A :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named ``stem``
+    (two 3x3 convolutions of 32 channels, each followed by BatchNorm and ELU,
+    then a 3x3/2 ``same`` max-pool) feeds six residual blocks
     (32, 32, 64/2, 64, 128/2, 128); flatten, dropout, a 128-unit ELU
     bottleneck with BatchNorm and a row-wise L2 normalization emit the
     128-dim descriptor. With ``include_top=True`` the cosine classifier
@@ -327,14 +335,22 @@ class DeepSortAppearanceNet(keras.Model):
     otherwise it returns the features alone. This package has no
     ``MODEL_VARIANTS`` table: the reference ships one network.
 
-    :param include_top: Whether to append the cosine classifier.
+    The network reads the reference's fixed 128x64 crops (the bottleneck is a
+    Dense layer over the flattened trunk), so it takes no ``input_shape``.
+
+    :param include_top: Whether to append the cosine classifier. Must be a
+        ``bool``.
     :type include_top: bool
     :param num_classes: Training identities for the head; required when
         ``include_top`` is True.
     :type num_classes: int or None
-    :param dropout_rate: Dropout rate (transcribed 0.4).
+    :param dropout_rate: Dropout rate (transcribed 0.4), in ``[0, 1)``.
     :type dropout_rate: float
     :param kwargs: Passthrough to ``keras.Model``.
+    :raises TypeError: If ``include_top`` is not a ``bool``.
+    :raises ValueError: If ``num_classes`` is not a positive integer while it
+        is needed (or given), ``dropout_rate`` is outside ``[0, 1)``, or
+        ``input_shape`` or ``input_dim`` is passed.
     """
 
     def __init__(
@@ -344,27 +360,17 @@ class DeepSortAppearanceNet(keras.Model):
         dropout_rate: float = DROPOUT_RATE,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, "DeepSortAppearanceNet", "it reads the reference's fixed 128x64 crops"
+        )
         super().__init__(**kwargs)
-        if include_top and (num_classes is None or num_classes <= 0):
-            raise ValueError("num_classes must be positive when include_top is True")
-        if not 0.0 <= dropout_rate < 1.0:
-            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        include_top = coerce_include_top(include_top)
+        if include_top or num_classes is not None:
+            num_classes = positive_int(num_classes, "num_classes", "DeepSortAppearanceNet")
+        validate_rates(dropout_rate=dropout_rate)
         self.include_top = include_top
         self.num_classes = num_classes
         self.dropout_rate = dropout_rate
-
-        def _conv(filters: int, name: str) -> layers.Conv2D:
-            return layers.Conv2D(
-                filters=filters,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=True,
-                kernel_initializer=_truncated_init(),
-                bias_initializer="zeros",
-                kernel_regularizer=keras.regularizers.L2(KERNEL_L2),
-                name=name,
-            )
 
         def _bn(name: str) -> keras.layers.Layer:
             # Routed through the norms factory, which honors an explicitly
@@ -374,19 +380,34 @@ class DeepSortAppearanceNet(keras.Model):
                 "batch_norm", momentum=BN_MOMENTUM, epsilon=BN_EPSILON, name=name
             )
 
-        self.conv1_1 = _conv(32, "conv1_1")
-        self.bn1_1 = _bn("bn1_1")
-        self.conv1_2 = _conv(32, "conv1_2")
-        self.bn1_2 = _bn("bn1_2")
-        self.pool1 = layers.MaxPooling2D(pool_size=3, strides=2, padding="same", name="pool1")
+        # The reference's first two 3x3 convolutions, each with BatchNorm and ELU,
+        # then the 3x3/2 pool; the BatchNorm values are the same TF-slim ones as
+        # every other norm here.
+        self.stem = ConvStem(
+            32,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            num_convs=2,
+            normalization_type="batch_norm",
+            normalization_kwargs={"momentum": BN_MOMENTUM, "epsilon": BN_EPSILON},
+            activation_type="elu",
+            use_pooling=True,
+            pool_size=3,
+            pool_strides=2,
+            pool_padding="same",
+            kernel_initializer=_truncated_init(),
+            kernel_regularizer=keras.regularizers.L2(KERNEL_L2),
+            name="stem",
+        )
         self.block2_1 = DeepSortResidualBlock(32, stride=1, is_first=True, name="block2_1")
         self.block2_3 = DeepSortResidualBlock(32, name="block2_3")
         self.block3_1 = DeepSortResidualBlock(64, stride=2, use_projection=True, name="block3_1")
         self.block3_3 = DeepSortResidualBlock(64, name="block3_3")
         self.block4_1 = DeepSortResidualBlock(128, stride=2, use_projection=True, name="block4_1")
         self.block4_3 = DeepSortResidualBlock(128, name="block4_3")
-        self.head_drop = layers.Dropout(dropout_rate, name="head_drop")
-        self.fc1 = layers.Dense(
+        self.head_drop = keras.layers.Dropout(dropout_rate, name="head_drop")
+        self.fc1 = keras.layers.Dense(
             EMBEDDING_DIM,
             kernel_initializer=_truncated_init(),
             bias_initializer="zeros",
@@ -406,15 +427,8 @@ class DeepSortAppearanceNet(keras.Model):
         # materialize it. Order mirrors call() exactly.
         if self.built:
             return
-        shape = input_shape
-        self.conv1_1.build(shape)
-        shape = self.conv1_1.compute_output_shape(shape)
-        self.bn1_1.build(shape)
-        self.conv1_2.build(shape)
-        shape = self.conv1_2.compute_output_shape(shape)
-        self.bn1_2.build(shape)
-        self.pool1.build(shape)
-        shape = self.pool1.compute_output_shape(shape)
+        self.stem.build(input_shape)
+        shape = self.stem.compute_output_shape(input_shape)
         for block in (
             self.block2_1, self.block2_3, self.block3_1,
             self.block3_3, self.block4_1, self.block4_3,
@@ -443,26 +457,20 @@ class DeepSortAppearanceNet(keras.Model):
         :return: Features ``(B, 128)``, or ``(features, logits)`` with
             ``include_top``.
         """
-        x = self.conv1_1(inputs)
-        x = self.bn1_1(x, training=training)
-        x = ops.elu(x)
-        x = self.conv1_2(x)
-        x = self.bn1_2(x, training=training)
-        x = ops.elu(x)
-        x = self.pool1(x)
+        x = self.stem(inputs, training=training)
         x = self.block2_1(x, training=training)
         x = self.block2_3(x, training=training)
         x = self.block3_1(x, training=training)
         x = self.block3_3(x, training=training)
         x = self.block4_1(x, training=training)
         x = self.block4_3(x, training=training)
-        x = ops.reshape(x, (ops.shape(x)[0], -1))
+        x = keras.ops.reshape(x, (keras.ops.shape(x)[0], -1))
         x = self.head_drop(x, training=training)
         x = self.fc1(x)
         x = self.bn_fc1(x, training=training)
-        x = ops.elu(x)
-        features = x / ops.maximum(
-            ops.sqrt(ops.sum(ops.square(x), axis=1, keepdims=True)),
+        x = keras.ops.elu(x)
+        features = x / keras.ops.maximum(
+            keras.ops.sqrt(keras.ops.sum(keras.ops.square(x), axis=1, keepdims=True)),
             keras.config.epsilon(),
         )
         if self.include_top:

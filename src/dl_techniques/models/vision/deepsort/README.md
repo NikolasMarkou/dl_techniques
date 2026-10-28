@@ -70,7 +70,7 @@ path instead.
 
 | Name | Purpose |
 | :--- | :--- |
-| **`DeepSortAppearanceNet`** | mars-small128 embedding; `include_top` appends the cosine classifier. |
+| **`DeepSortAppearanceNet`** | mars-small128 embedding; its two stem convolutions and pool are one `ConvStem` named `stem`; `include_top` appends the cosine classifier. It reads the reference's fixed 128x64 crops and takes no `input_shape` (passing `input_shape` or `input_dim` raises `ValueError`). |
 | **`DeepSortResidualBlock`** | Pre-activation residual block (first/projection variants). |
 | **`CosineClassifier`** | Normalized class vectors + learned softplus scale → cosine logits. |
 | **`create_deepsort_embedding`** | Thin factory. |
@@ -93,6 +93,21 @@ table: the reference ships one network.
   init) — train before trusting inference norms.
 - Batches should be PK (several shots per identity) for the triplet mode.
 - The reference trains with Adam at lr 1e-3; see `src/train/deepsort/`.
+
+### Archives written before the `ConvStem` stem
+
+The two stem convolutions, their BatchNorms and the pool used to be loose layers (`conv1_1`, `bn1_1`, `conv1_2`, `bn1_2`, `pool1`); they are now one tracked layer, `stem`. Archives of `DeepSortAppearanceNet` written by the earlier code (measured with `be92a74eb` and with `20b48aba6^`, which give the same results, each saved in a separate process and loaded by the current code) do not load by either route: `keras.models.load_model` and `model.load_weights` into a current model both fail with "A total of 4 objects could not be loaded ... Layer 'stem_conv1' expected 2 variables, but received 0".
+
+The weights themselves are intact and move by path. Copying the 88 weights of an earlier model by these renames into a current model gives outputs equal at atol 0, and a model built under the same seed holds the same 88 tensors as the earlier one:
+
+| Earlier path | Current path |
+| :--- | :--- |
+| `deep_sort_appearance_net/conv1_1/{kernel,bias}` | `deep_sort_appearance_net/stem/stem_conv1/{kernel,bias}` |
+| `deep_sort_appearance_net/bn1_1/*` | `deep_sort_appearance_net/stem/stem_norm1/*` |
+| `deep_sort_appearance_net/conv1_2/{kernel,bias}` | `deep_sort_appearance_net/stem/stem_conv2/{kernel,bias}` |
+| `deep_sort_appearance_net/bn1_2/*` | `deep_sort_appearance_net/stem/stem_norm2/*` |
+
+The trunk has 88 weights (60 trainable) and 2,804,384 parameters; the cosine head adds 2 weights and 641 parameters.
 
 ## 5. Citation
 

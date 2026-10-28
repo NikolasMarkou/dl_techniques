@@ -101,6 +101,7 @@ from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
+from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
 from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
@@ -1597,6 +1598,64 @@ CAPSNET_V2_BLOCK1 = _capsnet_case("capsnet-v2-legacy-block1-k9", _capsnet_v2_mod
 CAPSNET_V2_BLOCK2 = _capsnet_case("capsnet-v2-legacy-block2-k5", _capsnet_v2_model, 1)
 
 
+# ---------------------------------------------------------------------
+# DeepSORT appearance net (the mars-small128 trunk)
+# ---------------------------------------------------------------------
+
+# Original: ``DeepSortAppearanceNet.__init__`` and ``call`` before the migration
+# (HEAD d86e9e1ad): two Conv2D(32, 3, same, bias) with a truncated-normal 1e-3
+# kernel, zero bias and L2 1e-8, each followed by a BatchNormalization from the norm
+# factory (momentum 0.999, epsilon 1e-3: the TF-slim values, not the factory's 1e-6)
+# and a functional ``ops.elu`` (no layer of its own, so ``fused``), then
+# MaxPooling2D(3, strides=2, same). The model has no initializer knob: the
+# truncated normal is a literal of the stem call.
+_DEEPSORT_STDDEV = 1e-3
+_DEEPSORT_KERNEL_REG = 1e-8
+
+
+def _deepsort_original() -> Original:
+    def conv(name: str) -> keras.layers.Conv2D:
+        return keras.layers.Conv2D(
+            filters=32,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=_DEEPSORT_STDDEV),
+            bias_initializer="zeros",
+            kernel_regularizer=keras.regularizers.L2(_DEEPSORT_KERNEL_REG),
+            name=name,
+        )
+
+    def norm(name: str) -> keras.layers.Layer:
+        return create_normalization_layer(
+            "batch_norm", momentum=0.999, epsilon=1e-3, name=name
+        )
+
+    conv1, norm1, conv2, norm2 = conv("conv1_1"), norm("bn1_1"), conv("conv1_2"), norm("bn1_2")
+    pool = keras.layers.MaxPooling2D(pool_size=3, strides=2, padding="same", name="pool1")
+
+    def forward(x, training):
+        x = keras.ops.elu(norm1(conv1(x), training=training))
+        x = keras.ops.elu(norm2(conv2(x), training=training))
+        return pool(x)
+
+    return Original(
+        sublayers={"conv1": conv1, "norm1": norm1, "conv2": conv2, "norm2": norm2, "pool": pool},
+        forward=forward,
+        fused=("act1", "act2"),
+    )
+
+
+DEEPSORT = StemCase(
+    case_id="deepsort-two-convs-elu-pool",
+    make_model=DeepSortAppearanceNet,
+    make_original=_deepsort_original,
+    input_shape=(32, 16, 3),
+    expected_output_shape=(16, 8, 32),
+)
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1658,6 +1717,7 @@ CASES = [
     CAPSNET_V1_NOBN,
     CAPSNET_V2_BLOCK1,
     CAPSNET_V2_BLOCK2,
+    DEEPSORT,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1705,6 +1765,7 @@ BUILT_STEM_ROWS = [
     ("capsnet-v1-block2", _capsnet_v1_model, (28, 28, 1), _capsnet_block(1)),
     ("capsnet-v2-legacy-block1", _capsnet_v2_model, (28, 28, 1), _capsnet_block(0)),
     ("capsnet-v2-legacy-block2", _capsnet_v2_model, (28, 28, 1), _capsnet_block(1)),
+    ("deepsort", DeepSortAppearanceNet, (128, 64, 3)),
 ]
 
 
@@ -1769,6 +1830,10 @@ INITIALIZER_AUDIT = {
     "VAE": ("knob", "lecun_normal (default he_normal)"),
     "CapsNet": ("knob", "lecun_normal (default he_normal)"),
     "CapsNetV2": ("knob", "lecun_normal (default he_normal)"),
+    "DeepSortAppearanceNet": (
+        "hardcoded",
+        "TruncatedNormal(stddev=1e-3), the reference's init; the stem call writes the literal",
+    ),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2120,6 +2185,15 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         (MOBILENET_V3, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V4, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (VAE_BN_BIAS, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        # DeepSORT writes its initializer as a literal: a stem at the default
+        # glorot_uniform, or at another truncated-normal width, is a defect.
+        (DEEPSORT, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        (
+            DEEPSORT,
+            {"kernel_initializer": keras.initializers.TruncatedNormal(stddev=1e-2)},
+            "kernel_initializer",
+        ),
+        (DEEPSORT, {"kernel_regularizer": None}, "kernel_regularizer"),
     ],
     ids=[
         "kernel-initializer-class",
@@ -2132,6 +2206,9 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         "mobilenet-v3-initializer-dropped",
         "mobilenet-v4-initializer-dropped",
         "vae-initializer-dropped",
+        "deepsort-initializer-at-the-default",
+        "deepsort-initializer-other-width",
+        "deepsort-regularizer-dropped",
     ],
 )
 def test_the_guard_the_settings_check_sees_a_wrong_initializer_or_regularizer(
@@ -2206,6 +2283,38 @@ def test_the_guard_the_harness_sees_a_capsnet_block_at_the_norm_factorys_epsilon
     own = _stem_from_config(CAPSNET_V1_BLOCK1)
     assert own.norm1.epsilon == pytest.approx(1e-3)
     assert_stem_matches_original(CAPSNET_V1_BLOCK1, own)
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        # 3x3/2 pool padded "valid": 32 rows become 15, not 16.
+        ({"pool_padding": "valid"}, "shape"),
+        # The factory's own epsilon is 1e-6 and a torch-style 1e-5 is the usual
+        # carry-over: the reference is TF-slim's 1e-3.
+        ({"normalization_kwargs": {"epsilon": 1e-5}}, "differs from the original"),
+        ({"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        # Momentum is invisible at inference; the moving statistics after a
+        # training=True pass see it.
+        ({"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        ({"activation_type": "relu"}, "differs from the original"),
+        ({"kernel_regularizer": None}, "regularization loss"),
+    ],
+    ids=[
+        "pool-padding",
+        "epsilon-1e-5",
+        "epsilon-1e-6",
+        "momentum-0.9",
+        "relu-for-elu",
+        "regularizer-dropped",
+    ],
+)
+def test_the_guard_the_harness_sees_a_deepsort_stem_with_one_wrong_setting(override, match):
+    """Each TF-slim value the reference fixes is a defect when it is not kept."""
+    stem = _stem_from_config(DEEPSORT, **override)
+    with pytest.raises(AssertionError, match=match):
+        assert_stem_matches_original(DEEPSORT, stem)
+    assert_stem_matches_original(DEEPSORT, _stem_from_config(DEEPSORT))
 
 
 def test_the_guard_a_correct_stem_survives_the_same_harness():

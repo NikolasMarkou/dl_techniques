@@ -1,10 +1,12 @@
 """Tests for the DeepSORT appearance net and the tracking runtime."""
 
+import json
+
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.deepsort import (
     CosineClassifier,
     DeepSortAppearanceNet,
@@ -13,13 +15,10 @@ from dl_techniques.models.vision.deepsort import (
     Detection,
     KalmanFilter,
     NearestNeighborDistanceMetric,
-    TrackState,
     create_deepsort_embedding,
     gate_cost_matrix,
     iou,
-    iou_cost,
     matching_cascade,
-    min_cost_matching,
 )
 
 
@@ -92,11 +91,11 @@ class TestAppearanceNet:
     def test_serialization_round_trip_values(self, tmp_path):
         model = create_deepsort_embedding()
         x = np.ones((1, 128, 64, 3), dtype="float32")
-        original = ops.convert_to_numpy(model(x, training=False))
+        original = keras.ops.convert_to_numpy(model(x, training=False))
         path = str(tmp_path / "deepsort.keras")
         model.save(path)
         loaded = keras.models.load_model(path)
-        restored = ops.convert_to_numpy(loaded(x, training=False))
+        restored = keras.ops.convert_to_numpy(loaded(x, training=False))
         np.testing.assert_allclose(original, restored, atol=0.0, rtol=0)
 
     def test_get_config_round_trip(self):
@@ -114,9 +113,135 @@ class TestAppearanceNet:
         model = create_deepsort_embedding()
         x = tf.zeros((1, 128, 64, 3))
         with tf.GradientTape() as tape:
-            loss = ops.sum(model(x, training=True))
+            loss = keras.ops.sum(model(x, training=True))
         grads = tape.gradient(loss, model.trainable_variables)
         assert any(g is not None for g in grads)
+
+
+class TestAppearanceStem:
+    """The two 3x3 convolutions and the pool are one ``ConvStem`` named ``stem``."""
+
+    def test_the_stem_is_one_conv_stem_with_the_reference_settings(self):
+        stem = create_deepsort_embedding().stem
+        assert isinstance(stem, ConvStem)
+        assert stem.name == "stem"
+        assert (stem.num_convs, stem.filters, stem.kernel_size, stem.strides) == (2, 32, 3, 1)
+        assert stem.padding == "same" and stem.use_bias is True
+        assert stem.normalization_type == "batch_norm"
+        assert stem.norm1.momentum == pytest.approx(0.999)
+        assert stem.norm1.epsilon == pytest.approx(1e-3)
+        assert stem.norm2.momentum == pytest.approx(0.999)
+        assert stem.norm2.epsilon == pytest.approx(1e-3)
+        assert stem.activation_type == "elu" and stem.final_activation is True
+        assert (stem.pool_type, stem.pool_size, stem.pool_strides, stem.pool_padding) == (
+            "max", 3, 2, "same")
+        for conv in (stem.conv1, stem.conv2):
+            assert isinstance(conv.kernel_initializer, keras.initializers.TruncatedNormal)
+            assert conv.kernel_initializer.stddev == pytest.approx(1e-3)
+            assert float(conv.kernel_regularizer.l2) == pytest.approx(1e-8)
+
+    def test_the_stem_weights_have_exactly_these_paths(self):
+        model = create_deepsort_embedding()
+        model.build((None, 128, 64, 3))
+        stem_paths = sorted(
+            w.path.split("/", 1)[-1] for w in model.weights
+            if w.path.split("/", 1)[-1].startswith("stem/"))
+        assert stem_paths == sorted(
+            f"stem/stem_{layer}/{weight}"
+            for layer, names in (
+                ("conv1", ("kernel", "bias")), ("conv2", ("kernel", "bias")),
+                ("norm1", ("gamma", "beta", "moving_mean", "moving_variance")),
+                ("norm2", ("gamma", "beta", "moving_mean", "moving_variance")))
+            for weight in names)
+
+    def test_the_model_owns_no_loose_stem_layer(self):
+        model = create_deepsort_embedding()
+        for old in ("conv1_1", "bn1_1", "conv1_2", "bn1_2", "pool1"):
+            assert not hasattr(model, old), f"{old} survived the migration"
+
+    def test_the_trunk_keeps_the_reference_counts(self):
+        model = create_deepsort_embedding()
+        model.build((None, 128, 64, 3))
+        assert len(model.weights) == 88
+        assert len(model.trainable_weights) == 60
+        assert model.count_params() == 2_804_384
+
+    def test_an_explicit_build_builds_the_stem_and_no_head(self):
+        model = create_deepsort_embedding()
+        model.build((None, 128, 64, 3))
+        assert model.stem.built and all(
+            layer.built for layer in model.stem._flatten_layers(include_self=False))
+        assert not model.classifier.built
+
+    def test_the_stem_runs_in_training_and_updates_both_batch_norms(self):
+        model = create_deepsort_embedding()
+        x = np.random.default_rng(0).random((2, 128, 64, 3)).astype("float32")
+        model(x, training=False)
+        before = [keras.ops.convert_to_numpy(w).copy() for w in
+                  (model.stem.norm1.moving_mean, model.stem.norm2.moving_mean)]
+        model(x, training=True)
+        after = [keras.ops.convert_to_numpy(w) for w in
+                 (model.stem.norm1.moving_mean, model.stem.norm2.moving_mean)]
+        assert all(not np.array_equal(b, a) for b, a in zip(before, after))
+
+    def test_a_saved_model_reloads_with_the_stem(self, tmp_path):
+        model = create_deepsort_embedding()
+        x = np.random.default_rng(1).random((2, 128, 64, 3)).astype("float32")
+        original = keras.ops.convert_to_numpy(model(x, training=False))
+        path = str(tmp_path / "deepsort.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        assert isinstance(loaded.stem, ConvStem)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(loaded(x, training=False)), original, atol=0.0, rtol=0)
+
+
+class TestAppearanceArguments:
+    """The shared validators, with the argument and the value in the message."""
+
+    def test_include_top_must_be_a_bool(self):
+        for bad in (1, 0, "yes", None):
+            with pytest.raises(TypeError, match="include_top"):
+                DeepSortAppearanceNet(include_top=bad)
+        assert DeepSortAppearanceNet(include_top=np.False_).include_top is False
+
+    @pytest.mark.parametrize("bad", [0, -3, 2.5, True, None])
+    def test_a_head_needs_a_positive_integer_class_count(self, bad):
+        with pytest.raises(ValueError, match="num_classes"):
+            DeepSortAppearanceNet(include_top=True, num_classes=bad)
+
+    def test_a_class_count_given_without_a_head_is_checked_and_stored_as_an_int(self):
+        with pytest.raises(ValueError, match="num_classes"):
+            DeepSortAppearanceNet(include_top=False, num_classes=0)
+        model = DeepSortAppearanceNet(include_top=True, num_classes=np.int64(5))
+        assert type(model.num_classes) is int
+        json.dumps(model.get_config())
+
+    @pytest.mark.parametrize("rate", [-0.1, 1.0, 2.0, float("nan")])
+    def test_a_dropout_rate_outside_the_unit_interval_is_refused_by_name(self, rate):
+        with pytest.raises(ValueError, match="dropout_rate"):
+            DeepSortAppearanceNet(dropout_rate=rate)
+        with pytest.raises(ValueError, match="dropout_rate"):
+            DeepSortResidualBlock(filters=8, dropout_rate=rate)
+
+    @pytest.mark.parametrize("bad", [0, -1, 2.5, True])
+    def test_a_block_width_and_a_head_width_are_positive_integers(self, bad):
+        with pytest.raises(ValueError, match="filters"):
+            DeepSortResidualBlock(filters=bad)
+        with pytest.raises(ValueError, match="num_classes"):
+            CosineClassifier(num_classes=bad)
+        with pytest.raises(ValueError, match="embedding_dim"):
+            CosineClassifier(num_classes=3, embedding_dim=bad)
+
+    @pytest.mark.parametrize("make", [
+        lambda **kw: DeepSortAppearanceNet(**kw),
+        lambda **kw: DeepSortResidualBlock(filters=8, **kw),
+        lambda **kw: CosineClassifier(num_classes=3, **kw),
+    ], ids=["net", "block", "classifier"])
+    def test_a_shape_keyword_is_refused_not_dropped_with_a_warning(self, make):
+        for key, value in (("input_shape", (128, 64, 3)), ("input_dim", 3)):
+            with pytest.raises(ValueError, match=key):
+                make(**{key: value})
 
 
 class TestKalmanFilter:

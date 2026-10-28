@@ -302,10 +302,11 @@ def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) 
     """Raise for an ``input_shape`` or ``input_dim`` keyword a layer or model does not take.
 
     Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``RBFProtoNet``,
-    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``CliffordNet``
-    and ``HierarchicalCliffordNet``, each in its constructor, on its own keyword arguments and
-    before the base class constructor runs, in every layer or subclassed model that has no
-    ``input_shape`` parameter): ``kwargs`` is inspected, never mutated. ``keras.layers.Layer.__init__`` pops both keywords for the
+    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``CliffordNet``,
+    ``HierarchicalCliffordNet``, ``DeepSortAppearanceNet``, ``DeepSortResidualBlock`` and
+    ``CosineClassifier``, each in its constructor, on its own keyword arguments and before the
+    base class constructor runs, in every layer or subclassed model that has no ``input_shape``
+    parameter): ``kwargs`` is inspected, never mutated. ``keras.layers.Layer.__init__`` pops both keywords for the
     sake of ``Sequential`` and only warns ("Do not pass an `input_shape`/`input_dim`
     argument to a layer"), so a caller written against an older signature that took an
     ``input_shape`` keeps constructing a model that ignores it. This refuses it, naming the
@@ -357,9 +358,9 @@ def validate_rates(**rates: float) -> None:
 
     Interface contract (call sites, from ``grep -rn validate_rates src``: the ``__init__``
     of ``CliffordNet``, ``HierarchicalCliffordNet``, ``RADConvNet``, ``RBFProtoNet``,
-    ``CliffordRBFProtoNet``, ``SqueezeNetV1``, ``SqueezeNoduleNetV2`` and ``_ConvNeXtBase``,
-    before any sub-layer is built): pass each rate under the name of the
-    constructor argument it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
+    ``CliffordRBFProtoNet``, ``SqueezeNetV1``, ``SqueezeNoduleNetV2``, ``_ConvNeXtBase``,
+    ``DeepSortAppearanceNet`` and ``DeepSortResidualBlock``, before any sub-layer is built): pass
+    each rate under the name of the constructor argument it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
     Rates are checked in call order and the first bad one raises. Without this check
     the sub-layer that first meets the value raises with its own argument name and
     value (a ramped ``drop_path_rate`` of 2.0 reads "got 1.333333" from

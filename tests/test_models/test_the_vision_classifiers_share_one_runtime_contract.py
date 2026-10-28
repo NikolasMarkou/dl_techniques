@@ -1720,6 +1720,7 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     _named_other("uca_encoder", "uca_encoder", ("stem", "stage1_cpe", "stage1_block1")),
     _named_other("capsnet", "capsnet", ("conv_block_0",)),
     _named_other("capsnet_v2_legacy", "capsnet_v2_legacy", ("conv_block_0",)),
+    _named_other("deepsort", "deepsort", ("stem",)),
 )
 
 
@@ -2240,6 +2241,58 @@ def test_the_numbering_rule_sees_the_spellings_the_capsnet_pair_had() -> None:
 
 
 # ---------------------------------------------------------------------------
+# DeepSORT, SiamFC and DaSiamRPN own exactly the layers their arguments give
+# ---------------------------------------------------------------------------
+
+#: The residual stages of the mars-small128 trunk, in the reference's own numbering.
+_DEEPSORT_BLOCKS = ("2_1", "2_3", "3_1", "3_3", "4_1", "4_3")
+
+
+def _deepsort_owned() -> set:
+    """DeepSortAppearanceNet: the stem, six residual blocks, the head dropout, the 128-unit
+    bottleneck with its norm, and the cosine head (created always, built only with a top)."""
+    return ({"stem", "head_drop", "fc1", "bn_fc1", "cosine_head"}
+            | {f"block{n}" for n in _DEEPSORT_BLOCKS})
+
+
+def _deepsort_build() -> keras.Model:
+    from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
+    return DeepSortAppearanceNet()
+
+
+#: ``case id -> (build, the inputs of one forward, the exact set of layers the build owns
+#: directly)``; the expected sets are written from the architecture, never read off a model.
+TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
+                                  Callable[[], set]]] = {
+    "deepsort": (_deepsort_build, lambda: _images(128, 64, 3), _deepsort_owned),
+}
+
+
+@pytest.mark.parametrize("case", sorted(TRACKER_NUMBERED))
+def test_a_tracker_owns_exactly_the_layers_its_architecture_names(case: str) -> None:
+    build, inputs, owned = TRACKER_NUMBERED[case]
+    model = build()
+    model(inputs())
+    assert numbering_problems(direct_children(model), owned()) == []
+
+
+def test_the_tracker_name_rule_sees_the_spellings_deepsort_had() -> None:
+    expected = _deepsort_owned()
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the loose first conv": [*(n for n in clean if n != "stem"), "conv1_1"],
+        "the loose first norm": [*(n for n in clean if n != "stem"), "bn1_1"],
+        "the loose pool": [*clean, "pool1"],
+        "a stem left beside the loose layers": [*clean, "conv1_2", "bn1_2"],
+        "a missing stage": [n for n in clean if n != "block3_1"],
+        "a renamed head": ["classifier" if n == "cosine_head" else n for n in clean],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+
+
+# ---------------------------------------------------------------------------
 # A constructor with no input_shape parameter refuses the keyword
 # ---------------------------------------------------------------------------
 
@@ -2311,6 +2364,24 @@ def _cliffordnet_without_shape(**kw: Any) -> Any:
 def _hierarchical_without_shape(**kw: Any) -> Any:
     from dl_techniques.models.vision.cliffordnet.hierarchical import HierarchicalCliffordNet
     return HierarchicalCliffordNet(num_classes=5, **kw)
+
+
+@_no_shape("deepsort")
+def _deepsort_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
+    return DeepSortAppearanceNet(**kw)
+
+
+@_no_shape("deepsort_residual_block")
+def _deepsort_block_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.deepsort.appearance import DeepSortResidualBlock
+    return DeepSortResidualBlock(filters=8, **kw)
+
+
+@_no_shape("deepsort_cosine_classifier")
+def _deepsort_head_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.deepsort.appearance import CosineClassifier
+    return CosineClassifier(num_classes=3, **kw)
 
 
 def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:
