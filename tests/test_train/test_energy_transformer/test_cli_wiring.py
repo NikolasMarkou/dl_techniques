@@ -85,6 +85,8 @@ SHARED_SPEC: Dict[str, Tuple[str, Any]] = {
     "gradient_clipping": ("--gradient-clipping", 0.5),        # default: 1.0
     "early_stopping_patience": ("--early-stopping-patience", 4),  # default: 15
     "max_steps": ("--max-steps", 7),               # default: None
+    "validation_split": ("--validation-split", 0.2),  # default: None
+    "max_samples": ("--max-samples", 123),         # default: None
     "experiment_name": ("--experiment-name", "et_cli_wiring_probe"),  # default: None
     "seed": ("--seed", 123),                       # default: 42
     "gpu": ("--gpu", 1),                           # default: None
@@ -99,8 +101,6 @@ MIM_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
 CLS_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
     "dropout_rate": ("--dropout-rate", 0.3),       # default: 0.0
     "num_classes": ("--num-classes", 10),          # default: None
-    "validation_split": ("--validation-split", 0.2),  # default: None
-    "max_samples": ("--max-samples", 123),         # default: None
     # `pretrained_encoder` is filled in per-test: TrainingConfig.__post_init__ requires a REAL
     # .keras file on disk, so the fixture writes one (default: None).
 }

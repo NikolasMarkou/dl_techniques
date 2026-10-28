@@ -39,6 +39,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.losses.dino_loss import DINOLoss
+from tests.classification_fakes import use_tiny_raw
 from dl_techniques.models.vision.dino.training import create_dino_training_model
 from train.dino import train_dino as trainer
 from train.dino.knn_eval import (
@@ -743,6 +744,10 @@ class TestLogsReachTheCSV:
 class TestCallbackOrdering:
     """The trainer must INSERT the callback before CSVLogger, never append it."""
 
+    @pytest.fixture(autouse=True)
+    def _tiny_cifar(self, monkeypatch: Any) -> None:
+        use_tiny_raw(monkeypatch, n_train=44, n_test=8)
+
     def _callbacks(self, tmp_path: Any, **overrides: Any) -> List[Any]:
         config = trainer.TrainingConfig(
             dataset="cifar10",
@@ -792,6 +797,47 @@ class TestCallbackOrdering:
         callbacks = self._callbacks(tmp_path)
         knn = next(c for c in callbacks if isinstance(c, KNNEvalCallback))
         assert isinstance(knn.dino_loss, DINOLoss)
+
+
+class TestEvaluateSplit:
+    """``evaluate_split`` scores ANOTHER query set against the same bank, once.
+
+    It is how the trainer reads the test split after training while the per-epoch probe
+    queries the selection slice, so it must return the metrics an epoch writes, score the
+    query set it is GIVEN (not the callback's own), and write nothing anywhere.
+    """
+
+    def _callback(self) -> KNNEvalCallback:
+        return KNNEvalCallback(
+            _separable_labelled_dataset(51), _separable_labelled_dataset(52),
+            bank_batches=2, query_batches=2)
+
+    def test_it_returns_every_key_an_epoch_writes(self, dino_model: keras.Model) -> None:
+        knn = self._callback()
+        knn.set_model(dino_model)
+        metrics = knn.evaluate_split(_separable_labelled_dataset(53), 2)
+        assert list(metrics) == list(knn.log_keys)
+        assert all(np.isfinite(metrics[key]) for key in ("dino_knn_top1_k10", "dino_knn_top1_k20"))
+
+    def test_it_scores_the_query_set_it_is_given(self, dino_model: keras.Model) -> None:
+        """The callback's own queries and a given set that IS those queries agree; a
+        different set (random labels) does not."""
+        own = _separable_labelled_dataset(52)
+        knn = KNNEvalCallback(
+            _separable_labelled_dataset(51), own, bank_batches=2, query_batches=2)
+        knn.set_model(dino_model)
+        epoch = knn._evaluate_once()[0]
+        same = knn.evaluate_split(_separable_labelled_dataset(52), 2)
+        assert same["dino_knn_top1_k20"] == pytest.approx(epoch["dino_knn_top1_k20"])
+        other = knn.evaluate_split(_labelled_dataset(54), 2)
+        assert other["dino_knn_top1_k20"] != pytest.approx(epoch["dino_knn_top1_k20"], abs=1e-9) \
+            or other["dino_feat_mean_cos"] != pytest.approx(epoch["dino_feat_mean_cos"], abs=1e-9)
+
+    def test_it_refuses_a_non_positive_batch_count(self, dino_model: keras.Model) -> None:
+        knn = self._callback()
+        knn.set_model(dino_model)
+        with pytest.raises(ValueError, match="query_batches must be positive"):
+            knn.evaluate_split(_labelled_dataset(55), 0)
 
 
 class TestZeroStepControl:

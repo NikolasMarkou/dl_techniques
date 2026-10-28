@@ -207,11 +207,10 @@ def test_explicitly_set_flags_reports_exactly_the_documented_shapes(
 def test_the_real_dino_parser_agrees_on_its_own_prefix_pairs():
     """Same helper, a REAL trainer parser, on the shapes a probe cannot fake.
 
-    ``train_dino``'s parser carries three strict prefix pairs — ``--seed`` is a
-    prefix of ``--seed-training-stream``, ``--teacher-temp`` of both
-    ``--teacher-temp-final`` and ``--teacher-temp-warmup-epochs``. An EXACT
+    ``train_dino``'s parser carries strict prefix pairs — ``--teacher-temp`` is a
+    prefix of both ``--teacher-temp-final`` and ``--teacher-temp-warmup-epochs``. An EXACT
     match must win over being the prefix of a longer option, exactly as
-    argparse resolves it, or typing ``--seed 42`` would report a flag the
+    argparse resolves it, or typing ``--teacher-temp 0.04`` would report a flag the
     caller never passed.
 
     ``parse_arguments`` attaches the helper's result to the Namespace as
@@ -223,10 +222,9 @@ def test_the_real_dino_parser_agrees_on_its_own_prefix_pairs():
     assert parse_arguments(["--seed", "42"]).explicit_flags == {"seed"}
     assert parse_arguments(["--teacher-temp", "0.04"]).explicit_flags == {
         "teacher_temp"}
-    assert parse_arguments(["--seed-training-stream"]).explicit_flags == {
-        "seed_training_stream"}
-    assert parse_arguments(["--no-seed-training-stream"]).explicit_flags == {
-        "seed_training_stream"}
+    assert parse_arguments(["--no-stateless-augmentation"]).explicit_flags == {
+        "stateless_augmentation"}
+    assert parse_arguments(["--max-samples", "10"]).explicit_flags == {"max_samples"}
     assert parse_arguments(["--ema-warmup-ep", "1.0"]).explicit_flags == {
         "ema_warmup_epochs"}
 

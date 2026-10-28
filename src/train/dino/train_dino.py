@@ -39,6 +39,14 @@ Consequences, both deliberate:
 * There is therefore no ``val_loss``, so the callbacks monitor the TRAINING ``loss``.
   Validation is a k-NN probe that never invokes the loss -- see "Validation" below.
 
+The data protocol is the one every trainer shares (``train.common.image_streams``): the run
+FITS on the train rows minus a seeded ``--validation-split`` slice (default 0.1: 8,523
+Imagenette images), the per-epoch probe queries that SELECTION slice, and the labelled test
+split is probed exactly once, after training (``knn_test_*`` in the run summary). The test
+split never guides a run. Every k-NN figure quoted below and in the README was measured
+before this protocol (the bank and queries were the full train split and the test split), so
+a new run's numbers are comparable to each other, not to those.
+
 -------------------------------------------------------------------------------
 Scale: what ``--smoke`` pins, and the two traps that ride along with it
 -------------------------------------------------------------------------------
@@ -86,7 +94,8 @@ Validation, and the reason a decreasing loss is not enough
 -------------------------------------------------------------------------------
 `train.dino.knn_eval.KNNEvalCallback` is this run's ONLY validation signal (frozen
 student-backbone features, a weighted k-NN top-1, and two collapse numbers; README § 6
-describes it). It is INSERTED BEFORE ``CSVLogger`` -- appending it after would silently
+describes it). Its memory bank is drawn from the fit rows and its queries from the selection
+slice; :meth:`KNNEvalCallback.evaluate_split` scores the test split once after ``fit``. It is INSERTED BEFORE ``CSVLogger`` -- appending it after would silently
 drop every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
 
 **A decreasing loss does NOT rule out collapse.** Read
@@ -98,7 +107,7 @@ imagenette's 10 classes).
 -------------------------------------------------------------------------------
 Making a run COMPARABLE: the default is reproducible, and ``--no-`` gives that up
 -------------------------------------------------------------------------------
-Three flags decide it (full reference with caveats: README § 6.2):
+Two flags decide it (full reference with caveats: README § 6.2):
 
 ============================  =================================================
 flag                          what it buys
@@ -108,8 +117,6 @@ flag                          what it buys
                               into ``<run_dir>/random_init_control.json``. Quote
                               every k-NN delta against THAT, never against the
                               0.10 chance line. ``0`` disables it.
-``--seed-training-stream``    Default ON. Seeds the TRAINING stream's TFDS **file
-                              interleave** with ``--seed``.
 ``--stateless-augmentation``  Default ON. Keys the multi-crop augmentation on a
                               per-element counter (``stateless_uniform``) instead
                               of one shared ``tf.random.Generator`` stream -- the
@@ -118,20 +125,14 @@ flag                          what it buys
                               ``num_parallel_calls=AUTOTUNE``.
 ============================  =================================================
 
-**THE RULE: ``--seed`` alone does NOT make two runs the same experiment. BOTH
-stream flags are required TOGETHER, and neither is redundant** -- they close the
-two DIFFERENT unseeded sources above, so an A/B run without both compares models
-trained on different data. The probe that established this, its result table and
-its SCOPE (CPU-only: no model was built and no GPU kernel ran, so it says NOTHING
-about cuDNN nondeterminism) are in ``research/2026_dino_ssl_measurements.md`` § 4.
-
-Both ship ON, so a no-flag run is already reproducible against another no-flag run
-at the same ``--seed`` and nothing needs to be remembered. The non-obvious
-direction is the off-switch: ``--no-seed-training-stream`` OR
-``--no-stateless-augmentation`` ALONE is enough to lose it. Passing BOTH restores
-the older stream and with it comparability to runs in ``results/`` recorded while
-the flags shipped OFF -- each flag changes what every training batch CONTAINS, so
-a default run today is not comparable to those.
+**THE RULE: ``--stateless-augmentation`` is what makes ``--seed`` reproduce the
+AUGMENTATION.** The rows themselves are already pinned by ``--seed`` (a seeded permutation of
+the records and a seeded shuffle), so a no-flag run is reproducible against another no-flag
+run at the same ``--seed`` and nothing needs to be remembered. The off-switch is
+``--no-stateless-augmentation``: it loses the augmentation reproducibility. (Runs recorded
+before the data protocol changed also pinned the TFDS file interleave with a
+``--seed-training-stream`` flag; the records are no longer read in file order, so the flag is
+gone and those runs are not comparable to a run made now.)
 
 Usage::
 
@@ -146,7 +147,7 @@ Usage::
         --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100
 
     # the IMPROVED ARM of the 60-epoch measurement (README § 6.1).
-    # Both stream flags are ON by default, so they are NOT passed here.
+    # The stream flag is ON by default, so it is NOT passed here.
     # `--ema-warmup-steps 295` IS required and is NOT redundant with the shipped
     # `ema_warmup_epochs=1.0`: `--smoke` pins `ema_warmup_epochs=0.0` for any flag the
     # caller does not type, so DROPPING this line gives NO freeze at all. Typing
@@ -203,11 +204,12 @@ Usage::
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
         --knn-eval-every 4 --early-stopping-patience 70
 
-    # the OLD stream, to compare against a run recorded before the flags flipped
-    ... --no-seed-training-stream --no-stateless-augmentation
+    # the OLD augmentation stream, to compare against a run recorded before the flag flipped
+    ... --no-stateless-augmentation
 """
 
 import gc
+import json
 import math
 import time
 import keras
@@ -228,11 +230,9 @@ from train.common import (
 )
 from train.common.args import explicitly_set_flags
 from train.common.run_io import prepare_run_dir, save_training_history_json
-from train.energy_transformer.common import (
-    SUPPORTED_DATASETS,
-    build_optimizer,
-    build_raw_image_dataset,
-)
+from train.common.classification_data import add_selection_arguments
+from train.common.image_streams import SUPPORTED_DATASETS, load_image_streams
+from train.energy_transformer.common import build_optimizer
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.dino_loss import DINOLoss
 from dl_techniques.datasets.vision.multi_crop import (
@@ -315,12 +315,12 @@ class TrainingConfig:
     local_crop_size: Optional[int] = None
     n_local_crops: int = 4
     # DECISION plan-2026-08-01T105809-dc0c402e/D-036
-    # Resolution at which `build_raw_image_dataset` DECODES each record, i.e. the
+    # Resolution at which `load_image_streams` DECODES each record, i.e. the
     # resolution the multi-crop transform crops FROM. `None` means
     # `global_crop_size`, which is what the smoke run measured in step 12.
     #
-    # Why this exists: `build_raw_image_dataset._decode` resizes every record
-    # BEFORE `element_map_fn` runs, so with `None` a "local crop of the source
+    # Why this exists: the decode resizes every record
+    # BEFORE the element map runs, so with `None` a "local crop of the source
     # image" is a crop of a `global_crop_size` thumbnail. MEASURED at the smoke
     # scale (global_crop_size=96, local_scale=(0.05, 0.4), 2000 draws): local
     # crop sides are 19-69 px (mean 44) and get upsampled to 96 -- 2.33x mean,
@@ -338,7 +338,7 @@ class TrainingConfig:
     # UPDATE -- THE MEASUREMENT HAS NOW BEEN RUN, and the default still does not move.
     # `--source-image-size 224` vs `None`, 2 seeds, each arm read against its OWN
     # zero-step random-init control, on a fully controlled stream
-    # (--seed-training-stream --stateless-augmentation): effect +0.0024 on the
+    # (stateless augmentation plus a seeded file order, as that run was configured): effect +0.0024 on the
     # pre-registered endpoint and +0.0028 on the mean of the last 3 evaluated epochs --
     # NO DIFFERENCE, an order of magnitude inside the +/-0.02 band.
     #
@@ -370,11 +370,11 @@ class TrainingConfig:
     # comparability to `results/dino_smoke_step12/` and to every arm measured
     # before this plan.
     #
-    # This flag is NOT sufficient alone, and neither is `seed_training_stream`
-    # below: BOTH are required TOGETHER for bit-identical batches across
-    # processes. MEASURED (2-process CPU-only sha1 over the first 3 batches of
-    # the real `build_dataset`): either flag alone still DIFFERS; both together
-    # are bit-identical. Do not "simplify" by shipping one of them.
+    # This flag is what pins the AUGMENTATION. The rows are pinned by `seed` alone: the
+    # records are a seeded permutation and the shuffle is seeded, with no TFDS file
+    # interleave left to vary between processes. (Before the data protocol moved to
+    # `train.common.image_streams`, a second flag seeded that interleave and BOTH were
+    # needed for bit-identical batches across processes.)
     #
     # The honest counter-argument, stated here because `plans/` is gitignored:
     # `--stateless-augmentation` has only ever been exercised end-to-end in ONE
@@ -383,35 +383,11 @@ class TrainingConfig:
     # Numbers, configs and all 9 confounds: research/2026_dino_ssl_measurements.md
     stateless_augmentation: bool = True
 
-    # DECISION plan-2026-08-01T195746-12a1f2db/D-011
-    # Seed the TRAINING stream's TFDS file interleave, the way `build_knn_datasets`
-    # already seeds the k-NN memory bank's (D-040). Without it, `--seed` fixes the
-    # measuring instrument but NOT the data the model is trained on: `seed=` reaches
-    # the element `.shuffle()` and the augmentation, not the file order, so two
-    # same-seed runs interleave the TFDS shards differently and see a different
-    # example ORDER from step 0.
-    #
-    # DECISION plan-2026-08-02T132301-93deeae2/D-004
-    # DEFAULT-ON as of this plan (it shipped OFF under D-011 above; that "default
-    # OFF for comparability" rationale is SUPERSEDED). `--no-seed-training-stream`
-    # restores the old unpinned file interleave and with it comparability to
-    # `results/dino_smoke_step12/` and to every arm measured before this plan.
-    #
-    # Still NOT sufficient alone -- see `stateless_augmentation` above: BOTH flags
-    # are required TOGETHER for bit-identical batches across processes (MEASURED,
-    # 2-process CPU-only sha1 over the first 3 batches of the real `build_dataset`;
-    # either alone DIFFERS). research/2026_dino_ssl_measurements.md has the table.
-    #
-    # This is still NOT the same decision as `build_knn_datasets`' always-on seed.
-    # The bank is a frozen probe -- reseeding it changes only which images the score
-    # is read against. The TRAINING stream pins what every batch contains from step 0,
-    # which is why the off-switch exists and why the flip is recorded as a deliberate
-    # break rather than a cleanup.
-    #
-    # Do NOT pass `shuffle_files_seed=None` on the `--no-` path. `build_dataset` omits
-    # the kwarg ENTIRELY there (absence != None at the `ReadConfig` layer); the guard in
-    # tests/test_train/test_dino/test_train_dino.py asserts ABSENCE, not `None`.
-    seed_training_stream: bool = True
+    # Selection is a seeded slice of the train rows (None means the loader's 0.1); the k-NN
+    # probe queries it each epoch and the test split is probed once after training.
+    # max_samples caps the train pool and the test split (smoke runs).
+    validation_split: Optional[float] = None
+    max_samples: Optional[int] = None
 
     # Model
     variant: str = "small"
@@ -660,57 +636,59 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
             **crop_kwargs,
         )
 
-    # augment=False on purpose: build_raw_image_dataset's own flip / pad-crop runs BEFORE
-    # normalization and would stack a second, non-DINO augmentation under the multi-crop
-    # transform. The DINO recipe's augmentation lives entirely in map_fn.
+    # augment=False on purpose: the loader's own flip / pad-crop runs BEFORE normalization
+    # and would stack a second, non-DINO augmentation under the multi-crop transform. The
+    # DINO recipe's augmentation lives entirely in map_fn.
     # The DECODE resolution, i.e. what the multi-crop transform crops FROM.
-    # `build_raw_image_dataset` resizes every record to this size before
-    # `element_map_fn` runs; `map_fn` then emits views at `global_crop_size`
-    # regardless. See `TrainingConfig.source_image_size` for the measurement
-    # that motivates the knob and for why its default is behaviour-preserving.
+    # `load_image_streams` resizes every record to this size before the map runs; `map_fn`
+    # then emits views at `global_crop_size` regardless. See
+    # `TrainingConfig.source_image_size` for the measurement that motivates the knob and for
+    # why its default is behaviour-preserving.
     source_size = config.source_image_size or config.global_crop_size
 
-    # The stateless map fn takes `(index, image, label)`, so it goes in the
-    # INDEXED slot -- `build_raw_image_dataset` refuses both slots at once.
+    # The stateless map fn takes `(index, image, label)`, so it goes in the INDEXED slot;
+    # `load_image_streams` refuses both slots at once.
     # DECISION plan-2026-08-02T132301-93deeae2/D-004
     # As of this plan the INDEXED slot is the DEFAULT branch (the `element_map_fn`
-    # branch is now the `--no-stateless-augmentation` path). The dict-spread is
-    # unchanged and still correct; only which branch is the default has moved.
+    # branch is the `--no-stateless-augmentation` path).
     map_fn_kwarg = (
         {"indexed_element_map_fn": map_fn}
         if config.stateless_augmentation
         else {"element_map_fn": map_fn}
     )
 
-    # DECISION plan-2026-08-01T195746-12a1f2db/D-011
-    # Built as a dict so that the no-seed call passes NO `shuffle_files_seed` at all,
-    # rather than `shuffle_files_seed=None`. See `TrainingConfig.seed_training_stream`.
-    # DECISION plan-2026-08-02T132301-93deeae2/D-004
-    # D-011's wording above said "the DEFAULT call"; that is no longer the default
-    # call. After this plan the DEFAULT branch PASSES `shuffle_files_seed=config.seed`,
-    # and the empty-dict branch is the `--no-seed-training-stream` path. The spread
-    # still exists for exactly the original reason, which the flip did not change:
-    # absence of the kwarg is NOT the same as `shuffle_files_seed=None` at the
-    # `ReadConfig` layer, so the off-switch must omit it rather than pass `None`.
-    stream_seed_kwarg = (
-        {"shuffle_files_seed": config.seed} if config.seed_training_stream else {}
-    )
-
-    train_ds, num_train, _ = build_raw_image_dataset(
+    streams = load_image_streams(
         config.dataset,
-        source_size,
-        config.batch_size,
-        is_training=True,
-        augment=False,
+        image_size=source_size,
+        batch_size=config.batch_size,
         seed=config.seed,
+        validation_split=config.validation_split,
+        max_samples=config.max_samples,
+        augment=False,
         **map_fn_kwarg,
-        **stream_seed_kwarg,
     )
 
-    steps_per_epoch = max(1, num_train // config.batch_size)
+    steps_per_epoch = max(1, streams.n_train // config.batch_size)
     if config.max_steps is not None:
         steps_per_epoch = min(steps_per_epoch, config.max_steps)
-    return train_ds, steps_per_epoch
+    return streams.train_ds, steps_per_epoch
+
+
+def _plain_streams(config: TrainingConfig):
+    """The dataset's three streams with NO map: single crops at the global resolution.
+
+    A frozen-feature probe evaluates the representation of a plain image, not of an
+    augmented view, so the train stream is not augmented either.
+    """
+    return load_image_streams(
+        config.dataset,
+        image_size=config.global_crop_size,
+        batch_size=config.batch_size,
+        seed=config.seed,
+        validation_split=config.validation_split,
+        max_samples=config.max_samples,
+        augment=False,
+    )
 
 
 def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
@@ -721,63 +699,44 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
             config: The trainer config.
         Returns:
             ``(bank_ds, query_ds)`` -- both batched ``(image, label)`` pipelines at
-            the global crop resolution. NO multi-crop ``element_map_fn``: the probe
+            the global crop resolution. NO multi-crop element map: the probe
             evaluates the representation of a plain image, not of an augmented view.
         Failure mode:
-            ``ValueError`` for an unsupported dataset (from
-            ``build_raw_image_dataset``).
+            ``ValueError`` for an unsupported dataset (from ``load_image_streams``).
 
-    **The bank comes from the TRAIN split and the queries from the VALIDATION split**,
-    so the two are disjoint BY CONSTRUCTION -- which is the property that makes the
-    reported accuracy mean anything (a query that finds itself in the bank at cosine
-    1.0 scores a free hit). That disjointness is additionally checked numerically
-    inside `knn_top1_accuracy`; the two guards are deliberate belt-and-braces because
-    the failure is silent and looks like a good result.
+    **The bank comes from the FIT rows and the queries from the SELECTION slice** (the
+    seeded ``validation_split`` held out of train), so the two are disjoint BY CONSTRUCTION --
+    which is the property that makes the reported accuracy mean anything (a query that finds
+    itself in the bank at cosine 1.0 scores a free hit). That disjointness is additionally
+    checked numerically inside `knn_top1_accuracy`; the two guards are deliberate
+    belt-and-braces because the failure is silent and looks like a good result. The test split
+    is never read here: :func:`build_knn_test_dataset` serves the one post-training probe.
 
     Both pipelines are ``.take(n).cache()``d so the SAME samples are used every epoch;
     an eval set that reshuffles each epoch turns run-to-run noise into apparent
-    training progress.
-
-    **The bank is seeded down to the TFDS FILE order (D-040), and that is load-bearing.**
-    ``.take(knn_bank_batches)`` off the train stream selects a SMALL sample --
-    ``knn_bank_batches * batch_size`` images out of 9469, i.e. **512 at the SMOKE
-    defaults** (16 x 32) and 2048 at the 64/32 probe settings every measurement in
-    `plan-2026-08-01T195746-12a1f2db` used -- and `build_raw_image_dataset` opens the train
-    split with ``shuffle_files=True``. Without ``shuffle_files_seed`` the file interleave
-    is non-deterministic ACROSS PROCESSES even at a fixed ``--seed``, so two runs score
-    against two different memory banks. MEASURED before this was seeded: four bank draws
-    at ``seed=42`` (two per process, two processes) gave four different label sequences,
-    and the four zero-optimizer-step k-NN controls they produced spread over a band LARGER
-    than the effect a step-14 A/B was trying to read out of it. The QUERY set is
-    unaffected (the validation split is opened with ``shuffle_files=False``), which is why
-    ``dino_feat_mean_cos`` was bit-identical across those same repeats while the k-NN
-    moved. The four draws are in `knn_eval`'s module docstring, which also says how to
-    read the number; the record § 6 (iv) carries them verbatim.
+    training progress. ``.take(knn_bank_batches)`` off the train stream selects a SMALL
+    sample (``knn_bank_batches * batch_size`` images, 512 at the SMOKE defaults), and the
+    sample is the same in every process at a fixed ``--seed`` because the rows are a seeded
+    permutation and the shuffle is seeded. (Before the data protocol moved to
+    `train.common.image_streams`, the TFDS file interleave was unseeded and four bank draws
+    at one seed gave four different label sequences; `knn_eval`'s module docstring carries
+    that measurement, taken under the old pipeline.)
     """
-    bank_ds, _, _ = build_raw_image_dataset(
-        config.dataset,
-        config.global_crop_size,
-        config.batch_size,
-        is_training=True,   # -> the TRAIN split
-        augment=False,      # a frozen-feature probe must not see augmentation
-        seed=config.seed,
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-040
-        # Do NOT drop this and rely on `seed=` alone: `seed` reaches the element
-        # `.shuffle()` and the augmentation, NOT the TFDS file interleave, so the
-        # `.take()` below would select a different bank every process.
-        shuffle_files_seed=config.seed,
-    )
-    query_ds, _, _ = build_raw_image_dataset(
-        config.dataset,
-        config.global_crop_size,
-        config.batch_size,
-        is_training=False,  # -> the VALIDATION split
-        seed=config.seed,
-    )
+    streams = _plain_streams(config)
     return (
-        bank_ds.take(config.knn_bank_batches).cache(),
-        query_ds.take(config.knn_query_batches).cache(),
+        streams.train_ds.take(config.knn_bank_batches).cache(),
+        streams.select_ds.take(config.knn_query_batches).cache(),
     )
+
+
+def build_knn_test_dataset(config: TrainingConfig) -> Tuple[Any, int]:
+    """The labelled test split as plain single-crop batches, for the ONE post-training probe.
+
+    Returns:
+        ``(test_ds, n_batches)`` -- every test batch, and how many there are.
+    """
+    streams = _plain_streams(config)
+    return streams.test_ds, -(-streams.n_test // config.batch_size)
 
 
 # ---------------------------------------------------------------------
@@ -999,7 +958,8 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
 
     Returns:
         Dict with ``model``, ``loss``, ``first_loss``, ``final_loss``,
-        ``run_dir``, ``history``.
+        ``run_dir``, ``history`` and ``knn_test`` (the one post-training k-NN probe of the
+        test split, ``None`` when the probe is off; also written to ``knn_test.json``).
     """
     setup_gpu(config.gpu)
     set_seeds(config.seed)
@@ -1014,7 +974,7 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
 
     # ---- Data ----
     train_ds, steps_per_epoch = build_dataset(config)
-    logger.info(f"Steps per epoch: {steps_per_epoch} (NO validation pipeline)")
+    logger.info(f"Steps per epoch: {steps_per_epoch} (NO validation_data; k-NN probe only)")
 
     # ---- Model + loss ----
     model, loss = build_model_and_loss(config)
@@ -1058,6 +1018,19 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
     loss_curve = history.history.get("loss", []) or [float("nan")]
     save_training_history_json(history, run_dir)
 
+    # The test split is probed ONCE, here, with the bank and settings of the per-epoch
+    # probe. It never guided the run: the per-epoch probe queried the selection slice.
+    knn_test = None
+    knn_callback = next(
+        (callback for callback in callbacks if isinstance(callback, KNNEvalCallback)), None)
+    if knn_callback is not None:
+        test_ds, test_batches = build_knn_test_dataset(config)
+        knn_test = {key: float(value)
+                    for key, value in knn_callback.evaluate_split(test_ds, test_batches).items()}
+        logger.info(f"k-NN on the test split: {knn_test}")
+        with open(Path(run_dir) / "knn_test.json", "w") as handle:
+            json.dump({"split": "the labelled test split", "metrics": knn_test}, handle, indent=2)
+
     gc.collect()
     return {
         "model": model,
@@ -1066,6 +1039,7 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
         "final_loss": float(loss_curve[-1]),
         "run_dir": str(results_dir),
         "history": history,
+        "knn_test": knn_test,
     }
 
 
@@ -1122,33 +1096,15 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "AUGMENTATION stream under the shipped AUTOTUNE map "
                              "(MEASURED at HEAD: two same-seed parallel maps "
                              "differ, maxdiff 1.5312). DEFAULT ON, so a run with "
-                             "no flags is reproducible. REQUIRED TOGETHER WITH "
-                             "--seed-training-stream: MEASURED across two "
-                             "processes, this flag ALONE still gives different "
-                             "batches; both together are bit-identical. "
+                             "no flags is reproducible: the rows are already "
+                             "pinned by --seed, so this flag is all a run needs. "
                              "--no-stateless-augmentation restores the old shared-"
                              "Generator behaviour and with it comparability to any "
                              "run in results/ measured before this default moved. "
                              "Caveat: this path has only ever been exercised end-"
                              "to-end in one plan's confirm/long matrices. See "
                              "research/2026_dino_ssl_measurements.md")
-    parser.add_argument("--seed-training-stream",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="Seed the TRAINING stream's TFDS file interleave with "
-                             "--seed, the way the k-NN memory bank already is "
-                             "(D-040). Without it --seed fixes the measuring "
-                             "instrument but not the data: `seed` reaches the "
-                             "element shuffle and the augmentation, NOT the file "
-                             "order, so two same-seed runs see a different example "
-                             "order from step 0. DEFAULT ON. NOT SUFFICIENT ALONE: "
-                             "MEASURED across two processes, this flag by itself "
-                             "still gives different batches (the augmentation RNG "
-                             "is the residual source) -- it needs "
-                             "--stateless-augmentation too. "
-                             "--no-seed-training-stream restores the unpinned file "
-                             "order and with it comparability to any run in "
-                             "results/ measured before this default moved. See "
-                             "research/2026_dino_ssl_measurements.md")
+    add_selection_arguments(parser, imagenet=False, figures=False)
 
     # Model
     parser.add_argument("--variant", type=str, default="small", choices=list(VARIANTS))
@@ -1298,11 +1254,9 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "multi-crop generator. ON ITS OWN it does NOT make a run "
                              "bit-reproducible: the stateful multi-crop transform's seed "
                              "reproduces a SERIAL .map() only and this pipeline uses "
-                             "num_parallel_calls=AUTOTUNE (maxdiff 1.5312), and the TFDS "
-                             "file interleave is unseeded. Add BOTH "
-                             "--seed-training-stream AND --stateless-augmentation and two "
-                             "same-seed processes produce BIT-IDENTICAL batches "
-                             "(MEASURED); either flag alone is not enough. See "
+                             "num_parallel_calls=AUTOTUNE (maxdiff 1.5312). Add "
+                             "--stateless-augmentation (the default) and two same-seed "
+                             "processes produce BIT-IDENTICAL batches. See "
                              "dl_techniques/datasets/vision/multi_crop.py's module "
                              "docstring")
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
@@ -1343,7 +1297,8 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         local_crop_size=args.local_crop_size,
         source_image_size=args.source_image_size,
         stateless_augmentation=args.stateless_augmentation,
-        seed_training_stream=args.seed_training_stream,
+        validation_split=args.validation_split,
+        max_samples=args.max_samples,
         n_local_crops=args.n_local_crops,
         variant=args.variant,
         patch_size=args.patch_size,

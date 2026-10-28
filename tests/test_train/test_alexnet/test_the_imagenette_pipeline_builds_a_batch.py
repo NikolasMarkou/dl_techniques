@@ -5,8 +5,7 @@ trainer's default ``--dataset imagenet`` needed ImageNet class directories that
 are not on this machine, so a default run could not start. Imagenette
 (``imagenette/320px-v2``, a 10-class ImageNet subset) is on disk as TFDS
 records; the trainer reads it through ``train.common.classification_data`` with
-``crop_policy="random_resized_crop"`` at the model's own 227 input. The two refusal tests at
-the end pin ``build_raw_image_dataset``, which still serves the self-supervised trainers.
+``crop_policy="random_resized_crop"`` at the model's own 227 input.
 
 The batch tests read REAL records and never download: they skip when the
 records are absent, and a skip is not a pass.
@@ -20,7 +19,7 @@ import pytest
 import tensorflow as tf
 
 from train.alexnet import train_alexnet as module
-from train.common import IMAGENETTE_TFDS_NAME, build_raw_image_dataset
+from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
 
 _TFDS_DATA_DIR = os.environ.get(
     "TFDS_DATA_DIR", os.path.expanduser("~/tensorflow_datasets"))
@@ -88,15 +87,3 @@ def test_the_trainer_has_no_second_imagenette_reader():
     import inspect
     source = inspect.getsource(module)
     assert "build_raw_image_dataset" not in source and "create_imagenette_dataset" not in source
-
-
-def test_the_random_resized_crop_policy_is_refused_off_imagenette():
-    with pytest.raises(ValueError, match="imagenette only"):
-        build_raw_image_dataset(
-            "cifar10", 64, 2, is_training=True, crop_policy="random_resized_crop")
-
-
-def test_an_unknown_crop_policy_is_refused():
-    with pytest.raises(ValueError, match="Unknown crop_policy"):
-        build_raw_image_dataset("imagenette", 64, 2, is_training=True,
-                                crop_policy="centre")

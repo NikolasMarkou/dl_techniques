@@ -1,12 +1,11 @@
-"""Tests for ``train.beit.common`` — the three things all three BEiT trainers share.
+"""Tests for ``train.beit.common`` — the things all three BEiT trainers share.
 
-Two of those three are RE-EXPORTS from ``train.energy_transformer.common`` (D-008), so
-this module does not re-test their internals — ``tests/test_train/test_energy_transformer/
-test_build_raw_image_dataset.py`` owns those, 622 lines of them. What IS tested here is
-the contract this package depends on: that the re-exported names are the same objects,
-that the documented return tuple and the ``element_map_fn`` hook behave as the BEiT MIM
-trainer will use them, and that ``build_optimizer`` really builds the schedule it is asked
-for.
+``build_optimizer`` is a RE-EXPORT from ``train.energy_transformer.common`` (D-008), and the
+image streams come from ``train.common.image_streams``, so this module does not re-test their
+internals — ``tests/test_train/test_image_streams.py`` owns those. What IS tested here is the
+contract this package depends on: that the re-exported name is the same object, that the
+documented streams and the ``element_map_fn`` hook behave as the BEiT MIM trainer will use
+them, and that ``build_optimizer`` really builds the schedule it is asked for.
 
 The third — :func:`load_frozen_tokenizer` — is BEiT-specific and is tested for the
 failures it exists to prevent, each of which is otherwise SILENT:
@@ -17,7 +16,7 @@ failures it exists to prevent, each of which is otherwise SILENT:
 * a tokenizer that is not actually frozen (would drift during MIM pre-training, making the
   target distribution non-stationary — BEiT's tokenizer is frozen by definition).
 
-Everything here is CPU-cheap: cifar10 is built in memory from ``keras.datasets``, and every
+Everything here is CPU-cheap: cifar10 is a tiny fake array behind the loader's raw seam, and every
 VQ-VAE is a 16-channel toy at 32x32. The single imagenette test reads real prepared TFDS
 records and is ``skipif``-guarded on their presence — the guard GLOBS for the shards rather
 than assuming either way, and a SKIP is explicitly not a pass.
@@ -33,14 +32,10 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from train.beit.common import (
-    DATASET_NUM_CLASSES,
-    SUPPORTED_DATASETS,
-    build_optimizer,
-    build_raw_image_dataset,
-    load_frozen_tokenizer,
-)
-from train.energy_transformer.common import IMAGENETTE_TFDS_NAME
+from tests.classification_fakes import use_tiny_raw
+from train.beit.common import build_optimizer, load_frozen_tokenizer
+from train.common.image_streams import SUPPORTED_DATASETS, load_image_streams
+from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 
@@ -116,41 +111,38 @@ def _mim_element_map_fn(image: tf.Tensor, label: tf.Tensor) -> Tuple[Any, Any, A
 # 1. the dataset builder -- the documented tuple and the element_map_fn hook
 # ---------------------------------------------------------------------
 
-class TestBuildRawImageDataset:
-    """The contract the BEiT trainers consume, on the offline cifar10 branch."""
+class TestTheImageStreamsTheBeitTrainersConsume:
+    """The contract the BEiT trainers consume, on the offline cifar10 seam."""
 
-    def test_it_is_the_same_object_as_energy_transformers(self):
-        """D-008: re-exported, not re-implemented. A COPY would fail this by identity.
+    @pytest.fixture(autouse=True)
+    def _tiny_cifar(self, monkeypatch):
+        use_tiny_raw(monkeypatch, n_train=44, n_test=8)
 
-        Why this can fail if the implementation is wrong: someone "makes the BEiT package
-        self-contained" by pasting the body in. The copy would then silently drift from
-        the original's three in-code branch-ordering decision anchors.
-        """
+    def test_build_optimizer_is_the_same_object_as_energy_transformers(self):
+        """D-008: re-exported, not re-implemented. A COPY would fail this by identity."""
         from train.energy_transformer import common as et_common
 
-        assert build_raw_image_dataset is et_common.build_raw_image_dataset
         assert build_optimizer is et_common.build_optimizer
 
-    def test_it_returns_the_documented_triple(self):
-        ds, num_examples, num_classes = build_raw_image_dataset(
-            "cifar10", image_size=32, batch_size=4, is_training=False, augment=False,
-        )
-        assert isinstance(ds, tf.data.Dataset)
-        assert num_examples == 10000          # cifar10 test split
-        assert num_classes == 10 == DATASET_NUM_CLASSES["cifar10"]
+    def test_it_returns_the_documented_streams(self):
+        streams = load_image_streams(
+            "cifar10", image_size=32, batch_size=4, seed=0, augment=False)
+        assert isinstance(streams.test_ds, tf.data.Dataset)
+        assert (streams.n_train, streams.n_select, streams.n_test) == (40, 4, 8)
+        assert streams.num_classes == 10
 
-        images, labels = next(iter(ds))
+        images, labels = next(iter(streams.test_ds))
         assert tuple(images.shape) == (4, 32, 32, 3)
         assert tuple(labels.shape) == (4,)
         assert images.dtype == tf.float32
 
     def test_the_classifier_pipeline_is_the_unmodified_image_label_pair(self):
         """Stage 2 passes NO element_map_fn and must get `(image, label)` back."""
-        ds, _, _ = build_raw_image_dataset(
-            "cifar10", image_size=32, batch_size=4, is_training=False, augment=False,
-        )
-        element = next(iter(ds))
-        assert isinstance(element, tuple) and len(element) == 2
+        streams = load_image_streams(
+            "cifar10", image_size=32, batch_size=4, seed=0, augment=False)
+        for ds in (streams.train_ds, streams.select_ds, streams.test_ds):
+            element = next(iter(ds))
+            assert isinstance(element, tuple) and len(element) == 2
 
     def test_the_element_map_fn_hook_reshapes_the_element(self):
         """Stage 1 injects the masking/tokenizing element through this hook.
@@ -159,22 +151,22 @@ class TestBuildRawImageDataset:
         `element_map_fn` would still yield perfectly good `(image, label)` batches, and
         the MIM trainer would silently train on CLASS LABELS instead of code ids.
         """
-        ds, _, _ = build_raw_image_dataset(
-            "cifar10", image_size=32, batch_size=4, is_training=False, augment=False,
+        streams = load_image_streams(
+            "cifar10", image_size=32, batch_size=4, seed=0, augment=False,
             element_map_fn=_mim_element_map_fn,
         )
-        (images, mask), targets, weights = next(iter(ds))
-        assert tuple(images.shape) == (4, 32, 32, 3)
-        assert tuple(mask.shape) == (4, 16) and mask.dtype == tf.bool
-        assert tuple(targets.shape) == (4, 16) and targets.dtype == tf.int32
-        # sample_weight is exactly the mask -- BEiT's convention.
-        np.testing.assert_array_equal(
-            weights.numpy(), mask.numpy().astype("float32"))
+        for ds in (streams.train_ds, streams.select_ds, streams.test_ds):
+            (images, mask), targets, weights = next(iter(ds))
+            assert tuple(images.shape) == (4, 32, 32, 3)
+            assert tuple(mask.shape) == (4, 16) and mask.dtype == tf.bool
+            assert tuple(targets.shape) == (4, 16) and targets.dtype == tf.int32
+            # sample_weight is exactly the mask -- BEiT's convention.
+            np.testing.assert_array_equal(
+                weights.numpy(), mask.numpy().astype("float32"))
 
     def test_an_unsupported_dataset_raises(self):
         with pytest.raises(ValueError, match="Unsupported dataset"):
-            build_raw_image_dataset(
-                "imagenet21k", image_size=32, batch_size=4, is_training=False)
+            load_image_streams("imagenet21k", image_size=32, batch_size=4, seed=0)
 
     def test_both_beit_datasets_are_supported(self):
         assert set(SUPPORTED_DATASETS) == {"imagenette", "cifar10"}
@@ -184,19 +176,16 @@ class TestBuildRawImageDataset:
 class TestTheImagenetteBranch:
     """A-8: imagenette is the dataset VERIFIED present offline on this machine.
 
-    Bounded to `.take(1)` batch of 4 at `image_size=32` with a small shuffle buffer — the
-    4096 default would decode 4096 full-size JPEGs just to build the pipeline. Reads real
-    prepared records; never downloads.
+    Bounded to `.take(1)` batch of 4 at `image_size=32`. Reads real prepared records; never
+    downloads.
     """
 
-    def test_the_training_pipeline_yields_the_documented_triple_offline(self):
-        ds, num_examples, num_classes = build_raw_image_dataset(
-            "imagenette", image_size=32, batch_size=4, is_training=True,
-            augment=False, shuffle_buffer=32, seed=0,
-        )
-        assert num_examples > 0
-        assert num_classes == 10
-        images, labels = next(iter(ds.take(1)))
+    def test_the_training_pipeline_yields_the_documented_streams_offline(self):
+        streams = load_image_streams(
+            "imagenette", image_size=32, batch_size=4, seed=0, augment=False)
+        assert streams.n_train + streams.n_select == 9469 and streams.n_test == 3925
+        assert streams.num_classes == 10
+        images, labels = next(iter(streams.train_ds.take(1)))
         assert tuple(images.shape) == (4, 32, 32, 3)
         assert tuple(labels.shape) == (4,)
 

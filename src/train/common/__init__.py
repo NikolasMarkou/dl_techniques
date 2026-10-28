@@ -8,7 +8,7 @@ from train.common.args import (
     explicitly_set_flags,
     resolved_run_dir,
 )
-from train.common.datasets import collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
+from train.common.datasets import collect_image_paths, DEFAULT_IMAGE_EXTENSIONS
 from train.common.optimizer import build_optimizer
 from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback, resolve_monitor_mode
 from train.common.augment import augment_patch
@@ -174,7 +174,6 @@ __all__ = [
     "build_image_label_example",
     "build_image_text_example",
     "build_optimizer",
-    "build_raw_image_dataset",
     "build_synthetic_image_text_dataset",
     "bytes_feature",
     "collect_image_paths",
@@ -193,14 +192,12 @@ __all__ = [
     "create_nlp_tokenizer",
     "create_ts_argument_parser",
     "create_warmup_lr_schedule",
-    "DATASET_NUM_CLASSES",
     "decode_text",
     "default_experiment_name",
     "DEFAULT_HOLDOUT_PER_CLASS",
     "DEFAULT_IMAGE_EXTENSIONS",
     "DEFAULT_SEED",
     "discover_megadepth_pairs",
-    "ElementMapFn",
     "EpochMetricsPlotCallback",
     "estimate_clm_steps_per_epoch",
     "collect_logits",
@@ -219,8 +216,6 @@ __all__ = [
     "IMAGE_MEAN",
     "IMAGE_STD",
     "IMAGE_TEXT_SCHEMA",
-    "IMAGENETTE_NUM_CLASSES",
-    "IMAGENETTE_TFDS_NAME",
     "int64_feature",
     "int64_list_feature",
     "json_numpy_default",
@@ -277,7 +272,6 @@ __all__ = [
     "setup_visualization_manager",
     "StepCheckpointCallback",
     "StepPlotCallback",
-    "SUPPORTED_DATASETS",
     "TimeSeriesPerformanceCallback",
     "TrainingDashboardCallback",
     "TIMESTAMP_FORMAT",

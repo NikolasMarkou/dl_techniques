@@ -1,14 +1,12 @@
 """Shared plumbing for the three BEiT trainers.
 
-Deliberately SMALL. It holds exactly three things, and two of them are not written here
+Deliberately SMALL. It holds exactly two things, and one of them is not written here
 at all:
 
-1. :func:`build_raw_image_dataset` — RE-EXPORTED from ``train.common.datasets``.
-   The raw-image ``tf.data`` pipeline (imagenette via tfds, cifar10 in-memory) with the
-   ``element_map_fn`` hook the MIM trainer needs.
-2. :func:`build_optimizer` — RE-EXPORTED from ``train.common.optimizer``. The
-   ``learning_rate_schedule_builder`` / ``optimizer_builder`` block.
-3. :func:`load_frozen_tokenizer` — the only genuinely BEiT-specific helper: load a saved
+1. :func:`build_optimizer` — RE-EXPORTED from ``train.common.optimizer``. The
+   ``learning_rate_schedule_builder`` / ``optimizer_builder`` block. (The image data comes
+   from ``train.common.image_streams`` and ``train.common.classification_data``.)
+2. :func:`load_frozen_tokenizer` — the only genuinely BEiT-specific helper: load a saved
    VQ-VAE, freeze it, VERIFY its code grid, and hand back a callable that produces the
    MIM targets.
 
@@ -30,36 +28,21 @@ import tensorflow as tf
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-08-11T012340-f63796dc/D-008
-# `build_raw_image_dataset` and `build_optimizer` are IMPORTED, not re-implemented.
-# WHAT NOT TO DO: do NOT copy either function's body into this file "so the BEiT package
-# is self-contained". Both are already dataset/optimizer-generic and already support
-# exactly the two datasets BEiT needs (imagenette + cifar10) and exactly the
-# `element_map_fn` hook the MIM trainer needs; a copy would be a ~230-line fork of a
-# pipeline that carries THREE load-bearing in-code decision anchors (D-007/D-008/D-040 of
-# two other plans) about branch ordering that a fork would silently drift away from.
+# `build_optimizer` is IMPORTED, not re-implemented.
+# WHAT NOT TO DO: do NOT copy the function's body into this file "so the BEiT package
+# is self-contained". It is already optimizer-generic.
 # The cross-package import is the house convention, not an exception: `train/dino/
-# train_dino.py:237` imports these same two names, and
-# `train/graph_energy_transformer/common.py:24` re-exports `build_optimizer` the same way.
-# BOTH functions' HOME is now under `train.common`, not `train.energy_transformer.common`
-# where they were originally written (each is consumed by four packages, so both were
-# promoted: the pipeline to `train.common.datasets`, the optimizer adapter to
-# `train.common.optimizer`). `train.energy_transformer.common` re-exports both and those
-# paths still resolve to the SAME OBJECTS.
-# See decisions.md D-008.
-from train.common.datasets import (  # noqa: F401  (re-exported)
-    DATASET_NUM_CLASSES,
-    SUPPORTED_DATASETS,
-    build_raw_image_dataset,
-)
+# train_dino.py` imports it too, and `train/graph_energy_transformer/common.py:24`
+# re-exports `build_optimizer` the same way. Its HOME is `train.common.optimizer`, not
+# `train.energy_transformer.common` where it was originally written (four packages consume
+# it); `train.energy_transformer.common` re-exports it and both paths resolve to the SAME
+# OBJECT. See decisions.md D-008.
 from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported)
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 __all__ = [
-    "DATASET_NUM_CLASSES",
-    "SUPPORTED_DATASETS",
     "build_optimizer",
-    "build_raw_image_dataset",
     "load_frozen_tokenizer",
 ]
 

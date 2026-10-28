@@ -1,17 +1,12 @@
 """Shared plumbing for the two Energy Transformer trainers.
 
-Deliberately SMALL (D-005). It holds only the three things both trainers genuinely share:
+Deliberately SMALL (D-005). It holds only the two things both trainers genuinely share:
 
-1. :func:`build_raw_image_dataset` — a raw-image ``tf.data`` pipeline (imagenette via tfds,
-   cifar10 in-memory) with an optional per-sample ``element_map_fn`` hook. The MIM trainer
-   passes ``make_masked_patch_map_fn(...)`` through that hook; the classifier passes nothing.
-   It is no longer WRITTEN here: it was promoted to :mod:`train.common.datasets` (four
-   packages consume it) and is RE-EXPORTED below, object identity intact.
-2. :func:`build_optimizer` — the ``learning_rate_schedule_builder`` / ``optimizer_builder``
-   block. It is no longer WRITTEN here either: it was promoted to
-   :mod:`train.common.optimizer` (four packages consume it) and is RE-EXPORTED below,
-   object identity intact.
-3. :class:`EnergyTraceCallback` — the out-of-graph energy-descent probe.
+1. :func:`build_optimizer` — the ``learning_rate_schedule_builder`` / ``optimizer_builder``
+   block. It is no longer WRITTEN here: it was promoted to :mod:`train.common.optimizer`
+   (four packages consume it) and is RE-EXPORTED below, object identity intact. (The image
+   data comes from ``train.common.image_streams`` and ``train.common.classification_data``.)
+2. :class:`EnergyTraceCallback` — the out-of-graph energy-descent probe.
 
 There is NO shared config dataclass and NO shared ``train()`` orchestrator: each trainer owns
 its own ``TrainingConfig``, ``parse_arguments()`` and ``config_from_args()`` so that an
@@ -30,19 +25,6 @@ import numpy as np
 # local imports
 # ---------------------------------------------------------------------
 
-# `build_raw_image_dataset` and its constants were PROMOTED to
-# `train.common.datasets` (4 consuming packages); re-exported here so every
-# existing `train.energy_transformer.common` import path keeps resolving TO THE
-# SAME OBJECT -- see that module's D-006 anchor, and beit's identity test.
-from train.common.datasets import (  # noqa: F401  (re-exported, D-006)
-    DATASET_NUM_CLASSES,
-    ElementMapFn,
-    IMAGENETTE_NUM_CLASSES,
-    IMAGENETTE_TFDS_NAME,
-    SUPPORTED_DATASETS,
-    build_raw_image_dataset,
-)
-
 # `build_optimizer` was PROMOTED the same way, to `train.common.optimizer` (4
 # consuming packages, 9 call sites); re-exported here so every existing
 # `train.energy_transformer.common` import path keeps resolving TO THE SAME
@@ -54,12 +36,6 @@ from dl_techniques.utils.logger import logger
 # Same idiom as `train/graph_energy_transformer/common.py`: `__all__` is what marks
 # the re-exported names above as USED (pyflakes does not honour `# noqa`).
 __all__ = [
-    "DATASET_NUM_CLASSES",
-    "ElementMapFn",
-    "IMAGENETTE_NUM_CLASSES",
-    "IMAGENETTE_TFDS_NAME",
-    "SUPPORTED_DATASETS",
-    "build_raw_image_dataset",
     "build_optimizer",
     "EnergyTraceCallback",
 ]

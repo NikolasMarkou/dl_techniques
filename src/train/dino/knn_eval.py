@@ -461,8 +461,9 @@ class KNNEvalCallback(keras.callbacks.Callback):
         bank_dataset: Batched ``(image, label)`` dataset for the memory bank. Draw it
             from the TRAIN split.
         query_dataset: Batched ``(image, label)`` dataset for the queries. Draw it from
-            the VALIDATION split -- disjoint from the bank by construction, and checked
-            numerically by :func:`knn_top1_accuracy`'s overlap guard.
+            the SELECTION slice (held out of train) -- disjoint from the bank by
+            construction, and checked numerically by :func:`knn_top1_accuracy`'s overlap
+            guard. The test split is scored once after training with :meth:`evaluate_split`.
         bank_batches: Batches consumed from ``bank_dataset``.
         query_batches: Batches consumed from ``query_dataset``.
         ks: Neighbour counts to report. DINO reports 10 and 20.
@@ -778,11 +779,17 @@ class KNNEvalCallback(keras.callbacks.Callback):
 
     # -- one evaluation, shared by both hooks -------------------------------
 
-    def _evaluate_once(self) -> Tuple[Dict[str, float], str]:
+    def _evaluate_once(
+            self,
+            query_dataset: Optional[Iterable[Any]] = None,
+            query_batches: Optional[int] = None,
+    ) -> Tuple[Dict[str, float], str]:
         """Run the whole probe once and return its numbers plus a bank fingerprint.
 
         Interface contract:
-            Parameters: none (reads ``self.model`` and the two datasets).
+            Parameters: ``query_dataset`` / ``query_batches`` -- score a DIFFERENT query
+                set against the same bank (default: the callback's own queries). Reads
+                ``self.model`` and the datasets.
             Returns:
                 ``(metrics, bank_fingerprint)``. ``metrics`` carries a value for
                 EVERY key in :attr:`log_keys`, in that order. ``bank_fingerprint``
@@ -807,7 +814,8 @@ class KNNEvalCallback(keras.callbacks.Callback):
         bank_features, bank_labels, _ = self._extract(
             self.bank_dataset, self.bank_batches)
         query_features, query_labels, teacher_logits = self._extract(
-            self.query_dataset, self.query_batches)
+            self.query_dataset if query_dataset is None else query_dataset,
+            self.query_batches if query_batches is None else query_batches)
 
         metrics: Dict[str, float] = {}
         for k in self.ks:
@@ -834,6 +842,33 @@ class KNNEvalCallback(keras.callbacks.Callback):
         digest.update(np.ascontiguousarray(bank_features, dtype=np.float64).tobytes())
         digest.update(np.ascontiguousarray(bank_labels, dtype=np.int64).tobytes())
         return metrics, digest.hexdigest()
+
+    def evaluate_split(
+            self,
+            query_dataset: Iterable[Any],
+            query_batches: int,
+    ) -> Dict[str, float]:
+        """Score the model's CURRENT weights on another labelled query set, once.
+
+        Interface contract:
+            Parameters:
+                query_dataset: Batched ``(image, label)`` iterable, disjoint from the bank
+                    (the numerical overlap guard of :func:`knn_top1_accuracy` still runs).
+                query_batches: Batches to consume from it.
+            Returns:
+                The same metrics dict an epoch writes (every key of :attr:`log_keys`).
+            Failure mode:
+                Whatever :meth:`_evaluate_once` raises; the callback must have been
+                attached to a model by ``fit`` first.
+
+        This is how the trainer scores the TEST split exactly once after training, with the
+        bank and the probe settings of the per-epoch selection probe. Nothing is written
+        into any ``logs`` dict.
+        """
+        if query_batches <= 0:
+            raise ValueError(f"query_batches must be positive, got {query_batches}")
+        metrics, _fingerprint = self._evaluate_once(query_dataset, int(query_batches))
+        return metrics
 
     # -- the Keras hooks ---------------------------------------------------
 

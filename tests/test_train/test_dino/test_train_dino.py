@@ -44,7 +44,14 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.multi_crop import make_multi_crop_map_fn
+from tests.classification_fakes import use_tiny_raw
 from train.dino import train_dino as trainer
+
+
+@pytest.fixture(autouse=True)
+def _tiny_cifar(monkeypatch):
+    """No test here reads the Keras cache: CIFAR-10 is a tiny fake behind the loader's seam."""
+    use_tiny_raw(monkeypatch, n_train=44, n_test=8)
 
 # ---------------------------------------------------------------------------
 # The dest -> config-field map, and the two escape hatches
@@ -92,7 +99,8 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     # which made the previous `True` probes VACUOUS -- and this table's own
     # `test_probe_values_are_non_default` is what caught it.
     "stateless_augmentation": ("--stateless-augmentation", False),  # default: True
-    "seed_training_stream": ("--seed-training-stream", False),      # default: True
+    "validation_split": ("--validation-split", 0.2),              # default: None
+    "max_samples": ("--max-samples", 123),                        # default: None
     "variant": ("--variant", "tiny"),                             # default: small
     "patch_size": ("--patch-size", 8),                            # default: None
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
@@ -164,43 +172,40 @@ def _build_argv(spec: Dict[str, Tuple[str, Any]]) -> list:
 class TestSharedSymbolsAreImportedNotCopied:
     """`train_dino` must REUSE the shared implementations, not carry copies.
 
-    `train_dino.py` imports `SUPPORTED_DATASETS`, `build_optimizer` and
-    `build_raw_image_dataset` through `train.energy_transformer.common`, which merely
-    RE-EXPORTS them: their homes are `train.common.datasets` and
-    `train.common.optimizer`. Nothing here asserted that before -- BEiT has such a pin
-    (`tests/test_train/test_beit/test_common.py::TestBuildRawImageDataset::
-    test_it_is_the_same_object_as_energy_transformers`) and DINO did not, so a copy
-    pasted into the DINO package, or a re-export hop that quietly stopped forwarding,
-    would have been invisible on this side.
+    `train_dino.py` imports `SUPPORTED_DATASETS` and `load_image_streams` from
+    `train.common.image_streams`, and `build_optimizer` through
+    `train.energy_transformer.common`, which merely RE-EXPORTS it: its home is
+    `train.common.optimizer`.
 
-    Why identity and not behaviour: the failure mode is a FORK that still works. A
-    copied `build_raw_image_dataset` passes every behavioural test in this file while
-    drifting away from the three foreign branch-ordering anchors it carries (D-007 /
-    D-008 / D-040, two other plans); a copied `build_optimizer` re-introduces the
-    double-weight-decay guard as a second thing to maintain. `is` is the only assertion
-    a copy fails BY CONSTRUCTION.
+    Why identity and not behaviour: the failure mode is a FORK that still works. A copied
+    `build_optimizer` re-introduces the double-weight-decay guard as a second thing to
+    maintain, and a copied stream loader would drift from the protocol every trainer shares.
+    `is` is the only assertion a copy fails BY CONSTRUCTION.
     """
 
-    def test_dataset_symbols_are_the_train_common_datasets_objects(self) -> None:
-        from train.common import datasets as common_datasets
+    def test_dataset_symbols_are_the_image_streams_objects(self) -> None:
+        from train.common import image_streams
 
-        assert trainer.build_raw_image_dataset is common_datasets.build_raw_image_dataset
-        assert trainer.SUPPORTED_DATASETS is common_datasets.SUPPORTED_DATASETS
+        assert trainer.load_image_streams is image_streams.load_image_streams
+        assert trainer.SUPPORTED_DATASETS is image_streams.SUPPORTED_DATASETS
 
     def test_build_optimizer_is_the_train_common_optimizer_object(self) -> None:
         from train.common import optimizer as common_optimizer
 
         assert trainer.build_optimizer is common_optimizer.build_optimizer
 
-    def test_the_re_export_hop_forwards_the_same_objects(self) -> None:
+    def test_the_re_export_hop_forwards_the_same_object(self) -> None:
         """The hop DINO actually imports through must not become a second definition."""
-        from train.common import datasets as common_datasets
         from train.common import optimizer as common_optimizer
         from train.energy_transformer import common as et_common
 
-        assert et_common.build_raw_image_dataset is common_datasets.build_raw_image_dataset
-        assert et_common.SUPPORTED_DATASETS is common_datasets.SUPPORTED_DATASETS
         assert et_common.build_optimizer is common_optimizer.build_optimizer
+
+    def test_the_old_private_reader_is_gone(self) -> None:
+        from train.common import datasets as common_datasets
+
+        assert not hasattr(common_datasets, "build_raw_image_dataset")
+        assert not hasattr(trainer, "build_raw_image_dataset")
 
 
 # ---------------------------------------------------------------------------
@@ -323,34 +328,25 @@ class TestCLIWiring:
 class TestReproducibilityFlagDefaults:
     """The shipped default is a REPRODUCIBLE run (plan-2026-08-02-93deeae2, D-004).
 
-    Both flags are `argparse.BooleanOptionalAction`. They are required TOGETHER
-    for bit-identical batches across processes (MEASURED, 2-process CPU-only sha1
-    over the first 3 batches of the real `build_dataset` -- either alone DIFFERS;
-    see research/2026_dino_ssl_measurements.md). That framing makes it easy to
-    wire them as one switch by accident, so the off-switches are asserted
-    INDEPENDENTLY below.
+    `--stateless-augmentation` is an `argparse.BooleanOptionalAction`. The rows themselves
+    are pinned by `--seed` (a seeded permutation of the records and a seeded shuffle), so
+    this flag is all a run needs to be reproducible; the old `--seed-training-stream` flag,
+    which pinned a TFDS file interleave that no longer exists, is gone.
     """
 
-    def test_both_default_on_in_the_dataclass_and_through_the_cli(self) -> None:
+    def test_default_on_in_the_dataclass_and_through_the_cli(self) -> None:
         assert trainer.TrainingConfig().stateless_augmentation is True
-        assert trainer.TrainingConfig().seed_training_stream is True
-        config = trainer.config_from_args(trainer.parse_arguments([]))
-        assert config.stateless_augmentation is True
-        assert config.seed_training_stream is True
+        assert trainer.config_from_args(trainer.parse_arguments([])).stateless_augmentation is True
 
-    @pytest.mark.parametrize("off_flag,off_dest,other_dest", [
-        ("--no-stateless-augmentation", "stateless_augmentation", "seed_training_stream"),
-        ("--no-seed-training-stream", "seed_training_stream", "stateless_augmentation"),
-    ])
-    def test_each_off_switch_moves_only_its_own_flag(
-        self, off_flag: str, off_dest: str, other_dest: str
-    ) -> None:
-        config = trainer.config_from_args(trainer.parse_arguments([off_flag]))
-        assert getattr(config, off_dest) is False, f"{off_flag} did not turn {off_dest} off"
-        assert getattr(config, other_dest) is True, (
-            f"{off_flag} ALSO turned {other_dest} off -- the two flags are wired "
-            f"as one switch, which their 'both required together' framing invites"
-        )
+    def test_the_off_switch_moves_the_flag(self) -> None:
+        config = trainer.config_from_args(
+            trainer.parse_arguments(["--no-stateless-augmentation"]))
+        assert config.stateless_augmentation is False
+
+    def test_the_retired_stream_flag_is_gone(self) -> None:
+        assert not hasattr(trainer.TrainingConfig(), "seed_training_stream")
+        with pytest.raises(SystemExit):
+            trainer.parse_arguments(["--seed-training-stream"])
 
 
 class TestSmokePreset:
@@ -619,7 +615,7 @@ class TestConfigValidation:
             self, monkeypatch, source_image_size, expected) -> None:
         """A config field that never reaches its use site is a silent no-op.
 
-        `source_image_size` sets the resolution at which `build_raw_image_dataset`
+        `source_image_size` sets the resolution at which `load_image_streams`
         DECODES each record, i.e. the resolution the multi-crop transform crops
         FROM. Wiring it CLI -> config is checked by `TestCLIWiring`; this checks
         config -> the actual call, which is the half that would otherwise leave
@@ -629,11 +625,11 @@ class TestConfigValidation:
         """
         seen: Dict[str, Any] = {}
 
-        def spy(dataset, image_size, batch_size, **kwargs):
-            seen["image_size"] = image_size
+        def spy(dataset, **kwargs):
+            seen["image_size"] = kwargs["image_size"]
             raise RuntimeError("stop: the decode resolution has been captured")
 
-        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        monkeypatch.setattr(trainer, "load_image_streams", spy)
         config = trainer.TrainingConfig(
             variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
             n_local_crops=1, batch_size=2, dataset="cifar10",
@@ -641,7 +637,7 @@ class TestConfigValidation:
         with pytest.raises(RuntimeError, match="decode resolution"):
             trainer.build_dataset(config)
         assert seen["image_size"] == expected, (
-            f"build_raw_image_dataset was asked to decode at "
+            f"load_image_streams was asked to decode at "
             f"{seen['image_size']}, not {expected} -- source_image_size="
             f"{source_image_size} did not reach the pipeline"
         )
@@ -655,7 +651,7 @@ class TestConfigValidation:
         """The half `TestCLIWiring` cannot see: config -> the actual call.
 
         The two slots are two different CALLING CONVENTIONS (`fn(image, label)`
-        vs `fn(index, image, label)`), and `build_raw_image_dataset` refuses
+        vs `fn(index, image, label)`), and `load_image_streams` refuses
         both at once, so putting the stateless map fn in the wrong slot is not
         a subtle degradation -- it is a `TypeError` a thousand steps in, or, if
         the arity happened to match, a silently unindexed augmentation. The
@@ -664,11 +660,11 @@ class TestConfigValidation:
         """
         seen: Dict[str, Any] = {}
 
-        def spy(dataset, image_size, batch_size, **kwargs):
+        def spy(dataset, **kwargs):
             seen.update(kwargs)
             raise RuntimeError("stop: the map-fn slot has been captured")
 
-        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        monkeypatch.setattr(trainer, "load_image_streams", spy)
         config = trainer.TrainingConfig(
             variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
             n_local_crops=1, batch_size=2, dataset="cifar10",
@@ -681,164 +677,81 @@ class TestConfigValidation:
             f"map fn in `{expected_slot}` (got keys {sorted(seen)})"
         )
         assert absent_slot not in seen, (
-            f"both map-fn slots were passed; build_raw_image_dataset refuses "
+            f"both map-fn slots were passed; load_image_streams refuses "
             f"that combination, so this run would die at pipeline construction"
         )
 
-    @pytest.mark.parametrize("seed_training_stream,expected", [
-        (False, None),   # non-vacuity control: the DEFAULT must pass NO kwarg
-        (True, 1234),
-    ])
-    def test_seed_training_stream_reaches_the_training_file_order(
-            self, monkeypatch, seed_training_stream, expected) -> None:
-        """D-011: the half `TestCLIWiring` cannot see -- config -> the actual call.
+    def test_the_selection_split_and_the_cap_reach_the_training_pipeline(
+            self, monkeypatch) -> None:
+        """config -> the actual call, for the two fields the data protocol added.
 
-        `build_knn_datasets` seeds the k-NN bank's TFDS file interleave (D-040)
-        UNCONDITIONALLY; `build_dataset` seeds the TRAINING stream's only when this
-        flag is on. It now ships ON, so the `False` arm below is the
-        `--no-seed-training-stream` path -- the one where two same-seed runs share
-        the measuring instrument and NOT the data they are trained on. (That
-        sentence described the DEFAULT before this flag flipped; do not reinstate
-        the old form.) This flag closes that source -- and only that source: MEASURED
-        across two processes, this flag ALONE still yields different batches (the
-        augmentation RNG is the residual), so a reproducible run needs it TOGETHER
-        with `--stateless-augmentation`. Neither is redundant.
-
-        The `False` arm is the non-vacuity control, and it asserts ABSENCE rather
-        than `None`: `build_raw_image_dataset` is shared by 6 other `src/train/`
-        consumers and its own guard
-        (`test_shuffle_files_seed_is_strictly_additive`) pins that
-        `shuffle_files_seed=None` must pass no `read_config`. Keeping the kwarg out
-        of the default call entirely means the default path is byte-for-byte the
-        call it was before this flag existed.
+        A field that never reaches its use site is a silent no-op: the run would fit on the
+        default 90% of train while the command line said otherwise. The training stream
+        also passes no `shuffle_files_seed` any more (the rows are a seeded permutation).
         """
         seen: Dict[str, Any] = {}
 
-        def spy(dataset, image_size, batch_size, **kwargs):
+        def spy(dataset, **kwargs):
             seen.update(kwargs)
             raise RuntimeError("stop: the training-stream kwargs have been captured")
 
-        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        monkeypatch.setattr(trainer, "load_image_streams", spy)
         config = trainer.TrainingConfig(
             variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
             n_local_crops=1, batch_size=2, dataset="cifar10", seed=1234,
-            seed_training_stream=seed_training_stream)
+            validation_split=0.25, max_samples=30)
         with pytest.raises(RuntimeError, match="training-stream kwargs"):
             trainer.build_dataset(config)
 
-        if expected is None:
-            assert "shuffle_files_seed" not in seen, (
-                f"the DEFAULT training pipeline passed "
-                f"shuffle_files_seed={seen.get('shuffle_files_seed')!r}; it must "
-                f"pass the kwarg not at all, so the default call stays byte-for-"
-                f"byte what it was. Got keys {sorted(seen)}")
-        else:
-            assert seen.get("shuffle_files_seed") == expected, (
-                f"--seed-training-stream did not reach the training pipeline (got "
-                f"shuffle_files_seed={seen.get('shuffle_files_seed')!r}, wanted "
-                f"{expected}); the TFDS file interleave stays unseeded and two "
-                f"same-seed runs train on a different example order from step 0")
+        assert (seen["validation_split"], seen["max_samples"], seen["seed"]) == (0.25, 30, 1234)
+        assert seen["augment"] is False, "the loader's own augmentation would stack under the multi-crop"
+        assert "shuffle_files_seed" not in seen
 
-    def test_the_knn_memory_bank_seeds_the_TFDS_FILE_order(
+    def test_the_knn_probe_banks_the_fit_rows_and_queries_the_selection_slice(
             self, monkeypatch) -> None:
-        """D-040: the bank must be seeded down to the file interleave, not just `seed`.
+        """The bank comes from the TRAIN stream and the queries from the SELECTION slice.
 
-        `.take(knn_bank_batches)` selects a SMALL sample of the 9469 train images
-        -- `knn_bank_batches * batch_size`, i.e. 512 at the `--smoke` defaults
-        (16 x 32) and 2048 at the 64/32 probe settings every measured figure was
-        taken at -- and `build_raw_image_dataset` opens the train split with
-        `shuffle_files=True`. `seed=` reaches only the element `.shuffle()` and the
-        augmentation. MEASURED before this was wired: four bank draws at `seed=42`
-        (two per process, two processes) gave four DIFFERENT label sequences, and
-        four zero-step k-NN controls spread `dino_knn_top1_k20` over a range of
-        0.0195 -- larger than the +0.0127 effect a step-14 A/B was reading.
-
-        The QUERY arm is the non-vacuity control: the validation split is opened
-        with `shuffle_files=False`, so seeding its file order would be meaningless
-        and this test would pass whether or not the BANK were seeded if it only
-        checked "some call got a seed".
+        The tagged datasets make the source of every element visible: the bank must be
+        built from `train_ds`, the queries from `select_ds`, and nothing from `test_ds`
+        (which only the one post-training probe reads).
         """
         calls: list = []
 
-        def spy(dataset, image_size, batch_size, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 2:
-                raise RuntimeError("stop: both k-NN pipelines have been captured")
-            return (object(), 0, 0)
+        class _Streams:
+            train_ds = tf.data.Dataset.range(0, 100)
+            select_ds = tf.data.Dataset.range(1000, 1010)
+            test_ds = tf.data.Dataset.range(2000, 2010)
+            n_test = 10
 
-        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        def fake(dataset, **kwargs):
+            calls.append(kwargs)
+            return _Streams()
+
+        monkeypatch.setattr(trainer, "load_image_streams", fake)
         config = trainer.TrainingConfig(
             variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
-            n_local_crops=1, batch_size=2, dataset="cifar10", seed=1234)
-        with pytest.raises(RuntimeError, match="both k-NN pipelines"):
-            trainer.build_knn_datasets(config)
+            n_local_crops=1, batch_size=2, dataset="cifar10", seed=1234,
+            knn_bank_batches=3, knn_query_batches=2, validation_split=0.25, max_samples=30)
+        bank, query = trainer.build_knn_datasets(config)
 
-        bank_kwargs, query_kwargs = calls[0], calls[1]
-        assert bank_kwargs["is_training"] is True, "call 0 must be the BANK"
-        assert query_kwargs["is_training"] is False, "call 1 must be the QUERY set"
-        assert bank_kwargs.get("shuffle_files_seed") == 1234, (
-            f"the k-NN memory bank was built WITHOUT a seeded TFDS file order "
-            f"(got shuffle_files_seed={bank_kwargs.get('shuffle_files_seed')!r}); "
-            f"every dino_knn_top1_* it produces then carries a ~0.02 run-to-run "
-            f"band from an unseeded file interleave"
-        )
+        assert [int(x) for x in bank] == [0, 1, 2]
+        assert [int(x) for x in query] == [1000, 1001]
+        # single crops at the global resolution, no multi-crop map, no augmentation
+        assert calls[0]["image_size"] == 32 and calls[0]["augment"] is False
+        assert "element_map_fn" not in calls[0] and "indexed_element_map_fn" not in calls[0]
+        assert (calls[0]["validation_split"], calls[0]["max_samples"]) == (0.25, 30)
 
-    @pytest.mark.parametrize("shuffle_files_seed,expect_read_config", [
-        (None, False),   # non-vacuity control: the DEFAULT must not change
-        (42, True),
-    ])
-    def test_shuffle_files_seed_is_strictly_additive(
-            self, monkeypatch, shuffle_files_seed, expect_read_config) -> None:
-        """D-040: `shuffle_files_seed=None` must pass NO read_config at all.
+        test_ds, n_batches = trainer.build_knn_test_dataset(config)
+        assert [int(x) for x in test_ds.take(1)] == [2000]
+        assert n_batches == 5  # ceil(10 / 2)
 
-        `build_raw_image_dataset` is shared by every `src/train/` consumer, so the
-        new parameter is only safe if its default is byte-for-byte today's call.
-        `ReadConfig(shuffle_seed=None)` is NOT the same thing as no ReadConfig, and
-        the difference is invisible in a single-consumer test -- hence the `None`
-        arm, which is the control this pair exists for.
-
-        This guard lives beside the DINO trainer rather than in a new test module
-        because `shuffle_files_seed` exists for `build_knn_datasets` above and the
-        parameter is exercised nowhere else; the shared function's own regression
-        gate is `tests/test_train/test_energy_transformer/`.
-        """
-        import tensorflow_datasets as tfds
-
-        from train.energy_transformer import common as et_common
-
-        seen: Dict[str, Any] = {}
-
-        class _FakeSplit:
-            num_examples = 8
-
-        class _FakeInfo:
-            splits = {"train": _FakeSplit(), "validation": _FakeSplit()}
-
-        class _FakeBuilder:
-            info = _FakeInfo()
-
-            def as_dataset(self, **kwargs):
-                seen.update(kwargs)
-                raise RuntimeError("stop: as_dataset kwargs captured")
-
-        monkeypatch.setattr(tfds, "builder", lambda *a, **k: _FakeBuilder())
-
-        with pytest.raises(RuntimeError, match="as_dataset kwargs captured"):
-            et_common.build_raw_image_dataset(
-                "imagenette", 32, 2, is_training=True, augment=False, seed=7,
-                shuffle_files_seed=shuffle_files_seed)
-
-        assert seen["shuffle_files"] is True
-        if expect_read_config:
-            assert "read_config" in seen, (
-                f"shuffle_files_seed={shuffle_files_seed} did not reach "
-                f"as_dataset; the file order stays unseeded. Got {sorted(seen)}")
-            assert seen["read_config"].shuffle_seed == 42
-        else:
-            assert "read_config" not in seen, (
-                f"the DEFAULT passed read_config={seen.get('read_config')!r}; "
-                f"shuffle_files_seed=None must change NOTHING for the other "
-                f"src/train/ consumers of this shared function")
+    def test_the_post_training_probe_covers_the_whole_test_split(self) -> None:
+        config = trainer.TrainingConfig(
+            variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
+            n_local_crops=1, batch_size=3, dataset="cifar10", seed=1)
+        test_ds, n_batches = trainer.build_knn_test_dataset(config)
+        assert n_batches == 3  # ceil(8 / 3)
+        assert sum(int(x.shape[0]) for x, _ in test_ds) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +906,8 @@ def _make_fit_spy() -> Tuple[Any, list]:
 
     def fake_fit(self, *args: Any, **kwargs: Any):
         calls.append({"args": args, "kwargs": kwargs})
+        for callback in kwargs.get("callbacks", []):
+            callback.set_model(self)
         history = keras.callbacks.History()
         history.history = {"loss": [1.0, 0.9]}
         return history
@@ -1052,11 +967,24 @@ class TestNoValidationData:
         )
         assert kwargs.get("callbacks"), "no callbacks reached fit()"
 
+    def test_the_test_split_is_probed_once_after_training(self, spy_run) -> None:
+        """The per-epoch probe queried the selection slice; the test split is scored here,
+        once, and the result is returned and written beside the run."""
+        import json
+
+        _spy, result = spy_run
+        knn_test = result["knn_test"]
+        assert knn_test is not None and "dino_knn_top1_k20" in knn_test
+        assert 0.0 <= knn_test["dino_knn_top1_k20"] <= 1.0
+        written = json.loads((tmp_path_of(result) / "knn_test.json").read_text())
+        assert written["metrics"] == knn_test
+
     def test_the_run_wrote_its_artifacts(self, spy_run) -> None:
         _spy, result = spy_run
         run_dir = tmp_path_of(result)
         assert (run_dir / "config.json").is_file()
         assert (run_dir / "final_model.keras").is_file()
+        assert (run_dir / "knn_test.json").is_file()
         assert not str(run_dir).endswith("src/results"), "outputs must not land in src/"
 
 

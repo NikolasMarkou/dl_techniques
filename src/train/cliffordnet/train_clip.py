@@ -736,8 +736,8 @@ _PRETRAIN_NORMALIZATION = (IMAGE_MEAN, IMAGE_STD)
 def _pretrain_vision_datasets(
     x_train: np.ndarray,
     y_train: np.ndarray,
-    x_test: np.ndarray,
-    y_test: np.ndarray,
+    x_select: np.ndarray,
+    y_select: np.ndarray,
     batch_size: int,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """The CIFAR-100 pretraining datasets, normalised like the contrastive stage.
@@ -762,7 +762,7 @@ def _pretrain_vision_datasets(
         normalization=_PRETRAIN_NORMALIZATION,
     )
     val_ds = build_eval_dataset(
-        x_test, y_test,
+        x_select, y_select,
         batch_size=batch_size,
         dataset_name="cifar100",
         normalization=_PRETRAIN_NORMALIZATION,
@@ -810,13 +810,13 @@ def _run_pretrain_vision(
 
     if args.synthetic:
         x_train, y_train = _synthetic_cifar100(2 * batch_size, seed=args.seed)
-        x_test, y_test = _synthetic_cifar100(batch_size, seed=args.seed + 1)
+        x_select, y_select = _synthetic_cifar100(batch_size, seed=args.seed + 1)
         num_classes = _CIFAR100_CLASSES
     else:
         # Validation is a held-out slice of train; the test split is not used here.
         arrays = load_split_arrays("cifar100", seed=args.seed)
         x_train, y_train = arrays.x_train, arrays.y_train
-        x_test, y_test = arrays.x_select, arrays.y_select
+        x_select, y_select = arrays.x_select, arrays.y_select
         num_classes = arrays.num_classes
     if num_classes != _CIFAR100_CLASSES:
         raise RuntimeError(
@@ -825,7 +825,7 @@ def _run_pretrain_vision(
         )
 
     train_ds, val_ds = _pretrain_vision_datasets(
-        x_train, y_train, x_test, y_test, batch_size)
+        x_train, y_train, x_select, y_select, batch_size)
     steps_per_epoch = max(1, min(len(x_train) // batch_size, steps_budget))
     pretrain_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
     warmup_steps = max(1, int(0.05 * steps_budget))

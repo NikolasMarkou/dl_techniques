@@ -52,11 +52,11 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
 )
+from train.common.classification_data import add_selection_arguments
+from train.common.image_streams import SUPPORTED_DATASETS, load_image_streams
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.beit.common import (
-    SUPPORTED_DATASETS,
     build_optimizer,
-    build_raw_image_dataset,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
@@ -80,6 +80,10 @@ class TrainingConfig:
     image_size: int = 224
     batch_size: int = 32
     augment_data: bool = True
+    # Selection is a seeded slice of the train rows (None means the loader's 0.1); the test
+    # split never selects. max_samples caps the train pool and the test split (smoke runs).
+    validation_split: Optional[float] = None
+    max_samples: Optional[int] = None
 
     # Model (auto-build path of VQVAERotationTrick)
     downsample_factor: int = 16  # code grid = image_size // downsample_factor
@@ -182,7 +186,7 @@ class TrainingConfig:
 # DATA
 # ---------------------------------------------------------------------
 
-def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, int, int]:
+def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, Any, int, int]:
     """Build the raw-image train/val pipelines.
 
     NO ``element_map_fn``: the tokenizer reconstructs the raw image, so the stock
@@ -190,30 +194,20 @@ def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, int, int]:
     ``data[0]`` and ignores the label.
 
     Returns:
-        ``(train_ds, val_ds, steps_per_epoch, val_steps)``.
+        ``(train_ds, select_ds, test_ds, steps_per_epoch, val_steps)``.
     """
-    train_ds, num_train, _ = build_raw_image_dataset(
+    streams = load_image_streams(
         config.dataset,
-        config.image_size,
-        config.batch_size,
-        is_training=True,
+        image_size=config.image_size,
+        batch_size=config.batch_size,
+        seed=config.seed,
+        validation_split=config.validation_split,
+        max_samples=config.max_samples,
         augment=config.augment_data,
-        seed=config.seed,
+        
     )
-    val_ds, num_val, _ = build_raw_image_dataset(
-        config.dataset,
-        config.image_size,
-        config.batch_size,
-        is_training=False,
-        seed=config.seed,
-    )
-
-    steps_per_epoch = max(1, num_train // config.batch_size)
-    val_steps = max(1, num_val // config.batch_size)
-    if config.max_steps is not None:
-        steps_per_epoch = min(steps_per_epoch, config.max_steps)
-        val_steps = min(val_steps, config.max_steps)
-    return train_ds, val_ds, steps_per_epoch, val_steps
+    steps_per_epoch, val_steps = streams.capped_steps(config.max_steps)
+    return streams.train_ds, streams.select_ds, streams.test_ds, steps_per_epoch, val_steps
 
 
 # ---------------------------------------------------------------------
@@ -295,7 +289,7 @@ def train_tokenizer(config: TrainingConfig) -> Dict[str, Any]:
     run_dir = prepare_run_dir(config)
 
     # ---- Data ----
-    train_ds, val_ds, steps_per_epoch, val_steps = build_datasets(config)
+    train_ds, val_ds, test_ds, steps_per_epoch, val_steps = build_datasets(config)
     logger.info(f"Steps per epoch: {steps_per_epoch}, val steps: {val_steps}")
 
     # ---- Model ----
@@ -336,6 +330,11 @@ def train_tokenizer(config: TrainingConfig) -> Dict[str, Any]:
     )
     logger.info(f"Training completed in {(time.time() - start) / 3600.0:.3f} hours")
 
+    # The model holds the best epoch's weights (EarlyStopping restored them), selected on the
+    # held-out slice of train; the test split is scored once, here.
+    test_metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
+    logger.info(f"Test metrics: {test_metrics}")
+
     loss_curve = history.history.get("loss", []) or [float("nan")]
     val_curve = history.history.get("val_loss", []) or [float("nan")]
 
@@ -353,6 +352,7 @@ def train_tokenizer(config: TrainingConfig) -> Dict[str, Any]:
     return {
         "model": model,
         "best_val_loss": float(min(val_curve)),
+        "test_metrics": {k: float(v) for k, v in test_metrics.items()},
         "first_loss": float(loss_curve[0]),
         "final_loss": float(loss_curve[-1]),
         "run_dir": str(run_dir),
@@ -380,6 +380,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help="Auto: 224 for imagenette, 32 for cifar10")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
+    add_selection_arguments(parser, imagenet=False, figures=False)
 
     # Model
     parser.add_argument("--downsample-factor", type=int, default=None,
@@ -447,6 +448,8 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         image_size=image_size,
         batch_size=args.batch_size,
         augment_data=args.augment_data,
+        validation_split=args.validation_split,
+        max_samples=args.max_samples,
         downsample_factor=downsample_factor,
         num_embeddings=args.num_embeddings,
         embedding_dim=args.embedding_dim,

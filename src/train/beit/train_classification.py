@@ -53,9 +53,9 @@ from train.common.classification_data import (
     flip_pad_crop,
     load_classification_data,
 )
+from train.common.image_streams import SUPPORTED_DATASETS
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.beit.common import (
-    SUPPORTED_DATASETS,
     build_optimizer,
 )
 from dl_techniques.utils.logger import logger
@@ -467,7 +467,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help="Auto: 16 for imagenette, 4 for cifar10")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
-    add_selection_arguments(parser, imagenet=False)
+    add_selection_arguments(parser, imagenet=False, figures=False)
 
     # Model
     parser.add_argument("--variant", type=str, default="base",
