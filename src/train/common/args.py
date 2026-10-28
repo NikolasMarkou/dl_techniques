@@ -297,6 +297,7 @@ def create_base_argument_parser(
         default_batch_size: Optional[int] = 64,
         image_size_help: Optional[str] = None,
         batch_size_help: str = 'Training batch size',
+        include_image_size: bool = True,
 ) -> argparse.ArgumentParser:
     """Create argument parser with standard training arguments.
 
@@ -316,6 +317,8 @@ def create_base_argument_parser(
             caller to resolve after parsing (e.g. per dataset).
         image_size_help: Help text of ``--image-size`` (default: names 224).
         batch_size_help: Help text of ``--batch-size``.
+        include_image_size: Declare ``--image-size``. A trainer of fixed-size datasets
+            (MNIST, CIFAR) passes ``False``: the flag would do nothing there.
 
     Returns:
         ArgumentParser with common training arguments.
@@ -328,8 +331,9 @@ def create_base_argument_parser(
     # Data
     parser.add_argument('--dataset', type=str, default=default_dataset,
                         choices=dataset_choices, help='Dataset to use')
-    parser.add_argument('--image-size', type=int, default=default_image_size,
-                        help=image_size_help or 'Image size (for ImageNet, default: 224)')
+    if include_image_size:
+        parser.add_argument('--image-size', type=int, default=default_image_size,
+                            help=image_size_help or 'Image size (for ImageNet, default: 224)')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,

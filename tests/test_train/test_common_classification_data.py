@@ -311,3 +311,103 @@ def test_the_loader_seam_refuses_a_dataset_it_cannot_read(monkeypatch) -> None:
     monkeypatch.undo()
     with pytest.raises(ValueError, match="no in-memory loader for dataset 'imagenet'"):
         cd._load_raw("imagenet")
+
+
+# ---------------------------------------------------------------------
+# load_split_arrays: the same split with no pipeline
+# ---------------------------------------------------------------------
+
+
+def test_the_split_arrays_are_the_loaders_split() -> None:
+    arrays = cd.load_split_arrays("cifar10", seed=3)
+    data = _load(seed=3)
+    for name in ("x_train", "x_select", "x_test", "index_train", "index_select", "index_test"):
+        np.testing.assert_array_equal(getattr(arrays, name), getattr(data.arrays, name))
+
+
+def test_the_split_arrays_need_no_batch_size_and_carry_the_metadata() -> None:
+    arrays = cd.load_split_arrays("cifar100", seed=0, labels="one_hot")
+    assert arrays.input_shape == (32, 32, 3) and arrays.num_classes == 100
+    assert arrays.class_names[0] == "apple" and arrays.y_train.shape[1] == 100
+
+
+def test_the_row_indices_align_a_second_label_set_with_the_split() -> None:
+    """The indices are rows of the Keras arrays: pixel [0, 0, 0] is the row's identity."""
+    arrays = cd.load_split_arrays("cifar10", seed=5)
+    np.testing.assert_array_equal(_ids(arrays.x_train), arrays.index_train)
+    np.testing.assert_array_equal(_ids(arrays.x_select), arrays.index_select)
+    np.testing.assert_array_equal(_ids(arrays.x_test), arrays.index_test + N_TRAIN)
+
+
+def test_split_arrays_refuse_imagenet_and_a_bad_split() -> None:
+    with pytest.raises(ValueError, match="not an in-memory dataset"):
+        cd.load_split_arrays("imagenet", seed=0)
+    with pytest.raises(ValueError, match="strictly inside"):
+        cd.load_split_arrays("mnist", seed=0, validation_split=0.0)
+    with pytest.raises(ValueError, match="labels must be one of"):
+        cd.load_split_arrays("mnist", seed=0, labels="soft")
+
+
+# ---------------------------------------------------------------------
+# resize, eval_samples=0, colour augmentation
+# ---------------------------------------------------------------------
+
+
+def test_resize_upsamples_every_pipeline_and_reports_the_resized_shape() -> None:
+    data = _load(normalize="unit", resize=48)
+    assert data.input_shape == (48, 48, 3)
+    for dataset in (data.train_ds, data.select_ds, data.test_ds):
+        assert next(iter(dataset))[0].shape[1:] == (48, 48, 3)
+    # the arrays and the figure subset keep the native resolution
+    assert data.arrays.x_train.shape[1:] == (32, 32, 3) and data.x_fig.shape[1:] == (32, 32, 3)
+
+
+def test_resize_is_refused_for_imagenet(tree, three_class_imagenet) -> None:
+    with pytest.raises(ValueError, match="resize applies to in-memory datasets"):
+        _imagenet(tree, resize=64)
+
+
+def test_resize_happens_before_the_hook_and_commutes_with_standardizing() -> None:
+    seen = {}
+
+    def hook(image, label):
+        seen["shape"] = tuple(image.shape)
+        return image, label
+
+    _load(resize=40, augment=hook)
+    assert seen["shape"] == (40, 40, 3)
+
+
+def test_eval_samples_zero_keeps_no_figure_images(tree, three_class_imagenet) -> None:
+    data = _imagenet(tree, eval_samples=0)
+    assert data.x_fig.shape == (0, 32, 32, 3) and data.y_fig.shape == (0,)
+    assert data.n_test == len(VAL_CLASSES)
+
+
+def test_imagenet_colour_augmentation_reaches_the_loader(tree, three_class_imagenet, monkeypatch) -> None:
+    seen = {}
+    real = cd.load_imagenet_selection_splits
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cd, "load_imagenet_selection_splits", spy)
+    _imagenet(tree, imagenet_augment_color=True)
+    assert seen["augment_color"] is True and seen["augment"] is True
+    _imagenet(tree, imagenet_augment=False)
+    assert seen["augment"] is False and seen["augment_color"] is False
+
+
+def test_the_selection_flags_can_be_trimmed_to_what_a_trainer_uses() -> None:
+    def parse(**kwargs):
+        parser = argparse.ArgumentParser()
+        cd.add_selection_arguments(parser, **kwargs)
+        return {a.dest for a in parser._actions} - {"help"}
+
+    full = parse()
+    assert {"validation_split", "max_samples", "holdout_per_class", "imagenet_root",
+            "devkit_dir", "eval_samples"} <= full
+    assert parse(imagenet=False) == {"validation_split", "max_samples"}
+    assert "validation_split" not in parse(in_memory=False)
+    assert "eval_samples" not in parse(figures=False)

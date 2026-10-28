@@ -141,9 +141,18 @@ def flip_pad_crop(pad: int = AUGMENT_PAD, mode: str = "CONSTANT", flip: bool = T
     return augment
 
 
+def _resizer(size: Optional[int]) -> Callable[[tf.Tensor], tf.Tensor]:
+    """Bilinear resize to ``size`` x ``size`` (the identity for ``None``). Linear, so it
+    commutes with the per-channel affine normalization applied after it."""
+    if size is None:
+        return lambda image: image
+    return lambda image: tf.image.resize(image, (size, size), method="bilinear")
+
+
 def _train_pipeline(
         x: np.ndarray, y: np.ndarray, batch_size: int, seed: int,
         augment: Optional[Augment], normalize: Callable[[tf.Tensor], tf.Tensor],
+        resize: Callable[[tf.Tensor], tf.Tensor] = lambda image: image,
 ) -> "tf.data.Dataset":
     """Shuffled, augmented ([0, 1]), normalized, batched train pipeline; drops the remainder.
 
@@ -152,6 +161,8 @@ def _train_pipeline(
     """
     dataset = tf.data.Dataset.from_tensor_slices((x, y)).shuffle(
         len(x), seed=seed, reshuffle_each_iteration=True)
+    dataset = dataset.map(lambda image, label: (resize(image), label),
+                          num_parallel_calls=tf.data.AUTOTUNE)
     if augment is not None:
         dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
     return (
@@ -163,7 +174,8 @@ def _train_pipeline(
 
 
 def _eval_pipeline(
-        x: np.ndarray, y: np.ndarray, normalize: Callable[[tf.Tensor], tf.Tensor]
+        x: np.ndarray, y: np.ndarray, normalize: Callable[[tf.Tensor], tf.Tensor],
+        resize: Callable[[tf.Tensor], tf.Tensor] = lambda image: image,
 ) -> "tf.data.Dataset":
     """Un-augmented, un-shuffled, normalized, batched pipeline (selection and test).
 
@@ -172,7 +184,7 @@ def _eval_pipeline(
     """
     return (
         tf.data.Dataset.from_tensor_slices((x, y))
-        .map(lambda image, label: (normalize(image), label),
+        .map(lambda image, label: (normalize(resize(image)), label),
              num_parallel_calls=tf.data.AUTOTUNE)
         .batch(EVAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     )
@@ -186,9 +198,12 @@ def _eval_pipeline(
 class SplitArrays:
     """The in-memory splits of MNIST and CIFAR, scaled to [0, 1] (NOT normalized).
 
-    For a trainer that builds its own pipeline (numpy augmentation, flattened inputs).
-    Labels follow the ``labels`` mode of the load. ``None`` on :class:`ClassificationData`
-    for ImageNet, which cannot be held in memory.
+    For a trainer that builds its own pipeline (numpy augmentation, flattened inputs) or
+    needs no pipeline at all: :func:`load_split_arrays` returns this alone. Labels follow
+    the ``labels`` mode of the load. ``index_*`` are the rows of the original dataset
+    (the Keras arrays' order) each split took, so a second label set read from the same
+    source (CIFAR-100's coarse labels) can be aligned. ``None`` on
+    :class:`ClassificationData` for ImageNet, which cannot be held in memory.
     """
 
     x_train: np.ndarray
@@ -197,6 +212,12 @@ class SplitArrays:
     y_select: np.ndarray
     x_test: np.ndarray
     y_test: np.ndarray
+    input_shape: Tuple[int, int, int]
+    num_classes: int
+    class_names: list
+    index_train: np.ndarray
+    index_select: np.ndarray
+    index_test: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -281,6 +302,8 @@ def load_classification_data(
         channels: Optional[int] = None,
         augment: Optional[Augment] = None,
         imagenet_augment: bool = True,
+        imagenet_augment_color: bool = False,
+        resize: Optional[int] = None,
         max_samples: Optional[int] = None,
         eval_samples: int = DEFAULT_EVAL_SAMPLES,
         imagenet_root: Optional[str] = None,
@@ -303,9 +326,16 @@ def load_classification_data(
     :param augment: In-memory datasets only: a map applied to the train pipeline on the
         [0, 1] image, e.g. :func:`flip_pad_crop`. ``None`` means no augmentation.
     :param imagenet_augment: ImageNet only: the loader's random-resized-crop and flip.
+    :param imagenet_augment_color: ImageNet only: also jitter brightness, contrast,
+        saturation and hue on the train images.
+    :param resize: In-memory datasets only: bilinear-resize every image of every pipeline to
+        ``resize`` x ``resize`` before the hook (upsampling CIFAR for a model defined at
+        227 px). ``input_shape`` is then the resized shape; ``arrays`` and ``x_fig`` keep
+        the native resolution (a resized test set would be a very large array).
     :param max_samples: Smoke-run cap on the train pool and on the test split (ImageNet:
         ``max_images``; the selection split is never capped there).
-    :param eval_samples: ImageNet only: test images kept in memory for the figures.
+    :param eval_samples: ImageNet only: test images kept in memory for the figures; ``0``
+        keeps none (``x_fig`` and ``y_fig`` are empty), for a trainer that draws no figures.
     :param imagenet_root, devkit_dir, image_size: ImageNet only, ignored otherwise (every
         parser carries ``--imagenet-root`` with a default); ``None`` means the loader's
         defaults: its default root, ``<root>/devkit`` and 224.
@@ -325,9 +355,8 @@ def load_classification_data(
                 "use validation_split"
             )
         return _load_in_memory(
-            spec, batch_size, seed,
-            DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split,
-            normalize, labels, channels, augment, max_samples)
+            spec, batch_size, seed, validation_split, normalize, labels, channels, augment,
+            resize, max_samples)
     if validation_split is not None:
         raise ValueError(
             f"validation_split={validation_split} does not apply to ImageNet, which selects "
@@ -338,18 +367,46 @@ def load_classification_data(
             "augment applies to in-memory datasets; ImageNet augments in its loader "
             "(imagenet_augment)"
         )
+    if resize is not None:
+        raise ValueError("resize applies to in-memory datasets; ImageNet takes image_size")
     if channels not in (None, 3):
         raise ValueError(f"channels={channels} is not available for 'imagenet' (3)")
     return _load_imagenet(
         spec, batch_size, seed, holdout_per_class, normalize, labels, imagenet_augment,
+        imagenet_augment_color,
         max_samples, eval_samples, imagenet_root, devkit_dir, image_size)
 
 
-def _load_in_memory(
-        spec: DatasetSpec, batch_size: int, seed: int, validation_split: float,
-        normalize: str, labels: str, channels: Optional[int], augment: Optional[Augment],
-        max_samples: Optional[int],
-) -> ClassificationData:
+def load_split_arrays(
+        name: str,
+        *,
+        seed: int,
+        validation_split: Optional[float] = None,
+        labels: str = "sparse",
+        channels: Optional[int] = None,
+        max_samples: Optional[int] = None,
+) -> SplitArrays:
+    """The in-memory splits of MNIST or CIFAR in [0, 1], with no pipeline built.
+
+    The split is :func:`load_classification_data`'s (the same seeded permutation), for a
+    trainer that needs arrays only, such as a numpy loop or a flattened-input MLP.
+
+    :param name: ``mnist``, ``cifar10`` or ``cifar100``.
+    :param seed: Seed of the split.
+    :param validation_split: Fraction of train held out for selection (``None`` means
+        :data:`DEFAULT_VALIDATION_SPLIT`), strictly inside (0, 1).
+    :param labels: ``"sparse"`` or ``"one_hot"``.
+    :param channels: MNIST only: ``3`` repeats the channel; ``None`` keeps it native.
+    :param max_samples: Smoke-run cap on the train pool and the test split.
+    :raises ValueError: ``name`` is not an in-memory dataset, a bad option, or a selection
+        split holding out zero samples.
+    """
+    spec = get_spec(name)
+    if not spec.in_memory:
+        raise ValueError(f"{spec.name!r} is not an in-memory dataset; use load_classification_data")
+    if labels not in LABEL_MODES:
+        raise ValueError(f"labels must be one of {LABEL_MODES}, got {labels!r}")
+    validation_split = DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split
     if not 0.0 < validation_split < 1.0:
         raise ValueError(
             f"validation_split must be strictly inside (0, 1), got {validation_split}. "
@@ -370,17 +427,31 @@ def _load_in_memory(
     select_idx, train_idx = train_order[:n_select], train_order[n_select:]
 
     def unit(x: np.ndarray, idx: np.ndarray) -> np.ndarray:
-        return (x[idx].astype(np.float32) / 255.0)
+        return x[idx].astype(np.float32) / 255.0
 
     def label(y: np.ndarray, idx: np.ndarray) -> np.ndarray:
         y = y[idx].astype(np.int32)
         return _one_hot(y, spec.num_classes) if labels == "one_hot" else y
 
-    arrays = SplitArrays(
+    return SplitArrays(
         x_train=unit(x_train, train_idx), y_train=label(y_train, train_idx),
         x_select=unit(x_train, select_idx), y_select=label(y_train, select_idx),
         x_test=unit(x_test, test_order), y_test=label(y_test, test_order),
+        input_shape=(*x_train.shape[1:3], n_channels), num_classes=spec.num_classes,
+        class_names=spec.class_names_for(spec.num_classes),
+        index_train=train_idx, index_select=select_idx, index_test=test_order,
     )
+
+
+def _load_in_memory(
+        spec: DatasetSpec, batch_size: int, seed: int, validation_split: Optional[float],
+        normalize: str, labels: str, channels: Optional[int], augment: Optional[Augment],
+        resize: Optional[int], max_samples: Optional[int],
+) -> ClassificationData:
+    arrays = load_split_arrays(
+        spec.name, seed=seed, validation_split=validation_split, labels=labels,
+        channels=channels, max_samples=max_samples)
+    n_channels = arrays.input_shape[-1]
     mean, std = _stats(spec, n_channels, normalize)
     mean_t, std_t = tf.constant(mean), tf.constant(std)
 
@@ -391,31 +462,33 @@ def _load_in_memory(
         return ((x - mean) / std).astype(np.float32)
 
     steps = steps_per_epoch_for(len(arrays.x_train), batch_size)
-    input_shape = (*arrays.x_train.shape[1:3], n_channels)
     logger.info(
         f"{spec.name}: train {arrays.x_train.shape}, select {arrays.x_select.shape}, "
         f"test {arrays.x_test.shape}; {normalize}, labels {labels}"
     )
+    split = (f"validation_split={DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split}"
+             " of the train set (seeded permutation)")
     return ClassificationData(
-        train_ds=_train_pipeline(arrays.x_train, arrays.y_train, batch_size, seed, augment, norm),
-        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm),
-        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm),
+        train_ds=_train_pipeline(arrays.x_train, arrays.y_train, batch_size, seed, augment,
+                                 norm, _resizer(resize)),
+        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm, _resizer(resize)),
+        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm, _resizer(resize)),
         steps_per_epoch=steps,
         n_train=int(len(arrays.x_train)), n_select=int(len(arrays.x_select)),
         n_test=int(len(arrays.x_test)),
         x_fig=norm_np(arrays.x_test), y_fig=arrays.y_test, arrays=arrays,
-        mean=mean, std=std, input_shape=input_shape, num_classes=spec.num_classes,
-        class_names=spec.class_names_for(spec.num_classes),
-        selection_split=f"validation_split={validation_split} of the train set "
-                        "(seeded permutation)",
+        mean=mean, std=std,
+        input_shape=arrays.input_shape if resize is None else (resize, resize, n_channels),
+        num_classes=spec.num_classes, class_names=arrays.class_names,
+        selection_split=split,
         test_split="the dataset's test set",
     )
 
 
 def _load_imagenet(
         spec: DatasetSpec, batch_size: int, seed: int, holdout_per_class: Optional[int],
-        normalize: str, labels: str, augment: bool, max_samples: Optional[int],
-        eval_samples: int, root: Optional[str], devkit_dir: Optional[str],
+        normalize: str, labels: str, augment: bool, augment_color: bool,
+        max_samples: Optional[int], eval_samples: int, root: Optional[str], devkit_dir: Optional[str],
         image_size: Optional[int],
 ) -> ClassificationData:
     root = IMAGENET2012_DEFAULT_ROOT if root is None else root
@@ -424,11 +497,14 @@ def _load_imagenet(
     require_imagenet_root(root)
     train, select, test = load_imagenet_selection_splits(
         root, devkit_dir, size, batch_size, seed, augment=augment,
-        holdout_per_class=holdout,
+        augment_color=augment_color, holdout_per_class=holdout,
         normalize="imagenet" if normalize == "standardize" else "unit",
         num_classes=spec.num_classes, max_images=max_samples,
     )
-    x_fig, y_fig = eval_head(test, eval_samples)
+    if eval_samples == 0:
+        x_fig, y_fig = np.zeros((0, size, size, 3), np.float32), np.zeros((0,), np.int32)
+    else:
+        x_fig, y_fig = eval_head(test, eval_samples)
     mean, std = _stats(spec, 3, normalize)
 
     def encode(dataset: "tf.data.Dataset") -> "tf.data.Dataset":
@@ -458,20 +534,34 @@ def _load_imagenet(
 # Command line
 # ---------------------------------------------------------------------
 
-def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
+def add_selection_arguments(
+        parser: argparse.ArgumentParser, imagenet: bool = True, in_memory: bool = True,
+        figures: bool = True,
+) -> None:
     """Add the flags that describe the selection protocol to ``parser``.
 
-    ``--validation-split`` (MNIST and CIFAR), ``--holdout-per-class`` and the ImageNet
-    location flags (ImageNet), ``--max-samples`` and ``--eval-samples``. All default to
-    ``None`` (or the shared default) so :func:`load_classification_data` can refuse an
-    option that does not apply to the chosen dataset.
+    ``--validation-split`` (MNIST and CIFAR), ``--max-samples``, and with ``imagenet``
+    ``--holdout-per-class``, the ImageNet location flags and ``--eval-samples``. All
+    default to ``None`` (or the shared default) so :func:`load_classification_data` can
+    refuse an option that does not apply to the chosen dataset. A trainer of MNIST and
+    CIFAR only passes ``imagenet=False``; an ImageNet-only trainer passes ``in_memory=False``
+    (no ``--validation-split``); a trainer that draws no figures passes ``figures=False``
+    (no ``--eval-samples``; it loads with ``eval_samples=0``).
     """
+    if in_memory:
+        parser.add_argument(
+            "--validation-split", type=float, default=None,
+            help="MNIST and CIFAR: fraction of the train set held out (seeded) for early "
+                 f"stopping and checkpoint selection, strictly inside (0, 1) (default "
+                 f"{DEFAULT_VALIDATION_SPLIT}); the test set never selects."
+                 + (" Refused with imagenet." if imagenet else ""),
+        )
     parser.add_argument(
-        "--validation-split", type=float, default=None,
-        help="MNIST and CIFAR: fraction of the train set held out (seeded) for early "
-             f"stopping and checkpoint selection, strictly inside (0, 1) (default "
-             f"{DEFAULT_VALIDATION_SPLIT}); the test set never selects. Refused with imagenet.",
+        "--max-samples", type=int, default=None,
+        help="Cap the train pool and the test set at this many samples (smoke runs).",
     )
+    if not imagenet:
+        return
     parser.add_argument(
         "--holdout-per-class", type=int, default=None,
         help="Used only when --dataset imagenet: images per class taken out of train for "
@@ -480,10 +570,8 @@ def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
              f"{DEFAULT_HOLDOUT_PER_CLASS * 1000} images). Refused with MNIST and CIFAR.",
     )
     add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
-    parser.add_argument(
-        "--max-samples", type=int, default=None,
-        help="Cap the train pool and the test set at this many samples (smoke runs).",
-    )
+    if not figures:
+        return
     parser.add_argument(
         "--eval-samples", type=int, default=DEFAULT_EVAL_SAMPLES,
         help="Used only when --dataset imagenet: test images kept in memory for figures "
