@@ -38,6 +38,7 @@ ConvNeXt argues that most of the Transformer's gain came from macro/micro design
 -   **Macro design**: ViT-like stage compute ratios and a patchify stem.
 -   **Micro design**: `7x7` depthwise convolutions for a wide receptive field, an inverted bottleneck for capacity, LayerNorm and GELU for consistency with Transformer blocks.
 
+
 ---
 
 ## 3. How ConvNeXt Works: Core Concepts
@@ -85,6 +86,8 @@ the drop-path (`residual = x; x = block(x); x = drop_path(x); x = add([residual,
 the per-stage block counts and `dims` the widths; the number of stages follows the length of those
 lists, so a two-stage variant such as `cifar10` is a legal configuration.
 
+![convnext architecture](convnext_v1.webp)
+
 ---
 
 ## 4. Architecture Deep Dive
@@ -121,6 +124,7 @@ works in three steps:
 2.  **Normalize**: divide each channel's aggregate by the mean of all aggregates, giving a relative-importance score.
 3.  **Recalibrate**: rescale the features by those scores, apply the layer's own `gamma`/`beta`, and add the result to its input. Channels carrying distinctive responses are amplified and redundant ones damped, which is the feature competition the paper describes.
 
+![convnext blocks](convnext_v1_v2_blocks.png)
 ---
 
 ## 5. Quick Start Guide

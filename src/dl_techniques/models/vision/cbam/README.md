@@ -80,6 +80,7 @@ probabilities. With `include_top=False` the final stage's 4-D feature map is ret
 Archives saved before 2026-10-14 (a softmax head, or the two-`DenseBlock` head) do not load
 and are not supported.
 
+![cbam block](cbam_block.png)
 ---
 
 ## 4. Architecture Deep Dive
@@ -103,6 +104,7 @@ computed from that result. Constructor arguments are `channels`, `ratio` (defaul
 `kernel_size` (default 7), plus separate initializers, regularizers and bias flags for the channel
 and spatial branches (`channel_kernel_regularizer`, `spatial_kernel_regularizer`, ...).
 
+![cbam block](cbam_block_v2.png)
 ---
 
 ## 5. Quick Start Guide

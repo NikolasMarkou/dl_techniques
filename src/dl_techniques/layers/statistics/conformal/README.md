@@ -135,24 +135,6 @@ The classifier above is untrained, so its sets are large; the point is the calli
 No coverage or set-size numbers are quoted here: none have been measured on a trained model in this
 repository. The synthetic checks live in the tests.
 
-## In the trainers
-
-`train_resnet`, `train_vit` (ImageNet) and `train_cliffordnet` (ImageNet) call `train.common.conformal.run_conformal`
-after training. It runs one ordered pass over the validation set, reports coverage on random half splits,
-fits the exported threshold on all of it, and writes `conformal.json` and `conformal_model.keras` (outputs
-`(logits, probs, in_set)`) to the run directory. `--no-conformal` skips it and `--conformal-alpha` sets `alpha`.
-
-## Renamed API
-
-These layers were moved into this package and unified on 2026-10-27/28. Removed with no alias:
-`ConformalIntervalLayer` (now `ConformalInterval`), `ConformalPredictionSetLayer` (now
-`ConformalPredictionSet`), the modules `conformal_interval`, `conformal_prediction_set` and
-`conformal_quantile_head` under `layers/statistics/`, the constructor arguments `q_init` and `tau_init`
-(now `q_hat_init`), the attributes `q` and `tau` (now `q_hat`), the weights `conformal_q` and
-`conformal_tau` (now `conformal_q_hat`), and `calibrate(value)` on the interval and set layers (now
-`set_q_hat(value)`; `calibrate` takes scores). A `.keras` file that recorded an old class name or
-registration key does not load; no such file is kept in the repository.
-
 ## Tests
 
 `tests/test_layers/test_statistics/test_conformal/`: `test_base_contract.py` runs one contract over all three
