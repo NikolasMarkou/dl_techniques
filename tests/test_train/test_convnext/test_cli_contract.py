@@ -13,7 +13,8 @@ surface with the shared ``tests/test_train/_cli_contract.py`` driver, once per f
 - ``--gpu`` is not a config field: it is checked on the namespace AND through
   ``main()`` into ``setup_gpu``;
 - ``--variant`` offers exactly the keys of each family's ``MODEL_VARIANTS``;
-- ``imagenet`` is refused with the explicit message, at the parser and at the config;
+- ``imagenet`` is accepted at the parser and the config, resolves its own ``variant`` and
+  ``strides``, and refuses ``--validation-split``;
 - ``--help`` prints ``usage:`` and reaches no expensive call; the wrappers pass their
   family on.
 
@@ -42,13 +43,19 @@ from .._cli_contract import (  # noqa: TID252 -- shared driver, one level up
 
 
 def _rows(variant_probe: str) -> Tuple[Row, ...]:
-    """One row per declared flag. Probes differ from the defaults (cifar10 / cifar10 /
-    k=7 / s=2 / 100 epochs / ...) and from each other. ``variant_probe`` is the one
+    """One row per declared flag. Probes differ from the defaults (cifar10 / None / None /
+    k=7 / 100 epochs / ...) and from each other. ``variant_probe`` is the one
     value that has to be a member of the family's own variant table."""
     return (
         Row(("--dataset",), ("--dataset", "cifar100"), "dataset", "cifar100"),
         Row(("--validation-split",), ("--validation-split", "0.25"), "validation_split", 0.25),
         Row(("--max-samples",), ("--max-samples", "321"), "max_samples", 321),
+        Row(("--imagenet-root",), ("--imagenet-root", "/probe/imagenet"), "imagenet_root",
+            "/probe/imagenet"),
+        Row(("--devkit-dir",), ("--devkit-dir", "/probe/devkit"), "devkit_dir", "/probe/devkit"),
+        Row(("--holdout-per-class",), ("--holdout-per-class", "13"), "holdout_per_class", 13),
+        Row(("--image-size",), ("--image-size", "160"), "image_size", 160),
+        Row(("--eval-samples",), ("--eval-samples", "777"), "eval_samples", 777),
         Row(("--variant",), ("--variant", variant_probe), "variant", variant_probe),
         Row(("--kernel-size",), ("--kernel-size", "5"), "kernel_size", 5),
         Row(("--strides",), ("--strides", "4"), "strides", 4),
@@ -202,7 +209,7 @@ def _forbid_expensive_calls(monkeypatch) -> list:
             raise _Probe(name)
         return _sentinel
 
-    for name in ("setup_gpu", "train", "prepare_data"):
+    for name in ("setup_gpu", "train", "prepare_data", "prepare_run_data"):
         monkeypatch.setattr(common, name, _make(name))
     return touched
 
@@ -245,17 +252,23 @@ def test_help_prints_usage_and_reaches_no_expensive_call(monkeypatch, capsys, fa
     assert touched == []
 
 
-def test_imagenet_is_refused_with_the_explicit_message_before_any_expensive_call(
-        monkeypatch, capsys) -> None:
-    """``imagenet`` is a documented refusal, not a generic 'invalid choice'."""
+def test_imagenet_parses_and_resolves_its_own_defaults() -> None:
+    """``--dataset imagenet`` alone gives the ImageNet stem and variant, not the CIFAR ones."""
+    args = common.parse_arguments(["--dataset", "imagenet"], "v1")
+    config = common.config_from_args(args, "v1")
+    assert (config.dataset, config.variant, config.strides) == ("imagenet", "tiny", 4)
+    assert config.validation_split is None
+    assert (config.drop_path_rate, config.dropout_rate) == (0.1, 0.0)
+    cifar = common.config_from_args(common.parse_arguments([], "v1"), "v1")
+    assert (cifar.variant, cifar.strides, cifar.validation_split) == ("cifar10", 2, 0.1)
+
+
+def test_a_validation_split_is_refused_with_imagenet_before_any_expensive_call(
+        monkeypatch) -> None:
     touched = _forbid_expensive_calls(monkeypatch)
-    with pytest.raises(SystemExit) as exc:
-        common.main("v1", ["--dataset", "imagenet"])
-    assert exc.value.code == 2
-    assert "imagenet2012" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="validation_split=0.2 does not apply to ImageNet"):
+        common.main("v1", ["--dataset", "imagenet", "--validation-split", "0.2"])
     assert touched == []
-    with pytest.raises(ValueError, match="imagenet2012"):
-        common.TrainingConfig(dataset="imagenet")
 
 
 @pytest.mark.parametrize(

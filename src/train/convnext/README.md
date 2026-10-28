@@ -2,7 +2,7 @@
 
 Training scripts for the two supervised ConvNeXt families
 (`dl_techniques.models.vision.convnext.convnext_v1` and `.convnext_v2`) on **MNIST**,
-**CIFAR-10** and **CIFAR-100**, a driver that compares the two stochastic-regularization
+**CIFAR-10**, **CIFAR-100** and **ImageNet-1k**, a driver that compares the two stochastic-regularization
 modes (`depth` vs `gradient`), and a MAE pretraining script that is **not** part of the
 normalized trainers (see "The MAE trainer").
 
@@ -57,6 +57,10 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_c
 # Smoke run: 512 samples, 2 epochs
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v1 \
     --dataset cifar10 --variant cifar10 --epochs 2 --max-samples 512 --experiment-name smoke
+
+# ImageNet-1k from the extracted tree (variant tiny and strides 4 are the ImageNet defaults)
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v1 \
+    --dataset imagenet --epochs 90 --batch-size 128 --warmup-epochs 5
 ```
 
 `--help` parses first and exits, so it allocates no GPU and no run directory.
@@ -69,9 +73,9 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_c
   overwritten, merged or deleted. The default name is
   `convnext_<v1|v2>_<dataset>_<variant>_<timestamp>`, so it never collides.
 - One GPU job at a time.
-- The datasets come from the local Keras cache (`~/.keras/datasets`, through
+- MNIST and CIFAR come from the local Keras cache (`~/.keras/datasets`, through
   `train.common.load_dataset`). A missing file makes Keras try to download it and fail loudly;
-  nothing here retries.
+  nothing here retries. ImageNet is read from the extracted tree (`--imagenet-root`, see "Data").
 
 ---
 
@@ -82,15 +86,20 @@ it). Both wrappers have the same flags; only `--variant` differs.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dataset {mnist,cifar10,cifar100}` | `cifar10` | Dataset. `imagenet` is refused with an explicit error (see "Data"). |
-| `--validation-split` | `0.1` | Fraction of the TRAIN set held out (seeded) for early stopping and checkpoint selection. Strictly inside (0, 1); 0 is refused because it would silently validate on the test set. |
+| `--dataset {mnist,cifar10,cifar100,imagenet}` | `cifar10` | Dataset (see "Data"). |
+| `--validation-split` | `0.1` (MNIST, CIFAR) | Fraction of the TRAIN set held out (seeded) for early stopping and checkpoint selection. Strictly inside (0, 1); 0 is refused because it would silently validate on the test set. Refused with `imagenet`, which uses `--holdout-per-class`. |
+| `--imagenet-root` | `/media/arxwn/data0_4tb/datasets/imagenet2012` | ImageNet only: folder holding `train/<wnid>/` and the flat `val/`. |
+| `--devkit-dir` | `<imagenet-root>/devkit` | ImageNet only: ILSVRC2012 devkit with `meta.mat` and the val ground truth. |
+| `--holdout-per-class` | `10` | ImageNet only: images per class taken out of train for early stopping and checkpoint selection (10,000 images). The official val split is then the test set. |
+| `--image-size` | `224` | ImageNet only: square input side. |
+| `--eval-samples` | `2000` | ImageNet only: test images kept in memory for the figures, `ece` and `model_analysis/`. `test_metrics_*` always use the whole test set. |
 | `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
-| `--variant` | `cifar10` | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
+| `--variant` | `cifar10`; `tiny` for ImageNet | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
 | `--kernel-size` | `7` | Depthwise convolution kernel size. |
-| `--strides` | `2` | Stem patch size AND every inter-stage downsample stride (one knob). The default is 2 on measured evidence ("Choosing strides"); the model classes keep their own default 4. See "Geometry". |
-| `--drop-path-rate` | per dataset | Maximum stochastic-depth rate. `0.1` for mnist and cifar10, `0.2` for cifar100. |
+| `--strides` | `2`; `4` for ImageNet | Stem patch size AND every inter-stage downsample stride (one knob). The default 2 for MNIST and CIFAR is on measured evidence ("Choosing strides"); that measurement is on 32x32 inputs and was not repeated at 224x224, where 4 is the standard ConvNeXt stem. The model classes keep their own default 4. See "Geometry". |
+| `--drop-path-rate` | per dataset | Maximum stochastic-depth rate. `0.1` for mnist, cifar10 and imagenet, `0.2` for cifar100. |
 | `--stochastic-mode {depth,gradient}` | `depth` | `depth` = `StochasticDepth`, `gradient` = `StochasticGradient` (see below). |
-| `--dropout-rate` | per dataset | Dropout inside each block. `0.1` for mnist and cifar10, `0.2` for cifar100. |
+| `--dropout-rate` | per dataset | Dropout inside each block. `0.1` for mnist and cifar10, `0.2` for cifar100, `0` for imagenet. |
 | `--use-gamma` / `--no-use-gamma` | on | Learnable per-channel layer scale in each block. |
 | `--epochs` | `100` | Maximum epochs. The cosine spans exactly this many. |
 | `--batch-size` | `64` | Training batch size. |
@@ -148,11 +157,24 @@ and were removed; the driver below is how to measure it again.
   CIFAR-100. **MNIST gets no flip** (a flipped digit is a different digit). The padding is
   added after standardization, so the border is the per-channel mean colour, not black.
   Validation and test are not augmented.
-- **`imagenet` is not supported.** The `tfds` `imagenet2012` data is not available on this
-  machine, and the full-test-set figures (confusion matrix, calibration, confident errors)
-  cannot be built for a streaming dataset. `--dataset imagenet` fails with an explicit message
-  at the parser, and `TrainingConfig` refuses it too, before any GPU or run directory is
-  touched.
+- **ImageNet** (`--dataset imagenet`) is read from the extracted ILSVRC2012 tree through
+  `train.common.imagenet.load_imagenet_selection_splits` (the loader is
+  `dl_techniques.datasets.vision.imagenet2012`). The protocol is the same as for CIFAR:
+  - **Selection set**: `--holdout-per-class` images per class (a seeded, class-balanced draw)
+    are taken out of train. They drive early stopping, the best checkpoint and `best_epoch`
+    and are not augmented. `--validation-split` does not apply and is refused.
+  - **Test set**: the official 50,000-image val split, labelled through the devkit. It is
+    evaluated whole for `test_metrics_best` and `test_metrics_final` and never influences
+    selection.
+  - **Train**: every other train image, with a random-resized crop and a horizontal flip
+    (no colour jitter); the incomplete last batch is dropped. The inputs are normalized with
+    the ImageNet mean and std, which the summary records as `input_normalization`.
+  - **Memory**: nothing is held as an array. The confusion matrix, calibration, confident
+    errors, `ece` and `model_analysis/` use the first `--eval-samples` test images, and the
+    summary says so (`figure_samples` and a line in `notes`).
+  - `--max-samples` caps train and test (smoke runs); the selection set is not capped.
+  - The summary records `selection_split`, `test_split` and `holdout_per_class`.
+  - `train_convnext_v2_mae.py` is not covered: it stays on the three small datasets.
 
 ---
 
@@ -229,6 +251,7 @@ The stem is a `strides x strides` convolution at stride `strides` with `"valid"`
 | 28x28 (MNIST) | 4 | 2 (default) | 14, 7, 4, 2 |
 | 28x28 (MNIST) | 2 (`cifar10` variant) | 2 (default) | 14, 7 |
 | 28x28 (MNIST) | 4 | 4 | 7, 2, 1, 1 |
+| 224x224 (ImageNet) | 4 | 4 (ImageNet default) | 56, 28, 14, 7 |
 
 `--strides 4` builds and trains on 32x32 four-stage models (there is no crash), but the last two
 stages run on a single pixel, so the spatial mixing of the depthwise convolution there is
