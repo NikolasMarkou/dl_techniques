@@ -23,6 +23,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms.factory import (
     NormalizationType,
     create_normalization_layer,
@@ -31,6 +32,7 @@ from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.validation import positive_float, positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -45,7 +47,7 @@ def _build_auto_encoder(
         num_res_blocks: int,
         norm_type: NormalizationType,
 ) -> keras.Model:
-    """Small Conv2D encoder with stride-2 downsamples + residual blocks."""
+    """Small Conv2D encoder: ``ConvStem`` down-steps (conv, norm, ReLU, stride 2) + residual blocks."""
     import math
     n_down = int(math.log2(downsample_factor))
     if 2 ** n_down != downsample_factor:
@@ -56,12 +58,11 @@ def _build_auto_encoder(
     inp = keras.Input(shape=input_shape, name="encoder_input")
     x = inp
     for i in range(n_down):
-        x = keras.layers.Conv2D(
-            hidden_channels, 4, strides=2, padding="same",
+        x = ConvStem(
+            hidden_channels, kernel_size=4, strides=2, padding="same",
+            normalization_type=norm_type, activation_type="relu",
             name=f"enc_down_{i}",
         )(x)
-        x = create_normalization_layer(norm_type, name=f"enc_norm_{i}")(x)
-        x = keras.layers.Activation("relu", name=f"enc_act_{i}")(x)
 
     for j in range(num_res_blocks):
         residual = x
@@ -233,15 +234,10 @@ class VQVAERotationTrick(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        if num_embeddings <= 0:
-            raise ValueError(f"num_embeddings must be positive, got {num_embeddings}")
-        if embedding_dim <= 0:
-            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
-        if reconstruction_loss_weight <= 0:
-            raise ValueError(
-                f"reconstruction_loss_weight must be positive, "
-                f"got {reconstruction_loss_weight}"
-            )
+        num_embeddings = positive_int(num_embeddings, "num_embeddings", "VQVAERotationTrick")
+        embedding_dim = positive_int(embedding_dim, "embedding_dim", "VQVAERotationTrick")
+        reconstruction_loss_weight = positive_float(
+            reconstruction_loss_weight, "reconstruction_loss_weight", "VQVAERotationTrick")
 
         # Auto-build if both encoder/decoder are None.
         if encoder is None and decoder is None:
@@ -250,6 +246,10 @@ class VQVAERotationTrick(keras.Model):
                     "Auto-build path requires input_shape=(H, W, C) when "
                     "encoder and decoder are not supplied."
                 )
+            hidden_channels = positive_int(
+                hidden_channels, "hidden_channels", "VQVAERotationTrick")
+            downsample_factor = positive_int(
+                downsample_factor, "downsample_factor", "VQVAERotationTrick")
             encoder = _build_auto_encoder(
                 input_shape=input_shape,
                 hidden_channels=hidden_channels,

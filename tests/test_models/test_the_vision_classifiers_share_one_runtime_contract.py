@@ -2303,6 +2303,21 @@ def _depth_anything_encoder_build() -> keras.Model:
     return _depth_anything_build().encoder
 
 
+def _vq_encoder_owned() -> set:
+    """The auto-built encoder of ``VQVAERotationTrick`` at a downsample factor of 4 with one
+    residual block: two ``ConvStem`` down-steps counted from 0, the residual block's own layers
+    (its norm and activation are named inside the block), and the 1x1 projection to the code size."""
+    return ({"enc_down_0", "enc_down_1", "enc_to_embedding"}
+            | {f"enc_res_0_{part}" for part in ("a", "norm_a", "act", "b", "add")})
+
+
+def _vq_encoder_build() -> keras.Model:
+    from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
+    return VQVAERotationTrick(
+        num_embeddings=32, embedding_dim=16, input_shape=(32, 32, 3), hidden_channels=32,
+        downsample_factor=4, num_res_blocks=1, norm_type="layer_norm").encoder
+
+
 def _siamfc_build() -> keras.Model:
     from dl_techniques.models.vision.siamfc.model import SiamFC
     return SiamFC()
@@ -2332,6 +2347,7 @@ TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
                                     lambda: {"encoder_vit_s", "depth_head", "strong_augmentation"}),
     "depth_anything_encoder": (_depth_anything_encoder_build, lambda: _images(64, 64, 3),
                                _depth_anything_encoder_owned),
+    "vq_vae_rotation_encoder": (_vq_encoder_build, lambda: _images(32, 32, 3), _vq_encoder_owned),
 }
 
 
@@ -2387,6 +2403,22 @@ def test_the_tracker_name_rule_sees_the_spellings_the_depth_anything_encoder_had
         "a missing pool": [n for n in clean if n != "pool_block_1"],
         "a stage of three convolutions": [*clean, "conv_block_0_3"],
         "a stage renamed": ["conv_block_4_1" if n == "conv_block_3_1" else n for n in clean],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+
+
+def test_the_tracker_name_rule_sees_the_spellings_the_vq_encoder_had() -> None:
+    expected = _vq_encoder_owned()
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the loose down-step norm": [*clean, "enc_norm_0"],
+        "the loose down-step activation": [*clean, "enc_act_1"],
+        "a down-step beside its loose layers": [*clean, "enc_norm_0", "enc_act_0"],
+        "a missing down-step": [n for n in clean if n != "enc_down_1"],
+        "a down-step counted from 1": ["enc_down_2" if n == "enc_down_1" else n for n in clean],
+        "a third down-step": [*clean, "enc_down_2"],
     }
     for why, owned in plants.items():
         assert numbering_problems(owned, expected), f"{why} passed the numbering rule"

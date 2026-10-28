@@ -120,6 +120,7 @@ from dl_techniques.models.vision.siamfc.model import SiamFC, SiamFCBackbone
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 from tests.layer_naming import PublicAutoName
 from tests.numerics import true_float32_matmul
 
@@ -1851,6 +1852,63 @@ DEPTH_ANYTHING_PLACEHOLDER = StemCase(
 )
 
 
+# ---------------------------------------------------------------------
+# vq_vae_rotation: each down-step of the auto-built encoder
+# ---------------------------------------------------------------------
+
+# Original: ``_build_auto_encoder`` before the migration (HEAD 747341a70): per down-step
+# ``enc_down_{i}`` = Conv2D(hidden, 4, strides 2, same, bias) with Keras' defaults
+# (glorot_uniform kernel, zeros bias, no regularizer), ``enc_norm_{i}`` from the norm factory
+# with its defaults only, and ``enc_act_{i}`` = Activation("relu"). The encoder is a
+# functional graph, so the stem is a layer of it. Step ``i`` of a 32 px image at hidden 32 reads
+# ``(32 >> i, 32 >> i, 3 or 32)`` and halves the sides.
+_VQ_HIDDEN = 32
+
+
+def _vq_down_original(norm_type: str, name: str = "enc") -> Original:
+    conv = keras.layers.Conv2D(_VQ_HIDDEN, 4, strides=2, padding="same", name=f"{name}_down")
+    norm = create_normalization_layer(norm_type, name=f"{name}_norm")
+    act = keras.layers.Activation("relu", name=f"{name}_act")
+
+    def forward(x, training):
+        return act(norm(conv(x), training=training))
+
+    return Original(sublayers={"conv1": conv, "norm1": norm, "act1": act}, forward=forward)
+
+
+def _vq_model(norm_type: str) -> VQVAERotationTrick:
+    return VQVAERotationTrick(
+        num_embeddings=32,
+        embedding_dim=16,
+        input_shape=(32, 32, 3),
+        hidden_channels=_VQ_HIDDEN,
+        downsample_factor=4,
+        num_res_blocks=1,
+        norm_type=norm_type,
+    )
+
+
+def _vq_stem_of(step: int):
+    return lambda model: model.encoder.get_layer(f"enc_down_{step}")
+
+
+def _vq_case(norm_type: str, step: int) -> StemCase:
+    return StemCase(
+        case_id=f"vq-vae-rotation-{norm_type}-down-{step}",
+        make_model=lambda: _vq_model(norm_type),
+        make_original=lambda: _vq_down_original(norm_type),
+        input_shape=(32, 32, 3) if step == 0 else (16, 16, _VQ_HIDDEN),
+        expected_output_shape=(16, 16, _VQ_HIDDEN) if step == 0 else (8, 8, _VQ_HIDDEN),
+        stem_of=_vq_stem_of(step),
+    )
+
+
+VQ_LAYER_NORM_DOWN_0 = _vq_case("layer_norm", 0)
+VQ_BATCH_NORM_DOWN_0 = _vq_case("batch_norm", 0)
+VQ_BATCH_NORM_DOWN_1 = _vq_case("batch_norm", 1)
+VQ_RMS_NORM_DOWN_1 = _vq_case("rms_norm", 1)
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1921,6 +1979,10 @@ CASES = [
     DASIAMRPN_NOBN,
     DASIAMRPN_BACKBONE_MOMENTUM_EPSILON,
     DEPTH_ANYTHING_PLACEHOLDER,
+    VQ_LAYER_NORM_DOWN_0,
+    VQ_BATCH_NORM_DOWN_0,
+    VQ_BATCH_NORM_DOWN_1,
+    VQ_RMS_NORM_DOWN_1,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1973,6 +2035,8 @@ BUILT_STEM_ROWS = [
     ("siamfc-backbone", lambda: _siamfc_model().backbone, (91, 91, 3)),
     ("dasiamrpn-backbone", lambda: _dasiamrpn_model().backbone, (91, 91, 3)),
     ("depth-anything-placeholder", _depth_anything_model, (64, 64, 3), _depth_anything_stem_of),
+    ("vq-vae-rotation-down-0", lambda: _vq_model("layer_norm"), (32, 32, 3), _vq_stem_of(0)),
+    ("vq-vae-rotation-down-1", lambda: _vq_model("batch_norm"), (32, 32, 3), _vq_stem_of(1)),
 ]
 
 
@@ -2046,6 +2110,11 @@ INITIALIZER_AUDIT = {
     "DaSiamRPN": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "SiamRPNBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "DepthAnything": ("knob", "lecun_normal (default he_normal)"),
+    "VQVAERotationTrick": (
+        "default-no-knob",
+        "no initializer parameter (only the codebook's); the original Conv2D took Keras' "
+        "glorot_uniform / zeros, which are ConvStem's defaults",
+    ),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2634,6 +2703,53 @@ def test_the_guard_the_harness_sees_a_depth_anything_norm_applied_twice():
         assert_stem_matches_original(
             DEPTH_ANYTHING_PLACEHOLDER,
             DEPTH_ANYTHING_PLACEHOLDER.stem_of(model),
+            forward=_norm_applied_twice,
+        )
+
+
+@pytest.mark.parametrize(
+    "case,override,match",
+    [
+        # The factory's own norm kwargs are the original's: a different epsilon is a defect.
+        (VQ_BATCH_NORM_DOWN_0, {"normalization_kwargs": {"epsilon": 1e-3}}, "differs from the original"),
+        (VQ_BATCH_NORM_DOWN_0, {"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        # A 4x4/2 "valid" convolution turns 32 into 15, not 16.
+        (VQ_LAYER_NORM_DOWN_0, {"padding": "valid"}, "shape"),
+        (VQ_LAYER_NORM_DOWN_0, {"strides": 1}, "shape"),
+        (VQ_LAYER_NORM_DOWN_0, {"use_bias": False}, "weights"),
+        (VQ_LAYER_NORM_DOWN_0, {"activation_type": "gelu"}, "differs from the original"),
+        (VQ_LAYER_NORM_DOWN_0, {"activation_type": "linear"}, "roles"),
+        (VQ_LAYER_NORM_DOWN_0, {"normalization_type": "rms_norm"}, "weights"),
+        (VQ_LAYER_NORM_DOWN_0, {"use_pooling": True}, "roles"),
+    ],
+    ids=[
+        "batch-norm-epsilon-1e-3",
+        "batch-norm-momentum-0.9",
+        "valid-padding",
+        "stride-1",
+        "bias-dropped",
+        "gelu-for-relu",
+        "activation-dropped",
+        "rms-norm-for-layer-norm",
+        "pool-added",
+    ],
+)
+def test_the_guard_the_harness_sees_a_vq_down_step_with_one_wrong_setting(case, override, match):
+    """Each value of the encoder's down-step is a defect when it is not kept; the stem
+    rebuilt from the model's own config passes the same comparison."""
+    stem = _stem_from_config(case, **override)
+    with pytest.raises(AssertionError, match=match):
+        assert_stem_matches_original(case, stem)
+    assert_stem_matches_original(case, _stem_from_config(case))
+
+
+def test_the_guard_the_harness_sees_a_vq_down_step_norm_applied_twice():
+    """A second ``enc_norm`` in the forward changes the output."""
+    model = VQ_LAYER_NORM_DOWN_0.make_model()
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            VQ_LAYER_NORM_DOWN_0,
+            VQ_LAYER_NORM_DOWN_0.stem_of(model),
             forward=_norm_applied_twice,
         )
 

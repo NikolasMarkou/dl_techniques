@@ -24,10 +24,34 @@ Pass both `encoder` and `decoder` to bring your own, or leave both `None` and pa
 for the auto-built pair, scaled by `hidden_channels`, `downsample_factor` (a power of 2) and
 `num_res_blocks`:
 
-- encoder: `Conv2D(hidden, 4, strides=2)` + normalization + ReLU, once per factor of 2, then the
-  residual blocks, then a 1x1 `Conv2D` to `embedding_dim`;
+- encoder: one `ConvStem` per factor of 2, named `enc_down_{i}` from 0 (a `Conv2D(hidden, 4, strides=2)`,
+  the normalization chosen by `norm_type`, a ReLU), then the residual blocks, then a 1x1 `Conv2D` to
+  `embedding_dim`;
 - decoder: a 1x1 `Conv2D`, the residual blocks, `Conv2DTranspose(hidden, 4, strides=2)` +
   normalization + ReLU once per factor of 2, then `Conv2D(C, 3)` with a sigmoid.
+
+`num_embeddings`, `embedding_dim` and (on the auto-built path) `hidden_channels` and `downsample_factor`
+are positive integers and `reconstruction_loss_weight` is a positive finite number; anything else raises
+`ValueError` naming the argument. A numpy integer is stored as a Python `int`.
+
+**Archives written before the encoder's `ConvStem` down-steps.** The encoder's first layers were the loose
+`enc_down_{i}`, `enc_norm_{i}` and `enc_act_{i}`; each step is now one tracked layer, `enc_down_{i}`. Measured
+with `.keras` files of the roster model (`layer_norm` and `batch_norm`) saved by `be92a74eb` and by
+`20b48aba6^`, each in its own process and loaded by the current code, with identical results:
+`keras.models.load_model` restores them with equal outputs for `training=False` and `True` at `atol=0`,
+because the archive carries the encoder's own serialized graph, so the model comes back with the old loose
+layers; `model.load_weights` into a freshly built current model fails ("A total of 7 objects could not be
+loaded ... Layer 'enc_down_0_conv1' expected 2 variables, but received 0"). Copying the weights of an earlier
+model by path into a current one gives outputs equal at `atol=0` (all 35 weights with `layer_norm`, all 47
+with `batch_norm`):
+
+| Earlier path | Current path |
+| :--- | :--- |
+| `enc_down_{i}/{kernel,bias}` | `enc_down_{i}/enc_down_{i}_conv1/{kernel,bias}` |
+| `enc_norm_{i}/*` | `enc_down_{i}/enc_down_{i}_norm1/*` |
+
+The weight count (35 with `layer_norm`, 47 with `batch_norm`) and the parameter count (90,643 and 91,027)
+are unchanged.
 
 **GPU determinism of the auto-built decoder.** Its `Conv2DTranspose` layers run on a GPU as cuDNN
 backward-data convolutions whose engine is chosen by timing. Once another transposed convolution
