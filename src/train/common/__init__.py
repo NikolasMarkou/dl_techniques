@@ -53,6 +53,7 @@ from train.common.image_text import (
     build_synthetic_image_text_dataset,
     load_coco2017_local_split,
     load_cc3m_local_split,
+    hold_out_images,
     make_image_text_tf_dataset,
 )
 from train.common.megadepth import (
@@ -220,6 +221,7 @@ __all__ = [
     "int64_list_feature",
     "json_numpy_default",
     "list_tfrecord_shards",
+    "hold_out_images",
     "load_best_metrics",
     "load_cc3m_local_split",
     "load_coco2017_local_split",

@@ -14,6 +14,10 @@ scripts share:
   - Conceptual Captions 3M from the layout written by
     ``train/cliffordnet/prepare_cc3m.py``.
 
+- :func:`hold_out_images`, the selection cut of a path-list train split:
+  a seeded set of IMAGES (never pairs) leaves the fit set, with one caption
+  each, so the official validation split can stay a test set.
+
 - A ``tf.data`` pipeline builder that streams paths from disk and
   returns batches shaped ``{"image": float32, "text": int32}`` — with an
   opt-in ``cache_decoded`` mode that trades RAM for a per-step speedup
@@ -440,6 +444,59 @@ def load_cc3m_local_split(
         )
 
     return paths, token_ids
+
+
+def hold_out_images(
+    images: List[str],
+    token_ids: np.ndarray,
+    n_select: int,
+    seed: int,
+) -> Tuple[List[str], np.ndarray, List[str], np.ndarray]:
+    """Cut a selection split out of a path-list train split, BY IMAGE.
+
+    A seeded permutation of the distinct images (first-appearance order) puts the first
+    ``n_select`` of them in the selection split, with ONE caption each (the first one the
+    split lists, like the official validation splits), and leaves every pair of the other
+    images in train. The cut is per image and not per pair because COCO carries about five
+    captions per image: cutting pairs would leave a held-out image's other captions in the
+    fit set, and retrieval is scored one caption per image
+    (:func:`train.cliffordnet.train_clip._compute_retrieval_metrics` labels ``arange(n)``).
+
+    :param images: Image paths, one per pair (repeats allowed).
+    :param token_ids: ``(len(images), L)`` token matrix aligned with ``images``.
+    :param n_select: Distinct images to hold out.
+    :param seed: Seed of the permutation.
+    :return: ``(train_images, train_tokens, select_images, select_tokens)``.
+    :raises ValueError: ``n_select`` is below 1 or leaves no train image, or the lengths
+        disagree.
+    """
+    if len(images) != len(token_ids):
+        raise ValueError(
+            f"images ({len(images)}) and token_ids ({len(token_ids)}) must align one to one")
+    first_row = {}
+    for row, path in enumerate(images):
+        first_row.setdefault(path, row)
+    distinct = list(first_row)
+    if n_select < 1 or n_select >= len(distinct):
+        raise ValueError(
+            f"cannot hold out {n_select} images from a train split of {len(distinct)} distinct "
+            f"images ({len(images)} pairs): the selection split needs at least 1 and the fit "
+            "set at least 1. Lower --selection-images or raise --max-train-samples."
+        )
+    order = np.random.default_rng(seed).permutation(len(distinct))
+    held = {distinct[i] for i in order[:n_select]}
+    select_rows = np.asarray(sorted(first_row[path] for path in held), dtype=np.int64)
+    train_rows = np.asarray(
+        [row for row, path in enumerate(images) if path not in held], dtype=np.int64)
+    logger.info(
+        f"hold_out_images: {len(held)} of {len(distinct)} images held out for selection "
+        f"(1 caption each); {len(train_rows)} pairs of {len(distinct) - len(held)} images "
+        "remain for fit"
+    )
+    return (
+        [images[row] for row in train_rows], token_ids[train_rows],
+        [images[row] for row in select_rows], token_ids[select_rows],
+    )
 
 
 # ---------------------------------------------------------------------------
