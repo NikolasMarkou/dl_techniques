@@ -98,6 +98,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
+from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 
 
 # ---------------------------------------------------------------------
@@ -261,6 +262,9 @@ class TrainingConfig:
     # Test images kept in memory for the figures, ``ece`` and the analyzer (ImageNet only;
     # MNIST and CIFAR use their whole test set).
     eval_samples: int = DEFAULT_EVAL_SAMPLES
+
+    # Conformal prediction sets fitted on the whole test split with the best weights (None = off).
+    conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
     # Training (defaults are the pre-normalization CLI's values, not measured here)
     epochs: int = 100
@@ -491,6 +495,8 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                             "of a 198 s CIFAR-10 5-epoch run; its spectral verdicts are "
                             "heuristics, see the README). --no-model-analysis skips it.")
 
+    add_conformal_arguments(parser.add_argument_group("conformal prediction sets"))
+
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
                      help="Output root; a relative path is anchored at the repo root.")
@@ -537,7 +543,9 @@ def config_from_args(args: argparse.Namespace, model_family: str) -> TrainingCon
     """
     # Every config field except the family comes from the namespace of the same name, so a
     # field with no flag raises AttributeError here instead of silently keeping its default.
-    values = {f.name: getattr(args, f.name) for f in fields(TrainingConfig) if f.name != "model_family"}
+    values = {f.name: getattr(args, f.name) for f in fields(TrainingConfig)
+              if f.name not in ("model_family", "conformal_alpha")}
+    values["conformal_alpha"] = None if args.no_conformal else args.conformal_alpha
     return TrainingConfig(model_family=model_family, **values)
 
 
@@ -1099,6 +1107,22 @@ def _figure_subset_notes(n_figure: int, n_test: int) -> List[str]:
     ]
 
 
+def _conformal_notes(alpha: Optional[float]) -> List[str]:
+    """Plain-language lines for ``results_summary.json``'s ``notes``.
+
+    Args:
+        alpha: The configured miscoverage level, or ``None`` when the step is off.
+    """
+    if alpha is None:
+        return ["conformal prediction sets skipped (--no-conformal); `conformal` is null"]
+    return [
+        f"`conformal` is the record of conformal.json: APS prediction sets at alpha {alpha:g} "
+        "calibrated on the WHOLE test split with the best weights; the model was selected on "
+        "a separate split, so the calibration data did not choose it. Coverage is marginal, "
+        "not per image or per class"
+    ]
+
+
 def _analyzer_notes(ran: bool) -> List[str]:
     """The ``notes`` lines about ``model_analysis/``: what it measured, or that it was skipped.
 
@@ -1391,6 +1415,19 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             model, run_dir, data.test_ds
         )
 
+        # Conformal sets: the model still holds the best weights (the last epoch's are
+        # restored further down). The calibration set is the whole TEST split, which never
+        # chose the model, not the selection split and not the figure subset.
+        conformal: Optional[Dict[str, Any]] = None
+        if config.conformal_alpha is not None:
+            conformal = run_conformal(
+                model, data.test_ds, alpha=config.conformal_alpha, seed=config.seed,
+                out_dir=run_dir, input_shape=data.input_shape,
+                model_name=config.experiment_name,
+                weights=f"best checkpoint, selected on {data.selection_split}",
+                selection_overlaps_calibration=False,
+            )
+
         # Figures and the analyzer describe the best (selected) weights. The model emits
         # LOGITS, so every probability consumer gets a softmax first.
         logits = model.predict(data.x_fig, batch_size=EVAL_BATCH_SIZE, verbose=0)
@@ -1452,6 +1489,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             "ece": visualizations["ece"],
             "visualizations": visualizations,
             "model_loading_validated": load_check,
+            "conformal": conformal,
             "analyzer": analysis,
             "notes": [
                 f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
@@ -1465,6 +1503,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "last epoch's weights (final_model.keras); figures and model_analysis/ use the "
                 "best weights; the test set never influenced selection",
                 *_figure_subset_notes(len(data.x_fig), data.n_test),
+                *_conformal_notes(config.conformal_alpha),
                 *_label_smoothing_notes(config.label_smoothing),
                 *_analyzer_notes(config.model_analysis),
                 "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "

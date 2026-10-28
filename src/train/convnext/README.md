@@ -93,6 +93,8 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--holdout-per-class` | `10` | ImageNet only: images per class taken out of train for early stopping and checkpoint selection (10,000 images). The official val split is then the test set. |
 | `--image-size` | `224` | ImageNet only: square input side. |
 | `--eval-samples` | `2000` | ImageNet only: test images kept in memory for the figures, `ece` and `model_analysis/`. `test_metrics_*` always use the whole test set. |
+| `--conformal-alpha` | `0.1` | Miscoverage level of the conformal prediction sets fitted after training, for every dataset. The best weights are run once over the WHOLE test split (not the figure subset); an APS threshold is fit on it and its coverage is checked on 20 random half splits. The model was selected on a separate split, so the calibration data did not choose it. Writes `conformal.json` and `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory and a `conformal` block into the summary. |
+| `--no-conformal` | off | Skip that step; the summary's `conformal` is `null`. |
 | `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
 | `--variant` | `cifar10`; `tiny` for ImageNet | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
 | `--kernel-size` | `7` | Depthwise convolution kernel size. |
@@ -318,6 +320,8 @@ results/<experiment_name>/
         confidence_calibration.png   reliability diagram with ECE
         misclassifications.png       the most confident errors
         classification_report.json
+    conformal.json              the conformal record (alpha, tau, n_calibration, split coverage and set size, caveat); absent with --no-conformal
+    conformal_model.keras       the best weights with a ConformalPredictionSet on top; absent with --no-conformal
     model_analysis/             ModelAnalyzer output of the final analysis (analysis_results.json, ...); absent with --no-model-analysis
     epoch_analysis/             ONLY with --epoch-analysis
 ```
@@ -400,6 +404,7 @@ Keys added by a finished run (`status: "ok"`):
 | `visualizations` | `files`: the post-fit figure and report files that exist on disk (the dashboard is written by the training callback and is not listed; a perfect classifier writes no `misclassifications.png`, and the name is then absent, not listed), the ECE, and `failed` (figures that raised; empty on a healthy run). |
 | `lr_reduction_epochs` | 1-based epochs trained at a lower rate than the epoch before, from the `lr` history: only meaningful under `--lr-schedule constant` (which adds `ReduceLROnPlateau`), where an empty list means no plateau reduction; `null` under `cosine` and `exponential`, where the rate falls every epoch by design and `ReduceLROnPlateau` is not installed. |
 | `model_loading_validated` | Result of reloading `final_model.keras` and comparing predictions. |
+| `conformal` | The record written to `conformal.json` (`alpha`, `tau`, `n_calibration`, `repeated_splits`, `model_selected_on_calibration_set` = false, `caveat`), or `null` with `--no-conformal`. |
 | `analyzer` | Status, loss, accuracy, error and path of the `ModelAnalyzer` run, read back from disk; `{"status": "skipped", ...}` with `null` for the rest under `--no-model-analysis`. |
 | `notes` | Plain-language caveats for the reader of the file. |
 
