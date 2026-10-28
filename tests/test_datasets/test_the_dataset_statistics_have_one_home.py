@@ -22,14 +22,12 @@ import pytest
 
 import dl_techniques.datasets.vision.classification as classification
 import dl_techniques.datasets.vision.imagenet2012 as imagenet2012
-import train.alexnet.train_alexnet as alexnet
 import train.cliffordnet.train_cliffordnet as cliffordnet
 import train.cliffordnet.train_downsampling_techniques as downsampling
 import train.clip.train_clip as clip
 import train.common.megadepth as megadepth
 import train.power_mlp.train_power_mlp as power_mlp
 import train.rad_convnet.data as rad_data
-import train.vit.train_vit as vit
 
 SRC = Path(classification.__file__).resolve().parents[3]
 
@@ -79,10 +77,10 @@ def _copies(tree: ast.AST, dataset: str) -> list:
 
 
 CONSUMERS = [
-    ("cifar100", alexnet, "CIFAR100"), ("cifar100", cliffordnet, "CIFAR100"),
+    ("cifar100", cliffordnet, "CIFAR100"),
     ("cifar100", downsampling, "CIFAR100"),
-    ("cifar10", alexnet, "CIFAR10"), ("cifar10", cliffordnet, "CIFAR10"),
-    ("cifar10", vit, "CIFAR10"), ("cifar10", power_mlp, "CIFAR10"),
+    ("cifar10", cliffordnet, "CIFAR10"),
+    ("cifar10", power_mlp, "CIFAR10"),
     ("mnist", power_mlp, "MNIST"),
 ]
 
@@ -94,7 +92,7 @@ def test_each_consumer_holds_the_one_object(dataset, module, prefix):
     assert getattr(module, f"{prefix}_STD") is getattr(classification, f"{prefix}_STD")
 
 
-@pytest.mark.parametrize("module", [clip, megadepth, rad_data, cliffordnet],
+@pytest.mark.parametrize("module", [clip, megadepth, rad_data],
                          ids=lambda m: m.__name__)
 def test_every_imagenet_consumer_holds_the_one_object(module):
     assert module.IMAGENET_MEAN is imagenet2012.IMAGENET_MEAN

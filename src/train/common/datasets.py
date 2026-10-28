@@ -1,4 +1,10 @@
-"""Common dataset loading utilities for training scripts."""
+"""Dataset utilities for training scripts that the classification loader does not cover.
+
+MNIST, CIFAR and ImageNet classification data come from ``train.common.classification_data``.
+What is left here: image-file discovery (:func:`collect_image_paths`), the raw-image tf.data
+pipeline of the self-supervised trainers (:func:`build_raw_image_dataset`, imagenette via TFDS
+and CIFAR-10 in memory) and :func:`fill_batch`.
+"""
 
 import keras
 import numpy as np
@@ -6,129 +12,9 @@ import tensorflow as tf
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple, List, Optional, Sequence, Set
 
-from dl_techniques.datasets.vision.classification import (
-    CIFAR10_MEAN,
-    CIFAR10_STD,
-    CLASSIFICATION_DATASETS,
-)
+from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
-
-def make_imagenet_filesystem_dataset(
-        data_dir: str,
-        image_size: int,
-        batch_size: int,
-        is_training: bool = True,
-        augment: bool = True,
-        augment_color: bool = False,
-        shuffle_buffer: int = 10000,
-        num_parallel_calls=tf.data.AUTOTUNE,
-        cache_val: bool = False,
-        drop_remainder: Optional[bool] = None,
-        prefetch_buffer=tf.data.AUTOTUNE,
-) -> tf.data.Dataset:
-    """Build an ImageNet-style ``tf.data`` pipeline from a class-subdir layout.
-
-    Walks ``data_dir`` for class subdirectories (sorted, one integer label per
-    subdir), collects every ``*.JPEG`` (uppercase glob — lowercase would
-    silently skip files) into ``(path, label)`` lists, then builds a
-    ``tf.data.Dataset`` that reads, decodes, resizes, optionally augments, scales
-    to ``[0, 1]`` and normalizes with :data:`IMAGENET_MEAN` / :data:`IMAGENET_STD`.
-
-    This is the shared extraction of the byte-near-identical ImageNet pipelines
-    previously duplicated in ``train_resnet.py`` and ``train_vit.py``. The two
-    differed ONLY in four colour augmentations (random brightness / contrast /
-    saturation / hue), which are gated here behind ``augment_color``. The
-    ``clip_by_value(0, 255)`` clamp is applied unconditionally in BOTH original
-    callers and is therefore kept unconditional here (it is not a per-caller
-    divergence).
-
-    Args:
-        data_dir: Root directory containing one subdirectory per class.
-        image_size: Target square crop size (height == width) in pixels.
-        batch_size: Number of examples per batch.
-        is_training: When ``True`` the dataset is shuffled and repeated, the
-            training augmentation branch (random crop + horizontal flip) runs,
-            and ``drop_remainder`` defaults to ``True``.
-        augment: Master switch for the training augmentation branch. Augmentation
-            only runs when ``is_training and augment`` (matches the original
-            ``is_training and config.augment_data`` guard). When ``False`` (or in
-            validation) the deterministic resize + centre crop-or-pad branch runs.
-        augment_color: When ``True`` (and augmentation is active) additionally
-            applies the four colour augmentations (brightness / contrast /
-            saturation / hue). ResNet opts in (``True``); ViT uses the default
-            (``False``).
-        shuffle_buffer: Shuffle buffer size used when ``is_training``.
-        num_parallel_calls: ``num_parallel_calls`` for the per-element map.
-        cache_val: When ``True`` and ``not is_training``, caches the mapped
-            dataset in memory (mirrors the original ``cache_dataset and not
-            is_training`` guard).
-        drop_remainder: Passed to ``batch``. When ``None`` (the default) it
-            resolves to ``is_training`` (drop the ragged tail during training,
-            keep it for validation).
-        prefetch_buffer: ``buffer_size`` for the trailing ``prefetch``.
-
-    Returns:
-        A single ``tf.data.Dataset`` yielding ``(image, label)`` batches, where
-        ``image`` has shape ``(batch, image_size, image_size, 3)`` normalized with
-        the ImageNet mean/std. (Both original callers returned just the dataset;
-        this preserves that contract — no tuple, no ``num_classes`` / steps.)
-    """
-    if drop_remainder is None:
-        drop_remainder = is_training
-
-    data_dir = Path(data_dir)
-    class_names = sorted([d.name for d in data_dir.iterdir() if d.is_dir()])
-    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
-    logger.info(f"Found {len(class_names)} classes in {data_dir}")
-
-    image_paths: List[str] = []
-    labels: List[int] = []
-    for class_name in class_names:
-        class_idx = class_to_idx[class_name]
-        for img_file in (data_dir / class_name).glob("*.JPEG"):
-            image_paths.append(str(img_file))
-            labels.append(class_idx)
-    logger.info(f"Found {len(image_paths)} images")
-
-    dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
-    if is_training:
-        dataset = dataset.shuffle(
-            buffer_size=shuffle_buffer, reshuffle_each_iteration=True
-        ).repeat()
-
-    def _preprocess(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        image = tf.image.decode_jpeg(image, channels=3)
-        image = tf.cast(image, tf.float32)
-        if is_training and augment:
-            image = tf.image.resize(image, [image_size + 32, image_size + 32])
-            image = tf.image.random_crop(image, [image_size, image_size, 3])
-            image = tf.image.random_flip_left_right(image)
-            if augment_color:
-                image = tf.image.random_brightness(image, max_delta=0.2)
-                image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-                image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
-                image = tf.image.random_hue(image, max_delta=0.1)
-        else:
-            image = tf.image.resize(image, [int(image_size * 1.15), int(image_size * 1.15)])
-            image = tf.image.resize_with_crop_or_pad(image, image_size, image_size)
-        image = tf.clip_by_value(image, 0.0, 255.0) / 255.0
-        image = (image - IMAGENET_MEAN) / IMAGENET_STD
-        return image, label
-
-    def _load(path, label):
-        image = tf.io.read_file(path)
-        return _preprocess(image, label)
-
-    dataset = dataset.map(_load, num_parallel_calls=num_parallel_calls)
-    if cache_val and not is_training:
-        dataset = dataset.cache()
-    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
-    dataset = dataset.prefetch(prefetch_buffer)
-    return dataset
 
 
 # ---------------------------------------------------------------------
@@ -233,72 +119,6 @@ def collect_image_paths(
         all_file_paths = all_file_paths[:max_files]
 
     return all_file_paths
-
-
-# ---------------------------------------------------------------------
-
-def load_dataset(dataset_name: str) -> Tuple:
-    """
-    Load and preprocess an in-memory image dataset.
-
-    ImageNet is not handled here: use ``train.common.imagenet``.
-
-    Parameters
-    ----------
-    dataset_name : str
-        Name of the dataset ('mnist', 'cifar10', 'cifar100').
-
-    Returns
-    -------
-    Tuple
-        Training data, test/validation data, input shape, number of classes.
-    """
-    logger.info(f"Loading {dataset_name} dataset...")
-
-    if dataset_name.lower() == 'mnist':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-        x_train = np.repeat(x_train[..., np.newaxis], 3, axis=-1)
-        x_test = np.repeat(x_test[..., np.newaxis], 3, axis=-1)
-        input_shape = (28, 28, 3)
-        num_classes = 10
-
-    elif dataset_name.lower() == 'cifar10':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-        y_train = y_train.flatten()
-        y_test = y_test.flatten()
-        input_shape = (32, 32, 3)
-        num_classes = 10
-
-    elif dataset_name.lower() == 'cifar100':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-        y_train = y_train.flatten()
-        y_test = y_test.flatten()
-        input_shape = (32, 32, 3)
-        num_classes = 100
-
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-
-    logger.info(f"Dataset loaded: {x_train.shape[0]} train, {x_test.shape[0]} test samples")
-    logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
-
-    return (x_train, y_train), (x_test, y_test), input_shape, num_classes
-
-
-def get_class_names(dataset: str, num_classes: int) -> List[str]:
-    """Get class names for the dataset.
-
-    ``cifar100`` returns its 100 names when ``num_classes`` is 100; any other
-    ``num_classes`` (a subset, a different label mode), and any dataset without a
-    spec, falls back to ``class_N`` placeholders rather than mislabel the classes.
-    """
-    spec = CLASSIFICATION_DATASETS.get(dataset.lower())
-    if spec is None:
-        return [f'class_{i}' for i in range(num_classes)]
-    return spec.class_names_for(num_classes)
 
 
 # ---------------------------------------------------------------------

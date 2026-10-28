@@ -3,12 +3,12 @@
 ``dl_techniques.datasets.vision.imagenet2012.load_imagenet2012`` owns the
 pipeline (decode, crop, augment, normalize). This module owns what every
 trainer around it repeated: the ``--imagenet-root`` / ``--devkit-dir`` flags,
-the root-exists check, the train/val pair with the same loader settings, the
-class-count check, and a small in-memory head of val for the end-of-run
-figures. ``train_resnet``, ``train_vit`` and ``train_cliffordnet`` use
-:func:`load_imagenet_splits` (val doubles as the selection set); ``train_convnext``
-and ``train_capsnet`` use :func:`load_imagenet_selection_splits`, which takes
-the selection set from a class-balanced slice of train so val stays a clean test set.
+the root-exists check, the (train, select, test) triple with the same loader
+settings, the class-count check, and a small in-memory head of a split for the
+end-of-run figures. :func:`load_imagenet_selection_splits` takes the selection set
+from a class-balanced slice of train so the official val split stays a clean test
+set; trainers reach it through ``train.common.classification_data``, which adds the
+other datasets and the normalization statistics.
 """
 from __future__ import annotations
 
@@ -89,49 +89,6 @@ def _check_num_classes(
         )
 
 
-def load_imagenet_splits(
-        root: str,
-        devkit_dir: Optional[str],
-        image_size: int,
-        batch_size: int,
-        seed: int,
-        augment: bool,
-        augment_color: bool = False,
-        num_parallel_calls: int = tf.data.AUTOTUNE,
-        num_classes: Optional[int] = None,
-) -> Tuple[ImageNet2012Data, ImageNet2012Data]:
-    """Build the ``(train, val)`` pair every ImageNet trainer feeds to ``fit``.
-
-    Train drops its ragged last batch (a fixed step count per epoch); val keeps
-    every image. Both datasets are finite and do not repeat.
-
-    Args:
-        root: ImageNet folder holding ``train/`` and ``val/``.
-        devkit_dir: Devkit folder; ``None`` means ``<root>/devkit``.
-        image_size: Square output side.
-        batch_size: Batch size of both splits.
-        seed: Seed of the train shuffle and augmentation.
-        augment: Random-resized-crop and flip on train.
-        augment_color: Brightness, contrast, saturation and hue on train.
-        num_parallel_calls: Parallel decode calls (default: autotuned).
-        num_classes: When given, the number of class folders under ``train/``
-            must equal it.
-
-    Raises:
-        ValueError: ``num_classes`` differs from the number of class folders.
-    """
-    kwargs = _loader_kwargs(root, devkit_dir, image_size, batch_size, seed, augment,
-                            augment_color, num_parallel_calls, "imagenet")
-    train = load_imagenet2012("train", ImageNet2012Config(drop_remainder=True, **kwargs))
-    val = load_imagenet2012("val", ImageNet2012Config(**kwargs))
-    _check_num_classes(train, num_classes, root)
-    logger.info(
-        f"ImageNet: {train.num_samples} train ({train.steps_per_epoch} steps/epoch), "
-        f"{val.num_samples} val, {train.num_classes} classes"
-    )
-    return train, val
-
-
 def load_imagenet_selection_splits(
         root: str,
         devkit_dir: Optional[str],
@@ -150,7 +107,7 @@ def load_imagenet_selection_splits(
 
     ``select`` is ``holdout_per_class`` images per class taken out of train, for
     early stopping and checkpoint selection; ``train`` is every other train
-    image; ``test`` is the official val split. As in :func:`load_imagenet_splits`
+    image; ``test`` is the official val split. As in :func:`load_imagenet_selection_splits`
     train drops its ragged last batch, and all three are finite.
 
     Args:

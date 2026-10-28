@@ -25,7 +25,7 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 
 | Pattern | Used by | Exemplar to copy | Monitor |
 |---|---|---|---|
-| **Pattern 1: Vision classification** — `load_dataset()` + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, PowerMLP (`load_dataset()` and the evaluation pipeline, but its own parser, not `create_base_argument_parser()`; see `src/train/power_mlp/README.md`), KAN, ViT, SOM, MobileNet, DeepSORT embedding (`deepsort/`: PK identity batches over synthetic/Market1501 data, cosine-softmax or triplet loss, CMC/mAP retrieval eval; own parser since `load_dataset()` has no ReID source) | `src/train/vit/train_vit.py` | `val_accuracy` |
+| **Pattern 1: Vision classification** — `train.common.classification_data` (`load_classification_data` / `load_split_arrays`) + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, ResNet (ImageNet only), AlexNet, PowerMLP (the loader and the evaluation pipeline, but its own parser, not `create_base_argument_parser()`; see `src/train/power_mlp/README.md`), ViT, SOM, MobileNet, RBF-ProtoNet, MothNet, VAE; KAN is synthetic tabular; DeepSORT embedding (`deepsort/`: PK identity batches over synthetic/Market1501 data, cosine-softmax or triplet loss, CMC/mAP retrieval eval; own parser since the loader has no ReID source) | `src/train/vit/train_vit.py` | `val_accuracy` |
 | **Pattern 2: Time-series / probabilistic** — synthetic generators, local argparse (the base parser's `--dataset` choices do not apply), `include_terminate_on_nan=True`, analyzer behind a `--deep-analysis` flag | N-BEATS, PRISM, TiRex, MDN | `src/train/time_series/nbeats/` | `val_loss` |
 | **Pattern 3: NLP pretrain/finetune** — `train.common.nlp` for tokenization, text datasets, warmup LR, callbacks; model code stays local | BERT, FNet, tree_transformer, GPT-2, wave_field | `src/train/bert/pretrain.py`, `src/train/bert/finetune.py` | `val_loss` |
 | **Pattern 4: Denoising / detection / dense prediction** — file-based (or in-memory dense-label) datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, ConvUNeXt denoiser (`bfunet/`), ConvUNext segmentation (`convunext/`), YOLO12-COCO, ResNet, DarkIR, LightGlue (`lightglue/`: frozen SuperPoint front end, loss through `add_loss`, README lists the run directory and the flags), SiamFC (`siamfc/`: centered COCO/synthetic pairs, radius-label logistic loss), DaSiamRPN (`dasiamrpn/`: per-anchor cls/reg losses over the reference anchor grid) | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
@@ -216,8 +216,8 @@ Rules that each cost a run once: insert `LearningRateLogger(at_epoch_start=True)
 the callback list so `lr` reaches `training_log.csv` and the dashboard; pass the dashboard a
 `baseline_fn` that measures the untrained model the way the trainer's own loss guard does; give
 `write_classification_figures` PROBABILITIES (softmax of the logits for a logits head) in the
-order of `y_test`, and `mean`/`std` only when `x_test` is standardized; `get_class_names(dataset,
-num_classes)` supplies the labels. A figure that fails logs a warning and does not abort the run;
+order of `y_test`, and `mean`/`std` only when `x_test` is standardized; the loader's
+`class_names` supply the labels. A figure that fails logs a warning and does not abort the run;
 read `failed` in the helper's return value.
 
 **Not yet conforming.** From a grep for `write_classification_figures` and
@@ -235,9 +235,9 @@ from this list in the same commit. No test enforces this list.
 | `setup_gpu(gpu_id)` | Memory growth + device selection. Every script supports `--gpu` and calls `setup_gpu(args.gpu)`: it sets `CUDA_VISIBLE_DEVICES` for a specific GPU, or enables memory growth on all of them when `None`. When `CUDA_VISIBLE_DEVICES` is already set, `gpu_id` counts WITHIN that list (`CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on physical GPU 1; `--gpu 1` there raises `ValueError`); only when it is unset does `gpu_id` name a physical GPU. `visible_device_for(gpu_id, visible)` is the one rule (D-110). `train/common/gpu.py` is the ONLY module that writes `CUDA_VISIBLE_DEVICES` (census in `tests/test_train/test_common_setup_gpu_respects_visible_devices.py`, D-116): a launcher resolves `--gpu` once with `visible_device_for` (or `child_visible_devices` when it has its own default GPU) and builds each child's environment with `env_with_visible_devices(value)`, never `str(gpu_id)`; a process that must stay CPU-only calls `hide_gpus()`, which returns the value it replaced |
 | `create_callbacks(...)` / `create_nlp_callbacks(...)` | See above |
 | `resolve_monitor_mode(monitor, mode=None)` | The ONE producer of a checkpoint-selection direction |
-| `create_base_argument_parser(description, default_dataset)` | Only for scripts using `load_dataset()` |
+| `create_base_argument_parser(description, default_dataset, ..., include_image_size=True)` | For scripts that load through `classification_data`; a trainer of fixed-size datasets passes `include_image_size=False` |
 | `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` | Cosine / exponential / constant. Defined in `dl_techniques.optimization.schedule` and re-exported here; both paths resolve to the same object |
-| `load_dataset(...)` / `get_class_names(...)` | See Data loading below |
+| `load_classification_data(...)` / `load_split_arrays(...)` / `add_selection_arguments(...)` | The one ingestion path of the labelled-image trainers; see Data loading below |
 | `validate_model_loading(...)` / `run_model_analysis(...)` | Round-trip serialization check; full ModelAnalyzer pipeline |
 | `create_regression_results(...)` / `create_multi_model_regression(...)` / `create_timeseries_results(...)` | The constructors for `RegressionResults`, `MultiModelRegression` and `TimeSeriesEvaluationResults`. Every plugin in those two families type-checks its input with `isinstance`, so **without these, six plugins were unreachable by construction** — not merely unregistered. Flatten and length-check the prediction pair; the timeseries builder promotes a bare 1-D array on either axis to a batch of ONE (consistent across both axes, so one call means the same thing whichever array it touches) and refuses quantiles without `quantile_levels`, which the plugin needs to label the bands. **No trainer calls these yet** — they are available infrastructure; see the figures section below. Sibling of `create_classification_results`. Tested by `tests/test_train/test_common_evaluation_results.py` |
 | `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. After an `ok` read-back it deletes the library's empty `model_analysis/summary_dashboard.png` and adds `removed: ["summary_dashboard.png"]` to the block (absent otherwise), and only while `model_metrics`, `calibration_metrics`, `confidence_metrics` and `weight_pca` of the returned result are all empty: a dashboard a panel has data for is kept. `data_free_analysis_config()` is the one `AnalysisConfig` behind it. The analyzer call runs inside `threadpool_limits(limits=limits)`, scoped to that call; `limits` defaults to `DATA_FREE_ANALYSIS_BLAS_THREADS` = 4 (12 BLAS threads oversubscribed the host: 14.7 to 21.0 s against 6.1 to 6.6 s at one thread on one saved model, D-046; four against one: AlexNet 177.8 s against 381.7 s, a 1.9M-parameter ConvUNext 5.7 s against 5.8 s, plan-2026-10-14T062616-81938e81 D-243). Do not write a per-trainer copy |
@@ -331,18 +331,46 @@ Keep local: model creation and compilation, domain-specific losses, custom argpa
 
 ## Data loading
 
-`load_dataset()` covers mnist, cifar10 and cifar100 only, returning
-`(x_train, y_train), (x_test, y_test), input_shape, num_classes` (numpy). For ImageNet-1k use
-`train.common.imagenet` (flags via `add_imagenet_arguments`, splits via `load_imagenet_splits`,
-an in-memory val head via `eval_head`). For text use
-`train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth` (yielding
-`(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity per-map
-normalized to `[0, 1]`). For anything else write local
-loading — do NOT force it through `load_dataset()`.
+**One ingestion path for labelled images.** `train.common.classification_data` serves MNIST,
+CIFAR-10, CIFAR-100 and ImageNet-1k to every classification trainer, with one protocol: the
+SELECTION split (fit validation, early stopping, the best checkpoint) is a held-out slice of
+train, and the TEST split never selects.
 
-ImageNet-1k from the extracted `train/<wnid>/` + `val/` layout: `dl_techniques.datasets.vision.imagenet2012.load_imagenet2012`, wired through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet` (`--imagenet-root` / `--devkit-dir`; val labels need the ILSVRC2012 devkit). `train.common.make_imagenet_filesystem_dataset` remains for `alexnet`.
+- `load_classification_data(name, batch_size=, seed=, ...)` returns a `ClassificationData`: three
+  batched `tf.data` pipelines (`train_ds` drops the remainder and reshuffles, `select_ds`,
+  `test_ds`), the counts, `steps_per_epoch`, an in-memory test subset (`x_fig`, `y_fig`) for the
+  figures and the analyzer, `mean`/`std`, `input_shape`, `num_classes`, `class_names` and the
+  provenance strings. MNIST and CIFAR hold out `validation_split` of train (seeded permutation);
+  ImageNet holds out `holdout_per_class` images per class (`train.common.imagenet`).
+- `load_split_arrays(name, seed=, ...)` is the same split with no pipeline, for a numpy loop or a
+  flattened-input model (PowerMLP, MothNet, SOM, VAE, the logic E1, the MAE script). `index_*`
+  give each split's rows in the Keras arrays, to align a second label set.
+- `normalize="standardize"` uses the dataset's published statistics, `"unit"` leaves [0, 1];
+  `labels="one_hot"` for CapsNet; `channels=3` repeats MNIST's channel; `resize=` upsamples
+  (AlexNet); `augment=` is a hook that sees the [0, 1] image BEFORE normalization (the vit D-006
+  rule). `flip_pad_crop` is the shared flip + pad-crop.
+- `add_selection_arguments(parser, imagenet=, in_memory=, figures=)` declares the matching flags
+  (`--validation-split`, `--holdout-per-class`, `--max-samples`, `--imagenet-root`, `--devkit-dir`,
+  `--eval-samples`), all defaulting to `None` so a flag that does not apply to the chosen dataset
+  is refused, never ignored.
+- The constants (CIFAR-10, CIFAR-100, MNIST, ImageNet mean/std, class names, class counts) live in
+  `dl_techniques.datasets.vision.classification` (`DatasetSpec`, `CLASSIFICATION_DATASETS`);
+  ImageNet's pair is defined once in `imagenet2012.py`. A trainer imports the names.
+- `classification_data._load_raw` is the ONE `keras.datasets` call under `src/train`; a trainer
+  test replaces it (`tests/classification_fakes.py`). Exceptions are named, with reasons, in
+  `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`: the
+  self-supervised raw-image pipeline `build_raw_image_dataset` (dino, beit, energy_transformer,
+  alexnet's imagenette: TFDS records, test split as validation), CIFAR-100's coarse labels
+  (`head_comparison`).
 
-Conformal prediction sets for a trained classifier: `train.common.conformal` (`add_conformal_arguments`, `run_conformal`, `load_conformal_model`) runs one ordered pass over a labelled calibration set, checks coverage on random 50/50 splits, fits the exported threshold on all of it, and writes `conformal.json` plus `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. `run_conformal` requires `selection_overlaps_calibration`: the ResNet, ViT and CliffordNet ImageNet runs calibrate on the val set that also picked their checkpoint (`True`, weakened guarantee); `train_convnext` and `train_capsnet` select on a held-out slice of train and calibrate on the test split (`False`), for every dataset; there the step is OFF unless `--conformal-alpha [ALPHA]` is given (`add_conformal_arguments(parser, on_by_default=False)`). CapsNet emits capsule lengths in [0, 1], so it exports a wrapper that applies `ProbabilityLogits` first. The math lives in `dl_techniques/utils/conformal_classification.py`; the deterministic APS rule it reports is the one `ConformalPredictionSet` (`layers/statistics/conformal/`) runs.
+For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
+(yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity
+per-map normalized to `[0, 1]`); for image-file denoiser/restoration/matching data
+`train.common.datasets.collect_image_paths`. For anything else write local loading.
+
+ImageNet-1k from the extracted `train/<wnid>/` + `val/` layout: `dl_techniques.datasets.vision.imagenet2012.load_imagenet2012`, reached through `load_classification_data("imagenet", ...)` by `train_resnet`, `train_vit`, `train_cliffordnet`, `train_convnext`, `train_capsnet` and `train_alexnet` (`--imagenet-root` / `--devkit-dir`; val labels need the ILSVRC2012 devkit).
+
+Conformal prediction sets for a trained classifier: `train.common.conformal` (`add_conformal_arguments`, `run_conformal`, `load_conformal_model`) runs one ordered pass over a labelled calibration set, checks coverage on random 50/50 splits, fits the exported threshold on all of it, and writes `conformal.json` plus `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. `run_conformal` requires `selection_overlaps_calibration`; every trainer now selects on a held-out slice of train and calibrates on the test split, so each passes `False` (the `True` record and its weaker caveat remain for a run that does select on the calibration data). `train_convnext` and `train_capsnet` run it for every dataset and it is OFF unless `--conformal-alpha [ALPHA]` is given (`add_conformal_arguments(parser, on_by_default=False)`). CapsNet emits capsule lengths in [0, 1], so it exports a wrapper that applies `ProbabilityLogits` first. The math lives in `dl_techniques/utils/conformal_classification.py`; the deterministic APS rule it reports is the one `ConformalPredictionSet` (`layers/statistics/conformal/`) runs.
 
 ## Scripts that don't use `train.common` callbacks (and why)
 

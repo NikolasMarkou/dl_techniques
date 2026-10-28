@@ -35,6 +35,13 @@ Data loading, generation, and preprocessing utilities for various domains.
 - `vision/` — Computer vision dataset loaders:
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
     variant
+  - `classification.py` — the one home of the labelled-image datasets' constants: a
+    frozen `DatasetSpec` per dataset (`mnist`, `cifar10`, `cifar100`, `imagenet`: class count,
+    train size, native shape, per-channel mean/std of the [0, 1] training images, class names)
+    in `CLASSIFICATION_DATASETS`, `get_spec`, and `CIFAR10_MEAN` / `CIFAR100_MEAN` / `MNIST_MEAN`
+    (and `_STD`). ImageNet's pair is defined once in `imagenet2012.py` and referenced.
+    A trainer imports the names; `tests/test_datasets/test_the_dataset_statistics_have_one_home.py`
+    guards that and re-derives the values from the data.
   - `imagenet2012.py` — ImageNet-1k read straight from the extracted
     `train/<wnid>/` + flat `val/` layout (:func:`load_imagenet2012`, returns
     batched `(image, label)` plus counts and wnid class names). Class index =
@@ -44,7 +51,8 @@ Data loading, generation, and preprocessing utilities for various domains.
     `FileNotFoundError` when the devkit is absent; train never needs it. The
     file list is cached under `<root>/.index/`. Finite dataset, no `repeat()`.
     `augment_color` adds brightness/contrast/saturation/hue on [0, 1] pixels.
-    Used through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet`.
+    Used through `train.common.imagenet` and `train.common.classification_data` by `train_resnet`,
+    `train_vit`, `train_cliffordnet`, `train_convnext`, `train_capsnet` and `train_alexnet`.
     Tested by `tests/test_datasets/test_imagenet2012.py`. TensorFlow and
     SciPy at module scope.
   - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes

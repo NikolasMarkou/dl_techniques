@@ -150,6 +150,11 @@ OTHER_LENGTH_LOSING_SITES: Dict[str, str] = {
         "after repeat(): an infinite stream; fit passes steps_per_epoch and validation_steps",
     "src/train/bfunet/common.py::create_dataset::flat_map":
         "after repeat(): an infinite stream; fit passes steps_per_epoch and validation_steps",
+    "src/train/capsnet/train_capsnet.py::_head::unbatch":
+        "the first n rows for the reconstruction figures (take n); never reaches fit",
+    "src/train/common/imagenet.py::eval_head::unbatch":
+        "the first n rows of a split for the figures and the analyzer (take n); never "
+        "reaches fit",
     "src/train/common/nlp.py::prepare_data_for_analyzer::unbatch":
         "analyzer input preparation (take n); never reaches fit",
     "src/train/common/tfrecord.py::read_tfrecord_dataset::interleave":
