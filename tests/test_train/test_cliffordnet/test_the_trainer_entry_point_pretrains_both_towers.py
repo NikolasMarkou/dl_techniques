@@ -40,7 +40,7 @@ _VARIANT = "pretrain_test_tiny"
 _ARGV = (
     "--synthetic", "--variant", _VARIANT,
     "--image-size", "64", "--context-length", "16", "--vision-patch-size", "4",
-    "--batch-size", "8", "--max-train-samples", "16", "--max-val-samples", "8",
+    "--batch-size", "8", "--max-train-samples", "16", "--max-test-samples", "8",
     "--epochs", "1", "--steps-per-epoch", "2",
     "--pretrain-vision-steps", "1", "--pretrain-vision-batch-size", "8",
     "--pretrain-lm-steps", "1", "--pretrain-lm-batch-size", "2",

@@ -301,12 +301,23 @@ epoch).
 | `--probe-every-steps` | `750` | Retrieval probe cadence; 0 disables. |
 | `--probe-num-pairs` | `512` | |
 | `--gamma-probe-every-steps` | `500` | Logs projection-head LayerScale gamma. No effect for `--head-kind plain`. |
-| `--max-train-samples` / `--max-val-samples` | none | |
+| `--selection-images` | `5000` (`64` with `--synthetic`) | Distinct TRAIN images held out, one caption each, as the selection split that `val_loss` and the retrieval probes read. Every caption of those images leaves the fit set. |
+| `--max-train-samples` | none | Cap on the train pairs loaded; the selection split is cut out of this pool. |
+| `--max-test-samples` | none | Cap on the test split (see below). |
 | `--cache-decoded` | off | See gotchas. |
 | `--mixed-bfloat16` | off | No LossScaleOptimizer needed; `logit_scale` stays fp32. |
 | `--seed` | `42` | Seeds Python, numpy and Keras/TF (`set_seeds`) and the LM-pretrain loader. |
 | `--output-dir` | `results/cliffordclip_<variant>_<timestamp>` | Run directory. |
 | `--gpu` | none | Index within an exported `CUDA_VISIBLE_DEVICES` (D-110), selected by `setup_gpu` at the start of the run; `setup_gpu` raises if the selection or the memory growth does not take effect. |
+
+**Selection and test.** The selection split is a seeded cut of the train IMAGES (`train.common.image_text.hold_out_images`;
+by image, because COCO lists about five captions per image and retrieval is scored one caption per image). `fit`'s
+`val_loss` and the in-training retrieval probes read it. The dataset's official validation split (COCO `val2017`, CC3M
+`validation`) is the TEST split: it is loaded at the start so a missing tree fails early, then scored once after
+training, and `training_summary.txt` reports `Retrieval metrics (selection slice ...)` and `Retrieval metrics (test: ...)`
+as separate blocks. `eval_clip_retrieval.py` scores a saved checkpoint on that same test split. Runs made before this
+protocol read `val2017` for all three jobs, so their numbers are not comparable to a run made now (which also fits on
+about 4% fewer COCO pairs). On this machine CC3M has only `train/`, so a CC3M run stops at the test load.
 
 Training is stock `compile`/`fit` on the contrastive bridge of `src/train/clip/train_clip.py`
 (`compile_for_contrastive_training` with the `--loss` loss as its inner loss). Output:

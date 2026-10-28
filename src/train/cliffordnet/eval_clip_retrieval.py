@@ -1,7 +1,8 @@
 """COCO 2017 zero-shot image-text retrieval eval for CliffordCLIP.
 
 Loads a saved ``CliffordCLIP`` ``.keras`` checkpoint, streams the COCO 2017
-validation split through both encoders, and reports Recall@{1,5,10} in both
+validation split (``val2017``, the TEST split of ``train_clip.py``: no training epoch, probe
+or comparison between runs reads it) through both encoders, and reports Recall@{1,5,10} in both
 retrieval directions (image->text and text->image). All preprocessing matches
 training exactly (``image_size``, ``context_length``, tiktoken ``gpt2``,
 OpenAI CLIP mean/std, ``training=False``) via the shared image-text loaders, so
@@ -203,7 +204,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, float]:
     metrics = _compute_retrieval_metrics(clip_model, ds)
 
     n = int(metrics.get("num_pairs", len(paths)))
-    logger.info(f"COCO val zero-shot retrieval (N={n} pairs, 1 caption/image):")
+    logger.info(f"COCO val2017 (test split) zero-shot retrieval (N={n} pairs, 1 caption/image):")
     logger.info(
         "  image->text  R@1=%.2f%%  R@5=%.2f%%  R@10=%.2f%%"
         % (

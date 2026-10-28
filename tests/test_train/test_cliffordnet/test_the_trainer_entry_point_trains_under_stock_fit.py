@@ -35,6 +35,14 @@ from train.common.contrastive import StackedCLIPLogits
 from train.cliffordnet.train_clip import RetrievalProbeCallback, main, parse_arguments
 
 _BATCH = 8
+#: Train 16 pairs, selection 12, test 10: three different sizes, so a validation_data, a
+#: probe or a summary block built from the wrong split shows in its count.
+_TRAIN_PAIRS = 2 * _BATCH
+_SELECT_PAIRS = _BATCH + 4
+_TEST_PAIRS = _BATCH + 2
+#: Between the test split (10) and the selection slice (12): a probe cut from the test split
+#: could hold only 10 pairs, one cut from the selection slice holds all 11.
+_PROBE_PAIRS = _BATCH + 3
 _VARIANT = "entry_point_test_tiny"
 
 #: nano's ladder (4 stages, PatchMerging between them) at one block per stage
@@ -59,11 +67,11 @@ _TINY_ROW = dict(
 _ARGV = (
     "--synthetic", "--skip-pretrain", "--variant", _VARIANT,
     "--image-size", "64", "--context-length", "16", "--vision-patch-size", "4",
-    "--batch-size", str(_BATCH), "--max-train-samples", str(2 * _BATCH),
-    "--max-val-samples", str(_BATCH),
+    "--batch-size", str(_BATCH), "--max-train-samples", str(_TRAIN_PAIRS),
+    "--max-test-samples", str(_TEST_PAIRS), "--selection-images", str(_SELECT_PAIRS),
     "--epochs", "2", "--steps-per-epoch", "1",
     "--save-every-steps", "1", "--log-every-steps", "1", "--max-checkpoints", "2",
-    "--probe-every-steps", "1", "--probe-num-pairs", str(_BATCH),
+    "--probe-every-steps", "1", "--probe-num-pairs", str(_PROBE_PAIRS),
     "--gamma-probe-every-steps", "1", "--seed", "3",
 )
 
@@ -84,6 +92,7 @@ def _spy_on_fit(monkeypatch):
 
     def spy(self, *args, **kwargs):
         counter = _BatchCounter()
+        counter.fit_kwargs = dict(kwargs)
         kwargs["callbacks"] = [*(kwargs.get("callbacks") or []), counter]
         history = stock_fit(self, *args, **kwargs)
         calls.append((self, counter, history))
@@ -191,3 +200,37 @@ def test_the_command_line_refuses_a_dead_setting(argv, tmp_path):
     assert parse_arguments(base).output_dir == str(tmp_path / "run")
     with pytest.raises(SystemExit):
         parse_arguments([*base, *argv])
+
+
+def _rows(dataset):
+    """Number of (image, text) rows a batched contrastive-fit dataset holds."""
+    return sum(int(batch[0]["image"].shape[0]) for batch in dataset)
+
+
+def test_fit_validates_on_the_selection_slice_not_the_test_split(run):
+    """`validation_data` is the held-out slice of train (12 pairs), not the official
+    validation split (10) and not the fit set (16)."""
+    _, _, fit_calls = run
+    validation = fit_calls[0][1].fit_kwargs["validation_data"]
+    assert _rows(validation) == _SELECT_PAIRS, (
+        f"validation_data holds {_rows(validation)} rows; the selection slice has "
+        f"{_SELECT_PAIRS} and the test split {_TEST_PAIRS}")
+
+
+def test_the_probes_read_the_selection_slice(run):
+    """The first `--probe-num-pairs` (11) of the 12 selection pairs; the test split has only 10,
+    so a probe built from it would hold 10."""
+    out, _, _ = run
+    with open(out / "retrieval_probes" / "probes.jsonl") as handle:
+        probes = [json.loads(line) for line in handle]
+    assert {p["num_pairs"] for p in probes} == {float(_PROBE_PAIRS)}
+
+
+def test_the_summary_scores_the_selection_slice_and_the_test_split_separately(run):
+    out, _, _ = run
+    text = (out / "training_summary.txt").read_text()
+    selection_block = text.split("Retrieval metrics (selection slice")[1].split("Retrieval metrics (test")[0]
+    test_block = text.split("Retrieval metrics (test:")[1]
+    assert f"num_pairs: {float(_SELECT_PAIRS):.4f}" in selection_block
+    assert f"num_pairs: {float(_TEST_PAIRS):.4f}" in test_block
+    assert "scored once, after training" in test_block

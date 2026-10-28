@@ -17,6 +17,13 @@ throwaway wrappers — no save/reload between phases — trained with stock
 images with 100 labels, random-word text), so a smoke run reaches both
 pretraining stages without CIFAR-100 or Wikipedia on disk.
 
+**Selection and test.** ``fit``'s ``val_loss`` and the in-training retrieval probes read a
+selection split cut from the TRAIN images (``--selection-images``, one caption each; the cut is
+by image, see :func:`train.common.image_text.hold_out_images`). The dataset's official
+validation split (COCO ``val2017``, CC3M ``validation``) is the test split: scored once after
+training and reported in ``training_summary.txt`` as its own block, never read by an epoch, a
+probe or a comparison between runs.
+
 The training recipe borrows schedule ideas from the Penguin-VL paper
 (arXiv:2603.06569):
 
@@ -146,7 +153,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
@@ -164,6 +171,7 @@ from train.common.image_text import IMAGE_MEAN, IMAGE_STD
 from train.common import (
     StepCheckpointCallback,
     build_synthetic_image_text_dataset,
+    hold_out_images,
     load_cc3m_local_split,
     load_coco2017_local_split,
     make_image_text_tf_dataset,
@@ -265,7 +273,8 @@ class LogitScaleLogger(keras.callbacks.Callback):
 # Use these to calibrate CliffordCLIP runs; do not treat them as targets
 # for the nano variant.
 #
-# MSCOCO 5K (Karpathy test split, 5K images / 25K captions):
+# MSCOCO 5K (Karpathy test split, 5K images / 25K captions; NOT the 2017 val2017 split this
+# trainer scores, which is 5K different images with one caption each):
 #   OpenAI CLIP ViT-B/32 (WIT-400M):     i2t R@1 ~50-58, t2i R@1 ~30-38
 #   OpenCLIP ViT-B/32 (LAION-2B):        i2t R@5 ~75,    t2i R@5 ~55
 #   OpenCLIP H/14, G/14 (LAION-2B):      t2i R@5 ~73-75
@@ -1161,71 +1170,107 @@ def _build_optimizer(
 # =============================================================================
 
 
+#: Distinct train images held out for selection when ``--selection-images`` is not given:
+#: the size of COCO's val2017, so the selection numbers have the test split's resolution.
+_DEFAULT_SELECTION_IMAGES = 5000
+#: The same for ``--synthetic``, whose train split is a few dozen pairs.
+_DEFAULT_SYNTHETIC_SELECTION_IMAGES = 64
+
+
+class ClipSplits(NamedTuple):
+    """The three image-caption splits of a run.
+
+    ``train`` is what the optimizer fits. ``select`` is a seeded cut of the train IMAGES, one
+    caption each, and is what ``fit(validation_data=...)`` and the in-training retrieval
+    probes read. ``test`` is the dataset's official validation split, scored once after
+    training; it never selects. Each is ``(images, token_ids)``.
+    """
+
+    train: Tuple[Any, np.ndarray]
+    select: Tuple[Any, np.ndarray]
+    test: Tuple[Any, np.ndarray]
+    test_name: str
+
+
 def _prepare_datasets(
     args: argparse.Namespace,
     encoder,
-) -> Tuple[Any, Any, Any, Any]:
-    """Load raw image+token arrays/lists for training and evaluation.
+) -> ClipSplits:
+    """Load the raw image+token splits for training, selection and the final test.
 
-    Returns ``(train_images, train_tokens, val_images, val_tokens)``. For
-    synthetic mode, both splits are numpy arrays already normalized and
-    resized. For COCO mode, both splits are python lists of raw uint8
-    images plus numpy int32 token matrices.
+    For synthetic mode the splits are numpy arrays already normalized and resized. For COCO
+    and CC3M they are lists of image paths plus numpy int32 token matrices. The selection
+    split is cut from the TRAIN split BY IMAGE (:func:`hold_out_images`), so the official
+    validation split (COCO ``val2017``, CC3M ``validation``) is a test set that no epoch,
+    probe or comparison between runs has read.
+
+    :raises ValueError: ``--selection-images`` leaves no train image, or the dataset is unknown.
     """
     vocab_size = encoder.n_vocab
     eot_token_id = int(encoder.eot_token)
     if args.synthetic:
-        train_images, train_tokens = build_synthetic_image_text_dataset(
-            num_samples=args.max_train_samples or 256,
-            image_size=args.image_size,
-            context_length=args.context_length,
-            vocab_size=vocab_size,
-            eot_token_id=eot_token_id,
-            seed=0,
-        )
-        val_images, val_tokens = build_synthetic_image_text_dataset(
-            num_samples=args.max_val_samples or 64,
-            image_size=args.image_size,
-            context_length=args.context_length,
-            vocab_size=vocab_size,
-            eot_token_id=eot_token_id,
-            seed=1,
-        )
-        return train_images, train_tokens, val_images, val_tokens
+        def synthetic(num_samples, seed):
+            return build_synthetic_image_text_dataset(
+                num_samples=num_samples,
+                image_size=args.image_size,
+                context_length=args.context_length,
+                vocab_size=vocab_size,
+                eot_token_id=eot_token_id,
+                seed=seed,
+            )
 
+        n_select = args.selection_images or _DEFAULT_SYNTHETIC_SELECTION_IMAGES
+        return ClipSplits(
+            train=synthetic(args.max_train_samples or 256, 0),
+            select=synthetic(n_select, 1),
+            test=synthetic(args.max_test_samples or 64, 2),
+            test_name="synthetic",
+        )
+
+    n_select = args.selection_images or _DEFAULT_SELECTION_IMAGES
     if args.dataset == "coco2017":
-        train_images, train_tokens = load_coco2017_local_split(
+        pool_images, pool_tokens = load_coco2017_local_split(
             split="train",
             coco_root=args.coco_root,
             max_samples=args.max_train_samples,
             encoder=encoder,
             context_length=args.context_length,
         )
-        val_images, val_tokens = load_coco2017_local_split(
+        test_images, test_tokens = load_coco2017_local_split(
             split="val",
             coco_root=args.coco_root,
-            max_samples=args.max_val_samples,
+            max_samples=args.max_test_samples,
             encoder=encoder,
             context_length=args.context_length,
         )
+        test_name = "COCO val2017"
     elif args.dataset == "cc3m":
-        train_images, train_tokens = load_cc3m_local_split(
+        pool_images, pool_tokens = load_cc3m_local_split(
             split="train",
             cc3m_root=args.cc3m_root,
             max_samples=args.max_train_samples,
             encoder=encoder,
             context_length=args.context_length,
         )
-        val_images, val_tokens = load_cc3m_local_split(
+        test_images, test_tokens = load_cc3m_local_split(
             split="validation",
             cc3m_root=args.cc3m_root,
-            max_samples=args.max_val_samples,
+            max_samples=args.max_test_samples,
             encoder=encoder,
             context_length=args.context_length,
         )
+        test_name = "CC3M validation"
     else:
         raise ValueError(f"Unknown --dataset {args.dataset!r}")
-    return train_images, train_tokens, val_images, val_tokens
+
+    train_images, train_tokens, select_images, select_tokens = hold_out_images(
+        pool_images, pool_tokens, n_select, seed=args.seed)
+    return ClipSplits(
+        train=(train_images, train_tokens),
+        select=(select_images, select_tokens),
+        test=(test_images, test_tokens),
+        test_name=test_name,
+    )
 
 
 def train(args: argparse.Namespace) -> Path:
@@ -1259,9 +1304,10 @@ def train(args: argparse.Namespace) -> Path:
     )
 
     # --- Data ---
-    train_images, train_tokens, val_images, val_tokens = _prepare_datasets(
-        args, encoder
-    )
+    splits = _prepare_datasets(args, encoder)
+    train_images, train_tokens = splits.train
+    select_images, select_tokens = splits.select
+    test_images, test_tokens = splits.test
 
     # --- Dataset summary ---
     # One bracketed, greppable block so dataset sizes are immediately visible
@@ -1287,9 +1333,11 @@ def train(args: argparse.Namespace) -> Path:
         return len(set(images))
 
     n_train_pairs = len(train_tokens)
-    n_val_pairs = len(val_tokens)
+    n_select_pairs = len(select_tokens)
+    n_test_pairs = len(test_tokens)
     n_train_distinct = _distinct_image_count(train_images)
-    n_val_distinct = _distinct_image_count(val_images)
+    n_select_distinct = _distinct_image_count(select_images)
+    n_test_distinct = _distinct_image_count(test_images)
     summary_steps_per_epoch = (
         args.steps_per_epoch or max(1, n_train_pairs // args.batch_size)
     )
@@ -1304,8 +1352,13 @@ def train(args: argparse.Namespace) -> Path:
         f"(distinct images: {n_train_distinct:,})"
     )
     logger.info(
-        f"  val pairs        : {n_val_pairs:,} "
-        f"(distinct images: {n_val_distinct:,})"
+        f"  selection pairs  : {n_select_pairs:,} "
+        f"(distinct images: {n_select_distinct:,}; a seeded cut of the train images)"
+    )
+    logger.info(
+        f"  test pairs       : {n_test_pairs:,} "
+        f"(distinct images: {n_test_distinct:,}; {splits.test_name}, scored once "
+        f"after training)"
     )
     logger.info(f"  image resolution : {args.image_size}x{args.image_size}")
     logger.info(f"  context length   : {args.context_length}")
@@ -1441,28 +1494,28 @@ def train(args: argparse.Namespace) -> Path:
         training=True,
         cache_decoded=args.cache_decoded,
     ))
-    val_ds = as_contrastive_fit_batches(make_image_text_tf_dataset(
-        val_images,
-        val_tokens,
+    select_ds = as_contrastive_fit_batches(make_image_text_tf_dataset(
+        select_images,
+        select_tokens,
         image_size=args.image_size,
         batch_size=args.batch_size,
         training=False,
         cache_decoded=args.cache_decoded,
     ))
 
-    # A smaller slice of val used for in-training retrieval probes.
-    # Intentionally capped so each probe is fast; the full-val
-    # retrieval is computed once at the very end of training. The
-    # probe set is tiny (~512 pairs), so caching it is always fine
-    # regardless of the main ``--cache-decoded`` setting.
-    probe_n = min(args.probe_num_pairs, len(val_tokens))
-    if isinstance(val_images, np.ndarray):
-        probe_imgs = val_images[:probe_n]
+    # A smaller slice of the SELECTION split used for in-training retrieval probes.
+    # Intentionally capped so each probe is fast; the full retrieval is computed once at the
+    # very end of training. The probe set is tiny (~512 pairs), so caching it is always fine
+    # regardless of the main ``--cache-decoded`` setting. The test split is not read until
+    # training is over.
+    probe_n = min(args.probe_num_pairs, len(select_tokens))
+    if isinstance(select_images, np.ndarray):
+        probe_imgs = select_images[:probe_n]
     else:
-        probe_imgs = list(val_images[:probe_n])
+        probe_imgs = list(select_images[:probe_n])
     probe_ds = make_image_text_tf_dataset(
         probe_imgs,
-        val_tokens[:probe_n],
+        select_tokens[:probe_n],
         image_size=args.image_size,
         batch_size=args.batch_size,
         training=False,
@@ -1521,7 +1574,7 @@ def train(args: argparse.Namespace) -> Path:
 
     history = wrapper.fit(
         train_ds,
-        validation_data=val_ds,
+        validation_data=select_ds,
         epochs=train_cfg.epochs,
         steps_per_epoch=steps_per_epoch,
         callbacks=callbacks,
@@ -1579,20 +1632,26 @@ def train(args: argparse.Namespace) -> Path:
         custom_objects={"CliffordCLIP": CliffordCLIP},
     )
 
-    # --- Retrieval eval on val split at final resolution ---
-    logger.info("Computing retrieval recall@K on val split...")
-    val_ds_final = make_image_text_tf_dataset(
-        val_images,
-        val_tokens,
-        image_size=args.image_size,
-        batch_size=args.batch_size,
-        training=False,
-        cache_decoded=False,  # one-shot eval, no reuse benefit
-    )
-    metrics = _compute_retrieval_metrics(clip_model, val_ds_final)
-    logger.info("Retrieval metrics:")
-    for k, v in metrics.items():
-        logger.info(f"  {k}: {v:.4f}")
+    # --- Retrieval eval at final resolution: the selection slice, then the TEST split once ---
+    def _final_retrieval(images, tokens, label):
+        logger.info(f"Computing retrieval recall@K on {label}...")
+        eval_ds = make_image_text_tf_dataset(
+            images,
+            tokens,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            training=False,
+            cache_decoded=False,  # one-shot eval, no reuse benefit
+        )
+        result = _compute_retrieval_metrics(clip_model, eval_ds)
+        logger.info(f"Retrieval metrics ({label}):")
+        for k, v in result.items():
+            logger.info(f"  {k}: {v:.4f}")
+        return result
+
+    select_metrics = _final_retrieval(select_images, select_tokens, "the selection slice")
+    metrics = _final_retrieval(
+        test_images, test_tokens, f"the test split ({splits.test_name})")
 
     # --- Summary ---
     summary_path = os.path.join(results_dir, "training_summary.txt")
@@ -1618,7 +1677,14 @@ def train(args: argparse.Namespace) -> Path:
             f"CLIP training: image_size={args.image_size}, "
             f"epochs={args.epochs}, peak_lr={args.peak_lr}\n\n"
         )
-        f.write("Retrieval metrics (val split):\n")
+        f.write(
+            f"Retrieval metrics (selection slice, {n_select_distinct:,} train images "
+            "held out; read during training):\n")
+        for k, v in select_metrics.items():
+            f.write(f"  {k}: {v:.4f}\n")
+        f.write(
+            f"\nRetrieval metrics (test: {splits.test_name}, {n_test_distinct:,} images; "
+            "scored once, after training):\n")
         for k, v in metrics.items():
             f.write(f"  {k}: {v:.4f}\n")
     logger.info(f"Summary: {summary_path}")
@@ -1824,8 +1890,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "*_captions.jsonl files."
         ),
     )
-    parser.add_argument("--max-train-samples", type=int, default=None)
-    parser.add_argument("--max-val-samples", type=int, default=None)
+    parser.add_argument(
+        "--max-train-samples", type=int, default=None,
+        help=(
+            "Cap on the train pairs loaded. The selection split is cut out of this "
+            "pool, so fewer pairs than this remain for fitting."
+        ),
+    )
+    parser.add_argument(
+        "--selection-images", type=int, default=None,
+        help=(
+            "Distinct train images held out (one caption each) as the selection split "
+            "that val_loss and the retrieval probes read; every caption of those images "
+            "leaves the fit set. Default: 5000 (the size of COCO val2017), 64 with "
+            "--synthetic. Must leave at least one train image."
+        ),
+    )
+    parser.add_argument(
+        "--max-test-samples", type=int, default=None,
+        help=(
+            "Cap on the test split: the dataset's official validation split (COCO "
+            "val2017, CC3M validation), scored once after training and never used to "
+            "select."
+        ),
+    )
     parser.add_argument(
         "--cache-decoded", action="store_true",
         help=(
