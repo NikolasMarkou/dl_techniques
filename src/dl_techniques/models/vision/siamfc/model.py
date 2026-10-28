@@ -28,7 +28,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -38,8 +37,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import materialize_sublayers, refuse_input_shape
+from dl_techniques.utils.validation import positive_float, positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import initializer_spec
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -172,11 +174,11 @@ def _cross_correlate(
             patch = search_features[
                 :, i : i + template_extent, j : j + template_extent, :
             ]
-            value = ops.sum(template_features * patch, axis=(1, 2, 3))
+            value = keras.ops.sum(template_features * patch, axis=(1, 2, 3))
             cols.append(value)
-        rows.append(ops.stack(cols, axis=1))
-    response = ops.stack(rows, axis=1)
-    response = ops.expand_dims(response, axis=-1) + bias
+        rows.append(keras.ops.stack(cols, axis=1))
+    response = keras.ops.stack(rows, axis=1)
+    response = keras.ops.expand_dims(response, axis=-1) + bias
     return response
 
 
@@ -192,6 +194,10 @@ class SiamFCBackbone(keras.layers.Layer):
     convolution and the ReLU when ``use_batch_norm`` is set. The 1606.05233
     baseline keeps the second pool at stride 1 (total stride 4); this layer
     does not.
+
+    The first stage (``conv1``, ``bn1``, ReLU and ``pool1`` below) is one
+    :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named ``stem``;
+    stages two to five are the body and keep their own layers.
 
     Block internals:
 
@@ -240,8 +246,8 @@ class SiamFCBackbone(keras.layers.Layer):
     Edges give the extent for a 127 / 255 input. * only when use_batch_norm.
 
     :param use_batch_norm: Apply BatchNorm after the first four convolutions.
-        When off, ``bn1`` to ``bn4`` are still created but never built or
-        called.
+        When off, the stem holds no norm and ``bn2`` to ``bn4`` are still
+        created but never built or called.
     :type use_batch_norm: bool
     :param bn_momentum: BatchNorm momentum in the Keras convention (torch 0.1
         maps to 0.9 here). Must be in ``(0, 1)``.
@@ -249,9 +255,15 @@ class SiamFCBackbone(keras.layers.Layer):
     :param bn_epsilon: BatchNorm epsilon; the default 1e-5 is the torch
         default. Must be positive.
     :type bn_epsilon: float
-    :param kernel_initializer: Initializer for all convolutions.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Initializer for all convolutions: a name, a
+        serialized config dict or an ``Initializer`` instance. It is stored as
+        a name or dict and each convolution draws from its own copy, so an
+        instance given here does not hand one sample to five kernels.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param **kwargs: Passed to ``keras.layers.Layer``.
+    :raises ValueError: If ``bn_momentum`` is outside ``(0, 1)``,
+        ``bn_epsilon`` is not positive, or ``input_shape`` or ``input_dim`` is
+        passed (the layer embeds an image of any size).
     """
 
     def __init__(
@@ -259,28 +271,26 @@ class SiamFCBackbone(keras.layers.Layer):
         use_batch_norm: bool = True,
         bn_momentum: float = 0.9,
         bn_epsilon: float = 1e-5,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, dict, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
         """Validate arguments and create the sub-layers.
 
         Arguments are documented on the class.
-
-        :raises ValueError: If ``bn_momentum`` is outside ``(0, 1)`` or
-            ``bn_epsilon`` is not positive.
         """
+        refuse_input_shape(kwargs, "SiamFCBackbone", "it embeds an image of any size")
         super().__init__(**kwargs)
         if not 0.0 < bn_momentum < 1.0:
             raise ValueError(f"bn_momentum must be in (0, 1), got {bn_momentum}")
-        if bn_epsilon <= 0.0:
-            raise ValueError(f"bn_epsilon must be positive, got {bn_epsilon}")
+        self.bn_epsilon = positive_float(bn_epsilon, "bn_epsilon", "SiamFCBackbone")
         self.use_batch_norm = use_batch_norm
         self.bn_momentum = bn_momentum
-        self.bn_epsilon = bn_epsilon
-        self.kernel_initializer = kernel_initializer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem and to every body convolution; never keep the caller's Initializer instance.
+        # One seedless instance given to all five convolutions replayed a single draw across 10 of 10 kernel pairs, and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
 
-        def _conv(filters: int, kernel: int, stride: int, name: str) -> layers.Conv2D:
-            return layers.Conv2D(
+        def _conv(filters: int, kernel: int, stride: int, name: str) -> keras.layers.Conv2D:
+            return keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=kernel,
                 strides=stride,
@@ -299,12 +309,29 @@ class SiamFCBackbone(keras.layers.Layer):
                 name=name,
             )
 
-        self.conv1 = _conv(96, 11, 2, "conv1")
-        self.bn1 = _bn("bn1")
-        self.pool1 = layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool1")
+        # Stage 1: 11x11/2 convolution, BatchNorm, ReLU, 3x3/2 pool.
+        self.stem = ConvStem(
+            96,
+            kernel_size=11,
+            strides=2,
+            padding="valid",
+            normalization_type="batch_norm" if use_batch_norm else None,
+            normalization_kwargs=(
+                {"momentum": bn_momentum, "epsilon": self.bn_epsilon}
+                if use_batch_norm
+                else None
+            ),
+            activation_type="relu",
+            use_pooling=True,
+            pool_size=3,
+            pool_strides=2,
+            pool_padding="valid",
+            kernel_initializer=self.kernel_initializer,
+            name="stem",
+        )
         self.conv2 = _conv(256, 5, 1, "conv2")
         self.bn2 = _bn("bn2")
-        self.pool2 = layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool2")
+        self.pool2 = keras.layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool2")
         self.conv3 = _conv(384, 3, 1, "conv3")
         self.bn3 = _bn("bn3")
         self.conv4 = _conv(384, 3, 1, "conv4")
@@ -319,13 +346,8 @@ class SiamFCBackbone(keras.layers.Layer):
         :param input_shape: Shape ``(B, H, W, 3)``.
         :type input_shape: tuple
         """
-        shape = input_shape
-        self.conv1.build(shape)
-        shape = self.conv1.compute_output_shape(shape)
-        if self.use_batch_norm:
-            self.bn1.build(shape)
-        self.pool1.build(shape)
-        shape = self.pool1.compute_output_shape(shape)
+        self.stem.build(input_shape)
+        shape = self.stem.compute_output_shape(input_shape)
         self.conv2.build(shape)
         shape = self.conv2.compute_output_shape(shape)
         if self.use_batch_norm:
@@ -355,24 +377,20 @@ class SiamFCBackbone(keras.layers.Layer):
         :return: Features of shape ``(B, H', W', 256)``.
         :rtype: keras.KerasTensor
         """
-        x = self.conv1(inputs)
-        if self.use_batch_norm:
-            x = self.bn1(x, training=training)
-        x = ops.relu(x)
-        x = self.pool1(x)
+        x = self.stem(inputs, training=training)
         x = self.conv2(x)
         if self.use_batch_norm:
             x = self.bn2(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.pool2(x)
         x = self.conv3(x)
         if self.use_batch_norm:
             x = self.bn3(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.conv4(x)
         if self.use_batch_norm:
             x = self.bn4(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.conv5(x)
         return x
 
@@ -398,8 +416,8 @@ class SiamFCBackbone(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: Base config plus every constructor argument, with
-            ``kernel_initializer`` serialized.
+        :return: Base config plus every constructor argument; the
+            ``kernel_initializer`` is the stored name or dict.
         :rtype: dict
         """
         config = super().get_config()
@@ -408,25 +426,10 @@ class SiamFCBackbone(keras.layers.Layer):
                 "use_batch_norm": self.use_batch_norm,
                 "bn_momentum": self.bn_momentum,
                 "bn_epsilon": self.bn_epsilon,
-                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "kernel_initializer": self.kernel_initializer,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SiamFCBackbone":
-        """Rebuild the layer, deserializing a dict ``kernel_initializer``.
-
-        ``config`` is modified in place.
-
-        :param config: Output of :meth:`get_config`.
-        :type config: dict
-        :return: A new layer.
-        :rtype: SiamFCBackbone
-        """
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
-        return cls(**config)
 
 
 @register_dl_technique("dl_techniques.models.siamfc.model")
@@ -472,8 +475,10 @@ class SiamFC(keras.Model):
     :type search_size: int
     :param use_batch_norm: Forwarded to the shared backbone.
     :type use_batch_norm: bool
-    :param kernel_initializer: Forwarded to the shared backbone.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Forwarded to the shared backbone; stored as a
+        name or dict, so an ``Initializer`` instance is serialized once and
+        no two kernels share one draw.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param **kwargs: Passed to ``keras.Model``.
     """
 
@@ -482,20 +487,24 @@ class SiamFC(keras.Model):
         exemplar_size: int = EXEMPLAR_SIZE,
         search_size: int = SEARCH_SIZE,
         use_batch_norm: bool = True,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, dict, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
         """Validate the sizes, derive the extents and create the backbone.
 
         Arguments are documented on the class.
 
-        :raises ValueError: If ``exemplar_size`` is not positive,
-            ``search_size`` does not exceed it, or either feature extent or
-            the score extent is not positive.
+        :raises ValueError: If ``exemplar_size`` is not a positive integer,
+            ``search_size`` does not exceed it, either feature extent or the
+            score extent is not positive, or ``input_shape`` or ``input_dim``
+            is passed (the sizes are ``exemplar_size`` and ``search_size``).
         """
+        refuse_input_shape(
+            kwargs, "SiamFC", "the input sizes are exemplar_size and search_size"
+        )
         super().__init__(**kwargs)
-        if exemplar_size <= 0:
-            raise ValueError(f"exemplar_size must be positive, got {exemplar_size}")
+        exemplar_size = positive_int(exemplar_size, "exemplar_size", "SiamFC")
+        search_size = positive_int(search_size, "search_size", "SiamFC")
         if search_size <= exemplar_size:
             raise ValueError(
                 f"search_size ({search_size}) must exceed exemplar_size ({exemplar_size})"
@@ -511,14 +520,15 @@ class SiamFC(keras.Model):
         self.exemplar_size = exemplar_size
         self.search_size = search_size
         self.use_batch_norm = use_batch_norm
-        self.kernel_initializer = kernel_initializer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the spec and hand it to the backbone, as the backbone does for its convolutions; never keep the caller's Initializer instance.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self._template_extent = template_extent
         self._search_extent = search_extent
         self._score_size = score
 
         self.backbone = SiamFCBackbone(
             use_batch_norm=use_batch_norm,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="backbone",
         )
         self.response_bias = None
@@ -572,8 +582,8 @@ class SiamFC(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
 
-        :return: Base config plus every constructor argument, with
-            ``kernel_initializer`` serialized.
+        :return: Base config plus every constructor argument; the
+            ``kernel_initializer`` is the stored name or dict.
         :rtype: dict
         """
         config = super().get_config()
@@ -582,25 +592,10 @@ class SiamFC(keras.Model):
                 "exemplar_size": self.exemplar_size,
                 "search_size": self.search_size,
                 "use_batch_norm": self.use_batch_norm,
-                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "kernel_initializer": self.kernel_initializer,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SiamFC":
-        """Rebuild the model, deserializing a dict ``kernel_initializer``.
-
-        ``config`` is modified in place.
-
-        :param config: Output of :meth:`get_config`.
-        :type config: dict
-        :return: A new model.
-        :rtype: SiamFC
-        """
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
-        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -610,7 +605,7 @@ def create_siamfc(
     exemplar_size: int = EXEMPLAR_SIZE,
     search_size: int = SEARCH_SIZE,
     use_batch_norm: bool = True,
-    kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+    kernel_initializer: Union[str, dict, keras.initializers.Initializer] = "glorot_uniform",
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> SiamFC:
@@ -626,7 +621,7 @@ def create_siamfc(
     :param use_batch_norm: Forwarded to the shared backbone.
     :type use_batch_norm: bool
     :param kernel_initializer: Forwarded to the shared backbone.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param pretrained: Path to a local checkpoint, or ``False`` to skip
         loading. ``True`` raises.
     :type pretrained: bool or str

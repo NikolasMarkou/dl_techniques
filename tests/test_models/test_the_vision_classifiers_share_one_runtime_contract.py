@@ -445,11 +445,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::instance", "siamfc"): Open(
-        AssertionError,
-        "the SiamFC and DaSiamRPN stem migration",
-        '10 of 10 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "dasiamrpn"): Open(
         AssertionError,
         "the SiamFC and DaSiamRPN stem migration",
@@ -1721,6 +1716,7 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     _named_other("capsnet", "capsnet", ("conv_block_0",)),
     _named_other("capsnet_v2_legacy", "capsnet_v2_legacy", ("conv_block_0",)),
     _named_other("deepsort", "deepsort", ("stem",)),
+    _named_other("siamfc", "siamfc", ("stem",)),
 )
 
 
@@ -2260,11 +2256,35 @@ def _deepsort_build() -> keras.Model:
     return DeepSortAppearanceNet()
 
 
+def _siam_backbone_owned() -> set:
+    """The AlexNet-style trunk of SiamFC and DaSiamRPN: stage 1 is the ``stem``; stages two to
+    five keep the reference's own names, each convolution with its BatchNorm (``bn2`` to
+    ``bn4`` are created even when the model uses none) and the second pool."""
+    return {"stem", "conv2", "bn2", "pool2", "conv3", "bn3", "conv4", "bn4", "conv5"}
+
+
+def _siamfc_pair() -> Tuple[np.ndarray, np.ndarray]:
+    return _images(127, 127, 3, batch=1), _images(255, 255, 3, batch=1)
+
+
+def _siamfc_backbone_build() -> keras.layers.Layer:
+    from dl_techniques.models.vision.siamfc.model import SiamFCBackbone
+    return SiamFCBackbone()
+
+
+def _siamfc_build() -> keras.Model:
+    from dl_techniques.models.vision.siamfc.model import SiamFC
+    return SiamFC()
+
+
 #: ``case id -> (build, the inputs of one forward, the exact set of layers the build owns
 #: directly)``; the expected sets are written from the architecture, never read off a model.
 TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
                                   Callable[[], set]]] = {
     "deepsort": (_deepsort_build, lambda: _images(128, 64, 3), _deepsort_owned),
+    "siamfc": (_siamfc_build, _siamfc_pair, lambda: {"backbone"}),
+    "siamfc_backbone": (_siamfc_backbone_build, lambda: _images(127, 127, 3, batch=1),
+                        _siam_backbone_owned),
 }
 
 
@@ -2287,6 +2307,22 @@ def test_the_tracker_name_rule_sees_the_spellings_deepsort_had() -> None:
         "a stem left beside the loose layers": [*clean, "conv1_2", "bn1_2"],
         "a missing stage": [n for n in clean if n != "block3_1"],
         "a renamed head": ["classifier" if n == "cosine_head" else n for n in clean],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+
+
+def test_the_tracker_name_rule_sees_the_spellings_the_siamese_trunk_had() -> None:
+    expected = _siam_backbone_owned()
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the loose first conv": [*(n for n in clean if n != "stem"), "conv1"],
+        "the loose first norm": [*clean, "bn1"],
+        "the loose first pool": [*clean, "pool1"],
+        "the stem beside its three loose layers": [*clean, "conv1", "bn1", "pool1"],
+        "a missing body norm": [n for n in clean if n != "bn3"],
+        "a body stage renamed": ["conv_2" if n == "conv2" else n for n in clean],
     }
     for why, owned in plants.items():
         assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
@@ -2382,6 +2418,18 @@ def _deepsort_block_without_shape(**kw: Any) -> Any:
 def _deepsort_head_without_shape(**kw: Any) -> Any:
     from dl_techniques.models.vision.deepsort.appearance import CosineClassifier
     return CosineClassifier(num_classes=3, **kw)
+
+
+@_no_shape("siamfc")
+def _siamfc_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.siamfc.model import SiamFC
+    return SiamFC(**kw)
+
+
+@_no_shape("siamfc_backbone")
+def _siamfc_backbone_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.siamfc.model import SiamFCBackbone
+    return SiamFCBackbone(**kw)
 
 
 def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:

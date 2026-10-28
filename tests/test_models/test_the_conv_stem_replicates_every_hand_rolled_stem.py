@@ -114,6 +114,7 @@ from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
 from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
 from dl_techniques.models.vision.resnet.model import ResNet
+from dl_techniques.models.vision.siamfc.model import SiamFC, SiamFCBackbone
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
@@ -1656,6 +1657,101 @@ DEEPSORT = StemCase(
 )
 
 
+# ---------------------------------------------------------------------
+# SiamFC and DaSiamRPN: stage 1 of the AlexNet-style trunk
+# ---------------------------------------------------------------------
+
+# Original: ``SiamFCBackbone`` and ``SiamRPNBackbone`` before the migration (HEAD
+# 07363f8f6): ``conv1`` = Conv2D(96 * width, 11, strides 2, valid, bias) with the model's
+# ``kernel_initializer``; ``bn1`` from the norm factory with the backbone's momentum and
+# epsilon (0.9 and 1e-5, the torch values, when the model builds it) only when
+# ``use_batch_norm``; a functional ``ops.relu`` (no layer, so ``fused``); ``pool1`` =
+# MaxPooling2D(3, strides 2, valid). Stages two to five are the trunk's body and are not a
+# stem. A model without BatchNorm still created ``bn1`` and never built or called it.
+#: Neither the knob's default (``glorot_uniform``, which is also ConvStem's) nor
+#: ConvStem's, so a stem that dropped the argument is visible.
+_SIAM_KERNEL_INIT = "lecun_normal"
+_SIAM_FILTERS = 96
+
+
+def _siam_stage1_original(
+    filters: int, batch_norm: bool, momentum: float, epsilon: float
+) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=11,
+        strides=2,
+        padding="valid",
+        use_bias=True,
+        kernel_initializer=_SIAM_KERNEL_INIT,
+        name="conv1",
+    )
+    norm = (
+        create_normalization_layer(
+            "batch_norm", momentum=momentum, epsilon=epsilon, name="bn1"
+        )
+        if batch_norm
+        else None
+    )
+    pool = keras.layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool1")
+
+    def forward(x, training):
+        x = conv(x)
+        if norm is not None:
+            x = norm(x, training=training)
+        return pool(keras.ops.relu(x))
+
+    sublayers = {"conv1": conv, "pool": pool}
+    if norm is not None:
+        sublayers["norm1"] = norm
+    return Original(sublayers=sublayers, forward=forward, fused=("act1",))
+
+
+def _siamfc_model(batch_norm: bool = True) -> SiamFC:
+    return SiamFC(use_batch_norm=batch_norm, kernel_initializer=_SIAM_KERNEL_INIT)
+
+
+def _siamfc_backbone(momentum: float = 0.9, epsilon: float = 1e-5) -> SiamFCBackbone:
+    return SiamFCBackbone(
+        bn_momentum=momentum, bn_epsilon=epsilon, kernel_initializer=_SIAM_KERNEL_INIT
+    )
+
+
+def _through_backbone(model) -> ConvStem:
+    return model.backbone.stem
+
+
+# 47 px: (47 - 11) // 2 + 1 = 19, then a 3x3/2 valid pool gives 9.
+def _siam_case(case_id, make_model, filters, batch_norm, momentum, epsilon, stem_of):
+    return StemCase(
+        case_id=case_id,
+        make_model=make_model,
+        make_original=lambda: _siam_stage1_original(filters, batch_norm, momentum, epsilon),
+        input_shape=(47, 47, 3),
+        expected_output_shape=(9, 9, filters),
+        stem_of=stem_of,
+    )
+
+
+def _own_stem(layer) -> ConvStem:
+    return layer.stem
+
+
+SIAMFC_BN = _siam_case(
+    "siamfc-bn", _siamfc_model, _SIAM_FILTERS, True, 0.9, 1e-5, _through_backbone
+)
+SIAMFC_NOBN = _siam_case(
+    "siamfc-no-bn",
+    lambda: _siamfc_model(batch_norm=False),
+    _SIAM_FILTERS, False, 0.9, 1e-5, _through_backbone,
+)
+SIAMFC_BACKBONE_MOMENTUM_EPSILON = _siam_case(
+    "siamfc-backbone-momentum-0.8-epsilon-1e-3",
+    lambda: _siamfc_backbone(0.8, 1e-3),
+    _SIAM_FILTERS, True, 0.8, 1e-3, _own_stem,
+)
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1718,6 +1814,9 @@ CASES = [
     CAPSNET_V2_BLOCK1,
     CAPSNET_V2_BLOCK2,
     DEEPSORT,
+    SIAMFC_BN,
+    SIAMFC_NOBN,
+    SIAMFC_BACKBONE_MOMENTUM_EPSILON,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1766,6 +1865,8 @@ BUILT_STEM_ROWS = [
     ("capsnet-v2-legacy-block1", _capsnet_v2_model, (28, 28, 1), _capsnet_block(0)),
     ("capsnet-v2-legacy-block2", _capsnet_v2_model, (28, 28, 1), _capsnet_block(1)),
     ("deepsort", DeepSortAppearanceNet, (128, 64, 3)),
+    # 91 px is the smallest side the trunk's five valid convolutions leave a feature map at.
+    ("siamfc-backbone", lambda: _siamfc_model().backbone, (91, 91, 3)),
 ]
 
 
@@ -1834,6 +1935,8 @@ INITIALIZER_AUDIT = {
         "hardcoded",
         "TruncatedNormal(stddev=1e-3), the reference's init; the stem call writes the literal",
     ),
+    "SiamFC": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
+    "SiamFCBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2194,6 +2297,8 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
             "kernel_initializer",
         ),
         (DEEPSORT, {"kernel_regularizer": None}, "kernel_regularizer"),
+        # The trunk's knob reaches stage 1 as the model's own value.
+        (SIAMFC_BN, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
     ],
     ids=[
         "kernel-initializer-class",
@@ -2209,6 +2314,7 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         "deepsort-initializer-at-the-default",
         "deepsort-initializer-other-width",
         "deepsort-regularizer-dropped",
+        "siamfc-initializer-dropped",
     ],
 )
 def test_the_guard_the_settings_check_sees_a_wrong_initializer_or_regularizer(
@@ -2315,6 +2421,54 @@ def test_the_guard_the_harness_sees_a_deepsort_stem_with_one_wrong_setting(overr
     with pytest.raises(AssertionError, match=match):
         assert_stem_matches_original(DEEPSORT, stem)
     assert_stem_matches_original(DEEPSORT, _stem_from_config(DEEPSORT))
+
+
+@pytest.mark.parametrize(
+    "case,override,match",
+    [
+        # A 3x3/2 pool padded "same" turns 19 into 10, not 9.
+        (SIAMFC_BN, {"pool_padding": "same"}, "shape"),
+        # A "same" convolution keeps 47 at stride 2: 24, not 19.
+        (SIAMFC_BN, {"padding": "same"}, "shape"),
+        # The factory's own epsilon is 1e-6; the torch value the trunk carries is 1e-5.
+        (SIAMFC_BN, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        # Momentum shows only in the moving statistics after a training=True pass.
+        (SIAMFC_BN, {"normalization_kwargs": {"momentum": 0.99}}, "after a training=True pass"),
+        (SIAMFC_BN, {"activation_type": "gelu"}, "differs from the original"),
+        (SIAMFC_BACKBONE_MOMENTUM_EPSILON, {"normalization_kwargs": {"momentum": 0.9}},
+         "after a training=True pass"),
+    ],
+    ids=[
+        "siamfc-pool-padding",
+        "siamfc-conv-padding",
+        "siamfc-epsilon-1e-6",
+        "siamfc-momentum-0.99",
+        "siamfc-gelu-for-relu",
+        "siamfc-backbone-momentum-back-at-the-default",
+    ],
+)
+def test_the_guard_the_harness_sees_a_siamese_stem_with_one_wrong_setting(case, override, match):
+    """Each value the trunk's first stage fixes is a defect when it is not kept; the
+    stem rebuilt from the model's own config passes the same comparison."""
+    stem = _stem_from_config(case, **override)
+    exception = ValueError if match == "not compatible" else AssertionError
+    with pytest.raises(exception, match=match):
+        assert_stem_matches_original(case, stem)
+    assert_stem_matches_original(case, _stem_from_config(case))
+
+
+def test_the_guard_the_harness_sees_a_siamese_norm_applied_twice():
+    """A second ``bn1`` in the forward changes the output."""
+    model = SIAMFC_BN.make_model()
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(SIAMFC_BN, SIAMFC_BN.stem_of(model), forward=_norm_applied_twice)
+
+
+def test_the_guard_a_siamese_model_without_batch_norm_has_no_norm_in_its_stem():
+    """The no-BN case has no ``norm1`` role: a stem that built one fails the role-set check."""
+    stem = _stem_from_config(SIAMFC_BN)  # BatchNorm built, against the original without one
+    with pytest.raises(AssertionError, match="roles"):
+        assert_stem_matches_original(SIAMFC_NOBN, stem)
 
 
 def test_the_guard_a_correct_stem_survives_the_same_harness():

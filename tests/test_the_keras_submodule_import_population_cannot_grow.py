@@ -67,6 +67,7 @@ ROOTS = ("src", "tests")
 #: 426 / 407 after ``mambalct/uca_encoder.py`` moved to ``keras.ops`` (plan-2026-10-26T125959-7af851e5 step 16).
 #: 425 / 406 after ``capsnet/model.py`` moved to ``keras.ops`` (plan-2026-10-26T125959-7af851e5 step 17).
 #: 423 / 404 after ``deepsort/appearance.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
+#: 421 / 402 after ``siamfc/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -218,7 +219,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/world_models/lewm/predictor.py": 1,
     "src/dl_techniques/models/vision/mambalct/model.py": 1,
     "src/dl_techniques/models/vision/masked_autoencoder/patch_masking.py": 1,
-    "src/dl_techniques/models/vision/siamfc/model.py": 1,
     "src/dl_techniques/models/vision/thera/hypernetwork.py": 1,
     "src/dl_techniques/models/vision/thera/rdn_backbone.py": 1,
     "src/dl_techniques/models/vision/thera/tails.py": 1,
@@ -438,7 +438,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_models/test_sd3_mmdit/test_text_encoders.py": 1,
     "tests/test_models/test_shgcn/test_precision_arm.py": 1,
     "tests/test_models/test_shgcn/test_round_trip.py": 1,
-    "tests/test_models/test_siamfc/test_siamfc.py": 1,
     "tests/test_models/test_som/test_model.py": 1,
     "tests/test_models/test_som/test_second_train_and_batched_inference.py": 3,
     "tests/test_models/test_superpoint/test_precision_arm.py": 1,
@@ -537,7 +536,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (423, 404), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (421, 402), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"
