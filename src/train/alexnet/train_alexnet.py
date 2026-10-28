@@ -67,14 +67,16 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import (
-    setup_gpu,
-    set_seeds,
-    create_callbacks as create_common_callbacks,
+from dl_techniques.datasets.vision.classification import (
     CIFAR10_MEAN,
     CIFAR10_STD,
     CIFAR100_MEAN,
     CIFAR100_STD,
+)
+from train.common import (
+    setup_gpu,
+    set_seeds,
+    create_callbacks as create_common_callbacks,
     IMAGENETTE_NUM_CLASSES,
     build_raw_image_dataset,
     make_imagenet_filesystem_dataset,

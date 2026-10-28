@@ -251,7 +251,7 @@ def _reference_pipeline(*, element_map_fn=None, is_training: bool):
     """
     import keras
 
-    from train.common import CIFAR10_MEAN, CIFAR10_STD
+    from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
 
     (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
     images = (x_train if is_training else x_test).astype("float32") / 255.0

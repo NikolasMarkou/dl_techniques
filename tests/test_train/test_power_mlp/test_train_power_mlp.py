@@ -174,8 +174,8 @@ def test_prepare_data_standardizes_with_the_mnist_constants(monkeypatch) -> None
     """A constant image at the MNIST mean maps to 0, one std above maps to 1."""
     def load(name, *a, **k):
         x = np.zeros((20, 28, 28, 3), dtype=np.float32)
-        x[:10] = tpm.MNIST_MEAN
-        x[10:] = tpm.MNIST_MEAN + tpm.MNIST_STD
+        x[:10] = tpm.MNIST_MEAN[0]
+        x[10:] = tpm.MNIST_MEAN[0] + tpm.MNIST_STD[0]
         y = np.arange(20, dtype=np.uint8) % 10
         return (x, y), (x[:4].copy(), y[:4].copy()), (28, 28, 3), 10
 

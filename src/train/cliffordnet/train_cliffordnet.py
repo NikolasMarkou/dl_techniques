@@ -32,6 +32,12 @@ from PIL import Image, ImageOps, ImageEnhance
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.datasets.vision.classification import (
+    CIFAR10_MEAN,
+    CIFAR10_STD,
+    CIFAR100_MEAN,
+    CIFAR100_STD,
+)
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.models.vision.cliffordnet import CliffordNet, HierarchicalCliffordNet
 from dl_techniques.optimization import (
@@ -52,10 +58,6 @@ from train.common import (
     validate_model_loading,
     run_model_analysis,
     save_config_json,
-    CIFAR10_MEAN,
-    CIFAR10_STD,
-    CIFAR100_MEAN,
-    CIFAR100_STD,
 )
 from train.common import run_summary
 from train.common.callbacks import LearningRateLogger

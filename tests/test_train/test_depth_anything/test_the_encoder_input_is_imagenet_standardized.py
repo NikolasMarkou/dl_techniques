@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from train.common.megadepth import (
     MegaDepthDataset,
     UnlabeledImageDataset,

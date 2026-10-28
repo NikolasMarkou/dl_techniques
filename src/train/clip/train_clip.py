@@ -33,9 +33,8 @@ from train.common import (
     default_experiment_name,
     save_config_json,
     save_training_history_json,
-    IMAGENET_MEAN,
-    IMAGENET_STD,
 )
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from train.common.callbacks import (
     BestSubmodelCheckpoint,
     EpochCSVLogger,

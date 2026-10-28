@@ -413,11 +413,11 @@ def test_standardize_scaling_subtracts_the_mnist_mean_and_divides_by_the_std(mon
     (xt, _), (xv, _), _, info = tpm.prepare_data("mnist", 0.5, 0, "standardize")
 
     everything = np.sort(np.concatenate([xt, xv]).ravel())
-    expected = np.sort((_ramp_pixels() - tpm.MNIST_MEAN) / tpm.MNIST_STD)
+    expected = np.sort((_ramp_pixels() - tpm.MNIST_MEAN[0]) / tpm.MNIST_STD[0])
     np.testing.assert_allclose(everything, expected, rtol=1e-5, atol=1e-6)
     assert everything.min() < 0.0, "standardized pixels leave [0, 1]"
-    np.testing.assert_allclose(info["mean"], [tpm.MNIST_MEAN], rtol=1e-6)
-    np.testing.assert_allclose(info["std"], [tpm.MNIST_STD], rtol=1e-6)
+    np.testing.assert_allclose(info["mean"], tpm.MNIST_MEAN, rtol=1e-6)
+    np.testing.assert_allclose(info["std"], tpm.MNIST_STD, rtol=1e-6)
     assert info["input_scaling"] == "standardize"
 
 

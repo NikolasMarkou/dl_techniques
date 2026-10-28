@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -148,8 +149,8 @@ class VQADataProcessor:
         self.tokenizer = tokenizer if tokenizer is not None else SimpleCharTokenizer(vocab_size)
 
         # ImageNet normalization constants
-        self._imagenet_mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        self._imagenet_std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        self._imagenet_mean = np.array(IMAGENET_MEAN, dtype=np.float32)
+        self._imagenet_std = np.array(IMAGENET_STD, dtype=np.float32)
 
         logger.info(
             f"Initialized VQA processor - image_size: {image_size}, "

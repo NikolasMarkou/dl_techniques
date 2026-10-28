@@ -6,46 +6,13 @@ import tensorflow as tf
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple, List, Optional, Sequence, Set
 
+from dl_techniques.datasets.vision.classification import (
+    CIFAR10_MEAN,
+    CIFAR10_STD,
+    CLASSIFICATION_DATASETS,
+)
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
-# CIFAR-10 per-channel normalisation constants (computed from the CIFAR-10
-# training set). These are CIFAR-10 channel mean/std and are DISTINCT from
-# the OpenAI CLIP IMAGE_MEAN/IMAGE_STD in common/image_text.py (those are
-# [0.48145466, ...]). Do not conflate the two. Kept as plain lists so each
-# call site can wrap with np.array(...) when it needs array broadcasting.
-# ---------------------------------------------------------------------
-
-CIFAR10_MEAN = [0.4914, 0.4822, 0.4465]
-CIFAR10_STD = [0.2470, 0.2435, 0.2616]
-
-# CIFAR-100 per-channel mean/std, derived from the data the same way as the
-# CIFAR-10 pair above (which it reproduces to 4 places): the population mean
-# and standard deviation of every pixel of the 50,000 training images scaled
-# to [0, 1], computed in float64 (2026-10-16, `keras.datasets.cifar100`):
-# mean 0.50707516 0.48654887 0.44091784, std 0.26733429 0.25643846 0.27615047.
-# The often-quoted (0.2675, 0.2565, 0.2761) / 0.4867 do not come out of this
-# computation.
-# DECISION plan-2026-10-14T062616-81938e81/D-112
-# The ONE home of the CIFAR-100 statistics: trainers import these names, they
-# do NOT keep a literal copy (a guard scans src/train for one), and do NOT
-# "correct" them to the often-quoted values above.
-CIFAR100_MEAN = [0.5071, 0.4865, 0.4409]
-CIFAR100_STD = [0.2673, 0.2564, 0.2762]
-
-
-# ---------------------------------------------------------------------
-# ImageNet per-channel normalisation constants (the canonical ILSVRC /
-# torchvision RGB mean/std). These are DISTINCT from both the CIFAR-10
-# constants above ([0.4914, ...]) and the OpenAI CLIP IMAGE_MEAN/IMAGE_STD
-# in common/image_text.py ([0.48145466, ...]). Do not conflate the three.
-# Kept as plain lists so each call site can broadcast/cast as needed (the
-# tf.data pipeline below subtracts/divides directly).
-# ---------------------------------------------------------------------
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 # ---------------------------------------------------------------------
@@ -321,49 +288,17 @@ def load_dataset(dataset_name: str) -> Tuple:
     return (x_train, y_train), (x_test, y_test), input_shape, num_classes
 
 
-# ---------------------------------------------------------------------
-# The 100 CIFAR-100 fine label names, in the order of ``keras.datasets.cifar100``
-# (``label_mode="fine"`` integer labels are indices into this tuple, and that
-# order is alphabetical). Without them every CIFAR-100 figure carried ``class_N``
-# placeholders that no reader could map to a class.
-# ---------------------------------------------------------------------
-
-CIFAR100_CLASS_NAMES: Tuple[str, ...] = (
-    "apple", "aquarium_fish", "baby", "bear", "beaver", "bed", "bee", "beetle", "bicycle",
-    "bottle", "bowl", "boy", "bridge", "bus", "butterfly", "camel", "can", "castle",
-    "caterpillar", "cattle", "chair", "chimpanzee", "clock", "cloud", "cockroach", "couch",
-    "crab", "crocodile", "cup", "dinosaur", "dolphin", "elephant", "flatfish", "forest", "fox",
-    "girl", "hamster", "house", "kangaroo", "keyboard", "lamp", "lawn_mower", "leopard", "lion",
-    "lizard", "lobster", "man", "maple_tree", "motorcycle", "mountain", "mouse", "mushroom",
-    "oak_tree", "orange", "orchid", "otter", "palm_tree", "pear", "pickup_truck", "pine_tree",
-    "plain", "plate", "poppy", "porcupine", "possum", "rabbit", "raccoon", "ray", "road",
-    "rocket", "rose", "sea", "seal", "shark", "shrew", "skunk", "skyscraper", "snail", "snake",
-    "spider", "squirrel", "streetcar", "sunflower", "sweet_pepper", "table", "tank",
-    "telephone", "television", "tiger", "tractor", "train", "trout", "tulip", "turtle",
-    "wardrobe", "whale", "willow_tree", "wolf", "woman", "worm",
-)
-
-
-# ---------------------------------------------------------------------
-
 def get_class_names(dataset: str, num_classes: int) -> List[str]:
     """Get class names for the dataset.
 
-    ``cifar100`` returns :data:`CIFAR100_CLASS_NAMES` when ``num_classes`` is 100;
-    any other ``num_classes`` (a subset, a different label mode) falls back to
-    ``class_N`` placeholders rather than mislabel the classes.
+    ``cifar100`` returns its 100 names when ``num_classes`` is 100; any other
+    ``num_classes`` (a subset, a different label mode), and any dataset without a
+    spec, falls back to ``class_N`` placeholders rather than mislabel the classes.
     """
-    if dataset.lower() == 'mnist':
-        return [str(i) for i in range(10)]
-    elif dataset.lower() == 'cifar10':
-        return ['airplane', 'automobile', 'bird', 'cat', 'deer',
-                'dog', 'frog', 'horse', 'ship', 'truck']
-    elif dataset.lower() == 'cifar100':
-        if num_classes == len(CIFAR100_CLASS_NAMES):
-            return list(CIFAR100_CLASS_NAMES)
+    spec = CLASSIFICATION_DATASETS.get(dataset.lower())
+    if spec is None:
         return [f'class_{i}' for i in range(num_classes)]
-    else:
-        return [f'class_{i}' for i in range(num_classes)]
+    return spec.class_names_for(num_classes)
 
 
 # ---------------------------------------------------------------------

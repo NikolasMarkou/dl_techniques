@@ -46,7 +46,8 @@ import h5py
 import keras
 import numpy as np
 
-from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD, fill_batch
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+from train.common.datasets import fill_batch
 
 logger = logging.getLogger(__name__)
 

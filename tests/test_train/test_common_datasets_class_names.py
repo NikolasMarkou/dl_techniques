@@ -1,4 +1,4 @@
-"""``train.common.datasets.CIFAR100_CLASS_NAMES`` and ``get_class_names`` (audit H3).
+"""``dl_techniques.datasets.vision.classification.CIFAR100_CLASS_NAMES`` and ``get_class_names`` (audit H3).
 
 CIFAR-100 figures carried ``class_N`` placeholders. The names are the fine labels in the
 order of ``keras.datasets.cifar100`` (alphabetical); the spot checks pin that order, so a
@@ -13,7 +13,8 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 import pytest  # noqa: E402
 
-from train.common.datasets import CIFAR100_CLASS_NAMES, get_class_names  # noqa: E402
+from dl_techniques.datasets.vision.classification import CIFAR100_CLASS_NAMES
+from train.common.datasets import get_class_names  # noqa: E402
 
 
 def test_there_are_100_distinct_names_in_alphabetical_order() -> None:

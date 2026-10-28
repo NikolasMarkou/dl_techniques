@@ -12,7 +12,7 @@ import keras
 import numpy as np
 
 from train.alexnet import train_alexnet as module
-from train.common import CIFAR10_MEAN, CIFAR10_STD
+from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
 
 
 def _tiny_cifar():
@@ -48,7 +48,7 @@ def _tiny_white(*_args, **_kwargs):
 
 def test_cifar100_is_normalised_with_cifar100_statistics(monkeypatch):
     # Step 13.5 (D-103): the CIFAR-100 path used the CIFAR-10 mean/std.
-    from train.common import CIFAR100_MEAN, CIFAR100_STD
+    from dl_techniques.datasets.vision.classification import CIFAR100_MEAN, CIFAR100_STD
 
     monkeypatch.setattr(keras.datasets.cifar100, "load_data", _tiny_white)
     config = module.TrainingConfig(

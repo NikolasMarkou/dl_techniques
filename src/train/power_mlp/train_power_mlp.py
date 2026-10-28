@@ -78,9 +78,13 @@ from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.utils.logger import logger
 
-from train.common import (
+from dl_techniques.datasets.vision.classification import (
     CIFAR10_MEAN,
     CIFAR10_STD,
+    MNIST_MEAN,
+    MNIST_STD,
+)
+from train.common import (
     attach_run_log,
     create_callbacks,
     default_experiment_name,
@@ -104,10 +108,6 @@ from train.common.classification_viz import TrainingDashboardCallback
 # ---------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------
-
-# Canonical MNIST statistics for pixels scaled to [0, 1].
-MNIST_MEAN = 0.1307
-MNIST_STD = 0.3081
 
 # Per-variable gradient-norm clip: the only guard against ReLU-k blow-up
 # (degree k**depth) in the deeper presets. Passed to ``optimizer_builder`` as
@@ -509,8 +509,8 @@ def prepare_data(
     if dataset == "mnist":
         # load_dataset repeats the single MNIST channel 3x; channel 0 is lossless.
         x_train, x_test = x_train[..., :1], x_test[..., :1]
-        mean = np.asarray([MNIST_MEAN], dtype=np.float32)
-        std = np.asarray([MNIST_STD], dtype=np.float32)
+        mean = np.asarray(MNIST_MEAN, dtype=np.float32)
+        std = np.asarray(MNIST_STD, dtype=np.float32)
     else:
         mean = np.asarray(CIFAR10_MEAN, dtype=np.float32)
         std = np.asarray(CIFAR10_STD, dtype=np.float32)

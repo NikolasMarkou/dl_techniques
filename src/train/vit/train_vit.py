@@ -32,7 +32,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, EpochMetricsPlotCallback
+from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, EpochMetricsPlotCallback
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json

@@ -76,9 +76,8 @@ from train.cliffordnet.train_cliffordnet import (
     build_eval_dataset,
     build_train_dataset,
 )
+from dl_techniques.datasets.vision.classification import CIFAR100_MEAN, CIFAR100_STD
 from train.common import (
-    CIFAR100_MEAN,
-    CIFAR100_STD,
     create_callbacks,
     load_dataset,
     set_seeds,
