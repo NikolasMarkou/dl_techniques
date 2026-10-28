@@ -1,10 +1,9 @@
 """DINO, BEiT MIM, the BEiT tokenizer and ET masked completion never select on the test set.
 
-Before, the last three passed the labelled Imagenette validation split (CIFAR-10's ``x_test``)
-as ``validation_data`` and monitored ``val_loss`` for early stopping and the best checkpoint,
-and DINO's per-epoch k-NN probe queried that split. Now each builds its pipelines with
-``train.common.image_streams.load_image_streams``: the selection split is a seeded slice of
-train, the test split is separate, and the fit, selection and test rows are pairwise disjoint.
+Each builds its pipelines with ``train.common.image_streams.load_image_streams``: the
+selection split (what ``validation_data``, early stopping, the best checkpoint and DINO's
+per-epoch k-NN probe read) is a seeded slice of train, the test split is separate, and the
+fit, selection and test rows are pairwise disjoint.
 
 The audit is behavioural, image by image: the fake Imagenette records give row ``i`` the mean
 colour ``4 * i`` (test rows ``4 * i + 2``), so the identity of every image is read back from
@@ -12,7 +11,6 @@ the pixels of the REAL ``build_datasets`` / ``build_knn_datasets`` output, with 
 own element maps in place. A census can name a variable; only this can see which rows it holds.
 """
 
-import numpy as np
 import pytest
 import tensorflow as tf
 
@@ -20,7 +18,7 @@ from dl_techniques.datasets.vision.splits import seeded_split_indices, seeded_te
 from tests.classification_fakes import (
     IMAGENETTE_FAKE_TEST,
     IMAGENETTE_FAKE_TRAIN,
-    row_identities,
+    identities_of,
     use_fake_imagenette,
 )
 from train.beit import train_mim as beit_mim
@@ -38,17 +36,8 @@ def _fake_tokenizer(images):
     return tf.zeros((tf.shape(images)[0], GRID, GRID), tf.int32)
 
 
-def _image_of(element):
-    """The image of a batch, whatever the trainer's element is."""
-    while isinstance(element, (tuple, list)):
-        element = element[0]
-    return element.numpy()
-
-
 def _ids(ds, offset, n_batches=None):
-    batches = ds if n_batches is None else ds.take(n_batches)
-    images = np.concatenate([_image_of(element) for element in batches])
-    return row_identities(images, "imagenette", offset)
+    return identities_of("imagenette", ds, offset, n_batches)
 
 
 def _beit_mim(tmp_path, **kwargs):
@@ -101,23 +90,19 @@ def test_selection_is_a_slice_of_train_and_the_test_split_is_separate(name, tmp_
 
 @pytest.mark.parametrize("name", sorted(BUILDERS))
 def test_the_validation_data_a_trainer_would_pass_is_not_the_test_split(name, tmp_path) -> None:
-    """The exact defect: `val_ds` used to BE the test split."""
+    """`val_ds`, what a trainer passes as validation_data, is not the test split."""
     _, build = BUILDERS[name](tmp_path)
     _, val_ds, test_ds, _, _ = build()
-    assert sum(int(_image_of(e).shape[0]) for e in val_ds) == 6
-    assert sum(int(_image_of(e).shape[0]) for e in test_ds) == N_TEST
-    # The two splits are different row populations: the sizes differ and the first batches differ.
-    first_val = _image_of(next(iter(val_ds)))
-    first_test = _image_of(next(iter(test_ds)))
-    assert not np.array_equal(first_val, first_test)
+    assert len(_ids(val_ds, 0)) == 6
+    assert len(_ids(test_ds, 2)) == N_TEST
 
 
 @pytest.mark.parametrize("name", sorted(BUILDERS))
 def test_the_selection_split_and_the_cap_reach_the_streams(name, tmp_path) -> None:
     _, build = BUILDERS[name](tmp_path, validation_split=0.25, max_samples=40)
     train_ds, val_ds, test_ds, steps, val_steps = build()
-    assert sum(int(_image_of(e).shape[0]) for e in val_ds) == 10
-    assert sum(int(_image_of(e).shape[0]) for e in test_ds) == 20
+    assert len(_ids(val_ds, 0)) == 10
+    assert len(_ids(test_ds, 2)) == 20
     assert (steps, val_steps) == (30 // 6, 2)
 
 

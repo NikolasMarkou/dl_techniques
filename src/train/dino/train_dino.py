@@ -42,7 +42,7 @@ Consequences, both deliberate:
 The data protocol is the one every trainer shares (``train.common.image_streams``): the run
 FITS on the train rows minus a seeded ``--validation-split`` slice (default 0.1: 8,523
 Imagenette images), the per-epoch probe queries that SELECTION slice, and the labelled test
-split is probed exactly once, after training (``knn_test_*`` in the run summary). The test
+split is probed exactly once, after training (``knn_test.json`` and ``result["knn_test"]``). The test
 split never guides a run. Every k-NN figure quoted below and in the README was measured
 before this protocol (the bank and queries were the full train split and the test split), so
 a new run's numbers are comparable to each other, not to those.
@@ -338,8 +338,8 @@ class TrainingConfig:
     # UPDATE -- THE MEASUREMENT HAS NOW BEEN RUN, and the default still does not move.
     # `--source-image-size 224` vs `None`, 2 seeds, each arm read against its OWN
     # zero-step random-init control, on a fully controlled stream
-    # (stateless augmentation plus a seeded file order, as that run was configured): effect +0.0024 on the
-    # pre-registered endpoint and +0.0028 on the mean of the last 3 evaluated epochs --
+    # (stateless augmentation plus the seeded file order of the pipeline that existed then):
+    # effect +0.0024 on the pre-registered endpoint and +0.0028 on the mean of the last 3 evaluated epochs --
     # NO DIFFERENCE, an order of magnitude inside the +/-0.02 band.
     #
     # Read that null PRECISELY, because the geometry says why it is not the general
@@ -468,8 +468,8 @@ class TrainingConfig:
     # which also disables Pre-Mortem 3's detection: a decreasing loss then proves
     # nothing about the representation.
     knn_eval_every: int = 1  # epochs between evaluations; 0 = off
-    knn_bank_batches: int = 16  # memory-bank batches drawn from the TRAIN split
-    knn_query_batches: int = 8  # query batches drawn from the VALIDATION split
+    knn_bank_batches: int = 16  # memory-bank batches drawn from the fit rows
+    knn_query_batches: int = 8  # query batches drawn from the selection slice
     knn_temperature: float = DEFAULT_KNN_TEMPERATURE
     # DECISION plan-2026-08-01T195746-12a1f2db/D-004
     # Repeats of the ZERO-OPTIMIZER-STEP k-NN control that `KNNEvalCallback
@@ -668,9 +668,7 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
         **map_fn_kwarg,
     )
 
-    steps_per_epoch = max(1, streams.n_train // config.batch_size)
-    if config.max_steps is not None:
-        steps_per_epoch = min(steps_per_epoch, config.max_steps)
+    steps_per_epoch, _ = streams.capped_steps(config.max_steps)
     return streams.train_ds, steps_per_epoch
 
 
@@ -736,7 +734,7 @@ def build_knn_test_dataset(config: TrainingConfig) -> Tuple[Any, int]:
         ``(test_ds, n_batches)`` -- every test batch, and how many there are.
     """
     streams = _plain_streams(config)
-    return streams.test_ds, -(-streams.n_test // config.batch_size)
+    return streams.test_ds, streams.test_steps
 
 
 # ---------------------------------------------------------------------
@@ -1198,10 +1196,12 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                             "the representation."
                         ))
     parser.add_argument("--knn-bank-batches", type=int, default=16,
-                        help="Memory-bank batches, drawn from the TRAIN split")
+                        help="Memory-bank batches, drawn from the fit rows (train minus the "
+                             "selection slice)")
     parser.add_argument("--knn-query-batches", type=int, default=8,
-                        help="Query batches, drawn from the VALIDATION split (disjoint "
-                             "from the bank by construction)")
+                        help="Query batches, drawn from the selection slice (disjoint "
+                             "from the bank by construction); the test split is "
+                             "probed once after training")
     parser.add_argument("--knn-temperature", type=float,
                         default=DEFAULT_KNN_TEMPERATURE,
                         help="Temperature of the exp(sim / T) neighbour weighting")

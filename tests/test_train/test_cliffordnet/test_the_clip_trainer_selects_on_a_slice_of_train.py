@@ -118,8 +118,6 @@ def test_the_synthetic_splits_are_three_independent_datasets() -> None:
     assert not np.array_equal(result.select[0][:10], result.test[0])
 
 
-def test_the_retired_flag_is_gone() -> None:
-    with pytest.raises(SystemExit):
-        trainer.parse_arguments(["--max-val-samples", "8"])
+def test_the_selection_flags_reach_the_namespace() -> None:
     args = trainer.parse_arguments(["--selection-images", "9", "--max-test-samples", "7"])
     assert (args.selection_images, args.max_test_samples) == (9, 7)

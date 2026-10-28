@@ -1,7 +1,5 @@
 """AlexNet, BEiT and Energy-Transformer classification read their data through the loader.
 
-Before, the three classifiers took Imagenette (and the two transformers CIFAR-10) from
-``build_raw_image_dataset`` and validated on the very split they reported. Now
 ``build_datasets`` (BEiT, ET) and ``create_imagenette_data`` (AlexNet) return a selection
 split cut from train and a separate test split. The record reader and the CIFAR arrays are
 replaced by fakes, so nothing touches the TFDS records or the Keras cache.
@@ -47,6 +45,18 @@ def test_cifar10_is_cut_the_same_way(name, monkeypatch) -> None:
     x, _ = next(iter(train_ds))
     assert x.shape == (10, 32, 32, 3)
     assert sum(len(y) for _, y in test_ds) == 30
+
+
+@pytest.mark.parametrize("name", MODULES)
+def test_cifar10_validation_steps_are_the_real_batch_count_of_the_selection_split(
+        name, monkeypatch) -> None:
+    """The in-memory selection split is batched at EVAL_BATCH_SIZE, not at the trainer's
+    batch size; asking Keras for ceil(n_select / batch_size) steps overran it."""
+    module = importlib.import_module(name)
+    monkeypatch.setattr(classification_data, "_load_raw", tiny_raw(n_train=3000, n_test=30))
+    _, val_ds, _, _, val_steps, _ = module.build_datasets(
+        _config(module, dataset="cifar10", image_size=32, batch_size=10))
+    assert val_steps == sum(1 for _ in val_ds) == -(-300 // classification_data.EVAL_BATCH_SIZE)
 
 
 @pytest.mark.parametrize("name", MODULES)

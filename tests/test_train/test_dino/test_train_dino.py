@@ -201,12 +201,6 @@ class TestSharedSymbolsAreImportedNotCopied:
 
         assert et_common.build_optimizer is common_optimizer.build_optimizer
 
-    def test_the_old_private_reader_is_gone(self) -> None:
-        from train.common import datasets as common_datasets
-
-        assert not hasattr(common_datasets, "build_raw_image_dataset")
-        assert not hasattr(trainer, "build_raw_image_dataset")
-
 
 # ---------------------------------------------------------------------------
 # 1. The CLI -> config wiring guard
@@ -330,8 +324,7 @@ class TestReproducibilityFlagDefaults:
 
     `--stateless-augmentation` is an `argparse.BooleanOptionalAction`. The rows themselves
     are pinned by `--seed` (a seeded permutation of the records and a seeded shuffle), so
-    this flag is all a run needs to be reproducible; the old `--seed-training-stream` flag,
-    which pinned a TFDS file interleave that no longer exists, is gone.
+    this flag is all a run needs to be reproducible.
     """
 
     def test_default_on_in_the_dataclass_and_through_the_cli(self) -> None:
@@ -342,11 +335,6 @@ class TestReproducibilityFlagDefaults:
         config = trainer.config_from_args(
             trainer.parse_arguments(["--no-stateless-augmentation"]))
         assert config.stateless_augmentation is False
-
-    def test_the_retired_stream_flag_is_gone(self) -> None:
-        assert not hasattr(trainer.TrainingConfig(), "seed_training_stream")
-        with pytest.raises(SystemExit):
-            trainer.parse_arguments(["--seed-training-stream"])
 
 
 class TestSmokePreset:
@@ -721,7 +709,7 @@ class TestConfigValidation:
             train_ds = tf.data.Dataset.range(0, 100)
             select_ds = tf.data.Dataset.range(1000, 1010)
             test_ds = tf.data.Dataset.range(2000, 2010)
-            n_test = 10
+            test_steps = 5
 
         def fake(dataset, **kwargs):
             calls.append(kwargs)

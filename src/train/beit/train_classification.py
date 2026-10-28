@@ -44,12 +44,14 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from train.common import (
+    evaluate_on_test,
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
 )
 from train.common.classification_data import (
     add_selection_arguments,
+    capped_steps,
     flip_pad_crop,
     load_classification_data,
 )
@@ -212,11 +214,8 @@ def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, Any, int, int, int
         normalize="standardize", validation_split=config.validation_split,
         max_samples=config.max_samples, **file_based)
 
-    steps_per_epoch = max(1, data.steps_per_epoch)
-    val_steps = max(1, -(-data.n_select // config.batch_size))
-    if config.max_steps is not None:
-        steps_per_epoch = min(steps_per_epoch, config.max_steps)
-        val_steps = min(val_steps, config.max_steps)
+    steps_per_epoch, val_steps = capped_steps(
+        data.steps_per_epoch, data.select_steps, config.max_steps)
     return (data.train_ds, data.select_ds, data.test_ds, steps_per_epoch, val_steps,
             data.num_classes)
 
@@ -421,8 +420,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
 
     # The model holds the best epoch's weights (EarlyStopping restored them), selected on the
     # held-out slice of train; the test split is scored once, here.
-    test_metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
-    logger.info(f"Test metrics: {test_metrics}")
+    test_metrics = evaluate_on_test(model, test_ds)
 
     loss_curve = history.history.get("loss", []) or [float("nan")]
     val_acc_curve = history.history.get("val_accuracy", []) or [float("nan")]
@@ -437,7 +435,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
     return {
         "model": model,
         "best_val_accuracy": float(max(val_acc_curve)),
-        "test_metrics": {k: float(v) for k, v in test_metrics.items()},
+        "test_metrics": test_metrics,
         "first_loss": float(loss_curve[0]),
         "final_loss": float(loss_curve[-1]),
         "run_dir": str(run_dir),

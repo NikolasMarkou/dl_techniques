@@ -45,6 +45,15 @@ TEST_AS_VALIDATION_EXCEPTIONS = {
 }
 
 #: The self-supervised trainers and the module whose loader they must call.
+#: Trainers that score a test split after fit through ``train.common.evaluate_on_test``.
+TEST_SCORING_TRAINERS = (
+    "beit/train_classification.py",
+    "beit/train_mim.py",
+    "beit/train_tokenizer.py",
+    "energy_transformer/train_classification.py",
+    "energy_transformer/train_masked_completion.py",
+)
+
 SELF_SUPERVISED_TRAINERS = (
     "dino/train_dino.py",
     "beit/train_mim.py",
@@ -200,6 +209,27 @@ def test_the_old_raw_image_pipeline_is_gone() -> None:
     ]
     assert offenders == [], f"build_raw_image_dataset is deleted, yet: {offenders}"
     assert not hasattr(common, "build_raw_image_dataset")
+
+
+def _evaluates_test_ds_directly(tree) -> list:
+    return [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "evaluate" and node.args
+        and isinstance(node.args[0], ast.Name) and node.args[0].id == "test_ds"
+    ]
+
+
+def test_the_trainers_that_score_the_test_split_call_the_one_helper() -> None:
+    trees = dict(_trees())
+    not_calling = [name for name in TEST_SCORING_TRAINERS
+                   if not _mentions(trees[name], "evaluate_on_test")]
+    direct = [f"{name}:{line}" for name in TEST_SCORING_TRAINERS
+              for line in _evaluates_test_ds_directly(trees[name])]
+    assert not_calling == [], f"these trainers do not call evaluate_on_test: {not_calling}"
+    assert direct == [], f"model.evaluate(test_ds) written out instead of the helper: {direct}"
+    assert _evaluates_test_ds_directly(ast.parse("model.evaluate(test_ds, verbose=0)")) == [1]
+    assert _evaluates_test_ds_directly(ast.parse("model.evaluate(val_ds)")) == []
 
 
 def test_the_self_supervised_trainers_read_through_image_streams() -> None:

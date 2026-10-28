@@ -22,7 +22,6 @@ Usage:
 
 import gc
 import time
-import keras
 import argparse
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -32,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from train.common import (
+    evaluate_on_test,
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
@@ -244,8 +244,7 @@ def train_masked_completion(config: TrainingConfig) -> Dict[str, Any]:
 
     # The model holds the best epoch's weights (EarlyStopping restored them), selected on the
     # held-out slice of train; the test split is scored once, here.
-    test_metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
-    logger.info(f"Test metrics: {test_metrics}")
+    test_metrics = evaluate_on_test(model, test_ds)
 
     loss_curve = history.history.get("loss", []) or [float("nan")]
     val_curve = history.history.get("val_loss", []) or [float("nan")]
@@ -256,7 +255,7 @@ def train_masked_completion(config: TrainingConfig) -> Dict[str, Any]:
     return {
         "model": model,
         "best_val_loss": float(min(val_curve)),
-        "test_metrics": {k: float(v) for k, v in test_metrics.items()},
+        "test_metrics": test_metrics,
         "first_loss": float(loss_curve[0]),
         "final_loss": float(loss_curve[-1]),
         "run_dir": str(run_dir),

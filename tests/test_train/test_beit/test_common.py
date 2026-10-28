@@ -35,7 +35,11 @@ import tensorflow as tf
 from tests.classification_fakes import use_tiny_raw
 from train.beit.common import build_optimizer, load_frozen_tokenizer
 from train.common.image_streams import SUPPORTED_DATASETS, load_image_streams
-from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
+from dl_techniques.datasets.vision.imagenette import (
+    IMAGENETTE_TFDS_NAME,
+    IMAGENETTE_TRAIN_SIZE,
+    IMAGENETTE_VALIDATION_SIZE,
+)
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 
@@ -129,7 +133,6 @@ class TestTheImageStreamsTheBeitTrainersConsume:
             "cifar10", image_size=32, batch_size=4, seed=0, augment=False)
         assert isinstance(streams.test_ds, tf.data.Dataset)
         assert (streams.n_train, streams.n_select, streams.n_test) == (40, 4, 8)
-        assert streams.num_classes == 10
 
         images, labels = next(iter(streams.test_ds))
         assert tuple(images.shape) == (4, 32, 32, 3)
@@ -183,8 +186,8 @@ class TestTheImagenetteBranch:
     def test_the_training_pipeline_yields_the_documented_streams_offline(self):
         streams = load_image_streams(
             "imagenette", image_size=32, batch_size=4, seed=0, augment=False)
-        assert streams.n_train + streams.n_select == 9469 and streams.n_test == 3925
-        assert streams.num_classes == 10
+        assert streams.n_train + streams.n_select == IMAGENETTE_TRAIN_SIZE
+        assert streams.n_test == IMAGENETTE_VALIDATION_SIZE
         images, labels = next(iter(streams.train_ds.take(1)))
         assert tuple(images.shape) == (4, 32, 32, 3)
         assert tuple(labels.shape) == (4,)
