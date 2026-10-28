@@ -25,6 +25,7 @@ References:
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Any
+from dl_techniques.layers.activations.monotonicity_layer import MonotonicityLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -48,6 +49,8 @@ class QuantileHead(keras.layers.Layer):
     Softplus is positive, so each quantile is at least as large as the one
     before it. The constraint is applied to the reshaped Dense output, not
     to a separate delta head, and it only runs when ``num_quantiles > 1``.
+    It is a weightless ``MonotonicityLayer`` with
+    ``method="cumulative_softplus"``.
 
     Here B is the batch size, D the feature width, S the sequence length,
     L is ``output_length`` and Q is ``num_quantiles``.
@@ -80,10 +83,10 @@ class QuantileHead(keras.layers.Layer):
               │                   │ (monotonic, Q > 1)
               │                   ▼
               │       ┌─────────────────────────┐
-              │       │ q0   = r[..., 0:1]      │
-              │       │ rest = r[..., 1:]       │
+              │       │ MonotonicityLayer       │
+              │       │ cumulative_softplus     │
               │       │ q0 + cumsum(softplus)   │
-              │       │ concat -> [B, L, Q]     │
+              │       │ -> [B, L, Q]            │
               │       └────────────┬────────────┘
               ▼                    ▼
         Output: [B, L, Q]
@@ -192,6 +195,13 @@ class QuantileHead(keras.layers.Layer):
         else:
             self.dropout = None
 
+        # Weightless, so it is created whatever the flag says and is built
+        # and applied only when the ordering is enforced.
+        self.monotonicity = MonotonicityLayer(
+            method="cumulative_softplus", axis=-1, name="monotonicity"
+        )
+        self._applies_monotonicity = enforce_monotonicity and num_quantiles > 1
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer and all its sub-layers.
@@ -243,6 +253,11 @@ class QuantileHead(keras.layers.Layer):
 
         self.projection.build(dense_input_shape)
 
+        if self._applies_monotonicity:
+            self.monotonicity.build(
+                (input_shape[0], self.output_length, self.num_quantiles)
+            )
+
         super().build(input_shape)
 
     def call(
@@ -266,10 +281,9 @@ class QuantileHead(keras.layers.Layer):
 
         # 1. FLATTEN (Configuration Option)
         if self.flatten_input:
-            input_shape = ops.shape(x)
-            batch_size = input_shape[0]
-            # Reshape to (Batch, Seq*Dim) using -1 to infer dimension
-            x = ops.reshape(x, (batch_size, -1))
+            # Reshape to (Batch, Seq*Dim). build() already required both
+            # trailing dims to be static, so the flat width stays static.
+            x = ops.reshape(x, (-1, x.shape[1] * x.shape[2]))
 
         # 2. DROPOUT
         if self.dropout is not None:
@@ -289,26 +303,8 @@ class QuantileHead(keras.layers.Layer):
 
         # 5. MONOTONICITY (Configuration Option)
         # Ensures Q(tau_i) <= Q(tau_{i+1})
-        if self.enforce_monotonicity and self.num_quantiles > 1:
-            # Split the first quantile from the rest
-            # q0: (Batch, Len, 1)
-            q0 = quantiles[:, :, 0:1]
-
-            # The rest are interpreted as deltas
-            # rest: (Batch, Len, num_quantiles - 1)
-            rest = quantiles[:, :, 1:]
-
-            # Force deltas to be positive using softplus
-            deltas = ops.softplus(rest)
-
-            # Accumulate deltas
-            accumulated_deltas = ops.cumsum(deltas, axis=-1)
-
-            # Add base to accumulation
-            subsequent_quantiles = q0 + accumulated_deltas
-
-            # Recombine
-            quantiles = ops.concatenate([q0, subsequent_quantiles], axis=-1)
+        if self._applies_monotonicity:
+            quantiles = self.monotonicity(quantiles)
 
         return quantiles
 

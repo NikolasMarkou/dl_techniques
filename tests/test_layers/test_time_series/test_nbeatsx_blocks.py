@@ -7,7 +7,7 @@ import pytest
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 
 B = 4
-UNITS, THETAS, BACK, FL, INPUT_DIM = 16, 4, 12, 6, 1
+UNITS, BACK, FL, INPUT_DIM = 16, 12, 6, 1
 EXOG = 2
 
 
@@ -19,7 +19,7 @@ def _f32(*shape):
 
 def _make(**kw):
     defaults = dict(
-        exogenous_dim=EXOG, units=UNITS, thetas_dim=THETAS,
+        exogenous_dim=EXOG, units=UNITS,
         backcast_length=BACK, forecast_length=FL, input_dim=INPUT_DIM,
     )
     defaults.update(kw)
@@ -68,3 +68,13 @@ class TestExogenousBlock:
     def test_get_config_round_trip(self):
         rebuilt = ExogenousBlock.from_config(_make(tcn_filters=8).get_config())
         assert rebuilt.exogenous_dim == EXOG
+        assert rebuilt.thetas_dim == 8
+
+    @pytest.mark.parametrize("use_tcn, width", [(True, 8), (False, EXOG)])
+    def test_theta_width_is_the_basis_channel_count(self, use_tcn, width):
+        block = _make(use_tcn=use_tcn, tcn_filters=8)
+        assert block.thetas_dim == block.basis_channels == width
+
+    def test_thetas_dim_is_refused(self):
+        with pytest.raises(TypeError, match="thetas_dim"):
+            _make(thetas_dim=4)

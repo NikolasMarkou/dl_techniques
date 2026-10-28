@@ -50,6 +50,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -171,6 +172,9 @@ class NBeatsBlock(keras.layers.Layer):
         ``(batch, forecast_length * output_dim)``.
     """
 
+    # Depth of the dense spine, fixed by the N-BEATS paper.
+    NUM_DENSE_LAYERS = 4
+
     def __init__(
             self,
             units: int,
@@ -239,57 +243,30 @@ class NBeatsBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.theta_regularizer = keras.regularizers.get(theta_regularizer)
 
-        # Conditionally create normalization layers
-        if self.use_normalization:
-            self.norm1 = RMSNorm(axis=-1, use_scale=False)
-            self.norm2 = RMSNorm(axis=-1, use_scale=False)
-            self.norm3 = RMSNorm(axis=-1, use_scale=False)
-            self.norm4 = RMSNorm(axis=-1, use_scale=False)
-        else:
-            self.norm1 = self.norm2 = self.norm3 = self.norm4 = None
-
-        # Conditionally create dropout layers
-        if self.dropout_rate > 0:
-            self.dropout1 = keras.layers.Dropout(self.dropout_rate)
-            self.dropout2 = keras.layers.Dropout(self.dropout_rate)
-            self.dropout3 = keras.layers.Dropout(self.dropout_rate)
-            self.dropout4 = keras.layers.Dropout(self.dropout_rate)
-        else:
-            self.dropout1 = self.dropout2 = self.dropout3 = self.dropout4 = None
-
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        self.dense1 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense1'
-        )
-        self.dense2 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense2'
-        )
-        self.dense3 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense3'
-        )
-        self.dense4 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense4'
-        )
+        # The four-layer dense spine. Normalization and dropout are optional
+        # per configuration, so those two lists are empty when disabled.
+        # Every site gets its own clone_initializer copy: one shared instance
+        # replays one sample, which started dense2..dense4 as the same matrix
+        # and both theta heads as the same matrix (measured at HEAD).
+        self.dense_layers = [
+            keras.layers.Dense(
+                self.units,
+                use_bias=self.use_bias,
+                activation=self.activation,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                name=f'dense{i + 1}'
+            )
+            for i in range(self.NUM_DENSE_LAYERS)
+        ]
+        self.norm_layers = [
+            RMSNorm(axis=-1, use_scale=False, name=f'norm{i + 1}')
+            for i in range(self.NUM_DENSE_LAYERS)
+        ] if self.use_normalization else []
+        self.dropout_layers = [
+            keras.layers.Dropout(self.dropout_rate, name=f'dropout{i + 1}')
+            for i in range(self.NUM_DENSE_LAYERS)
+        ] if self.dropout_rate > 0 else []
 
         # Theta projection layers
         # For multivariate, we generate unique thetas for each feature
@@ -298,7 +275,7 @@ class NBeatsBlock(keras.layers.Layer):
             self.thetas_dim * self.input_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=self.theta_initializer,
+            kernel_initializer=clone_initializer(self.theta_initializer),
             kernel_regularizer=self.theta_regularizer,
             name='theta_backcast'
         )
@@ -306,7 +283,7 @@ class NBeatsBlock(keras.layers.Layer):
             self.thetas_dim * self.output_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=self.theta_initializer,
+            kernel_initializer=clone_initializer(self.theta_initializer),
             kernel_regularizer=self.theta_regularizer,
             name='theta_forecast'
         )
@@ -324,14 +301,13 @@ class NBeatsBlock(keras.layers.Layer):
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
 
-        # BUILD all sub-layers explicitly for proper serialization
-        self.dense1.build(input_shape)
-
-        # Subsequent layers take the output of the previous dense layer
+        # BUILD all sub-layers explicitly for proper serialization. The first
+        # dense layer reads the input; everything after it reads `units`.
         dense_output_shape = (input_shape[0], self.units)
-        self.dense2.build(dense_output_shape)
-        self.dense3.build(dense_output_shape)
-        self.dense4.build(dense_output_shape)
+        for i, dense in enumerate(self.dense_layers):
+            dense.build(input_shape if i == 0 else dense_output_shape)
+        for layer in (*self.norm_layers, *self.dropout_layers):
+            layer.build(dense_output_shape)
         self.theta_backcast.build(dense_output_shape)
         self.theta_forecast.build(dense_output_shape)
 
@@ -360,34 +336,7 @@ class NBeatsBlock(keras.layers.Layer):
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input, got shape: {input_shape}")
 
-        # Pass through four fully connected layers
-        # Stack 1
-        x = self.dense1(inputs, training=training)
-        if self.use_normalization:
-            x = self.norm1(x)
-        if self.dropout_rate > 0:
-            x = self.dropout1(x, training=training)
-
-        # Stack 2
-        x = self.dense2(x, training=training)
-        if self.use_normalization:
-            x = self.norm2(x)
-        if self.dropout_rate > 0:
-            x = self.dropout2(x, training=training)
-
-        # Stack 3
-        x = self.dense3(x, training=training)
-        if self.use_normalization:
-            x = self.norm3(x)
-        if self.dropout_rate > 0:
-            x = self.dropout3(x, training=training)
-
-        # Stack 4
-        x = self.dense4(x, training=training)
-        if self.use_normalization:
-            x = self.norm4(x)
-        if self.dropout_rate > 0:
-            x = self.dropout4(x, training=training)
+        x = self._forward_dense_stack(inputs, training=training)
 
         # Generate theta parameters
         # Shape: (batch_size, thetas_dim * dim)
@@ -399,6 +348,60 @@ class NBeatsBlock(keras.layers.Layer):
         forecast = self._generate_forecast(theta_f)
 
         return backcast, forecast
+
+    def _forward_dense_stack(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Run the dense spine: each Dense, then its RMSNorm and Dropout if enabled.
+
+        :param inputs: Input tensor of shape (batch_size, backcast_length * input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Hidden tensor of shape (batch_size, units).
+        :rtype: keras.KerasTensor
+        """
+        x = inputs
+        for i, dense in enumerate(self.dense_layers):
+            x = dense(x, training=training)
+            if self.norm_layers:
+                x = self.norm_layers[i](x)
+            if self.dropout_layers:
+                x = self.dropout_layers[i](x, training=training)
+        return x
+
+    def _expand_fixed_basis(
+            self,
+            theta: keras.KerasTensor,
+            basis_matrix: keras.Variable,
+            dim: int,
+            length: int
+    ) -> keras.KerasTensor:
+        """
+        Project per-channel theta onto a fixed basis and flatten time-major.
+
+        Reshapes theta to (batch, dim, thetas_dim), multiplies by the basis
+        matrix (thetas_dim, length), transposes to (batch, length, dim) and
+        flattens, so flat entry ``t * dim + i`` is step ``t`` of channel ``i``.
+
+        :param theta: Theta of shape (batch, thetas_dim * dim).
+        :type theta: keras.KerasTensor
+        :param basis_matrix: Basis of shape (thetas_dim, length).
+        :type basis_matrix: keras.Variable
+        :param dim: Channel count, ``input_dim`` or ``output_dim``.
+        :type dim: int
+        :param length: ``backcast_length`` or ``forecast_length``.
+        :type length: int
+        :return: Tensor of shape (batch, length * dim).
+        :rtype: keras.KerasTensor
+        """
+        theta_reshaped = ops.reshape(theta, (-1, dim, self.thetas_dim))
+        result = ops.matmul(theta_reshaped, basis_matrix)
+        result = ops.transpose(result, (0, 2, 1))
+        return ops.reshape(result, (-1, length * dim))
 
     @abstractmethod
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
@@ -568,7 +571,7 @@ class GenericBlock(NBeatsBlock):
             self.backcast_length * self.input_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=self.basis_initializer,
+            kernel_initializer=clone_initializer(self.basis_initializer),
             kernel_regularizer=self.basis_regularizer,
             name='backcast_basis'
         )
@@ -576,7 +579,7 @@ class GenericBlock(NBeatsBlock):
             self.forecast_length * self.output_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=self.basis_initializer,
+            kernel_initializer=clone_initializer(self.basis_initializer),
             kernel_regularizer=self.basis_regularizer,
             name='forecast_basis'
         )
@@ -836,17 +839,9 @@ class TrendBlock(NBeatsBlock):
         :return: Backcast tensor of shape (batch, backcast_length * input_dim).
         :rtype: keras.KerasTensor
         """
-        # 1. Reshape to separate features and polynomial degrees
-        theta_reshaped = ops.reshape(theta, (-1, self.input_dim, self.thetas_dim))
-
-        # 2. Apply basis function (broadcasts over batch and input_dim)
-        result = ops.matmul(theta_reshaped, self.backcast_basis_matrix)
-
-        # 3. Transpose to (Batch, Time, InputDim) to match flattened order
-        result = ops.transpose(result, (0, 2, 1))
-
-        # 4. Flatten back to residual stream format
-        return ops.reshape(result, (-1, self.backcast_length * self.input_dim))
+        return self._expand_fixed_basis(
+            theta, self.backcast_basis_matrix, self.input_dim, self.backcast_length
+        )
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -857,17 +852,9 @@ class TrendBlock(NBeatsBlock):
         :return: Forecast tensor of shape (batch, forecast_length * output_dim).
         :rtype: keras.KerasTensor
         """
-        # 1. Reshape to separate features and polynomial degrees
-        theta_reshaped = ops.reshape(theta, (-1, self.output_dim, self.thetas_dim))
-
-        # 2. Apply basis function
-        result = ops.matmul(theta_reshaped, self.forecast_basis_matrix)
-
-        # 3. Transpose to (Batch, Time, OutputDim)
-        result = ops.transpose(result, (0, 2, 1))
-
-        # 4. Flatten
-        return ops.reshape(result, (-1, self.forecast_length * self.output_dim))
+        return self._expand_fixed_basis(
+            theta, self.forecast_basis_matrix, self.output_dim, self.forecast_length
+        )
 
     def get_config(self) -> dict:
         """
@@ -1121,17 +1108,9 @@ class SeasonalityBlock(NBeatsBlock):
         :return: Backcast tensor of shape (batch, backcast_length * input_dim).
         :rtype: keras.KerasTensor
         """
-        # 1. Reshape
-        theta_reshaped = ops.reshape(theta, (-1, self.input_dim, self.thetas_dim))
-
-        # 2. Apply basis function
-        result = ops.matmul(theta_reshaped, self.backcast_basis_matrix)
-
-        # 3. Transpose
-        result = ops.transpose(result, (0, 2, 1))
-
-        # 4. Flatten
-        return ops.reshape(result, (-1, self.backcast_length * self.input_dim))
+        return self._expand_fixed_basis(
+            theta, self.backcast_basis_matrix, self.input_dim, self.backcast_length
+        )
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -1142,17 +1121,9 @@ class SeasonalityBlock(NBeatsBlock):
         :return: Forecast tensor of shape (batch, forecast_length * output_dim).
         :rtype: keras.KerasTensor
         """
-        # 1. Reshape
-        theta_reshaped = ops.reshape(theta, (-1, self.output_dim, self.thetas_dim))
-
-        # 2. Apply basis function
-        result = ops.matmul(theta_reshaped, self.forecast_basis_matrix)
-
-        # 3. Transpose
-        result = ops.transpose(result, (0, 2, 1))
-
-        # 4. Flatten
-        return ops.reshape(result, (-1, self.forecast_length * self.output_dim))
+        return self._expand_fixed_basis(
+            theta, self.forecast_basis_matrix, self.output_dim, self.forecast_length
+        )
 
     def get_config(self) -> dict:
         """

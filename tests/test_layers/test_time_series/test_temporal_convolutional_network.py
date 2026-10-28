@@ -110,7 +110,8 @@ def test_block_forward_shape_downsample(sample_inputs: tf.Tensor, block_params: 
     block = TemporalBlock(**block_params)
     out = block(sample_inputs)
     assert out.shape == (4, 16, block_params["filters"])
-    assert block.downsample is not None
+    assert block.project_residual
+    assert block.downsample.built
 
 
 def test_block_forward_shape_no_downsample(block_params: dict) -> None:
@@ -121,7 +122,9 @@ def test_block_forward_shape_no_downsample(block_params: dict) -> None:
     inputs = tf.random.normal((4, 16, 3))
     out = block(inputs)
     assert out.shape == (4, 16, 3)
-    assert block.downsample is None
+    assert not block.project_residual
+    assert not block.downsample.built
+    assert len(block.downsample.weights) == 0
 
 
 def test_block_build_materializes_convs(sample_inputs: tf.Tensor, block_params: dict) -> None:
@@ -136,7 +139,7 @@ def test_block_build_materializes_convs(sample_inputs: tf.Tensor, block_params: 
     assert block.conv1.built
     assert block.conv2.built
     # Downsample built since channels (3) != filters (8)
-    assert block.downsample is not None
+    assert block.project_residual
     assert len(block.downsample.weights) > 0
     assert len(block.weights) > 0
 

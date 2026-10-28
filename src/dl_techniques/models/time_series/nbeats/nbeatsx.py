@@ -130,7 +130,10 @@ class NBeatsXNet(keras.Model):
     :type stack_types: Sequence[str]
     :param nb_blocks_per_stack: Blocks per stack.
     :type nb_blocks_per_stack: int
-    :param thetas_dim: Basis-expansion width, one entry per stack.
+    :param thetas_dim: Basis-expansion width, one entry per stack. An
+        exogenous stack ignores its entry: its theta width is the basis
+        channel count (``tcn_filters``, or ``exogenous_dim`` for the
+        interpretable variant).
     :type thetas_dim: Sequence[int]
     :param hidden_layer_units: Hidden width of each block's dense trunk.
     :type hidden_layer_units: int
@@ -309,10 +312,9 @@ class NBeatsXNet(keras.Model):
                     else f"stack_{stack_id}_block_{block_id}_{stack_type}"
                 )
 
-                # Base args for standard N-BEATS blocks
+                # Args shared by every block type; thetas_dim is added per type below.
                 base_kwargs = {
                     'units': self.hidden_layer_units,
-                    'thetas_dim': theta_dim,
                     'backcast_length': self.backcast_length,
                     'forecast_length': self.forecast_length,
                     'input_dim': 1,  # Endogenous target is usually univariate
@@ -327,11 +329,11 @@ class NBeatsXNet(keras.Model):
                 }
 
                 if stack_type == 'trend':
-                    block = TrendBlock(**base_kwargs)
+                    block = TrendBlock(thetas_dim=theta_dim, **base_kwargs)
                 elif stack_type == 'seasonality':
-                    block = SeasonalityBlock(**base_kwargs)
+                    block = SeasonalityBlock(thetas_dim=theta_dim, **base_kwargs)
                 elif stack_type == 'generic':
-                    block = GenericBlock(**base_kwargs)
+                    block = GenericBlock(thetas_dim=theta_dim, **base_kwargs)
                 elif stack_type in [self.EXOGENOUS_BLOCK, self.EXOGENOUS_INTERP_BLOCK]:
                     # NBEATSx Exogenous Block
                     use_tcn = (stack_type == self.EXOGENOUS_BLOCK)
@@ -518,10 +520,8 @@ def create_nbeatsx_model(
                 thetas_dim.append(4)
             elif s == 'seasonality':
                 thetas_dim.append(8)
-            elif s == 'exogenous':
-                # Matches tcn_filters.
-                thetas_dim.append(16)
             else:
+                # Generic width; exogenous stacks ignore their entry.
                 thetas_dim.append(16)
         kwargs['thetas_dim'] = thetas_dim
 

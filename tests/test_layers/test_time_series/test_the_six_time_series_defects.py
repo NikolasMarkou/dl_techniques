@@ -150,7 +150,6 @@ def _exog_block(**kw):
     defaults = dict(
         exogenous_dim=2,
         units=16,
-        thetas_dim=4,
         backcast_length=10,
         forecast_length=4,
         tcn_dropout_rate=0.0,
@@ -161,8 +160,8 @@ def _exog_block(**kw):
 
 def test_the_exogenous_dropout_actually_drops():
     """
-    ``ExogenousBlock`` re-implements the parent's dense spine and must apply
-    ``dropout1..dropout4`` exactly as the parent does.
+    ``ExogenousBlock`` overrides the parent's ``call`` and must still apply
+    the spine's four Dropout layers exactly as the parent does.
 
     The discriminating quantity is a STRICT ``max|delta| > 0`` between two
     ``training=True`` calls on identical input at ``dropout_rate=0.5``. Two
@@ -218,14 +217,14 @@ def test_the_exogenous_block_honours_input_and_output_dim():
     """
     back_len, fore_len, in_dim, out_dim = 10, 4, 3, 2
     common = dict(
-        units=16, thetas_dim=4, backcast_length=back_len,
+        units=16, backcast_length=back_len,
         forecast_length=fore_len, input_dim=in_dim, output_dim=out_dim,
     )
 
     y = _f32(4, back_len * in_dim, seed=1)
     exog = (_f32(4, back_len, 2, seed=2), _f32(4, fore_len, 2, seed=3))
 
-    generic = GenericBlock(**common)
+    generic = GenericBlock(thetas_dim=4, **common)
     g_back, g_fore = generic(y)
     reference = (tuple(g_back.shape), tuple(g_fore.shape))
     assert reference == ((4, back_len * in_dim), (4, fore_len * out_dim)), (
@@ -258,17 +257,14 @@ class _WrongLayoutBlock(PublicAutoName, ExogenousBlock):
     the flatten, so flat entry ``i*T + t`` is step ``t`` of channel ``i`` — the
     dim-major stream the anchor at ``nbeatsx_blocks.py`` says not to produce. It
     passes every assertion in the shape guard above at both ``use_tcn``
-    settings, which is why the layout guard exists. Only the dense spine is
-    trimmed (dropout and normalization are off in this module's fixtures); the
-    projection is a faithful transcription of the wrong ordering.
+    settings, which is why the layout guard exists. The dense spine is the
+    inherited one; the projection is a faithful transcription of the wrong
+    ordering.
     """
 
     def call(self, inputs, training=None, exogenous_inputs=None, **kwargs):
         x_back, x_fore = exogenous_inputs
-        x = self.dense1(inputs, training=training)
-        x = self.dense2(x, training=training)
-        x = self.dense3(x, training=training)
-        x = self.dense4(x, training=training)
+        x = self._forward_dense_stack(inputs, training=training)
         theta_b = self.theta_backcast(x, training=training)
         theta_f = self.theta_forecast(x, training=training)
 
@@ -304,7 +300,7 @@ def _flat_backcast_channel_columns(block_cls, use_tcn, theta_slot):
     """
     back_len, fore_len, in_dim, out_dim, exog_dim = 10, 4, 3, 2, 2
     block = block_cls(
-        exogenous_dim=exog_dim, units=16, thetas_dim=4,
+        exogenous_dim=exog_dim, units=16,
         backcast_length=back_len, forecast_length=fore_len,
         input_dim=in_dim, output_dim=out_dim,
         dropout_rate=0.0, tcn_dropout_rate=0.0, use_tcn=use_tcn,

@@ -24,8 +24,9 @@ class TemporalBlock(layers.Layer):
 
     The residual branch is the input itself when the input already has
     ``filters`` channels. Otherwise a 1x1 convolution projects it so the
-    shapes match. That projection is created in ``build()``, so with matching
-    channels it holds no weights at all.
+    shapes match. That projection is created in ``__init__`` but built and
+    used only when the channels differ, so with matching channels it holds
+    no weights at all.
 
     **Architecture Overview:**
 
@@ -162,8 +163,10 @@ class TemporalBlock(layers.Layer):
         # Reused activation applied to the residual sum (created once, not per call)
         self.act = layers.Activation(activation)
 
-        # 1x1 conv for residual connection if dimensions mismatch
-        self.downsample = None
+        # 1x1 conv for the residual branch. Built and used only when the
+        # input channel count differs from `filters`; build() decides.
+        self.downsample = layers.Conv1D(filters, kernel_size=1, padding='same')
+        self.project_residual = False
 
     def build(self, input_shape):
         """
@@ -171,7 +174,8 @@ class TemporalBlock(layers.Layer):
 
         Builds ``conv1``, ``dropout1``, ``conv2``, ``dropout2`` and the residual
         activation. If ``input_shape[-1]`` differs from ``filters``, it also
-        creates and builds the 1x1 ``downsample`` projection. Building here
+        builds the 1x1 ``downsample`` projection and sets
+        ``project_residual``, which ``call`` reads. Building here
         materializes all inner ``Conv1D`` variables before any forward pass or
         ``.keras`` weight restore.
 
@@ -185,10 +189,8 @@ class TemporalBlock(layers.Layer):
         self.dropout2.build(shape_f)
         self.act.build(shape_f)
 
-        if input_shape[-1] != self.filters:
-            self.downsample = layers.Conv1D(
-                self.filters, kernel_size=1, padding='same'
-            )
+        self.project_residual = input_shape[-1] != self.filters
+        if self.project_residual:
             self.downsample.build(input_shape)
 
         super().build(input_shape)
@@ -210,8 +212,8 @@ class TemporalBlock(layers.Layer):
         """
         Run the two convolutions, add the residual, then activate.
 
-        The residual branch is ``inputs`` when ``downsample`` is ``None``, and
-        ``downsample(inputs)`` otherwise.
+        The residual branch is ``downsample(inputs)`` when
+        ``project_residual`` is True, and ``inputs`` otherwise.
 
         :param inputs: Input tensor of shape ``(batch, time, channels)``.
         :type inputs: keras.KerasTensor
@@ -226,7 +228,7 @@ class TemporalBlock(layers.Layer):
         x = self.conv2(x)
         x = self.dropout2(x, training=training)
 
-        res = inputs if self.downsample is None else self.downsample(inputs)
+        res = self.downsample(inputs) if self.project_residual else inputs
         return self.act(x + res)
 
     def get_config(self):

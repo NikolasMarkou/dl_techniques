@@ -33,6 +33,7 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Any
+from dl_techniques.layers.activations.monotonicity_layer import MonotonicityLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -57,7 +58,8 @@ class QuantileSequenceHead(keras.layers.Layer):
 
     Softplus is positive, so quantiles never cross at any position. Each
     step accumulates on its own. The constraint runs only when
-    ``num_quantiles > 1``.
+    ``num_quantiles > 1``. It is a weightless ``MonotonicityLayer`` with
+    ``method="cumulative_softplus"``.
 
     Here B is the batch size, S the sequence length, D the feature width and
     Q is ``num_quantiles``. The input length S is carried straight through.
@@ -81,10 +83,10 @@ class QuantileSequenceHead(keras.layers.Layer):
               │                   │ (monotonic, Q > 1)
               │                   ▼
               │       ┌─────────────────────────┐
-              │       │ q0   = r[..., 0:1]      │
-              │       │ rest = r[..., 1:]       │
+              │       │ MonotonicityLayer       │
+              │       │ cumulative_softplus     │
               │       │ q0 + cumsum(softplus)   │
-              │       │ concat -> [B, S, Q]     │
+              │       │ -> [B, S, Q]            │
               │       └────────────┬────────────┘
               ▼                    ▼
         Output: [B, S, Q]
@@ -209,6 +211,13 @@ class QuantileSequenceHead(keras.layers.Layer):
         else:
             self.dropout = None
 
+        # Weightless, so it is created whatever the flag says and is built
+        # and applied only when the ordering is enforced.
+        self.monotonicity = MonotonicityLayer(
+            method="cumulative_softplus", axis=-1, name="monotonicity"
+        )
+        self._applies_monotonicity = enforce_monotonicity and num_quantiles > 1
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer and initialize all sub-layer weights.
@@ -248,6 +257,9 @@ class QuantileSequenceHead(keras.layers.Layer):
         # transformation to the last axis while preserving batch and sequence dims
         self.projection.build(input_shape)
 
+        if self._applies_monotonicity:
+            self.monotonicity.build((batch_size, seq_len, self.num_quantiles))
+
         super().build(input_shape)
 
     def call(
@@ -285,30 +297,8 @@ class QuantileSequenceHead(keras.layers.Layer):
 
         # Step 3: Enforce monotonicity constraint if enabled
         # Ensures Q(tau_i) <= Q(tau_{i+1}) at each sequence position independently
-        if self.enforce_monotonicity and self.num_quantiles > 1:
-            # Extract first quantile (predicted directly)
-            # Shape: (batch, seq_len, 1)
-            q0 = quantiles[:, :, 0:1]
-
-            # Extract remaining raw values (interpreted as deltas)
-            # Shape: (batch, seq_len, num_quantiles - 1)
-            rest = quantiles[:, :, 1:]
-
-            # Force deltas to be non-negative using softplus activation
-            # Softplus is smooth and differentiable: softplus(x) = log(1 + exp(x))
-            # This ensures that all subsequent quantiles are >= the first quantile
-            deltas = keras.ops.softplus(rest)
-
-            # Accumulate deltas along the quantile dimension
-            # cumsum ensures Q_i = Q_0 + delta_1 + delta_2 + ... + delta_i
-            # Each time step's quantiles are accumulated independently
-            accumulated_deltas = keras.ops.cumsum(deltas, axis=-1)
-
-            # Compute final monotonic quantiles: Q_i = Q_0 + sum(deltas)
-            subsequent_quantiles = q0 + accumulated_deltas
-
-            # Concatenate first quantile with subsequent monotonic quantiles
-            quantiles = keras.ops.concatenate([q0, subsequent_quantiles], axis=-1)
+        if self._applies_monotonicity:
+            quantiles = self.monotonicity(quantiles)
 
         return quantiles
 

@@ -55,6 +55,7 @@ from typing import List, Optional, Tuple, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -76,8 +77,8 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
     1. **Attention weights**: ``w = sigma(W_a * context + b_a)``, sigma is
        sigmoid, shape ``(batch, num_lags)``
     2. **Gate value**: ``g = sigma(W_g * context + b_g)``, shape ``(batch, 1)``
-    3. **Weighted sum**: ``s = sum_i w_i * lag_i``, shape ``(batch,)``
-    4. **Output**: ``output = g * s``, reshaped to ``(batch, 1)``
+    3. **Weighted sum**: ``s = sum_i w_i * lag_i``, shape ``(batch, 1)``
+    4. **Output**: ``output = g * s``, shape ``(batch, 1)``
 
     **Architecture Overview:**
 
@@ -101,22 +102,15 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
              │                     [B, L]
              │                        ▼
              │                ┌───────────────┐
-             │                │    sum(-1)    │
+             │                │ sum(-1, keep) │
              │                └───────┬───────┘
-             │                      [B,]
-             ▼                        │
-         squeeze(-1)                  │
-            [B,]                      │
+             │                      [B, 1]
              │                        │
              └────────────┬───────────┘
                           ▼
                   ┌───────────────┐
                   │    g * sum    │
                   └───────┬───────┘
-                        [B,]
-                          ▼
-                   expand_dims(-1)
-                          │
                           ▼
                    Output [B, 1]
 
@@ -219,8 +213,8 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         self.attention_generator = keras.layers.Dense(
             units=self.num_lags,
             activation='sigmoid',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='attention_generator'
@@ -230,8 +224,8 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         self.gate_generator = keras.layers.Dense(
             units=1,
             activation='sigmoid',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='gate_generator'
@@ -327,17 +321,14 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         # Shape: (batch_size, 1)
         gate = self.gate_generator(context_tensor, training=training)
 
-        # 3. Compute the weighted sum of the lags
-        # Shape: (batch_size,)
-        weighted_sum_of_lags = ops.sum(attention_weights * lag_tensor, axis=-1)
-
-        # 4. Apply the master gate
-        # Shape: (batch_size,)
-        gated_output = ops.squeeze(gate, axis=-1) * weighted_sum_of_lags
-
-        # 5. Reshape for a consistent output shape
+        # 3. Compute the weighted sum of the lags, keeping the last axis
         # Shape: (batch_size, 1)
-        output = ops.expand_dims(gated_output, axis=-1)
+        weighted_sum_of_lags = ops.sum(
+            attention_weights * lag_tensor, axis=-1, keepdims=True
+        )
+
+        # 4. Apply the master gate; both operands are (batch_size, 1)
+        output = gate * weighted_sum_of_lags
 
         # DECISION plan-2026-08-30T020716-ebbaf641/D-008
         # Keras 3's Layer.__call__ already applies self.activity_regularizer to

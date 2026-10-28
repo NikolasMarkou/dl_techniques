@@ -31,6 +31,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 
@@ -297,17 +298,34 @@ class ForecastabilityGate(layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.forecast_length = forecast_length
 
-        # Complexity analyzer will be built in build()
-        self.complexity_analyzer = None
+        # Tiny sub-network to estimate forecastability
+        # Input: flattened time series
+        # Output: scalar alpha in [0, 1]
+        self.complexity_analyzer = keras.Sequential([
+            layers.Dense(
+                self.hidden_units,
+                activation=self.activation,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                name='complexity_hidden'
+            ),
+            layers.Dense(
+                1,
+                activation='sigmoid',
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                name='complexity_gate'
+            )
+        ], name='complexity_analyzer')
 
     def build(self, input_shape: Union[Tuple, list]):
         """
         Build the complexity analyzer sub-network.
 
-        The analyzer is a two-layer ``keras.Sequential``: ``hidden_units`` wide
-        with the configured activation, then one sigmoid unit. It is built on
-        the flattened history shape ``(batch, backcast_len * features)``. If a
-        list of shapes arrives, only the first one is used.
+        The analyzer, created in ``__init__``, is a two-layer
+        ``keras.Sequential``: ``hidden_units`` wide with the configured
+        activation, then one sigmoid unit. It is built on the flattened history
+        shape ``(batch, backcast_len * features)``, so both trailing dims must
+        be static. If a list of shapes arrives, only the first one is used.
 
         :param input_shape: Shape of the ``inputs`` tensor, or a list of the
             call shapes, in which case the first is used.
@@ -316,25 +334,6 @@ class ForecastabilityGate(layers.Layer):
         # Handle multiple input shapes (inputs, deep_forecast, naive_forecast)
         if isinstance(input_shape, list):
             input_shape = input_shape[0]
-
-        # Tiny sub-network to estimate forecastability
-        # Input: flattened time series
-        # Output: scalar alpha in [0, 1]
-        self.complexity_analyzer = keras.Sequential([
-            layers.Dense(
-                self.hidden_units,
-                activation=self.activation,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name='complexity_hidden'
-            ),
-            layers.Dense(
-                1,
-                activation='sigmoid',
-                kernel_initializer=self.kernel_initializer,
-                name='complexity_gate'
-            )
-        ], name='complexity_analyzer')
 
         # Build the analyzer with flattened input shape
         flat_shape = (input_shape[0], input_shape[1] * input_shape[2])
@@ -367,9 +366,10 @@ class ForecastabilityGate(layers.Layer):
             ``(batch, forecast_len, features)``.
         :rtype: keras.KerasTensor
         """
-        # Flatten input for complexity analysis
+        # Flatten input for complexity analysis. build() already required
+        # both trailing dims to be static, so the flat width stays static.
         # Shape: (batch, backcast_len * features)
-        flat_input = ops.reshape(inputs, (ops.shape(inputs)[0], -1))
+        flat_input = ops.reshape(inputs, (-1, inputs.shape[1] * inputs.shape[2]))
 
         # Compute forecastability score alpha
         # alpha -> 1.0 if signal is strong (trust deep model)

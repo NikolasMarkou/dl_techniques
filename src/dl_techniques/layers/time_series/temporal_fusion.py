@@ -63,6 +63,7 @@ from typing import List, Optional, Tuple, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -267,8 +268,8 @@ class TemporalFusionLayer(keras.layers.Layer):
             units=self.num_lags,
             activation='sigmoid',
             name='attention_generator',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -277,8 +278,8 @@ class TemporalFusionLayer(keras.layers.Layer):
             units=self.output_dim,
             activation='sigmoid',
             name='gate_generator',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -287,8 +288,8 @@ class TemporalFusionLayer(keras.layers.Layer):
         self.context_forecaster = keras.layers.Dense(
             units=self.output_dim,
             name='context_forecaster',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -300,8 +301,8 @@ class TemporalFusionLayer(keras.layers.Layer):
                 units=self.num_lags,
                 activation='relu',
                 name='lag_projector',
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer
             )
@@ -312,8 +313,8 @@ class TemporalFusionLayer(keras.layers.Layer):
         self.lag_forecaster = keras.layers.Dense(
             units=self.output_dim,
             name='lag_forecaster',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )

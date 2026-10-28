@@ -27,7 +27,7 @@ With ``use_tcn=True`` (NBEATSx-G) the basis is ``C = TCN(X)``. With
 """
 
 import keras
-from keras import ops, layers
+from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -51,12 +51,11 @@ class ExogenousBlock(NBeatsBlock):
     matching the inherited :meth:`NBeatsBlock.compute_output_shape`
     contract and every sibling block.
 
-    The dense spine is inherited from :class:`NBeatsBlock` and is drawn
-    there. This block re-runs those four layers itself, because it needs
-    the exogenous basis before it can project theta. The theta heads are
-    replaced: they are bias-free Dense layers whose width is the number of
-    basis channels times ``input_dim`` (or ``output_dim``), rather than
-    ``thetas_dim`` times it.
+    The dense spine and the theta heads are inherited from
+    :class:`NBeatsBlock` and are drawn there. The block passes its basis
+    channel count to the parent as ``thetas_dim``, so each theta head is
+    ``C * input_dim`` (or ``C * output_dim``) wide and carries the parent's
+    ``theta_initializer`` and ``theta_regularizer``.
 
     Two configurations follow the paper. NBEATSx-G (``use_tcn=True``)
     encodes the covariates with a TCN. NBEATSx-I (``use_tcn=False``) uses
@@ -128,8 +127,9 @@ class ExogenousBlock(NBeatsBlock):
         Defaults to True.
     :type use_tcn: bool
     :param kwargs: Arguments passed to :class:`NBeatsBlock`, including
-        ``units``, ``thetas_dim``, ``backcast_length`` and
-        ``forecast_length``.
+        ``units``, ``backcast_length`` and ``forecast_length``. Not
+        ``thetas_dim``: the basis channel count fixes it, and passing it
+        raises ``TypeError``.
 
     Input shape:
         Residual tensor (batch, backcast_length * input_dim), plus an
@@ -147,8 +147,7 @@ class ExogenousBlock(NBeatsBlock):
 
             block = ExogenousBlock(
                 exogenous_dim=6, tcn_filters=16, use_tcn=True,
-                units=32, thetas_dim=8,
-                backcast_length=10, forecast_length=4,
+                units=32, backcast_length=10, forecast_length=4,
             )
             back, fore = block(
                 residual, exogenous_inputs=(x_back, x_fore)
@@ -162,23 +161,21 @@ class ExogenousBlock(NBeatsBlock):
         ``block(x)``. Calling it without covariates raises ValueError.
 
     Note:
-        The dense stack is copied from the parent rather than delegated to,
-        because the exogenous basis must be built before theta is projected.
-        It applies the same RMSNorm AND the same four Dropout layers as the
-        parent, in the same order, so ``dropout_rate`` behaves identically
-        here, and the final reshape honours ``input_dim`` / ``output_dim``
-        the same way the sibling blocks do. ``call`` keeps a literal
+        ``call`` overrides the parent's because the exogenous basis must be
+        built before theta is projected. It runs the same dense spine
+        through :meth:`NBeatsBlock._forward_dense_stack`, and the final
+        reshape honours ``input_dim`` / ``output_dim`` the same way the
+        sibling blocks do. ``call`` keeps a literal
         ``input_dim == output_dim == 1`` fast path holding the older
         single-channel spelling: the two are algebraically the same but not
         bit-identical on CPU, and the only in-repo caller runs at 1/1.
 
     Note:
-        What still differs from the parent is the basis, not the shape
-        contract: theta weights a data-derived basis of ``C`` channels
-        here, where the parent's theta weights a fixed or learned basis of
-        ``thetas_dim`` rows. ``thetas_dim`` is therefore inert for this
-        block's projection -- it is still accepted, and still forwarded to
-        :class:`NBeatsBlock`, but nothing here reads it.
+        What differs from the parent is the basis, not the shape contract:
+        theta weights a data-derived basis of ``C`` channels here, where the
+        parent's theta weights a fixed or learned basis of ``thetas_dim``
+        rows. ``thetas_dim`` therefore equals ``C`` on this block and is not
+        a constructor argument.
     """
 
     def __init__(
@@ -190,15 +187,25 @@ class ExogenousBlock(NBeatsBlock):
             use_tcn: bool = True,
             **kwargs
     ):
-        # In NBEATSx, theta dimension corresponds to the channels of the basis/exog
-        # Ensure kwargs['thetas_dim'] matches or is set correctly if not provided
-        super().__init__(**kwargs)
+        if 'thetas_dim' in kwargs:
+            raise TypeError(
+                "ExogenousBlock does not take thetas_dim: theta weights the "
+                "exogenous basis, so its width is the basis channel count "
+                "(tcn_filters with use_tcn, exogenous_dim without)."
+            )
+
+        # Theta projects onto the basis channels, once per output channel, so
+        # the parent's `thetas_dim * input_dim` heads are sized by the basis
+        # channel count and keep theta_initializer / theta_regularizer.
+        basis_channels = tcn_filters if use_tcn else exogenous_dim
+        super().__init__(thetas_dim=basis_channels, **kwargs)
 
         self.exogenous_dim = exogenous_dim
         self.use_tcn = use_tcn
         self.tcn_filters = tcn_filters
         self.tcn_kernel_size = tcn_kernel_size
         self.tcn_dropout_rate = tcn_dropout_rate
+        self.basis_channels = basis_channels
 
         # The encoder for exogenous variables
         if self.use_tcn:
@@ -211,24 +218,6 @@ class ExogenousBlock(NBeatsBlock):
             # For Interpretable (NBEATSx-I), the basis is just X itself.
             # No complex encoder needed, but we might need projection if dims don't match
             self.encoder = None
-
-        # Redefine Theta layers to match TCN/Exog dimensionality.
-        # Theta must project to the dimension of the Basis channels, once per
-        # output channel -- mirroring the parent's `thetas_dim * input_dim`
-        # heads (nbeats_blocks.py:294-312) with `thetas_dim` replaced by the
-        # basis channel count.
-        self.basis_channels = tcn_filters if use_tcn else exogenous_dim
-
-        self.theta_backcast = layers.Dense(
-            self.basis_channels * self.input_dim,
-            use_bias=False,
-            name='theta_backcast_exog'
-        )
-        self.theta_forecast = layers.Dense(
-            self.basis_channels * self.output_dim,
-            use_bias=False,
-            name='theta_forecast_exog'
-        )
 
     def build(self, input_shape):
         """
@@ -281,27 +270,9 @@ class ExogenousBlock(NBeatsBlock):
 
         x_back, x_fore = exogenous_inputs
 
-        # 1. Process Target Residual through Dense Stack (Parent Logic)
+        # 1. Process Target Residual through the inherited dense spine
         # -----------------------------------------------------------
-        # Note: We duplicate the FC stack logic here because the parent .call()
-        # calls _generate_backcast immediately, but we need the exogenous basis first.
-
-        x = self.dense1(inputs, training=training)
-        if self.use_normalization: x = self.norm1(x)
-        if self.dropout_rate > 0:
-            x = self.dropout1(x, training=training)
-        x = self.dense2(x, training=training)
-        if self.use_normalization: x = self.norm2(x)
-        if self.dropout_rate > 0:
-            x = self.dropout2(x, training=training)
-        x = self.dense3(x, training=training)
-        if self.use_normalization: x = self.norm3(x)
-        if self.dropout_rate > 0:
-            x = self.dropout3(x, training=training)
-        x = self.dense4(x, training=training)
-        if self.use_normalization: x = self.norm4(x)
-        if self.dropout_rate > 0:
-            x = self.dropout4(x, training=training)
+        x = self._forward_dense_stack(inputs, training=training)
 
         # 2. Generate Theta Coefficients (Weights for the Basis)
         # -----------------------------------------------------------
@@ -391,13 +362,15 @@ class ExogenousBlock(NBeatsBlock):
         """
         Return the constructor arguments needed to rebuild this block.
 
-        The parent's configuration is included, so ``units``,
-        ``thetas_dim`` and the two lengths round-trip as well.
+        The parent's configuration is included, so ``units`` and the two
+        lengths round-trip as well. ``thetas_dim`` is dropped, because the
+        constructor derives it.
 
         :return: Serializable configuration dictionary.
         :rtype: dict
         """
         config = super().get_config()
+        del config['thetas_dim']
         config.update({
             'exogenous_dim': self.exogenous_dim,
             'tcn_filters': self.tcn_filters,

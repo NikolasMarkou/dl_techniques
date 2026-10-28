@@ -267,8 +267,6 @@ class MixedSequentialBlock(keras.layers.Layer):
             self.lstm_layer = keras.layers.LSTM(
                 units=self.lstm_units,
                 return_sequences=True,
-                #dropout=self.dropout_rate,
-                #recurrent_dropout=self.dropout_rate,
                 name="lstm"
             )
 
@@ -290,7 +288,7 @@ class MixedSequentialBlock(keras.layers.Layer):
             # `assemble_attention_config` filters these against the chosen
             # attention type, then merges the caller's `attention_args` on top
             # unfiltered, so a caller typo still reaches the factory's raise.
-            if self.attention_type == 'multi_head':
+            if self.attention_type in ['multi_head', 'anchor', 'perceiver']:
                 attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
@@ -313,12 +311,6 @@ class MixedSequentialBlock(keras.layers.Layer):
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'head_dim': self.embed_dim // self.num_heads,
-                    'dropout_rate': self.dropout_rate
-                }
-            elif self.attention_type in ['anchor', 'perceiver']:
-                attention_defaults = {
-                    'dim': self.embed_dim,
-                    'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate
                 }
             elif self.attention_type == 'adaptive_multi_head':
@@ -365,30 +357,19 @@ class MixedSequentialBlock(keras.layers.Layer):
             self.attention_layer = None
 
         # Normalization layers (Pre-LN architecture)
-        if self.use_layer_norm:
-            self.norm1 = create_normalization_layer(
+        def make_norm(name: str) -> Optional[keras.layers.Layer]:
+            if not self.use_layer_norm:
+                return None
+            return create_normalization_layer(
                 normalization_type=self.normalization_type,
-                name="norm1",
+                name=name,
                 **self.normalization_args
             )
-            self.norm2 = create_normalization_layer(
-                normalization_type=self.normalization_type,
-                name="norm2",
-                **self.normalization_args
-            )
-            # Mixed mode needs an extra norm layer
-            if self.block_type == 'mixed':
-                self.norm3 = create_normalization_layer(
-                    normalization_type=self.normalization_type,
-                    name="norm3",
-                    **self.normalization_args
-                )
-            else:
-                self.norm3 = None
-        else:
-            self.norm1 = None
-            self.norm2 = None
-            self.norm3 = None
+
+        self.norm1 = make_norm("norm1")
+        self.norm2 = make_norm("norm2")
+        # Mixed mode needs an extra norm layer
+        self.norm3 = make_norm("norm3") if self.block_type == 'mixed' else None
 
         # Feed-forward network, built through the factory.
         #
@@ -483,6 +464,94 @@ class MixedSequentialBlock(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
+    def _residual(
+        self,
+        x: keras.KerasTensor,
+        norm: Optional[keras.layers.Layer],
+        sublayer: Callable[..., keras.KerasTensor],
+        dropout: keras.layers.Layer,
+        training: Optional[bool],
+        **sublayer_kwargs: Any
+    ) -> keras.KerasTensor:
+        """
+        Apply one Pre-LN residual sub-layer: ``x + dropout(sublayer(norm(x)))``.
+
+        :param x: Residual stream of shape (batch, seq_len, embed_dim).
+        :type x: keras.KerasTensor
+        :param norm: Normalization layer, or None when ``use_layer_norm`` is
+            False, in which case ``x`` reaches the sub-layer unnormalized.
+        :type norm: keras.layers.Layer or None
+        :param sublayer: One of ``_lstm``, ``_attention`` or ``_ffn``.
+        :type sublayer: callable
+        :param dropout: Dropout applied to the sub-layer output.
+        :type dropout: keras.layers.Layer
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :param sublayer_kwargs: Extra keywords for ``sublayer``, e.g. ``mask``.
+        :return: Updated residual stream, same shape as ``x``.
+        :rtype: keras.KerasTensor
+        """
+        h = norm(x, training=training) if norm is not None else x
+        h = sublayer(h, training=training, **sublayer_kwargs)
+        return x + dropout(h, training=training)
+
+    def _lstm(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None,
+        mask: Optional[keras.KerasTensor] = None
+    ) -> keras.KerasTensor:
+        """
+        Run the LSTM, then the projection back to ``embed_dim`` if one exists.
+
+        :param x: Normalized input of shape (batch, seq_len, embed_dim).
+        :type x: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :param mask: Sequence mask, forwarded to the LSTM.
+        :type mask: keras.KerasTensor or None
+        :return: Tensor of shape (batch, seq_len, embed_dim).
+        :rtype: keras.KerasTensor
+        """
+        h = self.lstm_layer(x, training=training, mask=mask)
+        if self.projection is not None:
+            h = self.projection(h, training=training)
+        return h
+
+    def _attention(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Run the attention layer. No mask is forwarded.
+
+        :param x: Normalized input of shape (batch, seq_len, embed_dim).
+        :type x: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Tensor of the same shape.
+        :rtype: keras.KerasTensor
+        """
+        return self.attention_layer(x, training=training)
+
+    def _ffn(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Run the feed-forward network.
+
+        :param x: Normalized input of shape (batch, seq_len, embed_dim).
+        :type x: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Tensor of the same shape.
+        :rtype: keras.KerasTensor
+        """
+        return self.ffn_layer(x, training=training)
+
     def _transformer_block(
         self,
         inputs: keras.KerasTensor,
@@ -534,19 +603,8 @@ class MixedSequentialBlock(keras.layers.Layer):
         :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
-        x = inputs
-
-        # First Sub-layer: Multi-head Self-Attention
-        norm_input = self.norm1(x, training=training) if self.use_layer_norm else x
-        attn_output = self.attention_layer(norm_input, training=training)
-        attn_output = self.dropout1(attn_output, training=training)
-        x = x + attn_output
-
-        # Second Sub-layer: Feed-Forward Network
-        norm_output = self.norm2(x, training=training) if self.use_layer_norm else x
-        ff_output = self.ffn_layer(norm_output, training=training)
-        ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output
+        x = self._residual(inputs, self.norm1, self._attention, self.dropout1, training)
+        return self._residual(x, self.norm2, self._ffn, self.dropout2, training)
 
     def _lstm_block(
         self,
@@ -601,21 +659,10 @@ class MixedSequentialBlock(keras.layers.Layer):
         :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
-        x = inputs
-
-        # First Sub-layer: LSTM
-        norm_input = self.norm1(x, training=training) if self.use_layer_norm else x
-        lstm_output = self.lstm_layer(norm_input, training=training, mask=mask)
-        if self.projection is not None:
-            lstm_output = self.projection(lstm_output, training=training)
-        lstm_output = self.dropout1(lstm_output, training=training)
-        x = x + lstm_output
-
-        # Second Sub-layer: Feed-Forward Network
-        norm_output = self.norm2(x, training=training) if self.use_layer_norm else x
-        ff_output = self.ffn_layer(norm_output, training=training)
-        ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output
+        x = self._residual(
+            inputs, self.norm1, self._lstm, self.dropout1, training, mask=mask
+        )
+        return self._residual(x, self.norm2, self._ffn, self.dropout2, training)
 
     def _mixed_block(
         self,
@@ -680,27 +727,11 @@ class MixedSequentialBlock(keras.layers.Layer):
         :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
-        x = inputs
-
-        # Block 1: LSTM
-        norm1_input = self.norm1(x, training=training) if self.use_layer_norm else x
-        lstm_output = self.lstm_layer(norm1_input, training=training, mask=mask)
-        if self.projection is not None:
-            lstm_output = self.projection(lstm_output, training=training)
-        lstm_output = self.dropout1(lstm_output, training=training)
-        x = x + lstm_output
-
-        # Block 2: Attention
-        norm3_input = self.norm3(x, training=training) if self.use_layer_norm else x
-        attn_output = self.attention_layer(norm3_input, training=training)
-        attn_output = self.dropout3(attn_output, training=training)
-        x = x + attn_output
-
-        # Block 3: Feed-Forward Network
-        norm2_output = self.norm2(x, training=training) if self.use_layer_norm else x
-        ff_output = self.ffn_layer(norm2_output, training=training)
-        ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output
+        x = self._residual(
+            inputs, self.norm1, self._lstm, self.dropout1, training, mask=mask
+        )
+        x = self._residual(x, self.norm3, self._attention, self.dropout3, training)
+        return self._residual(x, self.norm2, self._ffn, self.dropout2, training)
 
     def call(
         self,

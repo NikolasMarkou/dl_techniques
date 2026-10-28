@@ -89,8 +89,9 @@ class ExponentialMovingAverage(keras.layers.Layer):
                          ▼
         Output: EMA, same shape as the input
 
-    Both branches of the ``adjust`` fork are computed every step and selected
-    with ``ops.where``, so the flag costs one extra divide either way.
+    ``adjust`` is a constructor flag, so the fork is taken once in Python
+    when the graph is traced. ``adjust=False`` builds neither the ``w_t``
+    weights nor the divide.
 
     Input shape:
         ``(batch, time_steps)`` or ``(batch, time_steps, features)``.
@@ -183,14 +184,74 @@ class ExponentialMovingAverage(keras.layers.Layer):
         alpha = ops.cast(self.alpha, dtype=x.dtype)
         one_minus_alpha = ops.cast(1.0 - self.alpha, dtype=x.dtype)
 
+        # ops.scan walks the LEADING axis of each xs entry, so the samples go
+        # in time-major: (B, T-1, F) -> (T-1, B, F).
+        x_rest_time_major = ops.transpose(x[:, 1:, :], axes=(1, 0, 2))
+
         # DECISION plan_2026-05-12_5f0e087c/D-001: adjust=True divides each
         # step by `1 - (1-α)^(t+1)`, then feeds the divided value back as the
         # carry. Not pandas: off ewm(span=3, adjust=True) by 5.88 on an 8-step
         # probe, while adjust=False matches to 8.6e-07. Do not "fix" it to
         # pandas and do not use ops.associative_scan. See decisions.md D-001.
-        adjust = self.adjust
+        if self.adjust:
+            def step(ema_prev, xw):
+                """
+                Advance the EMA by one time step and divide by ``w_t``.
 
-        # Precompute the adjust weights for t = 1..T-1, one per scan step.
+                :param ema_prev: Previous EMA value, shape (B, F).
+                :param xw: List of the two per-step slices keras takes from the
+                    leading axis of each xs entry: x_t (B, F) and w_t (1, 1).
+                :return: Tuple of (next carry, per-step output), both the new EMA.
+                """
+                x_t, w_t = xw
+                ema_current = (alpha * x_t + one_minus_alpha * ema_prev) / w_t
+                return ema_current, ema_current
+
+            xs = [x_rest_time_major, self._adjust_weights(x, one_minus_alpha)]
+        else:
+            def step(ema_prev, x_t):
+                """
+                Advance the EMA by one time step.
+
+                :param ema_prev: Previous EMA value, shape (B, F).
+                :param x_t: Current sample, shape (B, F).
+                :return: Tuple of (next carry, per-step output), both the new EMA.
+                """
+                ema_current = alpha * x_t + one_minus_alpha * ema_prev
+                return ema_current, ema_current
+
+            xs = x_rest_time_major
+
+        # Seed the carry with the first sample. It is never divided by w.
+        ema_0 = x[:, 0, :]
+
+        _, ema_rest = ops.scan(step, ema_0, xs)
+        # Back to batch-major: (T-1, B, F) -> (B, T-1, F).
+        ema_rest = ops.transpose(ema_rest, axes=(1, 0, 2))
+        ema = ops.concatenate([ops.expand_dims(ema_0, axis=1), ema_rest], axis=1)
+
+        if ndim == 2:
+            ema = ops.squeeze(ema, axis=-1)
+
+        return ema
+
+    def _adjust_weights(
+        self,
+        x: keras.KerasTensor,
+        one_minus_alpha: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """
+        Precompute the ``adjust`` divisors ``w_t`` for t = 1..T-1.
+
+        :param x: Rank-3 input ``(B, T, F)``, read only for its length and dtype.
+        :type x: keras.KerasTensor
+        :param one_minus_alpha: ``1 - alpha`` in the input dtype.
+        :type one_minus_alpha: keras.KerasTensor
+        :return: ``w_t = max(1 - (1-α)^(t+1), floor)``, shaped ``(T-1, 1, 1)``
+            so each scan step's ``(1, 1)`` slice broadcasts against the
+            ``(B, F)`` carry.
+        :rtype: keras.KerasTensor
+        """
         T_dynamic = ops.shape(x)[1]
         t_arange = ops.arange(1, T_dynamic, dtype=x.dtype)
         # The exponent is `t + 1`, matching the original Python loop.
@@ -200,48 +261,12 @@ class ExponentialMovingAverage(keras.layers.Layer):
         # `ops.maximum(weights_1d, ops.cast(1e-10, x.dtype))`. That cast is the
         # DEFECT, not the protection: it casts the LITERAL, and `float16(1e-10)`
         # is exactly 0.0, so the guard became `ops.maximum(w, 0.0)` and the
-        # `ema_current / w_t` below divided by zero. MEASURED at HEAD under
+        # divide in the scan step divided by zero. MEASURED at HEAD under
         # mixed_float16 with period=20000: [1. inf inf inf inf].
         weights_1d = ops.maximum(
             weights_1d, stability_floor(self.compute_dtype, 1e-10)
         )
-
-        # ops.scan walks the LEADING axis of each xs entry, so the samples go
-        # in time-major: (B, T-1, F) -> (T-1, B, F).
-        x_rest_time_major = ops.transpose(x[:, 1:, :], axes=(1, 0, 2))
-        # Weights become (T-1, 1, 1) so each step's (1, 1) slice broadcasts
-        # against the (B, F) carry.
-        w_time_major = ops.reshape(weights_1d, (-1, 1, 1))
-
-        def step(ema_prev, xw):
-            """
-            Advance the EMA by one time step.
-
-            :param ema_prev: Previous EMA value, shape (B, F).
-            :param xw: List of the two per-step slices keras takes from the
-                leading axis of each xs entry: x_t (B, F) and w_t (1, 1).
-            :return: Tuple of (next carry, per-step output), both the new EMA.
-            """
-            x_t, w_t = xw
-            ema_current = alpha * x_t + one_minus_alpha * ema_prev
-            ema_adjusted = ema_current / w_t
-            ema_out = ops.where(
-                ops.cast(adjust, "bool"), ema_adjusted, ema_current
-            )
-            return ema_out, ema_out
-
-        # Seed the carry with the first sample. It is never divided by w.
-        ema_0 = x[:, 0, :]
-
-        _, ema_rest = ops.scan(step, ema_0, [x_rest_time_major, w_time_major])
-        # Back to batch-major: (T-1, B, F) -> (B, T-1, F).
-        ema_rest = ops.transpose(ema_rest, axes=(1, 0, 2))
-        ema = ops.concatenate([ops.expand_dims(ema_0, axis=1), ema_rest], axis=1)
-
-        if ndim == 2:
-            ema = ops.squeeze(ema, axis=-1)
-
-        return ema
+        return ops.reshape(weights_1d, (-1, 1, 1))
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -482,25 +507,13 @@ class EMASlopeFilter(keras.layers.Layer):
 
         # slope_t = EMA_t - EMA_{t-lookback_period}. The first lookback_period
         # steps have no history, so the lag is padded with zeros there and
-        # their slope is just EMA_t.
-        ndim = len(inputs.shape)
-        if ndim == 2:
-            # Rank-2 input: (batch, time_steps).
-            ema_lagged = ops.concatenate([
-                ops.zeros((ops.shape(ema)[0], self.lookback_period), dtype=ema.dtype),
-                ema[:, :-self.lookback_period],
-            ], axis=1)
-        else:
-            # Rank-3 input: (batch, time_steps, features).
-            pad_shape = (
-                ops.shape(ema)[0],
-                self.lookback_period,
-                ema.shape[-1] if ema.shape[-1] is not None else ops.shape(ema)[-1],
-            )
-            ema_lagged = ops.concatenate([
-                ops.zeros(pad_shape, dtype=ema.dtype),
-                ema[:, :-self.lookback_period, :],
-            ], axis=1)
+        # their slope is just EMA_t. The pad touches the time axis only, so
+        # the same spelling serves (batch, time) and (batch, time, features).
+        time_pad = [[0, 0], [self.lookback_period, 0]]
+        feature_pad = [[0, 0]] * (len(inputs.shape) - 2)
+        ema_lagged = ops.pad(
+            ema[:, :-self.lookback_period], time_pad + feature_pad
+        )
 
         slope = ema - ema_lagged
 
