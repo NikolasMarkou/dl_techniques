@@ -362,6 +362,27 @@ serialized once in the constructor, so `get_config()` is JSON data and the inner
 own initializer from it. The layer has no `from_config` of its own; the Keras one rebuilds it from
 `get_config()`.
 
+**Initializer arguments of `create_convunext`.** `kernel_initializer` (the stem, the channel adjusts,
+the strided downsamplers, the projections and the supervision heads) and `depthwise_initializer` (the
+depthwise kernel of every ConvNeXt block; `None` keeps the block's own `TruncatedNormal(stddev=0.02)`) take
+a name, a serialized config or an `Initializer` instance. The builder serializes an instance once
+(`initializer_spec`) and every layer resolves its own initializer from that spec, so no two kernels start
+from one random sample. Before this fix the caller's object went to every site unchanged and a seedless
+instance replayed one draw: 21 of 1225 kernel pairs of the tiny model for `kernel_initializer=HeNormal()`
+and 91 of 1225 for `depthwise_initializer=HeNormal()`, which is what the bfunet trainer's
+`--depthwise-initializer orthonormal` hands in (`Orthogonal(gain=1.0)`: 91 of 1225 as well). Now the replay
+oracle finds 0 pairs for both arguments in the plain, bias-free, Gabor-stem, deep-supervision and
+strided-downsample builds (`tests/test_models/test_the_vision_classifiers_share_one_runtime_contract.py`,
+rows `convunext*`). The default (a string) path draws exactly what it drew before: the seeded weights of
+eight string-default builds (the tiny variant with V2 and V1 blocks, the bias-free arm with layer norm and with
+batch norm, the Gabor stem, deep supervision, strided downsamplers, and named `he_normal` initializers for both
+arguments), and of the `BFUNet` and `BFCNN` denoisers, equal the `be92a74eb` build tensor for tensor, outputs
+included (`scratch_iter2/step16_1/pseed_convunext.txt`). A value that is not a name, a dict or an
+`Initializer` (a bare function, a number) raises `TypeError` naming the type. An archive written by
+`be92a74eb`, with initializer instances or without, loads by `load_model` and `load_weights` with equal
+outputs at `atol=0` (`scratch_iter2/step16_1/archive_convunext_summary.txt`); the layer configs inside an
+archive are not read by the builder, so this change touches no archive.
+
 **Archive break (2026-10-28).** The stem used to be built lazily in `build()` as `self._conv_stem`; it is
 `self.stem`, a `ConvStem` created in `__init__`. Measured by saving the tiny variant
 (`create_convunext_variant("tiny", (32, 32, 3))`, 172 weights) in a separate process from the old

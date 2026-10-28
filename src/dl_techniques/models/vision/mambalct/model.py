@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import refuse_input_shape
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.attention.factory import create_attention_layer
@@ -47,6 +48,12 @@ SEARCH_SIZE_384 = 384
 # Token width of the encoder output, SSM and fusion; not configurable.
 EMBED_DIM = 512
 CONTEXT_LEN = 1
+#: Initializer of the fusion attention's three projections (``q``, ``kv``, ``proj``). It is the
+#: layer's own ``kernel_initializer`` default, named here once so that each projection can be
+#: given its own instance: the layer hands a single ``kernel_initializer`` instance to ``q`` and
+#: ``kv``, and, without ``output_kernel_initializer``, to ``proj`` too, which then all start
+#: from the same random stream. A test compares the class with the layer's default.
+FUSION_ATTENTION_INITIALIZER = "glorot_uniform"
 
 # ---------------------------------------------------------------------
 
@@ -223,8 +230,13 @@ class MambaLCT(keras.Model):
         :raises ValueError: If ``template_size``, ``search_size``,
             ``context_len`` or ``head_hidden_dim`` is not positive, the last
             ``stage_dims`` entry is not 512, 512 is not divisible by
-            ``fusion_heads``, or ``dropout_rate`` is outside ``[0, 1)``.
+            ``fusion_heads``, or ``dropout_rate`` is outside ``[0, 1)``, or if
+            ``input_shape`` or ``input_dim`` is passed (the model is sized by
+            ``template_size`` and ``search_size``).
         """
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "the model is sized by template_size and search_size")
         super().__init__(**kwargs)
         if template_size <= 0:
             raise ValueError(f"template_size must be positive, got {template_size}")
@@ -299,11 +311,20 @@ class MambaLCT(keras.Model):
             expand=self.expand,
             name="context_mamba",
         )
+        # DECISION plan-2026-10-26T125959-7af851e5/D-050: all three projections of the
+        # fusion attention are given an initializer of their own. Left at the layer's
+        # default, `q`, `kv` and `proj` hold ONE instance and start from the same random
+        # stream (measured: 3 of 496 kernel pairs of the tiny model, r = 1.000000). Do not
+        # drop `kv_kernel_initializer` or `output_kernel_initializer` to simplify the
+        # call: nothing but the replay oracle sees the difference. See decisions.md.
         self.fusion_attn = create_attention_layer(
             "multi_head_cross",
             dim=self.embed_dim,
             num_heads=self.fusion_heads,
             dropout_rate=self.dropout_rate,
+            kernel_initializer=FUSION_ATTENTION_INITIALIZER,
+            kv_kernel_initializer=FUSION_ATTENTION_INITIALIZER,
+            output_kernel_initializer=FUSION_ATTENTION_INITIALIZER,
             name="fusion_attn",
         )
         self.fusion_norm = create_normalization_layer(
@@ -340,7 +361,6 @@ class MambaLCT(keras.Model):
         if not self.encoder.built:
             self.encoder.build(template_shape)
 
-        encoder_out_shape = self.encoder.compute_output_shape(template_shape)
         flat_search_shape = (None, search_shape[2], search_shape[3], 3)
         # No-op: the shared encoder is already built on the template shape.
         if not self.encoder.built:

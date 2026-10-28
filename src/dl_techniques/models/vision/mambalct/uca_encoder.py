@@ -28,11 +28,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -42,6 +42,20 @@ from dl_techniques.utils.logger import logger
 #: projection draws from the same distribution as the rest of the block; a test compares the
 #: two initializers' classes, so a change of that default cannot go unnoticed.
 ATTENTION_OUTPUT_INITIALIZER = "glorot_uniform"
+
+#: The attention types a block accepts, each with the ``attention_args`` its blocks are built
+#: with. These are the types whose projections each start from their own random draw: a
+#: ``multi_head`` layer needs the output initializer above (it hands one instance to ``qkv`` and
+#: ``proj`` otherwise), ``group_query`` and ``multi_head_latent`` clone one per projection
+#: themselves. Every other type ``TransformerLayer`` offers is refused by ``UcaEncoder``: the
+#: ``differential``, ``anchor`` and window layers hand ONE instance to several projections and
+#: declare no knob to separate them, ``multi_head_cross`` is refused by ``TransformerLayer``,
+#: and ``beit``, ``lighthouse`` and ``fnet`` fail on the first call at the encoder's token shape.
+SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, Any]]] = {
+    "multi_head": {"output_kernel_initializer": ATTENTION_OUTPUT_INITIALIZER},
+    "group_query": None,
+    "multi_head_latent": None,
+}
 
 # ---------------------------------------------------------------------
 
@@ -65,7 +79,10 @@ class UcaEncoder(keras.layers.Layer):
     :type num_heads: List[int]
     :param mlp_ratio: FFN expansion ratio. Defaults to 4.0.
     :type mlp_ratio: float
-    :param attention_type: Attention factory key. Defaults to ``"multi_head"``.
+    :param attention_type: Attention layer of every block: ``"multi_head"``,
+        ``"group_query"`` or ``"multi_head_latent"``, the types whose projections each
+        draw their own initial weights (:data:`SUPPORTED_ATTENTION_TYPES`). Defaults to
+        ``"multi_head"``.
     :type attention_type: str
     :param ffn_type: FFN factory key. Defaults to ``"mlp"``.
     :type ffn_type: str
@@ -81,9 +98,11 @@ class UcaEncoder(keras.layers.Layer):
 
     :raises ValueError: If ``stage_dims``, ``stage_depths`` and ``num_heads`` differ
         in length or hold a non-positive entry, if a stage width is not divisible by
-        its head count, if ``mlp_ratio`` or ``norm_epsilon`` is not positive, or if
-        ``dropout_rate`` is outside ``[0, 1)``. ``build`` raises it too for an input
-        that is not a 4D image batch.
+        its head count, if ``mlp_ratio`` or ``norm_epsilon`` is not positive, if
+        ``dropout_rate`` is outside ``[0, 1)``, if ``attention_type`` is not one of
+        the supported types (the message lists them), or if ``input_shape`` or
+        ``input_dim`` is passed (the encoder takes any image size). ``build`` raises
+        it too for an input that is not a 4D image batch.
 
     Input shape:
         4D image tensor ``(batch, height, width, 3)``.
@@ -106,6 +125,9 @@ class UcaEncoder(keras.layers.Layer):
         use_bias: bool = True,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "its stages are convolutions and a depthwise positional encoding, so it takes any image size")
         super().__init__(**kwargs)
 
         dims = [128, 256, 512] if stage_dims is None else list(stage_dims)
@@ -134,6 +156,12 @@ class UcaEncoder(keras.layers.Layer):
         if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(
                 f"dropout_rate must be in [0, 1), got {dropout_rate}"
+            )
+        if attention_type not in SUPPORTED_ATTENTION_TYPES:
+            raise ValueError(
+                f"attention_type must be one of {sorted(SUPPORTED_ATTENTION_TYPES)}, got "
+                f"{attention_type!r}: every other attention layer either hands one random "
+                f"draw to several projections or cannot run on the encoder's tokens"
             )
 
         self.stage_dims = dims
@@ -170,13 +198,14 @@ class UcaEncoder(keras.layers.Layer):
         # to simplify: nothing but the replay oracle sees the difference. Only the
         # attention types that declare `output_kernel_initializer` take it; the others
         # keep their own construction.
-        takes_output_initializer = "output_kernel_initializer" in ATTENTION_REGISTRY.get(
-            attention_type, {}
-        ).get("optional_params", {})
-        attention_args = (
-            {"output_kernel_initializer": ATTENTION_OUTPUT_INITIALIZER}
-            if takes_output_initializer else None
-        )
+        # DECISION plan-2026-10-26T125959-7af851e5/D-050: since this revision only the
+        # three types in SUPPORTED_ATTENTION_TYPES exist here. The sentence above is
+        # still true of the two that are not `multi_head`, whose layers clone an
+        # initializer per projection themselves. Do not add `differential`, `anchor` or a
+        # window type back to widen the encoder: each one replays a draw across
+        # projections (measured: 60 of 630, 40 of 496 and 4 of 276 kernel pairs) and no
+        # argument of those layers separates them.
+        attention_args = SUPPORTED_ATTENTION_TYPES[attention_type]
 
         # DECISION plan-2026-10-26T125959-7af851e5/D-049: these two lists keep the
         # attribute names `merges` and `merge_norms` although their layers are named

@@ -64,6 +64,7 @@ from dl_techniques.utils.model_build import (
     coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    refuse_input_shape,
     require_channel_count,
     validate_rates,
 )
@@ -454,6 +455,10 @@ class CliffordNet(keras.Model):
         include_top: bool = True,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "the constructor builds nothing from a shape; from_variant(input_shape=...) "
+            "and create_cliffordnet take one and build the model")
         super().__init__(**kwargs)
 
         # A bool or numpy.bool_ only: plain `bool(...)` coercion would accept the

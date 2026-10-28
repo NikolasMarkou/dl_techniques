@@ -120,6 +120,22 @@ class TestSqueezeNoduleNetV2:
         with pytest.raises(ValueError, match=r"Unknown variant 'nope'. Available variants: \['v1', 'v2', 'v1_3d', 'v2_3d'\]"):
             SqueezeNoduleNetV2(variant="nope")
 
+    @pytest.mark.parametrize("value", [True, 2.5, "10", None, 0, -3])
+    def test_a_num_classes_that_is_no_positive_integer_is_refused_naming_it(self, value):
+        """The shared rule (``utils.validation.positive_int``): a bool and a float used to reach
+        the first convolution and fail there with a message about a shape or a group."""
+        with pytest.raises(ValueError, match="^SqueezeNoduleNetV2: num_classes must be a positive integer"):
+            SqueezeNoduleNetV2(num_classes=value, input_shape=(64, 64, 1))
+
+    @pytest.mark.parametrize("rate", [1.0, 2.0, -0.1, float("nan")])
+    def test_a_dropout_rate_outside_the_unit_interval_is_refused_by_the_shared_rule(self, rate):
+        with pytest.raises(ValueError, match=r"^dropout_rate must be in \[0, 1\), got "):
+            SqueezeNoduleNetV2(dropout_rate=rate, input_shape=(64, 64, 1))
+
+    def test_a_numpy_integer_num_classes_is_stored_as_an_int(self):
+        model = SqueezeNoduleNetV2(num_classes=np.int64(4), input_shape=(64, 64, 1))
+        assert type(model.num_classes) is int and model.num_classes == 4
+
     def test_the_constructor_stores_the_variant_name(self):
         assert SqueezeNoduleNetV2(input_shape=(64, 64, 1)).variant == "v2"
         assert SqueezeNoduleNetV2(variant="v1", input_shape=(64, 64, 1)).variant == "v1"

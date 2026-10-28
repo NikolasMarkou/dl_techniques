@@ -60,6 +60,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 
 # ---------------------------------------------------------------------
@@ -137,6 +138,8 @@ class ConvUNextStem(keras.layers.Layer):
         Layer whose class Keras cannot locate.
     :raises TypeError: If ``kernel_initializer`` is not a string, a dict or an
         ``Initializer`` instance.
+    :raises ValueError: Also if ``input_shape`` or ``input_dim`` is passed: a layer
+        takes the shape of the tensor it is called on.
 
     Input shape:
         4D tensor ``(batch, height, width, channels)``.
@@ -156,6 +159,9 @@ class ConvUNextStem(keras.layers.Layer):
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "a layer takes the shape of the tensor it is called on")
         super().__init__(**kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
@@ -728,9 +734,9 @@ def create_convunext(
         final_activation: Union[str, callable] = 'linear',
         # Orthogonal keeps the main-path structural convs norm-preserving; he_normal
         # compounds variance through the residual trunk and explodes a deep U-Net.
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'orthogonal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+        depthwise_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
         depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         dropout_rate: float = 0.0,
         enable_deep_supervision: bool = False,
@@ -1126,8 +1132,11 @@ def create_convunext(
     :param kernel_initializer: Initializer for the main-path structural convolutions
         (stem, channel adjusts, final projection, supervision heads). Defaults to
         ``'orthogonal'``, which is norm-preserving; ``'he_normal'`` compounds
-        variance through the residual trunk and explodes a deep U-Net at init.
-    :type kernel_initializer: str or keras.initializers.Initializer
+        variance through the residual trunk and explodes a deep U-Net at init. An
+        ``Initializer`` instance is serialized once and every site draws from its own
+        copy of that spec, so no two layers start from one sample (a seeded instance
+        is the exception, by contract: its seed is part of the spec).
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for those convolutions.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
     :param depthwise_initializer: Applied to the depthwise conv kernel of every
@@ -1137,7 +1146,9 @@ def create_convunext(
         flattens to a single column, so orthonormal there means unit-norm. The repo
         ``OrthonormalInitializer`` / ``HeOrthonormalInitializer`` (2D only) and
         ``OrthogonalHypersphereInitializer`` (norm blow-up) are unsupported here.
-    :type depthwise_initializer: str or keras.initializers.Initializer or None
+        An instance is serialized once and every block draws its own kernel from the
+        spec, exactly as for ``kernel_initializer``.
+    :type depthwise_initializer: str or dict or keras.initializers.Initializer or None
     :param depthwise_regularizer: Applied to the depthwise conv kernel of every
         ConvNeXt block. Defaults to None, which reproduces the block's own behavior
         (a deepcopy of ``kernel_regularizer``).
@@ -1204,7 +1215,9 @@ def create_convunext(
         ``use_gabor_stem``, ``gabor_stem_projection=False`` with a stem width other
         than ``initial_filters``, ``final_projection_groups`` is misused, or a
         bias-free guardrail fires.
-    :raises TypeError: If ``input_shape`` is not a tuple of length 3.
+    :raises TypeError: If ``input_shape`` is not a tuple of length 3, or if
+        ``kernel_initializer`` or ``depthwise_initializer`` is not a name, a config dict or an
+        ``Initializer`` instance.
 
     Example::
 
@@ -1309,6 +1322,16 @@ def create_convunext(
             supervision_norm_center=supervision_norm_center,
             block_normalization=block_normalization,
         )
+
+    # DECISION plan-2026-10-26T125959-7af851e5/D-033: serialize an instance once, here,
+    # and hand every site the spec. Do NOT pass the caller's object on: a seedless
+    # instance given to two layers replays one draw at both (measured: 21 of 1225
+    # kernel pairs for `kernel_initializer`, 91 of 1225 for `depthwise_initializer`,
+    # which is what the bfunet trainer's `--depthwise-initializer orthonormal` hands
+    # in), and a string or dict spec makes each layer resolve its own instance.
+    kernel_initializer = initializer_spec(kernel_initializer)
+    if depthwise_initializer is not None:
+        depthwise_initializer = initializer_spec(depthwise_initializer)
 
     ConvNextBlock = ConvNextV2Block if convnext_version == 'v2' else ConvNextV1Block
 

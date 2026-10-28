@@ -280,8 +280,13 @@ class TestDepthwisePassThrough:
         blocks = _find_convnext_blocks(model)
         assert len(blocks) > 0, "no ConvNeXt blocks found in the model"
         for blk in blocks:
-            assert isinstance(blk.depthwise_initializer, keras.initializers.Orthogonal)
+            # the builder hands every block the SPEC of the instance (a seedless instance given to
+            # two blocks would replay one draw), and each depthwise conv resolves its own copy
+            assert blk.depthwise_initializer == keras.initializers.serialize(init)
+            resolved = blk.conv_1.depthwise_initializer
+            assert isinstance(resolved, keras.initializers.Orthogonal) and resolved.gain == 1.0
             assert isinstance(blk.depthwise_regularizer, keras.regularizers.L2)
+        assert len({id(blk.conv_1.depthwise_initializer) for blk in blocks}) == len(blocks)
 
     @pytest.mark.parametrize("version", ["v2", "v1"])
     def test_default_unchanged(self, input_shape, version) -> None:

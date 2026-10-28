@@ -714,6 +714,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'use_bias': True,
             'kernel_initializer': "glorot_uniform",
             'output_kernel_initializer': None,
+            'kv_kernel_initializer': None,
             'bias_initializer': "zeros",
             'kernel_regularizer': None,
             'bias_regularizer': None,

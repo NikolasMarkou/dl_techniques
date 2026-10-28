@@ -17,6 +17,9 @@ import os
 # Import the layers to test
 from dl_techniques.layers.attention.multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.layers.activations.routing_probabilities import RoutingProbabilitiesLayer
+from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
+
+from ...test_models.initializer_replay_oracle import replayed_pairs
 
 
 class TestRoutingProbabilitiesLayer:
@@ -1373,3 +1376,69 @@ class TestMultiHeadCrossAttentionMaskPolarity:
             f"perturbing a KEPT token changed the output by only {delta_kept:.6g}; "
             "the test is vacuous — the layer is ignoring its input"
         )
+
+
+class TestMultiHeadCrossAttentionKvKernelInitializer:
+    """``kv_kernel_initializer`` gives the ``kv`` projection a draw of its own.
+
+    With the separate-projection mode, ``q`` and ``kv`` hold ONE initializer instance, so the
+    smaller ``q`` kernel is a rescaled prefix of the ``kv`` kernel; ``output_kernel_initializer``
+    separates ``proj`` and this argument separates ``kv``. ``None`` keeps the historical
+    construction, so no model built on the layer without the argument changes its seeded weights.
+    """
+
+    DIM = 32
+
+    def _built(self, **kwargs) -> MultiHeadCrossAttention:
+        keras.utils.set_random_seed(1234)
+        layer = MultiHeadCrossAttention(dim=self.DIM, num_heads=4, **kwargs)
+        layer.build((None, 6, self.DIM))
+        return layer
+
+    def test_the_historical_construction_shares_one_draw_across_the_three_projections(self):
+        """The control: without the arguments `q`, `kv` and `proj` replay one draw (measured 3 of 3)."""
+        pairs, compared = replayed_pairs(self._built())
+        assert compared == 3 and len(pairs) == 3, pairs
+
+    def test_the_two_arguments_together_leave_no_replayed_draw(self):
+        layer = self._built(
+            kv_kernel_initializer="glorot_uniform", output_kernel_initializer="glorot_uniform")
+        pairs, compared = replayed_pairs(layer)
+        assert compared == 3
+        assert not pairs, pairs
+
+    def test_kv_alone_separates_kv_from_q(self):
+        layer = self._built(kv_kernel_initializer="glorot_uniform")
+        pairs, _ = replayed_pairs(layer)
+        assert len(pairs) == 1 and "q/kernel ~ " in pairs[0] and "proj/kernel" in pairs[0], pairs
+
+    def test_the_kv_kernel_takes_the_initializer_it_was_given(self):
+        layer = self._built(kv_kernel_initializer="zeros")
+        assert float(np.abs(keras.ops.convert_to_numpy(layer.kv_dense.kernel)).max()) == 0.0
+        assert float(np.abs(keras.ops.convert_to_numpy(layer.q_dense.kernel)).max()) > 0.0
+
+    def test_none_changes_no_seeded_weight(self):
+        """The default path draws exactly what it drew before the argument existed."""
+        explicit = self._built(kv_kernel_initializer=None)
+        implicit = self._built()
+        for a, b in zip(explicit.weights, implicit.weights):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b))
+
+    def test_the_fused_projection_mode_refuses_it(self):
+        with pytest.raises(ValueError, match="kv_kernel_initializer needs the separate q and kv"):
+            MultiHeadCrossAttention(
+                dim=self.DIM, num_heads=4, shared_qk_projections=True,
+                kv_kernel_initializer="glorot_uniform")
+
+    def test_it_round_trips_through_get_config(self):
+        layer = self._built(kv_kernel_initializer=keras.initializers.HeNormal(seed=3))
+        config = layer.get_config()
+        assert config["kv_kernel_initializer"]["class_name"] == "HeNormal"
+        rebuilt = MultiHeadCrossAttention.from_config(config)
+        assert rebuilt.get_config() == config
+        assert self._built().get_config()["kv_kernel_initializer"] is None
+
+    def test_the_factory_registry_declares_it(self):
+        assert "kv_kernel_initializer" in ATTENTION_REGISTRY["multi_head_cross"]["optional_params"]
+        assert "kv_kernel_initializer" not in ATTENTION_REGISTRY["multi_head"]["optional_params"]

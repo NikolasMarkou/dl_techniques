@@ -18,9 +18,9 @@ configurable number of stride-2 `ConvBlock` downsampling stages, then global ave
 `RBFLayer` (`dl_techniques.layers.mixtures.radial_basis_function`) applied to the pooled
 feature vector |
 | Feature width | `feature_dim=128` (default) |
-| Input size | any: global average pooling ends the backbone, so the constructor takes no `input_shape` |
+| Input size | any: global average pooling ends the backbone, so the constructor takes no `input_shape`, and a stale `input_shape=` or `input_dim=` raises `ValueError` naming it (Keras alone would only warn) |
 | Registration | `dl_techniques.models.rbf_protonet.model` |
-| Pretrained weights | none — `create_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path; the constructor takes no `pretrained` |
+| Pretrained weights | none — `create_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path, and the message says to build the model and call `model.load_weights(path)`; the constructor takes no `pretrained` |
 
 ## Architecture
 
@@ -113,8 +113,12 @@ print(keras.ops.sum(probs, axis=-1))     # [1.0, 1.0, 1.0, 1.0] (within float to
 `get_config()` / `from_config()` round-trip every constructor argument (`kernel_regularizer` goes
 in as an instance, a name or a config and is stored as the object), and a model reloaded
 from a saved `.keras` file reproduces the original's output within `atol=1e-5` on a fixed
-input — see `tests/test_models/test_rbf_protonet/test_round_trip.py`. `num_classes` accepts any
-positive integer type (a numpy integer included) and `dropout_rate` must be in `[0, 1)`.
+input — see `tests/test_models/test_rbf_protonet/test_round_trip.py`. `num_classes` goes through the
+library's one positive-integer rule (`utils.validation.positive_int`): any positive integer type is accepted, a
+numpy integer included and stored as an `int`; a bool, a float, a string, `None` and a non-positive value raise
+`ValueError: RBFProtoNet: num_classes must be a positive integer, got ...`. `dropout_rate` must be in `[0, 1)`.
+Any keyword that is not an argument raises `ValueError` naming it: `input_shape` and `input_dim` by this
+model's own message, the rest by Keras (`Unrecognized keyword arguments passed to RBFProtoNet: {...}`).
 
 ## Testing
 
@@ -132,8 +136,12 @@ restoring them with the current code (`git archive`, `python -I`); inference and
 outputs are compared at `atol=0`:
 
 - `keras.models.load_model` refuses all four archives, from `be92a74eb` and from `20b48aba6^`:
-  `ValueError: Unrecognized keyword arguments passed to RBFProtoNet: {'pretrained': False}`. The saved
-  config carries the removed `pretrained` and `input_shape` keys, and nothing reads them.
+  `ValueError: RBFProtoNet takes no input_shape (it ends in a global average pool and runs at any spatial
+  size); got input_shape=[32, 32, 3]` (`CliffordRBFProtoNet` the same with its own name). The saved config
+  carries the removed `input_shape` and `pretrained` keys, and nothing reads them; the constructor refuses
+  `input_shape` first (before this refusal existed Keras popped it with a warning and then refused
+  `pretrained` with `Unrecognized keyword arguments passed to RBFProtoNet: {'pretrained': False}`). Re-measured
+  with the current code: `scratch_iter2/step16_1/archive_mlct_rbf_summary.txt`.
 - `model.load_weights(path)` into a freshly built model: from `be92a74eb` all four restore, with equal
   outputs in both modes. `CliffordRBFProtoNet`'s blocks changed spelling (`clifford_block_{i}` to
   `block_{i}`: 30 of 38 and 30 of 40 `w.path` strings), which does not matter to the loader. From
@@ -178,8 +186,8 @@ and share that one helper; the two backbones themselves have no shared code, mir
 | Head | The same `_create_rbf_head(...)` / `RBFLayer(output_mode='normalized')` head as `RBFProtoNet` |
 | Feature width | `feature_dim=128` (default); a `Dense` projection is only created if `channels != feature_dim` |
 | Registration | `dl_techniques.models.rbf_protonet.model` (same module as `RBFProtoNet`) |
-| Input size | any: the pooling is global, so the constructor takes no `input_shape` |
-| Pretrained weights | none -- `create_clifford_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path; the constructor takes no `pretrained` |
+| Input size | any: the pooling is global, so the constructor takes no `input_shape`, and a stale `input_shape=` or `input_dim=` raises `ValueError` naming it (Keras alone would only warn) |
+| Pretrained weights | none -- `create_clifford_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path, and the message says to build the model and call `model.load_weights(path)`; the constructor takes no `pretrained` |
 
 ### Architecture
 

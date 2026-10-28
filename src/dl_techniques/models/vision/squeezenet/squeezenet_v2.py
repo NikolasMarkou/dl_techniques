@@ -51,7 +51,9 @@ from dl_techniques.utils.model_build import (
     coerce_include_top,
     refuse_unknown_model_kwargs,
     require_channel_count,
+    validate_rates,
 )
+from dl_techniques.utils.validation import positive_int
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
@@ -465,10 +467,8 @@ class SqueezeNoduleNetV2(keras.Model):
             )
         variant_config = self.MODEL_VARIANTS[variant]
 
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
-        if not 0 <= dropout_rate < 1:
-            raise ValueError(f"dropout_rate must be in range [0, 1), got {dropout_rate}")
+        num_classes = positive_int(num_classes, "num_classes", type(self).__name__)
+        validate_rates(dropout_rate=dropout_rate)
 
         # A `_3d` variant wins over use_3d=False; the argument can only turn 3D on.
         use_3d = use_3d or variant_config.get("use_3d", False)

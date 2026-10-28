@@ -106,7 +106,9 @@ __all__ = [
     "concretize_axes",
     "materialize_sublayers",
     "plain_head_config_overrides",
+    "refuse_input_shape",
     "refuse_unknown_model_kwargs",
+    "require_channel_count",
     "validate_rates",
 ]
 
@@ -296,6 +298,33 @@ def plain_head_config_overrides(
 # ---------------------------------------------------------------------
 
 
+def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) -> None:
+    """Raise for an ``input_shape`` or ``input_dim`` keyword a layer or model does not take.
+
+    Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``RBFProtoNet``,
+    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``CliffordNet``
+    and ``HierarchicalCliffordNet``, each in its constructor, on its own keyword arguments and
+    before the base class constructor runs, in every layer or subclassed model that has no
+    ``input_shape`` parameter): ``kwargs`` is inspected, never mutated. ``keras.layers.Layer.__init__`` pops both keywords for the
+    sake of ``Sequential`` and only warns ("Do not pass an `input_shape`/`input_dim`
+    argument to a layer"), so a caller written against an older signature that took an
+    ``input_shape`` keeps constructing a model that ignores it. This refuses it, naming the
+    keyword, the class and why the class takes none. Every other unknown keyword is already
+    refused by Keras with ``ValueError: Unrecognized keyword arguments passed to <class>``.
+
+    :param kwargs: The constructor's leftover keyword arguments.
+    :param class_name: The class name, quoted in the message.
+    :param reason: Why the class takes no shape, as a clause (``"it runs at any spatial size"``).
+    :raises ValueError: If ``kwargs`` holds ``input_shape`` or ``input_dim``; the message names
+        the keyword, the class and the value.
+    """
+    for key in ("input_shape", "input_dim"):
+        if key in kwargs:
+            raise ValueError(
+                f"{class_name} takes no {key} ({reason}); got {key}={kwargs[key]!r}"
+            )
+
+
 def coerce_include_top(include_top: Any) -> bool:
     """Return ``include_top`` as a Python ``bool``, refusing anything else.
 
@@ -326,9 +355,11 @@ def coerce_include_top(include_top: Any) -> bool:
 def validate_rates(**rates: float) -> None:
     """Refuse a dropout or drop-path rate outside ``[0, 1)``, naming the argument.
 
-    Interface contract (call sites: the ``__init__`` of the vision classifiers, before
-    any sub-layer is built): pass each rate under the name of the constructor argument
-    it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
+    Interface contract (call sites, from ``grep -rn validate_rates src``: the ``__init__``
+    of ``CliffordNet``, ``HierarchicalCliffordNet``, ``RADConvNet``, ``RBFProtoNet``,
+    ``CliffordRBFProtoNet``, ``SqueezeNetV1``, ``SqueezeNoduleNetV2`` and ``_ConvNeXtBase``,
+    before any sub-layer is built): pass each rate under the name of the
+    constructor argument it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
     Rates are checked in call order and the first bad one raises. Without this check
     the sub-layer that first meets the value raises with its own argument name and
     value (a ramped ``drop_path_rate`` of 2.0 reads "got 1.333333" from
@@ -347,10 +378,12 @@ def validate_rates(**rates: float) -> None:
 def require_channel_count(input_shape: Any) -> None:
     """Refuse an ``input_shape`` whose last axis is unknown, naming the argument and the value.
 
-    Interface contract (call sites: ``load_pretrained_checkpoint``, before it builds an
-    unbuilt model, and the ``from_variant`` of the Clifford pair, which builds whenever
-    it is given a shape): ``input_shape`` is the unbatched shape a channels-last model is
-    built at. The spatial axes may be ``None``; the last axis may not, because the first
+    Interface contract (call sites, from ``grep -rn require_channel_count src``:
+    ``load_pretrained_checkpoint``, before it builds an unbuilt model; the
+    ``from_variant`` of ``CliffordNet`` and ``HierarchicalCliffordNet``, which builds
+    whenever it is given a shape; and the constructors of ``SqueezeNetV1`` and
+    ``SqueezeNoduleNetV2``, which build in ``__init__``): ``input_shape`` is the
+    unbatched shape a channels-last model is built at. The spatial axes may be ``None``; the last axis may not, because the first
     convolution derives its kernel from it (``None % groups``, reported by Keras as
     "unsupported operand type(s) for %" with no mention of the shape). An empty shape is
     refused too. Raises nothing for a shape with a known channel count.

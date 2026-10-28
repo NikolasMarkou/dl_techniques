@@ -6,6 +6,7 @@ covering initialization, forward pass, training, serialization,
 model variants, and edge cases.
 """
 
+import json
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -100,10 +101,22 @@ class TestSqueezeNetV1:
         """Test initialization with invalid parameters raises errors."""
         with pytest.raises(ValueError, match="num_classes must be a positive integer"):
             SqueezeNetV1(num_classes=0)
-        with pytest.raises(ValueError, match="dropout_rate must be in range"):
+        with pytest.raises(ValueError, match=r"dropout_rate must be in \[0, 1\)"):
             SqueezeNetV1(dropout_rate=1.1)
-        with pytest.raises(ValueError, match="dropout_rate must be in range"):
+        with pytest.raises(ValueError, match=r"dropout_rate must be in \[0, 1\)"):
             SqueezeNetV1(dropout_rate=-0.1)
+
+    @pytest.mark.parametrize("value", [True, 2.5, "10", None, 0, -3])
+    def test_a_num_classes_that_is_no_positive_integer_is_refused_naming_it(self, value):
+        """The shared rule (``utils.validation.positive_int``): a bool, a float and a string used
+        to reach the first convolution and fail there with a message about a shape or a group."""
+        with pytest.raises(ValueError, match="^SqueezeNetV1: num_classes must be a positive integer"):
+            SqueezeNetV1(num_classes=value, input_shape=(64, 64, 3))
+
+    def test_a_numpy_integer_num_classes_is_stored_as_an_int(self):
+        model = SqueezeNetV1(num_classes=np.int64(4), input_shape=(64, 64, 3))
+        assert type(model.num_classes) is int and model.num_classes == 4
+        json.dumps(model.get_config())
 
     def test_an_unknown_variant_is_refused_by_the_constructor(self):
         with pytest.raises(ValueError, match=r"Unknown variant 'nope'. Available variants: \['1.0', '1.1', '1.0_bypass'\]"):

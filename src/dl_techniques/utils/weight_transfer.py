@@ -1156,25 +1156,34 @@ def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]
     return pretrained
 
 
-def refuse_pretrained(pretrained: Any, model_label: str) -> None:
-    """Refuse every truthy ``pretrained`` for a model with no backbone/head split.
+def refuse_pretrained(
+    pretrained: Any, model_label: str, how_to_load: Optional[str] = None
+) -> None:
+    """Refuse every truthy ``pretrained`` for a model that distributes no weights.
 
-    Interface contract (callers: ``CLIP.from_variant``,
-    ``MobileClipModel.from_variant``, ``MobileClipV2Model.from_variant``,
-    ``NanoVLM.from_variant``, ``CliffordCLIP.from_variant``,
-    ``SAM.from_variant``, ``SAM2.from_variant``, ``Sam3Image.from_variant``,
-    and the variant-table-free factories
+    Interface contract (callers, from ``grep -rn refuse_pretrained src``:
+    ``CLIP.from_variant``, ``MobileClipModel.from_variant``,
+    ``MobileClipV2Model.from_variant``, ``NanoVLM.from_variant``,
+    ``CliffordCLIP.from_variant``, ``SAM.from_variant``, ``SAM2.from_variant``,
+    ``Sam3Image.from_variant``, and the variant-table-free factories
     ``create_shared_token_decoder``, ``create_ideogram4_transformer``,
-    ``create_ideogram4_autoencoder``, ``create_sd3_mmdit``, ``create_sd3_vae``
-    and ``create_sd3_pipeline``). The
-    sibling of :func:`pretrained_path_or_raise` for the models whose output IS
-    the model, such as a contrastive dual encoder: with no task head there is
-    no partial (backbone-only) load to offer, and a whole-archive load is what
+    ``create_ideogram4_autoencoder``, ``create_sd3_mmdit``, ``create_sd3_vae``,
+    ``create_sd3_pipeline``, ``create_rbf_protonet`` and
+    ``create_clifford_rbf_protonet``). The sibling of
+    :func:`pretrained_path_or_raise` for the models whose output IS the model,
+    such as a contrastive dual encoder: with no task head there is no partial
+    (backbone-only) load to offer, and a whole-archive load is what
     ``keras.models.load_model(path)`` already does.
 
     :param pretrained: The ``from_variant`` argument. Falsy (``False``,
         ``None``, ``""``) means random initialization and returns.
     :param model_label: Name used in the refusal message.
+    :param how_to_load: The sentence that tells the caller what to do instead.
+        ``None`` (the default) keeps the standard text, which is true of a model
+        with no backbone/head split whose archives ``keras.models.load_model``
+        restores. A model for which that is not the right advice (a pair whose
+        archives ``load_model`` refuses, restored by ``model.load_weights``) passes
+        its own sentence.
     :raises NotImplementedError: for any truthy value, ``True`` or a path: no
         pretrained weights are distributed, and a silent random initialization
         would be indistinguishable from a successful load. Raised before any
@@ -1182,10 +1191,15 @@ def refuse_pretrained(pretrained: Any, model_label: str) -> None:
     """
     if not pretrained:
         return
+    if how_to_load is None:
+        raise NotImplementedError(
+            f"Pretrained {model_label} weights are not distributed with "
+            f"dl_techniques (got pretrained={pretrained!r}), and {model_label} has "
+            "no backbone/head split for a partial load. Load a local .keras "
+            "archive with keras.models.load_model(path), or pass "
+            "pretrained=False to random-init."
+        )
     raise NotImplementedError(
         f"Pretrained {model_label} weights are not distributed with "
-        f"dl_techniques (got pretrained={pretrained!r}), and {model_label} has "
-        "no backbone/head split for a partial load. Load a local .keras "
-        "archive with keras.models.load_model(path), or pass "
-        "pretrained=False to random-init."
+        f"dl_techniques (got pretrained={pretrained!r}). {how_to_load}"
     )

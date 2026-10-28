@@ -211,11 +211,20 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     :param qk_norm_kwargs: Optional keyword arguments forwarded to
         :func:`create_normalization_layer` when constructing Q/K norms.
     :type qk_norm_kwargs: Optional[Dict[str, Any]]
+    :param kv_kernel_initializer: Optional initializer for the ``kv`` projection alone
+        (the separate-projection mode only). ``None`` (the default) leaves ``kv`` on
+        ``kernel_initializer``, i.e. the historical behaviour, in which ``q`` and ``kv``
+        hold ONE initializer instance and start from the same random stream (the smaller
+        ``q`` kernel is a rescaled prefix of ``kv``). Supply it, with
+        ``output_kernel_initializer``, when the three projections must start
+        independently.
+    :type kv_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :raises ValueError: If ``dim`` is not divisible by ``num_heads``, or if
         parameters are invalid.
     :raises ValueError: If ``shared_qk_projections=True`` is used with ``kv_input``.
+    :raises ValueError: If ``kv_kernel_initializer`` is given with ``shared_qk_projections=True``.
     :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
     :raises ValueError: From ``build()``, if a cross-attention ``input_shape`` is
         not a pair, if the query shape is not rank 3, or if its last dimension is
@@ -302,6 +311,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             probability_config: Optional[Dict[str, Any]] = None,
             qk_norm_type: Optional[str] = None,
             qk_norm_kwargs: Optional[Dict[str, Any]] = None,
+            kv_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             **kwargs: Any
     ) -> None:
         """Validate the configuration and create the projections, normalizer and norms.
@@ -320,6 +330,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if kv_kernel_initializer is not None and shared_qk_projections:
+            raise ValueError(
+                "kv_kernel_initializer needs the separate q and kv projections; "
+                "shared_qk_projections=True builds one fused qkv projection"
+            )
 
         self.dim = dim
         self.num_heads = num_heads
@@ -331,6 +346,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.output_kernel_initializer = (
             keras.initializers.get(output_kernel_initializer)
             if output_kernel_initializer is not None else None
+        )
+        self.kv_kernel_initializer = (
+            keras.initializers.get(kv_kernel_initializer)
+            if kv_kernel_initializer is not None else None
         )
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -359,8 +378,17 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             )
             self.q_dense, self.kv_dense = None, None
         else:
+            # DECISION plan-2026-10-26T125959-7af851e5/D-050: `kv` takes its own initializer
+            # only when asked (`kv_kernel_initializer`); None keeps `q` and `kv` on the one
+            # shared instance. Do NOT default it to a clone: that would move the seeded
+            # starting weights of every model built on this layer (DINO, DETR, SAM 3, the
+            # decoder blocks) to fix a replay only MambaLCT's fusion attention asked to
+            # be rid of. See decisions.md.
+            kv_kwargs = dict(dense_kwargs)
+            if self.kv_kernel_initializer is not None:
+                kv_kwargs["kernel_initializer"] = self.kv_kernel_initializer
             self.q_dense = keras.layers.Dense(self.dim, name="q", **dense_kwargs)
-            self.kv_dense = keras.layers.Dense(self.dim * 2, name="kv", **dense_kwargs)
+            self.kv_dense = keras.layers.Dense(self.dim * 2, name="kv", **kv_kwargs)
             self.qkv_dense = None
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-160: proj is the residual-
@@ -659,9 +687,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
 
-        ``output_kernel_initializer`` is emitted as ``None`` when it was never
-        supplied, so a round trip does not silently pin ``proj`` to a separate
-        initializer.
+        ``output_kernel_initializer`` and ``kv_kernel_initializer`` are emitted as
+        ``None`` when they were never supplied, so a round trip does not silently pin
+        ``proj`` or ``kv`` to a separate initializer.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]
@@ -677,6 +705,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "output_kernel_initializer": (
                 keras.initializers.serialize(self.output_kernel_initializer)
                 if self.output_kernel_initializer is not None else None
+            ),
+            "kv_kernel_initializer": (
+                keras.initializers.serialize(self.kv_kernel_initializer)
+                if self.kv_kernel_initializer is not None else None
             ),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),

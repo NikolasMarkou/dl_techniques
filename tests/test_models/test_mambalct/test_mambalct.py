@@ -1,5 +1,6 @@
 """Tests for the MambaLCT tracker: shapes, context sensitivity, serialization."""
 
+import inspect
 import io
 import json
 import os
@@ -12,7 +13,9 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.layers.attention.multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.models.vision.mambalct import MambaLCT, create_mambalct
+from dl_techniques.models.vision.mambalct.model import FUSION_ATTENTION_INITIALIZER
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
@@ -347,13 +350,80 @@ def test_every_block_of_the_uca_encoder_draws_each_projection_independently() ->
     assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:3]}"
 
 
-@pytest.mark.parametrize("attention_type", ["differential", "group_query"])
-def test_an_attention_type_without_an_output_initializer_still_builds(attention_type: str) -> None:
-    """Only the types that declare ``output_kernel_initializer`` are given one; a type that
-    does not keeps its own construction and the encoder still runs."""
+SUPPORTED_ATTENTION_TYPES = ["multi_head", "group_query", "multi_head_latent"]
+
+
+@pytest.mark.parametrize("attention_type", SUPPORTED_ATTENTION_TYPES)
+def test_every_supported_attention_type_runs_and_draws_each_projection_independently(
+        attention_type: str) -> None:
+    """For every attention type the encoder accepts, no two kernels of a built encoder carry
+    one random draw (two blocks per stage, so a draw replayed across blocks is seen too)."""
+    keras.utils.set_random_seed(1234)
+    encoder = UcaEncoder(
+        stage_dims=[16, 32], stage_depths=[2, 2], num_heads=[2, 4], attention_type=attention_type)
+    tokens = encoder(_images(), training=False)
+    assert tuple(tokens.shape) == (1, 4, 32) and np.isfinite(np.asarray(tokens)).all()
+    pairs, compared = replayed_pairs(encoder)
+    assert compared > 0, "the encoder exposes fewer than two kernels: nothing was compared"
+    assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:3]}"
+
+
+def test_the_supported_attention_types_are_exactly_these() -> None:
+    from dl_techniques.models.vision.mambalct import uca_encoder
+    assert sorted(uca_encoder.SUPPORTED_ATTENTION_TYPES) == sorted(SUPPORTED_ATTENTION_TYPES)
+    assert all(f'"{name}"' in UcaEncoder.__doc__ for name in SUPPORTED_ATTENTION_TYPES), (
+        "the attention_type docstring must name the supported set")
+
+
+@pytest.mark.parametrize("attention_type", [
+    "differential", "anchor", "window", "window_zigzag", "window_band", "beit", "lighthouse",
+    "fnet", "multi_head_cross", "no_such_attention"])
+def test_an_unsupported_attention_type_is_refused_naming_the_supported_set(
+        attention_type: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(
+            "attention_type must be one of ['group_query', 'multi_head', 'multi_head_latent'], "
+            f"got {attention_type!r}")):
+        UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4],
+                   attention_type=attention_type)
+
+
+#: Why each refused type is refused, as the encoder measured it: the types that replay a draw hand
+#: ONE initializer instance to several projections and declare no argument to separate them; the
+#: others cannot run on the encoder's token shape. The rows are strict expected failures: when a
+#: library layer is fixed the row passes, the run goes red, and the type can join the supported set.
+_REFUSED = {
+    "differential": "60 of 630 kernel pairs replay one draw (q1 ~ k1 ~ q2 ...)",
+    "anchor": "40 of 496 kernel pairs replay one draw (query_proj ~ key_proj ~ value_proj)",
+    "window": "4 of 276 kernel pairs replay one draw (qkv ~ proj)",
+    "window_band": "4 of 190 kernel pairs replay one draw (qkv ~ proj)",
+    "window_zigzag": "ValueError: needs a fixed sequence length for XLA",
+    "beit": "InvalidArgumentError in BeitAttention.call at the encoder's token shape",
+    "lighthouse": "RuntimeError: needs a statically known sequence length",
+    "fnet": "ValueError: sequence length and hidden dimension must be known at build time",
+    "multi_head_cross": "ValueError: TransformerLayer has no such attention type",
+}
+
+
+@pytest.mark.parametrize("attention_type", [
+    pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=f"measured: {why}"), id=name)
+    for name, why in _REFUSED.items()])
+def test_a_refused_attention_type_would_have_to_run_and_draw_independently(
+        attention_type: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dl_techniques.models.vision.mambalct import uca_encoder
+    monkeypatch.setitem(uca_encoder.SUPPORTED_ATTENTION_TYPES, attention_type, None)
+    keras.utils.set_random_seed(1234)
+    encoder = UcaEncoder(
+        stage_dims=[16, 32], stage_depths=[2, 2], num_heads=[2, 4], attention_type=attention_type)
+    assert np.isfinite(np.asarray(encoder(_images(), training=False))).all()
+    pairs, _ = replayed_pairs(encoder)
+    assert not pairs, f"{len(pairs)} kernel pairs replay one draw: {pairs[:2]}"
+
+
+@pytest.mark.parametrize("attention_type", ["group_query", "multi_head_latent"])
+def test_the_types_that_clone_per_projection_themselves_are_given_no_extra_arguments(
+        attention_type: str) -> None:
     encoder = UcaEncoder(
         stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4], attention_type=attention_type)
-    assert tuple(encoder(_images(), training=False).shape) == (1, 4, 32)
     assert all(block.attention_args == {} for block in encoder.blocks)
 
 
@@ -409,3 +479,40 @@ def test_every_block_of_the_uca_encoder_is_on_the_forward_path() -> None:
     encoder(x, training=False)
     report = assert_gradients_reach_every_trainable_weight(encoder, x, training=False)
     assert len(report) == len(encoder.trainable_weights) == 48
+
+
+# ---------------------------------------------------------------------------
+# MambaLCT: the draws of the fusion attention
+# ---------------------------------------------------------------------------
+
+
+def _built_tiny_model() -> MambaLCT:
+    keras.utils.set_random_seed(1234)
+    model = _tiny_model()
+    model.build([(None, 32, 32, 3), (None, 2, 64, 64, 3), (None, 1, 512)])
+    return model
+
+
+def test_the_fusion_attention_projections_start_from_independent_draws() -> None:
+    """`q`, `kv` and `proj` of the fusion attention: the layer hands one initializer instance to
+    all three by default, and the smaller kernels are then rescaled prefixes of the largest."""
+    fusion = _built_tiny_model().fusion_attn
+    pairs, compared = replayed_pairs(fusion)
+    assert compared == 3, "the three projection kernels were not all compared"
+    assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs}"
+    initializers = [fusion.q_dense.kernel_initializer, fusion.kv_dense.kernel_initializer,
+                    fusion.proj_dense.kernel_initializer]
+    assert len({id(i) for i in initializers}) == 3
+
+
+def test_no_two_kernels_of_a_tiny_mambalct_carry_one_draw() -> None:
+    pairs, compared = replayed_pairs(_built_tiny_model())
+    assert compared > 100, "the tracker's kernels were not compared"
+    assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:3]}"
+
+
+def test_the_fusion_initializer_is_the_layers_own_default() -> None:
+    """Naming the initializer must not change the distribution the projections start from."""
+    default = inspect.signature(MultiHeadCrossAttention.__init__).parameters["kernel_initializer"].default
+    assert type(keras.initializers.get(FUSION_ATTENTION_INITIALIZER)) is type(
+        keras.initializers.get(default))

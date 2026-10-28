@@ -18,7 +18,11 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet, create_rbf_protonet
+from dl_techniques.models.vision.rbf_protonet.model import (
+    WARM_START_HINT,
+    RBFProtoNet,
+    create_rbf_protonet,
+)
 from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 
@@ -39,9 +43,9 @@ def _images(batch: int = 4, height: int = 32, width: int = 32) -> np.ndarray:
 
 
 def _refusal(label: str, pretrained) -> str:
-    """The message ``refuse_pretrained`` raises: the one message every refusal shares."""
+    """The message ``refuse_pretrained`` raises for this pair: the shared text and the pair's hint."""
     with pytest.raises(NotImplementedError) as raised:
-        refuse_pretrained(pretrained, label)
+        refuse_pretrained(pretrained, label, WARM_START_HINT)
     return str(raised.value)
 
 
@@ -124,9 +128,22 @@ class TestRBFProtoNetArguments:
         json.dumps(model.get_config())  # an np.int64 in the config is not JSON-safe
 
     @pytest.mark.parametrize("value", [0, -3, 2.5, True, "10", None])
-    def test_a_bad_num_classes_raises_naming_the_value(self, value):
-        with pytest.raises(ValueError, match=f"^num_classes must be a positive int, got {re.escape(repr(value))}$"):
+    def test_a_bad_num_classes_raises_naming_the_class_the_argument_and_the_value(self, value):
+        """The one positive-integer rule (``utils.validation.positive_int``) with this class as owner."""
+        with pytest.raises(
+                ValueError, match=f"^RBFProtoNet: num_classes must be a positive integer, got .*{re.escape(str(value))}"):
             _small_rbf_protonet(num_classes=value)
+
+    @pytest.mark.parametrize("keyword, value", [("input_shape", (32, 32, 3)), ("input_dim", 3)])
+    def test_a_shape_keyword_is_refused_by_name(self, keyword, value):
+        """Keras pops ``input_shape`` and ``input_dim`` and only warns; a caller written against
+        the signature this class had before they were removed must not keep working silently."""
+        with pytest.raises(ValueError, match=f"^RBFProtoNet takes no {keyword} .*any spatial size.*{keyword}="):
+            RBFProtoNet(num_classes=10, **{keyword: value})
+
+    def test_an_unknown_keyword_is_refused_naming_it(self):
+        with pytest.raises(ValueError, match="not_an_argument"):
+            RBFProtoNet(num_classes=10, not_an_argument=1)
 
     @pytest.mark.parametrize("rate", [1.0, 1.5, -0.1, float("nan")])
     def test_a_dropout_rate_outside_the_unit_interval_raises_naming_the_value(self, rate):
@@ -176,6 +193,26 @@ class TestRBFProtoNetPretrainedRefusal:
         with pytest.raises(NotImplementedError) as raised:
             create_rbf_protonet(num_classes=10, pretrained=pretrained)
         assert str(raised.value) == _refusal("RBFProtoNet", pretrained)
+
+    def test_the_message_gives_the_advice_that_is_true_for_this_model(self):
+        """The model has a backbone and a head and its pre-change archives are refused by
+        ``load_model``; the standard text ("no backbone/head split ... load_model(path)")
+        describes another kind of model."""
+        message = _refusal("RBFProtoNet", "weights.keras")
+        assert "model.load_weights(path)" in message
+        assert "backbone/head split" not in message and "load_model" not in message
+        assert "(got pretrained='weights.keras')" in message
+
+    @pytest.mark.parametrize("keyword, value", [("input_shape", (64, 64, 1)), ("input_dim", 3)])
+    def test_the_factory_refuses_a_shape_keyword_by_name(self, keyword, value):
+        """``create_rbf_protonet(input_shape=...)`` was the documented signature until it was
+        removed; Keras alone only warns about it."""
+        with pytest.raises(ValueError, match=f"RBFProtoNet takes no {keyword}"):
+            create_rbf_protonet(num_classes=10, **{keyword: value})
+
+    def test_the_factory_refuses_an_unknown_keyword_naming_it(self):
+        with pytest.raises(ValueError, match="not_an_argument"):
+            create_rbf_protonet(num_classes=10, not_an_argument=1)
 
     def test_the_refusal_comes_before_anything_is_built(self):
         """An invalid ``num_classes`` would raise ``ValueError`` if the model were built first."""

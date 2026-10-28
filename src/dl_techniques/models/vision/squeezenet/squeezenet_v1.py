@@ -53,7 +53,9 @@ from dl_techniques.utils.model_build import (
     coerce_include_top,
     refuse_unknown_model_kwargs,
     require_channel_count,
+    validate_rates,
 )
+from dl_techniques.utils.validation import positive_int
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
@@ -484,10 +486,8 @@ class SqueezeNetV1(keras.Model):
             )
         variant_config = self.MODEL_VARIANTS[variant]
 
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
-        if not 0 <= dropout_rate < 1:
-            raise ValueError(f"dropout_rate must be in range [0, 1), got {dropout_rate}")
+        num_classes = positive_int(num_classes, "num_classes", type(self).__name__)
+        validate_rates(dropout_rate=dropout_rate)
         # DECISION plan-2026-10-26T125959-7af851e5/D-047: accept exactly None, False, "simple" and
         # "complex". Do NOT read any other truthy value as a bypass or as "no bypass": True and
         # "bogus" built a plain model that reported the value (the Add layers are made only for the

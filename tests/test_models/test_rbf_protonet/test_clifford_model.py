@@ -23,6 +23,7 @@ import pytest
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.models.vision.rbf_protonet.model import (
+    WARM_START_HINT,
     CliffordRBFProtoNet,
     create_clifford_rbf_protonet,
 )
@@ -59,9 +60,9 @@ def _images(batch: int = 4, height: int = _IMAGE_SIDE, width: int = _IMAGE_SIDE)
 
 
 def _refusal(label: str, pretrained) -> str:
-    """The message ``refuse_pretrained`` raises: the one message every refusal shares."""
+    """The message ``refuse_pretrained`` raises for this pair: the shared text and the pair's hint."""
     with pytest.raises(NotImplementedError) as raised:
-        refuse_pretrained(pretrained, label)
+        refuse_pretrained(pretrained, label, WARM_START_HINT)
     return str(raised.value)
 
 
@@ -141,9 +142,23 @@ class TestCliffordRBFProtoNetArguments:
         json.dumps(model.get_config())  # an np.int64 in the config is not JSON-safe
 
     @pytest.mark.parametrize("value", [0, -3, 2.5, True, "10", None])
-    def test_a_bad_num_classes_raises_naming_the_value(self, value):
-        with pytest.raises(ValueError, match=f"^num_classes must be a positive int, got {re.escape(repr(value))}$"):
+    def test_a_bad_num_classes_raises_naming_the_class_the_argument_and_the_value(self, value):
+        """The one positive-integer rule (``utils.validation.positive_int``) with this class as owner."""
+        with pytest.raises(
+                ValueError,
+                match=f"^CliffordRBFProtoNet: num_classes must be a positive integer, got .*{re.escape(str(value))}"):
             _small_clifford_rbf_protonet(num_classes=value)
+
+    @pytest.mark.parametrize("keyword, value", [("input_shape", (32, 32, 3)), ("input_dim", 3)])
+    def test_a_shape_keyword_is_refused_by_name(self, keyword, value):
+        """Keras pops ``input_shape`` and ``input_dim`` and only warns; a caller written against
+        the signature this class had before they were removed must not keep working silently."""
+        with pytest.raises(ValueError, match=f"^CliffordRBFProtoNet takes no {keyword} .*any spatial size.*{keyword}="):
+            CliffordRBFProtoNet(num_classes=10, depth=4, **{keyword: value})
+
+    def test_an_unknown_keyword_is_refused_naming_it(self):
+        with pytest.raises(ValueError, match="not_an_argument"):
+            CliffordRBFProtoNet(num_classes=10, depth=4, not_an_argument=1)
 
     @pytest.mark.parametrize("rate", [1.0, 1.5, -0.1, float("nan")])
     def test_a_drop_path_rate_outside_the_unit_interval_raises_naming_the_value(self, rate):
@@ -204,6 +219,22 @@ class TestCliffordRBFProtoNetPretrainedRefusal:
         with pytest.raises(NotImplementedError) as raised:
             create_clifford_rbf_protonet(num_classes=10, depth=4, pretrained=pretrained)
         assert str(raised.value) == _refusal("CliffordRBFProtoNet", pretrained)
+
+    def test_the_message_gives_the_advice_that_is_true_for_this_model(self):
+        message = _refusal("CliffordRBFProtoNet", "weights.keras")
+        assert "model.load_weights(path)" in message
+        assert "backbone/head split" not in message and "load_model" not in message
+
+    @pytest.mark.parametrize("keyword, value", [("input_shape", (28, 28, 1)), ("input_dim", 3)])
+    def test_the_factory_refuses_a_shape_keyword_by_name(self, keyword, value):
+        """``create_clifford_rbf_protonet(input_shape=...)`` was the documented signature until it
+        was removed; Keras alone only warns about it."""
+        with pytest.raises(ValueError, match=f"CliffordRBFProtoNet takes no {keyword}"):
+            create_clifford_rbf_protonet(num_classes=10, depth=4, **{keyword: value})
+
+    def test_the_factory_refuses_an_unknown_keyword_naming_it(self):
+        with pytest.raises(ValueError, match="not_an_argument"):
+            create_clifford_rbf_protonet(num_classes=10, depth=4, not_an_argument=1)
 
     def test_the_refusal_comes_before_anything_is_built(self):
         """An invalid ``num_classes`` would raise ``ValueError`` if the model were built first."""

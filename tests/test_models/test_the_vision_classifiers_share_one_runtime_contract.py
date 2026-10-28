@@ -274,7 +274,12 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
         head_attribute=False, functional=True,
         invalid=(({"use_bypass": "bogus"}, "use_bypass", "bogus"),
-                 ({"use_bypass": True}, "use_bypass", True)),
+                 ({"use_bypass": True}, "use_bypass", True),
+                 ({"num_classes": 0}, "num_classes", 0),
+                 ({"num_classes": True}, "num_classes", True),
+                 ({"num_classes": 2.5}, "num_classes", 2.5),
+                 ({"dropout_rate": 2.0}, "dropout_rate", 2.0),
+                 ({"dropout_rate": float("nan")}, "dropout_rate", float("nan"))),
         sizes={_NON_SQUARE: (48, 64)}),
     Classifier(
         "squeezenet_v2", f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2",
@@ -283,7 +288,12 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
                  input_shape=(48, 64, 3)),
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
         head_attribute=False, functional=True,
-        invalid=(({"input_shape": (36, 36, 36, 1)}, "input_shape", (36, 36, 36, 1)),),
+        invalid=(({"input_shape": (36, 36, 36, 1)}, "input_shape", (36, 36, 36, 1)),
+                 ({"num_classes": 0}, "num_classes", 0),
+                 ({"num_classes": True}, "num_classes", True),
+                 ({"num_classes": 2.5}, "num_classes", 2.5),
+                 ({"dropout_rate": 2.0}, "dropout_rate", 2.0),
+                 ({"dropout_rate": float("nan")}, "dropout_rate", float("nan"))),
         sizes={_NON_SQUARE: (48, 64)}),
 )
 CLASSIFIER_KEYS = tuple(c.key for c in CLASSIFIERS)
@@ -1434,16 +1444,34 @@ def _build_squeezenet_v2(init):
                                                     **_kw(init)), _images(64, 64, 1))
 
 
+def _build_squeezenet_v2_3d(init):
+    from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+    return _forward(SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=4, input_shape=(36, 36, 36, 1),
+                                                    **_kw(init)), _images(36, 36, 36, 1))
+
+
 def _build_vae(init):
     from dl_techniques.models.vision.vae.model import VAE
     return _forward(VAE.from_variant("small", input_shape=(32, 32, 3), **_kw(init)),
                     np.random.default_rng(0).uniform(size=(2, 32, 32, 3)).astype("float32"))
 
 
-def _build_convunext(init):
-    from dl_techniques.models.vision.convunext.model import create_convunext_variant
-    return _forward(create_convunext_variant("tiny", (32, 32, 3)),
-                    np.random.default_rng(0).uniform(size=(2, 32, 32, 3)).astype("float32"))
+def _convunext(bias_free: bool = False, **config: Any):
+    """A tiny ConvUNext; the instance arm hands ONE instance to both initializer arguments.
+
+    ConvUNext has two initializer knobs, ``kernel_initializer`` (stem, channel adjusts, strided
+    downsamplers, projections, supervision heads) and ``depthwise_initializer`` (every ConvNeXt
+    block). Both get the instance, so a model that stores either one raw replays it.
+    """
+    def build(init):
+        from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
+            create_convunext_variant as create_bias_free)
+        from dl_techniques.models.vision.convunext.model import create_convunext_variant
+        arms = {} if init is None else {"kernel_initializer": init, "depthwise_initializer": init}
+        create = create_bias_free if bias_free else create_convunext_variant
+        return _forward(create("tiny", (32, 32, 3), **config, **arms),
+                        np.random.default_rng(0).uniform(size=(2, 32, 32, 3)).astype("float32"))
+    return build
 
 
 def _build_rbf(init):
@@ -1458,10 +1486,24 @@ def _build_clifford_rbf(init):
                     _images(32, 32, 3))
 
 
-def _build_uca(init):
-    from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
-    return _forward(UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 2], num_heads=[2, 4]),
-                    _images(16, 16, 3))
+def _uca(attention_type: str):
+    def build(init):
+        from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+        return _forward(UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 2], num_heads=[2, 4],
+                                   attention_type=attention_type), _images(16, 16, 3))
+    return build
+
+
+def _build_mambalct(init):
+    """The tracker the package's own tests build: encoder, context SSM, fusion attention, head."""
+    from dl_techniques.models.vision.mambalct import MambaLCT
+    rng = np.random.default_rng(0)
+    model = MambaLCT(template_size=32, search_size=64, context_len=1, stage_dims=[64, 128, 512],
+                     stage_depths=[1, 1, 1], num_heads=[2, 4, 8], fusion_heads=8,
+                     head_hidden_dim=32, name="mambalct_tiny")
+    model([rng.uniform(0, 1, size=(1, 32, 32, 3)).astype("float32"),
+           rng.uniform(0, 1, size=(1, 2, 64, 64, 3)).astype("float32")], training=False)
+    return model
 
 
 def _build_capsnet(init):
@@ -1559,11 +1601,20 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "rad_convnet_hidden_head": (_build_rad_hidden_head, False),
     "squeezenet_v1": (_build_squeezenet_v1, True),
     "squeezenet_v2": (_build_squeezenet_v2, True),
+    "squeezenet_v2_3d": (_build_squeezenet_v2_3d, True),
     "vae": (_build_vae, True),
-    "convunext": (_build_convunext, False),
+    "convunext": (_convunext(), True),
+    "convunext_bias_free": (_convunext(bias_free=True), True),
+    "convunext_gabor_stem": (_convunext(use_gabor_stem=True, gabor_filters=32, use_bias=False,
+                                        final_activation="linear", block_normalization="batchnorm"), True),
+    "convunext_deep_supervision": (_convunext(enable_deep_supervision=True), True),
+    "convunext_strided_downsample": (_convunext(downsample_pool_type="strided_conv"), True),
     "rbf_protonet": (_build_rbf, False),
     "clifford_rbf_protonet": (_build_clifford_rbf, False),
-    "uca_encoder": (_build_uca, False),
+    "uca_encoder": (_uca("multi_head"), False),
+    "uca_encoder_group_query": (_uca("group_query"), False),
+    "uca_encoder_multi_head_latent": (_uca("multi_head_latent"), False),
+    "mambalct": (_build_mambalct, False),
     "capsnet": (_build_capsnet, True),
     "capsnet_v2_legacy": (_capsnet_v2("legacy", (28, 28, 1)), True),
     "capsnet_v2_resnet18": (_capsnet_v2("resnet18", (32, 32, 3)), True),
@@ -2149,6 +2200,138 @@ def test_the_numbering_rule_sees_the_spellings_the_rbf_pair_and_uca_had() -> Non
 
 
 # ---------------------------------------------------------------------------
+# A constructor with no input_shape parameter refuses the keyword
+# ---------------------------------------------------------------------------
+
+#: ``key -> constructor taking the keywords under test``, for every finished model or layer
+#: whose ``__init__`` has no ``input_shape`` parameter. ``keras.layers.Layer.__init__`` pops
+#: ``input_shape`` and ``input_dim`` and only warns, so a caller written against a signature
+#: that once took one keeps constructing a model that ignores it.
+NO_SHAPE_CONSTRUCTORS: Dict[str, Callable[..., Any]] = {}
+
+
+def _no_shape(key: str):
+    def register(build: Callable[..., Any]) -> Callable[..., Any]:
+        NO_SHAPE_CONSTRUCTORS[key] = build
+        return build
+    return register
+
+
+@_no_shape("rbf_protonet")
+def _rbf_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet
+    return RBFProtoNet(num_classes=5, **kw)
+
+
+@_no_shape("clifford_rbf_protonet")
+def _clifford_rbf_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
+    return CliffordRBFProtoNet(num_classes=5, channels=16, depth=1, **kw)
+
+
+@_no_shape("rbf_protonet_factory")
+def _rbf_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.rbf_protonet.model import create_rbf_protonet
+    return create_rbf_protonet(num_classes=5, **kw)
+
+
+@_no_shape("clifford_rbf_protonet_factory")
+def _clifford_rbf_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.rbf_protonet.model import create_clifford_rbf_protonet
+    return create_clifford_rbf_protonet(num_classes=5, channels=16, depth=1, **kw)
+
+
+@_no_shape("uca_encoder")
+def _uca_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+    return UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4], **kw)
+
+
+@_no_shape("mambalct")
+def _mambalct_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.mambalct import MambaLCT
+    return MambaLCT(template_size=32, search_size=64, context_len=1, stage_dims=[64, 128, 512],
+                    stage_depths=[1, 1, 1], num_heads=[2, 4, 8], fusion_heads=8,
+                    head_hidden_dim=32, **kw)
+
+
+@_no_shape("convunext_stem")
+def _convunext_stem_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.convunext.model import ConvUNextStem
+    return ConvUNextStem(filters=4, **kw)
+
+
+@_no_shape("cliffordnet")
+def _cliffordnet_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.cliffordnet.model import CliffordNet
+    return CliffordNet(num_classes=5, channels=16, depth=1, **kw)
+
+
+@_no_shape("hierarchical_cliffordnet")
+def _hierarchical_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.cliffordnet.hierarchical import HierarchicalCliffordNet
+    return HierarchicalCliffordNet(num_classes=5, **kw)
+
+
+def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:
+    """The shape keywords ``build`` accepts without raising ``ValueError`` (empty when it refuses both).
+
+    Interface contract: ``build(**kw)`` constructs the subject with the given extra keywords. A
+    keyword counts as swallowed when construction succeeds (or Keras only warns); a ``ValueError``
+    that does not name the keyword also counts, because the refusal must say what was wrong.
+    Any other exception propagates.
+    """
+    import warnings
+    swallowed = []
+    for key in ("input_shape", "input_dim"):
+        value = (8, 8, 3) if key == "input_shape" else 3
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                build(**{key: value})
+            except ValueError as error:
+                if key not in str(error):
+                    swallowed.append(key)
+            else:
+                swallowed.append(key)
+    return swallowed
+
+
+@pytest.mark.parametrize("key", [_param("no_shape_keyword_swallowed", k) for k in NO_SHAPE_CONSTRUCTORS])
+def test_a_constructor_without_an_input_shape_parameter_refuses_the_keyword(key: str) -> None:
+    assert swallowed_shape_keywords(NO_SHAPE_CONSTRUCTORS[key]) == []
+
+
+@pytest.mark.parametrize("key", [_param("unknown_keyword_refused", k) for k in NO_SHAPE_CONSTRUCTORS])
+def test_an_unknown_keyword_is_refused_naming_it(key: str) -> None:
+    with pytest.raises(ValueError, match="not_an_argument"):
+        NO_SHAPE_CONSTRUCTORS[key](not_an_argument=1)
+
+
+def test_the_no_shape_rule_sees_a_constructor_that_swallows_the_keyword() -> None:
+    class Swallows(keras.layers.Layer):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+
+    class RefusesElsewhere(keras.layers.Layer):
+        def __init__(self, **kwargs: Any) -> None:
+            if "input_shape" in kwargs:
+                raise ValueError("something unrelated is wrong")
+            super().__init__(**kwargs)
+
+    assert swallowed_shape_keywords(lambda **kw: Swallows(**kw)) == ["input_shape", "input_dim"]
+    assert swallowed_shape_keywords(lambda **kw: RefusesElsewhere(**kw)) == ["input_shape", "input_dim"]
+    from dl_techniques.utils.model_build import refuse_input_shape
+
+    class Refuses(keras.layers.Layer):
+        def __init__(self, **kwargs: Any) -> None:
+            refuse_input_shape(kwargs, "Refuses", "it has none")
+            super().__init__(**kwargs)
+
+    assert swallowed_shape_keywords(lambda **kw: Refuses(**kw)) == []
+
+
+# ---------------------------------------------------------------------------
 # The ledger names only rows that exist
 # ---------------------------------------------------------------------------
 
@@ -2172,6 +2355,8 @@ def _all_row_names() -> set:
             rows.add(("mobilenet_default_has_no_l2_losses", c.key))
     rows |= {(_row_name("no_replayed_draw", [arm]), key) for key, arm in _REPLAY_ARMS}
     rows |= {("layer_names_follow_the_table", s.key) for s in NAMED_SUBJECTS}
+    rows |= {("no_shape_keyword_swallowed", key) for key in NO_SHAPE_CONSTRUCTORS}
+    rows |= {("unknown_keyword_refused", key) for key in NO_SHAPE_CONSTRUCTORS}
     return rows
 
 

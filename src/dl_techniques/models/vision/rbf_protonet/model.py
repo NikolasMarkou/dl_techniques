@@ -21,8 +21,10 @@ rather than hand-rolling ``Conv2D`` + ``BatchNormalization`` + activation in
 this file.
 
 Neither model takes an ``input_shape``: both end in a global average pool, so
-they run at any spatial size and nothing in them would read one. Neither
-distributes pretrained weights, and the factories refuse ``pretrained``
+they run at any spatial size and nothing in them would read one. A caller that
+still passes ``input_shape`` (or ``input_dim``) gets a ``ValueError`` naming it
+instead of Keras's warning (``refuse_input_shape``). Neither distributes
+pretrained weights, and the factories refuse ``pretrained``
 (``refuse_pretrained``); a warm start is ``model.load_weights(path)``.
 
 This package intentionally ships without a ``MODEL_VARIANTS`` table (see
@@ -55,7 +57,6 @@ References:
 """
 
 import keras
-import numbers
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -66,7 +67,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.mixtures.factory import create_mixture_layer
-from dl_techniques.utils.model_build import materialize_sublayers, validate_rates
+from dl_techniques.utils.model_build import (
+    materialize_sublayers,
+    refuse_input_shape,
+    validate_rates,
+)
+from dl_techniques.utils.validation import positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.weight_transfer import refuse_pretrained
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
@@ -79,32 +85,16 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 #: The norm factory's own epsilon default is ``1e-6``, not the Keras ``1e-3`` the stem was
 #: measured with, so both values are stated. They are this model's own: the stem's
 #: composition was validated at exactly these values (anchor above ``_build_stem``).
+# DECISION plan-2026-10-26T125959-7af851e5/D-049: these two constants are this model's own
+# although ``cliffordnet.model`` defines constants of the same names and values. Do NOT
+# replace them with an import of those: the stem was validated at exactly these values
+# (the D-005 anchor at ``_build_stem``), and an import would let a retune of CliffordNet's
+# stem silently change this model's stem and the starting point of every archive. A
+# duplicated pair of numbers is the price of keeping the two models independent. See decisions.md.
 STEM_BN_MOMENTUM = 0.9
 STEM_BN_EPSILON = 1e-3
 
 # ---------------------------------------------------------------------
-
-
-def _validated_num_classes(num_classes: Any) -> int:
-    """Check ``num_classes`` and return it as a plain ``int``.
-
-    Interface contract (callers: ``RBFProtoNet.__init__`` and
-    ``CliffordRBFProtoNet.__init__``): any positive integer type is accepted, a numpy
-    integer included, and comes back as a Python ``int`` so ``get_config`` stays
-    JSON-safe. A ``bool``, a float, a string, ``None`` and a non-positive integer are
-    refused.
-
-    :param num_classes: The constructor argument.
-    :return: ``int(num_classes)``.
-    :raises ValueError: naming ``num_classes`` and the repr of the value.
-    """
-    if (
-            not isinstance(num_classes, numbers.Integral)
-            or isinstance(num_classes, bool)
-            or num_classes <= 0
-    ):
-        raise ValueError(f"num_classes must be a positive int, got {num_classes!r}")
-    return int(num_classes)
 
 
 # DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
@@ -268,9 +258,12 @@ class RBFProtoNet(keras.Model):
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``num_classes``, ``stem_filters`` or ``feature_dim``
-        is not positive, if ``filters_per_stage`` is empty or contains a
-        non-positive value, or if ``dropout_rate`` is outside ``[0, 1)``.
+    :raises ValueError: If ``num_classes`` is not a positive integer, if
+        ``stem_filters`` or ``feature_dim`` is not positive, if
+        ``filters_per_stage`` is empty or contains a non-positive value, if
+        ``dropout_rate`` is outside ``[0, 1)``, or if a keyword is not an
+        argument of the model: ``input_shape`` and ``input_dim`` are refused by
+        name (the model runs at any spatial size), anything else by Keras.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``; any
@@ -303,9 +296,12 @@ class RBFProtoNet(keras.Model):
             min_distance: float = 1.0,
             **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "it ends in a global average pool and runs at any spatial size")
         super().__init__(**kwargs)
 
-        num_classes = _validated_num_classes(num_classes)
+        num_classes = positive_int(num_classes, "num_classes", type(self).__name__)
         if stem_filters <= 0:
             raise ValueError(f"stem_filters must be positive, got {stem_filters}")
         if feature_dim <= 0:
@@ -586,9 +582,11 @@ class CliffordRBFProtoNet(keras.Model):
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``num_classes``, ``channels``, ``depth``,
-        ``patch_size`` or ``feature_dim`` is not positive, or if
-        ``drop_path_rate`` is outside ``[0, 1)``.
+    :raises ValueError: If ``num_classes`` is not a positive integer, if
+        ``channels``, ``depth``, ``patch_size`` or ``feature_dim`` is not positive,
+        if ``drop_path_rate`` is outside ``[0, 1)``, or if a keyword is not an
+        argument of the model: ``input_shape`` and ``input_dim`` are refused by
+        name (the model runs at any spatial size), anything else by Keras.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``; any
@@ -621,9 +619,12 @@ class CliffordRBFProtoNet(keras.Model):
             ] = None,
             **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, type(self).__name__,
+            "it ends in a global average pool and runs at any spatial size")
         super().__init__(**kwargs)
 
-        num_classes = _validated_num_classes(num_classes)
+        num_classes = positive_int(num_classes, "num_classes", type(self).__name__)
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if depth <= 0:
@@ -803,6 +804,17 @@ class CliffordRBFProtoNet(keras.Model):
 # ---------------------------------------------------------------------
 
 
+#: What ``refuse_pretrained`` tells a caller of either factory to do instead. These models have a
+#: backbone and an ``rbf_head`` and no distributed weights, ``keras.models.load_model`` refuses an
+#: archive written before the ``pretrained`` and ``input_shape`` knobs were removed (their config
+#: carries both keys), and ``load_weights`` restores such an archive into a model of the same
+#: architecture, so that is the advice the shared message gives.
+WARM_START_HINT = (
+    "Build the model and call model.load_weights(path) to warm-start it from a saved model "
+    "of the same architecture, or pass pretrained=False to random-init."
+)
+
+
 def create_rbf_protonet(
         num_classes: int = 100,
         pretrained: Union[bool, str] = False,
@@ -825,8 +837,11 @@ def create_rbf_protonet(
     :return: A configured, uncompiled :class:`RBFProtoNet` model.
     :rtype: RBFProtoNet
     :raises NotImplementedError: If ``pretrained`` is truthy.
+    :raises ValueError: If a keyword is not an argument of :class:`RBFProtoNet`; the
+        message names it. ``input_shape`` was a parameter of this factory once and
+        is refused, not ignored.
     """
-    refuse_pretrained(pretrained, "RBFProtoNet")
+    refuse_pretrained(pretrained, "RBFProtoNet", WARM_START_HINT)
     return RBFProtoNet(num_classes=num_classes, **kwargs)
 
 
@@ -852,8 +867,11 @@ def create_clifford_rbf_protonet(
     :return: A configured, uncompiled :class:`CliffordRBFProtoNet` model.
     :rtype: CliffordRBFProtoNet
     :raises NotImplementedError: If ``pretrained`` is truthy.
+    :raises ValueError: If a keyword is not an argument of :class:`CliffordRBFProtoNet`; the
+        message names it. ``input_shape`` was a parameter of this factory once and
+        is refused, not ignored.
     """
-    refuse_pretrained(pretrained, "CliffordRBFProtoNet")
+    refuse_pretrained(pretrained, "CliffordRBFProtoNet", WARM_START_HINT)
     return CliffordRBFProtoNet(num_classes=num_classes, **kwargs)
 
 # ---------------------------------------------------------------------

@@ -59,6 +59,7 @@ from dl_techniques.layers.activations.exact_activations import exact_gelu
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 
+from ..initializer_replay_oracle import replayed_pairs
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 from tests.test_layers.test_conv_blocks.stem_instruments import unlocatable_activation
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
@@ -2150,6 +2151,62 @@ class TestWeightTransfer:
         dst = create_convunext(**_cfg(initial_filters=16))
         with pytest.raises(ValueError):
             dst.set_weights(src.get_weights())
+
+
+class TestCreateConvUNextInitializerHandOff:
+    """An initializer INSTANCE given for either knob reaches every site as a spec.
+
+    A seedless instance handed to two layers replays one random draw at both. The builder
+    serializes it once and every layer resolves its own copy, so two kernels of one width
+    start from different samples (the bfunet trainer's ``--depthwise-initializer
+    orthonormal`` hands in exactly such an instance).
+    """
+
+    @pytest.mark.parametrize('argument', ['kernel_initializer', 'depthwise_initializer'])
+    def test_an_instance_replays_no_draw(self, argument: str) -> None:
+        keras.utils.set_random_seed(1234)
+        model = create_convunext(**_cfg(**{argument: keras.initializers.HeNormal()}))
+        pairs, compared = replayed_pairs(model)
+        assert compared > 0, 'the model exposes fewer than two kernels: nothing was compared'
+        assert not pairs, f'{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}'
+
+    def test_every_site_resolves_its_own_initializer_object(self) -> None:
+        model = create_convunext(**_cfg(
+            kernel_initializer=keras.initializers.HeNormal(),
+            depthwise_initializer=keras.initializers.Orthogonal(gain=1.0)))
+        adjusts = [model.get_layer(name).kernel_initializer
+                   for name in ('encoder_level_1_channel_adjust', 'bottleneck_channel_adjust')]
+        depthwise = [block.conv_1.depthwise_initializer for block in _convnext_block_layers(model)]
+        assert len(depthwise) == 5 and all(
+            isinstance(i, keras.initializers.Orthogonal) for i in depthwise)
+        assert all(isinstance(i, keras.initializers.HeNormal) for i in adjusts)
+        assert len({id(i) for i in [*adjusts, *depthwise]}) == len(adjusts) + len(depthwise)
+
+    def test_a_model_built_with_instances_survives_a_keras_round_trip(self) -> None:
+        keras.utils.set_random_seed(7)
+        model = create_convunext(**_cfg(
+            kernel_initializer=keras.initializers.HeNormal(),
+            depthwise_initializer=keras.initializers.Orthogonal(gain=1.0)))
+        x = np.random.default_rng(3).normal(size=(2, 16, 16, 3)).astype('float32')
+        expected = keras.ops.convert_to_numpy(model(x, training=False))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'convunext_instances.keras')
+            model.save(path)
+            loaded = keras.models.load_model(path)
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(loaded(x, training=False)), expected)
+
+    @pytest.mark.parametrize('argument', ['kernel_initializer', 'depthwise_initializer'])
+    def test_a_value_that_is_no_initializer_is_refused(self, argument: str) -> None:
+        with pytest.raises(TypeError, match='initializer'):
+            create_convunext(**_cfg(**{argument: 3.5}))
+
+    def test_no_depthwise_initializer_keeps_the_blocks_own_default(self) -> None:
+        model = create_convunext(**_cfg())
+        for block in _convnext_block_layers(model):
+            initializer = block.conv_1.depthwise_initializer
+            assert isinstance(initializer, keras.initializers.TruncatedNormal)
+            assert initializer.stddev == 0.02
 
 
 # ---------------------------------------------------------------------

@@ -717,6 +717,27 @@ class TestRefusePretrained:
                                match=r"keras\.models\.load_model\(path\)"):
                 refuse_pretrained(truthy, "M")
 
+    def test_the_default_message_is_unchanged(self):
+        with pytest.raises(NotImplementedError) as caught:
+            refuse_pretrained("w.keras", "M")
+        assert str(caught.value) == (
+            "Pretrained M weights are not distributed with dl_techniques "
+            "(got pretrained='w.keras'), and M has no backbone/head split for a partial "
+            "load. Load a local .keras archive with keras.models.load_model(path), or "
+            "pass pretrained=False to random-init.")
+
+    def test_how_to_load_replaces_the_advice_and_keeps_the_refusal(self):
+        """A model whose archives ``load_model`` refuses says what does work instead."""
+        with pytest.raises(NotImplementedError) as caught:
+            refuse_pretrained(True, "M", how_to_load="Call model.load_weights(path).")
+        assert str(caught.value) == (
+            "Pretrained M weights are not distributed with dl_techniques "
+            "(got pretrained=True). Call model.load_weights(path).")
+        assert "load_model" not in str(caught.value) and "backbone/head" not in str(caught.value)
+
+    def test_how_to_load_changes_nothing_for_a_falsy_argument(self):
+        assert refuse_pretrained(False, "M", how_to_load="Call model.load_weights(path).") is None
+
 
 # ---------------------------------------------------------------------------
 # Error paths

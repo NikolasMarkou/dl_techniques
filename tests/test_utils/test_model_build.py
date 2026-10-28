@@ -12,6 +12,12 @@ The substitution itself is measured where it matters, on the models:
 ``tests/test_models/test_the_explicit_build_materializes_the_model.py``.
 """
 
+import ast
+import inspect
+import re
+from pathlib import Path
+
+import keras
 import pytest
 
 from dl_techniques.utils.model_build import concretize_axes
@@ -191,3 +197,126 @@ class TestRequireChannelCount:
         require_channel_count((None, 7))
         with pytest.raises(ValueError):
             require_channel_count((7, None))
+
+
+class TestRefuseInputShape:
+    """``refuse_input_shape``: the shape keywords Keras would pop and only warn about."""
+
+    @pytest.mark.parametrize("keyword, value", [("input_shape", (8, 8, 3)), ("input_dim", 3)])
+    def test_a_shape_keyword_is_refused_naming_the_class_the_keyword_and_the_value(self, keyword, value):
+        from dl_techniques.utils.model_build import refuse_input_shape
+
+        with pytest.raises(ValueError) as caught:
+            refuse_input_shape({keyword: value}, "Toy", "it has no shape")
+        assert str(caught.value) == f"Toy takes no {keyword} (it has no shape); got {keyword}={value!r}"
+
+    def test_other_keywords_and_an_empty_mapping_pass(self):
+        from dl_techniques.utils.model_build import refuse_input_shape
+
+        refuse_input_shape({}, "Toy", "why")
+        refuse_input_shape({"name": "toy", "trainable": False}, "Toy", "why")
+
+    def test_the_mapping_is_not_mutated(self):
+        from dl_techniques.utils.model_build import refuse_input_shape
+
+        kwargs = {"name": "toy"}
+        refuse_input_shape(kwargs, "Toy", "why")
+        assert kwargs == {"name": "toy"}
+
+    def test_keras_alone_accepts_the_keyword_with_a_warning(self):
+        """The control: without the helper the keyword is swallowed, which is why the helper exists."""
+        import warnings
+
+        class Toy(keras.layers.Layer):
+            pass
+
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            Toy(input_shape=(8, 8, 3))
+        assert any("input_shape" in str(w.message) for w in seen)
+
+
+# ---------------------------------------------------------------------
+# The caller lists in the docstrings are the real callers
+# ---------------------------------------------------------------------
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "dl_techniques"
+
+
+def _enclosing_callers(name: str, defining: Path) -> set:
+    """Names of the classes (or functions, outside a class) whose code calls ``name``.
+
+    Interface contract: parses every module under ``src/dl_techniques`` except ``defining``;
+    a call counts when its callee is ``name`` or ``<expr>.name``. Returns the innermost
+    enclosing class name, else the enclosing function name.
+    """
+    found = set()
+    for path in _SRC.rglob("*.py"):
+        if path == defining:
+            continue
+        text = path.read_text()
+        if name not in text:
+            continue
+        tree = ast.parse(text)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = node.func
+            called = callee.id if isinstance(callee, ast.Name) else (
+                callee.attr if isinstance(callee, ast.Attribute) else None)
+            if called != name:
+                continue
+            cls = fn = None
+            cursor = node
+            while cursor in parents:
+                cursor = parents[cursor]
+                if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn is None:
+                    fn = cursor.name
+                if isinstance(cursor, ast.ClassDef) and cls is None:
+                    cls = cursor.name
+            found.add(cls or fn)
+    return found
+
+
+def _contract_paragraph(function) -> str:
+    """The caller clause of the interface contract: from "Interface contract" to the first "):" or ")."."""
+    doc = inspect.getdoc(function)
+    start = doc.index("Interface contract")
+    return doc[start:start + re.search(r"\)[:.]", doc[start:]).start()]
+
+
+_HELPERS = [
+    ("validate_rates", "model_build"), ("require_channel_count", "model_build"),
+    ("refuse_input_shape", "model_build"), ("refuse_pretrained", "weight_transfer")]
+
+
+@pytest.mark.parametrize("name, module", _HELPERS)
+def test_the_documented_callers_are_the_real_callers(name, module):
+    """Every class or function that calls the helper is named in its interface contract, and
+    every class-like or ``create_*`` name the contract lists really calls it. The lists were
+    written by hand and went stale twice (a caller added, a caller omitted)."""
+    import importlib
+
+    owner = importlib.import_module(f"dl_techniques.utils.{module}")
+    function = getattr(owner, name)
+    real = _enclosing_callers(name, Path(owner.__file__))
+    paragraph = _contract_paragraph(function)
+    named = set(re.findall(r"``([A-Za-z_][A-Za-z0-9_]*)(?:\.\w+)?``", paragraph))
+    assert real, "the scan found no caller: the instrument is blind"
+    assert real <= named, f"callers missing from the docstring: {sorted(real - named)}"
+    listed = {n for n in named if re.fullmatch(r"_?[A-Z]\w+|create_\w+", n)}
+    assert listed <= real, f"names in the docstring that do not call it: {sorted(listed - real)}"
+
+
+def test_the_caller_scan_sees_a_stale_docstring():
+    """Control: a function whose contract omits a real caller and names a stranger is caught."""
+    def toy():
+        """Toy.
+
+        Interface contract (callers: ``Stranger``): the rest.
+        """
+
+    real = {"Actual"}
+    named = set(re.findall(r"``([A-Za-z_][A-Za-z0-9_]*)(?:\.\w+)?``", _contract_paragraph(toy)))
+    assert not real <= named and {n for n in named if re.fullmatch(r"_?[A-Z]\w+", n)} - real
