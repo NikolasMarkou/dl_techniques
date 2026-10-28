@@ -400,10 +400,19 @@ convolutions draws from a `clone_initializer` copy of it. Before, all ten convol
 instance and replayed one sample (45 of 861 kernel pairs of the `vit_s` placeholder model at 64 px were
 the same draw). Storing the initializer as a spec instead would give each site a fresh initializer and
 also move every seeded tensor of the real DINOv2 model (104 of 410 at `vit_s`, 56 px), so the instance
-and the clones stay. The real DINOv2 encoder is unchanged tensor for tensor. Its attention layers still
-start `qkv` and `proj` from one shared sample, inside `MultiHeadAttention` (12 of 3,403 kernel pairs at
-56 px, one per block); `DepthAnything` builds no layer of those and the official weights replace them in
-the intended use.
+and the clones stay. The real DINOv2 encoder is unchanged by the stem work, tensor for tensor.
+
+Its attention layers used to start `qkv` and `proj` from one shared sample, inside `MultiHeadAttention`
+(12 of 3,403 kernel pairs at 56 px, one per block). `DINOv2Block` now gives each attention projection its
+own initializer (decision D-054), so the real model replays nothing (0 of 3,403). The official weights
+and every layer name are unchanged (weights keyed by path transplant with outputs equal at `atol=0`), but
+a seeded build of the real model at `vit_s`, 56 px differs from the earlier code in 126 of its 410
+tensors, all kernels: 47 encoder kernels, each listed twice because the frozen teacher repeats every
+name (94), and 32 decoder kernels. Each block's `proj` is a new draw, and so is every default-seeded
+kernel created after it (the blocks' FFN kernels, `qkv` of the blocks after the first, the decoder's
+convolutions). The first block's `qkv`, the patch embedding, the tokens and every bias and norm tensor
+are equal. The trained function is the same; only the starting weights of a run that does not load the
+official ones moved.
 
 `frozen_encoder` for the placeholder is `keras.models.clone_model(encoder)`; the stem clones with it, and
 the teacher's output equals the student's at `atol=0` until the EMA moves it.

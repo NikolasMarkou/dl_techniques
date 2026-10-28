@@ -74,8 +74,8 @@ SqueezeNet V1 and V2) and asks each the same questions:
     ``kernel_regularizer`` defaults to ``None``: ``model.losses == []``.
 
 The no-replayed-draw and name rows also cover the models that are not classifiers (VAE, the
-RBF pair, UcaEncoder, CapsNet, DeepSORT, SiamFC, DaSiamRPN, and the stem sites that are not
-migrated yet).
+RBF pair, UcaEncoder, CapsNet, DeepSORT, SiamFC, DaSiamRPN, the DINOv2 backbone and wrapper with
+each attention type its block accepts, and the stem sites that are not migrated yet).
 SqueezeNet is a functional model: it is exempt from the build-parity and the
 unbuilt ``compute_output_shape`` rows because it is built in ``__init__``.
 
@@ -446,13 +446,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::default", "depth_anything_real"): Open(
-        AssertionError,
-        "a per-projection initializer in MultiHeadAttention (D-053, refused as D-050 refused it: "
-        "it moves the seeded weights of every attention user)",
-        '12 of 3403 kernel pairs replay one draw: block_N/attention/cross_attention/qkv ~ proj, '
-        'one pair per DINOv2 block, inside DINOv2Block and not in a layer DepthAnything builds',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "clifford_clip"): Open(
         AssertionError,
         "the CliffordCLIP stem migration",
@@ -1496,6 +1489,28 @@ def _depth_anything(kind: str, size: int):
     return build
 
 
+def _dinov2_vit(attention_type: str = "multi_head"):
+    """A tiny DINOv2 backbone (three blocks, so a draw replayed across blocks is seen too).
+
+    The backbone has no initializer knob: the blocks' attention layers draw their own, so the subject
+    has a default arm only.
+    """
+    def build(init):
+        from dl_techniques.models.vision.dino.dino_v2 import DINOv2VisionTransformer
+        model = DINOv2VisionTransformer(image_size=28, patch_size=14, embed_dim=64, depth=3,
+                                        num_heads=4, init_values=1e-5, attention_type=attention_type)
+        return _forward(model, [_images(28, 28, 3), np.zeros((2, 4), dtype="bool")])
+    return build
+
+
+def _build_dinov2_classifier(init):
+    """DINOv2 itself: the backbone plus its classifier, whose initializer the wrapper builds."""
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2
+    model = DINOv2(image_size=28, patch_size=14, num_classes=5, embed_dim=64, depth=3, num_heads=4,
+                   init_values=1e-5)
+    return _forward(model, [_images(28, 28, 3), np.zeros((2, 4), dtype="bool")])
+
+
 def _build_clifford_clip(init):
     from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
     rng = np.random.default_rng(0)
@@ -1570,6 +1585,13 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     # The real encoder takes no initializer (DINOv2VisionTransformer has no such knob), so the knob
     # reaches only the head, which the placeholder subject measures with an instance as well.
     "depth_anything_placeholder": (_depth_anything("placeholder", 64), True),
+    # DINOv2 itself: the blocks build their own attention initializers, so there is no knob to arm.
+    "dinov2_vit": (_dinov2_vit(), False),
+    "dinov2_classifier": (_build_dinov2_classifier, False),
+    "dinov2_vit_multi_head_cross": (_dinov2_vit("multi_head_cross"), False),
+    "dinov2_vit_gated": (_dinov2_vit("gated"), False),
+    "dinov2_vit_linear": (_dinov2_vit("linear"), False),
+    "dinov2_vit_ring": (_dinov2_vit("ring"), False),
     "clifford_clip": (_build_clifford_clip, False),
     "vq_vae_rotation": (_build_vq_vae_rotation, False),
     "sam1_prompt_encoder": (_build_sam1_prompt_encoder, False),

@@ -79,6 +79,7 @@ from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.embedding.register_tokens import RegisterTokens
 from dl_techniques.layers.attention import create_attention_layer
+from dl_techniques.layers.attention import factory as _attention_factory
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.regularization.layer_scale import LayerScale
@@ -330,6 +331,35 @@ class DINOv2PositionEmbedding(keras.layers.Layer):
         return config
 
 
+def _own_draws(attention_type: str, *keywords: str) -> Dict[str, str]:
+    """The ``attention_args`` that give each named projection its own initializer.
+
+    Interface contract (caller: :data:`SUPPORTED_ATTENTION_TYPES`, at import): every keyword is
+    mapped to the registry's own ``kernel_initializer`` default for ``attention_type``, a string, so
+    each projection resolves its own instance of the class ``qkv`` draws from. Raises ``KeyError``
+    for an unregistered type or one without that default.
+    """
+    default = _attention_factory.ATTENTION_REGISTRY[attention_type]["optional_params"]["kernel_initializer"]
+    return {keyword: default for keyword in keywords}
+
+
+#: The attention types a block accepts, each with the ``attention_args`` its layer is built with.
+#: These are the types whose projections each start from their own random draw: ``multi_head`` and
+#: ``multi_head_cross`` hand one initializer instance to several Dense layers unless told otherwise
+#: and declare the keywords that separate them (``multi_head`` has a fused ``qkv`` and ``proj``,
+#: ``multi_head_cross`` a ``q``, a ``kv`` and a ``proj``); ``gated``, ``linear`` and ``ring`` already
+#: draw independently. Every other registry type is refused by the block: ``anchor``, ``perceiver``,
+#: ``performer``, ``rpc`` and ``wave_field`` replay a draw across projections and declare no keyword to
+#: separate them, and the rest cannot be built from the block's arguments or run on its tokens.
+SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, str]]] = {
+    "multi_head": _own_draws("multi_head", "output_kernel_initializer"),
+    "multi_head_cross": _own_draws(
+        "multi_head_cross", "output_kernel_initializer", "kv_kernel_initializer"),
+    "gated": None,
+    "linear": None,
+    "ring": None,
+}
+
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.dino.dino_v2")
@@ -370,8 +400,14 @@ class DINOv2Block(keras.layers.Layer):
     :type num_heads: int
     :param mlp_ratio: Ratio of MLP hidden dimension to embedding dimension.
     :type mlp_ratio: float
-    :param attention_type: Attention mechanism, a key of `ATTENTION_REGISTRY`
-        (`'multi_head_attention'` is not one; use `'multi_head'`).
+    :param attention_type: Attention mechanism, one of ``multi_head``,
+        ``multi_head_cross``, ``gated``, ``linear`` and ``ring``
+        (:data:`SUPPORTED_ATTENTION_TYPES`); any other value, a registry key included,
+        raises `ValueError` naming that set. The first two are built with the
+        keywords that give each projection its own initializer, so `qkv` and `proj`
+        start from independent draws (`'multi_head_attention'` is not a key; use
+        `'multi_head'`). `qkv_bias` reaches `multi_head` only: the others keep their
+        layer's own bias default.
     :type attention_type: str
     :param ffn_type: FFN type, e.g. ``"mlp"``, ``"swiglu"``.
     :type ffn_type: str
@@ -446,6 +482,10 @@ class DINOv2Block(keras.layers.Layer):
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
         if mlp_ratio <= 0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
+        if attention_type not in SUPPORTED_ATTENTION_TYPES:
+            raise ValueError(
+                f"attention_type must be one of {sorted(SUPPORTED_ATTENTION_TYPES)}, "
+                f"got {attention_type!r}")
 
         # Store all configuration
         self.dim = dim
@@ -485,6 +525,20 @@ class DINOv2Block(keras.layers.Layer):
             attention_args['use_bias'] = self.qkv_bias
         else:
             attention_args['dim'] = self.dim
+
+        # DECISION plan-2026-10-26T125959-7af851e5/D-054: every projection of the attention layer
+        # takes its own initializer. `MultiHeadAttention` hands ONE initializer instance to its
+        # `qkv` and `proj` Dense layers, and the smaller draw replays the larger one's stream
+        # (measured: `proj` was a rescaled prefix of `qkv`, one replayed pair per block, 12 of
+        # 1,326 kernel pairs of a bare ViT-S and 12 of 3,403 of the Depth Anything model). Do not
+        # drop this to simplify, and do not change the library layer instead: cloning an
+        # initializer per projection there moves the seeded weights of every attention user
+        # (plan-2026-10-26T125959-7af851e5/D-050). Only the types whose layer declares the keywords
+        # take them; `SUPPORTED_ATTENTION_TYPES` refuses the types that replay and cannot be
+        # separated. No weight name changes, so the official weights and every archive still
+        # address the same variables; only `proj` and the draws created after it move (carve-out
+        # C-7).
+        attention_args.update(SUPPORTED_ATTENTION_TYPES[self.attention_type] or {})
 
         self.attention = create_attention_layer(
             attention_type=self.attention_type,
@@ -679,7 +733,10 @@ class DINOv2VisionTransformer(keras.Model):
         stochastic_depth_rate: Maximum stochastic depth rate.
         drop_path_uniform: Use uniform drop rate across blocks.
         init_values: LayerScale initialization value.
-        attention_type: Type of attention mechanism.
+        attention_type: Type of attention mechanism, one of `SUPPORTED_ATTENTION_TYPES`
+            (`multi_head`, `multi_head_cross`, `gated`, `linear`, `ring`); any other value raises
+            `ValueError` when the first block is built. Only `multi_head` has the official
+            checkpoint's structure.
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization.
         num_register_tokens: Number of register tokens to use.

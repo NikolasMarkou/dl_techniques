@@ -78,6 +78,10 @@ DELIBERATELY_NOT_EXPORTED = {
     # `kernel_initializer=` or takes the default, and never needs the constant.
     "DINO_KERNEL_INITIALIZER",
     "DINO_INITIALIZER_STDDEV",
+    # `dino_v2.SUPPORTED_ATTENTION_TYPES` (D-054) is the table behind `DINOv2Block`'s
+    # `attention_type` refusal: the `ValueError` names the supported set, so a caller
+    # never reads the table, and the block docstring and its own test pin the names.
+    "SUPPORTED_ATTENTION_TYPES",
 }
 
 

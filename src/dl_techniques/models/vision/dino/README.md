@@ -95,6 +95,34 @@ Guards: `tests/test_models/test_dino/test_the_official_dinov2_weights_load_stric
 file-dependent tests skip with the path when the download is absent) and
 `test_the_dinov2_backbone_is_the_references.py`.
 
+### The attention types of a `DINOv2Block`, and how its projections start
+
+`attention_type` accepts `multi_head` (the default and the only one with the official checkpoint's
+structure), `multi_head_cross`, `gated`, `linear` and `ring`
+(`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
+registry, raises `ValueError` naming that set when the block is built. The excluded types fall into three
+groups, each measured on a block of width 64 with 4 heads: `anchor`, `perceiver`, `performer`, `rpc` and
+`wave_field` start several projections from one shared random draw and declare no argument that separates
+them; the window, `differential`, `group_query` and `multi_head_latent` types need arguments the block
+does not pass; the rest take none of the block's `dim`, `num_heads` and `dropout_rate`, or cannot run on
+its tokens. `qkv_bias` reaches `multi_head` only.
+
+`MultiHeadAttention` gives its `qkv` and `proj` Dense layers one initializer instance, and the smaller
+draw (`proj`) comes out as a rescaled prefix of the larger (`qkv`): one replayed kernel pair per block
+(12 of 1,326 kernel pairs of a ViT-S backbone, 0 now). The block therefore builds `multi_head` with
+`output_kernel_initializer` and `multi_head_cross` with that and `kv_kernel_initializer`, each the
+layer's own `kernel_initializer` default as a string, so every projection resolves its own instance of
+the class `qkv` draws from (decision D-054; the library layer is unchanged because cloning an initializer
+there would move the seeded weights of every attention user). No weight name changes, so the official
+weights, every archive and a transplant keyed by path address the same variables. What moves is the
+seeded starting weights of a build that does not load them: the first block's `qkv`, the patch
+embedding, the tokens and every bias and norm tensor are equal to the earlier code at the same seed, and
+every default-seeded kernel from the first block's `proj` on is a new draw (47 of 175 tensors of the
+56 px ViT-S backbone, 3 of 14 of a single block). Guard:
+`tests/test_models/test_dino/test_the_dinov2_block_draws_each_attention_projection_independently.py`
+(replay, seed positions, the supported set and the refusal, strict expected failures with the measured
+reason for every excluded type) and the DINOv2 rows of the shared runtime contract.
+
 ### `norm_last_layer` on `DINOHead`
 
 The reference DINO wraps the final projection in PyTorch's weight-norm reparameterization
@@ -505,6 +533,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_mode
 ```
 
 `test_dino_package.py` asserts that every path and import named in **this README** resolves;
+`test_the_dinov2_block_draws_each_attention_projection_independently.py` pins the attention types a DINOv2 block accepts and that its attention projections draw independently;
 `test_training.py` verifies the packed row layout pair-by-pair, a gradient-free teacher
 against a student control, and a real `fit()` in which the teacher moves TOWARD the student;
 `test_knn_eval.py` carries a RED-proven collapse detector and real `fit()` runs proving the
