@@ -32,7 +32,9 @@ from typing import Optional, Union, Tuple, List, Any, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from ..ffn import create_ffn_layer
+from ..ffn import create_ffn_layer, assemble_ffn_config
+from ..ffn.factory import FFN_REGISTRY
+from dl_techniques.initializers.clone import clone_initializer
 from ..norms import create_normalization_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -1368,9 +1370,13 @@ class sLSTMBlock(keras.layers.Layer):
     :param units: Dimensionality of the layer.
     :type units: int
     :param ffn_type: Type of FFN to use (e.g., ``'mlp'``, ``'swiglu'``, ``'geglu'``,
-        ``'glu'``, ``'differential'``, ``'residual'``, ``'swin_mlp'``).
+        ``'glu'``, ``'differential'``, ``'residual'``, ``'swin_mlp'``). A type
+        whose required arguments are neither ``output_dim`` nor ``hidden_dim``
+        (``'kan'``, ``'mixer'``, ...) raises ``ValueError``.
     :type ffn_type: str
     :param ffn_expansion_factor: Expansion factor for FFN intermediate size.
+        ``'swiglu'`` applies it itself (and rounds to its ``ffn_multiple_of``);
+        every other type gets ``hidden_dim = units * ffn_expansion_factor``.
     :type ffn_expansion_factor: int
     :param normalization_type: Type of normalization (e.g., ``'layer_norm'``,
         ``'rms_norm'``, ``'batch_norm'``, ``'band_rms'``).
@@ -1381,13 +1387,16 @@ class sLSTMBlock(keras.layers.Layer):
     :type forget_gate_activation: str
     :param dropout_rate: Dropout rate for the FFN.
     :type dropout_rate: float
-    :param kernel_initializer: Initializer for kernel weights.
+    :param kernel_initializer: Initializer for kernel weights, of the sLSTM and
+        the FFN. Each sub-layer receives its own clone, never the same instance.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param recurrent_initializer: Initializer for recurrent weights.
     :type recurrent_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias weights.
+    :param bias_initializer: Initializer for bias weights, cloned per sub-layer
+        like ``kernel_initializer``.
     :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :param kernel_regularizer: Optional regularizer for kernel weights. It and
+        ``bias_regularizer`` reach the FFN too, when its type accepts them.
     :type kernel_regularizer: keras.regularizers.Regularizer, optional
     :param recurrent_regularizer: Optional regularizer for recurrent weights.
     :type recurrent_regularizer: keras.regularizers.Regularizer, optional
@@ -1462,9 +1471,9 @@ class sLSTMBlock(keras.layers.Layer):
             units=units,
             forget_gate_activation=forget_gate_activation,
             return_sequences=True,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=clone_initializer(kernel_initializer),
             recurrent_initializer=recurrent_initializer,
-            bias_initializer=bias_initializer,
+            bias_initializer=clone_initializer(bias_initializer),
             kernel_regularizer=kernel_regularizer,
             recurrent_regularizer=recurrent_regularizer,
             bias_regularizer=bias_regularizer,
@@ -1477,13 +1486,25 @@ class sLSTMBlock(keras.layers.Layer):
             **self.normalization_kwargs
         )
 
-        # Create FFN using factory
+        # FFN through the factory. These are this block's defaults, so
+        # assemble_ffn_config drops the keys a type does not accept. A type
+        # with an expansion factor of its own (swiglu) sizes its hidden width
+        # from it; every other type gets hidden_dim = units * factor.
+        ffn_config: Dict[str, Any] = {
+            'output_dim': units,
+            'ffn_expansion_factor': ffn_expansion_factor,
+            'dropout_rate': dropout_rate,
+            'kernel_initializer': clone_initializer(kernel_initializer),
+            'bias_initializer': clone_initializer(bias_initializer),
+            'kernel_regularizer': kernel_regularizer,
+            'bias_regularizer': bias_regularizer,
+        }
+        ffn_params = FFN_REGISTRY.get(ffn_type, {})
+        if 'ffn_expansion_factor' not in ffn_params.get('optional_params', {}):
+            ffn_config['hidden_dim'] = units * ffn_expansion_factor
         self.ffn = create_ffn_layer(
-            ffn_type=ffn_type,
-            output_dim=units,
-            ffn_expansion_factor=ffn_expansion_factor,
-            dropout_rate=dropout_rate,
-            name='ffn',
+            ffn_type,
+            **assemble_ffn_config(ffn_type, ffn_config, {'name': 'ffn'}),
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -1648,11 +1669,14 @@ class mLSTMBlock(keras.layers.Layer):
     :type normalization_type: str
     :param normalization_kwargs: Optional dictionary of kwargs for the normalization layer.
     :type normalization_kwargs: dict, optional
-    :param kernel_initializer: Initializer for kernel weights.
+    :param kernel_initializer: Initializer for kernel weights. ``up_proj``,
+        ``conv1d``, the mLSTM and ``down_proj`` each receive their own clone:
+        one shared instance would replay one sample into all four kernels.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param recurrent_initializer: Initializer for recurrent weights.
     :type recurrent_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias weights.
+    :param bias_initializer: Initializer for bias weights, cloned per sub-layer
+        like ``kernel_initializer``.
     :type bias_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: keras.regularizers.Regularizer, optional
@@ -1732,8 +1756,8 @@ class mLSTMBlock(keras.layers.Layer):
         # Create sub-layers (Create in __init__, Build in build())
         self.up_proj = layers.Dense(
             self.inner_dim,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=clone_initializer(kernel_initializer),
+            bias_initializer=clone_initializer(bias_initializer),
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
             name='up_proj',
@@ -1746,8 +1770,8 @@ class mLSTMBlock(keras.layers.Layer):
             kernel_size=conv_kernel_size,
             padding='causal',
             groups=self.inner_dim,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=clone_initializer(kernel_initializer),
+            bias_initializer=clone_initializer(bias_initializer),
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
             name='conv1d',
@@ -1757,9 +1781,9 @@ class mLSTMBlock(keras.layers.Layer):
             units=self.inner_dim,
             num_heads=num_heads,
             return_sequences=True,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=clone_initializer(kernel_initializer),
             recurrent_initializer=recurrent_initializer,
-            bias_initializer=bias_initializer,
+            bias_initializer=clone_initializer(bias_initializer),
             kernel_regularizer=kernel_regularizer,
             recurrent_regularizer=recurrent_regularizer,
             bias_regularizer=bias_regularizer,
@@ -1774,8 +1798,8 @@ class mLSTMBlock(keras.layers.Layer):
 
         self.down_proj = layers.Dense(
             units,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=clone_initializer(kernel_initializer),
+            bias_initializer=clone_initializer(bias_initializer),
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
             name='down_proj',

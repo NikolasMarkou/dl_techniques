@@ -67,9 +67,14 @@ nbeats, prism, timestral, tirex, xlstm). Find them with
   `self.<x>_initializer` handed to a sub-layer in `clone_initializer`. Guarded by
   `test_the_time_series_kernels_start_independent.py` and the repo ratchet
   `tests/test_the_shared_initializer_population_cannot_grow.py`, which counts a list comprehension of
-  sub-layers as a loop-carried site.
-  `prism_blocks.py` and `xlstm_blocks.py` pass the raw constructor argument through. That is safe at the
-  string defaults, which resolve a fresh instance per site; a caller-supplied instance would alias.
+  sub-layers as a loop-carried site. A string default hides the defect, because it resolves a fresh
+  instance per site, so the guard passes `Initializer` instances to the xLSTM and PRISM builders:
+  `mLSTMBlock` aliased four kernels that way before its sites were cloned. PRISM is clean because its
+  router builds an `MLPBlock`, which clones per Dense.
+- **Forward every knob to a factory-built sub-layer.** Run the block's own defaults through
+  `assemble_ffn_config`, which drops what an `ffn_type` cannot take. `sLSTMBlock` once passed none of
+  its initializers or regularizers to the FFN, and no `hidden_dim`, so every advertised type but
+  `swiglu` raised.
 - **Static configuration branches in Python, not in the graph.** `ExponentialMovingAverage.adjust` picks
   the scan step at trace time; do not reintroduce an `ops.where` on a constructor flag.
 - **Keep static shapes static.** Flatten with `ops.reshape(x, (-1, x.shape[1] * x.shape[2]))` where
@@ -118,7 +123,8 @@ below it, and keep the anchor with the code it guards.
 `tests/test_layers/test_time_series/`: one comprehensive suite per module plus sentence-named guards
 (`test_the_six_time_series_defects.py`, `test_the_ema_floor_is_not_cast_to_zero.py`,
 `test_the_xlstm_floors_survive_fp16.py`, `test_basis_matrices_survive_stateless_build.py`,
-`test_the_exogenous_theta_regularizer_is_charged.py`, `test_the_time_series_kernels_start_independent.py`).
+`test_the_exogenous_theta_regularizer_is_charged.py`, `test_the_time_series_kernels_start_independent.py`,
+`test_the_slstm_block_ffn_takes_the_block_knobs.py`).
 
 Scope a run to this package plus its consumers. Never run the full suite as a regression check:
 
