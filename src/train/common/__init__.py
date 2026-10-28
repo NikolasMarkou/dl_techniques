@@ -13,6 +13,7 @@ from train.common.optimizer import build_optimizer
 from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback, resolve_monitor_mode
 from train.common.augment import augment_patch
 from train.common.evaluation import (
+    evaluate_on_test,
     validate_model_loading,
     convert_keras_history_to_training_history,
     create_classification_results,
@@ -203,6 +204,7 @@ __all__ = [
     "estimate_clm_steps_per_epoch",
     "collect_logits",
     "eval_head",
+    "evaluate_on_test",
     "explicitly_set_flags",
     "ClmPretrainConfig",
     "extract_step_from_checkpoint",

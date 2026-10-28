@@ -23,11 +23,17 @@ from dl_techniques.datasets.vision.classification import get_spec
 from dl_techniques.datasets.vision.imagenette import (
     CROP_POLICIES,
     ImagenetteConfig,
-    flip_and_reflect_crop,
     imagenette_examples,
 )
 from dl_techniques.utils.logger import logger
-from train.common.classification_data import DEFAULT_VALIDATION_SPLIT, load_split_arrays
+from train.common.classification_data import (
+    DEFAULT_VALIDATION_SPLIT,
+    array_examples,
+    capped_steps,
+    flip_pad_crop,
+    load_split_arrays,
+    resizer,
+)
 
 #: The datasets the self-supervised trainers take: three colour channels, small enough to
 #: hold in memory (CIFAR-10) or in prepared records (Imagenette). The trainers' image-size and
@@ -56,9 +62,6 @@ class ImageStreams:
     n_select: int
     n_test: int
     batch_size: int
-    num_classes: int
-    selection_split: str
-    test_split: str
 
     @property
     def steps_per_epoch(self) -> int:
@@ -66,40 +69,17 @@ class ImageStreams:
 
     @property
     def val_steps(self) -> int:
+        """Batches in one pass of ``select_ds``."""
         return max(1, -(-self.n_select // self.batch_size))
+
+    @property
+    def test_steps(self) -> int:
+        """Batches in one pass of ``test_ds``."""
+        return max(1, -(-self.n_test // self.batch_size))
 
     def capped_steps(self, max_steps: Optional[int]) -> Tuple[int, int]:
         """``(steps_per_epoch, val_steps)``, each capped by ``--max-steps`` (smoke runs)."""
-        if max_steps is None:
-            return self.steps_per_epoch, self.val_steps
-        return min(self.steps_per_epoch, max_steps), min(self.val_steps, max_steps)
-
-
-def _array_examples(
-        x: np.ndarray, y: np.ndarray, *, training: bool, image_size: int, augment: bool,
-        seed: int, mean: np.ndarray, std: np.ndarray,
-) -> "tf.data.Dataset":
-    """Unbatched normalized examples of an in-memory split: shuffle, resize, augment, normalize."""
-    mean_t = tf.constant(mean, dtype=tf.float32, shape=(1, 1, 3))
-    std_t = tf.constant(std, dtype=tf.float32, shape=(1, 1, 3))
-    dataset = tf.data.Dataset.from_tensor_slices((x, y))
-    if training:
-        # Shuffle at the native size: the buffer holds the whole split cheaply.
-        dataset = dataset.shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
-    if image_size != x.shape[1]:
-        dataset = dataset.map(
-            lambda image, label: (
-                tf.ensure_shape(
-                    tf.image.resize(image, (image_size, image_size), method="bilinear"),
-                    (image_size, image_size, 3)),
-                label),
-            num_parallel_calls=tf.data.AUTOTUNE)
-    if training and augment:
-        dataset = dataset.map(
-            lambda image, label: (flip_and_reflect_crop(image, seed=seed), label),
-            num_parallel_calls=tf.data.AUTOTUNE)
-    return dataset.map(lambda image, label: ((image - mean_t) / std_t, label),
-                       num_parallel_calls=tf.data.AUTOTUNE)
+        return capped_steps(self.steps_per_epoch, self.val_steps, max_steps)
 
 
 def _indexed_call(indexed_element_map_fn: ElementMapFn) -> ElementMapFn:
@@ -169,7 +149,8 @@ def load_image_streams(
     # The indexed map has no evaluation form: an eval pass has no `.repeat()`, so
     # `.enumerate()` would count a SINGLE pass and every element would key identically on
     # every epoch -- the frozen-augmentation failure D-035 RED-proved wrong, reintroduced
-    # silently through a different door.
+    # silently through a different door. Pinned by tests/test_train/test_image_streams.py::
+    # TestTheRefusals and ::TestIndexedElementMapFn::test_selection_and_test_are_plain_image_label_batches.
     if indexed_element_map_fn is not None and element_map_fn is not None:
         raise ValueError(
             "element_map_fn and indexed_element_map_fn are mutually exclusive: they are two "
@@ -203,22 +184,21 @@ def load_image_streams(
         train, n_train = imagenette_examples("train", config)
         select, n_select = imagenette_examples("select", config)
         test, n_test = imagenette_examples("test", config)
-        selection = f"validation_split={split} of the train records (seeded permutation)"
-        test_name = "the labelled validation split"
     else:
         arrays = load_split_arrays(
             dataset, seed=seed, validation_split=split, max_samples=max_samples)
-        common = dict(image_size=image_size, seed=seed, mean=np.asarray(spec.mean),
-                      std=np.asarray(spec.std))
-        train = _array_examples(arrays.x_train, arrays.y_train, training=True,
-                                augment=augment, **common)
-        select = _array_examples(arrays.x_select, arrays.y_select, training=False,
-                                 augment=False, **common)
-        test = _array_examples(arrays.x_test, arrays.y_test, training=False,
-                               augment=False, **common)
+        mean, std = np.asarray(spec.mean, np.float32), np.asarray(spec.std, np.float32)
+        common = dict(
+            seed=seed, normalize=lambda image: (image - mean) / std,
+            resize=resizer(None if image_size == spec.input_shape[0] else image_size))
+        hook = flip_pad_crop(mode="REFLECT", seed=seed) if augment else None
+        train = array_examples(arrays.x_train, arrays.y_train, training=True,
+                               augment=hook, **common)
+        select = array_examples(arrays.x_select, arrays.y_select, training=False,
+                                augment=None, **common)
+        test = array_examples(arrays.x_test, arrays.y_test, training=False,
+                              augment=None, **common)
         n_train, n_select, n_test = len(arrays.x_train), len(arrays.x_select), len(arrays.x_test)
-        selection = f"validation_split={split} of the train set (seeded permutation)"
-        test_name = "the dataset's test set"
 
     if element_map_fn is not None:
         train, select, test = (
@@ -248,5 +228,4 @@ def load_image_streams(
     return ImageStreams(
         train_ds=train, select_ds=select, test_ds=test,
         n_train=n_train, n_select=n_select, n_test=n_test, batch_size=batch_size,
-        num_classes=spec.num_classes, selection_split=selection, test_split=test_name,
     )

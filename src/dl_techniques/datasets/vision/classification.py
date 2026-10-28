@@ -23,6 +23,7 @@ from dl_techniques.datasets.vision.imagenet2012 import (
 from dl_techniques.datasets.vision.imagenette import (
     IMAGENETTE_CLASS_NAMES,
     IMAGENETTE_NUM_CLASSES,
+    IMAGENETTE_TRAIN_SIZE,
 )
 
 # ---------------------------------------------------------------------
@@ -143,7 +144,7 @@ CLASSIFICATION_DATASETS: Dict[str, DatasetSpec] = {
     # Imagenette's images are ImageNet's, so ImageNet's statistics apply.
     "imagenette": DatasetSpec(
         "imagenette", IMAGENETTE_NUM_CLASSES, (224, 224, 3), IMAGENET_MEAN, IMAGENET_STD,
-        IMAGENETTE_CLASS_NAMES, "records", 9469),
+        IMAGENETTE_CLASS_NAMES, "records", IMAGENETTE_TRAIN_SIZE),
 }
 
 

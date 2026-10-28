@@ -4,8 +4,7 @@ If this module is ever reported as carrying "pre-existing failures", read
 ``research/2026_test_suite_contention_and_false_failures.md`` FIRST: a prior report of
 exactly that was refuted, and the faults were GPU contention from concurrent test runs.
 
-The function replaced ``build_raw_image_dataset``, whose validation split was the labelled
-test set. Three things are pinned here:
+Three things are pinned here:
 
 1. **The protocol.** The fit, selection and test rows are pairwise disjoint, the first two
    cover the train pool, selection is the seeded slice the classifiers get for the same seed,
@@ -16,10 +15,8 @@ test set. Three things are pinned here:
    reaches the train stream only, and its counter comes from ``.enumerate()`` AFTER
    ``.repeat()`` (a counter that restarts each epoch freezes the augmentation per image, the
    failure D-035 RED-proved wrong). The two slots are mutually exclusive.
-3. **Determinism.** The rows and their order are a function of the seed alone. The old
-   pipeline read the TFDS files in an unseeded interleave and needed a ``shuffle_files_seed``
-   to pin a small ``.take(n)`` sample (D-040); a seeded permutation of the records needs none,
-   and the real-records test at the bottom measures that across builds.
+3. **Determinism.** The rows and their order are a function of the seed alone; the
+   real-records test at the bottom measures that across builds.
 
 The source seams are fakes (``tests/classification_fakes.py``): Imagenette is 60 tiny jpegs
 plus 20 validation jpegs, CIFAR-10 is 60 + 20 ramp arrays. Nothing touches TFDS or
@@ -34,15 +31,19 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-import train.common.classification_data as classification_data
 from dl_techniques.datasets.vision.classification import get_spec
-from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
+from dl_techniques.datasets.vision.imagenette import (
+    IMAGENETTE_TFDS_NAME,
+    IMAGENETTE_TRAIN_SIZE,
+    IMAGENETTE_VALIDATION_SIZE,
+)
 from dl_techniques.datasets.vision.splits import seeded_split_indices, seeded_test_rows
 from tests.classification_fakes import (
     IMAGENETTE_FAKE_TEST,
     IMAGENETTE_FAKE_TRAIN,
-    row_identities,
+    identities_of,
     use_fake_imagenette,
+    use_identity_cifar10,
 )
 from train.common.image_streams import SUPPORTED_DATASETS, load_image_streams
 
@@ -53,32 +54,13 @@ N_TRAIN, N_TEST = IMAGENETTE_FAKE_TRAIN, IMAGENETTE_FAKE_TEST
 TEST_OFFSET = 2  # the fake validation jpegs are `4 * i + 2`, the fake CIFAR test arrays too
 
 
-def _use_fake_cifar(monkeypatch) -> None:
-    """CIFAR-10 stand-in: image ``i`` has the mean colour ``4 * i`` (test: ``4 * i + 2``)."""
-
-    def load(name):
-        assert name == "cifar10"
-
-        def split(n, offset):
-            # A horizontal ramp (0..3, mean 1.5) so that a flip or a crop changes the pixels
-            # while the mean colour still reads back as the row identity (i + 0.375 rounds to i).
-            ramp = (np.arange(32)) // 8
-            level = (4 * np.arange(n) + offset)[:, None, None, None] + ramp[None, None, :, None]
-            x = np.broadcast_to(level, (n, 32, 32, 3)).astype(np.uint8)
-            return x, (np.arange(n) % 10).astype(np.int64)
-
-        return split(N_TRAIN, 0), split(N_TEST, TEST_OFFSET)
-
-    monkeypatch.setattr(classification_data, "_load_raw", load)
-
-
 @pytest.fixture(params=["imagenette", "cifar10"])
 def dataset(request, monkeypatch) -> str:
     """Each protocol test runs on both sources."""
     if request.param == "imagenette":
         use_fake_imagenette(monkeypatch)
     else:
-        _use_fake_cifar(monkeypatch)
+        use_identity_cifar10(monkeypatch)
     return request.param
 
 
@@ -89,14 +71,11 @@ def _streams(dataset: str, **kwargs):
 
 
 def _identities(dataset: str, ds: tf.data.Dataset, n_batches: int, offset: int) -> np.ndarray:
-    """The row identity of every image in ``n_batches`` batches, read back from the pixels."""
-    images = np.concatenate([np.asarray(x) for x, _ in ds.take(n_batches)])
-    return row_identities(images, dataset, offset)
+    return identities_of(dataset, ds, offset, n_batches)
 
 
 def _all(dataset: str, ds: tf.data.Dataset, offset: int) -> np.ndarray:
-    n_batches = sum(1 for _ in ds)
-    return _identities(dataset, ds, n_batches, offset)
+    return identities_of(dataset, ds, offset)
 
 
 def _pair_map_fn(image: tf.Tensor, label: tf.Tensor) -> Tuple[Any, Any]:
@@ -147,7 +126,7 @@ class TestTheRefusals:
 
     @pytest.mark.parametrize("split", [0.0, 1.0, -0.1])
     def test_a_selection_split_outside_the_open_interval_is_refused(self, split, monkeypatch) -> None:
-        _use_fake_cifar(monkeypatch)
+        use_identity_cifar10(monkeypatch)
         with pytest.raises(ValueError, match="strictly inside"):
             _streams("cifar10", validation_split=split)
 
@@ -167,7 +146,9 @@ class TestTheSelectionProtocol:
         assert (streams.n_train, streams.n_select, streams.n_test) == (54, 6, 20)
         assert streams.steps_per_epoch == 54 // BATCH_SIZE
         assert streams.val_steps == 2  # ceil(6 / 4): every selection row is scored
-        assert streams.num_classes == 10
+        assert streams.test_steps == 5  # 20 / 4
+        assert int(streams.select_ds.cardinality()) == streams.val_steps
+        assert int(streams.test_ds.cardinality()) == streams.test_steps
 
     def test_fit_selection_and_test_rows_are_disjoint_and_cover_the_pool(self, dataset) -> None:
         streams = _streams(dataset)
@@ -190,12 +171,6 @@ class TestTheSelectionProtocol:
         streams = _streams(dataset)
         assert list(_all(dataset, streams.test_ds, TEST_OFFSET)) == seeded_test_rows(
             N_TEST, SEED).tolist()
-
-    def test_the_test_split_is_not_the_selection_split(self, dataset) -> None:
-        streams = _streams(dataset)
-        assert streams.n_test != streams.n_select
-        assert streams.selection_split.startswith("validation_split=0.1 of the train")
-        assert "test" in streams.test_split or "validation split" in streams.test_split
 
     def test_the_split_follows_validation_split_and_max_samples(self, dataset) -> None:
         assert _streams(dataset, validation_split=0.25).n_select == 15
@@ -329,13 +304,11 @@ def _index_and_image_digest_map_fn(index, image, label):
 
 @pytest.mark.skipif(not _RECORD_SHARDS, reason=_SKIP_REASON)
 class TestTheRealImagenetteRecords:
-    """The property the old `shuffle_files_seed` existed for, measured without it.
-
-    A consumer that draws a SMALL fixed sample off the head of the train stream and reports a
-    number from it needs the same sample in every process at one seed. The old pipeline got it
-    only by seeding the TFDS file interleave; the records are now a seeded permutation, so the
-    same ``--seed`` must give the same window across builds and a different ``--seed`` a
-    different one. Bounded to ``.take(2)`` batches at 32 px (a few seconds, CPU).
+    """A consumer that draws a SMALL fixed sample off the head of the train stream and reports
+    a number from it (the DINO k-NN bank) needs the same sample in every process at one seed.
+    The records are a seeded permutation, so the same ``--seed`` must give the same window
+    across builds and a different ``--seed`` a different one. Bounded to ``.take(2)`` batches
+    at 32 px (a few seconds, CPU).
     """
 
     N_BATCHES = 2
@@ -352,8 +325,9 @@ class TestTheRealImagenetteRecords:
 
     def test_the_sizes_are_the_documented_split(self) -> None:
         streams, _, _ = self._window(SEED)
-        assert streams.n_train + streams.n_select == 9469 and streams.n_select == 946
-        assert streams.n_test == 3925 and streams.num_classes == 10
+        assert streams.n_train + streams.n_select == IMAGENETTE_TRAIN_SIZE
+        assert streams.n_select == IMAGENETTE_TRAIN_SIZE // 10
+        assert streams.n_test == IMAGENETTE_VALIDATION_SIZE
 
     def test_one_seed_reproduces_its_window_and_another_seed_changes_it(self) -> None:
         window = self.N_BATCHES * BATCH_SIZE

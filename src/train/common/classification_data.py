@@ -30,6 +30,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.classification import DatasetSpec, get_spec
+from dl_techniques.datasets.vision.crops import flip_and_pad_crop
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
 from dl_techniques.datasets.vision.imagenette import ImagenetteConfig, load_imagenette
 from dl_techniques.datasets.vision.splits import (
@@ -104,27 +105,36 @@ def steps_per_epoch_for(n_train: int, batch_size: int) -> int:
     return n_train // batch_size
 
 
-def flip_pad_crop(pad: int = AUGMENT_PAD, mode: str = "CONSTANT", flip: bool = True) -> Augment:
+def capped_steps(
+        steps_per_epoch: int, select_steps: int, max_steps: Optional[int],
+) -> Tuple[int, int]:
+    """``(steps_per_epoch, select_steps)``, each capped by ``--max-steps`` (smoke runs)."""
+    if max_steps is None:
+        return steps_per_epoch, select_steps
+    return min(steps_per_epoch, max_steps), min(select_steps, max_steps)
+
+
+def flip_pad_crop(
+        pad: int = AUGMENT_PAD, mode: str = "CONSTANT", flip: bool = True,
+        seed: Optional[int] = None,
+) -> Augment:
     """The standard small-image augmentation: random horizontal flip, then a ``pad``-pixel
     pad and a random crop back to the image's own size.
 
     :param pad: Pixels added on each side.
     :param mode: ``tf.pad`` mode (``"CONSTANT"``, ``"REFLECT"``, ``"SYMMETRIC"``).
     :param flip: Whether to flip horizontally (not for digits).
+    :param seed: Op-level seed (``None`` draws from the global generator).
     :return: A ``(image, label) -> (image, label)`` map for the ``augment`` argument.
     """
 
     def augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        if flip:
-            image = tf.image.random_flip_left_right(image)
-        size = tf.shape(image)
-        image = tf.pad(image, [[pad, pad], [pad, pad], [0, 0]], mode=mode)
-        return tf.image.random_crop(image, size), label
+        return flip_and_pad_crop(image, pad=pad, mode=mode, flip=flip, seed=seed), label
 
     return augment
 
 
-def _resizer(size: Optional[int]) -> Callable[[tf.Tensor], tf.Tensor]:
+def resizer(size: Optional[int]) -> Callable[[tf.Tensor], tf.Tensor]:
     """Bilinear resize to ``size`` x ``size`` (the identity for ``None``). Linear, so it
     commutes with the per-channel affine normalization applied after it."""
     if size is None:
@@ -132,25 +142,42 @@ def _resizer(size: Optional[int]) -> Callable[[tf.Tensor], tf.Tensor]:
     return lambda image: tf.image.resize(image, (size, size), method="bilinear")
 
 
+def array_examples(
+        x: np.ndarray, y: np.ndarray, *, training: bool, seed: int,
+        augment: Optional[Augment], normalize: Callable[[tf.Tensor], tf.Tensor],
+        resize: Callable[[tf.Tensor], tf.Tensor] = lambda image: image,
+) -> "tf.data.Dataset":
+    """The unbatched ``(image, label)`` examples of an in-memory split.
+
+    Training reshuffles every pass, then resizes, augments (on the [0, 1] image) and
+    normalizes; evaluation only resizes and normalizes, in the array's order. Nothing is
+    batched or repeated, so a caller can map per example before it batches: the
+    classification pipelines below batch it, and ``train.common.image_streams`` adds the
+    self-supervised element map first.
+
+    ``from_tensor_slices`` embeds the arrays in the graph, so the pool must stay under
+    TensorFlow's 2 GB constant limit (true for MNIST and CIFAR).
+    """
+    dataset = tf.data.Dataset.from_tensor_slices((x, y))
+    if training:
+        dataset = dataset.shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
+    dataset = dataset.map(lambda image, label: (resize(image), label),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+    if training and augment is not None:
+        dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    return dataset.map(lambda image, label: (normalize(image), label),
+                       num_parallel_calls=tf.data.AUTOTUNE)
+
+
 def _train_pipeline(
         x: np.ndarray, y: np.ndarray, batch_size: int, seed: int,
         augment: Optional[Augment], normalize: Callable[[tf.Tensor], tf.Tensor],
         resize: Callable[[tf.Tensor], tf.Tensor] = lambda image: image,
 ) -> "tf.data.Dataset":
-    """Shuffled, augmented ([0, 1]), normalized, batched train pipeline; drops the remainder.
-
-    ``from_tensor_slices`` embeds the arrays in the graph, so the pool must stay under
-    TensorFlow's 2 GB constant limit (true for MNIST and CIFAR).
-    """
-    dataset = tf.data.Dataset.from_tensor_slices((x, y)).shuffle(
-        len(x), seed=seed, reshuffle_each_iteration=True)
-    dataset = dataset.map(lambda image, label: (resize(image), label),
-                          num_parallel_calls=tf.data.AUTOTUNE)
-    if augment is not None:
-        dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    """Shuffled, augmented, normalized, batched train pipeline; drops the remainder."""
     return (
-        dataset.map(lambda image, label: (normalize(image), label),
-                    num_parallel_calls=tf.data.AUTOTUNE)
+        array_examples(x, y, training=True, seed=seed, augment=augment,
+                       normalize=normalize, resize=resize)
         .batch(batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
@@ -166,9 +193,8 @@ def _eval_pipeline(
     batch when the train data is a dataset.
     """
     return (
-        tf.data.Dataset.from_tensor_slices((x, y))
-        .map(lambda image, label: (normalize(resize(image)), label),
-             num_parallel_calls=tf.data.AUTOTUNE)
+        array_examples(x, y, training=False, seed=0, augment=None,
+                       normalize=normalize, resize=resize)
         .batch(EVAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     )
 
@@ -242,6 +268,19 @@ class ClassificationData:
     class_names: list
     selection_split: str
     test_split: str
+
+    @property
+    def select_steps(self) -> int:
+        """Batches in one pass of ``select_ds`` (it is batched at its own size, which is
+        ``EVAL_BATCH_SIZE`` for the in-memory datasets and the trainer's batch size
+        otherwise, so this is read from the dataset and never derived from ``batch_size``).
+
+        :raises ValueError: The dataset's length is unknown (ImageNet).
+        """
+        steps = int(self.select_ds.cardinality())
+        if steps < 0:
+            raise ValueError("select_ds has no known length; pass validation_steps explicitly")
+        return steps
 
 
 # ---------------------------------------------------------------------
@@ -461,9 +500,9 @@ def _load_in_memory(
              " of the train set (seeded permutation)")
     return ClassificationData(
         train_ds=_train_pipeline(arrays.x_train, arrays.y_train, batch_size, seed, augment,
-                                 norm, _resizer(resize)),
-        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm, _resizer(resize)),
-        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm, _resizer(resize)),
+                                 norm, resizer(resize)),
+        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm, resizer(resize)),
+        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm, resizer(resize)),
         steps_per_epoch=steps,
         n_train=int(len(arrays.x_train)), n_select=int(len(arrays.x_select)),
         n_test=int(len(arrays.x_test)),

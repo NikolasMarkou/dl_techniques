@@ -21,6 +21,11 @@ from typing import List, NamedTuple, Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.crops import (
+    flip_and_pad_crop,
+    random_resized_crop,
+    resize_and_centre_crop,
+)
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.datasets.vision.splits import (
     check_validation_split,
@@ -32,6 +37,8 @@ from dl_techniques.utils.logger import logger
 #: Verified present offline at ``$TFDS_DATA_DIR``: 9469 train / 3925 validation, 10 classes.
 IMAGENETTE_TFDS_NAME = "imagenette/320px-v2"
 IMAGENETTE_NUM_CLASSES = 10
+IMAGENETTE_TRAIN_SIZE = 9469
+IMAGENETTE_VALIDATION_SIZE = 3925
 
 #: The ten wnids in TFDS label order (``label.labels.txt``) and what they are.
 IMAGENETTE_WNIDS: Tuple[str, ...] = (
@@ -52,69 +59,6 @@ _NORMALIZE_MODES = ("imagenet", "unit")
 #: ImageNet-classifier recipe (Inception-style random-resized crop plus flip for training,
 #: resize-then-centre-crop for evaluation).
 CROP_POLICIES: Tuple[str, ...] = ("resize", "random_resized_crop")
-
-#: Evaluation centre-crop fraction of ``"random_resized_crop"``: the shorter side
-#: is resized to ``image_size / EVAL_CROP_FRACTION`` and the centre
-#: ``image_size`` square is kept (the torchvision 256 -> 224 ratio).
-EVAL_CROP_FRACTION = 0.875
-
-#: Area and aspect-ratio ranges of the training random-resized crop (the
-#: Inception / torchvision ``RandomResizedCrop`` defaults).
-RANDOM_RESIZED_CROP_AREA = (0.08, 1.0)
-RANDOM_RESIZED_CROP_RATIO = (3.0 / 4.0, 4.0 / 3.0)
-
-
-# ---------------------------------------------------------------------
-# Geometry
-# ---------------------------------------------------------------------
-
-def random_resized_crop(
-        image: tf.Tensor, image_size: int, seed: Optional[int] = None,
-) -> tf.Tensor:
-    """Random-resized crop plus horizontal flip of one ``[0, 1]`` image.
-
-    Samples a box covering :data:`RANDOM_RESIZED_CROP_AREA` of the image at an
-    aspect ratio in :data:`RANDOM_RESIZED_CROP_RATIO` (falling back to the whole
-    image when no box fits), resizes it to ``image_size`` square, then flips.
-    """
-    begin, size, _ = tf.image.sample_distorted_bounding_box(
-        tf.shape(image),
-        bounding_boxes=tf.zeros([0, 0, 4], tf.float32),
-        min_object_covered=0.0,
-        aspect_ratio_range=RANDOM_RESIZED_CROP_RATIO,
-        area_range=RANDOM_RESIZED_CROP_AREA,
-        max_attempts=10,
-        use_image_if_no_bounding_boxes=True,
-        seed=seed,
-    )
-    image = tf.slice(image, begin, size)
-    image = tf.image.resize(image, (image_size, image_size), method="bilinear")
-    return tf.image.random_flip_left_right(image, seed=seed)
-
-
-def resize_and_centre_crop(image: tf.Tensor, image_size: int) -> tf.Tensor:
-    """Resize the shorter side to ``image_size / EVAL_CROP_FRACTION``, keep the centre square."""
-    shape = tf.cast(tf.shape(image)[:2], tf.float32)
-    scale = (image_size / EVAL_CROP_FRACTION) / tf.reduce_min(shape)
-    resized = tf.cast(tf.round(shape * scale), tf.int32)
-    image = tf.image.resize(image, resized, method="bilinear")
-    return tf.image.resize_with_crop_or_pad(image, image_size, image_size)
-
-
-def flip_and_reflect_crop(image: tf.Tensor, seed: Optional[int] = None) -> tf.Tensor:
-    """Random flip + reflect-pad-and-crop, on the [0,1] image, BEFORE normalization.
-
-    Augmentation runs pre-normalization on purpose (the ``train_vit`` D-006/D-007 lesson:
-    augmenting normalized data and then clipping to [0,1] saturates most pixels and silently
-    creates a train/val distribution mismatch). No ``clip_by_value`` here.
-    """
-    image = tf.image.random_flip_left_right(image, seed=seed)
-    image = tf.image.random_crop(
-        tf.pad(image, [[4, 4], [4, 4], [0, 0]], mode="REFLECT"),
-        size=tf.shape(image),
-        seed=seed,
-    )
-    return image
 
 
 # ---------------------------------------------------------------------
@@ -267,7 +211,7 @@ def imagenette_examples(
         if config.crop_policy == "resize":
             image = tf.image.resize(image, (size, size), method="bilinear")
             if augment:
-                image = flip_and_reflect_crop(image, seed=config.seed)
+                image = flip_and_pad_crop(image, mode="REFLECT", seed=config.seed)
         elif augment:
             image = random_resized_crop(image, size, seed=config.seed)
         else:

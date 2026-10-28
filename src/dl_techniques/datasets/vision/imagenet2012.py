@@ -62,6 +62,11 @@ from typing import List, NamedTuple, Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.crops import (
+    EVAL_CROP_FRACTION,
+    RANDOM_RESIZED_CROP_AREA,
+    RANDOM_RESIZED_CROP_RATIO,
+)
 from dl_techniques.utils.logger import logger
 
 
@@ -77,7 +82,6 @@ _IMAGE_SUFFIXES = (".jpeg", ".jpg")
 _INDEX_DIRNAME = ".index"
 _META_FILE = "meta.mat"
 _VAL_GROUND_TRUTH_FILE = "ILSVRC2012_validation_ground_truth.txt"
-_CROP_FRACTION = 0.875
 
 
 @dataclass
@@ -344,8 +348,8 @@ def _random_resized_crop(image: tf.Tensor, size: int, seed: tf.Tensor) -> tf.Ten
         tf.shape(image),
         bounding_boxes=tf.constant([0.0, 0.0, 1.0, 1.0], shape=[1, 1, 4]),
         seed=seed,
-        area_range=(0.08, 1.0),
-        aspect_ratio_range=(3.0 / 4.0, 4.0 / 3.0),
+        area_range=RANDOM_RESIZED_CROP_AREA,
+        aspect_ratio_range=RANDOM_RESIZED_CROP_RATIO,
         max_attempts=10,
         use_image_if_no_bounding_boxes=True,
     )
@@ -356,7 +360,7 @@ def _random_resized_crop(image: tf.Tensor, size: int, seed: tf.Tensor) -> tf.Ten
 def _center_crop(image: tf.Tensor, size: int) -> tf.Tensor:
     shape = tf.shape(image)
     short = tf.cast(tf.minimum(shape[0], shape[1]), tf.float32)
-    scale = tf.cast(math.ceil(size / _CROP_FRACTION), tf.float32) / short
+    scale = tf.cast(math.ceil(size / EVAL_CROP_FRACTION), tf.float32) / short
     new_hw = tf.cast(tf.round(tf.cast(shape[:2], tf.float32) * scale), tf.int32)
     image = tf.image.resize(image, new_hw, method="bilinear", antialias=True)
     return tf.image.resize_with_crop_or_pad(image, size, size)

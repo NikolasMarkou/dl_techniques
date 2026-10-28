@@ -503,3 +503,75 @@ def test_a_trainer_can_use_the_spec_to_size_its_head() -> None:
     spec = classification.get_spec("imagenette")
     assert (spec.num_classes, spec.train_size, spec.source, spec.in_memory) == (
         10, 9469, "records", False)
+
+
+# ---------------------------------------------------------------------
+# select_steps, capped_steps and the shared unbatched example stage
+# ---------------------------------------------------------------------
+
+
+def test_select_steps_is_the_real_batch_count_of_select_ds(monkeypatch) -> None:
+    """An in-memory selection split is batched at EVAL_BATCH_SIZE, not at the trainer's batch
+    size, so a trainer must not derive its validation steps from ``batch_size``."""
+    from tests.classification_fakes import use_tiny_raw
+
+    use_tiny_raw(monkeypatch, n_train=3000, n_test=10)
+    data = cd.load_classification_data(
+        "cifar10", batch_size=8, seed=0, eval_samples=0)
+    assert data.n_select == 300
+    batches = sum(1 for _ in data.select_ds)
+    assert data.select_steps == batches == -(-300 // cd.EVAL_BATCH_SIZE)
+    assert data.select_steps != -(-data.n_select // 8), "derived from the trainer's batch size"
+
+
+def test_select_steps_of_a_file_based_dataset_follows_the_trainer_batch(monkeypatch) -> None:
+    use_fake_imagenette(monkeypatch)
+    data = cd.load_classification_data(
+        "imagenette", batch_size=4, seed=0, image_size=24, normalize="unit", eval_samples=0)
+    assert data.select_steps == sum(1 for _ in data.select_ds) == -(-data.n_select // 4)
+
+
+@pytest.mark.parametrize("steps, select, cap, expected", [
+    (13, 2, None, (13, 2)),
+    (13, 2, 1, (1, 1)),
+    (13, 2, 5, (5, 2)),
+    (13, 7, 5, (5, 5)),
+])
+def test_capped_steps_clamps_each_count_by_max_steps(steps, select, cap, expected) -> None:
+    assert cd.capped_steps(steps, select, cap) == expected
+
+
+def test_array_examples_trains_shuffled_resized_augmented_normalized_and_evaluates_in_order() -> None:
+    x = np.stack([np.full((8, 8, 3), i / 255.0, np.float32) for i in range(10)])
+    y = np.arange(10, dtype=np.int32)
+    calls = []
+
+    def augment(image, label):
+        calls.append("augment")
+        return image + 0.0, label
+
+    kwargs = dict(seed=3, normalize=lambda image: image * 2.0, resize=cd.resizer(4))
+    evaluation = list(cd.array_examples(x, y, training=False, augment=augment, **kwargs))
+    assert [int(label) for _, label in evaluation] == list(range(10)), "evaluation is in order"
+    assert not calls, "evaluation must not augment"
+    assert evaluation[0][0].shape == (4, 4, 3)
+    np.testing.assert_allclose(evaluation[7][0].numpy(), 2.0 * 7 / 255.0, atol=1e-6)
+
+    training = [int(label) for _, label in
+                cd.array_examples(x, y, training=True, augment=augment, **kwargs)]
+    assert sorted(training) == list(range(10)) and training != list(range(10))
+    assert calls, "training augments"
+
+
+def test_flip_pad_crop_with_a_seed_is_reproducible_and_without_one_keeps_its_signature() -> None:
+    image = tf.reshape(tf.range(8 * 8 * 3, dtype=tf.float32), (8, 8, 3))
+
+    def run(seed):
+        # Op-level seeds are deterministic per graph, so build the pipeline twice.
+        ds = tf.data.Dataset.from_tensors((image, 0)).repeat(4).map(
+            cd.flip_pad_crop(mode="REFLECT", seed=seed))
+        return np.stack([img.numpy() for img, _ in ds])
+
+    np.testing.assert_array_equal(run(5), run(5))
+    out, label = cd.flip_pad_crop()(image, 7)
+    assert out.shape == image.shape and int(label) == 7

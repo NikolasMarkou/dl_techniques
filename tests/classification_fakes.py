@@ -116,3 +116,42 @@ def row_identities(images: np.ndarray, dataset: str, offset: int = 0) -> np.ndar
     pixels = (np.asarray(images) * np.asarray(spec.std) + np.asarray(spec.mean)) \
         .mean(axis=(1, 2, 3)) * 255.0
     return np.rint((pixels - offset) / 4.0).astype(int)
+
+
+def use_identity_cifar10(monkeypatch, n_train: int = IMAGENETTE_FAKE_TRAIN,
+                         n_test: int = IMAGENETTE_FAKE_TEST) -> None:
+    """CIFAR-10 stand-in whose row ``i`` has the mean colour ``4 * i`` (test rows ``4 * i + 2``).
+
+    A horizontal ramp (0..3, mean 1.5) makes a flip or a crop change the pixels while the mean
+    colour still reads back as the row identity (``i + 0.375`` rounds to ``i``), so
+    :func:`identities_of` works on augmented and unaugmented pipelines alike.
+    """
+
+    def load(name):
+        assert name == "cifar10"
+
+        def split(n, offset):
+            ramp = np.arange(32) // 8
+            level = (4 * np.arange(n) + offset)[:, None, None, None] + ramp[None, None, :, None]
+            x = np.broadcast_to(level, (n, 32, 32, 3)).astype(np.uint8)
+            return x, (np.arange(n) % 10).astype(np.int64)
+
+        return split(n_train, 0), split(n_test, 2)
+
+    monkeypatch.setattr(classification_data, "_load_raw", load)
+
+
+def identities_of(dataset: str, ds, offset: int = 0, n_batches: int = None) -> np.ndarray:
+    """The row identity of every image of a batched dataset (or its first ``n_batches``).
+
+    The element may be a plain ``(image, label)`` batch or a trainer's nested element
+    (``((image, mask), targets, weights)``): the first array found by descending into the
+    first member is the image batch.
+    """
+    batches = ds if n_batches is None else ds.take(n_batches)
+    images = []
+    for element in batches:
+        while isinstance(element, (tuple, list)):
+            element = element[0]
+        images.append(np.asarray(element))
+    return row_identities(np.concatenate(images), dataset, offset)

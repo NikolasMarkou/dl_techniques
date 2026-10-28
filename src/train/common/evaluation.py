@@ -27,6 +27,24 @@ from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 
 # ---------------------------------------------------------------------
+# The test split, once
+# ---------------------------------------------------------------------
+
+def evaluate_on_test(model: keras.Model, test_ds: tf.data.Dataset) -> Dict[str, float]:
+    """Score ``model`` on the TEST dataset exactly once and return plain floats.
+
+    Called after ``fit`` by the trainers whose selection split is a held-out slice of train
+    (the protocol of ``train.common.classification_data`` and ``train.common.image_streams``),
+    on the weights EarlyStopping restored. The metrics are the compiled ones (``loss`` and
+    any compiled metric), keyed by name.
+    """
+    metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
+    result = {name: float(value) for name, value in metrics.items()}
+    logger.info(f"Test metrics: {result}")
+    return result
+
+
+# ---------------------------------------------------------------------
 
 def validate_model_loading(
         model_path: str,

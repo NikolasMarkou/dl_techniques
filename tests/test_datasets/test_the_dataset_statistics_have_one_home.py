@@ -175,3 +175,41 @@ def test_unknown_class_counts_fall_back_to_placeholders():
     spec = classification.CLASSIFICATION_DATASETS["cifar100"]
     assert spec.class_names_for(100)[0] == "apple"
     assert spec.class_names_for(20) == [f"class_{i}" for i in range(20)]
+
+
+# ---------------------------------------------------------------------
+# The crop recipe's constants have one home too
+# ---------------------------------------------------------------------
+
+CROPS_HOME = (SRC / "dl_techniques" / "datasets" / "vision" / "crops.py").resolve()
+
+
+def _crop_constant_copies(tree: ast.AST) -> list:
+    """Lines of a literal ``0.875`` or of the ``(0.08, 1.0)`` area range."""
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == 0.875:
+            hits.append(node.lineno)
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            values = [e.value for e in node.elts if isinstance(e, ast.Constant)]
+            if values == [0.08, 1.0]:
+                hits.append(node.lineno)
+    return hits
+
+
+def test_the_crop_recipe_constants_are_defined_only_in_crops():
+    offenders = []
+    for root in (SRC / "dl_techniques" / "datasets", SRC / "train"):
+        for path in sorted(root.rglob("*.py")):
+            if path.resolve() == CROPS_HOME:
+                continue
+            offenders += [f"{path.relative_to(SRC)}:{line}"
+                          for line in _crop_constant_copies(ast.parse(path.read_text()))]
+    assert offenders == [], f"literal copies of the crop recipe outside crops.py: {offenders}"
+
+
+def test_the_crop_census_sees_the_definition_and_a_copy():
+    assert _crop_constant_copies(ast.parse(CROPS_HOME.read_text()))
+    assert _crop_constant_copies(ast.parse("x = 0.875")) == [1]
+    assert _crop_constant_copies(ast.parse("area_range=(0.08, 1.0)")) == [1]
+    assert _crop_constant_copies(ast.parse("x = (0.08, 0.12)")) == []
