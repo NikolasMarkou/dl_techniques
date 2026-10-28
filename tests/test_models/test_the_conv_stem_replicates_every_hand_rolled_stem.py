@@ -101,6 +101,7 @@ from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
+from dl_techniques.models.vision.dasiamrpn.model import DaSiamRPN, SiamRPNBackbone
 from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
 from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
@@ -1717,6 +1718,19 @@ def _siamfc_backbone(momentum: float = 0.9, epsilon: float = 1e-5) -> SiamFCBack
     )
 
 
+def _dasiamrpn_model(variant: str = "otb", batch_norm: bool = True) -> DaSiamRPN:
+    return DaSiamRPN.from_variant(
+        variant, use_batch_norm=batch_norm, kernel_initializer=_SIAM_KERNEL_INIT
+    )
+
+
+def _siamrpn_backbone(momentum: float = 0.9, epsilon: float = 1e-5) -> SiamRPNBackbone:
+    return SiamRPNBackbone(
+        width_scale=1, bn_momentum=momentum, bn_epsilon=epsilon,
+        kernel_initializer=_SIAM_KERNEL_INIT,
+    )
+
+
 def _through_backbone(model) -> ConvStem:
     return model.backbone.stem
 
@@ -1748,6 +1762,24 @@ SIAMFC_NOBN = _siam_case(
 SIAMFC_BACKBONE_MOMENTUM_EPSILON = _siam_case(
     "siamfc-backbone-momentum-0.8-epsilon-1e-3",
     lambda: _siamfc_backbone(0.8, 1e-3),
+    _SIAM_FILTERS, True, 0.8, 1e-3, _own_stem,
+)
+DASIAMRPN_WIDTH1 = _siam_case(
+    "dasiamrpn-otb-width1", _dasiamrpn_model, _SIAM_FILTERS, True, 0.9, 1e-5, _through_backbone
+)
+DASIAMRPN_WIDTH2 = _siam_case(
+    "dasiamrpn-big-width2",
+    lambda: _dasiamrpn_model("big"),
+    2 * _SIAM_FILTERS, True, 0.9, 1e-5, _through_backbone,
+)
+DASIAMRPN_NOBN = _siam_case(
+    "dasiamrpn-otb-no-bn",
+    lambda: _dasiamrpn_model(batch_norm=False),
+    _SIAM_FILTERS, False, 0.9, 1e-5, _through_backbone,
+)
+DASIAMRPN_BACKBONE_MOMENTUM_EPSILON = _siam_case(
+    "siamrpn-backbone-momentum-0.8-epsilon-1e-3",
+    lambda: _siamrpn_backbone(0.8, 1e-3),
     _SIAM_FILTERS, True, 0.8, 1e-3, _own_stem,
 )
 
@@ -1817,6 +1849,10 @@ CASES = [
     SIAMFC_BN,
     SIAMFC_NOBN,
     SIAMFC_BACKBONE_MOMENTUM_EPSILON,
+    DASIAMRPN_WIDTH1,
+    DASIAMRPN_WIDTH2,
+    DASIAMRPN_NOBN,
+    DASIAMRPN_BACKBONE_MOMENTUM_EPSILON,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1867,6 +1903,7 @@ BUILT_STEM_ROWS = [
     ("deepsort", DeepSortAppearanceNet, (128, 64, 3)),
     # 91 px is the smallest side the trunk's five valid convolutions leave a feature map at.
     ("siamfc-backbone", lambda: _siamfc_model().backbone, (91, 91, 3)),
+    ("dasiamrpn-backbone", lambda: _dasiamrpn_model().backbone, (91, 91, 3)),
 ]
 
 
@@ -1937,6 +1974,8 @@ INITIALIZER_AUDIT = {
     ),
     "SiamFC": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "SiamFCBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
+    "DaSiamRPN": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
+    "SiamRPNBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2299,6 +2338,7 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         (DEEPSORT, {"kernel_regularizer": None}, "kernel_regularizer"),
         # The trunk's knob reaches stage 1 as the model's own value.
         (SIAMFC_BN, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        (DASIAMRPN_WIDTH1, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
     ],
     ids=[
         "kernel-initializer-class",
@@ -2315,6 +2355,7 @@ def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
         "deepsort-initializer-other-width",
         "deepsort-regularizer-dropped",
         "siamfc-initializer-dropped",
+        "dasiamrpn-initializer-dropped",
     ],
 )
 def test_the_guard_the_settings_check_sees_a_wrong_initializer_or_regularizer(
@@ -2437,6 +2478,9 @@ def test_the_guard_the_harness_sees_a_deepsort_stem_with_one_wrong_setting(overr
         (SIAMFC_BN, {"activation_type": "gelu"}, "differs from the original"),
         (SIAMFC_BACKBONE_MOMENTUM_EPSILON, {"normalization_kwargs": {"momentum": 0.9}},
          "after a training=True pass"),
+        (DASIAMRPN_WIDTH2, {"filters": _SIAM_FILTERS}, "not compatible"),
+        (DASIAMRPN_WIDTH2, {"pool_padding": "same"}, "shape"),
+        (DASIAMRPN_WIDTH1, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
     ],
     ids=[
         "siamfc-pool-padding",
@@ -2445,6 +2489,9 @@ def test_the_guard_the_harness_sees_a_deepsort_stem_with_one_wrong_setting(overr
         "siamfc-momentum-0.99",
         "siamfc-gelu-for-relu",
         "siamfc-backbone-momentum-back-at-the-default",
+        "dasiamrpn-width-not-doubled",
+        "dasiamrpn-pool-padding",
+        "dasiamrpn-epsilon-1e-6",
     ],
 )
 def test_the_guard_the_harness_sees_a_siamese_stem_with_one_wrong_setting(case, override, match):

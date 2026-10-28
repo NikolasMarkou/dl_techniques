@@ -54,8 +54,8 @@ instead.
 
 | Name | Purpose |
 | :--- | :--- |
-| **`DaSiamRPN`** | Model over `(z, x)` returning `{"cls", "reg"}`. |
-| **`SiamRPNBackbone`** | Width-scaled embedding trunk (scale 1 or 2). |
+| **`DaSiamRPN`** | Model over `(z, x)` returning `{"cls", "reg"}`. Takes no `input_shape`: the sizes are `exemplar_size` and `search_size`, and passing `input_shape` or `input_dim` raises `ValueError`. |
+| **`SiamRPNBackbone`** | Width-scaled embedding trunk (scale 1 or 2). Stage 1 (11x11/2 convolution, BatchNorm, ReLU, 3x3/2 pool) is one `ConvStem` named `stem`; stages 2 to 5 keep their own layers. |
 | **`create_dasiamrpn` / `from_variant`** | Named-configuration construction. |
 | **`generate_dasiamrpn_anchors`** | Reference anchor factory. |
 | **`decode_dasiamrpn_boxes`** | Reference delta parameterization. |
@@ -64,6 +64,21 @@ instead.
 Deliberate non-goals: the global-search redetection schedule and the online
 distractor template update are tracking-loop policies, not network layers,
 and are not implemented here.
+
+`kernel_initializer` is a name, a serialized dict or an `Initializer` instance. The model stores a name or dict (an instance is serialized once) and all ten convolutions (five in the backbone, five adjust convolutions) draw from their own copy, so an instance does not hand one sample to ten kernels, and `get_config()` is JSON-safe.
+
+### Archives written before the `ConvStem` stage 1
+
+The first convolution, its BatchNorm and the first pool used to be loose layers of the backbone (`conv1`, `bn1`, `pool1`); stage 1 is now one tracked layer, `stem`. Archives of `DaSiamRPN` written by the earlier code (measured with `be92a74eb` and with `20b48aba6^`, which give the same results, for the `otb` and `big` variants, each saved in a separate process and loaded by the current code) do not load by either route. `keras.models.load_model` and `model.load_weights` into a current model both fail with "A total of 2 objects could not be loaded ... Layer 'stem_conv1' expected 2 variables, but received 0".
+
+The weights themselves are intact and move by path. Copying the 36 weights of an earlier model (both variants) by these renames into a current model gives outputs equal at atol 0, and a model built under the same seed holds the same tensors as the earlier one:
+
+| Earlier path | Current path |
+| :--- | :--- |
+| `da_siam_rpn/backbone/conv1/{kernel,bias}` | `da_siam_rpn/backbone/stem/stem_conv1/{kernel,bias}` |
+| `da_siam_rpn/backbone/bn1/*` | `da_siam_rpn/backbone/stem/stem_norm1/*` |
+
+The backbone has 26 weights (18 trainable) and 3,751,680 parameters at width scale 1 and 14,925,312 at width scale 2. The `get_config()` of `DaSiamRPN` and `SiamRPNBackbone` now writes the stored initializer name or dict where it used to write the serialized instance; configs written by the earlier code still build.
 
 ## 4. Citation
 

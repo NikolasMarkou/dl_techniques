@@ -34,7 +34,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -44,8 +43,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import materialize_sublayers, refuse_input_shape
+from dl_techniques.utils.validation import positive_float, positive_int
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.clone import initializer_spec
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -255,9 +257,9 @@ def _per_location_channel_correlation(
             patch = search_features[
                 :, i : i + kernel_extent, j : j + kernel_extent, :
             ]
-            cols.append(ops.einsum("bhwc,bhwkc->bk", patch, kernels))
-        rows.append(ops.stack(cols, axis=1))
-    grid = ops.stack(rows, axis=1)
+            cols.append(keras.ops.einsum("bhwc,bhwkc->bk", patch, kernels))
+        rows.append(keras.ops.stack(cols, axis=1))
+    grid = keras.ops.stack(rows, axis=1)
     return grid
 
 
@@ -274,18 +276,29 @@ class SiamRPNBackbone(keras.layers.Layer):
     ``groups=2`` on two convolutions is a multi-GPU artifact and is not
     reproduced; dense convolutions learn the same function class.
 
+    The first stage (11x11/2 convolution, BatchNorm, ReLU and the 3x3/2 pool) is
+    one :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named ``stem``;
+    stages two to five are the body and keep their own layers.
+
     :param width_scale: Channel multiplier, 1 or 2.
     :type width_scale: int
-    :param use_batch_norm: Whether to keep BatchNorm after the first four convolutions.
+    :param use_batch_norm: Whether to keep BatchNorm after the first four
+        convolutions. When off, the stem holds no norm and ``bn2`` to ``bn4``
+        are created but never built or called.
     :type use_batch_norm: bool
     :param bn_momentum: BatchNorm momentum in the Keras convention.
     :type bn_momentum: float
-    :param bn_epsilon: BatchNorm epsilon.
+    :param bn_epsilon: BatchNorm epsilon, positive.
     :type bn_epsilon: float
-    :param kernel_initializer: Initializer for all convolutions.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Initializer for all convolutions: a name, a
+        serialized config dict or an ``Initializer`` instance. It is stored as
+        a name or dict and each convolution draws from its own copy, so an
+        instance given here does not hand one sample to five kernels.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Passthrough to ``keras.layers.Layer``.
-    :raises ValueError: If ``width_scale`` is not 1 or 2.
+    :raises ValueError: If ``width_scale`` is not 1 or 2, ``bn_epsilon`` is not
+        positive, or ``input_shape`` or ``input_dim`` is passed (the layer
+        embeds an image of any size).
     """
 
     def __init__(
@@ -294,22 +307,25 @@ class SiamRPNBackbone(keras.layers.Layer):
         use_batch_norm: bool = True,
         bn_momentum: float = 0.9,
         bn_epsilon: float = 1e-5,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, dict, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "SiamRPNBackbone", "it embeds an image of any size")
         super().__init__(**kwargs)
         if width_scale not in (1, 2):
             raise ValueError(f"width_scale must be 1 or 2, got {width_scale}")
         self.width_scale = width_scale
         self.use_batch_norm = use_batch_norm
         self.bn_momentum = bn_momentum
-        self.bn_epsilon = bn_epsilon
-        self.kernel_initializer = kernel_initializer
+        self.bn_epsilon = positive_float(bn_epsilon, "bn_epsilon", "SiamRPNBackbone")
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem and to every body convolution; never keep the caller's Initializer instance.
+        # One seedless instance given to all five convolutions replayed a single draw across 10 of 10 kernel pairs, and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         channels = [c * width_scale for c in BASE_CHANNELS]
         self.out_channels = channels[-1]
 
-        def _conv(filters: int, kernel: int, stride: int, name: str) -> layers.Conv2D:
-            return layers.Conv2D(
+        def _conv(filters: int, kernel: int, stride: int, name: str) -> keras.layers.Conv2D:
+            return keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=kernel,
                 strides=stride,
@@ -330,12 +346,29 @@ class SiamRPNBackbone(keras.layers.Layer):
                 name=name,
             )
 
-        self.conv1 = _conv(channels[0], 11, 2, "conv1")
-        self.bn1 = _bn("bn1")
-        self.pool1 = layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool1")
+        # Stage 1: 11x11/2 convolution, BatchNorm, ReLU, 3x3/2 pool.
+        self.stem = ConvStem(
+            channels[0],
+            kernel_size=11,
+            strides=2,
+            padding="valid",
+            normalization_type="batch_norm" if use_batch_norm else None,
+            normalization_kwargs=(
+                {"momentum": self.bn_momentum, "epsilon": self.bn_epsilon}
+                if use_batch_norm
+                else None
+            ),
+            activation_type="relu",
+            use_pooling=True,
+            pool_size=3,
+            pool_strides=2,
+            pool_padding="valid",
+            kernel_initializer=self.kernel_initializer,
+            name="stem",
+        )
         self.conv2 = _conv(channels[1], 5, 1, "conv2")
         self.bn2 = _bn("bn2")
-        self.pool2 = layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool2")
+        self.pool2 = keras.layers.MaxPooling2D(pool_size=3, strides=2, padding="valid", name="pool2")
         self.conv3 = _conv(channels[2], 3, 1, "conv3")
         self.bn3 = _bn("bn3")
         self.conv4 = _conv(channels[3], 3, 1, "conv4")
@@ -343,13 +376,8 @@ class SiamRPNBackbone(keras.layers.Layer):
         self.conv5 = _conv(channels[4], 3, 1, "conv5")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        shape = input_shape
-        self.conv1.build(shape)
-        shape = self.conv1.compute_output_shape(shape)
-        if self.use_batch_norm:
-            self.bn1.build(shape)
-        self.pool1.build(shape)
-        shape = self.pool1.compute_output_shape(shape)
+        self.stem.build(input_shape)
+        shape = self.stem.compute_output_shape(input_shape)
         self.conv2.build(shape)
         shape = self.conv2.compute_output_shape(shape)
         if self.use_batch_norm:
@@ -379,24 +407,20 @@ class SiamRPNBackbone(keras.layers.Layer):
         :return: Features of shape ``(B, H', W', out_channels)``.
         :rtype: keras.KerasTensor
         """
-        x = self.conv1(inputs)
-        if self.use_batch_norm:
-            x = self.bn1(x, training=training)
-        x = ops.relu(x)
-        x = self.pool1(x)
+        x = self.stem(inputs, training=training)
         x = self.conv2(x)
         if self.use_batch_norm:
             x = self.bn2(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.pool2(x)
         x = self.conv3(x)
         if self.use_batch_norm:
             x = self.bn3(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.conv4(x)
         if self.use_batch_norm:
             x = self.bn4(x, training=training)
-        x = ops.relu(x)
+        x = keras.ops.relu(x)
         x = self.conv5(x)
         return x
 
@@ -415,16 +439,10 @@ class SiamRPNBackbone(keras.layers.Layer):
                 "use_batch_norm": self.use_batch_norm,
                 "bn_momentum": self.bn_momentum,
                 "bn_epsilon": self.bn_epsilon,
-                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "kernel_initializer": self.kernel_initializer,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SiamRPNBackbone":
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
-        return cls(**config)
 
 
 @register_dl_technique("dl_techniques.models.dasiamrpn.model")
@@ -452,10 +470,14 @@ class DaSiamRPN(keras.Model):
     :type search_size: int
     :param use_batch_norm: Forwarded to the backbone.
     :type use_batch_norm: bool
-    :param kernel_initializer: Forwarded to backbone and adjust convolutions.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Forwarded to backbone and adjust convolutions;
+        stored as a name or dict, so an ``Initializer`` instance is serialized
+        once and no two kernels share one draw.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Passthrough to ``keras.Model``.
-    :raises ValueError: If the anchor lists are empty or the sizes collapse the grid.
+    :raises ValueError: If the anchor lists are empty, the sizes collapse the grid,
+        or ``input_shape`` or ``input_dim`` is passed (the sizes are
+        ``exemplar_size`` and ``search_size``).
     """
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -472,25 +494,28 @@ class DaSiamRPN(keras.Model):
         exemplar_size: int = EXEMPLAR_SIZE,
         search_size: int = SEARCH_SIZE,
         use_batch_norm: bool = True,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, dict, keras.initializers.Initializer] = "glorot_uniform",
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(
+            kwargs, "DaSiamRPN", "the input sizes are exemplar_size and search_size"
+        )
         super().__init__(**kwargs)
         if variant_config is None:
             variant_config = dict(self.MODEL_VARIANTS["big"])
         if "width_scale" not in variant_config or "feature_out" not in variant_config:
             raise ValueError("variant_config must carry 'width_scale' and 'feature_out'")
         width_scale = int(variant_config["width_scale"])
-        feature_out = int(variant_config["feature_out"])
+        feature_out = positive_int(variant_config["feature_out"], "feature_out", "DaSiamRPN")
         if width_scale not in (1, 2):
             raise ValueError(f"width_scale must be 1 or 2, got {width_scale}")
-        if feature_out <= 0:
-            raise ValueError(f"feature_out must be positive, got {feature_out}")
         self.anchor_ratios = list(anchor_ratios) if anchor_ratios is not None else list(ANCHOR_RATIOS)
         self.anchor_scales = list(anchor_scales) if anchor_scales is not None else list(ANCHOR_SCALES)
         if not self.anchor_ratios or not self.anchor_scales:
             raise ValueError("anchor_ratios and anchor_scales must be non-empty")
-        if exemplar_size <= 0 or search_size <= exemplar_size:
+        exemplar_size = positive_int(exemplar_size, "exemplar_size", "DaSiamRPN")
+        search_size = positive_int(search_size, "search_size", "DaSiamRPN")
+        if search_size <= exemplar_size:
             raise ValueError(
                 f"need 0 < exemplar ({exemplar_size}) < search ({search_size})"
             )
@@ -506,49 +531,51 @@ class DaSiamRPN(keras.Model):
         self.exemplar_size = exemplar_size
         self.search_size = search_size
         self.use_batch_norm = use_batch_norm
-        self.kernel_initializer = kernel_initializer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the spec and hand it to the backbone and to the five adjust convolutions; never keep the caller's Initializer instance.
+        # One seedless instance given to all ten convolutions replayed a single draw across 45 of 45 kernel pairs, and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.feature_out = feature_out
 
         feat_in = BASE_CHANNELS[-1] * width_scale
         self.backbone = SiamRPNBackbone(
             width_scale=width_scale,
             use_batch_norm=use_batch_norm,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="backbone",
         )
-        self.conv_r1 = layers.Conv2D(
+        self.conv_r1 = keras.layers.Conv2D(
             filters=feature_out * 4 * self.anchor_num,
             kernel_size=3,
             padding="valid",
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="conv_r1",
         )
-        self.conv_r2 = layers.Conv2D(
+        self.conv_r2 = keras.layers.Conv2D(
             filters=feature_out,
             kernel_size=3,
             padding="valid",
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="conv_r2",
         )
-        self.conv_cls1 = layers.Conv2D(
+        self.conv_cls1 = keras.layers.Conv2D(
             filters=feature_out * 2 * self.anchor_num,
             kernel_size=3,
             padding="valid",
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="conv_cls1",
         )
-        self.conv_cls2 = layers.Conv2D(
+        self.conv_cls2 = keras.layers.Conv2D(
             filters=feature_out,
             kernel_size=3,
             padding="valid",
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="conv_cls2",
         )
-        self.regress_adjust = layers.Conv2D(
+        self.regress_adjust = keras.layers.Conv2D(
             filters=4 * self.anchor_num,
             kernel_size=1,
             padding="valid",
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name="regress_adjust",
         )
         self._feat_in = feat_in
@@ -582,12 +609,12 @@ class DaSiamRPN(keras.Model):
         r2_feat = self.conv_r2(x_feat, training=training)
         cls2_feat = self.conv_cls2(x_feat, training=training)
 
-        batch = ops.shape(r1_raw)[0]
+        batch = keras.ops.shape(r1_raw)[0]
         k = self._kernel_extent
-        r_kernels = ops.reshape(
+        r_kernels = keras.ops.reshape(
             r1_raw, (batch, k, k, self.anchor_num * 4, self.feature_out)
         )
-        cls_kernels = ops.reshape(
+        cls_kernels = keras.ops.reshape(
             cls1_raw, (batch, k, k, self.anchor_num * 2, self.feature_out)
         )
         reg_corr = _per_location_channel_correlation(
@@ -609,16 +636,10 @@ class DaSiamRPN(keras.Model):
                 "exemplar_size": self.exemplar_size,
                 "search_size": self.search_size,
                 "use_batch_norm": self.use_batch_norm,
-                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "kernel_initializer": self.kernel_initializer,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "DaSiamRPN":
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
-        return cls(**config)
 
     @classmethod
     def from_variant(

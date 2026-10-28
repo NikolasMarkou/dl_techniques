@@ -74,7 +74,8 @@ SqueezeNet V1 and V2) and asks each the same questions:
     ``kernel_regularizer`` defaults to ``None``: ``model.losses == []``.
 
 The no-replayed-draw and name rows also cover the models that are not classifiers (VAE, the
-RBF pair, UcaEncoder, CapsNet, and the stem sites that are not migrated yet).
+RBF pair, UcaEncoder, CapsNet, DeepSORT, SiamFC, DaSiamRPN, and the stem sites that are not
+migrated yet).
 SqueezeNet is a functional model: it is exempt from the build-parity and the
 unbuilt ``compute_output_shape`` rows because it is built in ``__init__``.
 
@@ -445,11 +446,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::instance", "dasiamrpn"): Open(
-        AssertionError,
-        "the SiamFC and DaSiamRPN stem migration",
-        '45 of 45 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "depth_anything_real"): Open(
         AssertionError,
         "the depth_anything stem migration",
@@ -1717,6 +1713,7 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     _named_other("capsnet_v2_legacy", "capsnet_v2_legacy", ("conv_block_0",)),
     _named_other("deepsort", "deepsort", ("stem",)),
     _named_other("siamfc", "siamfc", ("stem",)),
+    _named_other("dasiamrpn", "dasiamrpn", ("stem",)),
 )
 
 
@@ -2263,8 +2260,17 @@ def _siam_backbone_owned() -> set:
     return {"stem", "conv2", "bn2", "pool2", "conv3", "bn3", "conv4", "bn4", "conv5"}
 
 
+def _dasiamrpn_owned() -> set:
+    """DaSiamRPN: the shared trunk and the five adjust convolutions."""
+    return {"backbone", "conv_r1", "conv_r2", "conv_cls1", "conv_cls2", "regress_adjust"}
+
+
 def _siamfc_pair() -> Tuple[np.ndarray, np.ndarray]:
     return _images(127, 127, 3, batch=1), _images(255, 255, 3, batch=1)
+
+
+def _dasiamrpn_pair() -> Tuple[np.ndarray, np.ndarray]:
+    return _images(127, 127, 3, batch=1), _images(271, 271, 3, batch=1)
 
 
 def _siamfc_backbone_build() -> keras.layers.Layer:
@@ -2272,9 +2278,19 @@ def _siamfc_backbone_build() -> keras.layers.Layer:
     return SiamFCBackbone()
 
 
+def _siamrpn_backbone_build() -> keras.layers.Layer:
+    from dl_techniques.models.vision.dasiamrpn.model import SiamRPNBackbone
+    return SiamRPNBackbone()
+
+
 def _siamfc_build() -> keras.Model:
     from dl_techniques.models.vision.siamfc.model import SiamFC
     return SiamFC()
+
+
+def _dasiamrpn_build() -> keras.Model:
+    from dl_techniques.models.vision.dasiamrpn.model import DaSiamRPN
+    return DaSiamRPN.from_variant("otb")
 
 
 #: ``case id -> (build, the inputs of one forward, the exact set of layers the build owns
@@ -2285,6 +2301,9 @@ TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
     "siamfc": (_siamfc_build, _siamfc_pair, lambda: {"backbone"}),
     "siamfc_backbone": (_siamfc_backbone_build, lambda: _images(127, 127, 3, batch=1),
                         _siam_backbone_owned),
+    "dasiamrpn": (_dasiamrpn_build, _dasiamrpn_pair, _dasiamrpn_owned),
+    "siamrpn_backbone": (_siamrpn_backbone_build, lambda: _images(127, 127, 3, batch=1),
+                         _siam_backbone_owned),
 }
 
 
@@ -2430,6 +2449,18 @@ def _siamfc_without_shape(**kw: Any) -> Any:
 def _siamfc_backbone_without_shape(**kw: Any) -> Any:
     from dl_techniques.models.vision.siamfc.model import SiamFCBackbone
     return SiamFCBackbone(**kw)
+
+
+@_no_shape("dasiamrpn")
+def _dasiamrpn_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dasiamrpn.model import DaSiamRPN
+    return DaSiamRPN(**kw)
+
+
+@_no_shape("siamrpn_backbone")
+def _siamrpn_backbone_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dasiamrpn.model import SiamRPNBackbone
+    return SiamRPNBackbone(**kw)
 
 
 def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:
