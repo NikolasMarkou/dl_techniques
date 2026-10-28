@@ -1,8 +1,7 @@
 """`evaluate()` must not reconstruct from the labels, and the loss tracker must
 track the loss.
 
-Guard for plan-2026-08-17T183311-79c63e38 step 12 (prior review finding G-11,
-which survived a 139-commit repair round unfixed).
+Both defects below survived a long repair round unfixed.
 
 1. ``test_step`` called ``self(x, training=False, mask=y)``. ``_reconstruct``
    takes ``reconstruction_mask = mask`` whenever a mask is given, so the

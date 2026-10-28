@@ -1335,12 +1335,6 @@ def _forward(model: keras.Model, *inputs: Any) -> keras.Model:
     return model
 
 
-def _selector(cls: type, value: str) -> Dict[str, str]:
-    """CapsNetV2's backbone selector under whichever spelling the constructor has."""
-    params = inspect.signature(cls.__init__).parameters
-    return {next(name for name in ("stem_type", "stem") if name in params): value}
-
-
 def _build_resnet(init):
     from dl_techniques.models.vision.resnet.model import ResNet
     return _forward(ResNet.from_variant("resnet18", num_classes=10, input_shape=(64, 64, 3),
@@ -1476,7 +1470,7 @@ def _capsnet_v2(backbone: str, shape: Tuple[int, int, int], reconstruction: bool
     def build(init):
         from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
         model = CapsNetV2(num_classes=10, input_shape=shape, reconstruction=reconstruction,
-                          **_selector(CapsNetV2, backbone), **_kw(init))
+                          stem_type=backbone, **_kw(init))
         model.build((None, *shape))  # the decoder is built here, not by a forward pass
         return _forward(model, np.random.default_rng(0).uniform(size=(2, *shape)).astype("float32"))
     return build
@@ -2198,7 +2192,7 @@ def _caps_v2_build(reconstruction: bool) -> Callable[[], keras.Model]:
         from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
         return CapsNetV2(num_classes=7, input_shape=_CAPS_IMAGE, legacy_conv_filters=_CAPS_TRUNK,
                          primary_capsules=4, reconstruction=reconstruction,
-                         **_selector(CapsNetV2, "legacy"))
+                         stem_type="legacy")
     return build
 
 
@@ -2223,7 +2217,7 @@ def test_the_capsnet_pair_number_their_trunk_blocks_exactly_as_their_filter_list
 def test_capsnet_v2_with_a_resnet_stem_owns_the_backbone_and_no_trunk() -> None:
     from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
     model = CapsNetV2(num_classes=7, input_shape=(32, 32, 3), primary_capsules=4,
-                      **_selector(CapsNetV2, "resnet18"))
+                      stem_type="resnet18")
     model(_images(32, 32, 3))
     assert model.conv_blocks == []
     assert numbering_problems(direct_children(model), {"stem", "primary_caps", "digit_caps"}) == []

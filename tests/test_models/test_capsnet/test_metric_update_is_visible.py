@@ -21,7 +21,6 @@ import inspect
 import numpy as np
 import keras
 import pytest
-import tensorflow as tf
 
 from dl_techniques.models.vision.capsnet.model import CapsNet
 from dl_techniques.models.vision.capsnet import model_v2

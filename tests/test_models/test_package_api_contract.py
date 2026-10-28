@@ -4495,7 +4495,7 @@ _CREATE_WITHOUT_FROM_VARIANT = {
 #: counts above are the 2026-08-22 census; the pinned set is the count.
 _CREATE_FACTORIES_THAT_COMPILE = {
     ("models/vision/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
-    ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
+    ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem_type`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
     ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
     # `models/language/hrm/model.py::create_hierarchical_reasoning_model` was
     # DELETED by plan-2026-10-13T035756-5dd4d94d D-015: the factory no longer

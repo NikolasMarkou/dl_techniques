@@ -1,7 +1,8 @@
-"""Tests for CapsNetV2 model (Stage 1 + Stage 2 + Stage 3a).
+"""Tests for CapsNetV2.
 
-Smoke-level: builds, forward passes, one-step fit, reconstruction helper,
-serialization round-trip.
+Construction and validation, the two stems, build and ``compute_output_shape``, the
+factories with a compile and one fit step, the reconstruction helper, the decoder's
+survival of a ``.keras`` round trip, the initializer and the configuration.
 """
 
 import json
@@ -104,7 +105,7 @@ class TestCapsNetV2:
         digit = model.get_capsules(x)
         assert digit.shape == (4, 10, 16)
 
-    # ---- factory + compile/fit (Stage 1 recipe) ----
+    # ---- factory + compile/fit ----
 
     def test_create_capsnet_v2_returns_compiled_adamw(self):
         model = create_capsnet_v2(
@@ -145,7 +146,7 @@ class TestCapsNetV2:
         loss = history.history["loss"][0]
         assert np.isfinite(loss)
 
-    # ---- Stage 2: pretrained-backbone factory ----
+    # ---- pretrained-backbone factory ----
 
     def test_create_capsnet_v2_pretrained_true_raises(self):
         """`pretrained=True` must RAISE, never return a random-init backbone.

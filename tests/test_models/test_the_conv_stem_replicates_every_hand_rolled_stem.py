@@ -1551,18 +1551,12 @@ def _capsnet_v2_model() -> CapsNetV2:
     return CapsNetV2(
         num_classes=4,
         input_shape=(28, 28, 1),
-        **_capsnet_v2_selector("legacy"),
+        stem_type="legacy",
         legacy_conv_filters=[_CAPSNET_FILTERS, _CAPSNET_FILTERS],
         primary_capsules=4,
         kernel_initializer=_CAPSNET_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_CAPSNET_KERNEL_REG),
     )
-
-
-def _capsnet_v2_selector(value: str) -> dict:
-    """CapsNetV2's backbone selector under whichever spelling the constructor has."""
-    params = inspect.signature(CapsNetV2.__init__).parameters
-    return {next(name for name in ("stem_type", "stem") if name in params): value}
 
 
 def _capsnet_block(index: int):

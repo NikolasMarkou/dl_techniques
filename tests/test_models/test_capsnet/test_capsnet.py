@@ -583,33 +583,16 @@ class TestCapsNet:
         assert recreated_capsnet.reconstruction_weight == original_capsnet.reconstruction_weight
 
     def test_model_save_load(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
-        """Test saving and loading a CapsNet model.
+        """Saving and loading a CapsNet model keeps every weight.
 
-        HISTORY -- this test carried `xfail(strict=True)` from 2026-08-18 until
-        plan-2026-08-18T073231-52a93f8c/iter-1/step-8. The pinned defect: CapsNet
-        lost EVERY kernel on a `.keras` round trip. Weight paths and shapes all
-        matched (16 weights, identical paths) while the values did not --
-        conv_1/kernel differed by 0.686, conv_2/kernel by 0.080,
-        primary_caps/primary_conv/kernel by 0.045,
-        digit_caps/capsule_transformation_weights by 0.022, i.e. the restored
-        kernels were FRESH. Only the tensors whose trained value still equalled
-        their initializer (biases, BN gamma/beta/moving stats) "matched", and
-        only by coincidence. Cause: `CapsNet.build()` overrode `keras.Model.build`
-        without building its sub-layer tree, which disables Keras'
-        `is_default(self.build)` build-by-run fallback while `build_from_config`
-        swallows the incomplete build in a bare `try/except` -- so the loss was
-        silent. Fixed by `CapsNet._build_sublayer_tree` (see that method's
-        `# DECISION .../D-006` anchor and decisions.md D-006).
-
-        The pin was strict, so removing it is itself the red-proof. It is kept
-        removed rather than deleted-and-forgotten because the original
-        instrument -- SHAPE equality only -- was blind to this failure mode
-        (reference_nested_sublayer_list_loses_weights.md). This test therefore
-        now asserts the DISCRIMINATING quantity: the weight count BEFORE the
-        first `call()` on the loaded model. A post-`call()` count is 16 either
-        way, because lazy build re-creates fresh variables; only the pre-call
-        count separates fixed from broken (measured: 0 before the fix, 16
-        after). Per-weight VALUES are compared too, not just outputs.
+        The discriminating quantity is the weight count BEFORE the first ``call()`` on the
+        loaded model, together with the per-weight VALUES. A model whose ``build`` does not
+        build its sub-layer tree reloads with zero weights, and Keras then creates fresh
+        variables on the first call, so a count taken after a call, shapes alone, or the
+        tensors whose trained value still equals their initializer (biases, batch-norm
+        statistics) all read as a pass while every kernel is a fresh random one.
+        ``build`` materializes the tree by tracing ``call`` (the D-006 anchor in
+        ``CapsNet.build``); this test fails if it does not.
         """
         # Create and compile model
         capsnet = CapsNet(
@@ -654,7 +637,7 @@ class TestCapsNet:
             # THE DISCRIMINATING MEASUREMENT, and it must run BEFORE the first
             # `call()` on the loaded model: a broken build lazily materializes
             # fresh variables on first call, so a post-call count is 16 either
-            # way. Measured 0 before the step-8 fix, 16 after.
+            # way. A model that did not build its tree holds 0 here, a built one 16.
             assert len(loaded_capsnet.weights) == 16, (
                 "loaded model has "
                 f"{len(loaded_capsnet.weights)} weights before its first call, "
@@ -694,21 +677,16 @@ class TestCapsNet:
     def test_model_save_load_with_reconstruction(
         self, num_classes, mnist_input_shape, sample_mnist_data
     ):
-        """Round-trip the RECONSTRUCTION path, whose decoder was never probed.
+        """Round-trip the RECONSTRUCTION path, whose decoder needs its own check.
 
-        The decoder is a `keras.Sequential`, and `Sequential` normally builds its
-        own sublayers by running them, so it was an open question whether it
-        rescued itself. It does NOT, and this test can fail: measured
-        2026-08-18 against a subclass that builds the whole tree EXCEPT the
-        decoder, `loaded.weights` holds 16 of 22 before the first call and the
-        six decoder tensors come back FRESH (decoder_hidden_1/kernel off by
-        0.521, decoder_hidden_2/kernel by 0.302, decoder_output/kernel by
-        0.219, the three biases by exactly the perturbation), which moves
-        `reconstructed` by 0.582 while `digit_caps` and `length` stay at exactly
-        0.0 -- so `test_model_save_load`, which runs `reconstruction=False`,
-        cannot see this at all. The decoder's explicit build in
-        `CapsNet._build_sublayer_tree` is therefore load-bearing, not
-        belt-and-braces.
+        The decoder is a ``keras.Sequential``, and ``Sequential`` normally builds its own
+        sublayers by running them, so it is not obvious that it needs building by the
+        model. It does: against a model that builds the whole tree EXCEPT the decoder,
+        ``loaded.weights`` holds 16 of 22 before the first call and the six decoder tensors
+        come back fresh, which moves ``reconstructed`` while ``digit_caps`` and ``length``
+        stay exactly equal -- so ``test_model_save_load``, which runs
+        ``reconstruction=False``, cannot see this at all. ``CapsNet.build`` creating and
+        building the decoder is therefore load-bearing.
         """
         capsnet = CapsNet(
             num_classes=num_classes,

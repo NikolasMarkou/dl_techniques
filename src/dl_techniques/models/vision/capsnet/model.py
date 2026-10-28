@@ -213,8 +213,25 @@ class CapsNet(keras.Model):
     :type reconstruction_weight: float
     :param name: Optional model name.
     :type name: Optional[str]
-    :param **kwargs: Additional keyword arguments passed to `keras.Model`.
+    :param kwargs: Additional keyword arguments passed to `keras.Model`.
     :raises ValueError: If any parameter is invalid or inconsistent.
+
+    Input shape:
+        4D tensor ``(batch, height, width, channels)``. The trunk uses ``valid``
+        convolutions, so the image must be large enough for the 9x9 block, the
+        5x5 blocks and the 9x9 stride-2 primary-capsule convolution (28x28 passes
+        two blocks).
+
+    Output shape:
+        A dict. ``digit_caps``: ``(batch, num_classes, digit_capsule_dim)``;
+        ``length``: ``(batch, num_classes)``; and, with reconstruction on,
+        ``reconstructed``: ``(batch, height, width, channels)``.
+
+    Example::
+
+        model = create_capsnet(num_classes=10, input_shape=(28, 28, 1))
+        outputs = model(images)                # {"digit_caps", "length", "reconstructed"}
+        probabilities = outputs["length"]      # (batch, 10)
     """
 
     def __init__(
@@ -897,7 +914,7 @@ def create_capsnet(
     :type optimizer: Union[str, keras.optimizers.Optimizer]
     :param learning_rate: Learning rate, applied when `optimizer` is given as a name.
     :type learning_rate: float
-    :param **kwargs: Additional keyword arguments passed to `CapsNet`.
+    :param kwargs: Additional keyword arguments passed to `CapsNet`.
     :return: A compiled `CapsNet` model.
     :rtype: CapsNet
     """

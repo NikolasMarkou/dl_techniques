@@ -212,15 +212,26 @@ class CapsNetV2(keras.Model):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param name: Model name.
     :type name: Optional[str]
-    :param **kwargs: Additional keyword arguments passed to `keras.Model`.
+    :param kwargs: Additional keyword arguments passed to `keras.Model`.
 
     :raises ValueError: If `num_classes` is not positive, `input_shape` is not a 3-tuple,
-    `stem_type` is not ``"legacy"`` or a supported ResNet variant, or `loss_type`
-    is neither ``"margin"`` nor ``"categorical_crossentropy"``.
+        `stem_type` is not ``"legacy"`` or a supported ResNet variant, or `loss_type`
+        is neither ``"margin"`` nor ``"categorical_crossentropy"``.
 
-    :note: `call` returns a single tensor of shape ``(batch, num_classes)``
-    with per-class capsule lengths in ``(0, 1)``. Use :meth:`reconstruct` separately for image reconstructions;
-    it is not part of the forward/loss path.
+    Input shape:
+        4D tensor ``(batch, height, width, channels)``; the legacy trunk's ``valid``
+        convolutions need an image large enough for its blocks and the primary-capsule
+        convolution.
+
+    Output shape:
+        ``(batch, num_classes)``: the per-class capsule lengths, in ``(0, 1)``. Use
+        :meth:`reconstruct` separately for image reconstructions; it is not part of the
+        forward/loss path.
+
+    Example::
+
+        model = create_capsnet_v2(num_classes=10, input_shape=(28, 28, 1), stem_type="legacy")
+        lengths = model(images)                # (batch, 10)
     """
 
     LEGACY_STEM = "legacy"
@@ -751,7 +762,7 @@ def create_capsnet_v2(
     :param optimizer: Supply an optimizer directly, skipping the built-in recipe.
         The learning-rate and schedule arguments are then unused.
     :type optimizer: Optional[keras.optimizers.Optimizer]
-    :param **model_kwargs: Forwarded to `CapsNetV2`.
+    :param model_kwargs: Forwarded to `CapsNetV2`.
     :return: A compiled `CapsNetV2`.
     :rtype: CapsNetV2
     :raises ValueError: If any argument `CapsNetV2` validates is invalid.
@@ -830,7 +841,7 @@ def create_capsnet_v2_pretrained(
     :type input_shape: Tuple[int, int, int]
     :param pretrained: A local ``.keras`` weights path, or True.
     :type pretrained: Union[bool, str]
-    :param **kwargs: Forwarded to `create_capsnet_v2`.
+    :param kwargs: Forwarded to `create_capsnet_v2`.
     :return: A compiled `CapsNetV2`.
     :rtype: CapsNetV2
     :raises ValueError: If `backbone` is not a supported ResNet variant.
