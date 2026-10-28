@@ -14,6 +14,14 @@ from typing import Any, Callable, Dict, Tuple, List, Optional, Sequence, Set
 
 from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+from dl_techniques.datasets.vision.imagenette import (
+    CROP_POLICIES,
+    IMAGENETTE_NUM_CLASSES,
+    IMAGENETTE_TFDS_NAME,
+    flip_and_reflect_crop,
+    random_resized_crop,
+    resize_and_centre_crop,
+)
 from dl_techniques.utils.logger import logger
 
 
@@ -152,10 +160,6 @@ def collect_image_paths(
 # against the pre-move source (verification.md, step 3).
 # See decisions.md D-006.
 
-# Verified present offline at $TFDS_DATA_DIR (D-007): 9469 train / 3925 validation, 10 classes.
-IMAGENETTE_TFDS_NAME = "imagenette/320px-v2"
-IMAGENETTE_NUM_CLASSES = 10
-
 DATASET_NUM_CLASSES: Dict[str, int] = {
     "imagenette": IMAGENETTE_NUM_CLASSES,
     "cifar10": 10,
@@ -166,77 +170,11 @@ SUPPORTED_DATASETS: Tuple[str, ...] = tuple(DATASET_NUM_CLASSES)
 # Element map function: (image, label) -> whatever the trainer wants the batch element to be.
 ElementMapFn = Callable[..., Any]
 
-#: ``crop_policy`` values of :func:`build_raw_image_dataset`. ``"resize"`` is the
-#: original behaviour every existing caller gets. ``"random_resized_crop"`` is the
-#: ImageNet-classifier recipe (Inception-style random-resized crop plus flip for
-#: training, resize-then-centre-crop for evaluation), imagenette only.
-CROP_POLICIES: Tuple[str, ...] = ("resize", "random_resized_crop")
-
-#: Evaluation centre-crop fraction of ``"random_resized_crop"``: the shorter side
-#: is resized to ``image_size / EVAL_CROP_FRACTION`` and the centre
-#: ``image_size`` square is kept (the torchvision 256 -> 224 ratio).
-EVAL_CROP_FRACTION = 0.875
-
-#: Area and aspect-ratio ranges of the training random-resized crop (the
-#: Inception / torchvision ``RandomResizedCrop`` defaults).
-RANDOM_RESIZED_CROP_AREA = (0.08, 1.0)
-RANDOM_RESIZED_CROP_RATIO = (3.0 / 4.0, 4.0 / 3.0)
-
-
-def _random_resized_crop(
-        image: tf.Tensor, image_size: int, seed: Optional[int] = None,
-) -> tf.Tensor:
-    """Random-resized crop plus horizontal flip of one ``[0, 1]`` image.
-
-    Samples a box covering :data:`RANDOM_RESIZED_CROP_AREA` of the image at an
-    aspect ratio in :data:`RANDOM_RESIZED_CROP_RATIO` (falling back to the whole
-    image when no box fits), resizes it to ``image_size`` square, then flips.
-    """
-    begin, size, _ = tf.image.sample_distorted_bounding_box(
-        tf.shape(image),
-        bounding_boxes=tf.zeros([0, 0, 4], tf.float32),
-        min_object_covered=0.0,
-        aspect_ratio_range=RANDOM_RESIZED_CROP_RATIO,
-        area_range=RANDOM_RESIZED_CROP_AREA,
-        max_attempts=10,
-        use_image_if_no_bounding_boxes=True,
-        seed=seed,
-    )
-    image = tf.slice(image, begin, size)
-    image = tf.image.resize(image, (image_size, image_size), method="bilinear")
-    return tf.image.random_flip_left_right(image, seed=seed)
-
-
-def _resize_and_centre_crop(image: tf.Tensor, image_size: int) -> tf.Tensor:
-    """Resize the shorter side to ``image_size / EVAL_CROP_FRACTION``, keep the centre square."""
-    shape = tf.cast(tf.shape(image)[:2], tf.float32)
-    scale = (image_size / EVAL_CROP_FRACTION) / tf.reduce_min(shape)
-    resized = tf.cast(tf.round(shape * scale), tf.int32)
-    image = tf.image.resize(image, resized, method="bilinear")
-    return tf.image.resize_with_crop_or_pad(image, image_size, image_size)
-
-
 def _normalization_constants(dataset: str) -> Tuple[List[float], List[float]]:
     """Per-channel mean/std for the [0,1]-scaled images of ``dataset``."""
     if dataset == "cifar10":
         return CIFAR10_MEAN, CIFAR10_STD
     return IMAGENET_MEAN, IMAGENET_STD
-
-
-def _augment(image: tf.Tensor, seed: Optional[int] = None) -> tf.Tensor:
-    """Random flip + reflect-pad-and-crop, on the [0,1] image, BEFORE normalization.
-
-    Augmentation runs pre-normalization on purpose (the ``train_vit`` D-006/D-007 lesson:
-    augmenting normalized data and then clipping to [0,1] saturates most pixels and silently
-    creates a train/val distribution mismatch). No ``clip_by_value`` here.
-    """
-    image = tf.image.random_flip_left_right(image, seed=seed)
-    image = tf.image.random_crop(
-        tf.pad(image, [[4, 4], [4, 4], [0, 0]], mode="REFLECT"),
-        size=tf.shape(image),
-        seed=seed,
-    )
-    return image
 
 
 def build_raw_image_dataset(
@@ -255,7 +193,12 @@ def build_raw_image_dataset(
         num_parallel_calls: int = tf.data.AUTOTUNE,
         prefetch_buffer: int = tf.data.AUTOTUNE,
 ) -> Tuple[tf.data.Dataset, int, int]:
-    """Build a raw-image ``tf.data`` pipeline for imagenette or cifar10.
+    """Build a raw-image ``tf.data`` pipeline for imagenette or cifar10, for the SELF-SUPERVISED trainers.
+
+    dino, BEiT MIM / tokenizer and ET masked completion feed unlabelled images through the
+    element-map slots below. The labelled classifiers (AlexNet, BEiT and ET classification)
+    read the same datasets through ``train.common.classification_data``, which holds out a
+    selection split; this function does not.
 
     The pipeline yields ``(image, label)`` — ``image`` float32, resized to
     ``(image_size, image_size, 3)``, scaled to ``[0, 1]`` and per-channel normalized; ``label``
@@ -420,9 +363,9 @@ def build_raw_image_dataset(
             if crop_policy == "resize":
                 image = tf.image.resize(image, (image_size, image_size), method="bilinear")
             elif random_crop:
-                image = _random_resized_crop(image, image_size, seed=seed)
+                image = random_resized_crop(image, image_size, seed=seed)
             else:
-                image = _resize_and_centre_crop(image, image_size)
+                image = resize_and_centre_crop(image, image_size)
             image = tf.ensure_shape(image, (image_size, image_size, 3))
             return image, tf.cast(element["label"], tf.int32)
 
@@ -456,7 +399,7 @@ def build_raw_image_dataset(
         # "random_resized_crop" augmented in `_decode`; only "resize" augments here.
         if augment and crop_policy == "resize":
             ds = ds.map(
-                lambda img, lbl: (_augment(img, seed=seed), lbl),
+                lambda img, lbl: (flip_and_reflect_crop(img, seed=seed), lbl),
                 num_parallel_calls=num_parallel_calls,
             )
 

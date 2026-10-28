@@ -43,6 +43,7 @@ import pytest  # noqa: E402
 import train.common.classification_data as classification_data  # noqa: E402
 import train.convnext.common as common  # noqa: E402
 from dl_techniques.datasets.vision.classification import get_spec  # noqa: E402
+from dl_techniques.datasets.vision.splits import split_sizes  # noqa: E402
 from train.common import json_numpy_default, run_summary  # noqa: E402
 
 N_TRAIN, N_TEST, MAX_SAMPLES = 400, 400, 240
@@ -756,9 +757,9 @@ def test_the_pool_check_uses_the_split_the_run_will_really_get() -> None:
     """The full dataset is checked too: a validation split of 0.99 leaves 500 of 50000."""
     with pytest.raises(ValueError, match="exceeds the 500 train samples"):
         common.TrainingConfig(dataset="cifar10", validation_split=0.99, batch_size=1000)
-    assert classification_data.split_sizes(50000, None, 0.1) == (45000, 5000)
-    assert classification_data.split_sizes(50000, 64, 0.1) == (58, 6)
-    assert classification_data.split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
+    assert split_sizes(50000, None, 0.1) == (45000, 5000)
+    assert split_sizes(50000, 64, 0.1) == (58, 6)
+    assert split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
 
 
 def test_every_per_dataset_table_covers_exactly_the_supported_datasets() -> None:

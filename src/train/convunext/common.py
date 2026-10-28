@@ -97,9 +97,9 @@ from train.convnext.common import (
     MONITOR,
     STATUS_DIVERGED,
     STATUS_OK,
-    split_sizes,
-    steps_per_epoch_for,
 )
+from dl_techniques.datasets.vision.splits import split_sizes
+from train.common.classification_data import steps_per_epoch_for
 from train.convunext.segmentation_viz import (
     SegmentationGridCallback,
     class_scores,

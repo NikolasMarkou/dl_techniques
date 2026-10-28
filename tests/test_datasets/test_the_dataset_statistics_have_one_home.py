@@ -103,6 +103,9 @@ def test_the_specs_reference_the_one_object():
     spec = classification.CLASSIFICATION_DATASETS
     assert spec["imagenet"].mean is imagenet2012.IMAGENET_MEAN
     assert spec["imagenet"].std is imagenet2012.IMAGENET_STD
+    # Imagenette's images are ImageNet's, so it normalizes with the same pair.
+    assert spec["imagenette"].mean is imagenet2012.IMAGENET_MEAN
+    assert spec["imagenette"].std is imagenet2012.IMAGENET_STD
     for name, prefix in (("cifar10", "CIFAR10"), ("cifar100", "CIFAR100"), ("mnist", "MNIST")):
         assert spec[name].mean is getattr(classification, f"{prefix}_MEAN")
         assert spec[name].std is getattr(classification, f"{prefix}_STD")

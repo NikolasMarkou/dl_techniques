@@ -18,6 +18,7 @@ import tensorflow as tf  # noqa: E402
 
 import dl_techniques.datasets.vision.classification as classification  # noqa: E402
 import train.common.classification_data as cd  # noqa: E402
+from tests.classification_fakes import use_fake_imagenette  # noqa: E402
 from tests.imagenet_fake_tree import (  # noqa: E402
     PER_CLASS,
     VAL_CLASSES,
@@ -411,3 +412,94 @@ def test_the_selection_flags_can_be_trimmed_to_what_a_trainer_uses() -> None:
     assert parse(imagenet=False) == {"validation_split", "max_samples"}
     assert "validation_split" not in parse(in_memory=False)
     assert "eval_samples" not in parse(figures=False)
+
+
+# ---------------------------------------------------------------------
+# Imagenette, on the fake record seam (60 train jpegs, 20 validation jpegs)
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def imagenette_records(monkeypatch):
+    return use_fake_imagenette(monkeypatch)
+
+
+def _imagenette(**kwargs):
+    settings = dict(batch_size=6, seed=3, image_size=24, normalize="unit", eval_samples=4)
+    settings.update(kwargs)
+    return cd.load_classification_data("imagenette", **settings)
+
+
+def test_imagenette_selects_on_a_seeded_slice_of_train_and_tests_on_the_validation_records(
+        imagenette_records) -> None:
+    data = _imagenette()
+    assert (data.n_train, data.n_select, data.n_test) == (54, 6, 20)
+    assert data.steps_per_epoch == 9 and data.arrays is None
+    assert data.input_shape == (24, 24, 3) and data.num_classes == 10
+    assert data.selection_split == "validation_split=0.1 of the train records (seeded permutation)"
+    assert data.test_split == "the labelled validation split"
+    assert data.class_names[:2] == ["tench", "English springer"]
+    assert data.x_fig.shape == (4, 24, 24, 3) and data.y_fig.shape == (4,)
+
+
+def test_imagenette_honours_the_split_the_cap_and_the_seed(imagenette_records) -> None:
+    assert _imagenette(validation_split=0.25, batch_size=3).n_select == 15
+    capped = _imagenette(max_samples=15, batch_size=3)
+    assert (capped.n_train, capped.n_select, capped.n_test) == (14, 1, 15)
+    first = next(iter(_imagenette(seed=1).select_ds))[0].numpy()
+    again = next(iter(_imagenette(seed=1).select_ds))[0].numpy()
+    other = next(iter(_imagenette(seed=2).select_ds))[0].numpy()
+    np.testing.assert_array_equal(first, again)
+    assert not np.array_equal(first, other)
+
+
+def test_imagenette_labels_normalization_and_figures(imagenette_records) -> None:
+    data = _imagenette(labels="one_hot", normalize="standardize", eval_samples=0)
+    x, y = next(iter(data.train_ds))
+    assert y.shape == (6, 10) and (y.numpy().sum(axis=1) == 1).all()
+    assert x.numpy().min() < 0.0 or x.numpy().max() > 1.0, "standardized, not unit"
+    assert data.x_fig.shape == (0, 24, 24, 3) and data.y_fig.shape == (0, 10)
+    np.testing.assert_allclose(data.mean, classification.get_spec("imagenette").mean, rtol=1e-6)
+
+
+def test_imagenette_passes_the_crop_policy_and_the_augmentation_switch(
+        imagenette_records, monkeypatch) -> None:
+    seen = []
+    real = cd.load_imagenette
+
+    def spy(split, config):
+        seen.append((split, config.crop_policy, config.augment))
+        return real(split, config)
+
+    monkeypatch.setattr(cd, "load_imagenette", spy)
+    _imagenette(crop_policy="resize", imagenet_augment=False)
+    assert {(policy, augment) for _, policy, augment in seen} == {("resize", False)}
+    seen.clear()
+    _imagenette()
+    assert {(policy, augment) for _, policy, augment in seen} == {("random_resized_crop", True)}
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(holdout_per_class=5), "holdout_per_class=5 does not apply to 'imagenette'"),
+    (dict(imagenet_augment_color=True), "imagenet_augment_color does not apply to 'imagenette'"),
+    (dict(augment=cd.flip_pad_crop()), "augment applies to in-memory datasets"),
+    (dict(resize=64), "resize applies to in-memory datasets"),
+    (dict(channels=1), "channels=1 is not available for 'imagenette'"),
+    (dict(validation_split=0.0), "strictly inside"),
+    (dict(crop_policy="centre"), "Unknown crop_policy"),
+])
+def test_imagenette_refuses_an_option_that_does_not_apply_naming_it(
+        imagenette_records, kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _imagenette(**kwargs)
+
+
+def test_imagenette_reads_only_the_two_record_splits(imagenette_records) -> None:
+    _imagenette()
+    assert set(imagenette_records) == {"train", "validation"}
+
+
+def test_a_trainer_can_use_the_spec_to_size_its_head() -> None:
+    spec = classification.get_spec("imagenette")
+    assert (spec.num_classes, spec.train_size, spec.source, spec.in_memory) == (
+        10, 9469, "records", False)

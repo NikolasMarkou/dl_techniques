@@ -100,9 +100,9 @@ from train.common.classification_data import (
     ClassificationData,
     flip_pad_crop,
     load_classification_data,
-    split_sizes,
     steps_per_epoch_for,
 )
+from dl_techniques.datasets.vision.splits import split_sizes
 from train.common.classification_viz import TrainingDashboardCallback
 from train.common.conformal import add_conformal_arguments, run_conformal
 

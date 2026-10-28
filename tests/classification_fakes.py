@@ -8,8 +8,10 @@ one batch of 4 after the 10% selection cut.
 """
 
 import numpy as np
+import tensorflow as tf
 
 import dl_techniques.datasets.vision.classification as classification
+import dl_techniques.datasets.vision.imagenette as imagenette
 import train.common.classification_data as classification_data
 
 
@@ -63,3 +65,41 @@ def use_raw_from_unit(monkeypatch, load, **kwargs) -> None:
     """Install :func:`raw_from_unit` of ``load`` on the raw-array seam (``min_train=0`` keeps
     the fake's rows exactly, for a test that audits every pixel)."""
     monkeypatch.setattr(classification_data, "_load_raw", raw_from_unit(load, **kwargs))
+
+
+# ---------------------------------------------------------------------
+# Imagenette records
+# ---------------------------------------------------------------------
+
+IMAGENETTE_FAKE_TRAIN = 60
+IMAGENETTE_FAKE_TEST = 20
+_IMAGE_SIZES = [(40, 50), (48, 36), (44, 44)]
+
+
+def _jpeg(value: int, size) -> bytes:
+    """Mean colour ``value`` with a horizontal ramp, so a crop or a flip changes the pixels."""
+    ramp = (np.arange(size[1]) - size[1] / 2.0) * 0.1
+    image = np.clip(value + ramp[None, :, None] + np.zeros((*size, 3)), 0, 255).astype(np.uint8)
+    return tf.io.encode_jpeg(tf.constant(image), quality=100).numpy()
+
+
+def imagenette_fake_records(n: int, offset: int):
+    """``n`` encoded jpegs of mean colour ``4 * i + offset`` and labels cycling the 10 classes."""
+    images = np.empty(n, dtype=object)
+    for i in range(n):
+        images[i] = _jpeg(4 * i + offset, _IMAGE_SIZES[i % len(_IMAGE_SIZES)])
+    return images, (np.arange(n) % 10).astype(np.int32)
+
+
+def use_fake_imagenette(monkeypatch, n_train: int = IMAGENETTE_FAKE_TRAIN,
+                        n_test: int = IMAGENETTE_FAKE_TEST):
+    """Replace the TFDS record reader with in-memory jpegs; returns the list of splits read."""
+    calls = []
+
+    def read(split, data_dir=None):
+        calls.append(split)
+        return (imagenette_fake_records(n_train, 0) if split == "train"
+                else imagenette_fake_records(n_test, 2))
+
+    monkeypatch.setattr(imagenette, "read_imagenette_records", read)
+    return calls

@@ -20,6 +20,10 @@ from dl_techniques.datasets.vision.imagenet2012 import (
     IMAGENET_MEAN,
     IMAGENET_STD,
 )
+from dl_techniques.datasets.vision.imagenette import (
+    IMAGENETTE_CLASS_NAMES,
+    IMAGENETTE_NUM_CLASSES,
+)
 
 # ---------------------------------------------------------------------
 # Per-channel normalisation constants. The CIFAR-10 pair is computed from the CIFAR-10
@@ -98,7 +102,9 @@ class DatasetSpec:
     :param std: Per-channel standard deviation of the same.
     :param class_names: One name per class, or ``None`` when they come from the data
         (ImageNet: the wnids of the extracted tree).
-    :param in_memory: ``True`` when the dataset is read whole into arrays (MNIST, CIFAR).
+    :param source: Where the images come from: ``"arrays"`` (read whole into memory: MNIST,
+        CIFAR), ``"records"`` (prepared TFDS records: Imagenette) or ``"tree"`` (an extracted
+        directory tree: ImageNet).
     :param train_size: Number of training images (before any held-out slice).
     """
 
@@ -108,8 +114,13 @@ class DatasetSpec:
     mean: Tuple[float, ...]
     std: Tuple[float, ...]
     class_names: Optional[Tuple[str, ...]]
-    in_memory: bool
+    source: str
     train_size: int
+
+    @property
+    def in_memory(self) -> bool:
+        """``True`` when the dataset is read whole into arrays (MNIST, CIFAR)."""
+        return self.source == "arrays"
 
     def class_names_for(self, num_classes: int) -> List[str]:
         """The class names, or ``class_N`` placeholders when ``num_classes`` is not the
@@ -121,14 +132,18 @@ class DatasetSpec:
 
 CLASSIFICATION_DATASETS: Dict[str, DatasetSpec] = {
     "mnist": DatasetSpec(
-        "mnist", 10, (28, 28, 1), MNIST_MEAN, MNIST_STD, MNIST_CLASS_NAMES, True, 60000),
+        "mnist", 10, (28, 28, 1), MNIST_MEAN, MNIST_STD, MNIST_CLASS_NAMES, "arrays", 60000),
     "cifar10": DatasetSpec(
-        "cifar10", 10, (32, 32, 3), CIFAR10_MEAN, CIFAR10_STD, CIFAR10_CLASS_NAMES, True, 50000),
+        "cifar10", 10, (32, 32, 3), CIFAR10_MEAN, CIFAR10_STD, CIFAR10_CLASS_NAMES, "arrays", 50000),
     "cifar100": DatasetSpec(
-        "cifar100", 100, (32, 32, 3), CIFAR100_MEAN, CIFAR100_STD, CIFAR100_CLASS_NAMES, True, 50000),
+        "cifar100", 100, (32, 32, 3), CIFAR100_MEAN, CIFAR100_STD, CIFAR100_CLASS_NAMES, "arrays", 50000),
     "imagenet": DatasetSpec(
         "imagenet", IMAGENET2012_NUM_CLASSES, (224, 224, 3), IMAGENET_MEAN, IMAGENET_STD,
-        None, False, 1281167),
+        None, "tree", 1281167),
+    # Imagenette's images are ImageNet's, so ImageNet's statistics apply.
+    "imagenette": DatasetSpec(
+        "imagenette", IMAGENETTE_NUM_CLASSES, (224, 224, 3), IMAGENET_MEAN, IMAGENET_STD,
+        IMAGENETTE_CLASS_NAMES, "records", 9469),
 }
 
 
