@@ -1262,6 +1262,21 @@ class TestCapsNetBuildAndShapes(_MnistFixtures):
         assert len(explicit.weights) == (22 if reconstruction else 16)
         assert explicit.count_params() == lazy.count_params() > 0
 
+    def test_without_batch_norm_or_decoder_a_model_holds_eight_weights_before_its_first_call(
+        self, mnist_input_shape, tmp_path
+    ):
+        """Two biased convolutions, the primary capsule convolution, the routing matrix and its
+        bias: 8 weights, built and after a ``.keras`` round trip, before any ``call()``."""
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=False, use_batch_norm=False
+        )
+        capsnet.build((None, *mnist_input_shape))
+        assert len(capsnet.weights) == 8
+
+        path = str(tmp_path / "no_bn.keras")
+        capsnet.save_model(path)
+        assert len(CapsNet.load_model(path).weights) == 8
+
     def test_build_is_idempotent(self, mnist_input_shape):
         capsnet = CapsNet(num_classes=10, input_shape=mnist_input_shape, reconstruction=False)
         capsnet.build((None, *mnist_input_shape))
