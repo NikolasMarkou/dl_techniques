@@ -67,6 +67,7 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import require_channel_count
 
 
 # Layer-by-layer set_weights rather than load_weights(by_name=True).
@@ -1017,7 +1018,9 @@ def load_pretrained_checkpoint(
     :returns: The :class:`TransferReport` of the transfer, for a caller that
         wants to inspect what the head kept.
     :raises FileNotFoundError: *weights_path* does not exist.
-    :raises ValueError: the archive's configuration differs from the model's
+    :raises ValueError: *model* is not built and *build_shape* has no channel count (its
+        last axis is ``None``); the message names ``input_shape`` and the value. Also: the
+        archive's configuration differs from the model's
         (the message names each key with both values), the head would be copied
         but its configuration differs, the build or the transfer failed (chained
         to the original error), a layer outside the head was not restored, or no
@@ -1025,6 +1028,8 @@ def load_pretrained_checkpoint(
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
+    if not model.built:
+        require_channel_count(build_shape)
 
     # DECISION plan-2026-10-26T125959-7af851e5/D-041: compare the archive's own
     # config before anything is built or copied. Do NOT rely on the layer check

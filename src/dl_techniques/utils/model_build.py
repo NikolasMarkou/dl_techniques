@@ -343,4 +343,28 @@ def validate_rates(**rates: float) -> None:
         if not 0.0 <= value < 1.0:
             raise ValueError(f"{name} must be in [0, 1), got {value}")
 
+
+def require_channel_count(input_shape: Any) -> None:
+    """Refuse an ``input_shape`` whose last axis is unknown, naming the argument and the value.
+
+    Interface contract (call sites: ``load_pretrained_checkpoint``, before it builds an
+    unbuilt model, and the ``from_variant`` of the Clifford pair, which builds whenever
+    it is given a shape): ``input_shape`` is the unbatched shape a channels-last model is
+    built at. The spatial axes may be ``None``; the last axis may not, because the first
+    convolution derives its kernel from it (``None % groups``, reported by Keras as
+    "unsupported operand type(s) for %" with no mention of the shape). An empty shape is
+    refused too. Raises nothing for a shape with a known channel count.
+
+    :param input_shape: The shape without the batch axis.
+    :raises ValueError: If the shape is empty or its last axis is ``None``; the message
+        carries ``input_shape`` and the tuple.
+    """
+    shape = tuple(input_shape)
+    if not shape or shape[-1] is None:
+        raise ValueError(
+            f"input_shape must give the channel count, its last axis, to build the model; "
+            f"got input_shape={shape} (for example (None, None, 3))"
+        )
+
+
 # ---------------------------------------------------------------------

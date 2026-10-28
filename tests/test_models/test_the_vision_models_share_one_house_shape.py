@@ -520,6 +520,31 @@ def _routes_to_its_own_slot(call: ast.Call, name: str, slots: Optional[List[str]
     return by_keyword or by_position
 
 
+def _forwards_only_its_own_arguments(fn: ast.FunctionDef, call: ast.Call,
+                                     names: Sequence[str]) -> Violations:
+    """The ways ``call`` can send ``from_variant`` something other than what the caller gave.
+
+    The splat must be the bare ``**<kwargs name>``: ``**{**kwargs, "include_top": True}`` or
+    ``**dict(kwargs, ...)`` returns a model the caller did not ask for, and a name-only scan
+    of the call cannot tell it from a forward. Every other argument must be one of the
+    factory's own parameters passed on by its own name.
+    """
+    out = []
+    bare = fn.args.kwarg.arg if fn.args.kwarg else None
+    splats = [k for k in call.keywords if k.arg is None]
+    if not (len(splats) == 1 and isinstance(splats[0].value, ast.Name) and splats[0].value.id == bare):
+        out.append(f"{fn.name} does not forward its extras as the bare `**{bare}`")
+    own = [k.arg for k in call.keywords if k.arg is not None
+           and not (isinstance(k.value, ast.Name) and k.value.id == k.arg and k.arg in names)]
+    if own:
+        out.append(f"{fn.name} passes {own} that are not its own parameters forwarded by name")
+    positional = [i for i, arg in enumerate(call.args)
+                  if not (isinstance(arg, ast.Name) and arg.id in names)]
+    if positional:
+        out.append(f"{fn.name} passes positional argument(s) {positional} that are not its own parameters")
+    return out
+
+
 def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violations:
     factories = [n for n in ast.parse(source).body
                  if isinstance(n, ast.FunctionDef) and n.name.startswith("create_")]
@@ -545,8 +570,9 @@ def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violatio
         if not _is_delegating_return(fn, module.classes):
             out.append(f"{fn.name} is not one `return Class.from_variant(..., **kwargs)`")
         else:
-            forwarded = {n.id for n in ast.walk(_body_without_docstring(fn)[0].value)
-                         if isinstance(n, ast.Name)}
+            call = _body_without_docstring(fn)[0].value
+            out += _forwards_only_its_own_arguments(fn, call, names)
+            forwarded = {n.id for n in ast.walk(call) if isinstance(n, ast.Name)}
             taken = names + ([fn.args.kwarg.arg] if fn.args.kwarg else [])
             unsent = [p for p in taken if p not in forwarded]
             if unsent:
@@ -1825,6 +1851,18 @@ PLANTED: Dict[str, Dict[str, str]] = {
             "                            pretrained=pretrained, **kwargs)",
             "Toy.from_variant(variant, num_classes, input_shape=input_shape,\n"
             "                            pretrained=pretrained, **kwargs)"),
+        "a factory that overrides its caller through the splat": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            'pretrained=pretrained, **{**kwargs, "include_top": True})\n'),
+        "a factory that rebuilds the splat from a call": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            "pretrained=pretrained, **dict(kwargs, include_top=True))\n"),
+        "a factory that forces a keyword beside the splat": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            "pretrained=pretrained, include_top=True, **kwargs)\n"),
+        "a factory that passes a positional literal": _plant(
+            "Toy.from_variant(variant, num_classes=num_classes,",
+            "Toy.from_variant(variant, 7, num_classes=num_classes,"),
         "a factory that ignores its arguments": _plant(
             "    return Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
             "                            pretrained=pretrained, **kwargs)\n",

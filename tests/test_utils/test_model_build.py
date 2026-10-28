@@ -166,3 +166,28 @@ class TestValidateRates:
 
         with pytest.raises(ValueError, match="dropout_rate must be in"):
             validate_rates(dropout_rate=2.0, spatial_dropout_rate=-1.0)
+
+
+class TestRequireChannelCount:
+    """``require_channel_count``: the last axis of an unbatched input shape must be known."""
+
+    @pytest.mark.parametrize("shape", [(32, 48, 3), (None, None, 3), [None, None, 1], (3,)])
+    def test_a_known_channel_count_passes_whatever_the_spatial_axes_are(self, shape):
+        from dl_techniques.utils.model_build import require_channel_count
+
+        require_channel_count(shape)
+
+    @pytest.mark.parametrize("shape", [(None, None, None), (32, 48, None), (None,), ()])
+    def test_an_unknown_channel_count_is_refused_naming_the_argument_and_the_tuple(self, shape):
+        from dl_techniques.utils.model_build import require_channel_count
+
+        with pytest.raises(ValueError, match="input_shape") as caught:
+            require_channel_count(shape)
+        assert f"input_shape={tuple(shape)}" in str(caught.value)
+
+    def test_only_the_last_axis_counts(self):
+        from dl_techniques.utils.model_build import require_channel_count
+
+        require_channel_count((None, 7))
+        with pytest.raises(ValueError):
+            require_channel_count((7, None))

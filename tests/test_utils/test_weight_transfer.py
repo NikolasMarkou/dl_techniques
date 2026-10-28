@@ -1052,6 +1052,26 @@ class TestLoadPretrainedCheckpoint:
             load_pretrained_checkpoint(tgt, missing, _BUILD_SHAPE)
         assert not tgt.built, "a missing file is refused before any build"
 
+    @pytest.mark.parametrize("shape", [(None,), (4, None), ()])
+    def test_an_unbuilt_model_without_a_channel_count_is_refused_by_name(self, tmp_path, shape):
+        """The build needs a known last axis; the failure used to be the model's own ``%``-on-``None``.
+
+        A channel-less ``input_shape`` reached the first convolution as ``None % groups`` and
+        came back as "unsupported operand type(s) for %" wrapped in a load error that named
+        neither the argument nor the value.
+        """
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(built=False)
+        with pytest.raises(ValueError, match="input_shape") as caught:
+            load_pretrained_checkpoint(tgt, ckpt, shape)
+        assert str(shape) in str(caught.value)
+        assert not tgt.built, "the check comes before the build"
+
+    def test_a_built_model_needs_no_channel_count_because_it_is_not_built(self, tmp_path):
+        ckpt = _save(_tiny(), tmp_path)
+        report = load_pretrained_checkpoint(_tiny(), ckpt, (None,))
+        assert report.num_loaded == 3
+
     def test_a_load_that_restores_nothing_raises_and_names_the_path(self, tmp_path):
         """No layer restored, none of them a head the caller expects to differ."""
         ckpt = _save(_tiny(width=6), tmp_path)
@@ -1565,6 +1585,25 @@ class TestAPretrainedLoadComparesAHeadThatWouldBeCopied:
         assert "classification_head" in message, message
         for name, weights in _by_layer_name(tgt).items():
             assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_a_layer_is_a_head_only_when_the_whole_name_matches_the_head_pattern(self, tmp_path):
+        """A trunk layer called ``classification_head_proj`` is not a head (the layer rule says so).
+
+        The head comparison reads ``head_pattern`` the same way: a prefix match would take
+        every layer whose name merely starts like the head's for the head, and refuse a load
+        over a configuration that no head holds.
+        """
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(), ckpt, _BUILD_SHAPE, head_pattern=r"classification"
+        )
+        assert sorted(report.loaded) == ["block_0", "classification_head", "stem"]
+
+        with pytest.raises(ValueError, match="head_config_overrides"):
+            load_pretrained_checkpoint(
+                _tiny(), ckpt, _BUILD_SHAPE, head_pattern=r"classification_head"
+            )
 
     def test_the_same_overrides_on_both_sides_load(self, tmp_path):
         ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)

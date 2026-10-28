@@ -166,3 +166,86 @@ def test_a_rate_outside_zero_one_is_refused_naming_the_argument_and_its_value(
 def test_the_rate_zero_and_a_rate_just_below_one_are_accepted(cls, filename, block, name) -> None:
     cls(**RATE_TINY, **{name: 0.0})
     cls(**RATE_TINY, **{name: 0.999})
+
+
+def _weights_by_relative_path(model: keras.Model) -> dict:
+    return {w.path.split("/", 1)[1]: w for w in model.weights}
+
+
+def _head_weights(model: keras.Model) -> dict:
+    return {w.path.split("classification_head/")[1]: keras.ops.convert_to_numpy(w).astype("float64")
+            for w in model.weights if "classification_head/" in w.path}
+
+
+def _layer_norm(x: np.ndarray, gamma: np.ndarray, beta: np.ndarray, epsilon: float) -> np.ndarray:
+    return (x - x.mean(-1, keepdims=True)) / np.sqrt(x.var(-1, keepdims=True) + epsilon) * gamma + beta
+
+
+@pytest.mark.parametrize(("cls", "filename", "block"), LEAVES)
+def test_the_head_is_average_pool_then_layer_norm_then_one_linear_layer(cls, filename, block) -> None:
+    """The logits equal the reference head (``self.head(self.norm(x.mean([-2, -1])))``) by hand.
+
+    Nothing else pins the head's pooling: a head that max-pools, or normalizes at another
+    epsilon, or grows a hidden block, still has the same output shape and the same weight
+    layout as far as the shape-only sweeps can tell. The head weights are randomized so no
+    layer is the identity, and the trunk of a headless sibling is given the same weights, so
+    the features the head sees are known without reading the model's own head.
+    """
+    keras.utils.set_random_seed(0)
+    model = cls(**TINY)
+    trunk = cls(**{**TINY, "include_top": False})
+    x = keras.random.normal((3, 32, 32, 3))
+    model(x)
+    trunk(x)
+    rng = np.random.default_rng(1)
+    for w in model.weights:
+        if "classification_head/" in w.path:
+            w.assign(rng.normal(size=w.shape).astype("float32"))
+    donor = _weights_by_relative_path(model)
+    for relative, w in _weights_by_relative_path(trunk).items():
+        w.assign(donor[relative])
+    features = keras.ops.convert_to_numpy(trunk(x)).astype("float64")
+    head = _head_weights(model)
+    assert set(head) == {"pooled_norm/gamma", "pooled_norm/beta", "classifier/kernel",
+                         "classifier/bias"}, "the default head is a norm and one linear layer"
+
+    def by_hand(pooled: np.ndarray, epsilon: float) -> np.ndarray:
+        normed = _layer_norm(pooled, head["pooled_norm/gamma"], head["pooled_norm/beta"], epsilon)
+        return normed @ head["classifier/kernel"] + head["classifier/bias"]
+
+    actual = keras.ops.convert_to_numpy(model(x))
+    np.testing.assert_allclose(actual, by_hand(features.mean(axis=(1, 2)), 1e-6),
+                               rtol=1e-4, atol=1e-5)
+    # The controls: each wrong head would have been told apart by this comparison.
+    max_pooled = by_hand(features.max(axis=(1, 2)), 1e-6)
+    assert np.abs(actual - max_pooled).max() > 1e-3, "control: max pooling gives the same logits"
+    coarse_epsilon = by_hand(features.mean(axis=(1, 2)), 1e-3)
+    assert np.abs(actual - coarse_epsilon).max() > 1e-4, "control: epsilon 1e-3 gives the same logits"
+
+
+@pytest.mark.parametrize("stochastic_mode", ["depth", "gradient"])
+@pytest.mark.parametrize(("cls", "filename", "block"), LEAVES)
+def test_the_drop_path_rates_ramp_linearly_across_all_blocks_not_within_a_stage(
+        cls, filename, block, stochastic_mode) -> None:
+    """The i-th of ``sum(depths)`` blocks, counted across stages, has rate ``linspace(0, r, n)[i]``.
+
+    ``test_stochastic_depth`` of each model only reads output shapes. A per-stage ramp (each
+    stage restarting at 0) builds the same layers with the same names and shapes.
+    """
+    depths, rate = [2, 1, 3], 0.3
+    model = cls(depths=depths, dims=[8, 16, 16], num_classes=4, input_shape=(32, 32, 3),
+                drop_path_rate=rate, stochastic_mode=stochastic_mode, strides=2)
+    ramp = np.linspace(0.0, rate, sum(depths))
+    seen = []
+    for stage_index, stage in enumerate(model.stages):
+        assert len(stage) == depths[stage_index]
+        for block_index, entry in enumerate(stage):
+            name = f"stage{stage_index + 1}_block{block_index + 1}"
+            gate = entry["drop_path"]
+            if gate is None:  # the ramp starts at 0, and a zero rate creates no layer
+                seen.append(0.0)
+            else:
+                assert gate.name == f"{name}_drop_path"
+                seen.append(gate.drop_path_rate)
+    np.testing.assert_allclose(seen, ramp, rtol=0, atol=1e-6)
+    assert seen[0] == 0.0 and seen[-1] == pytest.approx(rate), "control: the ramp spans 0 to the rate"

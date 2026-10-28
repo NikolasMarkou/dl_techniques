@@ -968,6 +968,46 @@ def test_a_live_object_in_head_config_overrides_is_refused_by_name(key) -> None:
     assert json.loads(json.dumps(model.get_config()))["head_config_overrides"] == serialized
 
 
+#: Shapes with no channel count: the first convolution would meet ``None % groups``.
+_CHANNELLESS_SHAPES = [(None, None, None), (32, 48, None)]
+
+
+@pytest.mark.parametrize("shape", _CHANNELLESS_SHAPES, ids=str)
+@pytest.mark.parametrize("key", MIGRATED_LOADER_KEYS)
+def test_a_pretrained_load_without_a_channel_count_is_refused_naming_input_shape(
+        key, shape, tmp_path) -> None:
+    """``from_variant(pretrained=path, input_shape=(None, None, None))`` cannot build the model.
+
+    It failed as "unsupported operand type(s) for %" (wrapped in a load error for most
+    families, bare for the Clifford pair), which names neither the argument nor its value.
+    """
+    c = classifier(key)
+    path = _saved(c.make(), c, tmp_path / "donor.keras")
+    with pytest.raises(ValueError, match="input_shape") as caught:
+        c.from_variant(pretrained=path, input_shape=shape)
+    assert str(shape) in str(caught.value), str(caught.value)
+
+
+#: The classifiers that build in ``from_variant`` or the constructor whenever they have a shape
+#: (the others store ``input_shape`` and build at the first call or at a pretrained load).
+_BUILD_AT_CONSTRUCTION = ("cliffordnet", "hierarchical", "squeezenet_v1", "squeezenet_v2")
+
+
+@pytest.mark.parametrize("key", _BUILD_AT_CONSTRUCTION)
+def test_a_model_that_builds_at_construction_refuses_a_channelless_input_shape_by_name(key) -> None:
+    """Without a checkpoint too: the build is the constructor's (SqueezeNet) or ``from_variant``'s."""
+    with pytest.raises(ValueError, match="input_shape") as caught:
+        classifier(key).from_variant(input_shape=(None, None, None))
+    assert "(None, None, None)" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", [k for k in CLASSIFIER_KEYS if k not in _BUILD_AT_CONSTRUCTION])
+def test_a_model_that_builds_later_stores_a_channelless_input_shape_unbuilt(key) -> None:
+    """The control of the row above: these classifiers have nothing to refuse until they build."""
+    model = classifier(key).from_variant(input_shape=(None, None, None))
+    assert not model.built
+
+
 def _built(c: Classifier, **knobs: Any) -> keras.Model:
     model = c.make(**knobs)
     model(_images(*c.input_shape))
@@ -1001,6 +1041,51 @@ def test_include_top_is_a_real_bool(key: str) -> None:
     assert json.loads(json.dumps(model.get_config()))["include_top"] is False
     if c.head_attribute:
         assert model.classification_head is None
+
+
+#: ``key -> the module-level factory`` of each classifier (house shape H9).
+FACTORY_NAMES: Dict[str, str] = {
+    "resnet": "create_resnet", "cliffordnet": "create_cliffordnet",
+    "hierarchical": "create_hierarchical_cliffordnet",
+    "mobilenet_v1": "create_mobilenetv1", "mobilenet_v2": "create_mobilenetv2",
+    "mobilenet_v3": "create_mobilenetv3", "mobilenet_v4": "create_mobilenetv4",
+    "convnext_v1": "create_convnext_v1", "convnext_v2": "create_convnext_v2",
+    "rad_convnet": "create_rad_convnet",
+    "squeezenet_v1": "create_squeezenet_v1", "squeezenet_v2": "create_squeezenodule_net_v2",
+}
+
+
+def test_every_classifier_module_defines_exactly_the_factories_this_file_calls() -> None:
+    assert set(FACTORY_NAMES) == set(CLASSIFIER_KEYS)
+    for module in {c.module for c in CLASSIFIERS}:
+        defined = {name for name, obj in vars(importlib.import_module(module)).items()
+                   if name.startswith("create_") and inspect.isfunction(obj)
+                   and obj.__module__ == module}
+        called = {FACTORY_NAMES[c.key] for c in CLASSIFIERS if c.module == module}
+        assert defined == called, (module, defined, called)
+
+
+@pytest.mark.parametrize("key", CLASSIFIER_KEYS)
+def test_a_factory_gives_its_caller_the_include_top_the_caller_asked_for(key: str) -> None:
+    """``create_*(include_top=False)`` is headless, and ``include_top=True`` is headed.
+
+    The factory forwards the caller's extras to ``from_variant``; a factory that forces the
+    argument (``**{**kwargs, "include_top": True}``) hands a headed model to every caller that
+    asked for a backbone, and only a trainer that happened to call it caught that before.
+    """
+    c = classifier(key)
+    factory = getattr(importlib.import_module(c.module), FACTORY_NAMES[key])
+    for requested in (False, True):
+        model = factory(c.variant, num_classes=NUM_CLASSES, input_shape=c.input_shape,
+                        include_top=requested, **c.tiny)
+        if c.head_attribute:
+            assert (model.classification_head is not None) is requested, (
+                f"{FACTORY_NAMES[key]}(include_top={requested}) gave include_top="
+                f"{model.include_top}")
+        model(_images(*c.input_shape))
+        assert bool(_head_paths(c.head_markers, model)) is requested, (
+            f"{FACTORY_NAMES[key]}(include_top={requested}) built "
+            f"{'a head' if requested is False else 'no head'}")
 
 
 def _head_paths(markers: Sequence[str], model: keras.Model) -> List[str]:
@@ -1821,6 +1906,152 @@ def test_direct_children_lists_every_direct_sublayer_weighted_or_not() -> None:
     model.drop = keras.layers.Dropout(0.1, name="dropout_0")
     model(np.ones((2, 5), dtype="float32"))
     assert direct_children(model) == ["body", "classification_head", "dropout_0"]
+
+
+# ---------------------------------------------------------------------------
+# The numbered names are exactly the names the model's own depths give
+# ---------------------------------------------------------------------------
+
+#: Three stages of three different depths, so a stage index swapped with a block index
+#: (``stage{B}_block{S}``) names a block that does not exist. The patterns above accept
+#: ANY index (``stage[1-9]\d*_block[1-9]\d*``), so a block counted from 2 or a
+#: downsampler counted from 1 passed them; the sets below do not.
+_DEPTHS = [2, 1, 3]
+_DIMS = [8, 16, 16]
+
+
+def _staged_blocks(depths: Sequence[int]) -> set:
+    """``stage{S}_block{B}`` with S and B counted from 1 (N-3), one per block of ``depths``."""
+    return {f"stage{s}_block{b}" for s, depth in enumerate(depths, 1) for b in range(1, depth + 1)}
+
+
+def _flat_blocks(count: int) -> set:
+    """``block_{i}`` counted from 0 (N-2)."""
+    return {f"block_{i}" for i in range(count)}
+
+
+def _downsamplers(stages: int, roles: Sequence[str]) -> set:
+    """``downsample_{i}_<role>`` for i from 0: ``stages - 1`` downsamplers sit between the stages (N-4)."""
+    return {f"downsample_{i}_{role}" for i in range(stages - 1) for role in roles}
+
+
+def _with_drop_paths(blocks: Sequence[str], rates: Sequence[float]) -> set:
+    """Each block's ``<block>_drop_path``, for the blocks whose rate is above 0.
+
+    ConvNeXt creates the layer only for a non-zero rate, and the ramp starts at 0.
+    """
+    return {f"{name}_drop_path" for name, rate in zip(blocks, rates) if rate > 0}
+
+
+def _ordered_staged_blocks(depths: Sequence[int]) -> List[str]:
+    return [f"stage{s}_block{b}" for s, depth in enumerate(depths, 1) for b in range(1, depth + 1)]
+
+
+def _head(headed: bool) -> set:
+    return {"classification_head"} if headed else set()
+
+
+_CONVNEXT_RATE = 0.2
+_V4_DEPTHS = [2, 1, 3, 1, 2, 1, 2]
+_V4_ATTENTION_STAGES = [5, 6]  # 0-based indices into the stages, named stage6_mqa and stage7_mqa
+_V4_INPUT = (128, 128, 3)  # attention needs a feature map large enough to pool at stage 6
+
+
+def _convnext_owned(headed: bool) -> set:
+    blocks = _ordered_staged_blocks(_DEPTHS)
+    ramp = np.linspace(0.0, _CONVNEXT_RATE, sum(_DEPTHS))
+    return ({"stem"} | set(blocks) | _with_drop_paths(blocks, ramp)
+            | _downsamplers(len(_DEPTHS), ("norm", "conv")) | _head(headed))
+
+
+def _hierarchical_owned(headed: bool) -> set:
+    # A pointwise convolution exists only where the width changes between two stages.
+    pointwise = {f"downsample_{i}_pointwise" for i in range(len(_DIMS) - 1)
+                 if _DIMS[i] != _DIMS[i + 1]}
+    blocks = _staged_blocks(_DEPTHS)
+    return ({"stem"} | blocks | {f"{b}_drop_path" for b in blocks}
+            | _downsamplers(len(_DEPTHS), ("depthwise", "norm")) | pointwise | _head(headed))
+
+
+def _rad_owned(headed: bool) -> set:
+    roles = ("rad_conv", "norm", "expand", "reduce", "dropout")
+    return ({"stem", "mlp_activation"}
+            | {f"{b}_{role}" for b in _staged_blocks(_DEPTHS) for role in roles}
+            | _downsamplers(len(_DEPTHS), ("norm", "conv")) | _head(headed))
+
+
+#: ``key -> (constructor knobs, headed -> the exact set of layers the model owns directly)``.
+#: MobileNet V1 to V3 have a fixed block list, so their counts are the architectures' own:
+#: 13 depthwise-separable blocks (Howard 2017, Table 1), 17 inverted residuals (Sandler 2018,
+#: Table 2) and 11 bottlenecks for V3 small (Howard 2019, Table 2).
+NUMBERED_FAMILIES: Dict[str, Tuple[Dict[str, Any], Callable[[bool], set]]] = {
+    "resnet": (dict(blocks_per_stage=_DEPTHS, filters_per_stage=_DIMS),
+               lambda headed: {"stem"} | _staged_blocks(_DEPTHS) | _head(headed)),
+    "cliffordnet": (dict(depth=3),
+                    lambda headed: {"stem"} | _flat_blocks(3)
+                    | {f"block_{i}_drop_path" for i in range(3)} | _head(headed)),
+    "hierarchical": (dict(stage_depths=_DEPTHS, stage_dims=_DIMS), _hierarchical_owned),
+    "mobilenet_v1": ({}, lambda headed: {"stem"} | _flat_blocks(13) | _head(headed)),
+    "mobilenet_v2": ({}, lambda headed: {"stem", "conv_last", "conv_last_bn", "conv_last_relu6"}
+                     | _flat_blocks(17) | _head(headed)),
+    "mobilenet_v3": ({}, lambda headed: {"stem", "last_conv", "last_bn", "last_hard_swish"}
+                     | _flat_blocks(11) | _head(headed)),
+    "mobilenet_v4": (dict(depths=_V4_DEPTHS, use_attention=True,
+                          attention_stages=_V4_ATTENTION_STAGES, input_shape=_V4_INPUT),
+                     lambda headed: {"stem"} | _staged_blocks(_V4_DEPTHS)
+                     | {f"stage{s + 1}_mqa" for s in _V4_ATTENTION_STAGES} | _head(headed)),
+    "convnext_v1": (dict(depths=_DEPTHS, dims=_DIMS, drop_path_rate=_CONVNEXT_RATE, strides=2),
+                    _convnext_owned),
+    "convnext_v2": (dict(depths=_DEPTHS, dims=_DIMS, drop_path_rate=_CONVNEXT_RATE, strides=2),
+                    _convnext_owned),
+    "rad_convnet": (dict(depths=_DEPTHS, dims=_DIMS, strides=2, dropout_rate=0.1), _rad_owned),
+}
+
+
+def numbering_problems(owned: Sequence[str], expected: set) -> List[str]:
+    """How the layers a model owns differ from the exact set its depths give.
+
+    Interface contract: ``owned`` is :func:`direct_children` of a built model; ``expected``
+    the set derived from the arguments the test built it with. Returns one message per name
+    that is missing or unexpected, empty when the two sets are equal. Raises nothing.
+    """
+    return ([f"missing `{name}`" for name in sorted(expected - set(owned))]
+            + [f"unexpected `{name}`" for name in sorted(set(owned) - expected)])
+
+
+def test_every_finished_family_has_an_exact_numbered_name_set() -> None:
+    assert set(NUMBERED_FAMILIES) == set(FAMILY_CHILD_NAMES)
+
+
+@pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+@pytest.mark.parametrize("key", sorted(NUMBERED_FAMILIES))
+def test_a_family_numbers_its_layers_exactly_as_its_depths_say(key: str, headed: bool) -> None:
+    """Stages and blocks from 1, flat blocks and downsamplers from 0, nothing else owned."""
+    knobs, owned = NUMBERED_FAMILIES[key]
+    c = classifier(key)
+    model = c.make(include_top=headed, **knobs)
+    model(_images(*knobs.get("input_shape", c.input_shape)))
+    assert numbering_problems(direct_children(model), owned(headed)) == []
+
+
+def test_the_numbering_rule_sees_a_block_counted_from_two_and_a_downsampler_counted_from_one() -> None:
+    expected = _staged_blocks([2, 1]) | _downsamplers(2, ("norm", "conv"))
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "a block counted from 2": ["stage2_block2" if n == "stage2_block1" else n for n in clean],
+        "a downsampler counted from 1": [n.replace("downsample_0", "downsample_1") for n in clean],
+        "a stage and a block swapped": ["stage1_block1", "stage2_block1", "stage2_block2",
+                                        *[n for n in clean if n.startswith("downsample")]],
+        "a missing block": [n for n in clean if n != "stage1_block2"],
+        "an extra block": [*clean, "stage3_block1"],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+    # The pattern table above is why this rule exists: it reads every one of these as a
+    # well-formed ConvNeXt name.
+    assert child_name_violations("convnext_v1", plants["a block counted from 2"]) == []
+    assert child_name_violations("convnext_v1", plants["a downsampler counted from 1"]) == []
 
 
 # ---------------------------------------------------------------------------

@@ -47,7 +47,11 @@ from .caffe_reference_init import (
     CAFFE_XAVIER_INITIALIZER,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.model_build import coerce_include_top, refuse_unknown_model_kwargs
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    refuse_unknown_model_kwargs,
+    require_channel_count,
+)
 
 # ---------------------------------------------------------------------
 
@@ -446,6 +450,8 @@ class SqueezeNetV1(keras.Model):
             raise ValueError("num_classes must be a positive integer")
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
+
+        require_channel_count(input_shape)
 
         # DECISION plan-2026-08-17T183311-79c63e38/D-020: validate here, not in
         # build(); by then the all-NaN graph is already assembled. See decisions.md.

@@ -73,6 +73,7 @@ from dl_techniques.utils.model_build import (
     coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    require_channel_count,
     validate_rates,
 )
 from dl_techniques.utils.weight_transfer import (
@@ -686,6 +687,7 @@ class HierarchicalCliffordNet(keras.Model):
         model = cls(num_classes=num_classes, **config)
 
         if input_shape is not None:
+            require_channel_count(input_shape)
             model.build((None,) + tuple(input_shape))
 
         if weights_path:
